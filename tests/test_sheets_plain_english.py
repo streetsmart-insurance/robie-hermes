@@ -1,4 +1,9 @@
 from robie_job_engine.sheets_sync import _friendly_datetime, _friendly_jobs, _friendly_person
+from function_loader import load_function_tests
+
+
+def load_tests(loader, tests, pattern):
+    return load_function_tests(globals())
 
 
 def test_job_ledger_starts_with_date_and_plain_english_identity():
@@ -31,6 +36,7 @@ def test_job_ledger_starts_with_date_and_plain_english_identity():
     assert row[9] == "MEDIUM — 65%"
     assert "No diagnostic recording" in row[10]
     assert row[17] == "technical-id"
+    assert row[20:25] == [0, 0, 0, 0, 0]
 
 
 def test_name_is_preserved_when_chat_supplies_display_name():

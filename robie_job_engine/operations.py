@@ -20,6 +20,10 @@ SAFE_MIME_PREFIXES = ("application/", "image/", "text/")
 SAFE_EXACT_MIMES = {"audio/mpeg", "audio/mp4", "video/mp4"}
 
 
+class ModelBudgetExceeded(RuntimeError):
+    """Raised before a model call would exceed a durable per-Job budget."""
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -160,7 +164,60 @@ class OperationsStore:
                     uploaded_at TEXT,
                     UNIQUE(job_id, segment_number)
                 );
+
+                CREATE TABLE IF NOT EXISTS release_records (
+                    environment TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    commit_sha TEXT NOT NULL,
+                    artifact_uri TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PREPARED',
+                    evidence_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(environment, digest)
+                );
+                CREATE TABLE IF NOT EXISTS release_pointers (
+                    environment TEXT PRIMARY KEY,
+                    current_digest TEXT,
+                    previous_digest TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS release_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    environment TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    from_digest TEXT,
+                    to_digest TEXT,
+                    actor TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
+            )
+            model_attempt_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(model_attempts)")
+            }
+            for name, declaration in {
+                "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+                "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+                "cache_read_tokens": "INTEGER NOT NULL DEFAULT 0",
+                "thinking_tokens": "INTEGER NOT NULL DEFAULT 0",
+                "estimated_cost_microusd": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in model_attempt_columns:
+                    conn.execute(f"ALTER TABLE model_attempts ADD COLUMN {name} {declaration}")
+            report_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(report_runs)")
+            }
+            for name, declaration in {
+                "dedupe_key": "TEXT",
+                "updated_at": "TEXT",
+                "error": "TEXT",
+            }.items():
+                if name not in report_columns:
+                    conn.execute(f"ALTER TABLE report_runs ADD COLUMN {name} {declaration}")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_report_runs_dedupe ON report_runs(dedupe_key)"
             )
 
     def ingest_cached_file(
@@ -310,6 +367,315 @@ class OperationsStore:
                    WHERE id=?""", (_now(), job_id, next_at, _now(), schedule_id)
             )
 
+    def record_model_attempt(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        model: str,
+        ordinal: int,
+        outcome: str,
+        error_class: str | None = None,
+        latency_ms: int | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        thinking_tokens: int = 0,
+        estimated_cost_usd: float = 0.0,
+    ) -> None:
+        token_values = (input_tokens, output_tokens, cache_read_tokens, thinking_tokens)
+        if any(value < 0 for value in token_values):
+            raise ValueError("token counts cannot be negative")
+        if estimated_cost_usd < 0:
+            raise ValueError("estimated model cost cannot be negative")
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO model_attempts
+                (job_id,provider,model,ordinal,outcome,error_class,latency_ms,
+                 input_tokens,output_tokens,cache_read_tokens,thinking_tokens,
+                 estimated_cost_microusd,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    job_id, provider, model, ordinal, outcome, error_class, latency_ms,
+                    input_tokens, output_tokens, cache_read_tokens, thinking_tokens,
+                    round(estimated_cost_usd * 1_000_000), _now(),
+                ),
+            )
+
+    def model_usage(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+                          COALESCE(SUM(output_tokens),0) AS output_tokens,
+                          COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
+                          COALESCE(SUM(thinking_tokens),0) AS thinking_tokens,
+                          COALESCE(SUM(estimated_cost_microusd),0) AS cost_microusd,
+                          COUNT(*) AS model_attempt_count
+                   FROM model_attempts WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        result = dict(row)
+        result["total_tokens"] = int(result["input_tokens"]) + int(result["output_tokens"])
+        result["estimated_cost_usd"] = int(result.pop("cost_microusd")) / 1_000_000
+        return result
+
+    def enforce_model_budget(
+        self,
+        job_id: str,
+        *,
+        max_total_tokens: int,
+        max_cost_usd: float,
+        reserve_tokens: int = 0,
+        reserve_cost_usd: float = 0.0,
+    ) -> dict[str, Any]:
+        if (
+            max_total_tokens <= 0 or max_cost_usd <= 0
+            or reserve_tokens < 0 or reserve_cost_usd < 0
+        ):
+            raise ValueError("model budgets must be positive and reserves cannot be negative")
+        usage = self.model_usage(job_id)
+        if int(usage["total_tokens"]) + reserve_tokens > max_total_tokens:
+            raise ModelBudgetExceeded(
+                f"Job token budget exceeded: {usage['total_tokens']} used, "
+                f"{reserve_tokens} reserved, {max_total_tokens} allowed"
+            )
+        if float(usage["estimated_cost_usd"]) + reserve_cost_usd > max_cost_usd:
+            raise ModelBudgetExceeded(
+                f"Job cost budget exceeded: ${usage['estimated_cost_usd']:.6f} used, "
+                f"${reserve_cost_usd:.6f} reserved, ${max_cost_usd:.6f} allowed"
+            )
+        return usage
+
+    @staticmethod
+    def _release_identity(environment: str, digest: str) -> tuple[str, str]:
+        environment = environment.strip().upper()
+        digest = digest.strip().lower()
+        if environment not in {"TEST", "PRODUCTION"}:
+            raise ValueError("release environment must be TEST or PRODUCTION")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("release digest must be a SHA-256 hex value")
+        return environment, digest
+
+    def register_release(
+        self,
+        *,
+        environment: str,
+        digest: str,
+        commit_sha: str,
+        artifact_uri: str,
+    ) -> dict[str, Any]:
+        environment, digest = self._release_identity(environment, digest)
+        commit_sha = commit_sha.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{7,64}", commit_sha):
+            raise ValueError("release commit must be a Git hex SHA")
+        if not artifact_uri.strip():
+            raise ValueError("release artifact URI is required")
+        now = _now()
+        with self._connect() as conn:
+            existing = conn.execute(
+                """SELECT commit_sha,artifact_uri FROM release_records
+                   WHERE environment=? AND digest=?""",
+                (environment, digest),
+            ).fetchone()
+            if existing and (
+                existing["commit_sha"] != commit_sha
+                or existing["artifact_uri"] != artifact_uri.strip()
+            ):
+                raise ValueError("an immutable release digest cannot be rebound")
+            conn.execute(
+                """INSERT INTO release_records
+                (environment,digest,commit_sha,artifact_uri,status,created_at,updated_at)
+                VALUES (?,?,?,?,'PREPARED',?,?)
+                ON CONFLICT(environment,digest) DO NOTHING""",
+                (environment, digest, commit_sha, artifact_uri.strip(), now, now),
+            )
+        return self.get_release(environment, digest)
+
+    def get_release(self, environment: str, digest: str) -> dict[str, Any]:
+        environment, digest = self._release_identity(environment, digest)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM release_records WHERE environment=? AND digest=?",
+                (environment, digest),
+            ).fetchone()
+        if row is None:
+            raise KeyError((environment, digest))
+        result = dict(row)
+        result["evidence"] = json.loads(result.pop("evidence_json") or "{}")
+        return result
+
+    def verify_release(
+        self,
+        environment: str,
+        digest: str,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        environment, digest = self._release_identity(environment, digest)
+        if not evidence.get("verified") or not evidence.get("authoritative"):
+            raise ValueError("release verification requires authoritative evidence")
+        now = _now()
+        with self._connect() as conn:
+            updated = conn.execute(
+                """UPDATE release_records SET status='VERIFIED',evidence_json=?,updated_at=?
+                   WHERE environment=? AND digest=?""",
+                (_json(evidence), now, environment, digest),
+            )
+            if updated.rowcount != 1:
+                raise KeyError((environment, digest))
+        return self.get_release(environment, digest)
+
+    def promote_verified_release(
+        self,
+        environment: str,
+        digest: str,
+        *,
+        actor: str,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        environment, digest = self._release_identity(environment, digest)
+        if not actor.strip():
+            raise ValueError("promotion actor is required")
+        if environment == "PRODUCTION" and not evidence.get("approved"):
+            raise ValueError("Production promotion requires explicit approval evidence")
+        release = self.get_release(environment, digest)
+        if release["status"] != "VERIFIED":
+            raise ValueError("only a verified release may become current")
+        now = _now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                pointer = conn.execute(
+                    "SELECT current_digest,previous_digest FROM release_pointers WHERE environment=?",
+                    (environment,),
+                ).fetchone()
+                current = str(pointer["current_digest"]) if pointer and pointer["current_digest"] else None
+                previous = current if current and current != digest else (
+                    str(pointer["previous_digest"]) if pointer and pointer["previous_digest"] else None
+                )
+                conn.execute(
+                    """INSERT INTO release_pointers(environment,current_digest,previous_digest,updated_at)
+                    VALUES (?,?,?,?) ON CONFLICT(environment) DO UPDATE SET
+                    current_digest=excluded.current_digest,
+                    previous_digest=excluded.previous_digest,updated_at=excluded.updated_at""",
+                    (environment, digest, previous, now),
+                )
+                conn.execute(
+                    """INSERT INTO release_events
+                    (environment,event_type,from_digest,to_digest,actor,evidence_json,created_at)
+                    VALUES (?,'PROMOTE',?,?,?,?,?)""",
+                    (environment, current, digest, actor.strip(), _json(evidence), now),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.release_state(environment)
+
+    def rollback_release(
+        self,
+        environment: str,
+        *,
+        actor: str,
+        evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        environment = environment.strip().upper()
+        if environment not in {"TEST", "PRODUCTION"} or not actor.strip():
+            raise ValueError("valid environment and rollback actor are required")
+        if not evidence.get("verified") or not evidence.get("authoritative"):
+            raise ValueError("rollback requires authoritative preflight evidence")
+        if environment == "PRODUCTION" and not evidence.get("approved"):
+            raise ValueError("Production rollback requires explicit approval evidence")
+        now = _now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                pointer = conn.execute(
+                    "SELECT current_digest,previous_digest FROM release_pointers WHERE environment=?",
+                    (environment,),
+                ).fetchone()
+                if not pointer or not pointer["current_digest"] or not pointer["previous_digest"]:
+                    raise ValueError("no previous verified release is available")
+                target = conn.execute(
+                    """SELECT status FROM release_records
+                       WHERE environment=? AND digest=?""",
+                    (environment, pointer["previous_digest"]),
+                ).fetchone()
+                if not target or target["status"] != "VERIFIED":
+                    raise ValueError("rollback target is not a verified release")
+                conn.execute(
+                    """UPDATE release_pointers SET current_digest=?,previous_digest=?,updated_at=?
+                       WHERE environment=?""",
+                    (pointer["previous_digest"], pointer["current_digest"], now, environment),
+                )
+                conn.execute(
+                    """INSERT INTO release_events
+                    (environment,event_type,from_digest,to_digest,actor,evidence_json,created_at)
+                    VALUES (?,'ROLLBACK',?,?,?,?,?)""",
+                    (
+                        environment, pointer["current_digest"], pointer["previous_digest"],
+                        actor.strip(), _json(evidence), now,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.release_state(environment)
+
+    def release_state(self, environment: str) -> dict[str, Any]:
+        environment = environment.strip().upper()
+        if environment not in {"TEST", "PRODUCTION"}:
+            raise ValueError("release environment must be TEST or PRODUCTION")
+        with self._connect() as conn:
+            pointer = conn.execute(
+                "SELECT * FROM release_pointers WHERE environment=?", (environment,)
+            ).fetchone()
+        return dict(pointer) if pointer else {
+            "environment": environment,
+            "current_digest": None,
+            "previous_digest": None,
+            "updated_at": None,
+        }
+
+    def record_report_run(
+        self,
+        *,
+        report_type: str,
+        destination: str,
+        window_start: str,
+        window_end: str,
+        status: str,
+        summary: dict[str, Any],
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        report_type = report_type.strip()
+        destination = destination.strip()
+        if not report_type or not destination or not window_start or not window_end:
+            raise ValueError("report identity and window are required")
+        key = hashlib.sha256(
+            f"{report_type}:{destination}:{window_start}:{window_end}".encode()
+        ).hexdigest()
+        report_id = str(uuid.uuid4())
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO report_runs
+                (id,report_type,destination,window_start,window_end,status,summary_json,
+                 created_at,dedupe_key,updated_at,error)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(dedupe_key) DO NOTHING""",
+                (
+                    report_id, report_type, destination, window_start, window_end,
+                    status.strip().upper(), _json(summary), now, key, now, error,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM report_runs WHERE dedupe_key=?", (key,)
+            ).fetchone()
+        result = dict(row)
+        result["summary"] = json.loads(result.pop("summary_json") or "{}")
+        return result
+
     def dashboard_rows(self) -> dict[str, list[dict[str, Any]]]:
         with self._connect() as conn:
             jobs = [dict(r) for r in conn.execute(
@@ -334,6 +700,7 @@ class OperationsStore:
                 ).fetchone()
                 if recording:
                     item.update({f"recording_{key}": value for key, value in dict(recording).items()})
+                item.update(self.model_usage(item["id"]))
             artifacts = [dict(r) for r in conn.execute(
                 """SELECT id,job_id,source_platform,original_name,mime_type,size_bytes,sha256,
                           status,destination_ref,created_at,updated_at
@@ -354,8 +721,28 @@ class OperationsStore:
                           redacted,review_notes,approved_by,started_at,stopped_at,uploaded_at
                    FROM job_recordings ORDER BY started_at DESC LIMIT 1000"""
             ).fetchall()]
+            model_attempts = [dict(r) for r in conn.execute(
+                """SELECT job_id,provider,model,ordinal,outcome,error_class,latency_ms,
+                          input_tokens,output_tokens,cache_read_tokens,thinking_tokens,
+                          estimated_cost_microusd,created_at
+                   FROM model_attempts ORDER BY created_at DESC LIMIT 5000"""
+            ).fetchall()]
+            releases = [dict(r) for r in conn.execute(
+                """SELECT environment,digest,commit_sha,artifact_uri,status,evidence_json,
+                          created_at,updated_at
+                   FROM release_records ORDER BY updated_at DESC LIMIT 1000"""
+            ).fetchall()]
+            reports = [dict(r) for r in conn.execute(
+                """SELECT id,report_type,destination,window_start,window_end,status,
+                          summary_json,error,created_at,updated_at
+                   FROM report_runs ORDER BY created_at DESC LIMIT 1000"""
+            ).fetchall()]
+        for attempt in model_attempts:
+            attempt["estimated_cost_usd"] = int(attempt.pop("estimated_cost_microusd")) / 1_000_000
         return {"jobs": jobs, "artifacts": artifacts, "schedules": schedules,
-                "evidence": evidence, "recordings": recordings}
+                "evidence": evidence, "recordings": recordings,
+                "model_attempts": model_attempts, "releases": releases,
+                "reports": reports}
 
 
 def ingest_chat_attachments(

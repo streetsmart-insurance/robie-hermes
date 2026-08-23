@@ -75,11 +75,14 @@ def execute_with_fallback(
     record: Callable[[ModelTarget, int, str, Exception | None], None],
     *,
     repair_invalid_thought: Callable[[ModelTarget, Exception], None] | None = None,
+    authorize_call: Callable[[ModelTarget, int], None] | None = None,
 ) -> Any:
     """Use fallback only for provider/model failures, never action uncertainty."""
     errors: list[str] = []
     for ordinal, target in enumerate(targets, start=1):
         try:
+            if authorize_call is not None:
+                authorize_call(target, ordinal)
             result = call(target)
             record(target, ordinal, "SUCCESS", None)
             return result
@@ -89,6 +92,8 @@ def execute_with_fallback(
                 if repair_invalid_thought is not None:
                     repair_invalid_thought(target, exc)
                     try:
+                        if authorize_call is not None:
+                            authorize_call(target, ordinal)
                         result = call(target)
                         record(target, ordinal, "SUCCESS_AFTER_CONTEXT_REPAIR", None)
                         return result

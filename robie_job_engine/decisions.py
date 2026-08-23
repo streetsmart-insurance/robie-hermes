@@ -471,3 +471,45 @@ def resolve_google_chat_interaction(
         custom_text=interaction.custom_text,
         session_scope=interaction.session_scope,
     )
+
+
+def google_chat_decision_response(result: DecisionResult) -> dict[str, Any]:
+    """Return a fail-closed Chat interaction response for an answered card."""
+    if result.status == "RESOLVED":
+        if result.choice in {"deny", "cancel"}:
+            text = "ROBIE recorded the denial. The Job is stopped and marked Failed."
+        else:
+            text = "ROBIE recorded your decision. The exact paused Job may now continue."
+    elif result.status == "NEEDS_TEXT":
+        text = "Type your alternative in Something else, then select Submit."
+    elif result.status == "UNAUTHORIZED":
+        text = "This approval request is restricted to its authorized reviewers."
+    elif result.status == "EXPIRED":
+        text = "This approval request expired. ROBIE did not continue the Job."
+    elif result.status == "CONFLICT":
+        text = "This approval request was already answered. ROBIE did not change it."
+    else:
+        text = "ROBIE could not safely apply this decision. The Job remains paused."
+    return {
+        "actionResponse": {"type": "UPDATE_MESSAGE"},
+        "text": text,
+    }
+
+
+def handle_google_chat_decision(
+    db_path: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve a signed Chat interaction and produce the card update payload."""
+    try:
+        result = resolve_google_chat_interaction(db_path, payload)
+    except (DecisionError, KeyError, ValueError):
+        result = DecisionResult(
+            decision_id="",
+            status="REJECTED",
+            choice=None,
+            handled_by=None,
+            handled_at=None,
+            resumed=False,
+            message="The interaction could not be validated.",
+        )
+    return google_chat_decision_response(result)

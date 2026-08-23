@@ -119,6 +119,9 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             _friendly_datetime(item.get("completed_at")),
             item.get("last_error") or "", item.get("id", ""),
             item.get("attempt_count", 0), item.get("verification_count", 0),
+            item.get("input_tokens", 0), item.get("output_tokens", 0),
+            item.get("cache_read_tokens", 0), item.get("total_tokens", 0),
+            item.get("estimated_cost_usd", 0),
         ])
     return output or [[""]]
 
@@ -162,12 +165,14 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
     data = ops.dashboard_rows()
     writes = [
         {"range": "Dashboard!B9", "values": [[datetime.now(timezone.utc).isoformat()]]},
-        {"range": "Jobs!A5:T5", "values": [[
+        {"range": "Jobs!A5:Y5", "values": [[
             "Date Started", "Job Name", "Client / Account", "Requested By",
             "Work Requested", "Owner", "Source", "Skill", "Status",
             "Confidence", "Issues", "Recording", "Reference Use",
             "Needs Attention", "Last Updated", "Date Completed",
             "Last Result / Error", "Job ID", "Attempts", "Verification Checks",
+            "Input Tokens", "Output Tokens", "Cache Read Tokens", "Total Tokens",
+            "Estimated Model Cost (USD)",
         ]]},
         {"range": "Jobs!A6", "values": _friendly_jobs(data["jobs"])},
         {"range": "Evidence!A6", "values": _matrix(data["evidence"],
@@ -176,9 +181,13 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
             ["id","name","action_type","interval_minutes","enabled","next_run_at","last_run_at","last_job_id","updated_at"], 100)},
         {"range": "Artifacts!A6", "values": _matrix(data["artifacts"],
             ["id","job_id","source_platform","original_name","mime_type","size_bytes","sha256","status","destination_ref","created_at","updated_at"], 1000)},
+        {"range": "Releases!A6", "values": _matrix(data["releases"],
+            ["environment","digest","commit_sha","artifact_uri","status","evidence_json","created_at","updated_at"], 1000)},
+        {"range": "Reports!A6", "values": _matrix(data["reports"],
+            ["id","report_type","destination","window_start","window_end","status","summary_json","error","created_at","updated_at"], 1000)},
     ] + assignment_updates
     api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
-    return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"])}
+    return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
 
 
 def sync_from_env(db_path: str) -> dict[str, int] | None:
