@@ -1,12 +1,61 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
-from robie_job_engine.chat_guard import guard_chat_response, open_chat_job
+from robie_job_engine.chat_guard import (
+    build_chat_execution_text,
+    chat_message_requires_job,
+    guard_chat_response,
+    open_chat_job,
+)
 from robie_job_engine.store import JobStore
+from robie_job_engine.recording import RecordingStore
 
 
 class ChatGuardTests(unittest.TestCase):
+    def test_conversation_only_messages_do_not_create_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            JobStore(db)
+            messages = [
+                "Thanks!",
+                "How is it going?",
+                "Where did we leave off?",
+                (
+                    "TEST ONLY — show one decision card with Continue and Pause. "
+                    "Do not perform any EZLynx action."
+                ),
+            ]
+            for index, text in enumerate(messages):
+                self.assertIsNone(open_chat_job(db, f"message-{index}", text))
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+
+    def test_operational_requests_and_attachments_still_fail_closed_into_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            operational = open_chat_job(
+                db,
+                "operational",
+                "Upload the renewal document and add its note in EZLynx",
+            )
+            self.assertIsNotNone(operational)
+            attached = open_chat_job(
+                db,
+                "attached",
+                "Thanks",
+                expected_attachment_count=1,
+                attachments=[],
+            )
+            self.assertIsNotNone(attached)
+            self.assertEqual(JobStore(db).get_job(attached)["status"], "FAILED")
+
+    def test_none_job_passes_prompt_and_response_through(self):
+        self.assertFalse(chat_message_requires_job("Thank you"))
+        self.assertEqual(build_chat_execution_text("unused.db", None, "Thank you"), "Thank you")
+        self.assertEqual(guard_chat_response("unused.db", None, "You're welcome"), "You're welcome")
+
     def test_chat_response_is_checkpointed_and_unverified(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "jobs.db")
@@ -14,6 +63,28 @@ class ChatGuardTests(unittest.TestCase):
             response = guard_chat_response(db, job_id, "Done")
             self.assertIn("UNVERIFIED", response)
             self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
+
+    def test_chat_response_includes_ready_recording_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(db, "spaces/s/messages/m-video", "move it")
+            recordings = RecordingStore(db)
+            recording = recordings.create(
+                job_id,
+                Path(tmp) / "job.webm",
+                Path(tmp) / "job.stop",
+            )
+            recordings.update(
+                recording["id"],
+                status="READY",
+                drive_url="https://drive.google.com/file/d/test-recording/view",
+                drive_file_id="test-recording",
+            )
+            response = guard_chat_response(db, job_id, "Done")
+            self.assertIn("UNVERIFIED", response)
+            self.assertIn("Review this job recording", response)
+            self.assertIn("https://drive.google.com/file/d/test-recording/view", response)
+            self.assertIn("Reply in this thread", response)
 
     def test_explicit_continue_reopens_same_unverified_job(self):
         with tempfile.TemporaryDirectory() as tmp:

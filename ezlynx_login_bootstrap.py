@@ -1,0 +1,176 @@
+import base64
+import re
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from google.auth.transport.requests import Request
+from google.cloud import secretmanager
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from playwright.sync_api import sync_playwright
+
+
+CDP_URL = "http://127.0.0.1:9222"
+TOKEN_PATH = Path("/opt/streetsmart-hermes/.hermes/robie_google_token.json")
+OTP_PATTERNS = (
+    re.compile(r"(?:verification|security|authentication|one[- ]time)\s+code\D{0,40}(\d{6})", re.I),
+    re.compile(r"\bcode\D{0,20}(\d{6})\b", re.I),
+)
+
+
+def secret(name: str) -> str:
+    response = secretmanager.SecretManagerServiceClient().access_secret_version(
+        request={
+            "name": f"projects/streetsmart-hermes-poc/secrets/{name}/versions/latest"
+        }
+    )
+    return response.payload.data.decode("utf-8").strip()
+
+
+def gmail_service():
+    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def decoded_body(payload: dict) -> str:
+    chunks: list[str] = []
+    data = payload.get("body", {}).get("data")
+    if data:
+        chunks.append(base64.urlsafe_b64decode(data + "===").decode("utf-8", "replace"))
+    for part in payload.get("parts", []):
+        chunks.append(decoded_body(part))
+    return "\n".join(chunks)
+
+
+def newest_ezlynx_code(
+    not_before: datetime, exclude_message_id: str | None = None
+) -> tuple[str, str] | None:
+    service = gmail_service()
+    result = service.users().messages().list(
+        userId="me", q="newer_than:15m", maxResults=50
+    ).execute()
+    messages = result.get("messages", [])
+    floor = max(
+        not_before - timedelta(seconds=30),
+        datetime.now(timezone.utc) - timedelta(minutes=14),
+    )
+    fetched = []
+    for meta in messages:
+        message = service.users().messages().get(
+            userId="me", id=meta["id"], format="full"
+        ).execute()
+        received_at = datetime.fromtimestamp(int(message.get("internalDate", "0")) / 1000, timezone.utc)
+        fetched.append((received_at, message))
+    for received_at, message in sorted(fetched, key=lambda pair: pair[0], reverse=True):
+        if received_at < floor:
+            continue
+        if message.get("id") == exclude_message_id:
+            continue
+        headers = {
+            h.get("name", "").lower(): h.get("value", "")
+            for h in message.get("payload", {}).get("headers", [])
+        }
+        haystack = "\n".join(
+            (headers.get("from", ""), headers.get("subject", ""), decoded_body(message.get("payload", {})))
+        )
+        if "ezlynx" not in haystack.lower():
+            continue
+        for pattern in OTP_PATTERNS:
+            match = pattern.search(haystack)
+            if match:
+                return str(message["id"]), match.group(1)
+    return None
+
+
+def visible_page(browser):
+    pages = [page for context in browser.contexts for page in context.pages]
+    if not pages:
+        raise RuntimeError("Persistent EZLynx browser has no page")
+    return pages[-1]
+
+
+def authenticated(page) -> bool:
+    url = page.url.lower()
+    return "app.ezlynx.com" in url and "/auth/" not in url
+
+
+def main() -> int:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(CDP_URL)
+        page = visible_page(browser)
+        page.set_default_timeout(20_000)
+
+        if authenticated(page):
+            print("AUTHENTICATED")
+            return 0
+
+        url = page.url.lower()
+        if "/auth/account/login" in url:
+            page.locator("#txtUserName").fill(secret("ezlynx-username"))
+            page.locator("#txtPassword").fill(secret("ezlynx-password"))
+            page.locator("#btnLogin").click()
+            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_timeout(2_000)
+            if authenticated(page):
+                print("AUTHENTICATED")
+                return 0
+            url = page.url.lower()
+
+        previous = newest_ezlynx_code(datetime.now(timezone.utc) - timedelta(minutes=14))
+        previous_message_id = previous[0] if previous else None
+        if "/auth/twofactorverification/typeselection" in url:
+            requested_at = datetime.now(timezone.utc)
+            page.locator("#VerificationType_EMAIL-input").check()
+            page.locator("#two-factor-next").click()
+            page.wait_for_load_state("domcontentloaded")
+
+        elif "/auth/twofactorverification/verificationcode" in url:
+            requested_at = datetime.now(timezone.utc)
+            page.locator("#btnResend").click()
+            page.wait_for_timeout(1_000)
+
+        else:
+            print("AUTH_STATE_REQUIRES_USERNAME_LOGIN")
+            return 24
+
+        deadline = time.monotonic() + 120
+        candidate = None
+        while time.monotonic() < deadline and candidate is None:
+            candidate = newest_ezlynx_code(requested_at, previous_message_id)
+            if candidate is None:
+                time.sleep(5)
+        if candidate is None:
+            print("MFA_CODE_NOT_FOUND")
+            return 20
+        _, code = candidate
+
+        code_inputs = page.locator(
+            "input[inputmode=numeric], input[autocomplete=one-time-code], "
+            "input[name*=code i], input[id*=code i], input[type=tel], input[type=text]"
+        )
+        if code_inputs.count() == 0:
+            print("MFA_INPUT_NOT_FOUND")
+            return 21
+        code_inputs.first.fill(code)
+        trust = page.locator("#trust-this-computer-input")
+        if trust.count() and not trust.is_checked():
+            trust.check()
+        submit = page.locator("button[type=submit], input[type=submit]")
+        if submit.count() == 0:
+            print("MFA_SUBMIT_NOT_FOUND")
+            return 22
+        submit.first.click()
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_timeout(2_000)
+        if authenticated(page):
+            print("AUTHENTICATED")
+            return 0
+        print("MFA_NOT_ACCEPTED")
+        return 23
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

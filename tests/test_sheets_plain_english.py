@@ -1,0 +1,41 @@
+from robie_job_engine.sheets_sync import _friendly_datetime, _friendly_jobs, _friendly_person
+
+
+def test_job_ledger_starts_with_date_and_plain_english_identity():
+    rows = _friendly_jobs([{
+        "id": "technical-id",
+        "action_type": "hermes.google_chat_task",
+        "payload": {
+            "text": "Upload Hartford quote and add the renewal note",
+            "requested_by": "jake.smith@streetsmart.insurance",
+            "client": "Razza",
+            "job_name": "Razza Renewal — Hartford Quote",
+            "source": "Google Chat",
+        },
+        "status": "VERIFYING",
+        "attempt_count": 1,
+        "verification_count": 1,
+        "created_at": "2026-08-22T14:52:15+00:00",
+        "updated_at": "2026-08-22T14:55:15+00:00",
+        "completed_at": None,
+        "last_error": None,
+    }])
+    row = rows[0]
+    assert row[0].startswith("Aug 22, 2026")
+    assert row[1] == "Razza Renewal — Hartford Quote"
+    assert row[2] == "Razza"
+    assert row[3] == "Jake Smith"
+    assert row[4] == "Upload Hartford quote and add the renewal note"
+    assert row[5] == "ROBIE"
+    assert row[8] == "Checking the result"
+    assert row[9] == "MEDIUM — 65%"
+    assert "No diagnostic recording" in row[10]
+    assert row[17] == "technical-id"
+
+
+def test_name_is_preserved_when_chat_supplies_display_name():
+    assert _friendly_person("Carlo Ferrara") == "Carlo Ferrara"
+
+
+def test_ledger_uses_streetsmart_eastern_time_not_server_utc():
+    assert _friendly_datetime("2026-08-23T00:33:00+00:00") == "Aug 22, 2026, 8:33 PM"

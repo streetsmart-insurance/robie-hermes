@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ROBIE scheduler every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=20
+Unit=robie-scheduler.service
+
+[Install]
+WantedBy=timers.target

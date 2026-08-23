@@ -1,5 +1,26 @@
 # ROBIE durable Job Engine
 
+See `RECORDINGS.md` for per-Job EZLynx tab recording, Drive storage,
+evidence-based confidence, and the human-gated reference/training policy.
+
+## Context isolation and cost control
+
+Interactive Google Chat DM context expires after 120 minutes of inactivity by
+default. Expiration archives the structured job summary, clears account/policy/
+submission identifiers, and pauses unfinished work without deleting it or
+claiming completion. `/new`, `/reset`, `new job`, and `start fresh` explicitly
+archive the current prompt context. Old Jobs remain searchable but are not
+automatically loaded; explicit `continue` or `resume` wording is required.
+
+Each model prompt is assembled from permanent rules, the compact active Job
+summary, one relevant Skill, the relevant SOP section, and the current trimmed
+tool result. `ROBIE_CONTEXT_CHAR_BUDGET` defaults to 12,000 characters and
+forces compaction before additional history can be carried forward.
+
+The scheduler enforces expiration using `ROBIE_DM_CONTEXT_TTL_MINUTES`
+(default `120`). Scheduled and monitored Jobs remain durable Jobs and are not
+silently deleted when an interactive DM context expires.
+
 This package adds a server-owned completion authority beside the existing Hermes runtime.
 The Computer Worker can only return an action receipt. `JobEngine` independently reads the
 destination, stores tamper-evident evidence, and is the only code path that may set `COMPLETE`.

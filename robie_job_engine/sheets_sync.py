@@ -5,6 +5,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .confidence import assess_job_confidence
 from .operations import OperationsStore
@@ -49,7 +50,8 @@ def _friendly_datetime(value: Any) -> str:
         return ""
     try:
         stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return stamp.astimezone().strftime("%b %-d, %Y, %-I:%M %p")
+        display_timezone = ZoneInfo(os.environ.get("ROBIE_DISPLAY_TIMEZONE", "America/New_York"))
+        return stamp.astimezone(display_timezone).strftime("%b %-d, %Y, %-I:%M %p")
     except (ValueError, TypeError):
         return raw
 
