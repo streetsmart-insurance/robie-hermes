@@ -1,0 +1,273 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterator
+
+from .models import JobStatus, TERMINAL_STATUSES, VerificationEvidence
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+class JobStore:
+    def __init__(self, path: str | Path):
+        self.path = str(path)
+        self._initialize()
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _initialize(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    action_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    resume_status TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    verification_count INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    next_wakeup_at TEXT,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    kind TEXT NOT NULL,
+                    data_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(job_id, kind)
+                );
+                CREATE TABLE IF NOT EXISTS attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    phase TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    detail_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS verification_evidence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    verified INTEGER NOT NULL,
+                    method TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    authoritative INTEGER NOT NULL,
+                    expected_json TEXT NOT NULL,
+                    observed_json TEXT NOT NULL,
+                    locator TEXT,
+                    evidence_sha256 TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_jobs_wakeup
+                    ON jobs(status, next_wakeup_at);
+                CREATE INDEX IF NOT EXISTS idx_evidence_job
+                    ON verification_evidence(job_id, id);
+                """
+            )
+
+    def create_job(
+        self,
+        action_type: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        key = idempotency_key or hashlib.sha256(
+            f"{action_type}:{canonical_json(payload)}".encode()
+        ).hexdigest()
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE idempotency_key=?", (key,)
+            ).fetchone()
+            if row:
+                return self._decode_job(row)
+            job_id = str(uuid.uuid4())
+            conn.execute(
+                """INSERT INTO jobs
+                (id,idempotency_key,action_type,payload_json,status,max_attempts,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (job_id, key, action_type, canonical_json(payload), JobStatus.PENDING, max_attempts, now, now),
+            )
+            return self.get_job(job_id, conn=conn)
+
+    def get_job(self, job_id: str, *, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+        owned = conn is None
+        conn = conn or self.connect()
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                raise KeyError(job_id)
+            return self._decode_job(row)
+        finally:
+            if owned:
+                conn.close()
+
+    def claim(self, job_id: str, owner: str, lease_seconds: int = 120) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
+        expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                raise KeyError(job_id)
+            if JobStatus(row["status"]) in TERMINAL_STATUSES or row["status"] == JobStatus.PAUSED:
+                return None
+            lease_expired = not row["lease_expires_at"] or row["lease_expires_at"] <= now.isoformat()
+            if row["lease_owner"] and row["lease_owner"] != owner and not lease_expired:
+                return None
+            conn.execute(
+                "UPDATE jobs SET lease_owner=?,lease_expires_at=?,updated_at=? WHERE id=?",
+                (owner, expiry, now.isoformat(), job_id),
+            )
+            return self.get_job(job_id, conn=conn)
+
+    def transition(
+        self,
+        job_id: str,
+        status: JobStatus,
+        *,
+        expected: set[JobStatus] | None = None,
+        error: str | None = None,
+        next_wakeup_at: str | None = None,
+        resume_status: JobStatus | None = None,
+        release_lease: bool = False,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                raise KeyError(job_id)
+            current = JobStatus(row["status"])
+            if expected is not None and current not in expected:
+                raise RuntimeError(f"invalid transition {current} -> {status}")
+            completed_at = now if status == JobStatus.COMPLETE else None
+            conn.execute(
+                """UPDATE jobs SET status=?,resume_status=?,last_error=?,next_wakeup_at=?,
+                lease_owner=CASE WHEN ? THEN NULL ELSE lease_owner END,
+                lease_expires_at=CASE WHEN ? THEN NULL ELSE lease_expires_at END,
+                completed_at=?,updated_at=? WHERE id=?""",
+                (status, resume_status, error, next_wakeup_at, release_lease, release_lease, completed_at, now, job_id),
+            )
+            return self.get_job(job_id, conn=conn)
+
+    def increment(self, job_id: str, field: str) -> int:
+        if field not in {"attempt_count", "verification_count"}:
+            raise ValueError(field)
+        with self.transaction() as conn:
+            conn.execute(f"UPDATE jobs SET {field}={field}+1,updated_at=? WHERE id=?", (utc_now(), job_id))
+            return int(conn.execute(f"SELECT {field} FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
+
+    def checkpoint(self, job_id: str, kind: str, data: dict[str, Any]) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at) VALUES(?,?,?,?)
+                ON CONFLICT(job_id,kind) DO UPDATE SET data_json=excluded.data_json,created_at=excluded.created_at""",
+                (job_id, kind, canonical_json(data), utc_now()),
+            )
+
+    def get_checkpoint(self, job_id: str, kind: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?", (job_id, kind)
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def add_attempt(self, job_id: str, phase: str, number: int, outcome: str, detail: dict[str, Any]) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO attempts(job_id,phase,attempt_number,outcome,detail_json,created_at) VALUES(?,?,?,?,?,?)",
+                (job_id, phase, number, outcome, canonical_json(detail), utc_now()),
+            )
+
+    def add_evidence(self, job_id: str, verified: bool, evidence: VerificationEvidence) -> None:
+        body = canonical_json(
+            {"method": evidence.method, "source": evidence.source, "expected": evidence.expected,
+             "observed": evidence.observed, "authoritative": evidence.authoritative,
+             "captured_at": evidence.captured_at, "locator": evidence.locator}
+        )
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO verification_evidence
+                (job_id,verified,method,source,authoritative,expected_json,observed_json,locator,
+                 evidence_sha256,captured_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (job_id, int(verified), evidence.method, evidence.source, int(evidence.authoritative),
+                 canonical_json(evidence.expected), canonical_json(evidence.observed), evidence.locator,
+                 hashlib.sha256(body.encode()).hexdigest(), evidence.captured_at, utc_now()),
+            )
+
+    def pause(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if JobStatus(job["status"]) in TERMINAL_STATUSES:
+            return job
+        resume = JobStatus.VERIFYING if self.get_checkpoint(job_id, "action") else JobStatus.PENDING
+        return self.transition(job_id, JobStatus.PAUSED, resume_status=resume, release_lease=True)
+
+    def resume(self, job_id: str) -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if job["status"] != JobStatus.PAUSED:
+            return job
+        target = JobStatus(job["resume_status"] or JobStatus.PENDING)
+        return self.transition(job_id, target, expected={JobStatus.PAUSED}, release_lease=True)
+
+    def wake_due(self, now: str | None = None) -> list[str]:
+        now = now or utc_now()
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id,resume_status FROM jobs WHERE status=? AND next_wakeup_at<=?",
+                (JobStatus.RETRY_WAIT, now),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE jobs SET status=?,next_wakeup_at=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?",
+                    (row["resume_status"] or JobStatus.PENDING, now, row["id"]),
+                )
+            return [row["id"] for row in rows]
+
+    @staticmethod
+    def _decode_job(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["payload"] = json.loads(result.pop("payload_json"))
+        return result
