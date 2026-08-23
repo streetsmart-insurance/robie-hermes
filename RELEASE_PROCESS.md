@@ -25,9 +25,14 @@ Every release record must include:
 - previous verified Production digest; and
 - rollback verification result.
 
+`scripts/build-release.sh` creates the archive directly from a reviewed Git
+commit, rejects sensitive/runtime paths, and emits its SHA-256. Test and
+Production must consume that exact archive and checksum. `scripts/verify-release.sh`
+revalidates the digest, compiles the extracted source, and runs the complete
+dependency-free acceptance suite before a deployment can proceed.
+
 ## Initial bounded proof
 
 The first Antigravity-managed release must be a low-risk, reversible change that does not alter EZLynx action behavior, Job state transitions, credentials, IAM, browser persistence, or message ingestion. A plain-English reporting/ledger presentation change is preferred.
 
 Acceptance requires a feature branch, passing checks, Test deployment, stored end-to-end evidence, explicit approval, immutable Production promotion, post-promotion verification, and successful rollback rehearsal. Until every item passes, Cloud Shell remains the emergency/bootstrap deployment route and Antigravity is not the standard Production interface.
-
