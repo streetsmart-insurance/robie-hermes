@@ -7,6 +7,8 @@ from typing import Any
 
 class JobStatus(str, Enum):
     PENDING = "PENDING"
+    NEEDS_SKILL = "NEEDS_SKILL"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
     RUNNING = "RUNNING"
     VERIFYING = "VERIFYING"
     RETRY_WAIT = "RETRY_WAIT"
@@ -17,6 +19,11 @@ class JobStatus(str, Enum):
 
 
 TERMINAL_STATUSES = {JobStatus.COMPLETE, JobStatus.UNVERIFIED, JobStatus.FAILED}
+WAITING_STATUSES = {
+    JobStatus.PAUSED,
+    JobStatus.NEEDS_SKILL,
+    JobStatus.NEEDS_CLARIFICATION,
+}
 
 
 @dataclass(frozen=True)
