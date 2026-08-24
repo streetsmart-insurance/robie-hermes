@@ -47,6 +47,10 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual("drive-file-123", result["drive_file_id"])
         self.assertTrue(result["sha256"])
         self.assertGreater(result["size_bytes"], 0)
+        segments = manager.list_for_job(self.job["id"])
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0]["segment_number"], 1)
+        self.assertEqual(segments[0]["drive_file_id"], "drive-file-123")
 
     def test_video_cannot_enter_reference_or_training_set_without_review(self) -> None:
         store = RecordingStore(self.db)

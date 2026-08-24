@@ -226,6 +226,15 @@ class RecordingStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        """Return every recording segment for a Job, oldest segment first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM job_recordings WHERE job_id=? ORDER BY segment_number",
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def approve_reference(
         self, recording_id: str, *, approved_by: str, notes: str, redacted: bool
     ) -> dict[str, Any]:
@@ -266,12 +275,21 @@ class RecordingManager:
         capture: CaptureBackend | None = None,
         uploader: RecordingUploader | None = None,
         enabled: bool | None = None,
+        keep_local: bool | None = None,
     ) -> None:
         self.store = RecordingStore(db_path)
         self.root = Path(root or os.environ.get("ROBIE_RECORDING_ROOT") or DEFAULT_RECORDING_ROOT)
         if enabled is None:
             enabled = os.environ.get("ROBIE_RECORD_ALL_JOBS", "0").lower() in {"1", "true", "yes"}
         self.enabled = enabled
+        if keep_local is None:
+            delete = os.environ.get("ROBIE_DELETE_LOCAL_RECORDING_AFTER_UPLOAD", "1").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            keep_local = not delete
+        self.keep_local = keep_local
         if self.enabled:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(self.root, 0o700)
@@ -327,7 +345,7 @@ class RecordingManager:
                 recording["id"], status="READY", drive_file_id=file_id,
                 drive_url=url, uploaded_at=_now(),
             )
-            if os.environ.get("ROBIE_DELETE_LOCAL_RECORDING_AFTER_UPLOAD", "1").lower() in {"1", "true", "yes"}:
+            if not self.keep_local:
                 output.unlink(missing_ok=True)
                 Path(recording["stop_file"]).unlink(missing_ok=True)
             return ready
@@ -348,3 +366,6 @@ class RecordingManager:
             self.stop_and_upload(job_id, final_job_status)
         except Exception:
             pass
+
+    def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        return self.store.list_for_job(job_id)
