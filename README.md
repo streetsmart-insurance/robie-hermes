@@ -32,3 +32,9 @@ Run the acceptance suite with:
 ```sh
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
+
+The optional `skills/ezlynx-session-login` skill keeps the server-owned Chrome
+profile authenticated using Google Secret Manager references. Credential values
+are never stored in this repository. Its systemd timer runs the session check at
+9:00 a.m. Eastern and stops for operator action when EZLynx requires MFA or a
+CAPTCHA. See the skill's provisioning reference for deployment and rotation.
