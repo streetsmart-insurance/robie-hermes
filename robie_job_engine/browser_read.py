@@ -35,7 +35,17 @@ class BoundedBrowserReadWorker:
                 error="browser read requires a destination locator",
                 hold_status=JobStatus.NEEDS_CLARIFICATION,
             )
-        snapshot = self.port.read_fresh(locator)
+        try:
+            snapshot = self.port.read_fresh(locator)
+        except Exception as exc:
+            return WorkerResult(
+                False,
+                "browser.read",
+                locator,
+                retryable=True,
+                error=f"browser destination is not available: {type(exc).__name__}: {exc}",
+                hold_status=JobStatus.WAITING,
+            )
         return WorkerResult(
             True,
             "browser.read",
@@ -72,6 +82,7 @@ class BrowserReadVerifier:
                 evidence,
                 retryable=True,
                 error=f"{type(exc).__name__}: {exc}",
+                hold_status=JobStatus.WAITING,
             )
         evidence = VerificationEvidence(
             method="FRESH_BROWSER_READBACK",

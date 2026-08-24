@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
-from .chat_policy import execution_contract_lines
+from .chat_policy import execution_contract_lines, forbidden_tool_request
 from .context_policy import JobContextManager
-from .models import WAITING_STATUSES, JobStatus
+from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .operations import ingest_chat_attachments
 from .recording import RecordingManager
 from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
@@ -211,6 +211,23 @@ def open_chat_job(
                 "next_action": "Execute the selected Skill and independently verify destination state.",
             },
         )
+    forbidden = forbidden_tool_request({}, text)
+    if forbidden:
+        current = store.get_job(job["id"])
+        if JobStatus(current["status"]) not in TERMINAL_STATUSES:
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.NEEDS_CLARIFICATION,
+                    JobStatus.WAITING,
+                },
+                error=forbidden,
+                release_lease=True,
+            )
+        return job["id"]
     if classification.hold_status == JobStatus.NEEDS_CLARIFICATION.value:
         current = store.get_job(job["id"])
         if current["status"] == JobStatus.PENDING:

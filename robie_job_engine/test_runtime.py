@@ -10,7 +10,12 @@ from .carrier_proposal import (
     MemoryProposalDestination,
 )
 from .engine import JobEngine
-from .ezlynx import EzlynxDestinationVerifier, HermesCuaEzlynxWorker
+from .ezlynx import (
+    BoundedEzlynxWorker,
+    EzlynxDestinationVerifier,
+    HermesCuaEzlynxWorker,
+    MemoryEzlynxDestination,
+)
 from .models import JobStatus
 from .request_routing import BOUNDED_ENGINE_ACTIONS
 from .store import JobStore
@@ -53,9 +58,15 @@ def build_test_engine(
 ) -> JobEngine:
     require_test_environment()
     destination = proposal_destination or MemoryProposalDestination()
+    if ezlynx_browser is not None:
+        ezlynx_worker: Any = HermesCuaEzlynxWorker(ezlynx_browser)
+    elif isinstance(ezlynx_readback, MemoryEzlynxDestination):
+        ezlynx_worker = BoundedEzlynxWorker(ezlynx_readback)
+    else:
+        ezlynx_worker = _UnavailableWorker()
     workers: dict[str, Any] = {
         "carrier-proposal": BoundedCarrierProposalWorker(destination, store),
-        "hermes-cua": HermesCuaEzlynxWorker(ezlynx_browser) if ezlynx_browser else _UnavailableWorker(),
+        "hermes-cua": ezlynx_worker,
     }
     verifiers: dict[str, Any] = {
         "carrier.proposal": CarrierProposalVerifier(destination),

@@ -267,8 +267,12 @@ class ReliabilityMvpTests(unittest.TestCase):
             },
             idempotency_key="read-ok",
         )
-        self.assertEqual(engine.run(job["id"])["status"], JobStatus.COMPLETE)
+        complete = engine.run(job["id"])
+        self.assertEqual(complete["status"], JobStatus.COMPLETE)
         self.assertGreaterEqual(browser.reads, 2)
+        self.assertEqual(
+            self.store.list_evidence(job["id"])[0]["method"], "FRESH_BROWSER_READBACK"
+        )
 
         failing = MemoryBrowser(pages, fail_times=99)
         engine = JobEngine(
@@ -287,7 +291,7 @@ class ReliabilityMvpTests(unittest.TestCase):
             max_attempts=1,
         )
         final = engine.run(bad["id"])
-        self.assertEqual(final["status"], JobStatus.FAILED)
+        self.assertEqual(final["status"], JobStatus.WAITING)
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
 
         stale = MemoryBrowser({"https://ezlynx.example/account": {"url": "https://ezlynx.example/account", "title": "Wrong"}})
@@ -345,6 +349,9 @@ class ReliabilityMvpTests(unittest.TestCase):
         waiting = engine.run(first["id"])
         self.assertEqual(waiting["status"], JobStatus.RETRY_WAIT)
         self.assertIsNotNone(waiting["next_wakeup_at"])
+        created = datetime.fromisoformat(waiting["created_at"])
+        wake = datetime.fromisoformat(waiting["next_wakeup_at"])
+        self.assertLessEqual((wake - created).total_seconds(), 300.25)
         third = engine.run(first["id"])
         self.assertEqual(third["status"], JobStatus.RETRY_WAIT)
         self.assertEqual(worker.calls, 1)
