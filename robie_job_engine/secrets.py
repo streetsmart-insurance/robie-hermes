@@ -56,6 +56,9 @@ _ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|pwd|secret|token|authorization|cookie|mfa|otp|bearer|api[_-]?key)"
     r"\s*[:=]\s*([^\s,;]{2,})"
 )
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?i)\b(authorization)\s*[:=]\s*(?:bearer\s+)?.+"
+)
 
 
 def is_secret_key(name: str) -> bool:
@@ -68,6 +71,7 @@ def is_secret_key(name: str) -> bool:
 def redact_text(value: str) -> str:
     text = str(value)
     text = text.replace(FAKE_SECRET_SENTINEL, REDACTED)
+    text = _AUTHORIZATION_HEADER.sub(lambda match: f"{match.group(1)}={REDACTED}", text)
     return _ASSIGNMENT.sub(lambda match: f"{match.group(1)}={REDACTED}", text)
 
 

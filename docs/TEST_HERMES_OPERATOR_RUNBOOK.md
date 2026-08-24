@@ -124,9 +124,27 @@ database and confirm a `verification_evidence` row for that Job with:
 - observed agency fee `$350` appearing **exactly once**
 - observed page count matching the proposal (default 10 if the PDF page count
   cannot be read)
+- expected versus observed postconditions match exactly
+- `captured_at` is from the current action attempt (stale / year-2000 timestamps
+  must not authorize `COMPLETE`)
 
 Until that row exists and is checked, the status is not a valid `COMPLETE`.
 If evidence is missing, leave the Job `UNVERIFIED`, `WAITING`, or `FAILED`.
+
+## Test deploy and rollback (do not run from this Cloud Agent VM)
+
+There is no Test SSH from this VM. Do **not** deploy or roll back from here.
+On the isolated Test host only, follow:
+
+- `.agents/workflows/deploy-to-test.md` — build an immutable digest, inventory
+  Test, deploy only the Test profile, store evidence, report `TEST VERIFIED`
+  only when authoritative evidence passed. Otherwise `TEST UNVERIFIED` / `TEST FAILED`.
+- `.agents/workflows/rollback.md` — restore the previous verified digest, preserve
+  durable Job data, do not delete Job state, report success only after
+  authoritative verification.
+
+`live_test_complete` stays `false` until an independent reviewer has stored live
+Test evidence on the Test host.
 
 ## What this runbook does not do
 
@@ -134,3 +152,4 @@ If evidence is missing, leave the Job `UNVERIFIED`, `WAITING`, or `FAILED`.
 - It does not claim live Test `COMPLETE` from a Cloud Agent VM that cannot see
   the Razza PDF.
 - It does not create or download a fake quote.
+- It does not deploy or roll back Test from a Cloud Agent VM.

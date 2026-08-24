@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -39,11 +40,12 @@ from robie_job_engine.secrets import (
     contains_secret,
     redact_exception,
     redact_narration,
+    redact_text,
     redact_tool_args,
     screenshot_may_be_logged,
 )
 from robie_job_engine.store import JobStore
-from robie_job_engine.test_runtime import dispatch_operational_chat
+from robie_job_engine.test_runtime import dispatch_operational_chat, maybe_run_bounded_job
 from robie_job_engine.typed_output import TypedOutputError, TypedOutputStore, user_visible_text
 
 
@@ -100,6 +102,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
                 self.assertFalse(contains_secret(surface, FAKE_SECRET_SENTINEL))
             self.assertEqual(args["password"], REDACTED)
             self.assertEqual(args["mfa"], REDACTED)
+            self.assertEqual(args["authorization"], REDACTED)
             self.assertNotIn(FAKE_SECRET_SENTINEL, narration)
             self.assertNotIn(FAKE_SECRET_SENTINEL, error)
         self.assertFalse(screenshot_may_be_logged({"page": "login", "contains_secrets": True}))
@@ -558,6 +561,159 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         second = engine.run(job["id"])
         self.assertEqual(calls["n"], 1)
         self.assertNotEqual(second["status"], JobStatus.COMPLETE)
+
+    def test_production_and_test_entrypoints_call_maybe_run_bounded_job(self):
+        root = Path(__file__).resolve().parents[1]
+        adapter = (root / "integrations/google_chat/adapter.py").read_text()
+        chat_guard = (root / "robie_job_engine/chat_guard.py").read_text()
+        engine = (root / "robie_job_engine/engine.py").read_text()
+        self.assertIn("maybe_run_bounded_job(ROBIE_JOB_DB, job_id)", adapter)
+        self.assertIn("dispatch_operational_chat(", adapter)
+        self.assertIn("DurableWorkLedger(db_path)", chat_guard)
+        self.assertIn("IsolatedRunStore(db_path)", chat_guard)
+        self.assertIn("IsolatedRunStore(self.store.path)", engine)
+        self.assertIn("DurableWorkLedger(self.store.path)", engine)
+        self.assertIn('lease_owner = f"{self.owner}:{uuid.uuid4()}"', engine)
+        for env in ("TEST", "PRODUCTION"):
+            with durable_temporary_directory() as tmp:
+                db = str(Path(tmp) / "jobs.db")
+                store = JobStore(db)
+                job = store.create_job(
+                    "carrier.proposal",
+                    {"worker": "carrier-proposal", "text": "generate a proposal"},
+                    idempotency_key=f"entry-{env}",
+                )
+                hermes = []
+                with patch.dict(os.environ, {"ROBIE_ENV": env}, clear=False):
+                    handled = maybe_run_bounded_job(db, job["id"])
+                    consumed = dispatch_operational_chat(
+                        db, job["id"], hermes=lambda: hermes.append(env)
+                    )
+                self.assertTrue(handled)
+                self.assertTrue(consumed)
+                self.assertEqual(hermes, [])
+                IsolatedRunStore(db)
+                DurableWorkLedger(db)
+
+    def test_complete_rejects_mismatched_and_stale_evidence(self):
+        job = self.store.create_job("browser.read", {"worker": "x"}, idempotency_key="stale-ev")
+        self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+        self.store.transition(job["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+        self.store.add_evidence(
+            job["id"],
+            True,
+            VerificationEvidence(
+                "TEST",
+                "destination",
+                {"status": "done"},
+                {"status": "wrong"},
+                True,
+                "2000-01-01T00:00:00+00:00",
+                "rec-stale",
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.transition(
+                job["id"],
+                JobStatus.COMPLETE,
+                expected={JobStatus.VERIFYING},
+                authority=VERIFIER_AUTHORITY,
+            )
+        self.assertNotEqual(self.store.get_job(job["id"])["status"], JobStatus.COMPLETE)
+
+        class Worker:
+            def perform(self, current, *, idempotency_key):
+                return WorkerResult(True, "browser.read", {"record_id": "r-stale"})
+
+        class Verifier:
+            def verify(self, current, action):
+                return VerificationResult(
+                    True,
+                    VerificationEvidence(
+                        "TEST",
+                        "destination",
+                        {"status": "done"},
+                        {"status": "wrong"},
+                        True,
+                        "2000-01-01T00:00:00+00:00",
+                        "rec-engine-stale",
+                    ),
+                )
+
+        live = self.store.create_job(
+            "browser.read", {"worker": "probe"}, idempotency_key="stale-engine"
+        )
+        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+            live["id"]
+        )
+        self.assertNotEqual(final["status"], JobStatus.COMPLETE)
+        self.assertIn(final["status"], {JobStatus.UNVERIFIED, JobStatus.FAILED})
+
+    def test_authorization_header_redacts_entire_bearer_value(self):
+        header = "Authorization: Bearer TESTVALUE123"
+        cleaned = redact_text(header)
+        self.assertNotIn("TESTVALUE123", cleaned)
+        self.assertIn(REDACTED, cleaned)
+        self.assertNotIn(
+            "TESTVALUE123",
+            redact_narration(f"upstream failed {header}"),
+        )
+        try:
+            raise RuntimeError(header)
+        except RuntimeError as exc:
+            self.assertNotIn("TESTVALUE123", redact_exception(exc))
+        args = redact_tool_args({"authorization": "Bearer TESTVALUE123"})
+        self.assertEqual(args["authorization"], REDACTED)
+        self.assertNotIn("TESTVALUE123", str(args))
+
+    def test_concurrent_isolated_run_start_is_database_enforced(self):
+        runs = IsolatedRunStore(self.db)
+        barrier = threading.Barrier(2)
+        started: list[dict] = []
+        errors: list[BaseException] = []
+
+        def attempt(owner: str) -> None:
+            try:
+                barrier.wait(timeout=2)
+                started.append(runs.start(owner=owner, job_id="concurrent-job"))
+            except BaseException as exc:
+                errors.append(exc)
+
+        workers = [
+            threading.Thread(target=attempt, args=("owner-a",)),
+            threading.Thread(target=attempt, args=("owner-b",)),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        self.assertEqual(len(started), 1)
+        self.assertTrue(any(isinstance(item, RunIsolationError) for item in errors))
+        self.assertEqual(sum(1 for run in runs.list_runs() if run["status"] == "ACTIVE"), 1)
+
+    def test_concurrent_external_action_is_atomic(self):
+        ledger = DurableWorkLedger(self.db)
+        ledger.acquire("carrier.proposal", "atomic-1", owner="w1")
+        barrier = threading.Barrier(2)
+        outcomes: list[object] = []
+
+        def attempt() -> None:
+            try:
+                barrier.wait(timeout=2)
+                outcomes.append(ledger.record_external_action("carrier.proposal", "atomic-1"))
+            except BaseException as exc:
+                outcomes.append(exc)
+
+        workers = [threading.Thread(target=attempt) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        successes = [item for item in outcomes if isinstance(item, dict)]
+        failures = [item for item in outcomes if isinstance(item, IdempotencyError)]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(ledger.get("carrier.proposal", "atomic-1")["external_actions"], 1)
 
     def test_phase10_production_release_stays_fail(self):
         self.assertEqual(production_release_decision(), "FAIL")

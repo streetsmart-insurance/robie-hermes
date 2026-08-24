@@ -208,7 +208,7 @@ from robie_job_engine.chat_guard import (build_chat_execution_text, guard_chat_r
 from robie_job_engine.pubsub_ack import PubSubAckCoordinator
 from robie_job_engine.runtime_env import chat_path_is_sandbox
 from robie_job_engine.secrets import redact_text
-from robie_job_engine.test_runtime import dispatch_operational_chat
+from robie_job_engine.test_runtime import dispatch_operational_chat, maybe_run_bounded_job
 ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 
 logger = logging.getLogger("gateway.platforms.google_chat")
@@ -1807,10 +1807,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if jobs is None:
                 jobs = self._robie_jobs_by_reply = {}
             jobs[event.message_id] = job_id
-            # Operational bounded Jobs run through the durable Job Engine in
-            # Test and Production. Ledger/path failures fail closed and never
-            # fall through to Hermes. Hermes/cua-driver is only for
-            # non-operational or explicitly labeled sandbox chat.
+            # Test AND Production: operational bounded work goes through
+            # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
+            # DurableWorkLedger. Ledger/path failures fail closed. Hermes
+            # is only for non-operational or explicit sandbox chat.
+            if maybe_run_bounded_job(ROBIE_JOB_DB, job_id):
+                return
             if dispatch_operational_chat(
                 ROBIE_JOB_DB,
                 job_id,

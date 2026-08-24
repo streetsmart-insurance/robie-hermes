@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from .models import ACTION_OUTCOME_UNKNOWN, JobStatus
@@ -72,6 +73,58 @@ def complete_is_prohibited(observed: dict[str, Any] | None) -> str | None:
     return None
 
 
+def postcondition_mismatch(
+    expected: dict[str, Any] | None,
+    observed: dict[str, Any] | None,
+) -> str | None:
+    """Require an exact expected-versus-observed postcondition match."""
+    expected = dict(expected or {})
+    observed = dict(observed or {})
+    for key, value in expected.items():
+        if observed.get(key) != value:
+            return (
+                f"COMPLETE prohibited: expected {key}={value!r} "
+                f"observed {observed.get(key)!r}"
+            )
+    return None
+
+
+def parse_evidence_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def evidence_is_stale(
+    *,
+    captured_at: str | None,
+    not_before: str | None,
+    stored_at: str | None = None,
+    stored_not_before: str | None = None,
+) -> str | None:
+    """Reject year-2000 / pre-job timestamps and prior-attempt rows."""
+    captured = parse_evidence_timestamp(captured_at)
+    if captured is None:
+        return "COMPLETE prohibited: captured_at is missing or unparseable"
+    captured_floor = parse_evidence_timestamp(not_before)
+    if captured_floor is not None and captured < captured_floor:
+        return "COMPLETE prohibited: evidence timestamp is stale"
+    stored = parse_evidence_timestamp(stored_at)
+    stored_floor = parse_evidence_timestamp(stored_not_before)
+    if stored is not None and stored_floor is not None and stored < stored_floor:
+        return "COMPLETE prohibited: evidence is not from the current action attempt"
+    return None
+
+
 def require_complete_postcondition(
     *,
     current: JobStatus,
@@ -85,6 +138,9 @@ def require_complete_postcondition(
     locator: str | None,
     job_id: str | None,
     verifier_authority: str,
+    not_before: str | None = None,
+    stored_at: str | None = None,
+    stored_not_before: str | None = None,
 ) -> None:
     if current != JobStatus.VERIFYING or authority != verifier_authority:
         raise PermissionError(
@@ -105,3 +161,14 @@ def require_complete_postcondition(
     prohibited = complete_is_prohibited(observed)
     if prohibited:
         raise PermissionError(prohibited)
+    mismatch = postcondition_mismatch(expected, observed)
+    if mismatch:
+        raise PermissionError(mismatch)
+    stale = evidence_is_stale(
+        captured_at=captured_at,
+        not_before=not_before,
+        stored_at=stored_at,
+        stored_not_before=stored_not_before,
+    )
+    if stale:
+        raise PermissionError(stale)

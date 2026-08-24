@@ -211,12 +211,34 @@ class JobStore:
             if status == JobStatus.COMPLETE:
                 evidence = conn.execute(
                     """SELECT locator,expected_json,observed_json,captured_at,
-                              evidence_sha256,verified,authoritative
+                              evidence_sha256,verified,authoritative,created_at
                        FROM verification_evidence
                        WHERE job_id=? AND verified=1 AND authoritative=1
                        ORDER BY id DESC LIMIT 1""",
                     (job_id,),
                 ).fetchone()
+                job_meta = conn.execute(
+                    "SELECT created_at FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                perform = conn.execute(
+                    """SELECT created_at FROM attempts
+                       WHERE job_id=? AND phase='perform'
+                       ORDER BY id DESC LIMIT 1""",
+                    (job_id,),
+                ).fetchone()
+                action_ckpt = conn.execute(
+                    """SELECT created_at FROM checkpoints
+                       WHERE job_id=? AND kind='action'""",
+                    (job_id,),
+                ).fetchone()
+                attempt_floors = [
+                    perform["created_at"] if perform else None,
+                    action_ckpt["created_at"] if action_ckpt else None,
+                ]
+                stored_not_before = max(
+                    (item for item in attempt_floors if item),
+                    default=job_meta["created_at"] if job_meta else None,
+                )
                 require_complete_postcondition(
                     current=current,
                     authority=authority,
@@ -229,6 +251,9 @@ class JobStore:
                     locator=evidence["locator"] if evidence else None,
                     job_id=job_id,
                     verifier_authority=VERIFIER_AUTHORITY,
+                    not_before=job_meta["created_at"] if job_meta else None,
+                    stored_at=evidence["created_at"] if evidence else None,
+                    stored_not_before=stored_not_before,
                 )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(

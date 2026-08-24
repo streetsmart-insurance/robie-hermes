@@ -317,16 +317,16 @@ class ReliabilityMvpTests(unittest.TestCase):
 
     def test_checkpoint_restart_does_not_repeat_action(self):
         worker = RecordingWorker(WorkerResult(True, "ezlynx.apply_label", {"resource_id": "doc-1"}))
-        first_verify = VerificationResult(False, _evidence(False), True, error="not yet")
-        later = VerificationResult(True, _evidence(True, expected={"resource_id": "doc-1"}), False)
-        verifier = SequenceVerifier([first_verify, later])
-        engine = self._engine(worker, {"ezlynx.apply_label": verifier})
         job = self.store.create_job(
             "ezlynx.apply_label",
             {"worker": "hermes-cua"},
             idempotency_key="restart-1",
             max_attempts=3,
         )
+        first_verify = VerificationResult(False, _evidence(False), True, error="not yet")
+        later = VerificationResult(True, _evidence(True, expected={"resource_id": "doc-1"}), False)
+        verifier = SequenceVerifier([first_verify, later])
+        engine = self._engine(worker, {"ezlynx.apply_label": verifier})
         waiting = engine.run(job["id"])
         self.assertEqual(waiting["status"], JobStatus.RETRY_WAIT)
         self.assertEqual(worker.calls, 1)

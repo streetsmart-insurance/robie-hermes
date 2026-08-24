@@ -6,7 +6,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
-from .complete_guard import complete_is_prohibited
+from .complete_guard import (
+    complete_is_prohibited,
+    evidence_is_stale,
+    postcondition_mismatch,
+)
 from .idempotency import DurableWorkLedger, IdempotencyError
 from .job_schema import bounded_schema_hold_reason
 from .models import (
@@ -242,12 +246,20 @@ class JobEngine:
             )
         if result.verified and result.evidence.authoritative:
             prohibited = complete_is_prohibited(result.evidence.observed)
-            if prohibited:
+            mismatch = postcondition_mismatch(
+                result.evidence.expected, result.evidence.observed
+            )
+            stale = evidence_is_stale(
+                captured_at=result.evidence.captured_at,
+                not_before=job.get("created_at"),
+            )
+            reason = prohibited or mismatch or stale
+            if reason:
                 return self.store.transition(
                     job["id"],
                     JobStatus.UNVERIFIED,
                     expected={JobStatus.VERIFYING},
-                    error=prohibited,
+                    error=reason,
                     release_lease=True,
                 )
             return self.store.transition(

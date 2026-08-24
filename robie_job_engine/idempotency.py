@@ -75,9 +75,10 @@ class DurableWorkLedger:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _initialize(self) -> None:
@@ -174,15 +175,29 @@ class DurableWorkLedger:
         return self.get(namespace, work_item_key)
 
     def record_external_action(self, namespace: str, work_item_key: str) -> dict[str, Any]:
-        item = self.get(namespace, work_item_key)
-        if item["external_actions"] >= 1:
-            raise IdempotencyError("at most one external action is allowed")
-        with self._connect() as conn:
-            conn.execute(
-                """UPDATE durable_work_items SET external_actions=external_actions+1, updated_at=?
+        stamp = utc_now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT external_actions FROM durable_work_items
                    WHERE namespace=? AND work_item_key=?""",
-                (utc_now(), namespace, work_item_key),
+                (namespace, work_item_key),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise KeyError((namespace, work_item_key))
+            cur = conn.execute(
+                """UPDATE durable_work_items SET external_actions=external_actions+1, updated_at=?
+                   WHERE namespace=? AND work_item_key=? AND external_actions=0""",
+                (stamp, namespace, work_item_key),
             )
+            if cur.rowcount != 1:
+                conn.rollback()
+                raise IdempotencyError("at most one external action is allowed")
+            conn.commit()
+        finally:
+            conn.close()
         return self.get(namespace, work_item_key)
 
     def mark_verified(self, namespace: str, work_item_key: str) -> dict[str, Any]:

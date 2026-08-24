@@ -28,10 +28,11 @@ class IsolatedRunStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _initialize(self) -> None:
@@ -57,6 +58,8 @@ class IsolatedRunStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_isolated_runs_active
                     ON isolated_runs(status);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_isolated_runs_one_active
+                    ON isolated_runs(status) WHERE status='ACTIVE';
                 """
             )
 
@@ -106,20 +109,31 @@ class IsolatedRunStore:
             raise
 
     def start(self, *, owner: str, job_id: str) -> dict[str, Any]:
-        active = self.active_run()
-        if active:
-            raise RunIsolationError(
-                f"rejecting new run; active run {active['id']} is owned by {active['owner']}"
-            )
         run_id = str(uuid.uuid4())
         now = utc_now()
-        with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO isolated_runs
-                   (id,owner,job_id,status,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (run_id, owner, job_id, "ACTIVE", now, now),
-            )
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """INSERT INTO isolated_runs
+                       (id,owner,job_id,status,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (run_id, owner, job_id, "ACTIVE", now, now),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                row = conn.execute(
+                    "SELECT id, owner FROM isolated_runs WHERE status='ACTIVE' ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                owner_label = row["owner"] if row else "another owner"
+                run_label = row["id"] if row else "unknown"
+                raise RunIsolationError(
+                    f"rejecting new run; active run {run_label} is owned by {owner_label}"
+                ) from exc
+        finally:
+            conn.close()
         return self.get(run_id)
 
     def cancel(self, run_id: str) -> dict[str, Any]:
