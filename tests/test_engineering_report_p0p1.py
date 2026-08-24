@@ -6,7 +6,6 @@ No live EZLynx. No real credentials. Production release stays FAIL.
 from __future__ import annotations
 
 import os
-import tempfile
 import threading
 import time
 import unittest
@@ -450,21 +449,24 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
 
     def test_ledger_path_failure_never_invokes_hermes(self):
         hermes_calls = []
-        with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "jobs.db")
+
+        def _fail_ledger(*_args, **_kwargs):
+            raise IdempotencyError("persistent store cannot be /tmp")
+
+        with patch.object(DurableWorkLedger, "__init__", side_effect=_fail_ledger):
             job_id = open_chat_job(
-                db,
+                self.db,
                 "spaces/s/messages/hermes-block",
                 "generate a proposal and add a $350 fee",
             )
             consumed = dispatch_operational_chat(
-                db, job_id, hermes=lambda: hermes_calls.append("hermes")
+                self.db, job_id, hermes=lambda: hermes_calls.append("hermes")
             )
-            self.assertTrue(consumed)
-            self.assertEqual(hermes_calls, [])
-            job = JobStore(db).get_job(job_id)
-            self.assertNotEqual(job["status"], JobStatus.COMPLETE)
-            self.assertIn("durable", str(job.get("last_error") or "").casefold())
+        self.assertTrue(consumed)
+        self.assertEqual(hermes_calls, [])
+        job = self.store.get_job(job_id)
+        self.assertNotEqual(job["status"], JobStatus.COMPLETE)
+        self.assertIn("durable", str(job.get("last_error") or "").casefold())
 
     def test_chat_persist_and_outbound_redact_fake_sentinel(self):
         text = f"generate a proposal password={FAKE_SECRET_SENTINEL}"
@@ -696,6 +698,60 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
 
         live = self.store.create_job(
             "browser.read", {"worker": "probe"}, idempotency_key="future-engine"
+        )
+        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+            live["id"]
+        )
+        self.assertNotEqual(final["status"], JobStatus.COMPLETE)
+        self.assertIn(final["status"], {JobStatus.UNVERIFIED, JobStatus.FAILED})
+
+    def test_complete_rejects_empty_expected_postcondition(self):
+        job = self.store.create_job("browser.read", {"worker": "x"}, idempotency_key="empty-ev")
+        self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+        self.store.transition(job["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+        self.store.add_evidence(
+            job["id"],
+            True,
+            VerificationEvidence(
+                "TEST",
+                "destination",
+                {},
+                {"status": "wrong"},
+                True,
+                datetime.now(timezone.utc).isoformat(),
+                "rec-empty",
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.transition(
+                job["id"],
+                JobStatus.COMPLETE,
+                expected={JobStatus.VERIFYING},
+                authority=VERIFIER_AUTHORITY,
+            )
+        self.assertNotEqual(self.store.get_job(job["id"])["status"], JobStatus.COMPLETE)
+
+        class Worker:
+            def perform(self, current, *, idempotency_key):
+                return WorkerResult(True, "browser.read", {"record_id": "r-empty"})
+
+        class Verifier:
+            def verify(self, current, action):
+                return VerificationResult(
+                    True,
+                    VerificationEvidence(
+                        "TEST",
+                        "destination",
+                        {},
+                        {"status": "wrong"},
+                        True,
+                        datetime.now(timezone.utc).isoformat(),
+                        "rec-engine-empty",
+                    ),
+                )
+
+        live = self.store.create_job(
+            "browser.read", {"worker": "probe"}, idempotency_key="empty-engine"
         )
         final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
             live["id"]

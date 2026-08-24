@@ -43,6 +43,27 @@ IDENTITY_KEYS = (
     "locator",
     "id",
 )
+WORKFLOW_EXPECTED_KEYS = frozenset(
+    IDENTITY_KEYS
+    + (
+        "status",
+        "ok",
+        "outcome",
+        "page_count",
+        "agency_fee_usd",
+        "agency_fee_occurrences",
+        "title",
+        "url",
+        "account_id",
+        "document_id",
+        "assignee_id",
+        "assignee_name",
+        "destination_id",
+        "destination_name",
+        "label_id",
+        "label",
+    )
+)
 
 
 def evidence_record_id(
@@ -76,12 +97,24 @@ def complete_is_prohibited(observed: dict[str, Any] | None) -> str | None:
     return None
 
 
+def expected_postcondition_missing(expected: dict[str, Any] | None) -> str | None:
+    """Empty or non-workflow expected must never authorize COMPLETE."""
+    if not isinstance(expected, dict) or not expected:
+        return "COMPLETE prohibited: expected postcondition is empty"
+    if not any(key in WORKFLOW_EXPECTED_KEYS for key in expected):
+        return "COMPLETE prohibited: expected postcondition has no workflow-relevant keys"
+    return None
+
+
 def postcondition_mismatch(
     expected: dict[str, Any] | None,
     observed: dict[str, Any] | None,
 ) -> str | None:
-    """Require an exact expected-versus-observed postcondition match."""
-    expected = dict(expected or {})
+    """Require a non-empty, workflow-relevant expected-versus-observed match."""
+    missing = expected_postcondition_missing(expected)
+    if missing:
+        return missing
+    expected = dict(expected)
     observed = dict(observed or {})
     for key, value in expected.items():
         if observed.get(key) != value:
@@ -166,6 +199,9 @@ def require_complete_postcondition(
         raise PermissionError("COMPLETE evidence is missing timestamp or evidence ref")
     if expected is None or observed is None:
         raise PermissionError("COMPLETE evidence must include expected and observed")
+    missing = expected_postcondition_missing(expected)
+    if missing:
+        raise PermissionError(missing)
     if not evidence_record_id(
         locator=locator, expected=expected, observed=observed, job_id=job_id
     ):
