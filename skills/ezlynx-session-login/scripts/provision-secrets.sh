@@ -14,8 +14,8 @@ command -v gcloud >/dev/null 2>&1 || {
   exit 2
 }
 
-username_secret=robie-ezlynx-username
-password_secret=robie-ezlynx-password
+username_secret=ezlynx-username
+password_secret=ezlynx-password
 
 for secret_name in "$username_secret" "$password_secret"; do
   if ! gcloud secrets describe "$secret_name" --project "$project_id" >/dev/null 2>&1; then
