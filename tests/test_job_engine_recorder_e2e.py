@@ -112,6 +112,34 @@ class SequenceVerifier:
         return self.results.pop(0)
 
 
+class FreshMatchVerifier:
+    """Stamp expected/observed evidence at verify time so it is never pre-dated."""
+
+    def __init__(
+        self,
+        expected: dict,
+        *,
+        first_error: str | None = None,
+        first_hold: JobStatus | None = None,
+    ) -> None:
+        self.expected = expected
+        self.first_error = first_error
+        self.first_hold = first_hold
+        self.calls = 0
+
+    def verify(self, job, action):
+        self.calls += 1
+        if self.calls == 1 and self.first_error:
+            return VerificationResult(
+                False,
+                _fresh_evidence(self.expected, {}),
+                True,
+                error=self.first_error,
+                hold_status=self.first_hold,
+            )
+        return VerificationResult(True, _fresh_evidence(self.expected), False)
+
+
 class CountingWorker:
     def __init__(self, result: WorkerResult) -> None:
         self.result = result
@@ -428,19 +456,14 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         worker = CountingWorker(
             WorkerResult(True, "ezlynx.apply_label", {"resource_id": "doc-retry"})
         )
-        first = VerificationResult(
-            False, _fresh_evidence({"resource_id": "doc-retry"}, {}), True, error="not yet"
-        )
-        later = VerificationResult(
-            True, _fresh_evidence({"resource_id": "doc-retry"}), False
-        )
+        verifier = FreshMatchVerifier({"resource_id": "doc-retry"}, first_error="not yet")
         job = self.store.create_job(
             "ezlynx.apply_label",
             {"worker": "hermes-cua"},
             idempotency_key="e2e-retry-segments",
             max_attempts=3,
         )
-        engine = self._engine({"hermes-cua": worker}, {"ezlynx.apply_label": SequenceVerifier([first, later])})
+        engine = self._engine({"hermes-cua": worker}, {"ezlynx.apply_label": verifier})
         waiting = engine.run(job["id"])
         self.assertEqual(waiting["status"], JobStatus.RETRY_WAIT)
         self.assertEqual(worker.calls, 1)
@@ -450,6 +473,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         final = engine.run(job["id"])
         self.assertEqual(final["status"], JobStatus.COMPLETE)
         self.assertEqual(worker.calls, 1)
+        self.assertEqual(verifier.calls, 2)
         segments = self._assert_test_recording(job["id"], min_segments=2)
         self.assertEqual(len(segments), 2)
         self.assertEqual(segments[0]["segment_number"], 1)
@@ -466,15 +490,10 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         worker = CountingWorker(
             WorkerResult(True, "ezlynx.apply_label", {"resource_id": "doc-restart"})
         )
-        waiting_verify = VerificationResult(
-            False,
-            _fresh_evidence({"resource_id": "doc-restart"}, {}),
-            True,
-            error="destination not ready",
-            hold_status=JobStatus.WAITING,
-        )
-        later = VerificationResult(
-            True, _fresh_evidence({"resource_id": "doc-restart"}), False
+        first_verifier = FreshMatchVerifier(
+            {"resource_id": "doc-restart"},
+            first_error="destination not ready",
+            first_hold=JobStatus.WAITING,
         )
         job = self.store.create_job(
             "ezlynx.apply_label",
@@ -484,7 +503,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         )
         first_engine = self._engine(
             {"hermes-cua": worker},
-            {"ezlynx.apply_label": SequenceVerifier([waiting_verify])},
+            {"ezlynx.apply_label": first_verifier},
         )
         held = first_engine.run(job["id"])
         self.assertEqual(held["status"], JobStatus.WAITING)
@@ -498,7 +517,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         self.store.resume(job["id"])
         restarted = self._engine(
             {"hermes-cua": worker},
-            {"ezlynx.apply_label": SequenceVerifier([later])},
+            {"ezlynx.apply_label": FreshMatchVerifier({"resource_id": "doc-restart"})},
         )
         final = restarted.run(job["id"])
         self.assertEqual(final["status"], JobStatus.COMPLETE)
