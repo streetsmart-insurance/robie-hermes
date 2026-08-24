@@ -328,6 +328,14 @@ _TRUSTED_ATTACHMENT_HOSTS = (
     "lh6.googleusercontent.com",
 )
 
+_MAX_INBOUND_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_DRIVE_EXPORT_TYPES: Dict[str, Tuple[str, str]] = {
+    "application/vnd.google-apps.document": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    "application/vnd.google-apps.spreadsheet": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+    "application/vnd.google-apps.presentation": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+    "application/vnd.google-apps.drawing": ("application/pdf", ".pdf"),
+}
+
 
 def _is_google_owned_host(url: str) -> bool:
     """Return True iff *url* is https and targets a Google-owned domain."""
@@ -2068,7 +2076,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         attachments = msg.get("attachment") or []
         for att in attachments:
             try:
-                local_path, mime = await self._download_attachment(att)
+                local_path, mime = await self._download_attachment(
+                    att, sender_email=sender_email,
+                )
             except Exception:
                 logger.exception("[GoogleChat] attachment download failed")
                 continue
@@ -2155,7 +2165,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
 
     async def _download_attachment(
-        self, attachment: Dict[str, Any]
+        self, attachment: Dict[str, Any], *, sender_email: str = ""
     ) -> Tuple[Optional[str], Optional[str]]:
         """Download an inbound attachment to the local cache; return (path, mime).
 
@@ -2177,6 +2187,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         name = attachment.get("name") or ""
         attachment_data_ref = attachment.get("attachmentDataRef") or {}
         resource_name = attachment_data_ref.get("resourceName") or ""
+        drive_file_id = (attachment.get("driveDataRef") or {}).get("driveFileId") or ""
         download_uri = attachment.get("downloadUri") or ""
 
         # NOTE on ``source == "DRIVE_FILE"``: Google Chat tags BOTH
@@ -2184,18 +2195,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # source string, but the two have different access models.
         # Drag-and-drop uploads come with an ``attachmentDataRef.resourceName``
         # that bot SA tokens CAN download via ``media.download_media``.
-        # Pure Drive-picker shares often lack that field and require
-        # user OAuth + Drive scope (which we deliberately don't request).
-        # So we only short-circuit when there's nothing the bot path
-        # can use — otherwise try the bot path first.
-        if source == "DRIVE_FILE" and not resource_name:
-            logger.info(
-                "[GoogleChat] Skipping Drive-picker attachment (no "
-                "resourceName, would need user-OAuth Drive scope)"
-            )
+        # Drive-picker shares use a structured Drive file reference.
+        if source == "DRIVE_FILE" and not resource_name and not drive_file_id:
+            logger.warning("[GoogleChat] Drive attachment has no supported data reference")
             return None, mime
 
         data: Optional[bytes] = None
+        filename = attachment.get("contentName") or (
+            name.split("/")[-1] if name else "attachment"
+        )
 
         # Path 1: media.download with attachmentDataRef.resourceName (bot-path).
         if resource_name:
@@ -2222,7 +2230,68 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
                 data = None
 
-        # Path 2: downloadUri fallback (rarely works with SA tokens, but try).
+
+        # Path 2: Drive picker. Accept IDs only from Google's structured event.
+        if data is None and drive_file_id:
+            candidates: List[Tuple[str, Any]] = []
+            if self._credentials is not None:
+                candidates.append(("app", self._credentials))
+            if sender_email:
+                try:
+                    from .oauth import load_user_credentials
+                    user_creds = await asyncio.to_thread(
+                        load_user_credentials, sender_email.strip().lower()
+                    )
+                    if user_creds is not None:
+                        candidates.append(("user", user_creds))
+                except Exception:
+                    logger.exception("[GoogleChat] Could not load user Drive credentials")
+
+            def _fetch_drive(creds: Any) -> Tuple[bytes, str, str]:
+                import io
+                from googleapiclient.http import MediaIoBaseDownload
+                drive = build_service("drive", "v3", credentials=creds, cache_discovery=False)
+                meta = drive.files().get(
+                    fileId=drive_file_id, fields="id,name,mimeType,size",
+                    supportsAllDrives=True,
+                ).execute()
+                source_mime = str(meta.get("mimeType") or mime or "")
+                resolved_name = str(meta.get("name") or filename)
+                if int(meta.get("size") or 0) > _MAX_INBOUND_ATTACHMENT_BYTES:
+                    raise ValueError("Drive attachment exceeds the 25 MB limit")
+                export = _DRIVE_EXPORT_TYPES.get(source_mime)
+                if source_mime.startswith("application/vnd.google-apps."):
+                    if export is None:
+                        raise ValueError(f"unsupported native Google Drive type: {source_mime}")
+                    resolved_mime, suffix = export
+                    if not resolved_name.casefold().endswith(suffix):
+                        resolved_name += suffix
+                    req = drive.files().export_media(fileId=drive_file_id, mimeType=resolved_mime)
+                else:
+                    resolved_mime = source_mime or "application/octet-stream"
+                    req = drive.files().get_media(fileId=drive_file_id, supportsAllDrives=True)
+                buf = io.BytesIO()
+                downloader = MediaIoBaseDownload(buf, req)
+                done = False
+                while not done:
+                    _status, done = downloader.next_chunk()
+                    if buf.tell() > _MAX_INBOUND_ATTACHMENT_BYTES:
+                        raise ValueError("Drive attachment exceeds the 25 MB limit")
+                return buf.getvalue(), resolved_mime, resolved_name
+
+            for identity, creds in candidates:
+                try:
+                    data, mime, filename = await asyncio.to_thread(_fetch_drive, creds)
+                    logger.info("[GoogleChat] Downloaded Drive attachment with %s identity", identity)
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "[GoogleChat] Drive download with %s identity failed: %s",
+                        identity, _redact_sensitive(str(exc)),
+                    )
+                    data = None
+
+        # Path 3: downloadUri fallback (rarely works with SA tokens, but try).
         if data is None and download_uri:
             if not _is_google_owned_host(download_uri):
                 logger.warning(
@@ -2254,7 +2323,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # Cache based on MIME. Upstream's cache_* helpers expect `ext` for
         # media (image/audio/video) and a positional `filename` for docs.
-        filename = attachment.get("contentName") or (name.split("/")[-1] if name else "attachment")
         if "." in filename:
             ext = "." + filename.rsplit(".", 1)[-1].lower()
         else:
