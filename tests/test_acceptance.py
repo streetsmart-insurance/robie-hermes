@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.ezlynx import EzlynxDestinationVerifier, HermesCuaEzlynxWorker
@@ -82,7 +83,7 @@ class StaticVerifier:
 
 class AcceptanceTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = durable_temporary_directory()
         self.store = JobStore(Path(self.tmp.name) / "jobs.db")
 
     def tearDown(self):

@@ -169,11 +169,21 @@ class JobStore:
             ):
                 return None
             lease_expired = not row["lease_expires_at"] or row["lease_expires_at"] <= now.isoformat()
-            if row["lease_owner"] and row["lease_owner"] != owner and not lease_expired:
+            if row["lease_owner"] and not lease_expired:
                 return None
             conn.execute(
                 "UPDATE jobs SET lease_owner=?,lease_expires_at=?,updated_at=? WHERE id=?",
                 (owner, expiry, now.isoformat(), job_id),
+            )
+            return self.get_job(job_id, conn=conn)
+
+    def release_lease(self, job_id: str) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as conn:
+            conn.execute(
+                """UPDATE jobs SET lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                   WHERE id=?""",
+                (now, job_id),
             )
             return self.get_job(job_id, conn=conn)
 

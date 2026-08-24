@@ -57,29 +57,13 @@ def build_test_engine(
     ezlynx_readback: Any | None = None,
 ) -> JobEngine:
     require_test_environment()
-    destination = proposal_destination or MemoryProposalDestination()
-    if ezlynx_browser is not None:
-        ezlynx_worker: Any = HermesCuaEzlynxWorker(ezlynx_browser)
-    elif isinstance(ezlynx_readback, MemoryEzlynxDestination):
-        ezlynx_worker = BoundedEzlynxWorker(ezlynx_readback)
-    else:
-        ezlynx_worker = _UnavailableWorker()
-    workers: dict[str, Any] = {
-        "carrier-proposal": BoundedCarrierProposalWorker(destination, store),
-        "hermes-cua": ezlynx_worker,
-    }
-    verifiers: dict[str, Any] = {
-        "carrier.proposal": CarrierProposalVerifier(destination),
-    }
-    if browser_port is not None:
-        workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
-        verifiers["browser.read"] = BrowserReadVerifier(browser_port)
-    if ezlynx_readback is not None:
-        ezlynx_verifier = EzlynxDestinationVerifier(ezlynx_readback)
-        verifiers["ezlynx.reassign"] = ezlynx_verifier
-        verifiers["ezlynx.move_document"] = ezlynx_verifier
-        verifiers["ezlynx.apply_label"] = ezlynx_verifier
-    return JobEngine(store, workers, verifiers)
+    return build_runtime_engine(
+        store,
+        proposal_destination=proposal_destination,
+        browser_port=browser_port,
+        ezlynx_browser=ezlynx_browser,
+        ezlynx_readback=ezlynx_readback,
+    )
 
 
 class _UnavailableWorker:
@@ -95,6 +79,68 @@ class _UnavailableWorker:
         )
 
 
+def build_runtime_engine(
+    store: JobStore,
+    *,
+    proposal_destination: Any | None = None,
+    browser_port: Any | None = None,
+    ezlynx_browser: Any | None = None,
+    ezlynx_readback: Any | None = None,
+) -> JobEngine:
+    """Bounded Job Engine for Test and Production Chat intake.
+
+    Does not open live EZLynx unless an explicit port is supplied.
+    Hermes/cua-driver remains the path for non-bounded chat.
+    """
+    destination = proposal_destination
+    if destination is None and current_robie_env() == TEST_ENV_NAME:
+        destination = MemoryProposalDestination()
+    if ezlynx_browser is not None:
+        ezlynx_worker: Any = HermesCuaEzlynxWorker(ezlynx_browser)
+    elif isinstance(ezlynx_readback, MemoryEzlynxDestination):
+        ezlynx_worker = BoundedEzlynxWorker(ezlynx_readback)
+    else:
+        ezlynx_worker = _UnavailableWorker()
+    workers: dict[str, Any] = {
+        "carrier-proposal": (
+            BoundedCarrierProposalWorker(destination, store)
+            if destination is not None
+            else _UnavailableWorker()
+        ),
+        "hermes-cua": ezlynx_worker,
+    }
+    verifiers: dict[str, Any] = {}
+    if destination is not None:
+        verifiers["carrier.proposal"] = CarrierProposalVerifier(destination)
+    if browser_port is not None:
+        workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
+        verifiers["browser.read"] = BrowserReadVerifier(browser_port)
+    if ezlynx_readback is not None:
+        ezlynx_verifier = EzlynxDestinationVerifier(ezlynx_readback)
+        verifiers["ezlynx.reassign"] = ezlynx_verifier
+        verifiers["ezlynx.move_document"] = ezlynx_verifier
+        verifiers["ezlynx.apply_label"] = ezlynx_verifier
+    return JobEngine(store, workers, verifiers)
+
+
+def maybe_run_bounded_job(db_path: str, job_id: str | None) -> bool:
+    """Run a bounded operational Job through the durable Job Engine.
+
+    Used for Test and Production Chat. Non-bounded conversation still
+    returns False so Hermes/cua-driver can continue.
+    """
+    if not job_id:
+        return False
+    store = JobStore(db_path)
+    job = store.get_job(job_id)
+    if job["action_type"] not in BOUNDED_ENGINE_ACTIONS:
+        return False
+    if JobStatus(job["status"]) != JobStatus.PENDING:
+        return False
+    build_runtime_engine(store).run(job_id)
+    return True
+
+
 def maybe_run_test_bounded_job(db_path: str, job_id: str | None) -> bool:
     """Run a bounded Job on the Test gateway only.
 
@@ -106,12 +152,4 @@ def maybe_run_test_bounded_job(db_path: str, job_id: str | None) -> bool:
     if not job_id or current_robie_env() != TEST_ENV_NAME:
         return False
     require_test_environment()
-    store = JobStore(db_path)
-    job = store.get_job(job_id)
-    if job["action_type"] not in BOUNDED_ENGINE_ACTIONS:
-        return False
-    if JobStatus(job["status"]) != JobStatus.PENDING:
-        return False
-    engine = build_test_engine(store)
-    engine.run(job_id)
-    return True
+    return maybe_run_bounded_job(db_path, job_id)

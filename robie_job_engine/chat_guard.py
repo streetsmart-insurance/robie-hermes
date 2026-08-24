@@ -5,7 +5,9 @@ from typing import Iterable
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
 from .context_policy import JobContextManager
+from .idempotency import DurableWorkLedger, IdempotencyError
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
+from .runs import IsolatedRunStore, RunIsolationError
 from .operations import ingest_chat_attachments
 from .recording import RecordingManager
 from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
@@ -211,6 +213,43 @@ def open_chat_job(
                 "next_action": "Execute the selected Skill and independently verify destination state.",
             },
         )
+    try:
+        ledger = DurableWorkLedger(db_path)
+        ledger.reserve(job["action_type"], job["idempotency_key"])
+        IsolatedRunStore(db_path).record_intake(
+            owner=f"google-chat-intake:{message_id}",
+            job_id=job["id"],
+            payload={
+                "namespace": job["action_type"],
+                "work_item_key": job["idempotency_key"],
+                "source": "google-chat-intake",
+            },
+        )
+    except (IdempotencyError, RunIsolationError) as exc:
+        current = store.get_job(job["id"])
+        if JobStatus(current["status"]) not in TERMINAL_STATUSES:
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.NEEDS_CLARIFICATION,
+                    JobStatus.WAITING,
+                },
+                error=f"durable intake failed: {exc}",
+                release_lease=True,
+            )
+        return job["id"]
+    store.checkpoint(
+        job["id"],
+        "durable_work",
+        {
+            "namespace": job["action_type"],
+            "work_item_key": job["idempotency_key"],
+            "source": "google-chat-intake",
+        },
+    )
     forbidden = forbidden_tool_request({}, text)
     if forbidden:
         current = store.get_job(job["id"])

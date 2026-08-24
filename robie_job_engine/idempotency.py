@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,19 +16,61 @@ class IdempotencyError(RuntimeError):
     pass
 
 
+EPHEMERAL_PREFIXES = (
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+)
+
+
+def _normalize_path_text(value: str) -> str:
+    text = value.replace("\\", "/")
+    while "//" in text:
+        text = text.replace("//", "/")
+    if len(text) > 1:
+        text = text.rstrip("/")
+    return text
+
+
+def _is_ephemeral_text(value: str) -> bool:
+    text = _normalize_path_text(value)
+    for prefix in EPHEMERAL_PREFIXES:
+        if text == prefix or text.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def path_variants(path: str | Path) -> set[str]:
+    """Return lexical, absolute, resolved, and realpath forms."""
+    raw = Path(path).expanduser()
+    variants = {str(raw), str(raw.absolute()), os.path.normpath(str(raw))}
+    try:
+        variants.add(str(raw.resolve()))
+    except OSError:
+        pass
+    try:
+        variants.add(os.path.realpath(str(raw)))
+    except OSError:
+        pass
+    return {_normalize_path_text(item) for item in variants}
+
+
 def assert_durable_path(path: str | Path) -> Path:
-    resolved = Path(path).expanduser().resolve()
-    as_text = str(resolved)
-    if as_text == "/tmp" or as_text.startswith("/tmp/") or as_text.startswith("/var/tmp/"):
-        raise IdempotencyError("persistent store cannot be /tmp")
-    return resolved
+    """Reject /tmp, /private/tmp, /var/tmp, and any symlink into them."""
+    for variant in path_variants(path):
+        if _is_ephemeral_text(variant):
+            raise IdempotencyError(
+                "persistent store cannot be /tmp, /private/tmp, or /var/tmp"
+            )
+    return Path(path).expanduser().resolve()
 
 
 class DurableWorkLedger:
     """Atomic acquire on (workflow namespace, stable work-item key)."""
 
-    def __init__(self, db_path: str | Path, *, require_durable: bool = False) -> None:
-        self.path = str(assert_durable_path(db_path) if require_durable else Path(db_path))
+    def __init__(self, db_path: str | Path) -> None:
+        self.path = str(assert_durable_path(db_path))
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -55,6 +98,26 @@ class DurableWorkLedger:
                 );
                 """
             )
+
+    def reserve(self, namespace: str, work_item_key: str) -> dict[str, Any]:
+        """Create the durable work row at intake without taking an execution lease."""
+        stamp = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM durable_work_items
+                   WHERE namespace=? AND work_item_key=?""",
+                (namespace, work_item_key),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """INSERT INTO durable_work_items
+                       (namespace,work_item_key,created_at,updated_at)
+                       VALUES (?,?,?,?)""",
+                    (namespace, work_item_key, stamp, stamp),
+                )
+            conn.commit()
+        return self.get(namespace, work_item_key)
 
     def acquire(
         self,

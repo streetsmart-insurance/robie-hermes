@@ -1,7 +1,8 @@
-import tempfile
 import unittest
 import sqlite3
 from pathlib import Path
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
@@ -15,7 +16,7 @@ from robie_job_engine.recording import RecordingStore
 
 class ChatGuardTests(unittest.TestCase):
     def test_conversation_only_messages_do_not_create_jobs(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             JobStore(db)
             messages = [
@@ -33,7 +34,7 @@ class ChatGuardTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
     def test_operational_requests_and_attachments_still_fail_closed_into_jobs(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             operational = open_chat_job(
                 db,
@@ -57,7 +58,7 @@ class ChatGuardTests(unittest.TestCase):
         self.assertEqual(guard_chat_response("unused.db", None, "You're welcome"), "You're welcome")
 
     def test_chat_response_is_checkpointed_and_unverified(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(db, "spaces/s/messages/m1", "move it")
             response = guard_chat_response(db, job_id, "Done")
@@ -65,7 +66,7 @@ class ChatGuardTests(unittest.TestCase):
             self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
 
     def test_chat_response_includes_ready_recording_link(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(db, "spaces/s/messages/m-video", "move it")
             recordings = RecordingStore(db)
@@ -87,7 +88,7 @@ class ChatGuardTests(unittest.TestCase):
             self.assertIn("Reply in this thread", response)
 
     def test_explicit_continue_reopens_same_unverified_job(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             first_id = open_chat_job(
                 db,
@@ -111,7 +112,7 @@ class ChatGuardTests(unittest.TestCase):
             )
 
     def test_missing_chat_attachment_fails_closed_before_execution(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(
                 db,

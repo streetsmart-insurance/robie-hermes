@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.attachments import AttachmentRef
 from robie_job_engine.browser_read import BoundedBrowserReadWorker, BrowserReadVerifier
@@ -65,7 +66,7 @@ class GuardedWorker:
 
 class ReliabilityHardeningTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = durable_temporary_directory()
         self.root = Path(self.tmp.name)
         self.store = JobStore(self.root / "jobs.db")
         self.db = str(self.root / "jobs.db")

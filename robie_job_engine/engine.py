@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import random
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from .complete_guard import complete_is_prohibited
+from .idempotency import DurableWorkLedger, IdempotencyError
 from .models import (
+    ACTION_OUTCOME_UNKNOWN,
     VERIFIER_AUTHORITY,
     WAITING_STATUSES,
     JobStatus,
@@ -13,6 +16,7 @@ from .models import (
     WorkerResult,
 )
 from .recording import RecordingManager
+from .runs import IsolatedRunStore, RunIsolationError
 from .secrets import redact_exception, redact_mapping
 from .store import JobStore
 
@@ -36,27 +40,73 @@ class JobEngine:
         self.recordings = recordings or RecordingManager(store.path)
 
     def run(self, job_id: str) -> dict[str, Any]:
-        job = self.store.claim(job_id, self.owner)
-        if not job:
+        lease_owner = f"{self.owner}:{uuid.uuid4()}"
+        runs = IsolatedRunStore(self.store.path)
+        ledger = DurableWorkLedger(self.store.path)
+        try:
+            run = runs.start(owner=lease_owner, job_id=job_id)
+        except RunIsolationError:
             return self.store.get_job(job_id)
+        job = self.store.claim(job_id, lease_owner)
+        if not job:
+            runs.terminate(run["id"], "BLOCKED")
+            return self.store.get_job(job_id)
+        runs.bind(run["id"], "lease", {"owner": lease_owner, "job_id": job_id})
+        verify_only = False
+        try:
+            ledger.acquire(job["action_type"], job["idempotency_key"], owner=lease_owner)
+        except IdempotencyError:
+            if self.store.get_checkpoint(job_id, "action") is None:
+                self.store.release_lease(job_id)
+                runs.terminate(run["id"], "BLOCKED")
+                return self.store.get_job(job_id)
+            verify_only = True
+        runs.bind(
+            run["id"],
+            "durable_work",
+            {
+                "namespace": job["action_type"],
+                "work_item_key": job["idempotency_key"],
+                "verify_only": verify_only,
+                "lease_owner": lease_owner,
+            },
+        )
         self.recordings.safe_start(job_id)
         try:
             action = self.store.get_checkpoint(job_id, "action")
-            if action is None:
-                job = self._perform(job)
+            if action is None and not verify_only:
+                job = self._perform(job, ledger=ledger, run_id=run["id"])
                 if job["status"] != JobStatus.VERIFYING:
                     return job
                 action = self.store.get_checkpoint(job_id, "action")
-            return self._verify(self.store.get_job(job_id), action or {})
+            final = self._verify(self.store.get_job(job_id), action or {})
+            if JobStatus(final["status"]) == JobStatus.COMPLETE:
+                try:
+                    ledger.mark_verified(job["action_type"], job["idempotency_key"])
+                except KeyError:
+                    pass
+            return final
         finally:
             final = self.store.get_job(job_id)
             final_status = final["status"]
-            self.recordings.safe_stop(
-                job_id,
-                final_status.value if isinstance(final_status, JobStatus) else str(final_status),
+            status_name = (
+                final_status.value if isinstance(final_status, JobStatus) else str(final_status)
             )
+            self.recordings.safe_stop(job_id, status_name)
+            if not runs.get(run["id"]).get("terminal_event"):
+                event = status_name if status_name in {"COMPLETE", "FAILED", "UNVERIFIED", "CANCELLED"} else "BLOCKED"
+                try:
+                    runs.terminate(run["id"], event)
+                except RunIsolationError:
+                    pass
 
-    def _perform(self, job: dict[str, Any]) -> dict[str, Any]:
+    def _perform(
+        self,
+        job: dict[str, Any],
+        *,
+        ledger: DurableWorkLedger,
+        run_id: str,
+    ) -> dict[str, Any]:
         self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING, JobStatus.RUNNING})
         number = self.store.increment(job["id"], "attempt_count")
         worker_name = job["payload"].get("worker", "hermes-cua")
@@ -66,12 +116,37 @@ class JobEngine:
         try:
             result = worker.perform(job, idempotency_key=job["idempotency_key"])
         except Exception as exc:
-            result = WorkerResult(
-                False,
-                job["action_type"],
-                {},
-                retryable=True,
-                error=redact_exception(exc),
+            error = redact_exception(exc)
+            self.store.add_attempt(
+                job["id"],
+                "perform",
+                number,
+                ACTION_OUTCOME_UNKNOWN,
+                {"error": error, "outcome": ACTION_OUTCOME_UNKNOWN},
+            )
+            self.store.checkpoint(
+                job["id"],
+                "action",
+                {
+                    "action": job["action_type"],
+                    "destination": {},
+                    "detail": {"outcome": ACTION_OUTCOME_UNKNOWN, "error": error, "run_id": run_id},
+                },
+            )
+            try:
+                ledger.mark_timeout_unknown(job["action_type"], job["idempotency_key"])
+            except KeyError:
+                pass
+            try:
+                ledger.record_external_action(job["action_type"], job["idempotency_key"])
+            except (IdempotencyError, KeyError):
+                pass
+            return self.store.transition(
+                job["id"],
+                JobStatus.VERIFYING,
+                expected={JobStatus.RUNNING},
+                error=f"{ACTION_OUTCOME_UNKNOWN}: {error}",
+                release_lease=True,
             )
         self.store.add_attempt(
             job["id"],
@@ -80,6 +155,17 @@ class JobEngine:
             "success" if result.succeeded else "failure",
             {"error": result.error, "detail": redact_mapping(result.detail)},
         )
+        if result.succeeded:
+            try:
+                ledger.record_external_action(job["action_type"], job["idempotency_key"])
+            except IdempotencyError:
+                return self.store.transition(
+                    job["id"],
+                    JobStatus.VERIFYING,
+                    expected={JobStatus.RUNNING},
+                    error="external action already recorded; resume at verification only",
+                    release_lease=True,
+                )
         if result.hold_status in WAITING_STATUSES:
             return self.store.transition(
                 job["id"],

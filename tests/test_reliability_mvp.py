@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.attachments import AttachmentRef, ingest_attachment_refs, refs_from_chat_payload
 from robie_job_engine.browser_read import BoundedBrowserReadWorker, BrowserReadVerifier
@@ -92,7 +93,7 @@ def _evidence(verified=True, authoritative=True, expected=None, observed=None):
 
 class ReliabilityMvpTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = durable_temporary_directory()
         self.root = Path(self.tmp.name)
         self.store = JobStore(self.root / "jobs.db")
         self.artifacts = self.root / "artifacts"

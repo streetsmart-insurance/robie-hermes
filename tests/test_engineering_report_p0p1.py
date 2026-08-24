@@ -5,11 +5,13 @@ No live EZLynx. No real credentials. Production release stays FAIL.
 
 from __future__ import annotations
 
-import tempfile
+import os
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.chat_guard import open_chat_job
 from robie_job_engine.complete_guard import complete_is_prohibited
@@ -55,7 +57,7 @@ def _evidence(expected, observed, *, locator="rec-1"):
 
 class EngineeringReportP0P1Tests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = durable_temporary_directory()
         self.root = Path(self.tmp.name)
         self.db = str(self.root / "jobs.db")
         self.store = JobStore(self.db)
@@ -138,8 +140,13 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
             runs.assert_can_work(second["id"])
 
     def test_phase04_durable_idempotency_at_most_one_action(self):
+        self._assert_canonical_ephemeral_paths_rejected()
+        with self.assertRaises(TypeError):
+            DurableWorkLedger(self.db, require_durable=False)
         with self.assertRaises(IdempotencyError):
-            assert_durable_path("/tmp/robie-persist.db")
+            DurableWorkLedger("/tmp/jobs.db")
+        with self.assertRaises(IdempotencyError):
+            DurableWorkLedger("/private/tmp/jobs.db")
         ledger = DurableWorkLedger(self.db)
         first = ledger.acquire("carrier.proposal", "work-1", owner="w1")
         ledger.record_external_action("carrier.proposal", "work-1")
@@ -156,6 +163,99 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         self.assertEqual(unknown["outcome"], ACTION_OUTCOME_UNKNOWN)
         self.assertEqual(first["work_item_key"], "work-1")
         self.assertEqual(timed["work_item_key"], "work-2")
+
+    def test_canonical_ephemeral_paths_rejected_including_macos_private_tmp(self):
+        """Linux CI must reject the same canonical forms that fail on macOS."""
+        self._assert_canonical_ephemeral_paths_rejected()
+
+    def _assert_canonical_ephemeral_paths_rejected(self):
+        from robie_job_engine.idempotency import path_variants
+
+        ephemeral_paths = (
+            "/tmp",
+            "/tmp/robie-persist.db",
+            "/tmp/../tmp/robie-persist.db",
+            "/private/tmp",
+            "/private/tmp/robie-persist.db",
+            "/var/tmp",
+            "/var/tmp/robie-persist.db",
+            "/private/var/tmp",
+            "/private/var/tmp/ledger.db",
+        )
+        for ephemeral in ephemeral_paths:
+            with self.assertRaises(IdempotencyError, msg=ephemeral):
+                assert_durable_path(ephemeral)
+            with self.assertRaises(IdempotencyError, msg=f"ledger:{ephemeral}"):
+                DurableWorkLedger(ephemeral)
+        link_dir = self.root / "link-to-tmp"
+        if not link_dir.exists():
+            try:
+                os.symlink("/tmp", link_dir)
+            except OSError:
+                link_dir = None
+        if link_dir is not None:
+            with self.assertRaises(IdempotencyError):
+                assert_durable_path(link_dir / "ledger.db")
+        with patch.object(Path, "resolve", return_value=Path("/private/tmp/hidden.db")):
+            with patch("os.path.realpath", return_value="/private/tmp/hidden.db"):
+                with self.assertRaises(IdempotencyError):
+                    assert_durable_path("/workspace/looks-durable.db")
+                variants = path_variants("/workspace/looks-durable.db")
+        self.assertIn("/private/tmp/hidden.db", variants)
+
+    def test_intake_and_engine_call_isolated_run_and_durable_ledger(self):
+        job_id = open_chat_job(
+            self.db,
+            "spaces/s/messages/wire-1",
+            "generate a proposal and add a $350 fee",
+        )
+        job = self.store.get_job(job_id)
+        ledger = DurableWorkLedger(self.db)
+        reserved = ledger.get(job["action_type"], job["idempotency_key"])
+        self.assertEqual(reserved["work_item_key"], job["idempotency_key"])
+        intake_runs = IsolatedRunStore(self.db).list_runs(job_id)
+        self.assertTrue(intake_runs)
+        self.assertTrue(any(run["terminal_event"] == "INTAKE" for run in intake_runs))
+        self.assertFalse(any(run["status"] == "ACTIVE" for run in intake_runs))
+        self.assertIsNotNone(self.store.get_checkpoint(job_id, "durable_work"))
+
+        class Worker:
+            def perform(self, current, *, idempotency_key):
+                return WorkerResult(True, current["action_type"], {"record_id": "wired"})
+
+        class Verifier:
+            def verify(self, current, action):
+                return VerificationResult(
+                    True, _evidence({"ok": True}, {"ok": True}, locator="wired")
+                )
+
+        owners = []
+        original_claim = JobStore.claim
+
+        def tracking_claim(store, claimed_id, owner, lease_seconds=120):
+            owners.append(owner)
+            return original_claim(store, claimed_id, owner, lease_seconds)
+
+        with patch.object(JobStore, "claim", tracking_claim):
+            final = JobEngine(
+                self.store, {job["payload"]["worker"]: Worker()}, {job["action_type"]: Verifier()}
+            ).run(job_id)
+        self.assertEqual(final["status"], JobStatus.COMPLETE)
+        self.assertEqual(len(owners), 1)
+        self.assertNotEqual(owners[0], "robie-job-engine")
+        self.assertTrue(owners[0].startswith("robie-job-engine:"))
+        item = DurableWorkLedger(self.db).get(job["action_type"], job["idempotency_key"])
+        self.assertEqual(item["external_actions"], 1)
+        self.assertEqual(item["verified"], 1)
+        execution_runs = IsolatedRunStore(self.db).list_runs(job_id)
+        self.assertTrue(any(run["terminal_event"] == "COMPLETE" for run in execution_runs))
+        self.assertTrue(
+            any(
+                IsolatedRunStore(self.db).bindings(run["id"], "durable_work")
+                for run in execution_runs
+                if run["terminal_event"] == "COMPLETE"
+            )
+        )
 
     def test_phase05_report_registry_blocks_unverified_schema(self):
         self.assertEqual(get_report_spec("4247").name, "Manual Renewals")
@@ -293,6 +393,53 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
             final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(job["id"])
             self.assertNotEqual(final["status"], JobStatus.COMPLETE)
             self.assertIn(final["status"], {JobStatus.UNVERIFIED, JobStatus.WAITING, JobStatus.FAILED})
+
+    def test_unexpired_lease_is_rejected_even_for_same_owner(self):
+        job = self.store.create_job("browser.read", {"worker": "x"}, idempotency_key="lease-1")
+        first = self.store.claim(job["id"], "robie-job-engine:same")
+        self.assertIsNotNone(first)
+        second = self.store.claim(job["id"], "robie-job-engine:same")
+        self.assertIsNone(second)
+        other = self.store.claim(job["id"], "robie-job-engine:other")
+        self.assertIsNone(other)
+
+    def test_worker_exception_is_unknown_and_not_retried(self):
+        calls = {"n": 0}
+
+        class Boom:
+            def perform(self, job, *, idempotency_key):
+                calls["n"] += 1
+                raise RuntimeError("injected worker crash")
+
+        class Verifier:
+            def verify(self, job, action):
+                return VerificationResult(
+                    False,
+                    _evidence({"ok": True}, {"outcome": ACTION_OUTCOME_UNKNOWN}),
+                    retryable=True,
+                    error="destination unknown after worker exception",
+                )
+
+        job = self.store.create_job(
+            "browser.read",
+            {"worker": "boom"},
+            idempotency_key="boom-1",
+            max_attempts=3,
+        )
+        engine = JobEngine(self.store, {"boom": Boom()}, {"browser.read": Verifier()})
+        first = engine.run(job["id"])
+        self.assertNotEqual(first["status"], JobStatus.COMPLETE)
+        action = self.store.get_checkpoint(job["id"], "action")
+        self.assertIsNotNone(action)
+        self.assertEqual(action["detail"]["outcome"], ACTION_OUTCOME_UNKNOWN)
+        item = DurableWorkLedger(self.db).get("browser.read", "boom-1")
+        self.assertEqual(item["outcome"], ACTION_OUTCOME_UNKNOWN)
+        self.assertEqual(item["external_actions"], 1)
+        self.assertFalse(item["verified"])
+        self.store.wake_due("9999-12-31T23:59:59+00:00")
+        second = engine.run(job["id"])
+        self.assertEqual(calls["n"], 1)
+        self.assertNotEqual(second["status"], JobStatus.COMPLETE)
 
     def test_phase10_production_release_stays_fail(self):
         self.assertEqual(production_release_decision(), "FAIL")

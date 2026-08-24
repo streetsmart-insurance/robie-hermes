@@ -12,7 +12,9 @@ from .store import utc_now
 
 
 ACTIVE_STATUSES = frozenset({"ACTIVE"})
-TERMINAL_EVENTS = frozenset({"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "UNVERIFIED"})
+TERMINAL_EVENTS = frozenset(
+    {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "UNVERIFIED", "INTAKE"}
+)
 
 
 class RunIsolationError(RuntimeError):
@@ -74,6 +76,34 @@ class IsolatedRunStore:
                 "SELECT * FROM isolated_runs WHERE status='ACTIVE' ORDER BY created_at LIMIT 1"
             ).fetchone()
         return self._decode(row) if row else None
+
+    def list_runs(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM isolated_runs"
+        args: list[Any] = []
+        if job_id:
+            sql += " WHERE job_id=?"
+            args.append(job_id)
+        sql += " ORDER BY created_at, id"
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def record_intake(
+        self,
+        *,
+        owner: str,
+        job_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Record Chat/script intake without leaving an ACTIVE execution run."""
+        run = self.start(owner=owner, job_id=job_id)
+        try:
+            self.bind(run["id"], "intake", payload)
+            return self.terminate(run["id"], "INTAKE")
+        except Exception:
+            if not self.get(run["id"]).get("terminal_event"):
+                self.terminate(run["id"], "BLOCKED")
+            raise
 
     def start(self, *, owner: str, job_id: str) -> dict[str, Any]:
         active = self.active_run()

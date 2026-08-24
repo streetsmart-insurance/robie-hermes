@@ -206,7 +206,7 @@ from gateway.platforms.base import (
 sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
 from robie_job_engine.chat_guard import (build_chat_execution_text, guard_chat_response, open_chat_job)
 from robie_job_engine.pubsub_ack import PubSubAckCoordinator
-from robie_job_engine.test_runtime import maybe_run_test_bounded_job
+from robie_job_engine.test_runtime import maybe_run_bounded_job
 ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 
 logger = logging.getLogger("gateway.platforms.google_chat")
@@ -1803,9 +1803,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if jobs is None:
                 jobs = self._robie_jobs_by_reply = {}
             jobs[event.message_id] = job_id
-            # Test-only: bounded workers run through JobEngine. Production
-            # and unset ROBIE_ENV keep the existing Hermes/cua-driver path.
-            if maybe_run_test_bounded_job(ROBIE_JOB_DB, job_id):
+            # Operational bounded Jobs run through the durable Job Engine in
+            # Test and Production. Non-bounded chat still uses Hermes/cua-driver.
+            if maybe_run_bounded_job(ROBIE_JOB_DB, job_id):
                 return
             execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, text)
             try:

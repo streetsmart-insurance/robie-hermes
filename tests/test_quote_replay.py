@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import io
 import os
-import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.models import JobStatus
 from robie_job_engine.quote_replay import (
@@ -24,7 +25,7 @@ from robie_job_engine.test_runtime import ProductionGuardError
 
 class QuoteReplayHarnessTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = durable_temporary_directory()
         self.root = Path(self.tmp.name)
         self.db = str(self.root / "jobs.db")
         self.artifacts = str(self.root / "artifacts")
