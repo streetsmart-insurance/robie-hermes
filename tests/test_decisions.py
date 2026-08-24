@@ -5,11 +5,17 @@ from datetime import datetime, timedelta, timezone
 from robie_job_engine.decisions import (
     DecisionStore,
     decision_card,
+    handle_google_chat_decision,
     parse_google_chat_interaction,
     resolve_google_chat_interaction,
 )
 from robie_job_engine.models import JobStatus
 from robie_job_engine.store import JobStore
+from function_loader import load_function_tests
+
+
+def load_tests(loader, tests, pattern):
+    return load_function_tests(globals())
 
 
 def _decision(tmp_path):
@@ -116,3 +122,41 @@ def test_dynamic_google_chat_choice_and_free_text_are_audited(tmp_path):
     assert result.status == "RESOLVED" and result.resumed is True
     checkpoint = jobs.get_checkpoint(job["id"], f"decision:{decision['id']}")
     assert checkpoint["custom_text"] == "Use the active Renewal Manual discussion"
+
+
+def test_chat_response_updates_card_and_rejects_forged_identity(tmp_path):
+    jobs, _, job, decision = _decision(tmp_path)
+    forged = {
+        "common": {
+            "invokedFunction": "robie_decision",
+            "parameters": {"decision_id": decision["id"], "choice": "approve"},
+        },
+        "user": {"email": "intruder@example.com"},
+    }
+    rejected = handle_google_chat_decision(str(tmp_path / "jobs.db"), forged)
+    assert rejected["actionResponse"]["type"] == "UPDATE_MESSAGE"
+    assert "restricted" in rejected["text"]
+    assert jobs.get_job(job["id"])["status"] == JobStatus.PAUSED
+
+
+def test_client_cannot_expand_session_approval_scope(tmp_path):
+    _, decisions, _, decision = _decision(tmp_path)
+    payload = {
+        "common": {
+            "invokedFunction": "robie_decision",
+            "parameters": {
+                "decision_id": decision["id"],
+                "choice": "approve_session",
+                "session_scope": "space:attacker:production-admin",
+            },
+        },
+        "user": {"email": "carlo@streetsmart.insurance"},
+    }
+    response = handle_google_chat_decision(str(tmp_path / "jobs.db"), payload)
+    assert "may now continue" in response["text"]
+    assert decisions.session_is_approved(
+        "space:abc:ezlynx-write", "carlo@streetsmart.insurance"
+    )
+    assert not decisions.session_is_approved(
+        "space:attacker:production-admin", "carlo@streetsmart.insurance"
+    )

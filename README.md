@@ -17,6 +17,13 @@ summary, one relevant Skill, the relevant SOP section, and the current trimmed
 tool result. `ROBIE_CONTEXT_CHAR_BUDGET` defaults to 12,000 characters and
 forces compaction before additional history can be carried forward.
 
+Every provider attempt must call `OperationsStore.enforce_model_budget` through
+the fallback executor's `authorize_call` hook before network execution, then
+store the returned provider usage with `record_model_attempt`. The durable Job
+ledger reports input, output, cache-read, and total tokens plus estimated cost.
+Budget exhaustion is a non-retryable guard condition: it pauses/escalates the
+Job rather than silently falling through to another model and spending more.
+
 The scheduler enforces expiration using `ROBIE_DM_CONTEXT_TTL_MINUTES`
 (default `120`). Scheduled and monitored Jobs remain durable Jobs and are not
 silently deleted when an interactive DM context expires.

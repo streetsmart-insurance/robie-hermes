@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
-from datetime import datetime, timezone
 
 from .context_policy import JobContextManager
 from .operations import OperationsStore
@@ -22,9 +20,10 @@ def run_once(db_path: str) -> dict[str, int]:
     ).expire_due()
     created = 0
     for schedule in ops.claim_due_schedules():
-        window = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
-        bucket = int(window[-2:]) // max(1, schedule["interval_minutes"])
-        key = f"schedule:{schedule['id']}:{window[:-2]}:{bucket}"
+        # The persisted occurrence timestamp is the idempotency boundary. It
+        # stays stable across restarts and clock/hour boundaries until the
+        # schedule has been durably advanced.
+        key = f"schedule:{schedule['id']}:{schedule['next_run_at']}"
         job = jobs.create_job(schedule["action_type"], schedule["payload"], idempotency_key=key)
         ops.advance_schedule(schedule["id"], job["id"])
         created += 1
