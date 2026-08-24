@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -164,32 +166,36 @@ class QuoteReplayHarnessTests(unittest.TestCase):
 
     def test_cli_without_pdf_exits_blocked(self):
         work = self.root / "cli-work"
-        code = main(
-            [
-                "--work-dir",
-                str(work),
-                "--db",
-                str(work / "jobs.db"),
-                "--artifact-root",
-                str(work / "artifacts"),
-            ]
-        )
+        with redirect_stdout(io.StringIO()) as captured:
+            code = main(
+                [
+                    "--work-dir",
+                    str(work),
+                    "--db",
+                    str(work / "jobs.db"),
+                    "--artifact-root",
+                    str(work / "artifacts"),
+                ]
+            )
         self.assertEqual(code, 2)
+        self.assertIn("Do not invent a PDF", captured.getvalue())
 
     def test_cli_with_provided_pdf_stays_local(self):
         quote = self._write_provided_quote("cli-quote.pdf")
         work = self.root / "cli-complete"
-        code = main(
-            [
-                "--quote-pdf",
-                str(quote),
-                "--work-dir",
-                str(work),
-                "--message-id",
-                "quote-replay:cli",
-            ]
-        )
+        with redirect_stdout(io.StringIO()) as captured:
+            code = main(
+                [
+                    "--quote-pdf",
+                    str(quote),
+                    "--work-dir",
+                    str(work),
+                    "--message-id",
+                    "quote-replay:cli",
+                ]
+            )
         self.assertEqual(code, 0)
+        self.assertIn("not live Test COMPLETE", captured.getvalue())
         report_db = JobStore(str(work / "jobs.db"))
         jobs = _list_jobs(report_db)
         self.assertEqual(len(jobs), 1)
