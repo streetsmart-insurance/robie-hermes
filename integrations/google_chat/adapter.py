@@ -205,6 +205,7 @@ from gateway.platforms.base import (
 # downstream log-monitor that greps for ``gateway.platforms.google_chat``.
 sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
 from robie_job_engine.chat_guard import (build_chat_execution_text, guard_chat_response, open_chat_job)
+from robie_job_engine.pubsub_ack import PubSubAckCoordinator
 ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 
 logger = logging.getLogger("gateway.platforms.google_chat")
@@ -787,6 +788,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._bot_user_id: Optional[str] = None  # users/{id}
         self._dedup = MessageDeduplicator()
+        self._pubsub_ack = PubSubAckCoordinator(self._dedup)
         self._typing_messages: Dict[str, str] = {}
         self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
@@ -978,28 +980,45 @@ class GoogleChatAdapter(BasePlatformAdapter):
     def _loop_accepts_callbacks(loop: Optional[asyncio.AbstractEventLoop]) -> bool:
         return loop is not None and not bool(getattr(loop, "is_closed", lambda: False)())
 
-    def _submit_on_loop(self, coro: Any) -> None:
+    def _submit_on_loop(self, coro: Any) -> Any:
         """Schedule a coroutine on the adapter loop from a Pub/Sub callback thread."""
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
-            # Loop already closed (shutdown race). Safe to drop; Pub/Sub will
-            # redeliver on next reconnect.
-            logger.warning("[GoogleChat] Loop not accepting callbacks; dropping event")
-            return
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            logger.warning("[GoogleChat] Loop not accepting callbacks; retaining event for retry")
+            return None
         try:
             from agent.async_utils import safe_schedule_threadsafe
-            future = safe_schedule_threadsafe(
+            return safe_schedule_threadsafe(
                 coro, loop,
                 logger=logger,
                 log_message="[GoogleChat] Failed to schedule background callback",
                 log_level=logging.WARNING,
             )
         except RuntimeError:
+            if asyncio.iscoroutine(coro):
+                coro.close()
             logger.warning("[GoogleChat] Loop closed between check and submit")
-            return
-        if future is None:
-            return
-        future.add_done_callback(self._log_background_failure)
+            return None
+
+    def _schedule_pubsub_processing(
+        self, coro: Any, message: Any, msg_name: str = ""
+    ) -> None:
+        def report_failure(exc: BaseException) -> None:
+            logger.error(
+                "[GoogleChat] Pub/Sub handoff or settlement failed: %s",
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+        self._pubsub_ack.schedule(
+            coro=coro,
+            message=message,
+            message_id=msg_name,
+            submit=self._submit_on_loop,
+            on_error=report_failure,
+        )
 
     # ------------------------------------------------------------------
     # Bot identity resolution
@@ -1530,8 +1549,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             # --- Card-click events ---
             if _card_event_payload(envelope) is not None or "widget" in ce_type or "card" in ce_type.lower():
-                self._submit_on_loop(self._handle_card_event(envelope, notify=True))
-                message.ack()
+                self._schedule_pubsub_processing(
+                    self._handle_card_event(envelope, notify=True), message
+                )
                 return
 
             # --- Message events ---
@@ -1553,12 +1573,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 message.ack()
                 return
 
-            # Dedup guard — Pub/Sub is at-least-once.
+            # Completed-message deduplication and concurrent redelivery
+            # coordination are handled by PubSubAckCoordinator. An in-flight
+            # duplicate must never ACK before the original handoff settles.
             msg_name = msg.get("name") or ""
-            if msg_name and self._dedup.is_duplicate(msg_name):
-                logger.debug("[GoogleChat] Dedup drop for %s", msg_name)
-                message.ack()
-                return
 
             # Wrap msg with parent-level space so _build_message_event can find it.
             msg_with_space = dict(msg)
@@ -1571,12 +1589,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if "space" not in enriched_env and space:
                 enriched_env["space"] = space
 
-            self._submit_on_loop(self._dispatch_message(msg_with_space, enriched_env))
-            message.ack()
+            self._schedule_pubsub_processing(
+                self._dispatch_message(msg_with_space, enriched_env),
+                message,
+                msg_name,
+            )
         except Exception:
             logger.exception("[GoogleChat] Error in _on_pubsub_message")
             try:
-                message.ack()
+                message.nack()
             except Exception:
                 pass
 
