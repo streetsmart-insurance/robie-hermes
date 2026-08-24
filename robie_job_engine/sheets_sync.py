@@ -76,10 +76,16 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
         "ezlynx.reassign": "Reassign an EZLynx account",
         "ezlynx.move_document": "Move an EZLynx document",
         "ezlynx.apply_label": "Apply an EZLynx document label",
+        "carrier.proposal": "Create a carrier proposal",
+        "browser.read": "Read a page without changing it",
+        "hermes.plain_english": "Plain-English request",
         "deployment.smoke": "Deployment safety check",
     }
     status_names = {
         "PENDING": "Queued",
+        "NEEDS_SKILL": "Needs a Skill — waiting",
+        "NEEDS_CLARIFICATION": "Needs clarification — waiting",
+        "WAITING": "Waiting — not complete",
         "RUNNING": "Working now",
         "VERIFYING": "Checking the result",
         "RETRY_WAIT": "Waiting to retry",
@@ -105,7 +111,10 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             else "Gmail" if "email" in action_type
             else "Job Engine"
         )
-        needs_attention = "YES — review this job" if status in {"UNVERIFIED", "FAILED", "PAUSED"} else "No"
+        needs_attention = "YES — review this job" if status in {
+            "UNVERIFIED", "FAILED", "PAUSED", "WAITING",
+            "NEEDS_CLARIFICATION", "NEEDS_SKILL",
+        } else "No"
         job_name = _friendly_job_name(payload, action_type, str(task or ""))
         confidence = assess_job_confidence(item)
         recording_url = item.get("recording_drive_url") or ""

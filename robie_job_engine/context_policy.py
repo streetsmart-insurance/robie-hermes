@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import JobStatus, TERMINAL_STATUSES
+from .models import WAITING_STATUSES, JobStatus, TERMINAL_STATUSES
 from .store import JobStore, canonical_json
 
 
@@ -112,7 +112,7 @@ class JobContextManager:
         explicit_continue = any(normalized.startswith(prefix) for prefix in CONTINUATION_PREFIXES)
         if explicit_continue and current and current.get("active_job_id"):
             job = self.jobs.get_job(current["active_job_id"])
-            if job["status"] == JobStatus.PAUSED:
+            if JobStatus(job["status"]) in WAITING_STATUSES:
                 self.jobs.resume(job["id"])
             elif job["status"] == JobStatus.UNVERIFIED:
                 # UNVERIFIED is closed to automatic workers but remains open

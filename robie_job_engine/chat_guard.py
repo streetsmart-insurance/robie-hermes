@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from .attachments import AttachmentRef, ingest_attachment_refs
+from .chat_policy import execution_contract_lines
 from .context_policy import JobContextManager
-from .models import JobStatus
+from .models import WAITING_STATUSES, JobStatus
 from .operations import ingest_chat_attachments
 from .recording import RecordingManager
+from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
 from .submission_routing import resolve_submission_route, submission_verification_requirements
 from .store import JobStore
 
@@ -146,6 +149,7 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Never claim success from modal text, a local DOM value, or your own prior action. If any requested field is absent, say the action is not verified.",
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
+    lines.extend(execution_contract_lines())
     lines.extend(_submission_contract(text))
     lines.append("[END ROBIE JOB ENGINE EXECUTION CONTRACT]")
     return text + "\n".join(lines)
@@ -159,6 +163,9 @@ def open_chat_job(
     requested_by: str | None = None,
     conversation_id: str | None = None,
     expected_attachment_count: int = 0,
+    attachment_refs: Iterable[AttachmentRef] | None = None,
+    drive_port: object | None = None,
+    artifact_root: str | None = None,
 ) -> str | None:
     """Create the Job before execution and bind durable attachment artifacts."""
     if not chat_message_requires_job(
@@ -170,6 +177,11 @@ def open_chat_job(
     context = JobContextManager(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
     context_decision = context.decide(context_key, text)
+    files = list(attachments or [])
+    refs = list(attachment_refs or [])
+    classification = classify_request(
+        text, attachment_count=max(expected_attachment_count, len(files), len(refs))
+    )
     if context_decision.action == "RESUME" and context_decision.active_job_id:
         job = store.get_job(context_decision.active_job_id)
         store.checkpoint(job["id"], f"continuation:{message_id}", {
@@ -179,13 +191,14 @@ def open_chat_job(
         })
     else:
         job = store.create_job(
-            "hermes.google_chat_task",
+            classification.action_type,
             {
                 "message_id": message_id,
                 "text": text,
                 "requested_by": requested_by or "Google Chat user",
                 "source": "Google Chat",
                 "conversation_id": context_key,
+                "worker": classification.worker,
             },
             idempotency_key=f"gchat:{message_id}",
         )
@@ -198,12 +211,31 @@ def open_chat_job(
                 "next_action": "Execute the selected Skill and independently verify destination state.",
             },
         )
-    if job["status"] == JobStatus.PENDING:
+    if classification.hold_status == JobStatus.NEEDS_CLARIFICATION.value:
+        current = store.get_job(job["id"])
+        if current["status"] == JobStatus.PENDING:
+            store.transition(
+                job["id"],
+                JobStatus.NEEDS_CLARIFICATION,
+                expected={JobStatus.PENDING},
+                error="request is too vague to execute safely",
+                resume_status=JobStatus.PENDING,
+                release_lease=True,
+            )
+            return job["id"]
+    # Bounded workers stay PENDING so JobEngine can claim them. Hermes chat
+    # tasks still move to RUNNING so the existing adapter path can proceed.
+    if (
+        job["status"] == JobStatus.PENDING
+        and classification.action_type not in BOUNDED_ENGINE_ACTIONS
+    ):
         store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
-    files = list(attachments or [])
+    staged_count = len(files) + sum(
+        1 for ref in refs if ref.local_path or (ref.kind == "drive_chip" and drive_port)
+    )
     if expected_attachment_count < 0:
         raise ValueError("expected attachment count cannot be negative")
-    if expected_attachment_count > len(files):
+    if expected_attachment_count > staged_count:
         current = store.get_job(job["id"])
         if current["status"] not in {JobStatus.COMPLETE, JobStatus.FAILED}:
             store.transition(
@@ -214,17 +246,28 @@ def open_chat_job(
                     JobStatus.RUNNING,
                     JobStatus.VERIFYING,
                     JobStatus.UNVERIFIED,
+                    JobStatus.NEEDS_CLARIFICATION,
+                    JobStatus.WAITING,
                 },
                 error=(
                     f"attachment ingestion incomplete: received {expected_attachment_count} "
-                    f"attachment reference(s), staged {len(files)}"
+                    f"attachment reference(s), staged {staged_count}"
                 ),
                 release_lease=True,
             )
         return job["id"]
-    if files and not store.get_checkpoint(job["id"], "ingestion"):
+    if (files or refs) and not store.get_checkpoint(job["id"], "ingestion"):
         try:
-            records = ingest_chat_attachments(db_path, job["id"], message_id, files)
+            records = []
+            if files:
+                records.extend(ingest_chat_attachments(
+                    db_path, job["id"], message_id, files, artifact_root=artifact_root
+                ))
+            if refs:
+                records.extend(ingest_attachment_refs(
+                    db_path, job["id"], message_id, refs,
+                    drive_port=drive_port, artifact_root=artifact_root,
+                ))
             store.checkpoint(job["id"], "ingestion", {
                 "source": "google_chat",
                 "message_id": message_id,
@@ -239,9 +282,17 @@ def open_chat_job(
             })
         except Exception as exc:
             current = store.get_job(job["id"])
-            if current["status"] == JobStatus.RUNNING:
+            if current["status"] not in {JobStatus.COMPLETE, JobStatus.FAILED}:
                 store.transition(
-                    job["id"], JobStatus.FAILED, expected={JobStatus.RUNNING},
+                    job["id"], JobStatus.FAILED,
+                    expected={
+                        JobStatus.PENDING,
+                        JobStatus.RUNNING,
+                        JobStatus.VERIFYING,
+                        JobStatus.UNVERIFIED,
+                        JobStatus.NEEDS_CLARIFICATION,
+                        JobStatus.WAITING,
+                    },
                     error=f"attachment ingestion failed: {type(exc).__name__}: {exc}",
                     release_lease=True,
                 )
@@ -294,6 +345,15 @@ def guard_chat_response(db_path: str, job_id: str | None, content: str) -> str:
             "ROBIE attempted the work, but the destination state was not independently verified. "
             "Any success wording produced by the Computer Worker has been suppressed.\n\n"
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
+            + _recording_chat_note(recordings, job_id)
+        )
+    if JobStatus(job["status"]) in WAITING_STATUSES:
+        status = JobStatus(job["status"]).value
+        recordings.safe_stop(job_id, status)
+        return (
+            f"ROBIE Job {job_id} — {status}\n\n"
+            "ROBIE is not treating this request as successful. "
+            f"Reason: {job.get('last_error') or 'waiting for a human or destination update'}."
             + _recording_chat_note(recordings, job_id)
         )
     store.checkpoint(job_id, "action", {

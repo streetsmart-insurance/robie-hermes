@@ -36,6 +36,12 @@ Lifecycle:
 
 `PENDING -> RUNNING -> VERIFYING -> COMPLETE | UNVERIFIED | FAILED`
 
+Uncertain outcomes become `WAITING`, `NEEDS_CLARIFICATION`, `NEEDS_SKILL`,
+`UNVERIFIED`, or `FAILED`. They never become silent success. Only
+`JobEngine._verify` may set `COMPLETE`, and only after it reads fresh
+destination state and stores authoritative evidence. Action workers cannot
+authorize `COMPLETE`.
+
 Retries use persisted `RETRY_WAIT` wakeups with exponential backoff and jitter. The action
 checkpoint prevents a successful action from being repeated when only verification needs a
 retry. Idempotency keys deduplicate repeated Gmail/Google Chat delivery.
@@ -47,6 +53,9 @@ Integration boundaries:
 - Enqueue each inbound request with the Gmail message ID or Google Chat event ID as the
   `idempotency_key`.
 - Register the existing Hermes/cua-driver implementation as `hermes-cua`.
+- Route carrier-proposal and browser-only read jobs through the bounded workers
+  in `carrier_proposal.py` and `browser_read.py`. Those workers never expose
+  terminal, raw-file, or code execution in staff Google Chat.
 - Route the three hardened EZLynx actions through `HermesCuaEzlynxWorker`.
 - Implement `EzlynxReadback.api_state` from an observed EZLynx network endpoint when available.
   Return `None` when it is not; the adapter must then create a fresh navigation/session and read

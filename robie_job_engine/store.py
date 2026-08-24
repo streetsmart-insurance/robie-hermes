@@ -9,7 +9,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import JobStatus, TERMINAL_STATUSES, VerificationEvidence
+from .models import (
+    VERIFIER_AUTHORITY,
+    WAITING_STATUSES,
+    JobStatus,
+    TERMINAL_STATUSES,
+    VerificationEvidence,
+)
 
 
 def utc_now() -> str:
@@ -153,7 +159,12 @@ class JobStore:
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 raise KeyError(job_id)
-            if JobStatus(row["status"]) in TERMINAL_STATUSES or row["status"] == JobStatus.PAUSED:
+            current = JobStatus(row["status"])
+            if (
+                current in TERMINAL_STATUSES
+                or current in WAITING_STATUSES
+                or current == JobStatus.RETRY_WAIT
+            ):
                 return None
             lease_expired = not row["lease_expires_at"] or row["lease_expires_at"] <= now.isoformat()
             if row["lease_owner"] and row["lease_owner"] != owner and not lease_expired:
@@ -174,6 +185,7 @@ class JobStore:
         next_wakeup_at: str | None = None,
         resume_status: JobStatus | None = None,
         release_lease: bool = False,
+        authority: str = "job-engine",
     ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction() as conn:
@@ -183,6 +195,21 @@ class JobStore:
             current = JobStatus(row["status"])
             if expected is not None and current not in expected:
                 raise RuntimeError(f"invalid transition {current} -> {status}")
+            if status == JobStatus.COMPLETE:
+                if authority != VERIFIER_AUTHORITY:
+                    raise PermissionError(
+                        "action workers cannot authorize COMPLETE; "
+                        "only the independent verifier may"
+                    )
+                evidence = conn.execute(
+                    """SELECT 1 FROM verification_evidence
+                       WHERE job_id=? AND verified=1 AND authoritative=1""",
+                    (job_id,),
+                ).fetchone()
+                if not evidence:
+                    raise PermissionError(
+                        "COMPLETE requires independently stored authoritative evidence"
+                    )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(
                 """UPDATE jobs SET status=?,resume_status=?,last_error=?,next_wakeup_at=?,
@@ -247,10 +274,27 @@ class JobStore:
 
     def resume(self, job_id: str) -> dict[str, Any]:
         job = self.get_job(job_id)
-        if job["status"] != JobStatus.PAUSED:
+        current = JobStatus(job["status"])
+        if current not in WAITING_STATUSES:
             return job
         target = JobStatus(job["resume_status"] or JobStatus.PENDING)
-        return self.transition(job_id, target, expected={JobStatus.PAUSED}, release_lease=True)
+        return self.transition(job_id, target, expected=set(WAITING_STATUSES), release_lease=True)
+
+    def list_evidence(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT job_id,verified,method,source,authoritative,expected_json,
+                          observed_json,locator,evidence_sha256,captured_at,created_at
+                   FROM verification_evidence WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["expected"] = json.loads(item.pop("expected_json"))
+            item["observed"] = json.loads(item.pop("observed_json"))
+            result.append(item)
+        return result
 
     def wake_due(self, now: str | None = None) -> list[str]:
         now = now or utc_now()

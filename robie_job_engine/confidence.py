@@ -21,6 +21,9 @@ def assess_job_confidence(job: dict[str, Any]) -> ConfidenceAssessment:
 
     base = {
         "PENDING": 35,
+        "NEEDS_SKILL": 30,
+        "NEEDS_CLARIFICATION": 30,
+        "WAITING": 40,
         "RUNNING": 50,
         "VERIFYING": 65,
         "RETRY_WAIT": 45,
@@ -44,6 +47,12 @@ def assess_job_confidence(job: dict[str, Any]) -> ConfidenceAssessment:
         issues.append("Job is paused and needs attention")
     elif status == "RETRY_WAIT":
         issues.append("Job is waiting to retry")
+    elif status == "WAITING":
+        issues.append("Job is waiting on destination or human input")
+    elif status == "NEEDS_CLARIFICATION":
+        issues.append("Job needs clarification before execution")
+    elif status == "NEEDS_SKILL":
+        issues.append("Job needs a registered Skill before execution")
 
     if job.get("last_error"):
         issues.append(str(job["last_error"])[:300])

@@ -280,6 +280,46 @@ class OperationsStore:
                 return dict(row)
         return self.get_artifact(artifact_id)
 
+    def ingest_bytes(
+        self,
+        *,
+        job_id: str,
+        data: bytes,
+        original_name: str,
+        source_external_id: str,
+        mime_type: str | None = None,
+        source_platform: str = "google_drive",
+        max_bytes: int = DEFAULT_MAX_BYTES,
+    ) -> dict[str, Any]:
+        if not data:
+            raise ValueError("attachment is empty")
+        if len(data) > max_bytes:
+            raise ValueError(f"attachment size {len(data)} is outside the allowed range")
+        staging = self.artifact_root / ".inbound"
+        staging.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(staging, 0o700)
+        staged = staging / f"{uuid.uuid4()}-{_safe_filename(original_name)}"
+        fd, temp_name = tempfile.mkstemp(prefix=".bytes-", dir=staging)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, staged)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+        try:
+            return self.ingest_cached_file(
+                job_id=job_id,
+                source_path=str(staged),
+                source_external_id=source_external_id,
+                mime_type=mime_type,
+                source_platform=source_platform,
+                max_bytes=max_bytes,
+            )
+        finally:
+            staged.unlink(missing_ok=True)
+
     def get_artifact(self, artifact_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()

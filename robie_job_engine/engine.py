@@ -4,7 +4,13 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
-from .models import JobStatus, VerificationResult, WorkerResult
+from .models import (
+    VERIFIER_AUTHORITY,
+    WAITING_STATUSES,
+    JobStatus,
+    VerificationResult,
+    WorkerResult,
+)
 from .recording import RecordingManager
 from .store import JobStore
 
@@ -60,6 +66,15 @@ class JobEngine:
         except Exception as exc:
             result = WorkerResult(False, job["action_type"], {}, retryable=True, error=f"{type(exc).__name__}: {exc}")
         self.store.add_attempt(job["id"], "perform", number, "success" if result.succeeded else "failure", {"error": result.error, "detail": result.detail})
+        if result.hold_status in WAITING_STATUSES:
+            return self.store.transition(
+                job["id"],
+                result.hold_status,
+                expected={JobStatus.RUNNING},
+                error=result.error,
+                resume_status=JobStatus.PENDING,
+                release_lease=True,
+            )
         if not result.succeeded:
             return self._retry_or_fail(job, number, result.error or "worker failed", result.retryable, JobStatus.PENDING)
         action = {"action": result.action, "destination": result.destination, "detail": result.detail}
@@ -77,8 +92,23 @@ class JobEngine:
             return self._verification_retry_or_unverified(job, number, f"{type(exc).__name__}: {exc}", True)
         self.store.add_evidence(job["id"], result.verified, result.evidence)
         self.store.add_attempt(job["id"], "verify", number, "verified" if result.verified else "not_verified", {"error": result.error, "method": result.evidence.method, "authoritative": result.evidence.authoritative})
+        if result.hold_status in WAITING_STATUSES:
+            return self.store.transition(
+                job["id"],
+                result.hold_status,
+                expected={JobStatus.VERIFYING},
+                error=result.error,
+                resume_status=JobStatus.VERIFYING,
+                release_lease=True,
+            )
         if result.verified and result.evidence.authoritative:
-            return self.store.transition(job["id"], JobStatus.COMPLETE, expected={JobStatus.VERIFYING}, release_lease=True)
+            return self.store.transition(
+                job["id"],
+                JobStatus.COMPLETE,
+                expected={JobStatus.VERIFYING},
+                release_lease=True,
+                authority=VERIFIER_AUTHORITY,
+            )
         if result.verified and not result.evidence.authoritative:
             return self.store.transition(job["id"], JobStatus.UNVERIFIED, error="evidence was not authoritative", release_lease=True)
         return self._verification_retry_or_unverified(job, number, result.error or "destination state not verified", result.retryable)
