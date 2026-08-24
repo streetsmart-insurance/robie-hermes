@@ -287,8 +287,28 @@ class ReliabilityMvpTests(unittest.TestCase):
             max_attempts=1,
         )
         final = engine.run(bad["id"])
-        self.assertEqual(final["status"], JobStatus.UNVERIFIED)
-        self.assertTrue(self.store.list_evidence(bad["id"]))
+        self.assertEqual(final["status"], JobStatus.FAILED)
+        self.assertNotEqual(final["status"], JobStatus.COMPLETE)
+
+        stale = MemoryBrowser({"https://ezlynx.example/account": {"url": "https://ezlynx.example/account", "title": "Wrong"}})
+        engine = JobEngine(
+            self.store,
+            {"browser-read": BoundedBrowserReadWorker(stale)},
+            {"browser.read": BrowserReadVerifier(stale)},
+        )
+        mismatch = self.store.create_job(
+            "browser.read",
+            {
+                "worker": "browser-read",
+                "locator": {"url": "https://ezlynx.example/account"},
+                "expected": {"title": "Acme"},
+            },
+            idempotency_key="read-mismatch",
+            max_attempts=1,
+        )
+        unverified = engine.run(mismatch["id"])
+        self.assertEqual(unverified["status"], JobStatus.UNVERIFIED)
+        self.assertTrue(self.store.list_evidence(mismatch["id"]))
 
     def test_checkpoint_restart_does_not_repeat_action(self):
         worker = RecordingWorker(WorkerResult(True, "ezlynx.apply_label", {"resource_id": "doc-1"}))

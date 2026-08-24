@@ -56,11 +56,17 @@ def _requested_fee(payload: dict[str, Any], text: str) -> int:
     return DEFAULT_AGENCY_FEE_USD
 
 
-def _page_count(payload: dict[str, Any], quote_text: str) -> int:
+def _page_count(payload: dict[str, Any], quote_text: str, request_text: str = "") -> int:
     if payload.get("page_count"):
         return int(payload["page_count"])
-    pages = quote_text.count("\f") + 1 if quote_text else 0
-    return pages or int(payload.get("expected_page_count") or 10)
+    if payload.get("expected_page_count"):
+        return int(payload["expected_page_count"])
+    match = re.search(r"(\d+)\s*-?\s*page", request_text)
+    if match:
+        return int(match.group(1))
+    if quote_text and "\f" in quote_text:
+        return quote_text.count("\f") + 1
+    return 10
 
 
 class BoundedCarrierProposalWorker:
@@ -118,7 +124,7 @@ class BoundedCarrierProposalWorker:
                 error="quote already contains the agency fee; refusing to duplicate it",
             )
         proposal_id = payload.get("proposal_id") or f"proposal:{idempotency_key}"
-        pages = _page_count(payload, quote_text)
+        pages = _page_count(payload, quote_text, text)
         body = quote_text.rstrip() + f"\n\nAgency fee: ${fee}.00\n"
         document = {
             "proposal_id": proposal_id,
