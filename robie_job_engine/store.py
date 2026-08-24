@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .complete_guard import require_complete_postcondition
+from .complete_guard import intended_destination_identity, require_complete_postcondition
 from .models import (
     VERIFIER_AUTHORITY,
     WAITING_STATUSES,
@@ -218,7 +218,7 @@ class JobStore:
                     (job_id,),
                 ).fetchone()
                 job_meta = conn.execute(
-                    "SELECT created_at FROM jobs WHERE id=?", (job_id,)
+                    "SELECT created_at, payload_json FROM jobs WHERE id=?", (job_id,)
                 ).fetchone()
                 perform = conn.execute(
                     """SELECT created_at FROM attempts
@@ -227,7 +227,7 @@ class JobStore:
                     (job_id,),
                 ).fetchone()
                 action_ckpt = conn.execute(
-                    """SELECT created_at FROM checkpoints
+                    """SELECT created_at, data_json FROM checkpoints
                        WHERE job_id=? AND kind='action'""",
                     (job_id,),
                 ).fetchone()
@@ -238,6 +238,16 @@ class JobStore:
                 stored_not_before = max(
                     (item for item in attempt_floors if item),
                     default=job_meta["created_at"] if job_meta else None,
+                )
+                action_data = (
+                    json.loads(action_ckpt["data_json"])
+                    if action_ckpt and action_ckpt["data_json"]
+                    else None
+                )
+                payload = (
+                    json.loads(job_meta["payload_json"])
+                    if job_meta and job_meta["payload_json"]
+                    else None
                 )
                 require_complete_postcondition(
                     current=current,
@@ -254,6 +264,9 @@ class JobStore:
                     not_before=job_meta["created_at"] if job_meta else None,
                     stored_at=evidence["created_at"] if evidence else None,
                     stored_not_before=stored_not_before,
+                    intended=intended_destination_identity(
+                        action=action_data, payload=payload
+                    ),
                 )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(

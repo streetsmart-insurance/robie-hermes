@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from robie_job_engine.confidence import assess_job_confidence
 from robie_job_engine.recording import RecordingManager, RecordingStore
@@ -17,6 +19,19 @@ class FakeCapture:
     def stop(self, pid: int, stop_file: Path, output_path: Path) -> None:
         stop_file.touch()
         output_path.write_bytes(b"fake-webm-for-acceptance-test")
+
+
+class DistinctSegmentCapture:
+    def __init__(self) -> None:
+        self.stops = 0
+
+    def start(self, output_path: Path, stop_file: Path) -> int:
+        return 4300 + self.stops
+
+    def stop(self, pid: int, stop_file: Path, output_path: Path) -> None:
+        self.stops += 1
+        stop_file.touch()
+        output_path.write_bytes(f"segment-bytes-{self.stops}\n".encode())
 
 
 class FakeUploader:
@@ -75,6 +90,32 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual((98, "HIGH"), (complete.score, complete.level))
         self.assertEqual("LOW", unverified.level)
         self.assertIn("Destination state was not independently verified", unverified.issues)
+
+    def test_same_second_segments_keep_distinct_paths_and_contents(self) -> None:
+        frozen = datetime(2026, 8, 24, 23, 50, 0, tzinfo=timezone.utc)
+        capture = DistinctSegmentCapture()
+        manager = RecordingManager(
+            self.db,
+            root=self.root / "recordings",
+            capture=capture,
+            uploader=FakeUploader(),
+            enabled=True,
+            keep_local=True,
+        )
+        with patch("robie_job_engine.recording.datetime") as mocked:
+            mocked.now.return_value = frozen
+            manager.start(self.job["id"])
+            manager.stop_and_upload(self.job["id"], "RETRY_WAIT")
+            manager.start(self.job["id"])
+            manager.stop_and_upload(self.job["id"], "COMPLETE")
+        segments = manager.list_for_job(self.job["id"])
+        self.assertEqual(len(segments), 2)
+        paths = [item["local_path"] for item in segments]
+        self.assertEqual(len(set(paths)), 2)
+        contents = [Path(path).read_bytes() for path in paths]
+        self.assertEqual(len(set(contents)), 2)
+        self.assertTrue(all(Path(path).is_file() for path in paths))
+        self.assertTrue(all("-" in Path(path).name for path in paths))
 
 
 if __name__ == "__main__":

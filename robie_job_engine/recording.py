@@ -309,7 +309,8 @@ class RecordingManager:
         job_dir = self.root / _safe(job_id)
         job_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        output = job_dir / f"{_safe(job_id)}-{stamp}.webm"
+        unique = uuid.uuid4().hex
+        output = job_dir / f"{_safe(job_id)}-{stamp}-{unique}.webm"
         stop_file = output.with_suffix(".stop")
         recording = self.store.create(job_id, output, stop_file)
         try:

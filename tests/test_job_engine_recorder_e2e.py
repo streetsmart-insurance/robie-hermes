@@ -150,12 +150,18 @@ class CountingWorker:
         return self.result
 
 
-def _fresh_evidence(expected: dict, observed: dict | None = None, *, locator="rec-e2e", captured_at=None):
+def _fresh_evidence(expected: dict, observed: dict | None = None, *, locator=None, captured_at=None):
+    observed = observed if observed is not None else dict(expected)
+    if locator is None:
+        for key in ("record_id", "resource_id", "proposal_id", "locator", "id"):
+            if expected.get(key):
+                locator = str(expected[key])
+                break
     return VerificationEvidence(
         "TEST",
         "destination",
         expected,
-        observed if observed is not None else dict(expected),
+        observed,
         True,
         captured_at or datetime.now(timezone.utc).isoformat(),
         locator,
@@ -211,6 +217,11 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         latest = segments[-1]
         self.assertEqual(latest["status"], "READY")
         self.assertTrue(Path(latest["local_path"]).is_file())
+        paths = [item["local_path"] for item in segments]
+        self.assertEqual(len(paths), len(set(paths)))
+        contents = [Path(path).read_bytes() for path in paths if Path(path).is_file()]
+        if len(contents) > 1:
+            self.assertEqual(len(contents), len(set(contents)))
         return segments
 
     def _assert_complete_success_conditions(self, job_id: str) -> dict:
@@ -355,8 +366,8 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                         VerificationResult(
                             True,
                             _fresh_evidence(
-                                {"status": "done"},
-                                locator="skew-ok",
+                                {"status": "done", "record_id": "skew"},
+                                locator="skew",
                                 captured_at=within_skew,
                             ),
                         )

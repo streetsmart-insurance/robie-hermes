@@ -66,6 +66,27 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
 )
 
 
+def _identity_from_blobs(*blobs: Any) -> str | None:
+    extra = ("url", "title", "document_id")
+    keys = IDENTITY_KEYS + extra
+    for blob in blobs:
+        if isinstance(blob, str) and blob.strip():
+            return blob.strip()
+        if not isinstance(blob, dict):
+            continue
+        nested = blob.get("locator")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        if isinstance(nested, dict):
+            for key in keys:
+                if nested.get(key):
+                    return str(nested[key])
+        for key in keys:
+            if blob.get(key):
+                return str(blob[key])
+    return None
+
+
 def evidence_record_id(
     *,
     locator: str | None,
@@ -73,13 +94,50 @@ def evidence_record_id(
     observed: dict[str, Any] | None,
     job_id: str | None = None,
 ) -> str | None:
-    if locator:
-        return str(locator)
-    for blob in (expected or {}, observed or {}):
-        for key in IDENTITY_KEYS:
-            if blob.get(key):
-                return str(blob[key])
-    return job_id
+    """Return a destination record identity. Never fall back to the Job ID."""
+    del job_id
+    if locator and str(locator).strip():
+        return str(locator).strip()
+    return _identity_from_blobs(expected or {}, observed or {})
+
+
+def intended_destination_identity(
+    *,
+    action: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> str | None:
+    """Identity of the action target the evidence must bind to."""
+    action = dict(action or {})
+    payload = dict(payload or {})
+    return _identity_from_blobs(
+        action.get("destination"),
+        payload.get("locator"),
+        payload,
+    )
+
+
+def destination_identity_missing(
+    *,
+    locator: str | None,
+    expected: dict[str, Any] | None,
+    observed: dict[str, Any] | None,
+    intended: str | None = None,
+    job_id: str | None = None,
+) -> str | None:
+    """Refuse COMPLETE when destination identity is missing or unbound."""
+    record_id = evidence_record_id(
+        locator=locator, expected=expected, observed=observed
+    )
+    if not record_id:
+        return "COMPLETE prohibited: destination record identity is missing"
+    if job_id and record_id == str(job_id):
+        return "COMPLETE prohibited: destination record identity cannot be the Job ID"
+    if intended and record_id != str(intended):
+        return (
+            f"COMPLETE prohibited: evidence identity {record_id!r} "
+            f"does not match action target {intended!r}"
+        )
+    return None
 
 
 def complete_is_prohibited(observed: dict[str, Any] | None) -> str | None:
@@ -186,6 +244,7 @@ def require_complete_postcondition(
     not_before: str | None = None,
     stored_at: str | None = None,
     stored_not_before: str | None = None,
+    intended: str | None = None,
 ) -> None:
     if current != JobStatus.VERIFYING or authority != verifier_authority:
         raise PermissionError(
@@ -202,10 +261,15 @@ def require_complete_postcondition(
     missing = expected_postcondition_missing(expected)
     if missing:
         raise PermissionError(missing)
-    if not evidence_record_id(
-        locator=locator, expected=expected, observed=observed, job_id=job_id
-    ):
-        raise PermissionError("COMPLETE evidence is missing a record ID")
+    identity = destination_identity_missing(
+        locator=locator,
+        expected=expected,
+        observed=observed,
+        intended=intended,
+        job_id=job_id,
+    )
+    if identity:
+        raise PermissionError(identity)
     prohibited = complete_is_prohibited(observed)
     if prohibited:
         raise PermissionError(prohibited)

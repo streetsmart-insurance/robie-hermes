@@ -8,7 +8,9 @@ from typing import Any, Protocol
 
 from .complete_guard import (
     complete_is_prohibited,
+    destination_identity_missing,
     evidence_is_stale,
+    intended_destination_identity,
     postcondition_mismatch,
 )
 from .idempotency import DurableWorkLedger, IdempotencyError
@@ -253,7 +255,16 @@ class JobEngine:
                 captured_at=result.evidence.captured_at,
                 not_before=job.get("created_at"),
             )
-            reason = prohibited or mismatch or stale
+            identity = destination_identity_missing(
+                locator=result.evidence.locator,
+                expected=result.evidence.expected,
+                observed=result.evidence.observed,
+                intended=intended_destination_identity(
+                    action=action, payload=job.get("payload")
+                ),
+                job_id=job.get("id"),
+            )
+            reason = prohibited or mismatch or stale or identity
             if reason:
                 return self.store.transition(
                     job["id"],

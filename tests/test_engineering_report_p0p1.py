@@ -759,6 +759,61 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
         self.assertIn(final["status"], {JobStatus.UNVERIFIED, JobStatus.FAILED})
 
+    def test_complete_rejects_missing_destination_identity(self):
+        job = self.store.create_job("browser.read", {"worker": "x"}, idempotency_key="no-ident")
+        self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+        self.store.transition(job["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+        self.store.add_evidence(
+            job["id"],
+            True,
+            VerificationEvidence(
+                "TEST",
+                "destination",
+                {"status": "done"},
+                {"status": "done"},
+                True,
+                datetime.now(timezone.utc).isoformat(),
+                None,
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.transition(
+                job["id"],
+                JobStatus.COMPLETE,
+                expected={JobStatus.VERIFYING},
+                authority=VERIFIER_AUTHORITY,
+            )
+        self.assertNotEqual(self.store.get_job(job["id"])["status"], JobStatus.COMPLETE)
+
+        class Worker:
+            def perform(self, current, *, idempotency_key):
+                return WorkerResult(True, "browser.read", {"record_id": "r-ident"})
+
+        class Verifier:
+            def verify(self, current, action):
+                return VerificationResult(
+                    True,
+                    VerificationEvidence(
+                        "TEST",
+                        "destination",
+                        {"status": "done"},
+                        {"status": "done"},
+                        True,
+                        datetime.now(timezone.utc).isoformat(),
+                        None,
+                    ),
+                )
+
+        live = self.store.create_job(
+            "browser.read", {"worker": "probe"}, idempotency_key="no-ident-engine"
+        )
+        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+            live["id"]
+        )
+        self.assertNotEqual(final["status"], JobStatus.COMPLETE)
+        self.assertIn(final["status"], {JobStatus.UNVERIFIED, JobStatus.FAILED})
+        self.assertIn("identity", str(final.get("last_error") or "").casefold())
+
     def test_authorization_header_redacts_entire_bearer_value(self):
         header = "Authorization: Bearer TESTVALUE123"
         cleaned = redact_text(header)
