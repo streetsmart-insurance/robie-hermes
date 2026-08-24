@@ -69,3 +69,10 @@ Run the acceptance suite with:
 ```sh
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
+
+Test Hermes operators: see `docs/TEST_HERMES_OPERATOR_RUNBOOK.md` for copying
+the Razza quote into the Test artifact store, setting `ROBIE_ENV=TEST`,
+installing the Test-only systemd drop-in, and running
+`scripts/replay-quote-proposal.py`. That harness needs a real `--quote-pdf`
+path, refuses `COMPLETE` without stored verifier evidence, and never claims
+live Test `COMPLETE`.
