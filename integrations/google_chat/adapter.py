@@ -206,7 +206,9 @@ from gateway.platforms.base import (
 sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
 from robie_job_engine.chat_guard import (build_chat_execution_text, guard_chat_response, open_chat_job)
 from robie_job_engine.pubsub_ack import PubSubAckCoordinator
-from robie_job_engine.test_runtime import maybe_run_bounded_job
+from robie_job_engine.runtime_env import chat_path_is_sandbox
+from robie_job_engine.secrets import redact_text
+from robie_job_engine.test_runtime import dispatch_operational_chat
 ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 
 logger = logging.getLogger("gateway.platforms.google_chat")
@@ -373,6 +375,7 @@ def _redact_sensitive(text: str) -> str:
         "projects/<redacted>/topics/<redacted>",
         text,
     )
+    text = redact_text(text)
     text = re.sub(
         r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.iam\.gserviceaccount\.com",
         "<sa>@<project>.iam.gserviceaccount.com",
@@ -1784,6 +1787,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     return
 
             message_id = event.message_id or f"unidentified:{id(event)}"
+            text = redact_text(text)
             job_id = open_chat_job(
                 ROBIE_JOB_DB,
                 message_id,
@@ -1804,8 +1808,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 jobs = self._robie_jobs_by_reply = {}
             jobs[event.message_id] = job_id
             # Operational bounded Jobs run through the durable Job Engine in
-            # Test and Production. Non-bounded chat still uses Hermes/cua-driver.
-            if maybe_run_bounded_job(ROBIE_JOB_DB, job_id):
+            # Test and Production. Ledger/path failures fail closed and never
+            # fall through to Hermes. Hermes/cua-driver is only for
+            # non-operational or explicitly labeled sandbox chat.
+            if dispatch_operational_chat(
+                ROBIE_JOB_DB,
+                job_id,
+                sandbox=chat_path_is_sandbox(
+                    conversation_id=getattr(event.source, "chat_id", None)
+                    if getattr(event, "source", None)
+                    else None
+                ),
+            ):
                 return
             execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, text)
             try:
@@ -2372,6 +2386,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         jobs = getattr(self, "_robie_jobs_by_reply", {})
         job_id = jobs.pop(reply_to, None) if reply_to else None
+        content = redact_text(content)
         content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
         self.pause_typing_for_chat(chat_id)

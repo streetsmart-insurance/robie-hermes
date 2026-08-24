@@ -81,6 +81,9 @@ class MemoryEzlynxDestination:
     """In-memory EZLynx stand-in. Never opens a live EZLynx session."""
 
     def __init__(self) -> None:
+        from .runtime_env import forbid_memory_destination
+
+        forbid_memory_destination("MemoryEzlynxDestination")
         self._state: dict[tuple[str, str], dict[str, Any]] = {}
         self.unavailable = False
         self.writes = 0

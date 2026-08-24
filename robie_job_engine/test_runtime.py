@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-from typing import Any
+from typing import Any, Callable
 
 from .browser_read import BoundedBrowserReadWorker, BrowserReadVerifier
 from .carrier_proposal import (
@@ -16,21 +15,17 @@ from .ezlynx import (
     HermesCuaEzlynxWorker,
     MemoryEzlynxDestination,
 )
-from .models import JobStatus
+from .idempotency import IdempotencyError
+from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .request_routing import BOUNDED_ENGINE_ACTIONS
+from .runtime_env import (
+    PRODUCTION_ENV_NAMES,
+    TEST_ENV_NAME,
+    ProductionGuardError,
+    chat_path_is_sandbox,
+    current_robie_env,
+)
 from .store import JobStore
-
-
-TEST_ENV_NAME = "TEST"
-PRODUCTION_ENV_NAMES = frozenset({"PRODUCTION", "PROD", "LIVE"})
-
-
-class ProductionGuardError(RuntimeError):
-    """Raised when Test-only wiring is asked to run outside TEST."""
-
-
-def current_robie_env() -> str:
-    return str(os.environ.get("ROBIE_ENV") or "").strip().upper()
 
 
 def require_test_environment() -> str:
@@ -123,6 +118,27 @@ def build_runtime_engine(
     return JobEngine(store, workers, verifiers)
 
 
+def _fail_closed_engine_start(store: JobStore, job_id: str, exc: BaseException) -> None:
+    current = store.get_job(job_id)
+    status = JobStatus(current["status"])
+    if status in TERMINAL_STATUSES or status in WAITING_STATUSES:
+        return
+    try:
+        store.transition(
+            job_id,
+            JobStatus.FAILED,
+            expected={
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+                JobStatus.VERIFYING,
+            },
+            error=f"durable engine failed: {exc}",
+            release_lease=True,
+        )
+    except Exception:
+        return
+
+
 def maybe_run_bounded_job(db_path: str, job_id: str | None) -> bool:
     """Run a bounded operational Job through the durable Job Engine.
 
@@ -136,9 +152,56 @@ def maybe_run_bounded_job(db_path: str, job_id: str | None) -> bool:
     if job["action_type"] not in BOUNDED_ENGINE_ACTIONS:
         return False
     if JobStatus(job["status"]) != JobStatus.PENDING:
-        return False
-    build_runtime_engine(store).run(job_id)
+        return True
+    try:
+        build_runtime_engine(store).run(job_id)
+    except (IdempotencyError, ProductionGuardError, OSError) as exc:
+        _fail_closed_engine_start(store, job_id, exc)
     return True
+
+
+def dispatch_operational_chat(
+    db_path: str,
+    job_id: str | None,
+    *,
+    sandbox: bool = False,
+    hermes: Callable[[], None] | None = None,
+) -> bool:
+    """Route operational Chat. Return True when Hermes must not continue.
+
+    Hermes/cua-driver may run only for non-operational messages or an
+    explicitly labeled sandbox path. A ledger/path/engine start failure
+    is fail-closed and never invokes Hermes.
+    """
+    if sandbox or chat_path_is_sandbox():
+        if hermes is not None:
+            hermes()
+        return False
+    if not job_id:
+        if hermes is not None:
+            hermes()
+        return False
+    try:
+        store = JobStore(db_path)
+        job = store.get_job(job_id)
+    except Exception:
+        return True
+    error = str(job.get("last_error") or "")
+    durable_failed = (
+        "durable intake failed" in error
+        or "durable engine failed" in error
+        or "persistent store cannot" in error
+    )
+    if durable_failed or job["action_type"] in BOUNDED_ENGINE_ACTIONS:
+        if JobStatus(job["status"]) == JobStatus.PENDING:
+            try:
+                maybe_run_bounded_job(db_path, job_id)
+            except (IdempotencyError, ProductionGuardError, OSError) as exc:
+                _fail_closed_engine_start(store, job_id, exc)
+        return True
+    if hermes is not None:
+        hermes()
+    return False
 
 
 def maybe_run_test_bounded_job(db_path: str, job_id: str | None) -> bool:

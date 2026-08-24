@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import random
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,7 @@ from typing import Any, Protocol
 
 from .complete_guard import complete_is_prohibited
 from .idempotency import DurableWorkLedger, IdempotencyError
+from .job_schema import bounded_schema_hold_reason
 from .models import (
     ACTION_OUTCOME_UNKNOWN,
     VERIFIER_AUTHORITY,
@@ -32,12 +34,22 @@ class Verifier(Protocol):
 class JobEngine:
     """The only component authorized to set COMPLETE."""
 
-    def __init__(self, store: JobStore, workers: dict[str, ComputerWorker], verifiers: dict[str, Verifier], *, owner: str = "robie-job-engine", recordings: RecordingManager | None = None):
+    def __init__(
+        self,
+        store: JobStore,
+        workers: dict[str, ComputerWorker],
+        verifiers: dict[str, Verifier],
+        *,
+        owner: str = "robie-job-engine",
+        recordings: RecordingManager | None = None,
+        perform_timeout_seconds: float = 120,
+    ):
         self.store = store
         self.workers = workers
         self.verifiers = verifiers
         self.owner = owner
         self.recordings = recordings or RecordingManager(store.path)
+        self.perform_timeout_seconds = perform_timeout_seconds
 
     def run(self, job_id: str) -> dict[str, Any]:
         lease_owner = f"{self.owner}:{uuid.uuid4()}"
@@ -107,6 +119,16 @@ class JobEngine:
         ledger: DurableWorkLedger,
         run_id: str,
     ) -> dict[str, Any]:
+        schema_hold = bounded_schema_hold_reason(job["action_type"], job["payload"])
+        if schema_hold:
+            return self.store.transition(
+                job["id"],
+                JobStatus.NEEDS_CLARIFICATION,
+                expected={JobStatus.PENDING, JobStatus.RUNNING},
+                error=schema_hold,
+                resume_status=JobStatus.PENDING,
+                release_lease=True,
+            )
         self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING, JobStatus.RUNNING})
         number = self.store.increment(job["id"], "attempt_count")
         worker_name = job["payload"].get("worker", "hermes-cua")
@@ -114,7 +136,7 @@ class JobEngine:
         if not worker:
             return self.store.transition(job["id"], JobStatus.FAILED, error=f"unknown worker: {worker_name}", release_lease=True)
         try:
-            result = worker.perform(job, idempotency_key=job["idempotency_key"])
+            result = self._call_worker(worker, job)
         except Exception as exc:
             error = redact_exception(exc)
             self.store.add_attempt(
@@ -141,6 +163,11 @@ class JobEngine:
                 ledger.record_external_action(job["action_type"], job["idempotency_key"])
             except (IdempotencyError, KeyError):
                 pass
+            if isinstance(exc, TimeoutError):
+                try:
+                    IsolatedRunStore(self.store.path).cancel(run_id)
+                except (RunIsolationError, KeyError):
+                    pass
             return self.store.transition(
                 job["id"],
                 JobStatus.VERIFYING,
@@ -180,6 +207,18 @@ class JobEngine:
         action = {"action": result.action, "destination": result.destination, "detail": result.detail}
         self.store.checkpoint(job["id"], "action", action)
         return self.store.transition(job["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+
+    def _call_worker(self, worker: ComputerWorker, job: dict[str, Any]) -> WorkerResult:
+        timeout = float(job["payload"].get("perform_timeout_seconds", self.perform_timeout_seconds))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(worker.perform, job, idempotency_key=job["idempotency_key"])
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError as exc:
+                raise TimeoutError(f"worker perform exceeded {timeout}s") from exc
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _verify(self, job: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
         verifier = self.verifiers.get(job["action_type"])

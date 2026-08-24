@@ -12,6 +12,7 @@ from robie_job_engine.store import JobStore
 from robie_job_engine.test_runtime import (
     ProductionGuardError,
     build_test_engine,
+    dispatch_operational_chat,
     maybe_run_bounded_job,
     maybe_run_test_bounded_job,
     require_test_environment,
@@ -90,6 +91,28 @@ class TestRuntimeGuardTests(unittest.TestCase):
             self.assertEqual(len(evidence), 1)
             self.assertEqual(evidence[0]["observed"]["agency_fee_occurrences"], 1)
             self.assertTrue(evidence[0]["authoritative"])
+
+    def test_production_ledger_failure_does_not_invoke_hermes(self):
+        hermes = []
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job(
+                "carrier.proposal",
+                {"worker": "carrier-proposal", "text": "generate a proposal"},
+                idempotency_key="prod-ledger-fail",
+            )
+            with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+                with patch(
+                    "robie_job_engine.engine.DurableWorkLedger",
+                    side_effect=ProductionGuardError("ledger cannot start"),
+                ):
+                    consumed = dispatch_operational_chat(
+                        db, job["id"], hermes=lambda: hermes.append("hermes")
+                    )
+            self.assertTrue(consumed)
+            self.assertEqual(hermes, [])
+            self.assertNotEqual(store.get_job(job["id"])["status"], JobStatus.COMPLETE)
 
 
 if __name__ == "__main__":

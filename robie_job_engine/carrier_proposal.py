@@ -25,6 +25,9 @@ class MemoryProposalDestination:
     """In-memory destination used by tests and the bounded Test worker."""
 
     def __init__(self) -> None:
+        from .runtime_env import forbid_memory_destination
+
+        forbid_memory_destination("MemoryProposalDestination")
         self._documents: dict[str, dict[str, Any]] = {}
 
     def write(self, proposal_id: str, document: dict[str, Any]) -> None:

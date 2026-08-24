@@ -123,6 +123,7 @@ class JobStore:
         idempotency_key: str | None = None,
         max_attempts: int = 3,
     ) -> dict[str, Any]:
+        payload = redact_mapping(payload)
         key = idempotency_key or hashlib.sha256(
             f"{action_type}:{canonical_json(payload)}".encode()
         ).hexdigest()
@@ -261,7 +262,7 @@ class JobStore:
             conn.execute(
                 """INSERT INTO checkpoints(job_id,kind,data_json,created_at) VALUES(?,?,?,?)
                 ON CONFLICT(job_id,kind) DO UPDATE SET data_json=excluded.data_json,created_at=excluded.created_at""",
-                (job_id, kind, canonical_json(data), utc_now()),
+                (job_id, kind, canonical_json(redact_mapping(data)), utc_now()),
             )
 
     def get_checkpoint(self, job_id: str, kind: str) -> dict[str, Any] | None:

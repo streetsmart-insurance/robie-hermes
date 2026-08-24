@@ -6,11 +6,13 @@ from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
 from .context_policy import JobContextManager
 from .idempotency import DurableWorkLedger, IdempotencyError
+from .job_schema import bounded_schema_hold_reason
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .runs import IsolatedRunStore, RunIsolationError
 from .operations import ingest_chat_attachments
 from .recording import RecordingManager
 from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
+from .secrets import redact_mapping, redact_text
 from .submission_routing import resolve_submission_route, submission_verification_requirements
 from .store import JobStore
 
@@ -194,14 +196,16 @@ def open_chat_job(
     else:
         job = store.create_job(
             classification.action_type,
-            {
-                "message_id": message_id,
-                "text": text,
-                "requested_by": requested_by or "Google Chat user",
-                "source": "Google Chat",
-                "conversation_id": context_key,
-                "worker": classification.worker,
-            },
+            redact_mapping(
+                {
+                    "message_id": message_id,
+                    "text": text,
+                    "requested_by": requested_by or "Google Chat user",
+                    "source": "Google Chat",
+                    "conversation_id": context_key,
+                    "worker": classification.worker,
+                }
+            ),
             idempotency_key=f"gchat:{message_id}",
         )
         context.bind_job(
@@ -250,6 +254,19 @@ def open_chat_job(
             "source": "google-chat-intake",
         },
     )
+    schema_hold = bounded_schema_hold_reason(job["action_type"], job["payload"])
+    if schema_hold:
+        current = store.get_job(job["id"])
+        if current["status"] == JobStatus.PENDING:
+            store.transition(
+                job["id"],
+                JobStatus.NEEDS_CLARIFICATION,
+                expected={JobStatus.PENDING},
+                error=schema_hold,
+                resume_status=JobStatus.PENDING,
+                release_lease=True,
+            )
+        return job["id"]
     forbidden = forbidden_tool_request({}, text)
     if forbidden:
         current = store.get_job(job["id"])
@@ -378,6 +395,7 @@ def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
 
 
 def guard_chat_response(db_path: str, job_id: str | None, content: str) -> str:
+    content = redact_text(content)
     if not job_id:
         return content
     store = JobStore(db_path)

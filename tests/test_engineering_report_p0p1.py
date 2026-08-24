@@ -6,6 +6,8 @@ No live EZLynx. No real credentials. Production release stays FAIL.
 from __future__ import annotations
 
 import os
+import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +15,7 @@ from unittest.mock import patch
 
 from durable_temp import durable_temporary_directory
 
-from robie_job_engine.chat_guard import open_chat_job
+from robie_job_engine.chat_guard import guard_chat_response, open_chat_job
 from robie_job_engine.complete_guard import complete_is_prohibited
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.fallback_audit import (
@@ -29,6 +31,7 @@ from robie_job_engine.models import ACTION_OUTCOME_UNKNOWN, VERIFIER_AUTHORITY, 
 from robie_job_engine.release_gate import production_release_decision
 from robie_job_engine.report_registry import ReportRegistryError, ReportRunRegistry, get_report_spec
 from robie_job_engine.runs import IsolatedRunStore, RunIsolationError
+from robie_job_engine.runtime_env import ProductionGuardError
 from robie_job_engine.secrets import (
     FAKE_SECRET_SENTINEL,
     REDACTED,
@@ -40,6 +43,7 @@ from robie_job_engine.secrets import (
     screenshot_may_be_logged,
 )
 from robie_job_engine.store import JobStore
+from robie_job_engine.test_runtime import dispatch_operational_chat
 from robie_job_engine.typed_output import TypedOutputError, TypedOutputStore, user_visible_text
 
 
@@ -436,6 +440,120 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         self.assertEqual(item["outcome"], ACTION_OUTCOME_UNKNOWN)
         self.assertEqual(item["external_actions"], 1)
         self.assertFalse(item["verified"])
+        self.store.wake_due("9999-12-31T23:59:59+00:00")
+        second = engine.run(job["id"])
+        self.assertEqual(calls["n"], 1)
+        self.assertNotEqual(second["status"], JobStatus.COMPLETE)
+
+    def test_ledger_path_failure_never_invokes_hermes(self):
+        hermes_calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "spaces/s/messages/hermes-block",
+                "generate a proposal and add a $350 fee",
+            )
+            consumed = dispatch_operational_chat(
+                db, job_id, hermes=lambda: hermes_calls.append("hermes")
+            )
+            self.assertTrue(consumed)
+            self.assertEqual(hermes_calls, [])
+            job = JobStore(db).get_job(job_id)
+            self.assertNotEqual(job["status"], JobStatus.COMPLETE)
+            self.assertIn("durable", str(job.get("last_error") or "").casefold())
+
+    def test_chat_persist_and_outbound_redact_fake_sentinel(self):
+        text = f"generate a proposal password={FAKE_SECRET_SENTINEL}"
+        job_id = open_chat_job(self.db, "spaces/s/messages/redact", text)
+        job = self.store.get_job(job_id)
+        self.assertFalse(contains_secret(job["payload"], FAKE_SECRET_SENTINEL))
+        self.assertNotIn(FAKE_SECRET_SENTINEL, str(job["payload"].get("text") or ""))
+        self.store.checkpoint(job_id, "note", {"detail": f"cookie={FAKE_SECRET_SENTINEL}"})
+        self.assertFalse(contains_secret(self.store.get_checkpoint(job_id, "note"), FAKE_SECRET_SENTINEL))
+        outbound = guard_chat_response(
+            self.db, None, f"done token={FAKE_SECRET_SENTINEL}"
+        )
+        self.assertNotIn(FAKE_SECRET_SENTINEL, outbound)
+        self.assertIn(REDACTED, outbound)
+
+    def test_missing_bounded_schema_holds_and_never_acts(self):
+        calls = {"n": 0}
+
+        class Worker:
+            def perform(self, current, *, idempotency_key):
+                calls["n"] += 1
+                return WorkerResult(True, current["action_type"], {"record_id": "x"})
+
+        with patch.dict("robie_job_engine.job_schema.BOUNDED_JOB_SCHEMAS", {}, clear=True):
+            job_id = open_chat_job(
+                self.db,
+                "spaces/s/messages/no-schema",
+                "generate a proposal and add a $350 fee",
+            )
+            job = self.store.get_job(job_id)
+            self.assertEqual(job["status"], JobStatus.NEEDS_CLARIFICATION)
+            self.assertIn("schema", str(job.get("last_error") or "").casefold())
+            JobEngine(
+                self.store,
+                {job["payload"]["worker"]: Worker()},
+                {},
+            ).run(job_id)
+        self.assertEqual(calls["n"], 0)
+        self.assertIsNone(self.store.get_checkpoint(job_id, "action"))
+
+    def test_memory_destinations_forbidden_in_production(self):
+        from robie_job_engine.carrier_proposal import MemoryProposalDestination
+        from robie_job_engine.ezlynx import MemoryEzlynxDestination
+
+        with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+            with self.assertRaises(ProductionGuardError):
+                MemoryProposalDestination()
+            with self.assertRaises(ProductionGuardError):
+                MemoryEzlynxDestination()
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            MemoryProposalDestination()
+            MemoryEzlynxDestination()
+
+    def test_worker_hard_timeout_is_unknown_and_not_retried(self):
+        calls = {"n": 0}
+
+        class Slow:
+            def perform(self, job, *, idempotency_key):
+                calls["n"] += 1
+                time.sleep(0.4)
+                return WorkerResult(True, "browser.read", {"record_id": "late"})
+
+        class Verifier:
+            def verify(self, job, action):
+                return VerificationResult(
+                    False,
+                    _evidence({"ok": True}, {"outcome": ACTION_OUTCOME_UNKNOWN}),
+                    retryable=True,
+                    error="verification after timeout",
+                )
+
+        job = self.store.create_job(
+            "browser.read",
+            {"worker": "slow", "perform_timeout_seconds": 0.05},
+            idempotency_key="timeout-1",
+            max_attempts=3,
+        )
+        engine = JobEngine(
+            self.store,
+            {"slow": Slow()},
+            {"browser.read": Verifier()},
+            perform_timeout_seconds=0.05,
+        )
+        first = engine.run(job["id"])
+        self.assertNotEqual(first["status"], JobStatus.COMPLETE)
+        action = self.store.get_checkpoint(job["id"], "action")
+        self.assertEqual(action["detail"]["outcome"], ACTION_OUTCOME_UNKNOWN)
+        item = DurableWorkLedger(self.db).get("browser.read", "timeout-1")
+        self.assertEqual(item["outcome"], ACTION_OUTCOME_UNKNOWN)
+        self.assertEqual(item["external_actions"], 1)
+        runs = IsolatedRunStore(self.db).list_runs(job["id"])
+        self.assertTrue(any(run["terminal_event"] == "CANCELLED" for run in runs))
         self.store.wake_due("9999-12-31T23:59:59+00:00")
         second = engine.run(job["id"])
         self.assertEqual(calls["n"], 1)
