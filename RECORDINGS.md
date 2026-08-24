@@ -42,3 +42,20 @@ python -m robie_job_engine.recording_admin --db /path/to/jobs.db approve-referen
 python -m robie_job_engine.recording_admin --db /path/to/jobs.db approve-training RECORDING_ID --reviewer "Name"
 python -m robie_job_engine.recording_admin --db /path/to/jobs.db manifest
 ```
+
+## Deployment readiness
+
+Install `deploy/systemd/robie-recording.env.example` as
+`/etc/streetsmart-hermes/robie-recording.env`, populate the Drive folder and
+token-file settings outside GitHub, restrict it to the service account, and
+restart both `hermes-gateway` and `robie-scheduler` after `daemon-reload`.
+
+Before running a canary Job, verify capture and upload prerequisites:
+
+```text
+python -m robie_job_engine.recording_admin --db /opt/streetsmart-hermes/robie-job-engine/data/jobs.db health
+```
+
+The command exits with status 2 and lists secret-free issues when recording is
+disabled, ffmpeg or Playwright is missing, Chrome CDP cannot be reached, the
+recording directory is not writable, or the Drive destination is not configured.

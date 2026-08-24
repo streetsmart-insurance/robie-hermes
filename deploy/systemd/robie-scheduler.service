@@ -1,6 +1,7 @@
 [Unit]
 Description=ROBIE durable Job Engine scheduler tick
-After=local-fs.target
+After=local-fs.target network-online.target robie-ezlynx-browser.service
+Wants=network-online.target robie-ezlynx-browser.service
 
 [Service]
 Type=oneshot
@@ -9,6 +10,7 @@ Group=streetsmart-hermes
 WorkingDirectory=/opt/streetsmart-hermes/robie-job-engine
 Environment=PYTHONPATH=/opt/streetsmart-hermes/robie-job-engine
 Environment=ROBIE_DASHBOARD_SHEET_ID=1Qj0-i4QJuNkfWtjdfAdpQpI1JmC44KmThr_rrzGG6EQ
+EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
 ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.scheduler
 NoNewPrivileges=true
 PrivateTmp=true

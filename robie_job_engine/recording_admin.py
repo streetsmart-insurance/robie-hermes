@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 
-from .recording import RecordingStore
+from .recording import RecordingStore, recording_health
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Review ROBIE diagnostic recordings")
     parser.add_argument("--db", required=True)
     commands = parser.add_subparsers(dest="command", required=True)
+    health = commands.add_parser("health")
+    health.add_argument("--skip-cdp", action="store_true")
     reference = commands.add_parser("approve-reference")
     reference.add_argument("recording_id")
     reference.add_argument("--reviewer", required=True)
@@ -20,6 +22,10 @@ def main() -> None:
     training.add_argument("--reviewer", required=True)
     commands.add_parser("manifest")
     args = parser.parse_args()
+    if args.command == "health":
+        result = recording_health(check_cdp=not args.skip_cdp)
+        print(json.dumps(result, indent=2, default=str))
+        raise SystemExit(0 if result["ready"] else 2)
     store = RecordingStore(args.db)
     if args.command == "approve-reference":
         result = store.approve_reference(
