@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import ACTION_OUTCOME_UNKNOWN, JobStatus
@@ -33,6 +33,9 @@ PROHIBITED_VALUES = frozenset(
         ACTION_OUTCOME_UNKNOWN,
     }
 )
+EVIDENCE_CLOCK_SKEW = timedelta(minutes=5)
+
+
 IDENTITY_KEYS = (
     "record_id",
     "resource_id",
@@ -110,18 +113,27 @@ def evidence_is_stale(
     not_before: str | None,
     stored_at: str | None = None,
     stored_not_before: str | None = None,
+    now: datetime | None = None,
 ) -> str | None:
-    """Reject year-2000 / pre-job timestamps and prior-attempt rows."""
+    """Reject stale, prior-attempt, and far-future evidence timestamps."""
     captured = parse_evidence_timestamp(captured_at)
     if captured is None:
         return "COMPLETE prohibited: captured_at is missing or unparseable"
     captured_floor = parse_evidence_timestamp(not_before)
     if captured_floor is not None and captured < captured_floor:
         return "COMPLETE prohibited: evidence timestamp is stale"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    if captured > current + EVIDENCE_CLOCK_SKEW:
+        return "COMPLETE prohibited: evidence timestamp is in the future"
     stored = parse_evidence_timestamp(stored_at)
     stored_floor = parse_evidence_timestamp(stored_not_before)
     if stored is not None and stored_floor is not None and stored < stored_floor:
         return "COMPLETE prohibited: evidence is not from the current action attempt"
+    if stored is not None and stored > current + EVIDENCE_CLOCK_SKEW:
+        return "COMPLETE prohibited: evidence timestamp is in the future"
     return None
 
 
