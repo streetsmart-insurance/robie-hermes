@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .complete_guard import require_complete_postcondition
 from .models import (
     VERIFIER_AUTHORITY,
     WAITING_STATUSES,
@@ -16,6 +17,7 @@ from .models import (
     TERMINAL_STATUSES,
     VerificationEvidence,
 )
+from .secrets import redact_mapping, redact_text
 
 
 def utc_now() -> str:
@@ -196,27 +198,44 @@ class JobStore:
             if expected is not None and current not in expected:
                 raise RuntimeError(f"invalid transition {current} -> {status}")
             if status == JobStatus.COMPLETE:
-                if authority != VERIFIER_AUTHORITY:
-                    raise PermissionError(
-                        "action workers cannot authorize COMPLETE; "
-                        "only the independent verifier may"
-                    )
                 evidence = conn.execute(
-                    """SELECT 1 FROM verification_evidence
-                       WHERE job_id=? AND verified=1 AND authoritative=1""",
+                    """SELECT locator,expected_json,observed_json,captured_at,
+                              evidence_sha256,verified,authoritative
+                       FROM verification_evidence
+                       WHERE job_id=? AND verified=1 AND authoritative=1
+                       ORDER BY id DESC LIMIT 1""",
                     (job_id,),
                 ).fetchone()
-                if not evidence:
-                    raise PermissionError(
-                        "COMPLETE requires independently stored authoritative evidence"
-                    )
+                require_complete_postcondition(
+                    current=current,
+                    authority=authority,
+                    verified=bool(evidence and evidence["verified"]),
+                    authoritative=bool(evidence and evidence["authoritative"]),
+                    expected=json.loads(evidence["expected_json"]) if evidence else None,
+                    observed=json.loads(evidence["observed_json"]) if evidence else None,
+                    captured_at=evidence["captured_at"] if evidence else None,
+                    evidence_ref=evidence["evidence_sha256"] if evidence else None,
+                    locator=evidence["locator"] if evidence else None,
+                    job_id=job_id,
+                    verifier_authority=VERIFIER_AUTHORITY,
+                )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(
                 """UPDATE jobs SET status=?,resume_status=?,last_error=?,next_wakeup_at=?,
                 lease_owner=CASE WHEN ? THEN NULL ELSE lease_owner END,
                 lease_expires_at=CASE WHEN ? THEN NULL ELSE lease_expires_at END,
                 completed_at=?,updated_at=? WHERE id=?""",
-                (status, resume_status, error, next_wakeup_at, release_lease, release_lease, completed_at, now, job_id),
+                (
+                    status,
+                    resume_status,
+                    redact_text(error) if error else None,
+                    next_wakeup_at,
+                    release_lease,
+                    release_lease,
+                    completed_at,
+                    now,
+                    job_id,
+                ),
             )
             return self.get_job(job_id, conn=conn)
 
@@ -246,13 +265,15 @@ class JobStore:
         with self.transaction() as conn:
             conn.execute(
                 "INSERT INTO attempts(job_id,phase,attempt_number,outcome,detail_json,created_at) VALUES(?,?,?,?,?,?)",
-                (job_id, phase, number, outcome, canonical_json(detail), utc_now()),
+                (job_id, phase, number, outcome, canonical_json(redact_mapping(detail)), utc_now()),
             )
 
     def add_evidence(self, job_id: str, verified: bool, evidence: VerificationEvidence) -> None:
+        expected = redact_mapping(evidence.expected)
+        observed = redact_mapping(evidence.observed)
         body = canonical_json(
-            {"method": evidence.method, "source": evidence.source, "expected": evidence.expected,
-             "observed": evidence.observed, "authoritative": evidence.authoritative,
+            {"method": evidence.method, "source": evidence.source, "expected": expected,
+             "observed": observed, "authoritative": evidence.authoritative,
              "captured_at": evidence.captured_at, "locator": evidence.locator}
         )
         with self.transaction() as conn:
@@ -261,7 +282,7 @@ class JobStore:
                 (job_id,verified,method,source,authoritative,expected_json,observed_json,locator,
                  evidence_sha256,captured_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, int(verified), evidence.method, evidence.source, int(evidence.authoritative),
-                 canonical_json(evidence.expected), canonical_json(evidence.observed), evidence.locator,
+                 canonical_json(expected), canonical_json(observed), evidence.locator,
                  hashlib.sha256(body.encode()).hexdigest(), evidence.captured_at, utc_now()),
             )
 

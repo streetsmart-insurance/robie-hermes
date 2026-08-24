@@ -29,6 +29,7 @@ WAITING_STATUSES = {
 # The action worker never receives this token. JobEngine._verify is the
 # only caller allowed to pass it into JobStore.transition.
 VERIFIER_AUTHORITY = "independent-verifier"
+ACTION_OUTCOME_UNKNOWN = "ACTION_OUTCOME_UNKNOWN"
 
 
 @dataclass(frozen=True)

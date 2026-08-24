@@ -4,6 +4,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from .complete_guard import complete_is_prohibited
 from .models import (
     VERIFIER_AUTHORITY,
     WAITING_STATUSES,
@@ -12,6 +13,7 @@ from .models import (
     WorkerResult,
 )
 from .recording import RecordingManager
+from .secrets import redact_exception, redact_mapping
 from .store import JobStore
 
 
@@ -64,8 +66,20 @@ class JobEngine:
         try:
             result = worker.perform(job, idempotency_key=job["idempotency_key"])
         except Exception as exc:
-            result = WorkerResult(False, job["action_type"], {}, retryable=True, error=f"{type(exc).__name__}: {exc}")
-        self.store.add_attempt(job["id"], "perform", number, "success" if result.succeeded else "failure", {"error": result.error, "detail": result.detail})
+            result = WorkerResult(
+                False,
+                job["action_type"],
+                {},
+                retryable=True,
+                error=redact_exception(exc),
+            )
+        self.store.add_attempt(
+            job["id"],
+            "perform",
+            number,
+            "success" if result.succeeded else "failure",
+            {"error": result.error, "detail": redact_mapping(result.detail)},
+        )
         if result.hold_status in WAITING_STATUSES:
             return self.store.transition(
                 job["id"],
@@ -102,6 +116,15 @@ class JobEngine:
                 release_lease=True,
             )
         if result.verified and result.evidence.authoritative:
+            prohibited = complete_is_prohibited(result.evidence.observed)
+            if prohibited:
+                return self.store.transition(
+                    job["id"],
+                    JobStatus.UNVERIFIED,
+                    expected={JobStatus.VERIFYING},
+                    error=prohibited,
+                    release_lease=True,
+                )
             return self.store.transition(
                 job["id"],
                 JobStatus.COMPLETE,
