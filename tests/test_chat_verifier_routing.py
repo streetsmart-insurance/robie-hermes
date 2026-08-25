@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from durable_temp import durable_temporary_directory
 
@@ -143,6 +145,166 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             self.assertNotIn("UNVERIFIED", response)
             self.assertEqual(store.get_job(job_id)["status"], JobStatus.COMPLETE)
             self.assertEqual(readback.calls, 1)
+
+    def test_submission_audit_chat_reports_the_verified_page_state(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            scope = {
+                "time_frame": "All Submissions",
+                "assigned_producer": "Streetsmart Insurance",
+                "my_submissions": False,
+            }
+            postcondition = {
+                "pager_total": 4751,
+                "mat_row_count": 100,
+                "status_aria_sort": "ascending",
+                "first_row_status": "In Progress",
+                "first_closed_row_index": 56,
+                "rows_inspected_through_boundary": 57,
+                "distinct_non_closed_statuses": ["In Progress", "Submitted"],
+            }
+            job_id = open_chat_job(
+                db,
+                "submission-audit-summary",
+                "Run a read-only Submission Center audit. Do not modify records or send emails.",
+                action_payload={
+                    "resource_id": "ezlynx:submission-center",
+                    "scope": scope,
+                    "expected_postcondition": postcondition,
+                },
+            )
+            store = JobStore(db)
+            store.checkpoint(job_id, "action", {
+                "action": "ezlynx.submission_audit",
+                "destination": {
+                    "resource_id": "ezlynx:submission-center",
+                    "scope": scope,
+                    "expected_postcondition": postcondition,
+                },
+                "detail": {},
+            })
+            readback = _SubmissionReadback({
+                "resource_id": "ezlynx:submission-center",
+                "authenticated": True,
+                "scope": scope,
+                "postcondition": postcondition,
+                "engine": "playwright",
+                "fresh_navigation": True,
+            })
+            response = guard_chat_response(
+                db,
+                job_id,
+                "generic worker prose",
+                verifiers={
+                    "ezlynx.submission_audit": EzlynxSubmissionAuditVerifier(readback)
+                },
+            )
+            self.assertIn("Live pager total: 4751", response)
+            self.assertIn("First closed row: row 57", response)
+            self.assertIn("Record changes: none", response)
+            self.assertIn("Emails sent: none", response)
+            self.assertNotIn("generic worker prose", response)
+
+    def test_complete_is_failed_when_control_center_publication_fails(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            scope = {"producer": "Jake"}
+            postcondition = {"overdue_count": 4}
+            job_id = open_chat_job(
+                db,
+                "submission-audit-publication-failure",
+                "Audit the EZLynx Submission Center overdue items",
+                action_payload={
+                    "resource_id": "submission-center:jake",
+                    "scope": scope,
+                    "expected_postcondition": postcondition,
+                },
+            )
+            store = JobStore(db)
+            store.checkpoint(job_id, "action", {
+                "action": "ezlynx.submission_audit",
+                "destination": {
+                    "resource_id": "submission-center:jake",
+                    "scope": scope,
+                    "expected_postcondition": postcondition,
+                },
+                "detail": {},
+            })
+            readback = _SubmissionReadback({
+                "resource_id": "submission-center:jake",
+                "authenticated": True,
+                "scope": scope,
+                "postcondition": postcondition,
+                "engine": "playwright",
+                "fresh_navigation": True,
+            })
+            with patch.dict(os.environ, {"ROBIE_DASHBOARD_SHEET_ID": "sheet"}), patch(
+                "robie_job_engine.chat_guard.publish_job_to_control_center",
+                side_effect=RuntimeError("sheet write rejected"),
+            ):
+                response = guard_chat_response(
+                    db,
+                    job_id,
+                    "Four overdue items were found.",
+                    verifiers={
+                        "ezlynx.submission_audit": EzlynxSubmissionAuditVerifier(readback)
+                    },
+                )
+            self.assertIn("FAILED", response)
+            self.assertIn("Control Center publication failed", response)
+            self.assertEqual(store.get_job(job_id)["status"], JobStatus.FAILED)
+
+    def test_complete_mentions_control_center_only_after_exact_publication(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            expected_content = "verified content\n"
+            target = Path(tmp) / "skills" / "policy" / "SKILL.md"
+            target.parent.mkdir(parents=True)
+            target.write_text(expected_content, encoding="utf-8")
+            digest = hashlib.sha256(expected_content.encode()).hexdigest()
+            job_id = open_chat_job(
+                db,
+                "published-skill-update",
+                f"Update skill file {target}",
+                action_payload={
+                    "target_path": str(target),
+                    "expected_content": expected_content,
+                    "expected_sha256": digest,
+                },
+            )
+            store = JobStore(db)
+            store.checkpoint(job_id, "action", {
+                "action": "filesystem.skill_update",
+                "destination": {
+                    "target_path": str(target),
+                    "expected_content": expected_content,
+                    "expected_sha256": digest,
+                },
+                "detail": {"written_at": datetime.now(timezone.utc).isoformat()},
+            })
+            publication = {
+                "job_id": job_id,
+                "sheet_row": 7,
+                "evidence_rows": 1,
+                "recording": "Segment 1: https://drive.google.com/file/d/test/view",
+                "status": "Complete — independently verified",
+            }
+            with patch.dict(os.environ, {"ROBIE_DASHBOARD_SHEET_ID": "sheet"}), patch(
+                "robie_job_engine.chat_guard.publish_job_to_control_center",
+                return_value=publication,
+            ):
+                response = guard_chat_response(
+                    db,
+                    job_id,
+                    "Updated.",
+                    verifiers={
+                        "filesystem.skill_update": FilesystemSkillUpdateVerifier([Path(tmp) / "skills"])
+                    },
+                )
+            self.assertIn("Control Center row was reread successfully", response)
+            self.assertEqual(
+                store.get_checkpoint(job_id, "control_center_publication"), publication
+            )
 
     def test_unknown_action_without_structured_verifier_remains_unverified(self):
         with durable_temporary_directory() as tmp:

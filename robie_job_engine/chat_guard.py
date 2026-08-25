@@ -14,6 +14,7 @@ from .operations import ingest_chat_attachments
 from .recording import RecordingManager
 from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
 from .secrets import redact_mapping, redact_text
+from .sheets_sync import publish_job_to_control_center
 from .submission_routing import resolve_submission_route, submission_verification_requirements
 from .store import JobStore
 
@@ -596,16 +597,109 @@ def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
     return ""
 
 
+def _submission_audit_summary(store: JobStore, job_id: str) -> str:
+    evidence = [
+        item for item in store.list_evidence(job_id)
+        if item.get("verified") and item.get("authoritative")
+        and item.get("method") == "EZLYNX_PLAYWRIGHT_FRESH_READBACK"
+    ]
+    if not evidence:
+        return ""
+    observed = dict(evidence[-1].get("observed") or {})
+    scope = dict(observed.get("scope") or {})
+    result = dict(observed.get("postcondition") or {})
+    required = (
+        "pager_total", "mat_row_count", "status_aria_sort",
+        "first_row_status", "first_closed_row_index",
+        "rows_inspected_through_boundary",
+    )
+    if any(key not in result for key in required):
+        return ""
+    first_closed_number = int(result["first_closed_row_index"]) + 1
+    statuses = ", ".join(str(item) for item in result.get("distinct_non_closed_statuses", []))
+    return (
+        "\n\nVerified Submission Center read-back:\n"
+        f"• Time frame: {scope.get('time_frame', 'All Submissions')}\n"
+        f"• Assigned producer scope: {scope.get('assigned_producer', 'Streetsmart Insurance')}\n"
+        f"• My Submissions selected: {'yes' if scope.get('my_submissions') else 'no'}\n"
+        f"• Visible rows: {result['mat_row_count']}\n"
+        f"• Live pager total: {result['pager_total']}\n"
+        f"• Status sort: {result['status_aria_sort']}\n"
+        f"• First row status: {result['first_row_status']}\n"
+        f"• First closed row: row {first_closed_number}\n"
+        f"• Rows inspected through the boundary: {result['rows_inspected_through_boundary']}\n"
+        f"• Non-closed statuses observed: {statuses or 'none'}\n"
+        "• Record changes: none\n"
+        "• Emails sent: none"
+    )
+
+
+def _publish_terminal_job(
+    db_path: str,
+    store: JobStore,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish and reread one terminal Job before Chat advertises success."""
+    job_id = str(job["id"])
+    if store.get_checkpoint(job_id, "control_center_publication"):
+        return store.get_job(job_id)
+    sheet_id = os.environ.get("ROBIE_DASHBOARD_SHEET_ID", "").strip()
+    if not sheet_id:
+        store.checkpoint(
+            job_id,
+            "control_center_publication_exemption",
+            {"reason": "ROBIE_DASHBOARD_SHEET_ID is not configured"},
+        )
+        return store.get_job(job_id)
+    try:
+        published = publish_job_to_control_center(db_path, sheet_id, job_id)
+    except Exception as exc:
+        error = f"Control Center publication failed: {type(exc).__name__}: {exc}"
+        store.checkpoint(
+            job_id,
+            "control_center_publication_failed",
+            {"status": "FAILED", "error": error},
+        )
+        if JobStatus(job["status"]) == JobStatus.COMPLETE:
+            job = store.fail_unpublished_completion(job_id, error)
+            # Best effort: publish the explicit failure row. The original
+            # exception remains the Job result if the sheet is unavailable.
+            try:
+                publish_job_to_control_center(db_path, sheet_id, job_id)
+            except Exception:
+                pass
+        return store.get_job(job_id)
+    store.checkpoint(job_id, "control_center_publication", published)
+    return store.get_job(job_id)
+
+
 def _render_chat_terminal(
-    job: dict[str, Any], content: str, recordings: RecordingManager
+    store: JobStore,
+    job: dict[str, Any],
+    content: str,
+    recordings: RecordingManager,
 ) -> str:
     job_id = job["id"]
     status = JobStatus(job["status"])
     if status == JobStatus.COMPLETE:
+        publication = store.get_checkpoint(job_id, "control_center_publication")
+        completion_line = (
+            "The expected destination state was independently verified, the evidence was stored, "
+            "and the Control Center row was reread successfully."
+            if publication
+            else "The expected destination state was independently verified and the evidence was stored."
+        )
+        verified_summary = (
+            _submission_audit_summary(store, job_id)
+            if job.get("action_type") == "ezlynx.submission_audit"
+            else ""
+        )
+        worker_detail = "" if verified_summary else f"\n\n{content}"
         return (
             f"ROBIE Job {job_id} — COMPLETE\n\n"
-            "The expected destination state was independently verified and the evidence was stored.\n\n"
-            f"{content}"
+            + completion_line
+            + verified_summary
+            + worker_detail
             + _recording_chat_note(recordings, job_id)
         )
     if status == JobStatus.FAILED:
@@ -647,17 +741,20 @@ def guard_chat_response(
     recordings = recordings or RecordingManager(db_path)
     if job["status"] == JobStatus.COMPLETE:
         recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
-        return _render_chat_terminal(job, content, recordings)
+        job = _publish_terminal_job(db_path, store, store.get_job(job_id))
+        return _render_chat_terminal(store, job, content, recordings)
     if job["status"] == JobStatus.FAILED:
         recordings.safe_stop(job_id, JobStatus.FAILED.value)
-        return _render_chat_terminal(job, content, recordings)
+        job = _publish_terminal_job(db_path, store, store.get_job(job_id))
+        return _render_chat_terminal(store, job, content, recordings)
     if job["status"] == JobStatus.UNVERIFIED:
         recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
-        return _render_chat_terminal(job, content, recordings)
+        job = _publish_terminal_job(db_path, store, store.get_job(job_id))
+        return _render_chat_terminal(store, job, content, recordings)
     if JobStatus(job["status"]) in WAITING_STATUSES:
         status = JobStatus(job["status"]).value
         recordings.safe_stop(job_id, status)
-        return _render_chat_terminal(job, content, recordings)
+        return _render_chat_terminal(store, job, content, recordings)
 
     # The Computer Worker response is diagnostic only. A separate structured
     # action checkpoint and registered destination verifier are required.
@@ -702,4 +799,7 @@ def guard_chat_response(
                 release_lease=True,
             )
             recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
-    return _render_chat_terminal(store.get_job(job_id), content, recordings)
+    final = store.get_job(job_id)
+    if JobStatus(final["status"]) in TERMINAL_STATUSES:
+        final = _publish_terminal_job(db_path, store, final)
+    return _render_chat_terminal(store, final, content, recordings)

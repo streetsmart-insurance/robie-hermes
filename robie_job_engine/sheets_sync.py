@@ -217,6 +217,124 @@ def upsert_job_rows(
     return {"jobs": len(selected), "updated": updated, "appended": appended}
 
 
+def _truthy_cell(value: Any) -> bool:
+    return value is True or str(value or "").strip().casefold() in {"true", "yes", "1"}
+
+
+def publish_job_to_control_center(
+    db_path: str,
+    spreadsheet_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Upsert one Job plus its evidence and verify the exact ledger read-back.
+
+    Publication is intentionally targeted: unrelated Jobs and Evidence rows are
+    never cleared or reordered.  A caller may advertise COMPLETE only after
+    this function confirms the exact Job ID, terminal status, authoritative
+    evidence, and every READY recording segment in the Control Center.
+    """
+    job_id = str(job_id).strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    artifact_root = os.environ.get("ROBIE_ARTIFACT_ROOT") or str(
+        Path(db_path).resolve().parent / "artifacts"
+    )
+    dashboard = OperationsStore(db_path, artifact_root=artifact_root).dashboard_rows()
+    selected = [item for item in dashboard["jobs"] if str(item.get("id")) == job_id]
+    if len(selected) != 1:
+        raise ValueError(f"exact Job {job_id} was not found in the local ledger")
+    job = selected[0]
+    expected_row = _friendly_jobs(selected, limit=1)[0]
+    expected_status = _cell(expected_row, 8)
+    expected_recording = _cell(expected_row, 11)
+    if str(job.get("status")) == "COMPLETE":
+        if int(job.get("authoritative_evidence_count") or 0) < 1:
+            raise RuntimeError("COMPLETE publication requires authoritative evidence")
+        if not job.get("recording_links"):
+            raise RuntimeError("COMPLETE publication requires a READY recording link")
+
+    result = upsert_job_rows(db_path, spreadsheet_id, [job_id])
+    api = _service().spreadsheets().values()
+
+    evidence = [
+        item for item in dashboard.get("evidence", [])
+        if str(item.get("job_id")) == job_id
+    ]
+    existing_evidence = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Evidence!A6:K",
+    ).execute().get("values", [])
+    row_by_digest = {
+        _cell(row, 8): sheet_row
+        for sheet_row, row in enumerate(existing_evidence, start=6)
+        if _cell(row, 8)
+    }
+    next_evidence_row = 6 + len(existing_evidence)
+    evidence_writes: list[dict[str, Any]] = []
+    for item in evidence:
+        digest = str(item.get("evidence_sha256") or "")
+        sheet_row = row_by_digest.get(digest)
+        if sheet_row is None:
+            sheet_row = next_evidence_row
+            next_evidence_row += 1
+        values = [[
+            item.get(key) if item.get(key) is not None else ""
+            for key in (
+                "job_id", "verified", "method", "source", "authoritative",
+                "expected_json", "observed_json", "locator", "evidence_sha256",
+                "captured_at", "created_at",
+            )
+        ]]
+        evidence_writes.append(
+            {"range": f"Evidence!A{sheet_row}:K{sheet_row}", "values": values}
+        )
+    if evidence_writes:
+        api.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": "USER_ENTERED", "data": evidence_writes},
+        ).execute()
+
+    job_rows = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Jobs!A6:Y",
+    ).execute().get("values", [])
+    matching = [
+        (sheet_row, row)
+        for sheet_row, row in enumerate(job_rows, start=6)
+        if _cell(row, 17) == job_id
+    ]
+    if len(matching) != 1:
+        raise RuntimeError(
+            f"Control Center read-back found {len(matching)} rows for Job {job_id}"
+        )
+    sheet_row, observed_row = matching[0]
+    if _cell(observed_row, 8) != expected_status:
+        raise RuntimeError("Control Center status read-back did not match")
+    if _cell(observed_row, 11) != expected_recording:
+        raise RuntimeError("Control Center recording read-back did not match")
+
+    evidence_rows = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Evidence!A6:K",
+    ).execute().get("values", [])
+    authoritative = [
+        row for row in evidence_rows
+        if _cell(row, 0) == job_id
+        and _truthy_cell(row[1] if len(row) > 1 else None)
+        and _truthy_cell(row[4] if len(row) > 4 else None)
+    ]
+    if str(job.get("status")) == "COMPLETE" and not authoritative:
+        raise RuntimeError("Control Center authoritative evidence read-back is missing")
+    return {
+        **result,
+        "job_id": job_id,
+        "sheet_row": sheet_row,
+        "evidence_rows": len(authoritative),
+        "recording": expected_recording,
+        "status": expected_status,
+    }
+
+
 def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
     spreadsheets = _service().spreadsheets()
     api = spreadsheets.values()

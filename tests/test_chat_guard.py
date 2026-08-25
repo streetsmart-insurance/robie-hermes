@@ -12,6 +12,7 @@ from robie_job_engine.chat_guard import (
 )
 from robie_job_engine.store import JobStore
 from robie_job_engine.recording import RecordingStore
+from robie_job_engine.models import JobStatus
 
 
 class ChatGuardTests(unittest.TestCase):
@@ -219,6 +220,23 @@ class ChatGuardTests(unittest.TestCase):
                 "robie_job_engine.chat_guard", fromlist=["build_chat_execution_text"]
             ).build_chat_execution_text(db, job_id, "upload it")
             self.assertIn("Do not attempt this Job", prompt)
+
+    def test_published_complete_job_cannot_be_downgraded(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(db, "immutable-complete", "move it")
+            store = JobStore(db)
+            # This test isolates the post-publication immutability rule. The
+            # normal COMPLETE path and its evidence gate are tested elsewhere.
+            with store.transaction() as conn:
+                conn.execute(
+                    "UPDATE jobs SET status=? WHERE id=?",
+                    (JobStatus.COMPLETE.value, job_id),
+                )
+            store.checkpoint(job_id, "control_center_publication", {"sheet_row": 7})
+            with self.assertRaisesRegex(RuntimeError, "immutable"):
+                store.fail_unpublished_completion(job_id, "late failure")
+            self.assertEqual(store.get_job(job_id)["status"], JobStatus.COMPLETE)
 
 
 if __name__ == "__main__":

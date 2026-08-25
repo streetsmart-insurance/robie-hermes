@@ -372,6 +372,49 @@ class JobStore:
                 (job_id, kind, canonical_json(redact_mapping(data)), utc_now()),
             )
 
+    def fail_unpublished_completion(self, job_id: str, error: str) -> dict[str, Any]:
+        """Fail a verified Job whose required Control Center publication failed.
+
+        This narrow correction is allowed only before a successful publication
+        checkpoint exists.  It prevents a terminal Chat card from advertising
+        COMPLETE when the authoritative evidence or recording link is absent
+        from the operator ledger.
+        """
+        now = utc_now()
+        safe_error = redact_text(error)
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(job_id)
+            if JobStatus(row["status"]) != JobStatus.COMPLETE:
+                raise RuntimeError("only an unpublished COMPLETE Job may be failed")
+            published = conn.execute(
+                """SELECT 1 FROM checkpoints
+                   WHERE job_id=? AND kind='control_center_publication'""",
+                (job_id,),
+            ).fetchone()
+            if published:
+                raise RuntimeError("published COMPLETE Jobs are immutable")
+            conn.execute(
+                """UPDATE jobs SET status=?,last_error=?,completed_at=NULL,
+                   lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                (JobStatus.FAILED.value, safe_error, now, job_id),
+            )
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                   VALUES (?, 'control_center_publication_failed', ?, ?)
+                   ON CONFLICT(job_id,kind) DO UPDATE SET
+                   data_json=excluded.data_json,created_at=excluded.created_at""",
+                (
+                    job_id,
+                    canonical_json({"status": "FAILED", "error": safe_error}),
+                    now,
+                ),
+            )
+            return self.get_job(job_id, conn=conn)
+
     def get_checkpoint(self, job_id: str, kind: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
