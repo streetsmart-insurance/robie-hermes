@@ -10,13 +10,12 @@ from typing import Any
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
+from .ezlynx_auth_evidence import authenticated_app_evidence
+
 
 CDP_URL = "http://127.0.0.1:9222"
 SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
 CLOSED = {"Closed - Not Sold", "Closed - Bound"}
-AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
-LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
-INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def _matching_page(browser) -> Page:
@@ -32,14 +31,7 @@ def _matching_page(browser) -> Page:
 
 
 def _authenticated(page: Page) -> bool:
-    if not page.url.lower().startswith(AUTHENTICATED_APP_PREFIX):
-        return False
-    try:
-        login_controls = page.locator(LOGIN_CONTROL_SELECTOR).count()
-        internal_links = page.locator(INTERNAL_WEB_LINK_SELECTOR).count()
-    except Exception:
-        return False
-    return login_controls == 0 and internal_links > 0
+    return authenticated_app_evidence(page)
 
 
 def _click_control(page: Page, label: str) -> None:
