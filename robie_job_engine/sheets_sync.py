@@ -17,6 +17,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
+DRIVE_SCOPES = {
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+}
 
 
 def _service():
@@ -25,7 +29,13 @@ def _service():
     token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
     if token_file:
         from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file(token_file, scopes=SCOPES)
+        # Preserve the OAuth grant exactly as issued. Supplying a different
+        # scope list during refresh can produce invalid_scope even when the
+        # stored token already has broader Drive access.
+        creds = Credentials.from_authorized_user_file(token_file)
+        granted = set(creds.scopes or ())
+        if SCOPES[0] not in granted or not (granted & DRIVE_SCOPES):
+            raise PermissionError("Google token lacks required Sheets/Drive scopes")
     else:
         creds, _ = google.auth.default(scopes=SCOPES)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)

@@ -139,7 +139,10 @@ class GoogleDriveUploader:
         token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
         if token_file:
             from google.oauth2.credentials import Credentials
-            credentials = Credentials.from_authorized_user_file(token_file, scopes=[scope])
+            credentials = Credentials.from_authorized_user_file(token_file)
+            granted = set(credentials.scopes or ())
+            if scope not in granted:
+                raise PermissionError("Google token lacks required Drive scope")
         else:
             credentials, _ = google.auth.default(scopes=[scope])
         drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
