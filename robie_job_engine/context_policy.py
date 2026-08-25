@@ -16,6 +16,11 @@ RESET_COMMANDS = {"/new", "/reset", "new job", "start fresh"}
 CONTINUATION_PREFIXES = (
     "continue ", "resume ", "pick up where we left off", "continue job ",
 )
+CORRECTION_PREFIXES = (
+    "actually ", "correction", "correct that", "do not ", "don't ",
+    "instead ", "make sure ", "retry", "try again", "use ", "set ",
+    "clear ", "keep ", "still ", "no ", "no,", "yes ", "yes,",
+)
 
 
 def _now() -> datetime:
@@ -110,7 +115,8 @@ class JobContextManager:
             self.archive(conversation_id, reason="two-hour inactivity expiration", now=at)
             return ContextDecision("NEW", None, f"expired context for {old_job or 'no job'}")
         explicit_continue = any(normalized.startswith(prefix) for prefix in CONTINUATION_PREFIXES)
-        if explicit_continue and current and current.get("active_job_id"):
+        corrective_reply = any(normalized.startswith(prefix) for prefix in CORRECTION_PREFIXES)
+        if (explicit_continue or corrective_reply) and current and current.get("active_job_id"):
             job = self.jobs.get_job(current["active_job_id"])
             if JobStatus(job["status"]) in WAITING_STATUSES:
                 self.jobs.resume(job["id"])
@@ -131,7 +137,11 @@ class JobContextManager:
                     release_lease=True,
                 )
             self.touch(conversation_id, now=at)
-            return ContextDecision("RESUME", job["id"], "explicit continuation")
+            return ContextDecision(
+                "RESUME",
+                job["id"],
+                "explicit continuation" if explicit_continue else "corrective continuation",
+            )
         return ContextDecision("NEW", None, "new DM starts fresh by default")
 
     def bind_job(
