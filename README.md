@@ -52,11 +52,13 @@ Integration boundaries:
   sync services unchanged.
 - Enqueue each inbound request with the Gmail message ID or Google Chat event ID as the
   `idempotency_key`.
-- Register the existing Hermes/cua-driver implementation as `hermes-cua`.
+- Register the deterministic Playwright-backed browser port as `hermes-cua`;
+  the Job Engine remains the sole execution and completion authority.
 - Route carrier-proposal and browser-only read jobs through the bounded workers
   in `carrier_proposal.py` and `browser_read.py`. Those workers never expose
   terminal, raw-file, or code execution in staff Google Chat.
-- Route the three hardened EZLynx actions through `HermesCuaEzlynxWorker`.
+- Route the three hardened EZLynx actions through `HermesCuaEzlynxWorker` using
+  the approved Playwright port described in `docs/PLAYWRIGHT_RUNTIME.md`.
 - Implement `EzlynxReadback.api_state` from an observed EZLynx network endpoint when available.
   Return `None` when it is not; the adapter must then create a fresh navigation/session and read
   the server-backed UI state.
