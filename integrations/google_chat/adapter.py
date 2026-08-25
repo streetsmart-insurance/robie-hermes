@@ -218,6 +218,20 @@ from robie_job_engine.runtime_env import chat_path_is_sandbox
 from robie_job_engine.secrets import redact_text
 from robie_job_engine.test_runtime import dispatch_operational_chat, maybe_run_bounded_job
 from robie_job_engine.store import JobStore
+
+_configured_job_engine_root = os.environ.get("ROBIE_CANONICAL_JOB_ENGINE_ROOT")
+if _configured_job_engine_root:
+    _EXPECTED_JOB_ENGINE_ROOT = _Path(_configured_job_engine_root).resolve()
+    _LOADED_JOB_ENGINE_MODULE = _Path(
+        sys.modules[open_chat_job.__module__].__file__ or ""
+    ).resolve()
+    if os.path.commonpath(
+        (str(_EXPECTED_JOB_ENGINE_ROOT), str(_LOADED_JOB_ENGINE_MODULE))
+    ) != str(_EXPECTED_JOB_ENGINE_ROOT):
+        raise RuntimeError(
+            "Google Chat gateway loaded ROBIE Job Engine from a non-canonical path: "
+            f"{_LOADED_JOB_ENGINE_MODULE}"
+        )
 ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 
 logger = logging.getLogger("gateway.platforms.google_chat")
