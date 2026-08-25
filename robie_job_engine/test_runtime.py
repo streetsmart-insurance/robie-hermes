@@ -18,6 +18,7 @@ from .ezlynx import (
 from .idempotency import IdempotencyError
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .request_routing import BOUNDED_ENGINE_ACTIONS
+from .submission_audit import EzlynxSubmissionAuditWorker, SubprocessSubmissionReadback
 from .runtime_env import (
     PRODUCTION_ENV_NAMES,
     TEST_ENV_NAME,
@@ -107,6 +108,7 @@ def build_runtime_engine(
             else _UnavailableWorker()
         ),
         "hermes-cua": ezlynx_worker,
+        "submission-audit": EzlynxSubmissionAuditWorker(),
     }
     verifiers: dict[str, Any] = {}
     if destination is not None:
@@ -123,12 +125,11 @@ def build_runtime_engine(
         from .chat_verifiers import FilesystemSkillUpdateVerifier
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
-    if submission_readback is not None:
-        from .chat_verifiers import EzlynxSubmissionAuditVerifier
+    from .chat_verifiers import EzlynxSubmissionAuditVerifier
 
-        verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
-            submission_readback
-        )
+    verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
+        submission_readback or SubprocessSubmissionReadback()
+    )
     return JobEngine(
         store,
         workers,
