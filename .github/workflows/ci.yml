@@ -28,7 +28,7 @@ jobs:
       - name: Test Google Chat bridge
         run: PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py' -v
       - name: Compile source
-        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q integrations robie_job_engine tests
+        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine tests
       - name: Run acceptance suite
         run: PYTHONPATH=. python -m unittest discover -s tests -v
       - name: Build immutable release candidate
