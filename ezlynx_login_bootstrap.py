@@ -21,6 +21,7 @@ OTP_PATTERNS = (
     re.compile(r"\bcode\D{0,20}(\d{6})\b", re.I),
 )
 AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
+SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
 LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
 INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
@@ -125,6 +126,11 @@ def authenticated(page) -> bool:
     return login_controls == 0 and internal_links > 0
 
 
+def navigate_to_submission_route(page) -> None:
+    page.goto(SUBMISSION_URL, wait_until="domcontentloaded")
+    page.wait_for_timeout(2_000)
+
+
 def main() -> int:
     try:
         # Verify the OAuth identity before retrieving credentials or requesting
@@ -146,6 +152,21 @@ def main() -> int:
             return 0
 
         url = page.url.lower()
+        recognized_auth_route = any(
+            route in url
+            for route in (
+                "/auth/account/login",
+                "/auth/twofactorverification/typeselection",
+                "/auth/twofactorverification/verificationcode",
+            )
+        )
+        if not recognized_auth_route:
+            navigate_to_submission_route(page)
+            if authenticated(page):
+                print("AUTHENTICATED")
+                return 0
+            url = page.url.lower()
+
         if "/auth/account/login" in url:
             page.locator("#txtUserName").fill(secret("ezlynx-username"))
             page.locator("#txtPassword").fill(secret("ezlynx-password"))
