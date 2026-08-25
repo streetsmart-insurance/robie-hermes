@@ -66,6 +66,17 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn('selector.first.press("Enter")', page_size_block)
         self.assertNotIn("selector.first.click()", page_size_block)
 
+    def test_status_wait_uses_current_playwright_keyword_argument(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        status_block = source.split("def _normalize_status_sort", 1)[1].split(
+            "def _pager_total", 1
+        )[0]
+        self.assertIn("arg=before", status_block)
+
 
 if __name__ == "__main__":
     unittest.main()
