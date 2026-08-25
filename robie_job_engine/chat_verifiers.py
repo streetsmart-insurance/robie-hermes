@@ -56,7 +56,11 @@ class FilesystemSkillUpdateVerifier:
             action_time = datetime.fromisoformat(
                 str(action.get("detail", {}).get("written_at") or job["created_at"]).replace("Z", "+00:00")
             ).timestamp()
-            fresh = stat.st_mtime >= action_time
+            # Some deployed filesystems expose whole-second mtime granularity.
+            # Keep the freshness gate while allowing only that documented
+            # rounding window; exact path, bytes, and SHA-256 must still match.
+            action_time_ns = int(action_time * 1_000_000_000)
+            fresh = stat.st_mtime_ns >= action_time_ns - 1_000_000_000
             verified = (
                 isinstance(expected_content, str)
                 and bool(expected_sha256)
