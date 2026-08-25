@@ -1843,6 +1843,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
             )
             jobs[event.message_id] = None if related_only else job_id
             if related_only:
+                # A corrective reply may safely retarget the exact active
+                # zero-attempt Job to a bounded destination action. Execute
+                # that same Job ID instead of dispatching Hermes or creating
+                # a duplicate. Ordinary status/questions remain conversational.
+                if maybe_run_bounded_job(ROBIE_JOB_DB, job_id):
+                    jobs[event.message_id] = job_id
+                    await self.send(
+                        event.source.chat_id,
+                        "ROBIE finished the bounded attempt and is checking the recorded destination evidence.",
+                        reply_to=event.message_id,
+                        metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                    )
+                    return
                 await self.handle_message(event)
                 return
             # Test AND Production: operational bounded work goes through
