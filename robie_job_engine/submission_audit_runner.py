@@ -70,14 +70,33 @@ def _option_selected(option: Locator) -> bool:
     )
 
 
+def _normalize_option_label(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
+def _exact_visible_option(options: Locator, expected: str) -> Locator | None:
+    normalized_expected = _normalize_option_label(expected)
+    for index in range(options.count()):
+        option = options.nth(index)
+        if (
+            option.is_visible()
+            and _normalize_option_label(option.inner_text()) == normalized_expected
+        ):
+            return option
+    return None
+
+
 def _live_agency_options(page: Page) -> Locator:
     last_error: PlaywrightTimeoutError | None = None
     for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox"):
         options = page.locator(selector)
-        ready = options.filter(has_text=re.compile(r"^My Submissions$", re.I))
         try:
-            ready.first.wait_for(state="visible", timeout=5_000)
-            return options
+            options.first.wait_for(state="visible", timeout=5_000)
+            if (
+                _exact_visible_option(options, "My Submissions") is not None
+                and _exact_visible_option(options, "Streetsmart Insurance") is not None
+            ):
+                return options
         except PlaywrightTimeoutError as exc:
             last_error = exc
     raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found") from last_error
@@ -97,14 +116,14 @@ def _set_agency_scope(page: Page) -> None:
     else:
         _click_control(page, "Submissions by assigned producer")
         options = page.locator("mat-option, [role=option]")
-    mine = options.filter(has_text=re.compile(r"^My Submissions$", re.I))
-    agency = options.filter(has_text=re.compile(r"^Streetsmart Insurance$", re.I))
-    if not mine.count() or not agency.count():
+    mine = _exact_visible_option(options, "My Submissions")
+    agency = _exact_visible_option(options, "Streetsmart Insurance")
+    if mine is None or agency is None:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found")
-    if _option_selected(mine.first):
-        mine.first.click()
-    if not _option_selected(agency.first):
-        agency.first.click()
+    if _option_selected(mine):
+        mine.click()
+    if not _option_selected(agency):
+        agency.click()
     apply_button = page.get_by_role(
         "button", name=re.compile(r"^(Apply|Done|Select)$", re.I)
     )
@@ -119,15 +138,13 @@ def _set_agency_scope(page: Page) -> None:
         # the actual checkbox state instead of trusting the prior clicks.
         picker_button.first.click()
         live_options = _live_agency_options(page)
-        live_mine = live_options.filter(has_text=re.compile(r"^My Submissions$", re.I))
-        live_agency = live_options.filter(
-            has_text=re.compile(r"^Streetsmart Insurance$", re.I)
-        )
+        live_mine = _exact_visible_option(live_options, "My Submissions")
+        live_agency = _exact_visible_option(live_options, "Streetsmart Insurance")
         if (
-            not live_mine.count()
-            or not live_agency.count()
-            or _option_selected(live_mine.first)
-            or not _option_selected(live_agency.first)
+            live_mine is None
+            or live_agency is None
+            or _option_selected(live_mine)
+            or not _option_selected(live_agency)
         ):
             raise RuntimeError("PLAYWRIGHT_BLOCKED: agency scope did not apply")
         cancel = page.get_by_role("button", name=re.compile(r"^Cancel$", re.I))
