@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import signal
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from robie_job_engine.confidence import assess_job_confidence
 from robie_job_engine.browser_capture import SENSITIVE_CAPTURE_SELECTOR
-from robie_job_engine.recording import RecordingManager, RecordingStore
+from robie_job_engine.recording import (
+    RecordingManager,
+    RecordingRequiredError,
+    RecordingStore,
+    SubprocessTabCapture,
+)
 from robie_job_engine.store import JobStore
 
 
@@ -67,6 +73,43 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["segment_number"], 1)
         self.assertEqual(segments[0]["drive_file_id"], "drive-file-123")
+
+    def test_subprocess_capture_waits_for_first_frame_readiness(self) -> None:
+        output = self.root / "ready.webm"
+        stop_file = self.root / "ready.stop"
+        process = Mock(pid=31337, returncode=None)
+        process.poll.side_effect = lambda: None
+
+        def launch(command, **_kwargs):
+            ready_path = Path(command[command.index("--ready-file") + 1])
+            ready_path.touch(mode=0o600)
+            return process
+
+        capture = SubprocessTabCapture(ready_timeout=0.2)
+        with patch("robie_job_engine.recording.subprocess.Popen", side_effect=launch):
+            pid = capture.start(output, stop_file)
+        self.assertEqual(31337, pid)
+        self.assertTrue(output.with_suffix(".ready").is_file())
+
+    def test_required_recording_fails_before_work_when_capture_never_ready(self) -> None:
+        process = Mock(pid=31338, returncode=None)
+        process.poll.return_value = None
+        capture = SubprocessTabCapture(ready_timeout=0.01)
+        manager = RecordingManager(
+            self.db,
+            root=self.root / "recordings",
+            capture=capture,
+            uploader=FakeUploader(),
+            enabled=True,
+        )
+        with patch("robie_job_engine.recording.subprocess.Popen", return_value=process), \
+             patch("robie_job_engine.recording.os.killpg") as killpg:
+            with self.assertRaisesRegex(RecordingRequiredError, "did not become ready"):
+                manager.start_required(self.job["id"])
+        killpg.assert_called_once_with(31338, signal.SIGTERM)
+        latest = manager.store.latest(self.job["id"])
+        self.assertEqual("FAILED", latest["status"])
+        self.assertEqual("START", latest["failure_stage"])
 
     def test_sensitive_fields_are_in_capture_mask_policy(self) -> None:
         for marker in ("password", "one-time-code", "cc-", "mfa", "otp", "card", "cvv", "ssn"):
