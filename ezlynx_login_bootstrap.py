@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import re
 import time
@@ -24,11 +26,17 @@ INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def secret(name: str) -> str:
-    response = secretmanager.SecretManagerServiceClient().access_secret_version(
-        request={
-            "name": f"projects/streetsmart-hermes-poc/secrets/{name}/versions/latest"
-        }
+    client = secretmanager.SecretManagerServiceClient()
+    parent = f"projects/streetsmart-hermes-poc/secrets/{name}"
+    enabled = list(
+        client.list_secret_versions(
+            request={"parent": parent, "filter": "state:ENABLED"}
+        )
     )
+    if not enabled:
+        raise RuntimeError(f"No enabled version exists for required secret {name}")
+    newest = max(enabled, key=lambda version: version.create_time)
+    response = client.access_secret_version(request={"name": newest.name})
     return response.payload.data.decode("utf-8").strip()
 
 
