@@ -473,6 +473,56 @@ def resolve_google_chat_interaction(
     )
 
 
+def resolve_bound_text_decision(
+    db_path: str,
+    command: str,
+    *,
+    actor: str,
+    active_job_id: str | None,
+) -> DecisionResult:
+    """Resolve `/approve JOB DECISION` or `/deny JOB DECISION` fail-closed.
+
+    Plain approvals are intentionally insufficient: the command must name the
+    exact active Job and exact pending operation (decision id). This prevents a
+    late approval from being consumed by a newer or already-denied operation.
+    """
+    parts = str(command or "").strip().split()
+    if len(parts) != 3 or parts[0].casefold() not in {"/approve", "/deny"}:
+        return DecisionResult(
+            "", "REJECTED", None, None, None, False,
+            "Use /approve JOB_ID DECISION_ID or /deny JOB_ID DECISION_ID from the pending request.",
+        )
+    job_id, decision_id = parts[1], parts[2]
+    if not active_job_id or job_id != active_job_id:
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That approval does not match the active Job. Nothing was resumed.",
+        )
+    decisions = DecisionStore(db_path)
+    try:
+        pending = decisions.get(decision_id)
+    except KeyError:
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That pending operation was not found. Nothing was resumed.",
+        )
+    if pending["job_id"] != job_id or pending["status"] != "PENDING":
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That operation is not pending for the named Job. Nothing was resumed.",
+        )
+    choice = "approve" if parts[0].casefold() == "/approve" else "deny"
+    return decisions.resolve(decision_id, actor=actor, choice=choice)
+
+
+def text_decision_response(result: DecisionResult) -> str:
+    if result.status == "RESOLVED":
+        if result.choice == "deny":
+            return "ROBIE denied the exact pending operation and stopped that Job."
+        return "ROBIE approved the exact pending operation for the named Job."
+    return result.message
+
+
 def google_chat_decision_response(result: DecisionResult) -> dict[str, Any]:
     """Return a fail-closed Chat interaction response for an answered card."""
     if result.status == "RESOLVED":
