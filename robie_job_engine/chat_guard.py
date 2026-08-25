@@ -50,6 +50,9 @@ _CONVERSATION_ONLY_PREFIXES = (
     "can you give me a rundown",
     "can you tell me what was done",
     "is this good or bad",
+    "change your profile",
+    "talk to me like",
+    "speak to me like",
 )
 
 _RELATED_JOB_COMMANDS = ("/jobs", "/skills", "/status", "status", "approve", "approved")
