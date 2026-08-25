@@ -54,6 +54,18 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             normalize("Streetsmart Insurance"),
         )
 
+    def test_page_size_uses_accessible_keyboard_activation(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        page_size_block = source.split("def _set_page_size", 1)[1].split(
+            "def _headers", 1
+        )[0]
+        self.assertIn('selector.first.press("Enter")', page_size_block)
+        self.assertNotIn("selector.first.click()", page_size_block)
+
 
 if __name__ == "__main__":
     unittest.main()
