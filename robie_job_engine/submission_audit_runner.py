@@ -169,7 +169,10 @@ def _set_page_size(page: Page) -> None:
         selector = paginator.get_by_role("combobox")
     if not selector.count():
         raise RuntimeError("PLAYWRIGHT_BLOCKED: page-size control not found")
-    if re.search(r"\b100\b", selector.first.inner_text() or ""):
+    selected_value = selector.first.locator(
+        ".mat-mdc-select-value-text, .mat-select-value-text"
+    )
+    if selected_value.count() and selected_value.first.inner_text().strip() == "100":
         return
     # The live MDC paginator renders a touch-target layer above the visible
     # select, which intercepts pointer clicks. Activate the accessible
@@ -182,6 +185,34 @@ def _set_page_size(page: Page) -> None:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: 100 page-size option not found")
     option.first.click()
     page.wait_for_timeout(1_000)
+
+
+def _verify_page_size_result(page: Page) -> None:
+    try:
+        page.wait_for_function(
+            "() => document.querySelectorAll('mat-row').length === 100",
+            timeout=15_000,
+        )
+    except PlaywrightTimeoutError as exc:
+        rows = page.locator("mat-row").count()
+        raise RuntimeError(
+            f"PLAYWRIGHT_BLOCKED: 100-row selection rendered {rows} mat-row elements"
+        ) from exc
+    paginator = page.locator("mat-paginator")
+    selected_value = paginator.locator(
+        ".mat-mdc-select-value-text, .mat-select-value-text"
+    )
+    if not selected_value.count() or selected_value.first.inner_text().strip() != "100":
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: page-size control did not retain 100")
+    range_label = paginator.locator(
+        ".mat-paginator-range-label, .mat-mdc-paginator-range-label"
+    )
+    if not range_label.count() or not re.search(
+        r"^1\s*[\-–—]\s*100\s+of\s+[\d,]+$",
+        " ".join(range_label.first.inner_text().split()),
+        re.I,
+    ):
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not confirm rows 1-100")
 
 
 def _headers(page: Page) -> list[str]:
@@ -210,13 +241,34 @@ def _row_statuses(page: Page, status_index: int) -> list[str]:
 
 def _normalize_status_sort(page: Page) -> tuple[int, list[str]]:
     header, status_index = _status_column(page)
-    for _ in range(3):
+    last_statuses: list[str] = []
+    refreshed_ascending = False
+    for _ in range(5):
         state = (header.get_attribute("aria-sort") or "none").casefold()
         if state == "ascending":
             statuses = _row_statuses(page, status_index)
             if statuses and statuses[0] not in CLOSED:
                 return status_index, statuses
-            raise RuntimeError("PLAYWRIGHT_BLOCKED: ascending sort showed a closed first row")
+            if not refreshed_ascending:
+                # Like page-size changes, the live table can update aria-sort
+                # without refetching its server-backed rows. Reapply the
+                # unchanged read-only scope once, then independently reread.
+                _set_agency_scope(page)
+                _verify_page_size_result(page)
+                refreshed_ascending = True
+                header, status_index = _status_column(page)
+                statuses = _row_statuses(page, status_index)
+                if (
+                    (header.get_attribute("aria-sort") or "none").casefold()
+                    == "ascending"
+                    and statuses
+                    and statuses[0] not in CLOSED
+                ):
+                    return status_index, statuses
+            # The table can preserve an ascending aria state while replacing
+            # its rows after a scope/page-size refresh. Cycle away and back so
+            # the server reapplies the sort to the refreshed 100-row result.
+            last_statuses = statuses
         before = page.locator("mat-row").first.inner_text() if page.locator("mat-row").count() else ""
         header.click()
         page.wait_for_timeout(1_000)
@@ -229,6 +281,8 @@ def _normalize_status_sort(page: Page) -> tuple[int, list[str]]:
         except PlaywrightTimeoutError:
             pass
         header, status_index = _status_column(page)
+    if last_statuses and last_statuses[0] in CLOSED:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: ascending sort showed a closed first row")
     raise RuntimeError("PLAYWRIGHT_BLOCKED: Status sort did not reach ascending")
 
 
@@ -250,8 +304,15 @@ def audit(*, fresh: bool) -> dict[str, Any]:
         if not _authenticated(page):
             raise PermissionError("NEEDS_AUTH")
         _select_single(page, "Time frame", "All Submissions")
+        # The live Submission Center does not render its paginator until the
+        # agency scope has been applied. Apply the scope once to reveal it,
+        # select 100, then reapply the same scope so its server-backed refresh
+        # uses the new page size instead of leaving a stale ten-row data set
+        # under a visible value of 100.
         _set_agency_scope(page)
         _set_page_size(page)
+        _set_agency_scope(page)
+        _verify_page_size_result(page)
         status_index, statuses = _normalize_status_sort(page)
         rows = page.locator("mat-row")
         if rows.count() != 100:
