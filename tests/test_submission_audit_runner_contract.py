@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import ast
 import unittest
 from pathlib import Path
-
-from robie_job_engine.submission_audit_runner import _normalize_option_label
 
 
 class SubmissionAuditRunnerContractTests(unittest.TestCase):
@@ -28,13 +27,31 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn('for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox")', source)
 
     def test_picker_labels_ignore_presentation_whitespace_only(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        tree = ast.parse(source)
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_normalize_option_label"
+        )
+        namespace = {}
+        exec(
+            compile(ast.Module(body=[function], type_ignores=[]), "<normalizer>", "exec"),
+            namespace,
+        )
+        normalize = namespace["_normalize_option_label"]
         self.assertEqual(
-            _normalize_option_label("  Streetsmart\n  Insurance  "),
-            _normalize_option_label("Streetsmart Insurance"),
+            normalize("  Streetsmart\n  Insurance  "),
+            normalize("Streetsmart Insurance"),
         )
         self.assertNotEqual(
-            _normalize_option_label("Streetsmart Insurance Team"),
-            _normalize_option_label("Streetsmart Insurance"),
+            normalize("Streetsmart Insurance Team"),
+            normalize("Streetsmart Insurance"),
         )
 
 
