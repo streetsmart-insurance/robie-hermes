@@ -66,3 +66,10 @@ class EzlynxLoginSecretVersionTests(TestCase):
         client.access_secret_version.assert_called_once_with(
             request={"name": "versions/3"}
         )
+
+        page = Mock()
+        bootstrap.navigate_to_submission_route(page)
+        page.goto.assert_called_once_with(
+            bootstrap.SUBMISSION_URL, wait_until="domcontentloaded"
+        )
+        page.wait_for_timeout.assert_called_once_with(2_000)
