@@ -152,6 +152,37 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             self.assertIn("UNVERIFIED", response)
             self.assertIn("structured destination", JobStore(db).get_job(job_id)["last_error"])
 
+    def test_progress_wrapper_does_not_force_premature_unverified(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "audit-progress-1",
+                "Audit the EZLynx Submission Center overdue list",
+            )
+            response = guard_chat_response(
+                db,
+                job_id,
+                "Working — 9 min — playwright_exec",
+            )
+            self.assertIn("RUNNING", response)
+            self.assertEqual(JobStore(db).get_job(job_id)["status"], JobStatus.PENDING)
+            self.assertIsNone(JobStore(db).get_checkpoint(job_id, "action"))
+
+    def test_submission_audit_intake_has_server_owned_read_only_scope(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "audit-scope-1",
+                "Audit the EZLynx Submission Center overdue list",
+            )
+            job = JobStore(db).get_job(job_id)
+            self.assertEqual(job["action_type"], "ezlynx.submission_audit")
+            self.assertEqual(job["payload"]["scope"]["page_size"], 100)
+            self.assertFalse(job["payload"]["scope"]["my_submissions"])
+            self.assertTrue(job["payload"]["read_only"])
+
     def test_ordinary_questions_and_followups_create_no_executable_job(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
