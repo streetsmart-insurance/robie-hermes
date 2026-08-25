@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from robie_job_engine.submission_audit_runner import _authenticated
+from robie_job_engine.ezlynx_auth_evidence import authenticated_app_evidence
 
 
 class _CountLocator:
@@ -31,11 +31,11 @@ class _Page:
 class EzlynxAuthEvidenceTests(unittest.TestCase):
     def test_arbitrary_app_url_is_not_authenticated_evidence(self):
         page = _Page("https://app.ezlynx.com/account", internal_links=3)
-        self.assertFalse(_authenticated(page))
+        self.assertFalse(authenticated_app_evidence(page))
 
     def test_web_shell_requires_internal_navigation_evidence(self):
         page = _Page("https://app.ezlynx.com/web/submission-center/overview/submissions")
-        self.assertFalse(_authenticated(page))
+        self.assertFalse(authenticated_app_evidence(page))
 
     def test_visible_login_controls_fail_closed(self):
         page = _Page(
@@ -43,14 +43,14 @@ class EzlynxAuthEvidenceTests(unittest.TestCase):
             login_controls=1,
             internal_links=3,
         )
-        self.assertFalse(_authenticated(page))
+        self.assertFalse(authenticated_app_evidence(page))
 
     def test_fresh_internal_web_navigation_is_authenticated_evidence(self):
         page = _Page(
             "https://app.ezlynx.com/web/submission-center/overview/submissions",
             internal_links=3,
         )
-        self.assertTrue(_authenticated(page))
+        self.assertTrue(authenticated_app_evidence(page))
 
     def test_login_helper_uses_the_same_fail_closed_evidence_contract(self):
         helper = (Path(__file__).resolve().parents[1] / "ezlynx_login_bootstrap.py").read_text()
