@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
 
@@ -57,30 +58,45 @@ finally:
     env = os.environ.copy()
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-u", "-c", wrapper],
-            input=code,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
             text=True,
-            timeout=timeout,
             env=env,
         )
+        stdout, stderr = proc.communicate(
+            input=code,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.communicate(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
         return tool_error(
             f"PLAYWRIGHT_BLOCKED: execution exceeded {timeout} seconds; "
+            "the runner was cancelled and the persistent browser was preserved; "
             "the browser state was not verified"
         )
     except OSError as exc:
         return tool_error(f"PLAYWRIGHT_BLOCKED: runner failed to start: {exc}")
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "runner exited without details")[-12000:]
+        detail = (stderr or stdout or "runner exited without details")[-12000:]
         return tool_error(f"PLAYWRIGHT_BLOCKED: {detail}")
     return tool_result(
         {
             "success": True,
             "exit_code": 0,
-            "output": proc.stdout,
+            "output": stdout,
             "engine": "playwright",
         }
     )
