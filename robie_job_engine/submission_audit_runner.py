@@ -70,6 +70,16 @@ def _option_selected(option: Locator) -> bool:
     )
 
 
+def _live_agency_options(page: Page) -> Locator:
+    options = page.locator(".cdk-overlay-container mat-checkbox")
+    ready = options.filter(has_text=re.compile(r"^My Submissions$", re.I))
+    try:
+        ready.first.wait_for(state="visible", timeout=5_000)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found") from exc
+    return options
+
+
 def _set_agency_scope(page: Page) -> None:
     field = page.locator("mat-form-field").filter(
         has_text=re.compile("Submissions by assigned producer", re.I)
@@ -80,7 +90,7 @@ def _set_agency_scope(page: Page) -> None:
     live_checkbox_picker = picker_button.count() > 0
     if live_checkbox_picker:
         picker_button.first.click()
-        options = page.locator(".cdk-overlay-container mat-checkbox")
+        options = _live_agency_options(page)
     else:
         _click_control(page, "Submissions by assigned producer")
         options = page.locator("mat-option, [role=option]")
@@ -105,7 +115,7 @@ def _set_agency_scope(page: Page) -> None:
         # chosen producer names in the form-field text. Reopen it and reread
         # the actual checkbox state instead of trusting the prior clicks.
         picker_button.first.click()
-        live_options = page.locator(".cdk-overlay-container mat-checkbox")
+        live_options = _live_agency_options(page)
         live_mine = live_options.filter(has_text=re.compile(r"^My Submissions$", re.I))
         live_agency = live_options.filter(
             has_text=re.compile(r"^Streetsmart Insurance$", re.I)
