@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
-from .models import VerificationEvidence, VerificationResult
+from .models import JobStatus, VerificationEvidence, VerificationResult
 
 
 def _utc_now() -> str:
@@ -138,6 +138,17 @@ class EzlynxSubmissionAuditVerifier:
             observed = {"resource_id": resource_id, "error": f"{type(exc).__name__}: {exc}"}
             verified = False
             error = "EZLynx Playwright destination could not be reread"
+            hold_status = (
+                JobStatus.NEEDS_AUTH
+                if getattr(exc, "code", None) in {
+                    "NEEDS_AUTH",
+                    "MAILBOX_IDENTITY_MISMATCH",
+                    "ROBIE_MAILBOX_AUTH_REQUIRED",
+                }
+                else None
+            )
+        else:
+            hold_status = None
         evidence = VerificationEvidence(
             method="EZLYNX_PLAYWRIGHT_FRESH_READBACK",
             source="ezlynx-authenticated-playwright",
@@ -147,4 +158,10 @@ class EzlynxSubmissionAuditVerifier:
             captured_at=_utc_now(),
             locator=resource_id or None,
         )
-        return VerificationResult(verified, evidence, retryable=False, error=error)
+        return VerificationResult(
+            verified,
+            evidence,
+            retryable=False,
+            error=error,
+            hold_status=hold_status,
+        )
