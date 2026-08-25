@@ -71,13 +71,16 @@ def _option_selected(option: Locator) -> bool:
 
 
 def _live_agency_options(page: Page) -> Locator:
-    options = page.locator(".cdk-overlay-container mat-checkbox")
-    ready = options.filter(has_text=re.compile(r"^My Submissions$", re.I))
-    try:
-        ready.first.wait_for(state="visible", timeout=5_000)
-    except PlaywrightTimeoutError as exc:
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found") from exc
-    return options
+    last_error: PlaywrightTimeoutError | None = None
+    for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox"):
+        options = page.locator(selector)
+        ready = options.filter(has_text=re.compile(r"^My Submissions$", re.I))
+        try:
+            ready.first.wait_for(state="visible", timeout=5_000)
+            return options
+        except PlaywrightTimeoutError as exc:
+            last_error = exc
+    raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found") from last_error
 
 
 def _set_agency_scope(page: Page) -> None:
