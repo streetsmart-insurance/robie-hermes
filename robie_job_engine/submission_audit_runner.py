@@ -71,8 +71,19 @@ def _option_selected(option: Locator) -> bool:
 
 
 def _set_agency_scope(page: Page) -> None:
-    _click_control(page, "Submissions by assigned producer")
-    options = page.locator("mat-option, [role=option]")
+    field = page.locator("mat-form-field").filter(
+        has_text=re.compile("Submissions by assigned producer", re.I)
+    )
+    if not field.count():
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: agency field not found")
+    picker_button = field.first.locator("button")
+    live_checkbox_picker = picker_button.count() > 0
+    if live_checkbox_picker:
+        picker_button.first.click()
+        options = page.locator(".cdk-overlay-container mat-checkbox")
+    else:
+        _click_control(page, "Submissions by assigned producer")
+        options = page.locator("mat-option, [role=option]")
     mine = options.filter(has_text=re.compile(r"^My Submissions$", re.I))
     agency = options.filter(has_text=re.compile(r"^Streetsmart Insurance$", re.I))
     if not mine.count() or not agency.count():
@@ -81,19 +92,42 @@ def _set_agency_scope(page: Page) -> None:
         mine.first.click()
     if not _option_selected(agency.first):
         agency.first.click()
-    apply_button = page.get_by_role("button", name=re.compile(r"^(Apply|Done)$", re.I))
+    apply_button = page.get_by_role(
+        "button", name=re.compile(r"^(Apply|Done|Select)$", re.I)
+    )
     if apply_button.count():
         apply_button.last.click()
     else:
         page.keyboard.press("Escape")
     page.wait_for_timeout(1_000)
-    field = page.locator("mat-form-field").filter(
-        has_text=re.compile("Submissions by assigned producer", re.I)
-    )
-    if not field.count() or "streetsmart insurance" not in field.first.inner_text().casefold():
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: agency scope did not apply")
-    if "my submissions" in field.first.inner_text().casefold():
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: My Submissions remained selected")
+    if live_checkbox_picker:
+        # The live MDC picker collapses to an icon and does not render the
+        # chosen producer names in the form-field text. Reopen it and reread
+        # the actual checkbox state instead of trusting the prior clicks.
+        picker_button.first.click()
+        live_options = page.locator(".cdk-overlay-container mat-checkbox")
+        live_mine = live_options.filter(has_text=re.compile(r"^My Submissions$", re.I))
+        live_agency = live_options.filter(
+            has_text=re.compile(r"^Streetsmart Insurance$", re.I)
+        )
+        if (
+            not live_mine.count()
+            or not live_agency.count()
+            or _option_selected(live_mine.first)
+            or not _option_selected(live_agency.first)
+        ):
+            raise RuntimeError("PLAYWRIGHT_BLOCKED: agency scope did not apply")
+        cancel = page.get_by_role("button", name=re.compile(r"^Cancel$", re.I))
+        if cancel.count():
+            cancel.last.click()
+        else:
+            page.keyboard.press("Escape")
+    else:
+        field_text = field.first.inner_text().casefold()
+        if "streetsmart insurance" not in field_text:
+            raise RuntimeError("PLAYWRIGHT_BLOCKED: agency scope did not apply")
+        if "my submissions" in field_text:
+            raise RuntimeError("PLAYWRIGHT_BLOCKED: My Submissions remained selected")
 
 
 def _set_page_size(page: Page) -> None:
