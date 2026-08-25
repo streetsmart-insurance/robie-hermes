@@ -65,6 +65,27 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         )[0]
         self.assertIn('selector.first.press("Enter")', page_size_block)
         self.assertNotIn("selector.first.click()", page_size_block)
+        self.assertIn(".mat-mdc-select-value-text", page_size_block)
+
+    def test_page_size_is_followed_by_scope_refresh_and_reread(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        audit_block = source.split("def audit", 1)[1]
+        first_scope = audit_block.index("_set_agency_scope(page)")
+        page_size = audit_block.index("_set_page_size(page)")
+        second_scope = audit_block.index("_set_agency_scope(page)", first_scope + 1)
+        reread = audit_block.index("_verify_page_size_result(page)")
+        self.assertLess(first_scope, page_size)
+        self.assertLess(page_size, second_scope)
+        self.assertLess(second_scope, reread)
+        verification_block = source.split(
+            "def _verify_page_size_result", 1
+        )[1].split("def _headers", 1)[0]
+        self.assertIn("document.querySelectorAll('mat-row').length === 100", verification_block)
+        self.assertIn("paginator did not confirm rows 1-100", verification_block)
 
     def test_status_wait_uses_current_playwright_keyword_argument(self):
         source = (
@@ -76,6 +97,15 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             "def _pager_total", 1
         )[0]
         self.assertIn("arg=before", status_block)
+        self.assertIn("for _ in range(5)", status_block)
+        self.assertIn("Cycle away and back", status_block)
+        self.assertIn("refreshed_ascending", status_block)
+        self.assertIn("_set_agency_scope(page)", status_block)
+        self.assertIn("_verify_page_size_result(page)", status_block)
+        self.assertLess(
+            status_block.index("header.click()"),
+            status_block.rindex("ascending sort showed a closed first row"),
+        )
 
 
 if __name__ == "__main__":
