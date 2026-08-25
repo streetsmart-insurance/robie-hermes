@@ -18,6 +18,9 @@ OTP_PATTERNS = (
     re.compile(r"(?:verification|security|authentication|one[- ]time)\s+code\D{0,40}(\d{6})", re.I),
     re.compile(r"\bcode\D{0,20}(\d{6})\b", re.I),
 )
+AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
+LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
+INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def secret(name: str) -> str:
@@ -104,7 +107,14 @@ def visible_page(browser):
 
 def authenticated(page) -> bool:
     url = page.url.lower()
-    return "app.ezlynx.com" in url and "/auth/" not in url
+    if not url.startswith(AUTHENTICATED_APP_PREFIX):
+        return False
+    try:
+        login_controls = page.locator(LOGIN_CONTROL_SELECTOR).count()
+        internal_links = page.locator(INTERNAL_WEB_LINK_SELECTOR).count()
+    except Exception:
+        return False
+    return login_controls == 0 and internal_links > 0
 
 
 def main() -> int:
