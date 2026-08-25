@@ -304,6 +304,52 @@ def open_chat_job(
     server_payload.update(dict(action_payload or {}))
     if context_decision.action == "RESUME" and context_decision.active_job_id:
         job = store.get_job(context_decision.active_job_id)
+        if (
+            classification.action_type in BOUNDED_ENGINE_ACTIONS
+            and job["action_type"] in {
+                "hermes.google_chat_task",
+                "hermes.plain_english",
+                "hermes.needs_clarification",
+            }
+            and job["attempt_count"] == 0
+            and not job.get("lease_owner")
+            and store.get_checkpoint(job["id"], "action") is None
+        ):
+            recordings = RecordingManager(db_path)
+            previous_segment = recordings.stop_and_upload(job["id"], "RETRY")
+            if previous_segment and (
+                previous_segment.get("status") != "READY"
+                or not previous_segment.get("drive_url")
+            ):
+                current = store.get_job(job["id"])
+                if JobStatus(current["status"]) not in TERMINAL_STATUSES:
+                    store.transition(
+                        job["id"],
+                        JobStatus.FAILED,
+                        expected={
+                            JobStatus.PENDING,
+                            JobStatus.RUNNING,
+                            JobStatus.UNVERIFIED,
+                            JobStatus.NEEDS_CLARIFICATION,
+                        },
+                        error=(
+                            "Recording upload failed during route correction"
+                            if previous_segment.get("failure_stage") == "UPLOAD"
+                            else "Recording failed during route correction"
+                        ),
+                        release_lease=True,
+                    )
+                return job["id"]
+            job = store.retarget_unattempted(
+                job["id"],
+                classification.action_type,
+                {
+                    "text": text,
+                    "worker": classification.worker,
+                    **server_payload,
+                },
+                reason="corrective DM supplied a destination-specific bounded action",
+            )
         store.checkpoint(job["id"], f"continuation:{message_id}", {
             "message_id": message_id,
             "text": text,

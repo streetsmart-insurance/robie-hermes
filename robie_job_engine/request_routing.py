@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -134,9 +135,26 @@ def _is_browser_read(text: str) -> bool:
 def _is_submission_audit(text: str) -> bool:
     if "submission center" not in text:
         return False
-    if any(word in text for word in ("upload", "move", "delete", "send", "submit")):
+    if any(
+        re.search(rf"\b{word}\b", _positive_request_text(text))
+        for word in ("upload", "move", "delete", "send", "submit")
+    ):
         return False
     return any(word in text for word in ("audit", "review", "check", "read", "overdue"))
+
+
+def _positive_request_text(text: str) -> str:
+    """Remove explicit safety prohibitions before mutation-word routing."""
+    kept: list[str] = []
+    for clause in re.split(r"(?<=[.!?;])\s+", text):
+        normalized = clause.strip()
+        if re.match(r"^(?:do not|don't|never)\b", normalized):
+            contrast = re.search(r"\b(?:but|however)\b(.+)$", normalized)
+            if contrast:
+                kept.append(contrast.group(1))
+            continue
+        kept.append(normalized)
+    return " ".join(kept)
 
 
 def _is_skill_update(text: str) -> bool:

@@ -155,6 +155,75 @@ class JobStore:
             if owned:
                 conn.close()
 
+    def retarget_unattempted(
+        self,
+        job_id: str,
+        action_type: str,
+        payload_updates: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Safely reroute a zero-attempt generic Job without changing its ID."""
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["attempt_count"] != 0:
+                raise ValueError("attempted jobs cannot be retargeted")
+            if row["lease_owner"]:
+                raise ValueError("leased jobs cannot be retargeted")
+            if row["action_type"] not in {
+                "hermes.google_chat_task",
+                "hermes.plain_english",
+                "hermes.needs_clarification",
+            }:
+                raise ValueError("only generic chat jobs can be retargeted")
+            if row["status"] not in {
+                JobStatus.PENDING.value,
+                JobStatus.RUNNING.value,
+                JobStatus.UNVERIFIED.value,
+                JobStatus.NEEDS_CLARIFICATION.value,
+            }:
+                raise ValueError(f"job status {row['status']} cannot be retargeted")
+            action = conn.execute(
+                "SELECT 1 FROM checkpoints WHERE job_id=? AND kind='action'", (job_id,)
+            ).fetchone()
+            if action is not None:
+                raise ValueError("jobs with destination action evidence cannot be retargeted")
+            payload = json.loads(row["payload_json"] or "{}")
+            payload.update(redact_mapping(payload_updates))
+            conn.execute(
+                """UPDATE jobs SET action_type=?,payload_json=?,status=?,resume_status=NULL,
+                   next_wakeup_at=NULL,lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,
+                   updated_at=? WHERE id=?""",
+                (
+                    action_type,
+                    canonical_json(payload),
+                    JobStatus.PENDING.value,
+                    now,
+                    job_id,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                   VALUES (?, 'route_correction', ?, ?)
+                   ON CONFLICT(job_id,kind) DO UPDATE SET
+                   data_json=excluded.data_json,created_at=excluded.created_at""",
+                (
+                    job_id,
+                    canonical_json(
+                        {
+                            "from_action_type": row["action_type"],
+                            "to_action_type": action_type,
+                            "reason": reason,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            return self.get_job(job_id, conn=conn)
+
     def claim(self, job_id: str, owner: str, lease_seconds: int = 120) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
