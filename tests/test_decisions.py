@@ -8,6 +8,7 @@ from robie_job_engine.decisions import (
     handle_google_chat_decision,
     parse_google_chat_interaction,
     resolve_google_chat_interaction,
+    resolve_bound_text_decision,
 )
 from robie_job_engine.models import JobStatus
 from robie_job_engine.store import JobStore
@@ -160,3 +161,30 @@ def test_client_cannot_expand_session_approval_scope(tmp_path):
     assert not decisions.session_is_approved(
         "space:attacker:production-admin", "carlo@streetsmart.insurance"
     )
+
+
+def test_text_approval_requires_exact_active_job_and_pending_operation(tmp_path):
+    jobs, decisions, job, decision = _decision(tmp_path)
+    rejected = resolve_bound_text_decision(
+        str(tmp_path / "jobs.db"),
+        "/approve",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=job["id"],
+    )
+    assert rejected.status == "REJECTED"
+    assert jobs.get_job(job["id"])["status"] == JobStatus.PAUSED
+    wrong_job = resolve_bound_text_decision(
+        str(tmp_path / "jobs.db"),
+        f"/approve wrong-job {decision['id']}",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=job["id"],
+    )
+    assert wrong_job.status == "REJECTED"
+    approved = resolve_bound_text_decision(
+        str(tmp_path / "jobs.db"),
+        f"/approve {job['id']} {decision['id']}",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=job["id"],
+    )
+    assert approved.status == "RESOLVED"
+    assert jobs.get_job(job["id"])["status"] == JobStatus.PENDING
