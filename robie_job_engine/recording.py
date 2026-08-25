@@ -43,11 +43,20 @@ class RecordingRequiredError(RuntimeError):
 class SubprocessTabCapture:
     """Capture only the persistent Chrome tab through CDP, never the desktop."""
 
-    def __init__(self, *, cdp_url: str = DEFAULT_CDP_URL, fps: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        cdp_url: str = DEFAULT_CDP_URL,
+        fps: int = 4,
+        ready_timeout: float = 20.0,
+    ) -> None:
         self.cdp_url = cdp_url
         self.fps = fps
+        self.ready_timeout = ready_timeout
 
     def start(self, output_path: Path, stop_file: Path) -> int:
+        ready_file = output_path.with_suffix(".ready")
+        ready_file.unlink(missing_ok=True)
         command = [
             sys.executable,
             "-m",
@@ -55,20 +64,38 @@ class SubprocessTabCapture:
             "--cdp-url", self.cdp_url,
             "--output", str(output_path),
             "--stop-file", str(stop_file),
+            "--ready-file", str(ready_file),
             "--fps", str(self.fps),
         ]
         log_path = output_path.with_suffix(".capture.log")
         log_handle = log_path.open("ab")
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-        log_handle.close()
-        return int(process.pid)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            log_handle.close()
+
+        deadline = time.monotonic() + self.ready_timeout
+        while time.monotonic() < deadline:
+            if ready_file.is_file():
+                return int(process.pid)
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"browser capture exited before readiness (code {process.returncode})"
+                )
+            time.sleep(0.05)
+
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        raise RuntimeError("browser capture did not become ready before timeout")
 
     def stop(self, pid: int, stop_file: Path, output_path: Path) -> None:
         stop_file.touch(mode=0o600, exist_ok=True)
@@ -94,6 +121,7 @@ class SubprocessTabCapture:
             time.sleep(1)
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise RuntimeError("browser capture produced no video")
+        output_path.with_suffix(".ready").unlink(missing_ok=True)
 
 
 class GoogleDriveUploader:
@@ -368,6 +396,7 @@ class RecordingManager:
             if not self.keep_local:
                 output.unlink(missing_ok=True)
                 Path(recording["stop_file"]).unlink(missing_ok=True)
+                output.with_suffix(".ready").unlink(missing_ok=True)
             return ready
         except Exception as exc:
             stage = "UPLOAD" if recording.get("status") == "UPLOADING" else "FINALIZE"

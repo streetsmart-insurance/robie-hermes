@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,12 @@ SCOPES = [
 def _service():
     import google.auth
     from googleapiclient.discovery import build
-    creds, _ = google.auth.default(scopes=SCOPES)
+    token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
+    if token_file:
+        from google.oauth2.credentials import Credentials
+        creds = Credentials.from_authorized_user_file(token_file, scopes=SCOPES)
+    else:
+        creds, _ = google.auth.default(scopes=SCOPES)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
@@ -146,6 +152,59 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             item.get("estimated_cost_usd", 0),
         ])
     return output or [[""]]
+
+
+def upsert_job_rows(
+    db_path: str,
+    spreadsheet_id: str,
+    job_ids: list[str] | tuple[str, ...] | set[str],
+) -> dict[str, int]:
+    """Update only the requested Jobs rows, preserving every unrelated ledger row."""
+    requested = {str(job_id).strip() for job_id in job_ids if str(job_id).strip()}
+    if not requested:
+        return {"jobs": 0, "updated": 0, "appended": 0}
+
+    artifact_root = os.environ.get("ROBIE_ARTIFACT_ROOT") or str(
+        Path(db_path).resolve().parent / "artifacts"
+    )
+    data = OperationsStore(db_path, artifact_root=artifact_root).dashboard_rows()
+    selected = [item for item in data["jobs"] if str(item.get("id")) in requested]
+    found = {str(item.get("id")) for item in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise ValueError(f"job IDs were not found in the local ledger: {', '.join(missing)}")
+
+    api = _service().spreadsheets().values()
+    existing = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Jobs!A6:Y",
+    ).execute().get("values", [])
+    row_by_job_id = {
+        _cell(row, 17): sheet_row
+        for sheet_row, row in enumerate(existing, start=6)
+        if _cell(row, 17)
+    }
+    next_row = 6 + len(existing)
+    writes: list[dict[str, Any]] = []
+    updated = 0
+    appended = 0
+    for row in _friendly_jobs(selected, limit=len(selected)):
+        job_id = _cell(row, 17)
+        sheet_row = row_by_job_id.get(job_id)
+        if sheet_row is None:
+            sheet_row = next_row
+            next_row += 1
+            appended += 1
+        else:
+            updated += 1
+        writes.append({"range": f"Jobs!A{sheet_row}:Y{sheet_row}", "values": [row]})
+
+    if writes:
+        api.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": "USER_ENTERED", "data": writes},
+        ).execute()
+    return {"jobs": len(selected), "updated": updated, "appended": appended}
 
 
 def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:

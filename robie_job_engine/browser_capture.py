@@ -64,7 +64,13 @@ def _remove_capture_masks(page) -> None:
             continue
 
 
-def capture(cdp_url: str, output: Path, stop_file: Path, fps: int) -> None:
+def capture(
+    cdp_url: str,
+    output: Path,
+    stop_file: Path,
+    ready_file: Path,
+    fps: int,
+) -> None:
     from playwright.sync_api import sync_playwright
 
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -92,12 +98,17 @@ def capture(cdp_url: str, output: Path, stop_file: Path, fps: int) -> None:
                 raise RuntimeError("no Chrome tab was available for recording")
             _mask_sensitive_fields(page)
             session = page.context.new_cdp_session(page)
+            first_frame_written = False
 
             def on_frame(params):
+                nonlocal first_frame_written
                 try:
                     if ffmpeg.stdin and not stop_file.exists():
                         ffmpeg.stdin.write(base64.b64decode(params["data"]))
                         ffmpeg.stdin.flush()
+                        if not first_frame_written:
+                            ready_file.touch(mode=0o600, exist_ok=True)
+                            first_frame_written = True
                 finally:
                     session.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
 
@@ -130,9 +141,16 @@ def main() -> None:
     parser.add_argument("--cdp-url", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--stop-file", required=True)
+    parser.add_argument("--ready-file", required=True)
     parser.add_argument("--fps", type=int, default=4)
     args = parser.parse_args()
-    capture(args.cdp_url, Path(args.output), Path(args.stop_file), args.fps)
+    capture(
+        args.cdp_url,
+        Path(args.output),
+        Path(args.stop_file),
+        Path(args.ready_file),
+        args.fps,
+    )
 
 
 if __name__ == "__main__":
