@@ -8,6 +8,8 @@ from robie_job_engine.submission_audit import (
     BoundedProcessError,
     DEFAULT_SCOPE,
     EzlynxSubmissionAuditWorker,
+    PYTHON,
+    _runner_command,
 )
 
 
@@ -48,6 +50,17 @@ def _job():
 
 
 class SubmissionAuditRuntimeTests(unittest.TestCase):
+    def test_playwright_runner_starts_as_package_module(self):
+        self.assertEqual(
+            _runner_command(fresh=False),
+            [
+                PYTHON,
+                "-m",
+                "robie_job_engine.submission_audit_runner",
+                "--reuse",
+            ],
+        )
+
     @patch("robie_job_engine.submission_audit.run_submission_read", return_value=OBSERVED)
     @patch("robie_job_engine.submission_audit.ensure_ezlynx_login")
     def test_worker_uses_allowlisted_login_and_returns_structured_read_only_action(
