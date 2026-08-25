@@ -58,6 +58,7 @@ def build_test_engine(
         browser_port=browser_port,
         ezlynx_browser=ezlynx_browser,
         ezlynx_readback=ezlynx_readback,
+        enforce_recording_policy=False,
     )
 
 
@@ -81,6 +82,7 @@ def build_runtime_engine(
     browser_port: Any | None = None,
     ezlynx_browser: Any | None = None,
     ezlynx_readback: Any | None = None,
+    enforce_recording_policy: bool = True,
 ) -> JobEngine:
     """Bounded Job Engine for Test and Production Chat intake.
 
@@ -115,7 +117,12 @@ def build_runtime_engine(
         verifiers["ezlynx.reassign"] = ezlynx_verifier
         verifiers["ezlynx.move_document"] = ezlynx_verifier
         verifiers["ezlynx.apply_label"] = ezlynx_verifier
-    return JobEngine(store, workers, verifiers)
+    return JobEngine(
+        store,
+        workers,
+        verifiers,
+        enforce_recording_policy=enforce_recording_policy,
+    )
 
 
 def _fail_closed_engine_start(store: JobStore, job_id: str, exc: BaseException) -> None:

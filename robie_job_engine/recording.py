@@ -36,6 +36,10 @@ class RecordingUploader(Protocol):
     def upload(self, path: Path, file_name: str) -> tuple[str, str]: ...
 
 
+class RecordingRequiredError(RuntimeError):
+    """Raised before executable work when required capture is unavailable."""
+
+
 class SubprocessTabCapture:
     """Capture only the persistent Chrome tab through CDP, never the desktop."""
 
@@ -153,6 +157,7 @@ class RecordingStore:
                     size_bytes INTEGER,
                     final_job_status TEXT,
                     failure TEXT,
+                    failure_stage TEXT,
                     reference_approved INTEGER NOT NULL DEFAULT 0,
                     training_approved INTEGER NOT NULL DEFAULT 0,
                     redacted INTEGER NOT NULL DEFAULT 0,
@@ -167,6 +172,9 @@ class RecordingStore:
                     ON job_recordings(job_id, segment_number DESC);
                 """
             )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(job_recordings)")}
+            if "failure_stage" not in columns:
+                conn.execute("ALTER TABLE job_recordings ADD COLUMN failure_stage TEXT")
 
     def create(self, job_id: str, local_path: Path, stop_file: Path) -> dict[str, Any]:
         with self._connect() as conn:
@@ -188,7 +196,7 @@ class RecordingStore:
             "status", "capture_pid", "drive_file_id", "drive_url", "sha256",
             "size_bytes", "final_job_status", "failure", "stopped_at", "uploaded_at",
             "reference_approved", "training_approved", "redacted", "review_notes",
-            "approved_by",
+            "approved_by", "failure_stage",
         }
         invalid = set(fields) - allowed
         if invalid:
@@ -318,8 +326,19 @@ class RecordingManager:
             return self.store.update(recording["id"], status="RECORDING", capture_pid=pid)
         except Exception as exc:
             return self.store.update(
-                recording["id"], status="FAILED", failure=f"{type(exc).__name__}: {exc}"
+                recording["id"], status="FAILED", failure_stage="START",
+                failure=f"{type(exc).__name__}: {exc}"
             )
+
+    def start_required(self, job_id: str) -> dict[str, Any]:
+        """Start capture and fail closed before any executable work."""
+        if not self.enabled:
+            raise RecordingRequiredError("recording is required but disabled")
+        recording = self.start(job_id)
+        if not recording or recording.get("status") != "RECORDING":
+            detail = (recording or {}).get("failure") or "capture did not enter RECORDING"
+            raise RecordingRequiredError(f"recording start failed: {detail}")
+        return recording
 
     def stop_and_upload(self, job_id: str, final_job_status: str) -> dict[str, Any] | None:
         recording = self.store.active(job_id)
@@ -351,8 +370,10 @@ class RecordingManager:
                 Path(recording["stop_file"]).unlink(missing_ok=True)
             return ready
         except Exception as exc:
+            stage = "UPLOAD" if recording.get("status") == "UPLOADING" else "FINALIZE"
             return self.store.update(
-                recording["id"], status="FAILED", failure=f"{type(exc).__name__}: {exc}",
+                recording["id"], status="FAILED", failure_stage=stage,
+                failure=f"{type(exc).__name__}: {exc}",
                 stopped_at=_now(),
             )
 
@@ -370,3 +391,21 @@ class RecordingManager:
 
     def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
         return self.store.list_for_job(job_id)
+
+    def completion_error(self, job_id: str) -> str | None:
+        """Explain why recording evidence cannot authorize COMPLETE."""
+        segments = self.list_for_job(job_id)
+        if not segments:
+            return "Recording failed: no recording segment exists"
+        for segment in segments:
+            if segment.get("status") != "READY" or not segment.get("drive_url"):
+                if segment.get("failure_stage") == "UPLOAD":
+                    return (
+                        "Recording upload failed for segment "
+                        f"{segment['segment_number']}: {segment.get('failure') or 'unknown error'}"
+                    )
+                return (
+                    "Recording failed for segment "
+                    f"{segment['segment_number']}: {segment.get('failure') or segment.get('status')}"
+                )
+        return None

@@ -85,6 +85,7 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
         "PENDING": "Queued",
         "NEEDS_SKILL": "Needs a Skill — waiting",
         "NEEDS_CLARIFICATION": "Needs clarification — waiting",
+        "NEEDS_AUTH": "Needs authorization — waiting",
         "WAITING": "Waiting — not complete",
         "RUNNING": "Working now",
         "VERIFYING": "Checking the result",
@@ -113,11 +114,23 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
         )
         needs_attention = "YES — review this job" if status in {
             "UNVERIFIED", "FAILED", "PAUSED", "WAITING",
-            "NEEDS_CLARIFICATION", "NEEDS_SKILL",
+            "NEEDS_CLARIFICATION", "NEEDS_AUTH", "NEEDS_SKILL",
         } else "No"
         job_name = _friendly_job_name(payload, action_type, str(task or ""))
         confidence = assess_job_confidence(item)
-        recording_url = item.get("recording_drive_url") or ""
+        recording_links = item.get("recording_links") or []
+        if recording_links:
+            recording_url = "\n".join(
+                f"Segment {entry['segment']}: {entry['url']}" for entry in recording_links
+            )
+        elif item.get("recording_status") == "FAILED":
+            recording_url = (
+                "Recording upload failed"
+                if item.get("recording_failure_stage") == "UPLOAD"
+                else "Recording failed"
+            )
+        else:
+            recording_url = ""
         reference_use = "Approved reference" if item.get("recording_reference_approved") else "Not approved for reference"
         output.append([
             _friendly_datetime(item.get("created_at")), job_name, account, requester,

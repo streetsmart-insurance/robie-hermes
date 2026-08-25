@@ -14,7 +14,7 @@ from .complete_guard import (
     postcondition_mismatch,
 )
 from .idempotency import DurableWorkLedger, IdempotencyError
-from .job_schema import bounded_schema_hold_reason
+from .job_schema import bounded_schema_hold_reason, get_executable_skill_contract
 from .models import (
     ACTION_OUTCOME_UNKNOWN,
     VERIFIER_AUTHORITY,
@@ -23,7 +23,7 @@ from .models import (
     VerificationResult,
     WorkerResult,
 )
-from .recording import RecordingManager
+from .recording import RecordingManager, RecordingRequiredError
 from .runs import IsolatedRunStore, RunIsolationError
 from .secrets import redact_exception, redact_mapping
 from .store import JobStore
@@ -49,6 +49,7 @@ class JobEngine:
         owner: str = "robie-job-engine",
         recordings: RecordingManager | None = None,
         perform_timeout_seconds: float = 120,
+        enforce_recording_policy: bool = False,
     ):
         self.store = store
         self.workers = workers
@@ -56,6 +57,7 @@ class JobEngine:
         self.owner = owner
         self.recordings = recordings or RecordingManager(store.path)
         self.perform_timeout_seconds = perform_timeout_seconds
+        self.enforce_recording_policy = enforce_recording_policy
 
     def run(self, job_id: str) -> dict[str, Any]:
         lease_owner = f"{self.owner}:{uuid.uuid4()}"
@@ -89,15 +91,93 @@ class JobEngine:
                 "lease_owner": lease_owner,
             },
         )
-        self.recordings.safe_start(job_id)
+        contract = get_executable_skill_contract(job["action_type"])
+        recording_required = bool(
+            contract
+            and contract.recording_policy == "REQUIRED"
+            and (self.enforce_recording_policy or self.recordings.enabled)
+        )
+        recording_started = False
+        recording_finalized = False
+        if recording_required:
+            try:
+                self.recordings.start_required(job_id)
+                recording_started = True
+            except RecordingRequiredError as exc:
+                failed = self.store.transition(
+                    job_id,
+                    JobStatus.FAILED,
+                    expected={JobStatus.PENDING, JobStatus.RUNNING, JobStatus.VERIFYING},
+                    error=str(exc),
+                    release_lease=True,
+                )
+                runs.terminate(run["id"], "FAILED")
+                return failed
+        else:
+            self.store.checkpoint(
+                job_id,
+                "recording_exemption",
+                {"reason": "action is not registered as an executable Skill"},
+            )
         try:
             action = self.store.get_checkpoint(job_id, "action")
             if action is None and not verify_only:
                 job = self._perform(job, ledger=ledger, run_id=run["id"])
                 if job["status"] != JobStatus.VERIFYING:
+                    if recording_started:
+                        recording = self.recordings.stop_and_upload(
+                            job_id, JobStatus(job["status"]).value
+                        )
+                        recording_finalized = True
+                        recording_error = self.recordings.completion_error(job_id)
+                        if recording is None or recording_error:
+                            return self.store.transition(
+                                job_id,
+                                JobStatus.FAILED,
+                                expected={JobStatus(job["status"])},
+                                error=recording_error or "Recording upload failed",
+                                release_lease=True,
+                            )
                     return job
                 action = self.store.get_checkpoint(job_id, "action")
-            final = self._verify(self.store.get_job(job_id), action or {})
+            final = self._verify(self.store.get_job(job_id), action or {}, defer_complete=True)
+            if (
+                JobStatus(final["status"]) == JobStatus.VERIFYING
+                and self.store.get_checkpoint(job_id, "verification_passed")
+            ):
+                if recording_required:
+                    recording = self.recordings.stop_and_upload(job_id, JobStatus.COMPLETE.value)
+                    recording_finalized = True
+                    recording_error = self.recordings.completion_error(job_id)
+                    if recording is None or recording_error:
+                        return self.store.transition(
+                            job_id,
+                            JobStatus.FAILED,
+                            expected={JobStatus.VERIFYING},
+                            error=recording_error or "Recording upload failed",
+                            release_lease=True,
+                        )
+                final = self.store.transition(
+                    job_id,
+                    JobStatus.COMPLETE,
+                    expected={JobStatus.VERIFYING},
+                    release_lease=True,
+                    authority=VERIFIER_AUTHORITY,
+                )
+            elif recording_started:
+                recording = self.recordings.stop_and_upload(
+                    job_id, JobStatus(final["status"]).value
+                )
+                recording_finalized = True
+                recording_error = self.recordings.completion_error(job_id)
+                if recording is None or recording_error:
+                    final = self.store.transition(
+                        job_id,
+                        JobStatus.FAILED,
+                        expected={JobStatus(final["status"])},
+                        error=recording_error or "Recording upload failed",
+                        release_lease=True,
+                    )
             if JobStatus(final["status"]) == JobStatus.COMPLETE:
                 try:
                     ledger.mark_verified(job["action_type"], job["idempotency_key"])
@@ -110,7 +190,25 @@ class JobEngine:
             status_name = (
                 final_status.value if isinstance(final_status, JobStatus) else str(final_status)
             )
-            self.recordings.safe_stop(job_id, status_name)
+            if recording_started and not recording_finalized:
+                recording = self.recordings.stop_and_upload(job_id, status_name)
+                recording_finalized = True
+                recording_error = self.recordings.completion_error(job_id)
+                if recording is None or recording_error:
+                    current = self.store.get_job(job_id)
+                    current_status = JobStatus(current["status"])
+                    if current_status != JobStatus.COMPLETE:
+                        try:
+                            final = self.store.transition(
+                                job_id,
+                                JobStatus.FAILED,
+                                expected={current_status},
+                                error=recording_error or "Recording upload failed",
+                                release_lease=True,
+                            )
+                            status_name = JobStatus.FAILED.value
+                        except RuntimeError:
+                            pass
             if not runs.get(run["id"]).get("terminal_event"):
                 event = status_name if status_name in {"COMPLETE", "FAILED", "UNVERIFIED", "CANCELLED"} else "BLOCKED"
                 try:
@@ -226,7 +324,13 @@ class JobEngine:
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
-    def _verify(self, job: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    def _verify(
+        self,
+        job: dict[str, Any],
+        action: dict[str, Any],
+        *,
+        defer_complete: bool = False,
+    ) -> dict[str, Any]:
         verifier = self.verifiers.get(job["action_type"])
         if not verifier:
             return self.store.transition(job["id"], JobStatus.UNVERIFIED, error="no independent verifier registered", release_lease=True)
@@ -273,6 +377,13 @@ class JobEngine:
                     error=reason,
                     release_lease=True,
                 )
+            if defer_complete:
+                self.store.checkpoint(
+                    job["id"],
+                    "verification_passed",
+                    {"evidence": "authoritative", "recording_pending": True},
+                )
+                return self.store.get_job(job["id"])
             return self.store.transition(
                 job["id"],
                 JobStatus.COMPLETE,
@@ -285,12 +396,12 @@ class JobEngine:
         return self._verification_retry_or_unverified(job, number, result.error or "destination state not verified", result.retryable)
 
     def _retry_or_fail(self, job: dict[str, Any], number: int, error: str, retryable: bool, resume: JobStatus) -> dict[str, Any]:
-        if retryable and number < int(job["max_attempts"]):
+        if retryable and number < self._maximum_attempts(job):
             return self._backoff(job["id"], number, error, resume)
         return self.store.transition(job["id"], JobStatus.FAILED, error=error, release_lease=True)
 
     def _verification_retry_or_unverified(self, job: dict[str, Any], number: int, error: str, retryable: bool) -> dict[str, Any]:
-        if retryable and number < int(job["max_attempts"]):
+        if retryable and number < self._maximum_attempts(job):
             return self._backoff(job["id"], number, error, JobStatus.VERIFYING)
         return self.store.transition(job["id"], JobStatus.UNVERIFIED, error=error, release_lease=True)
 
@@ -298,3 +409,9 @@ class JobEngine:
         delay = min(300, 2 ** max(0, number - 1)) + random.uniform(0, 0.25)
         wake = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
         return self.store.transition(job_id, JobStatus.RETRY_WAIT, error=error, next_wakeup_at=wake, resume_status=resume, release_lease=True)
+
+    @staticmethod
+    def _maximum_attempts(job: dict[str, Any]) -> int:
+        contract = get_executable_skill_contract(job["action_type"])
+        configured = int(job["max_attempts"])
+        return min(configured, contract.maximum_attempts) if contract else configured

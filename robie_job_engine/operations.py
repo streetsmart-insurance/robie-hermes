@@ -154,6 +154,7 @@ class OperationsStore:
                     size_bytes INTEGER,
                     final_job_status TEXT,
                     failure TEXT,
+                    failure_stage TEXT,
                     reference_approved INTEGER NOT NULL DEFAULT 0,
                     training_approved INTEGER NOT NULL DEFAULT 0,
                     redacted INTEGER NOT NULL DEFAULT 0,
@@ -194,6 +195,11 @@ class OperationsStore:
                 );
                 """
             )
+            recording_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(job_recordings)")
+            }
+            if "failure_stage" not in recording_columns:
+                conn.execute("ALTER TABLE job_recordings ADD COLUMN failure_stage TEXT")
             model_attempt_columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(model_attempts)")
             }
@@ -734,12 +740,21 @@ class OperationsStore:
                 item["verified_evidence_count"] = int(counts["verified_count"] or 0)
                 item["authoritative_evidence_count"] = int(counts["authoritative_count"] or 0)
                 recording = conn.execute(
-                    """SELECT status,drive_url,failure,reference_approved,training_approved,redacted
+                    """SELECT status,drive_url,failure,failure_stage,reference_approved,training_approved,redacted
                        FROM job_recordings WHERE job_id=? ORDER BY segment_number DESC LIMIT 1""",
                     (item["id"],),
                 ).fetchone()
                 if recording:
                     item.update({f"recording_{key}": value for key, value in dict(recording).items()})
+                segments = conn.execute(
+                    """SELECT segment_number,drive_url,status,failure_stage
+                       FROM job_recordings WHERE job_id=? ORDER BY segment_number""",
+                    (item["id"],),
+                ).fetchall()
+                item["recording_links"] = [
+                    {"segment": int(row["segment_number"]), "url": row["drive_url"]}
+                    for row in segments if row["status"] == "READY" and row["drive_url"]
+                ]
                 item.update(self.model_usage(item["id"]))
             artifacts = [dict(r) for r in conn.execute(
                 """SELECT id,job_id,source_platform,original_name,mime_type,size_bytes,sha256,
@@ -757,7 +772,7 @@ class OperationsStore:
             ).fetchall()]
             recordings = [dict(r) for r in conn.execute(
                 """SELECT id,job_id,segment_number,status,drive_url,sha256,size_bytes,
-                          final_job_status,failure,reference_approved,training_approved,
+                          final_job_status,failure,failure_stage,reference_approved,training_approved,
                           redacted,review_notes,approved_by,started_at,stopped_at,uploaded_at
                    FROM job_recordings ORDER BY started_at DESC LIMIT 1000"""
             ).fetchall()]

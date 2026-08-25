@@ -42,6 +42,8 @@ _CONVERSATION_ONLY_PREFIXES = (
     "is this good or bad",
 )
 
+_RELATED_JOB_COMMANDS = ("/jobs", "/skills", "/status", "status", "approve", "approved")
+
 
 def chat_message_requires_job(
     text: str,
@@ -172,14 +174,34 @@ def open_chat_job(
     artifact_root: str | None = None,
 ) -> str | None:
     """Create the Job before execution and bind durable attachment artifacts."""
-    if not chat_message_requires_job(
-        text,
-        expected_attachment_count=expected_attachment_count,
-    ):
-        return None
     store = JobStore(db_path)
     context = JobContextManager(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
+    normalized = " ".join(str(text or "").casefold().split()).strip()
+    related_only = (
+        not chat_message_requires_job(
+            text,
+            expected_attachment_count=expected_attachment_count,
+        )
+        or any(normalized.startswith(prefix) for prefix in _RELATED_JOB_COMMANDS)
+    )
+    if related_only:
+        current = context.get(context_key)
+        active_job_id = current.get("active_job_id") if current else None
+        if not active_job_id:
+            return None
+        store.checkpoint(
+            active_job_id,
+            f"continuation:{message_id}",
+            {
+                "message_id": message_id,
+                "text": text,
+                "requested_by": requested_by or "Google Chat user",
+                "related_only": True,
+            },
+        )
+        context.touch(context_key)
+        return active_job_id
     context_decision = context.decide(context_key, text)
     files = list(attachments or [])
     refs = list(attachment_refs or [])
@@ -387,8 +409,13 @@ def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
             "Reply in this thread with what ROBIE should correct or retry."
         )
     if recording.get("status") == "FAILED":
+        failure = (
+            "Recording upload failed"
+            if recording.get("failure_stage") == "UPLOAD"
+            else "Recording failed"
+        )
         return (
-            "\n\n⚠️ The diagnostic recording could not be uploaded. "
+            f"\n\n⚠️ {failure}. "
             "The Job remains governed by the status above; check the Job ledger for details."
         )
     return ""
