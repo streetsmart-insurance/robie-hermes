@@ -223,7 +223,7 @@ def _normalize_status_sort(page: Page) -> tuple[int, list[str]]:
         try:
             page.wait_for_function(
                 "before => { const row=document.querySelector('mat-row'); return row && row.innerText !== before; }",
-                before,
+                arg=before,
                 timeout=5_000,
             )
         except PlaywrightTimeoutError:
