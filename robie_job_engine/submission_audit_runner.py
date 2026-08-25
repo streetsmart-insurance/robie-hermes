@@ -171,7 +171,10 @@ def _set_page_size(page: Page) -> None:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: page-size control not found")
     if re.search(r"\b100\b", selector.first.inner_text() or ""):
         return
-    selector.first.click()
+    # The live MDC paginator renders a touch-target layer above the visible
+    # select, which intercepts pointer clicks. Activate the accessible
+    # combobox with its native keyboard behavior instead of forcing a click.
+    selector.first.press("Enter")
     option = page.get_by_role("option", name=re.compile(r"^100$"))
     if not option.count():
         option = page.locator("mat-option").filter(has_text=re.compile(r"^100$"))
