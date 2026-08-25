@@ -169,6 +169,38 @@ class ChatGuardTests(unittest.TestCase):
             with sqlite3.connect(db) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
 
+    def test_explicit_job_id_correction_cannot_remain_generic(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            first_id = open_chat_job(
+                db,
+                "spaces/s/messages/original",
+                "Run the destination workflow now",
+                conversation_id="spaces/dm",
+                requested_by="Carlo",
+            )
+            correction = (
+                f"Correction: continue the same read-only Submission Center audit job {first_id}. "
+                "Treat this as a continuation, not a new job. Verify All Submissions; "
+                "Streetsmart Insurance with My Submissions cleared; exactly 100 mat-row "
+                "elements; the live pager total; Status aria-sort=ascending; inspect "
+                "through the first closed row. Do not modify records or send emails."
+            )
+            continued_id = open_chat_job(
+                db,
+                "spaces/s/messages/explicit-correction",
+                correction,
+                conversation_id="spaces/dm",
+                requested_by="Carlo",
+            )
+            self.assertEqual(continued_id, first_id)
+            job = JobStore(db).get_job(first_id)
+            self.assertEqual(job["action_type"], "ezlynx.submission_audit")
+            self.assertEqual(job["status"], "PENDING")
+            self.assertIsNotNone(JobStore(db).get_checkpoint(first_id, "route_correction"))
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+
     def test_missing_chat_attachment_fails_closed_before_execution(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
