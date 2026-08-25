@@ -9,7 +9,7 @@ WORKER_FOR_ACTION = {
     "ezlynx.reassign": "hermes-cua",
     "ezlynx.move_document": "hermes-cua",
     "ezlynx.apply_label": "hermes-cua",
-    "ezlynx.submission_audit": "hermes-cua",
+    "ezlynx.submission_audit": "submission-audit",
     "filesystem.skill_update": "hermes-cua",
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
@@ -23,6 +23,7 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.reassign",
         "ezlynx.move_document",
         "ezlynx.apply_label",
+        "ezlynx.submission_audit",
     }
 )
 
