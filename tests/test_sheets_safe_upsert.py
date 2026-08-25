@@ -9,7 +9,8 @@ from robie_job_engine import sheets_sync
 
 class SheetsSafeUpsertTests(unittest.TestCase):
     def test_service_uses_authorized_user_token_when_configured(self):
-        credentials = object()
+        credentials = MagicMock()
+        credentials.scopes = list(sheets_sync.SCOPES)
         google = types.ModuleType("google")
         google_auth = types.ModuleType("google.auth")
         google.auth = google_auth
@@ -36,7 +37,7 @@ class SheetsSafeUpsertTests(unittest.TestCase):
             sheets_sync._service()
 
         credentials_class.from_authorized_user_file.assert_called_once_with(
-            "/secure/token.json", scopes=sheets_sync.SCOPES
+            "/secure/token.json"
         )
         discovery.build.assert_called_once_with(
             "sheets", "v4", credentials=credentials, cache_discovery=False
