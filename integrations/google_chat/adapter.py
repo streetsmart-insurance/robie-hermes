@@ -204,11 +204,20 @@ from gateway.platforms.base import (
 # loader namespaces this module, which would silently break every
 # downstream log-monitor that greps for ``gateway.platforms.google_chat``.
 sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
-from robie_job_engine.chat_guard import (build_chat_execution_text, guard_chat_response, open_chat_job)
+from robie_job_engine.chat_guard import (
+    build_chat_execution_text,
+    chat_message_is_related_only,
+    guard_chat_response,
+    open_chat_job,
+)
+from robie_job_engine.context_policy import JobContextManager
+from robie_job_engine.decisions import resolve_bound_text_decision, text_decision_response
+from robie_job_engine.models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from robie_job_engine.pubsub_ack import PubSubAckCoordinator
 from robie_job_engine.runtime_env import chat_path_is_sandbox
 from robie_job_engine.secrets import redact_text
 from robie_job_engine.test_runtime import dispatch_operational_chat, maybe_run_bounded_job
+from robie_job_engine.store import JobStore
 ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 
 logger = logging.getLogger("gateway.platforms.google_chat")
@@ -1786,6 +1795,26 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if handled:
                     return
 
+            if text.casefold().startswith(("/approve", "/deny")) and event.source is not None:
+                context = JobContextManager(ROBIE_JOB_DB).get(event.source.chat_id)
+                result = resolve_bound_text_decision(
+                    ROBIE_JOB_DB,
+                    text,
+                    actor=(
+                        getattr(event.source, "user_id", None)
+                        or getattr(event.source, "user_name", None)
+                        or ""
+                    ),
+                    active_job_id=context.get("active_job_id") if context else None,
+                )
+                await self.send(
+                    event.source.chat_id,
+                    text_decision_response(result),
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                )
+                return
+
             message_id = event.message_id or f"unidentified:{id(event)}"
             text = redact_text(text)
             job_id = open_chat_job(
@@ -1806,12 +1835,27 @@ class GoogleChatAdapter(BasePlatformAdapter):
             jobs = getattr(self, "_robie_jobs_by_reply", None)
             if jobs is None:
                 jobs = self._robie_jobs_by_reply = {}
-            jobs[event.message_id] = job_id
+            related_only = chat_message_is_related_only(
+                text,
+                expected_attachment_count=len(
+                    ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
+                ),
+            )
+            jobs[event.message_id] = None if related_only else job_id
+            if related_only:
+                await self.handle_message(event)
+                return
             # Test AND Production: operational bounded work goes through
             # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
             # DurableWorkLedger. Ledger/path failures fail closed. Hermes
             # is only for non-operational or explicit sandbox chat.
             if maybe_run_bounded_job(ROBIE_JOB_DB, job_id):
+                await self.send(
+                    event.source.chat_id,
+                    "ROBIE finished the bounded attempt and is checking the recorded destination evidence.",
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                )
                 return
             if dispatch_operational_chat(
                 ROBIE_JOB_DB,
@@ -2387,9 +2431,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
         the typing card (if any), subsequent chunks are new messages.
         """
         jobs = getattr(self, "_robie_jobs_by_reply", {})
-        job_id = jobs.pop(reply_to, None) if reply_to else None
+        job_id = jobs.get(reply_to) if reply_to else None
         content = redact_text(content)
         content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
+        if job_id and reply_to:
+            try:
+                status = JobStatus(JobStore(ROBIE_JOB_DB).get_job(job_id)["status"])
+                if status in TERMINAL_STATUSES or status in WAITING_STATUSES:
+                    jobs.pop(reply_to, None)
+            except Exception:
+                # Preserve the binding on a transient ledger read failure. A
+                # later response must not lose the exact Job association.
+                pass
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
         self.pause_typing_for_chat(chat_id)
         try:
