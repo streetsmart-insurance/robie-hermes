@@ -54,6 +54,44 @@ _CONVERSATION_ONLY_PREFIXES = (
 
 _RELATED_JOB_COMMANDS = ("/jobs", "/skills", "/status", "status", "approve", "approved")
 
+_IN_PROGRESS_MARKERS = (
+    "accepted",
+    "queued",
+    "working",
+    "still working",
+    "processing",
+    "running",
+    "playwright_exec",
+)
+
+
+def _submission_audit_payload() -> dict[str, Any]:
+    """Return the server-owned read-only scope for a Submission Center audit."""
+    return {
+        "resource_id": "ezlynx:submission-center:overview:submissions",
+        "scope": {
+            "time_frame": "All Submissions",
+            "assigned_producer": "Streetsmart Insurance",
+            "my_submissions": False,
+            "page_size": 100,
+            "status_sort": "ascending",
+            "inspection_boundary": "first_closed_row",
+        },
+        "expected_postcondition": {
+            "mat_row_count": 100,
+            "pager_total_present": True,
+            "status_aria_sort": "ascending",
+            "first_row_non_closed": True,
+            "first_closed_row_inspected": True,
+        },
+        "read_only": True,
+    }
+
+
+def _looks_in_progress(content: str) -> bool:
+    normalized = " ".join(str(content or "").casefold().split())
+    return any(marker in normalized for marker in _IN_PROGRESS_MARKERS)
+
 
 def register_chat_verifier(action_type: str, verifier: Any) -> None:
     """Register a destination verifier during gateway bootstrap."""
@@ -118,6 +156,21 @@ def chat_message_requires_job(
     ):
         return False
     return True
+
+
+def chat_message_is_related_only(
+    text: str,
+    *,
+    expected_attachment_count: int = 0,
+) -> bool:
+    normalized = " ".join(str(text or "").casefold().split()).strip()
+    return (
+        not chat_message_requires_job(
+            text,
+            expected_attachment_count=expected_attachment_count,
+        )
+        or any(normalized.startswith(prefix) for prefix in _RELATED_JOB_COMMANDS)
+    )
 
 
 def _submission_contract(text: str) -> list[str]:
@@ -218,13 +271,9 @@ def open_chat_job(
     store = JobStore(db_path)
     context = JobContextManager(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
-    normalized = " ".join(str(text or "").casefold().split()).strip()
-    related_only = (
-        not chat_message_requires_job(
-            text,
-            expected_attachment_count=expected_attachment_count,
-        )
-        or any(normalized.startswith(prefix) for prefix in _RELATED_JOB_COMMANDS)
+    related_only = chat_message_is_related_only(
+        text,
+        expected_attachment_count=expected_attachment_count,
     )
     if related_only:
         current = context.get(context_key)
@@ -249,6 +298,10 @@ def open_chat_job(
     classification = classify_request(
         text, attachment_count=max(expected_attachment_count, len(files), len(refs))
     )
+    server_payload: dict[str, Any] = {}
+    if classification.action_type == "ezlynx.submission_audit":
+        server_payload.update(_submission_audit_payload())
+    server_payload.update(dict(action_payload or {}))
     if context_decision.action == "RESUME" and context_decision.active_job_id:
         job = store.get_job(context_decision.active_job_id)
         store.checkpoint(job["id"], f"continuation:{message_id}", {
@@ -267,7 +320,7 @@ def open_chat_job(
                     "source": "Google Chat",
                     "conversation_id": context_key,
                     "worker": classification.worker,
-                    **dict(action_payload or {}),
+                    **server_payload,
                 }
             ),
             idempotency_key=f"gchat:{message_id}",
@@ -469,7 +522,12 @@ def _render_chat_terminal(
     job_id = job["id"]
     status = JobStatus(job["status"])
     if status == JobStatus.COMPLETE:
-        return content + _recording_chat_note(recordings, job_id)
+        return (
+            f"ROBIE Job {job_id} — COMPLETE\n\n"
+            "The expected destination state was independently verified and the evidence was stored.\n\n"
+            f"{content}"
+            + _recording_chat_note(recordings, job_id)
+        )
     if status == JobStatus.FAILED:
         return (
             f"ROBIE Job {job_id} — FAILED\n\n"
@@ -538,6 +596,14 @@ def guard_chat_response(
             {job["action_type"]: verifier},
             recordings=recordings,
         ).run(job_id)
+    elif _looks_in_progress(content):
+        # A progress/wrapper response is not the worker's terminal result.
+        # Keep the Job and recorder open so a later structured result can be
+        # verified, cancelled, or reported with a precise blocker.
+        return (
+            f"ROBIE Job {job_id} — RUNNING\n\n"
+            "ROBIE accepted the request and is still working. Completion has not been claimed."
+        )
     else:
         current = store.get_job(job_id)
         if JobStatus(current["status"]) == JobStatus.RUNNING:
