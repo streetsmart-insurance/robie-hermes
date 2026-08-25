@@ -15,6 +15,14 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn('Apply|Done|Select', source)
         self.assertGreaterEqual(source.count('_option_selected'), 4)
 
+    def test_live_picker_waits_for_async_checkbox_render(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        self.assertIn('ready.first.wait_for(state="visible", timeout=5_000)', source)
+
 
 if __name__ == "__main__":
     unittest.main()
