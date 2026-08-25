@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from robie_job_engine.submission_audit_runner import _normalize_option_label
+
 
 class SubmissionAuditRunnerContractTests(unittest.TestCase):
     def test_live_mdc_agency_picker_is_supported_and_reread(self):
@@ -22,8 +24,18 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             / "robie_job_engine"
             / "submission_audit_runner.py"
         ).read_text()
-        self.assertIn('ready.first.wait_for(state="visible", timeout=5_000)', source)
+        self.assertIn('options.first.wait_for(state="visible", timeout=5_000)', source)
         self.assertIn('for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox")', source)
+
+    def test_picker_labels_ignore_presentation_whitespace_only(self):
+        self.assertEqual(
+            _normalize_option_label("  Streetsmart\n  Insurance  "),
+            _normalize_option_label("Streetsmart Insurance"),
+        )
+        self.assertNotEqual(
+            _normalize_option_label("Streetsmart Insurance Team"),
+            _normalize_option_label("Streetsmart Insurance"),
+        )
 
 
 if __name__ == "__main__":
