@@ -68,7 +68,7 @@ class TestRuntimeGuardTests(unittest.TestCase):
             self.assertNotEqual(final["status"], JobStatus.COMPLETE)
             self.assertIn(final["status"], {JobStatus.FAILED, JobStatus.UNVERIFIED})
 
-    def test_test_env_runs_bounded_job_without_false_complete(self):
+    def test_test_env_without_required_recorder_fails_before_work(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             store = JobStore(db)
@@ -86,11 +86,10 @@ class TestRuntimeGuardTests(unittest.TestCase):
                 handled = maybe_run_test_bounded_job(db, job["id"])
             self.assertTrue(handled)
             final = store.get_job(job["id"])
-            self.assertEqual(final["status"], JobStatus.COMPLETE)
+            self.assertEqual(final["status"], JobStatus.FAILED)
+            self.assertIn("recording is required", final["last_error"])
             evidence = store.list_evidence(job["id"])
-            self.assertEqual(len(evidence), 1)
-            self.assertEqual(evidence[0]["observed"]["agency_fee_occurrences"], 1)
-            self.assertTrue(evidence[0]["authoritative"])
+            self.assertEqual(evidence, [])
 
     def test_production_ledger_failure_does_not_invoke_hermes(self):
         hermes = []

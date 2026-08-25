@@ -52,6 +52,26 @@ class ChatGuardTests(unittest.TestCase):
             self.assertIsNotNone(attached)
             self.assertEqual(JobStore(db).get_job(attached)["status"], "FAILED")
 
+    def test_questions_commands_and_approvals_attach_to_active_job(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            first_id = open_chat_job(
+                db,
+                "message-work",
+                "Upload the renewal document in EZLynx",
+                conversation_id="spaces/related",
+            )
+            for index, text in enumerate(("How is it going?", "/jobs", "/skills", "Approved")):
+                related = open_chat_job(
+                    db,
+                    f"message-related-{index}",
+                    text,
+                    conversation_id="spaces/related",
+                )
+                self.assertEqual(related, first_id)
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+
     def test_none_job_passes_prompt_and_response_through(self):
         self.assertFalse(chat_message_requires_job("Thank you"))
         self.assertEqual(build_chat_execution_text("unused.db", None, "Thank you"), "Thank you")

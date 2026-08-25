@@ -35,6 +35,7 @@ from robie_job_engine.ezlynx import (
     MemoryEzlynxDestination,
 )
 from robie_job_engine.idempotency import DurableWorkLedger
+from robie_job_engine.job_schema import EXECUTABLE_SKILL_CONTRACTS
 from robie_job_engine.models import (
     ACTION_OUTCOME_UNKNOWN,
     JobStatus,
@@ -87,6 +88,19 @@ class TestOnlyDriveUploader:
             }
         )
         return file_id, url
+
+
+class FailingCapture:
+    def start(self, output_path: Path, stop_file: Path) -> int:
+        raise RuntimeError("synthetic recorder unavailable")
+
+    def stop(self, pid: int, stop_file: Path, output_path: Path) -> None:
+        raise AssertionError("stop must not run when start failed")
+
+
+class FailingUploader:
+    def upload(self, path: Path, file_name: str) -> tuple[str, str]:
+        raise RuntimeError("synthetic Drive outage")
 
 
 class MemoryBrowser:
@@ -204,6 +218,17 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
 
     def _engine(self, workers: dict, verifiers: dict) -> JobEngine:
         return JobEngine(self.store, workers, verifiers, recordings=self.recordings)
+
+    def test_every_executable_skill_has_complete_contract(self):
+        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 5)
+        for contract in EXECUTABLE_SKILL_CONTRACTS.values():
+            contract.validate()
+            self.assertEqual(contract.recording_policy, "REQUIRED")
+            self.assertTrue(contract.expected_destination_result)
+            self.assertTrue(contract.independent_verifier)
+            self.assertGreaterEqual(contract.maximum_attempts, 1)
+            self.assertTrue(contract.success_conditions)
+            self.assertTrue(contract.failure_conditions)
 
     def _assert_test_recording(self, job_id: str, *, min_segments: int = 1) -> list[dict]:
         segments = self.recordings.list_for_job(job_id)
@@ -432,7 +457,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                     },
                     retryable=False,
                     error="MFA challenge on login; human authentication required",
-                    hold_status=JobStatus.NEEDS_CLARIFICATION,
+                    hold_status=JobStatus.NEEDS_AUTH,
                 )
 
         job = self.store.create_job(
@@ -450,7 +475,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
             {"browser-read": MfaLoginWorker()},
             {"browser.read": BrowserReadVerifier(self.browser)},
         ).run(job["id"])
-        self.assertEqual(final["status"], JobStatus.NEEDS_CLARIFICATION)
+        self.assertEqual(final["status"], JobStatus.NEEDS_AUTH)
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
         self.assertIn("mfa", str(final.get("last_error") or "").casefold())
         blob = {
@@ -462,6 +487,90 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         self.assertFalse(contains_secret(blob, FAKE_SECRET_SENTINEL))
         self.assertNotIn(FAKE_SECRET_SENTINEL, json.dumps(blob, default=str))
         self._assert_test_recording(job["id"])
+
+    def test_five_intentionally_failed_jobs_keep_recording_evidence(self):
+        worker = CountingWorker(
+            WorkerResult(False, "ezlynx.apply_label", {}, retryable=False, error="intentional")
+        )
+        engine = self._engine(
+            {"hermes-cua": worker},
+            {"ezlynx.apply_label": FreshMatchVerifier({"resource_id": "never"})},
+        )
+        job_ids = []
+        for index in range(5):
+            job = self.store.create_job(
+                "ezlynx.apply_label",
+                {"worker": "hermes-cua", "resource_id": f"failed-{index}"},
+                idempotency_key=f"e2e-intentional-failure-{index}",
+                max_attempts=1,
+            )
+            final = engine.run(job["id"])
+            self.assertEqual(final["status"], JobStatus.FAILED)
+            self.assertIn("intentional", final["last_error"])
+            self._assert_test_recording(job["id"])
+            job_ids.append(job["id"])
+        self.assertEqual(len(job_ids), 5)
+
+    def test_recorder_start_failure_stops_before_worker(self):
+        worker = CountingWorker(
+            WorkerResult(True, "ezlynx.apply_label", {"resource_id": "must-not-run"})
+        )
+        recordings = RecordingManager(
+            self.db,
+            root=self.recording_root,
+            capture=FailingCapture(),
+            uploader=self.uploader,
+            enabled=True,
+            keep_local=True,
+        )
+        job = self.store.create_job(
+            "ezlynx.apply_label",
+            {"worker": "hermes-cua", "resource_id": "must-not-run"},
+            idempotency_key="e2e-recorder-start-failure",
+        )
+        final = JobEngine(
+            self.store,
+            {"hermes-cua": worker},
+            {"ezlynx.apply_label": FreshMatchVerifier({"resource_id": "must-not-run"})},
+            recordings=recordings,
+        ).run(job["id"])
+        self.assertEqual(final["status"], JobStatus.FAILED)
+        self.assertEqual(worker.calls, 0)
+        self.assertIn("recording start failed", final["last_error"].casefold())
+        latest = recordings.store.latest(job["id"])
+        self.assertEqual(latest["status"], "FAILED")
+        self.assertEqual(latest["failure_stage"], "START")
+
+    def test_recording_upload_failure_prevents_complete(self):
+        worker = CountingWorker(
+            WorkerResult(True, "ezlynx.apply_label", {"resource_id": "upload-failure"})
+        )
+        recordings = RecordingManager(
+            self.db,
+            root=self.recording_root,
+            capture=self.capture,
+            uploader=FailingUploader(),
+            enabled=True,
+            keep_local=True,
+        )
+        job = self.store.create_job(
+            "ezlynx.apply_label",
+            {"worker": "hermes-cua", "resource_id": "upload-failure"},
+            idempotency_key="e2e-recording-upload-failure",
+        )
+        final = JobEngine(
+            self.store,
+            {"hermes-cua": worker},
+            {"ezlynx.apply_label": FreshMatchVerifier({"resource_id": "upload-failure"})},
+            recordings=recordings,
+        ).run(job["id"])
+        self.assertEqual(final["status"], JobStatus.FAILED)
+        self.assertIn("recording upload failed", final["last_error"].casefold())
+        self.assertTrue(self.store.list_evidence(job["id"]))
+        latest = recordings.store.latest(job["id"])
+        self.assertEqual(latest["status"], "FAILED")
+        self.assertEqual(latest["failure_stage"], "UPLOAD")
+        self.assertFalse(latest["drive_url"])
 
     def test_retry_records_multiple_video_segments(self):
         worker = CountingWorker(

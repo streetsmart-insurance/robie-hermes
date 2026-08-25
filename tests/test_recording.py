@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from robie_job_engine.confidence import assess_job_confidence
+from robie_job_engine.browser_capture import SENSITIVE_CAPTURE_SELECTOR
 from robie_job_engine.recording import RecordingManager, RecordingStore
 from robie_job_engine.store import JobStore
 
@@ -66,6 +67,10 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["segment_number"], 1)
         self.assertEqual(segments[0]["drive_file_id"], "drive-file-123")
+
+    def test_sensitive_fields_are_in_capture_mask_policy(self) -> None:
+        for marker in ("password", "one-time-code", "cc-", "mfa", "otp", "card", "cvv", "ssn"):
+            self.assertIn(marker, SENSITIVE_CAPTURE_SELECTOR)
 
     def test_video_cannot_enter_reference_or_training_set_without_review(self) -> None:
         store = RecordingStore(self.db)
