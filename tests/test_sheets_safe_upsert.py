@@ -102,6 +102,50 @@ class SheetsSafeUpsertTests(unittest.TestCase):
         request = values.batchUpdate.call_args.kwargs
         self.assertEqual("Jobs!A7:Y7", request["body"]["data"][0]["range"])
 
+    def test_sync_skips_missing_optional_tabs_without_dropping_jobs(self):
+        values = MagicMock()
+        values.get.return_value.execute.return_value = {"values": []}
+        spreadsheets = MagicMock()
+        spreadsheets.values.return_value = values
+        spreadsheets.get.return_value.execute.return_value = {
+            "sheets": [
+                {"properties": {"title": title}}
+                for title in (
+                    "Dashboard", "Assignments", "Jobs", "Evidence",
+                    "Schedules", "Artifacts",
+                )
+            ]
+        }
+        service = MagicMock()
+        service.spreadsheets.return_value = spreadsheets
+        operations = MagicMock()
+        operations.claim_due_schedules.return_value = []
+        operations.dashboard_rows.return_value = {
+            "jobs": [{
+                "id": "verified-job",
+                "action_type": "deployment.smoke",
+                "payload": {"task": "Production smoke"},
+                "status": "COMPLETE",
+            }],
+            "evidence": [],
+            "schedules": [],
+            "artifacts": [],
+            "releases": [],
+            "reports": [],
+            "recordings": [],
+        }
+        with patch.object(sheets_sync, "_service", return_value=service), \
+             patch.object(sheets_sync, "OperationsStore", return_value=operations), \
+             patch.object(sheets_sync, "JobStore", return_value=MagicMock()):
+            result = sheets_sync.sync("jobs.db", "sheet")
+
+        self.assertEqual(1, result["jobs"])
+        request = values.batchUpdate.call_args.kwargs
+        ranges = [item["range"] for item in request["body"]["data"]]
+        self.assertIn("Jobs!A6", ranges)
+        self.assertNotIn("Releases!A6", ranges)
+        self.assertNotIn("Reports!A6", ranges)
+
 
 if __name__ == "__main__":
     unittest.main()

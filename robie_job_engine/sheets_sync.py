@@ -218,7 +218,16 @@ def upsert_job_rows(
 
 
 def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
-    api = _service().spreadsheets().values()
+    spreadsheets = _service().spreadsheets()
+    api = spreadsheets.values()
+    metadata = spreadsheets.get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties.title",
+    ).execute()
+    available_sheets = {
+        str(sheet.get("properties", {}).get("title") or "").strip()
+        for sheet in metadata.get("sheets", [])
+    }
     jobs = JobStore(db_path)
     ops = OperationsStore(db_path)
     intake = api.get(spreadsheetId=spreadsheet_id, range="Assignments!A6:P205").execute().get("values", [])
@@ -277,6 +286,15 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
         {"range": "Reports!A6", "values": _matrix(data["reports"],
             ["id","report_type","destination","window_start","window_end","status","summary_json","error","created_at","updated_at"], 1000)},
     ] + assignment_updates
+    # The Control Center can intentionally omit optional operational tabs.
+    # Google rejects an entire values.batchUpdate if any one range names a
+    # missing sheet, so only send writes whose destination is present. This
+    # keeps the core Jobs/Recording ledger current without recreating or
+    # requiring display-only tabs such as Releases or Reports.
+    writes = [
+        write for write in writes
+        if str(write["range"]).split("!", 1)[0] in available_sheets
+    ]
     api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
     return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
 
