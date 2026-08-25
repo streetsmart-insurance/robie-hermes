@@ -133,6 +133,42 @@ class ChatGuardTests(unittest.TestCase):
                 JobStore(db).get_checkpoint(first_id, "continuation:spaces/s/messages/m2")
             )
 
+    def test_corrective_dm_retargets_same_zero_attempt_job_to_submission_audit(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            first_id = open_chat_job(
+                db,
+                "spaces/s/messages/misrouted",
+                "Run the destination workflow now",
+                conversation_id="spaces/dm",
+                requested_by="Carlo",
+            )
+            self.assertEqual(
+                JobStore(db).get_job(first_id)["action_type"],
+                "hermes.google_chat_task",
+            )
+            continued_id = open_chat_job(
+                db,
+                "spaces/s/messages/correction",
+                (
+                    "Correction: run the same read-only Submission Center audit. "
+                    "Do not modify records or send emails."
+                ),
+                conversation_id="spaces/dm",
+                requested_by="Carlo",
+            )
+            self.assertEqual(continued_id, first_id)
+            job = JobStore(db).get_job(first_id)
+            self.assertEqual(job["action_type"], "ezlynx.submission_audit")
+            self.assertEqual(job["status"], "PENDING")
+            self.assertEqual(
+                job["payload"]["scope"]["assigned_producer"],
+                "Streetsmart Insurance",
+            )
+            self.assertIsNotNone(JobStore(db).get_checkpoint(first_id, "route_correction"))
+            with sqlite3.connect(db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+
     def test_missing_chat_attachment_fails_closed_before_execution(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")

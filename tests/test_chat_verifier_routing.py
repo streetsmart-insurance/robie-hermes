@@ -207,6 +207,19 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             classify_request("Audit the EZLynx Submission Center overdue list").action_type,
             "ezlynx.submission_audit",
         )
+        self.assertEqual(
+            classify_request(
+                "Run a read-only Submission Center audit. "
+                "Do not modify records or send emails."
+            ).action_type,
+            "ezlynx.submission_audit",
+        )
+        self.assertNotEqual(
+            classify_request(
+                "Audit the Submission Center, but send the producer an email."
+            ).action_type,
+            "ezlynx.submission_audit",
+        )
 
 
 if __name__ == "__main__":
