@@ -82,6 +82,8 @@ def build_runtime_engine(
     browser_port: Any | None = None,
     ezlynx_browser: Any | None = None,
     ezlynx_readback: Any | None = None,
+    skill_roots: tuple[str, ...] | None = None,
+    submission_readback: Any | None = None,
     enforce_recording_policy: bool = True,
 ) -> JobEngine:
     """Bounded Job Engine for Test and Production Chat intake.
@@ -117,6 +119,16 @@ def build_runtime_engine(
         verifiers["ezlynx.reassign"] = ezlynx_verifier
         verifiers["ezlynx.move_document"] = ezlynx_verifier
         verifiers["ezlynx.apply_label"] = ezlynx_verifier
+    if skill_roots:
+        from .chat_verifiers import FilesystemSkillUpdateVerifier
+
+        verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
+    if submission_readback is not None:
+        from .chat_verifiers import EzlynxSubmissionAuditVerifier
+
+        verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
+            submission_readback
+        )
     return JobEngine(
         store,
         workers,

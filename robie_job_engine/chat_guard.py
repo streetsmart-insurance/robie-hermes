@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable
+import os
+from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
@@ -17,6 +18,9 @@ from .submission_routing import resolve_submission_route, submission_verificatio
 from .store import JobStore
 
 
+_CHAT_VERIFIERS: dict[str, Any] = {}
+
+
 _CONVERSATION_ONLY_EXACT = {
     "ok",
     "okay",
@@ -27,6 +31,12 @@ _CONVERSATION_ONLY_EXACT = {
     "sweet",
     "wow",
     "got it",
+    "yes",
+    "no",
+    "sure",
+    "done",
+    "good",
+    "good?",
 }
 
 _CONVERSATION_ONLY_PREFIXES = (
@@ -43,6 +53,30 @@ _CONVERSATION_ONLY_PREFIXES = (
 )
 
 _RELATED_JOB_COMMANDS = ("/jobs", "/skills", "/status", "status", "approve", "approved")
+
+
+def register_chat_verifier(action_type: str, verifier: Any) -> None:
+    """Register a destination verifier during gateway bootstrap."""
+    _CHAT_VERIFIERS[action_type] = verifier
+
+
+def clear_chat_verifiers() -> None:
+    """Test/bootstrap helper; never changes persisted Job evidence."""
+    _CHAT_VERIFIERS.clear()
+
+
+def _default_chat_verifiers() -> dict[str, Any]:
+    from .chat_verifiers import FilesystemSkillUpdateVerifier
+
+    roots = tuple(
+        item for item in os.environ.get(
+            "ROBIE_SKILL_ROOTS",
+            "/opt/streetsmart-hermes/.hermes/skills"
+            + os.pathsep
+            + "/opt/streetsmart-hermes-test/.hermes/skills",
+        ).split(os.pathsep) if item
+    )
+    return {"filesystem.skill_update": FilesystemSkillUpdateVerifier(roots), **_CHAT_VERIFIERS}
 
 
 def chat_message_requires_job(
@@ -75,6 +109,12 @@ def chat_message_requires_job(
             "do not perform any ezlynx action" in normalized
             or "no ezlynx action" in normalized
         )
+    ):
+        return False
+    question_prefixes = ("what ", "why ", "when ", "where ", "who ", "how ", "is ", "are ")
+    mutation_words = ("upload", "move", "delete", "apply", "send", "create", "write", "update", "edit", "submit")
+    if normalized.startswith(question_prefixes) and not any(
+        word in normalized for word in mutation_words
     ):
         return False
     return True
@@ -172,6 +212,7 @@ def open_chat_job(
     attachment_refs: Iterable[AttachmentRef] | None = None,
     drive_port: object | None = None,
     artifact_root: str | None = None,
+    action_payload: dict[str, Any] | None = None,
 ) -> str | None:
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
@@ -226,6 +267,7 @@ def open_chat_job(
                     "source": "Google Chat",
                     "conversation_id": context_key,
                     "worker": classification.worker,
+                    **dict(action_payload or {}),
                 }
             ),
             idempotency_key=f"gchat:{message_id}",
@@ -421,26 +463,21 @@ def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
     return ""
 
 
-def guard_chat_response(db_path: str, job_id: str | None, content: str) -> str:
-    content = redact_text(content)
-    if not job_id:
-        return content
-    store = JobStore(db_path)
-    job = store.get_job(job_id)
-    recordings = RecordingManager(db_path)
-    if job["status"] == JobStatus.COMPLETE:
-        recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
+def _render_chat_terminal(
+    job: dict[str, Any], content: str, recordings: RecordingManager
+) -> str:
+    job_id = job["id"]
+    status = JobStatus(job["status"])
+    if status == JobStatus.COMPLETE:
         return content + _recording_chat_note(recordings, job_id)
-    if job["status"] == JobStatus.FAILED:
-        recordings.safe_stop(job_id, JobStatus.FAILED.value)
+    if status == JobStatus.FAILED:
         return (
             f"ROBIE Job {job_id} — FAILED\n\n"
             "ROBIE could not safely finish the requested work. No success claims from the Computer Worker are being reported.\n\n"
             f"Reason: {job.get('last_error') or 'unknown error'}."
             + _recording_chat_note(recordings, job_id)
         )
-    if job["status"] == JobStatus.UNVERIFIED:
-        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+    if status == JobStatus.UNVERIFIED:
         return (
             f"ROBIE Job {job_id} — UNVERIFIED\n\n"
             "ROBIE attempted the work, but the destination state was not independently verified. "
@@ -448,31 +485,75 @@ def guard_chat_response(db_path: str, job_id: str | None, content: str) -> str:
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
             + _recording_chat_note(recordings, job_id)
         )
+    return (
+        f"ROBIE Job {job_id} — {status.value}\n\n"
+        "ROBIE is not treating this request as successful. "
+        f"Reason: {job.get('last_error') or 'waiting for a human or destination update'}."
+        + _recording_chat_note(recordings, job_id)
+    )
+
+
+def guard_chat_response(
+    db_path: str,
+    job_id: str | None,
+    content: str,
+    *,
+    verifiers: dict[str, Any] | None = None,
+    recordings: RecordingManager | None = None,
+) -> str:
+    content = redact_text(content)
+    if not job_id:
+        return content
+    store = JobStore(db_path)
+    job = store.get_job(job_id)
+    recordings = recordings or RecordingManager(db_path)
+    if job["status"] == JobStatus.COMPLETE:
+        recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
+        return _render_chat_terminal(job, content, recordings)
+    if job["status"] == JobStatus.FAILED:
+        recordings.safe_stop(job_id, JobStatus.FAILED.value)
+        return _render_chat_terminal(job, content, recordings)
+    if job["status"] == JobStatus.UNVERIFIED:
+        recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+        return _render_chat_terminal(job, content, recordings)
     if JobStatus(job["status"]) in WAITING_STATUSES:
         status = JobStatus(job["status"]).value
         recordings.safe_stop(job_id, status)
-        return (
-            f"ROBIE Job {job_id} — {status}\n\n"
-            "ROBIE is not treating this request as successful. "
-            f"Reason: {job.get('last_error') or 'waiting for a human or destination update'}."
-            + _recording_chat_note(recordings, job_id)
-        )
-    store.checkpoint(job_id, "action", {
-        "action": "hermes.google_chat_task",
-        "destination": {"message_id": job["payload"]["message_id"]},
-        "detail": {"response_text": content},
-    })
-    if job["status"] == JobStatus.RUNNING:
-        store.transition(job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING})
-    store.transition(
-        job_id, JobStatus.UNVERIFIED, expected={JobStatus.VERIFYING},
-        error="no independent destination verifier registered", release_lease=True,
-    )
-    recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
-    return (
-        f"ROBIE Job {job_id} — UNVERIFIED\n\n"
-        "ROBIE attempted the work, but the destination state was not independently verified. "
-        "Any success wording produced by the Computer Worker has been suppressed.\n\n"
-        "Do not treat this Job as COMPLETE; it remains open for review or retry."
-        + _recording_chat_note(recordings, job_id)
-    )
+        return _render_chat_terminal(job, content, recordings)
+
+    # The Computer Worker response is diagnostic only. A separate structured
+    # action checkpoint and registered destination verifier are required.
+    store.checkpoint(job_id, "worker_response", {"response_text": content})
+    action = store.get_checkpoint(job_id, "action")
+    registry = dict(verifiers or _default_chat_verifiers())
+    verifier = registry.get(job["action_type"])
+    if action and verifier:
+        from .engine import JobEngine
+
+        if JobStatus(job["status"]) == JobStatus.RUNNING:
+            store.transition(job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+        JobEngine(
+            store,
+            {},
+            {job["action_type"]: verifier},
+            recordings=recordings,
+        ).run(job_id)
+    else:
+        current = store.get_job(job_id)
+        if JobStatus(current["status"]) == JobStatus.RUNNING:
+            store.transition(job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+        current = store.get_job(job_id)
+        if JobStatus(current["status"]) == JobStatus.VERIFYING:
+            store.transition(
+                job_id,
+                JobStatus.UNVERIFIED,
+                expected={JobStatus.VERIFYING},
+                error=(
+                    "no structured destination action checkpoint"
+                    if not action
+                    else f"no independent verifier registered for {job['action_type']}"
+                ),
+                release_lease=True,
+            )
+            recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+    return _render_chat_terminal(store.get_job(job_id), content, recordings)

@@ -9,6 +9,8 @@ WORKER_FOR_ACTION = {
     "ezlynx.reassign": "hermes-cua",
     "ezlynx.move_document": "hermes-cua",
     "ezlynx.apply_label": "hermes-cua",
+    "ezlynx.submission_audit": "hermes-cua",
+    "filesystem.skill_update": "hermes-cua",
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
@@ -93,6 +95,14 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification("ezlynx.move_document", WORKER_FOR_ACTION["ezlynx.move_document"])
     if "ezlynx" in normalized and "label" in normalized:
         return RequestClassification("ezlynx.apply_label", WORKER_FOR_ACTION["ezlynx.apply_label"])
+    if _is_submission_audit(normalized):
+        return RequestClassification(
+            "ezlynx.submission_audit", WORKER_FOR_ACTION["ezlynx.submission_audit"]
+        )
+    if _is_skill_update(normalized):
+        return RequestClassification(
+            "filesystem.skill_update", WORKER_FOR_ACTION["filesystem.skill_update"]
+        )
     if _is_browser_read(normalized):
         return RequestClassification("browser.read", WORKER_FOR_ACTION["browser.read"])
     if normalized in _VAGUE and attachment_count == 0:
@@ -118,6 +128,19 @@ def _is_browser_read(text: str) -> bool:
     if any(word in text for word in _MUTATION_WORDS):
         return False
     return any(phrase in text for phrase in _BROWSER_READ_PHRASES)
+
+
+def _is_submission_audit(text: str) -> bool:
+    if "submission center" not in text:
+        return False
+    if any(word in text for word in ("upload", "move", "delete", "send", "submit")):
+        return False
+    return any(word in text for word in ("audit", "review", "check", "read", "overdue"))
+
+
+def _is_skill_update(text: str) -> bool:
+    has_target = "skill.md" in text or " skill file" in text or " skill-file" in text
+    return has_target and any(word in text for word in ("update", "edit", "write", "create"))
 
 
 def _is_plain_english(text: str, attachment_count: int) -> bool:

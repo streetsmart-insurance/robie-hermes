@@ -62,6 +62,13 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
         "destination_name",
         "label_id",
         "label",
+        "target_path",
+        "sha256",
+        "content",
+        "mtime_ns",
+        "authenticated",
+        "scope",
+        "postcondition",
     )
 )
 

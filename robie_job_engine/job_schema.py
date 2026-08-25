@@ -80,6 +80,14 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
         "the requested label exists on the exact EZLynx resource",
         "EzlynxDestinationVerifier",
     ),
+    "ezlynx.submission_audit": _contract(
+        "a fresh authenticated Submission Center read matches the requested scope and postcondition",
+        "EzlynxSubmissionAuditVerifier",
+    ),
+    "filesystem.skill_update": _contract(
+        "the allowlisted SKILL.md path contains the exact requested bytes and hash",
+        "FilesystemSkillUpdateVerifier",
+    ),
 }
 
 
@@ -108,6 +116,16 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": True,
         "required": (),
         "identity": ("resource_id",),
+    },
+    "ezlynx.submission_audit": {
+        "schema_verified": True,
+        "required": ("resource_id", "expected_postcondition"),
+        "identity": ("resource_id",),
+    },
+    "filesystem.skill_update": {
+        "schema_verified": True,
+        "required": ("target_path", "expected_content", "expected_sha256"),
+        "identity": ("target_path",),
     },
 }
 
