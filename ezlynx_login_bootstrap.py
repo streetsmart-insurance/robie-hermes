@@ -13,6 +13,7 @@ from playwright.sync_api import sync_playwright
 
 CDP_URL = "http://127.0.0.1:9222"
 TOKEN_PATH = Path("/opt/streetsmart-hermes/.hermes/robie_google_token.json")
+EXPECTED_MAILBOX = "robie@streetsmart.insurance"
 OTP_PATTERNS = (
     re.compile(r"(?:verification|security|authentication|one[- ]time)\s+code\D{0,40}(\d{6})", re.I),
     re.compile(r"\bcode\D{0,20}(\d{6})\b", re.I),
@@ -28,11 +29,20 @@ def secret(name: str) -> str:
     return response.payload.data.decode("utf-8").strip()
 
 
+class MailboxIdentityError(RuntimeError):
+    pass
+
+
 def gmail_service():
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    profile = service.users().getProfile(userId="me").execute()
+    mailbox = str(profile.get("emailAddress") or "").strip().casefold()
+    if mailbox != EXPECTED_MAILBOX:
+        raise MailboxIdentityError("Robie mailbox identity did not match")
+    return service
 
 
 def decoded_body(payload: dict) -> str:
@@ -98,6 +108,16 @@ def authenticated(page) -> bool:
 
 
 def main() -> int:
+    try:
+        # Verify the OAuth identity before retrieving credentials or requesting
+        # an MFA message. Carlo's mailbox must never be used as a fallback.
+        gmail_service()
+    except MailboxIdentityError:
+        print("MAILBOX_IDENTITY_MISMATCH")
+        return 25
+    except Exception:
+        print("ROBIE_MAILBOX_AUTH_REQUIRED")
+        return 26
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
         page = visible_page(browser)
