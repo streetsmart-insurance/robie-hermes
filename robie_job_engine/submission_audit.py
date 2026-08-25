@@ -46,6 +46,14 @@ class BoundedProcessError(RuntimeError):
 
 def _run_bounded(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     """Run a helper in its own process group and kill the whole group on timeout."""
+    env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parents[1])
+    existing_pythonpath = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = (
+        package_root
+        if not existing_pythonpath
+        else package_root + os.pathsep + existing_pythonpath
+    )
     proc = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
@@ -53,7 +61,7 @@ def _run_bounded(command: list[str], *, timeout: int) -> subprocess.CompletedPro
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        env=os.environ.copy(),
+        env=env,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
@@ -98,7 +106,8 @@ def ensure_ezlynx_login() -> None:
 def _runner_command(*, fresh: bool) -> list[str]:
     return [
         PYTHON,
-        str(Path(__file__).with_name("submission_audit_runner.py")),
+        "-m",
+        "robie_job_engine.submission_audit_runner",
         "--fresh" if fresh else "--reuse",
     ]
 
