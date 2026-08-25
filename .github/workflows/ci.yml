@@ -44,7 +44,7 @@ jobs:
           python-version: "3.12"
       - name: Canonical ephemeral-path tests (macOS /private/tmp)
         run: |
-          PYTHONPATH=. python -m unittest \
+          PYTHONPATH=.:tests python -m unittest \
             tests.test_engineering_report_p0p1.EngineeringReportP0P1Tests.test_canonical_ephemeral_paths_rejected_including_macos_private_tmp \
             tests.test_engineering_report_p0p1.EngineeringReportP0P1Tests.test_phase04_durable_idempotency_at_most_one_action \
             -v
