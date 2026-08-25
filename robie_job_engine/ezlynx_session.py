@@ -17,6 +17,7 @@ class SessionState(str, Enum):
     SIGNED_IN = "SIGNED_IN"
     LOGIN_REQUIRED = "LOGIN_REQUIRED"
     INTERACTIVE_AUTH_REQUIRED = "INTERACTIVE_AUTH_REQUIRED"
+    UNVERIFIED = "UNVERIFIED"
 
 
 class EzlynxSessionPort(Protocol):
@@ -26,6 +27,25 @@ class EzlynxSessionPort(Protocol):
 
 class InteractiveAuthenticationRequired(RuntimeError):
     pass
+
+
+class SessionVerificationFailed(RuntimeError):
+    pass
+
+
+def authenticated_app_evidence(
+    url: str,
+    *,
+    internal_web_links: int,
+    login_controls: int,
+) -> bool:
+    """Fail closed unless fresh page state proves the authenticated web shell."""
+    normalized = url.casefold().split("?", 1)[0]
+    return (
+        normalized.startswith("https://app.ezlynx.com/web/")
+        and internal_web_links > 0
+        and login_controls == 0
+    )
 
 
 class PlaywrightEzlynxSession:
@@ -60,14 +80,20 @@ class PlaywrightEzlynxSession:
             return SessionState.INTERACTIVE_AUTH_REQUIRED
         if "/auth/account/login" in url or "/auth/account/logout" in url:
             return SessionState.LOGIN_REQUIRED
-        return SessionState.SIGNED_IN
+        if authenticated_app_evidence(
+            url,
+            internal_web_links=self._page.locator('a[href*="/web/"]').count(),
+            login_controls=self._page.locator("#txtUserName,#txtPassword,#btnLogin").count(),
+        ):
+            return SessionState.SIGNED_IN
+        return SessionState.UNVERIFIED
 
     def login(self, username: str, password: str) -> SessionState:
         self._page.goto(LOGIN_URL, wait_until="domcontentloaded")
         try:
-            self._page.get_by_label("Username", exact=True).fill(username)
-            self._page.get_by_label("Password", exact=True).fill(password)
-            self._page.get_by_role("button", name="Log in", exact=True).click()
+            self._page.locator("#txtUserName").fill(username)
+            self._page.locator("#txtPassword").fill(password)
+            self._page.locator("#btnLogin").click()
             self._page.wait_for_load_state("domcontentloaded", timeout=20_000)
         except Exception as exc:
             raise RuntimeError("EZLynx login interaction failed") from exc
@@ -86,8 +112,16 @@ def ensure_ezlynx_session(
         raise InteractiveAuthenticationRequired(
             "EZLynx requires an interactive verification step"
         )
+    if state is SessionState.UNVERIFIED:
+        raise SessionVerificationFailed(
+            "fresh EZLynx page state did not prove an authenticated application shell"
+        )
     credentials = load_ezlynx_credentials(accessor)
     state = browser.login(credentials.username, credentials.password)
+    if state is SessionState.UNVERIFIED:
+        raise SessionVerificationFailed(
+            "credential submission completed but fresh destination state was not verified"
+        )
     if state is not SessionState.SIGNED_IN:
         raise InteractiveAuthenticationRequired(
             "EZLynx requires interactive authentication after credential submission"
@@ -109,6 +143,9 @@ def main() -> None:
     except InteractiveAuthenticationRequired:
         print(json.dumps({"ezlynx_session": SessionState.INTERACTIVE_AUTH_REQUIRED.value}, sort_keys=True))
         raise SystemExit(2)
+    except SessionVerificationFailed as exc:
+        print(json.dumps({"ezlynx_session": SessionState.UNVERIFIED.value, "error": str(exc)}, sort_keys=True))
+        raise SystemExit(3)
     finally:
         browser.close()
 

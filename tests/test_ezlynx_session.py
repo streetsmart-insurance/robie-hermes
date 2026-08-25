@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 from robie_job_engine.ezlynx_session import (
     InteractiveAuthenticationRequired,
+    SessionVerificationFailed,
     SessionState,
+    authenticated_app_evidence,
     ensure_ezlynx_session,
 )
 from robie_job_engine.secret_manager import EzlynxCredentials, load_ezlynx_credentials
@@ -70,6 +72,32 @@ class EzlynxSessionTests(unittest.TestCase):
         with self.refs(), self.assertRaises(InteractiveAuthenticationRequired):
             ensure_ezlynx_session(browser, accessor=accessor)
         self.assertEqual(accessor.calls, [])
+
+    def test_unrecognized_ezlynx_page_fails_closed_without_reading_secrets(self):
+        browser = FakeBrowser(SessionState.UNVERIFIED)
+        accessor = FakeAccessor()
+        with self.refs(), self.assertRaises(SessionVerificationFailed):
+            ensure_ezlynx_session(browser, accessor=accessor)
+        self.assertEqual(accessor.calls, [])
+
+    def test_arbitrary_ezlynx_url_is_not_authenticated_evidence(self):
+        self.assertFalse(authenticated_app_evidence(
+            "https://app.ezlynx.com/error",
+            internal_web_links=0,
+            login_controls=0,
+        ))
+
+    def test_authenticated_web_shell_requires_fresh_internal_navigation(self):
+        self.assertTrue(authenticated_app_evidence(
+            "https://app.ezlynx.com/web/submission-center/overview/submissions",
+            internal_web_links=16,
+            login_controls=0,
+        ))
+        self.assertFalse(authenticated_app_evidence(
+            "https://app.ezlynx.com/web/submission-center/overview/submissions",
+            internal_web_links=0,
+            login_controls=0,
+        ))
 
     def test_secret_repr_is_redacted(self):
         credentials = EzlynxCredentials("visible-user", "visible-password")
