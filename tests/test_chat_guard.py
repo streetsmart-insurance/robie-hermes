@@ -126,7 +126,9 @@ class ChatGuardTests(unittest.TestCase):
                 requested_by="Carlo",
             )
             self.assertEqual(continued_id, first_id)
-            self.assertEqual(JobStore(db).get_job(first_id)["status"], "VERIFYING")
+            # A prose worker response is not a destination action checkpoint,
+            # so explicit continuation correctly resumes execution, not verify-only.
+            self.assertEqual(JobStore(db).get_job(first_id)["status"], "RUNNING")
             self.assertIsNotNone(
                 JobStore(db).get_checkpoint(first_id, "continuation:spaces/s/messages/m2")
             )
