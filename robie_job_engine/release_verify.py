@@ -14,6 +14,7 @@ DEFAULT_VERIFY_ROOT = REPO_ROOT / ".robie-durable-test"
 def durable_verify_root(explicit: str | Path | None = None) -> Path:
     """Return a durable directory that is not /tmp, /private/tmp, or /var/tmp."""
     root = Path(explicit) if explicit else DEFAULT_VERIFY_ROOT
+    assert_durable_path(root)
     root.mkdir(parents=True, exist_ok=True)
     return assert_durable_path(root)
 
