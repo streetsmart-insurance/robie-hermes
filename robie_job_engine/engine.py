@@ -140,6 +140,15 @@ class JobEngine:
                             )
                     return job
                 action = self.store.get_checkpoint(job_id, "action")
+            elif action is not None and JobStatus(self.store.get_job(job_id)["status"]) in {
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            }:
+                self.store.transition(
+                    job_id,
+                    JobStatus.VERIFYING,
+                    expected={JobStatus.PENDING, JobStatus.RUNNING},
+                )
             final = self._verify(self.store.get_job(job_id), action or {}, defer_complete=True)
             if (
                 JobStatus(final["status"]) == JobStatus.VERIFYING
