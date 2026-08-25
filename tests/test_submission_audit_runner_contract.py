@@ -12,6 +12,7 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             / "submission_audit_runner.py"
         ).read_text()
         self.assertIn('.cdk-overlay-container mat-checkbox', source)
+        self.assertIn('"mat-checkbox"', source)
         self.assertIn('Apply|Done|Select', source)
         self.assertGreaterEqual(source.count('_option_selected'), 4)
 
@@ -22,6 +23,7 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             / "submission_audit_runner.py"
         ).read_text()
         self.assertIn('ready.first.wait_for(state="visible", timeout=5_000)', source)
+        self.assertIn('for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox")', source)
 
 
 if __name__ == "__main__":
