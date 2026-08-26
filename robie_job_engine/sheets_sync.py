@@ -4,7 +4,9 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .confidence import assess_job_confidence
 from .operations import OperationsStore
@@ -15,12 +17,27 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
+DRIVE_SCOPES = {
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+}
 
 
 def _service():
     import google.auth
     from googleapiclient.discovery import build
-    creds, _ = google.auth.default(scopes=SCOPES)
+    token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
+    if token_file:
+        from google.oauth2.credentials import Credentials
+        # Preserve the OAuth grant exactly as issued. Supplying a different
+        # scope list during refresh can produce invalid_scope even when the
+        # stored token already has broader Drive access.
+        creds = Credentials.from_authorized_user_file(token_file)
+        granted = set(creds.scopes or ())
+        if SCOPES[0] not in granted or not (granted & DRIVE_SCOPES):
+            raise PermissionError("Google token lacks required Sheets/Drive scopes")
+    else:
+        creds, _ = google.auth.default(scopes=SCOPES)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
@@ -49,7 +66,8 @@ def _friendly_datetime(value: Any) -> str:
         return ""
     try:
         stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return stamp.astimezone().strftime("%b %-d, %Y, %-I:%M %p")
+        display_timezone = ZoneInfo(os.environ.get("ROBIE_DISPLAY_TIMEZONE", "America/New_York"))
+        return stamp.astimezone(display_timezone).strftime("%b %-d, %Y, %-I:%M %p")
     except (ValueError, TypeError):
         return raw
 
@@ -74,10 +92,17 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
         "ezlynx.reassign": "Reassign an EZLynx account",
         "ezlynx.move_document": "Move an EZLynx document",
         "ezlynx.apply_label": "Apply an EZLynx document label",
+        "carrier.proposal": "Create a carrier proposal",
+        "browser.read": "Read a page without changing it",
+        "hermes.plain_english": "Plain-English request",
         "deployment.smoke": "Deployment safety check",
     }
     status_names = {
         "PENDING": "Queued",
+        "NEEDS_SKILL": "Needs a Skill — waiting",
+        "NEEDS_CLARIFICATION": "Needs clarification — waiting",
+        "NEEDS_AUTH": "Needs authorization — waiting",
+        "WAITING": "Waiting — not complete",
         "RUNNING": "Working now",
         "VERIFYING": "Checking the result",
         "RETRY_WAIT": "Waiting to retry",
@@ -103,10 +128,30 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             else "Gmail" if "email" in action_type
             else "Job Engine"
         )
-        needs_attention = "YES — review this job" if status in {"UNVERIFIED", "FAILED", "PAUSED"} else "No"
+        needs_attention = "YES — review this job" if status in {
+            "UNVERIFIED", "FAILED", "PAUSED", "WAITING",
+            "NEEDS_CLARIFICATION", "NEEDS_AUTH", "NEEDS_SKILL",
+        } else "No"
         job_name = _friendly_job_name(payload, action_type, str(task or ""))
         confidence = assess_job_confidence(item)
-        recording_url = item.get("recording_drive_url") or ""
+        recording_links = item.get("recording_links") or []
+        if recording_links:
+            recording_url = "\n".join(
+                f"Segment {entry['segment']}: {entry['url']}" for entry in recording_links
+            )
+        elif item.get("recording_status") == "FAILED":
+            recording_url = (
+                "Recording upload failed"
+                if item.get("recording_failure_stage") == "UPLOAD"
+                else "Recording failed"
+            )
+        elif item.get("recording_exemption"):
+            reason = str((item.get("recording_exemption") or {}).get("reason") or "").strip()
+            recording_url = "Recording exempt — sensitive authentication flow"
+            if reason:
+                recording_url = f"{recording_url}: {reason}"
+        else:
+            recording_url = ""
         reference_use = "Approved reference" if item.get("recording_reference_approved") else "Not approved for reference"
         output.append([
             _friendly_datetime(item.get("created_at")), job_name, account, requester,
@@ -117,12 +162,235 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             _friendly_datetime(item.get("completed_at")),
             item.get("last_error") or "", item.get("id", ""),
             item.get("attempt_count", 0), item.get("verification_count", 0),
+            item.get("input_tokens", 0), item.get("output_tokens", 0),
+            item.get("cache_read_tokens", 0), item.get("total_tokens", 0),
+            item.get("estimated_cost_usd", 0),
         ])
     return output or [[""]]
 
 
-def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
+def _runtime_job_fields(item: dict[str, Any]) -> dict[str, Any]:
+    """Return the authoritative values for the Control Center runtime columns."""
+    status = str(item.get("status") or "")
+    current_step = {
+        "COMPLETE": "Completed and independently verified",
+        "UNVERIFIED": "Destination state was not independently verified",
+        "FAILED": "Execution failed",
+        "NEEDS_AUTH": "Waiting for authorization",
+        "VERIFYING": "Independently verifying destination result",
+        "RUNNING": "Executing bounded work",
+        "PENDING": "Queued for execution",
+    }.get(status, status.replace("_", " ").title())
+    checks = int(item.get("verification_count") or 0)
+    verified = int(item.get("verified_evidence_count") or 0)
+    authoritative = int(item.get("authoritative_evidence_count") or 0)
+    verification_status = (
+        "Verified" if status == "COMPLETE" and verified > 0 and authoritative > 0
+        else "Needs review" if status in {"UNVERIFIED", "FAILED"}
+        else "Pending"
+    )
+    return {
+        "current_step": current_step,
+        "step_progress": f"{checks} verification check{'s' if checks != 1 else ''}",
+        "last_activity": _friendly_datetime(item.get("updated_at")),
+        "verification_status": verification_status,
+        "evidence_count": verified,
+        "control_mode": "ROBIE",
+    }
+
+
+def upsert_job_rows(
+    db_path: str,
+    spreadsheet_id: str,
+    job_ids: list[str] | tuple[str, ...] | set[str],
+) -> dict[str, int]:
+    """Update only the requested Jobs rows, preserving every unrelated ledger row."""
+    requested = {str(job_id).strip() for job_id in job_ids if str(job_id).strip()}
+    if not requested:
+        return {"jobs": 0, "updated": 0, "appended": 0}
+
+    artifact_root = os.environ.get("ROBIE_ARTIFACT_ROOT") or str(
+        Path(db_path).resolve().parent / "artifacts"
+    )
+    data = OperationsStore(db_path, artifact_root=artifact_root).dashboard_rows()
+    selected = [item for item in data["jobs"] if str(item.get("id")) in requested]
+    found = {str(item.get("id")) for item in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise ValueError(f"job IDs were not found in the local ledger: {', '.join(missing)}")
+
     api = _service().spreadsheets().values()
+    existing = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Jobs!A6:Y",
+    ).execute().get("values", [])
+    row_by_job_id = {
+        _cell(row, 17): sheet_row
+        for sheet_row, row in enumerate(existing, start=6)
+        if _cell(row, 17)
+    }
+    next_row = 6 + len(existing)
+    writes: list[dict[str, Any]] = []
+    updated = 0
+    appended = 0
+    for row in _friendly_jobs(selected, limit=len(selected)):
+        job_id = _cell(row, 17)
+        sheet_row = row_by_job_id.get(job_id)
+        if sheet_row is None:
+            sheet_row = next_row
+            next_row += 1
+            appended += 1
+        else:
+            updated += 1
+        runtime = _runtime_job_fields(next(item for item in selected if str(item.get("id")) == job_id))
+        writes.extend([
+            {"range": f"Jobs!A{sheet_row}:Y{sheet_row}", "values": [row]},
+            {"range": f"Jobs!Z{sheet_row}:AB{sheet_row}", "values": [[
+                runtime["current_step"], runtime["step_progress"], runtime["last_activity"],
+            ]]},
+            {"range": f"Jobs!AD{sheet_row}:AE{sheet_row}", "values": [[
+                runtime["verification_status"], runtime["evidence_count"],
+            ]]},
+            {"range": f"Jobs!AG{sheet_row}", "values": [[runtime["control_mode"]]]},
+        ])
+
+    if writes:
+        api.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": "USER_ENTERED", "data": writes},
+        ).execute()
+    return {"jobs": len(selected), "updated": updated, "appended": appended}
+
+
+def _truthy_cell(value: Any) -> bool:
+    return value is True or str(value or "").strip().casefold() in {"true", "yes", "1"}
+
+
+def publish_job_to_control_center(
+    db_path: str,
+    spreadsheet_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Upsert one Job plus its evidence and verify the exact ledger read-back.
+
+    Publication is intentionally targeted: unrelated Jobs and Evidence rows are
+    never cleared or reordered.  A caller may advertise COMPLETE only after
+    this function confirms the exact Job ID, terminal status, authoritative
+    evidence, and every READY recording segment in the Control Center.
+    """
+    job_id = str(job_id).strip()
+    if not job_id:
+        raise ValueError("job_id is required")
+    artifact_root = os.environ.get("ROBIE_ARTIFACT_ROOT") or str(
+        Path(db_path).resolve().parent / "artifacts"
+    )
+    dashboard = OperationsStore(db_path, artifact_root=artifact_root).dashboard_rows()
+    selected = [item for item in dashboard["jobs"] if str(item.get("id")) == job_id]
+    if len(selected) != 1:
+        raise ValueError(f"exact Job {job_id} was not found in the local ledger")
+    job = selected[0]
+    expected_row = _friendly_jobs(selected, limit=1)[0]
+    expected_status = _cell(expected_row, 8)
+    expected_recording = _cell(expected_row, 11)
+    if str(job.get("status")) == "COMPLETE":
+        if int(job.get("authoritative_evidence_count") or 0) < 1:
+            raise RuntimeError("COMPLETE publication requires authoritative evidence")
+        if not job.get("recording_links") and not job.get("recording_exemption"):
+            raise RuntimeError("COMPLETE publication requires a READY recording link or documented exemption")
+
+    result = upsert_job_rows(db_path, spreadsheet_id, [job_id])
+    api = _service().spreadsheets().values()
+
+    evidence = [
+        item for item in dashboard.get("evidence", [])
+        if str(item.get("job_id")) == job_id
+    ]
+    existing_evidence = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Evidence!A6:K",
+    ).execute().get("values", [])
+    row_by_digest = {
+        _cell(row, 8): sheet_row
+        for sheet_row, row in enumerate(existing_evidence, start=6)
+        if _cell(row, 8)
+    }
+    next_evidence_row = 6 + len(existing_evidence)
+    evidence_writes: list[dict[str, Any]] = []
+    for item in evidence:
+        digest = str(item.get("evidence_sha256") or "")
+        sheet_row = row_by_digest.get(digest)
+        if sheet_row is None:
+            sheet_row = next_evidence_row
+            next_evidence_row += 1
+        values = [[
+            item.get(key) if item.get(key) is not None else ""
+            for key in (
+                "job_id", "verified", "method", "source", "authoritative",
+                "expected_json", "observed_json", "locator", "evidence_sha256",
+                "captured_at", "created_at",
+            )
+        ]]
+        evidence_writes.append(
+            {"range": f"Evidence!A{sheet_row}:K{sheet_row}", "values": values}
+        )
+    if evidence_writes:
+        api.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": "USER_ENTERED", "data": evidence_writes},
+        ).execute()
+
+    job_rows = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Jobs!A6:Y",
+    ).execute().get("values", [])
+    matching = [
+        (sheet_row, row)
+        for sheet_row, row in enumerate(job_rows, start=6)
+        if _cell(row, 17) == job_id
+    ]
+    if len(matching) != 1:
+        raise RuntimeError(
+            f"Control Center read-back found {len(matching)} rows for Job {job_id}"
+        )
+    sheet_row, observed_row = matching[0]
+    if _cell(observed_row, 8) != expected_status:
+        raise RuntimeError("Control Center status read-back did not match")
+    if _cell(observed_row, 11) != expected_recording:
+        raise RuntimeError("Control Center recording read-back did not match")
+
+    evidence_rows = api.get(
+        spreadsheetId=spreadsheet_id,
+        range="Evidence!A6:K",
+    ).execute().get("values", [])
+    authoritative = [
+        row for row in evidence_rows
+        if _cell(row, 0) == job_id
+        and _truthy_cell(row[1] if len(row) > 1 else None)
+        and _truthy_cell(row[4] if len(row) > 4 else None)
+    ]
+    if str(job.get("status")) == "COMPLETE" and not authoritative:
+        raise RuntimeError("Control Center authoritative evidence read-back is missing")
+    return {
+        **result,
+        "job_id": job_id,
+        "sheet_row": sheet_row,
+        "evidence_rows": len(authoritative),
+        "recording": expected_recording,
+        "status": expected_status,
+    }
+
+
+def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
+    spreadsheets = _service().spreadsheets()
+    api = spreadsheets.values()
+    metadata = spreadsheets.get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties.title",
+    ).execute()
+    available_sheets = {
+        str(sheet.get("properties", {}).get("title") or "").strip()
+        for sheet in metadata.get("sheets", [])
+    }
     jobs = JobStore(db_path)
     ops = OperationsStore(db_path)
     intake = api.get(spreadsheetId=spreadsheet_id, range="Assignments!A6:P205").execute().get("values", [])
@@ -160,12 +428,14 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
     data = ops.dashboard_rows()
     writes = [
         {"range": "Dashboard!B9", "values": [[datetime.now(timezone.utc).isoformat()]]},
-        {"range": "Jobs!A5:T5", "values": [[
+        {"range": "Jobs!A5:Y5", "values": [[
             "Date Started", "Job Name", "Client / Account", "Requested By",
             "Work Requested", "Owner", "Source", "Skill", "Status",
             "Confidence", "Issues", "Recording", "Reference Use",
             "Needs Attention", "Last Updated", "Date Completed",
             "Last Result / Error", "Job ID", "Attempts", "Verification Checks",
+            "Input Tokens", "Output Tokens", "Cache Read Tokens", "Total Tokens",
+            "Estimated Model Cost (USD)",
         ]]},
         {"range": "Jobs!A6", "values": _friendly_jobs(data["jobs"])},
         {"range": "Evidence!A6", "values": _matrix(data["evidence"],
@@ -174,9 +444,22 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
             ["id","name","action_type","interval_minutes","enabled","next_run_at","last_run_at","last_job_id","updated_at"], 100)},
         {"range": "Artifacts!A6", "values": _matrix(data["artifacts"],
             ["id","job_id","source_platform","original_name","mime_type","size_bytes","sha256","status","destination_ref","created_at","updated_at"], 1000)},
+        {"range": "Releases!A6", "values": _matrix(data["releases"],
+            ["environment","digest","commit_sha","artifact_uri","status","evidence_json","created_at","updated_at"], 1000)},
+        {"range": "Reports!A6", "values": _matrix(data["reports"],
+            ["id","report_type","destination","window_start","window_end","status","summary_json","error","created_at","updated_at"], 1000)},
     ] + assignment_updates
+    # The Control Center can intentionally omit optional operational tabs.
+    # Google rejects an entire values.batchUpdate if any one range names a
+    # missing sheet, so only send writes whose destination is present. This
+    # keeps the core Jobs/Recording ledger current without recreating or
+    # requiring display-only tabs such as Releases or Reports.
+    writes = [
+        write for write in writes
+        if str(write["range"]).split("!", 1)[0] in available_sheets
+    ]
     api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
-    return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"])}
+    return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
 
 
 def sync_from_env(db_path: str) -> dict[str, int] | None:

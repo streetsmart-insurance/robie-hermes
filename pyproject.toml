@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streetsmart-robie-job-engine"
+version = "0.1.0"
+description = "Durable, independently verified Job Engine for ROBIE and Hermes."
+requires-python = ">=3.11"
+dependencies = [
+  "google-api-python-client>=2.170,<3",
+  "google-auth>=2.40,<3",
+  "google-cloud-secret-manager>=2.24,<3",
+  "playwright>=1.52,<2",
+  "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+]
+
+[tool.setuptools.packages.find]
+include = ["robie_job_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

@@ -16,7 +16,14 @@ from .ezlynx_poller import (
     EzlynxSyncStore,
     MockEzlynxAdapter,
 )
-from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
+from .models import (
+    VERIFIER_AUTHORITY,
+    WAITING_STATUSES,
+    JobStatus,
+    VerificationEvidence,
+    VerificationResult,
+    WorkerResult,
+)
 from .store import JobStore
 from .video_to_skill import (
     CompiledSkill,
@@ -44,6 +51,8 @@ __all__ = [
     "JobStore",
     "MockEzlynxAdapter",
     "UiAction",
+    "VERIFIER_AUTHORITY",
+    "WAITING_STATUSES",
     "VerificationEvidence",
     "VerificationResult",
     "VideoToSkillCompiler",

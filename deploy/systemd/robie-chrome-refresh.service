@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh Robie's persistent Chrome session
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart robie-ezlynx-browser.service
