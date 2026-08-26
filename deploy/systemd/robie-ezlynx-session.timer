@@ -1,0 +1,11 @@
+[Unit]
+Description=Ensure the Hermes EZLynx session daily at 9 a.m. Eastern
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=robie-ezlynx-session.service
+
+[Install]
+WantedBy=timers.target

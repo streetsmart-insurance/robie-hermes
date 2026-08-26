@@ -1,0 +1,21 @@
+[Unit]
+Description=ROBIE ensure persistent EZLynx session
+After=network-online.target robie-ezlynx-browser.service
+Wants=network-online.target robie-ezlynx-browser.service
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/robie-job-engine
+Environment=PYTHONPATH=/opt/streetsmart-hermes/robie-job-engine
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+EnvironmentFile=/etc/streetsmart-hermes/robie-ezlynx.env
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.ezlynx_session
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
