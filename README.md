@@ -78,3 +78,9 @@ installing the Test-only systemd drop-in, and running
 `scripts/replay-quote-proposal.py`. That harness needs a real `--quote-pdf`
 path, refuses `COMPLETE` without stored verifier evidence, and never claims
 live Test `COMPLETE`.
+
+The optional `skills/ezlynx-session-login` skill keeps the server-owned Chrome
+profile authenticated using Google Secret Manager references. Credential values
+are never stored in this repository. Its systemd timer runs the session check at
+9:00 a.m. Eastern and stops for operator action when EZLynx requires MFA or a
+CAPTCHA. See the skill's provisioning reference for deployment and rotation.
