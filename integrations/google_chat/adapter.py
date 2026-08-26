@@ -38,6 +38,7 @@ CARD_CLICKED is ACK'd only in v1 (follow-up PR implements interactivity).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import sys
@@ -46,6 +47,7 @@ import random
 import re
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path as _Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -203,9 +205,51 @@ from gateway.platforms.base import (
 # ``hermes_plugins.platforms__google_chat.adapter`` once the plugin
 # loader namespaces this module, which would silently break every
 # downstream log-monitor that greps for ``gateway.platforms.google_chat``.
-sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
-from robie_job_engine.chat_guard import (build_chat_execution_text, guard_chat_response, open_chat_job)
-ROBIE_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
+_configured_job_engine_root = os.environ.get("ROBIE_CANONICAL_JOB_ENGINE_ROOT")
+if _configured_job_engine_root:
+    # Production supplies the versioned release root. Never insert the old
+    # flattened working directory: it contains ``secrets.py`` and can shadow
+    # Python's standard-library ``secrets`` module.
+    _canonical_import_root = str(_Path(_configured_job_engine_root).resolve())
+    if _canonical_import_root not in sys.path:
+        sys.path.insert(0, _canonical_import_root)
+from robie_job_engine.chat_guard import (
+    build_chat_execution_text,
+    chat_message_is_related_only,
+    guard_chat_response,
+    open_chat_job,
+)
+from robie_job_engine.chat_queue import DurableChatEventQueue
+from robie_job_engine.chat_admin import handle_admin_command
+from robie_job_engine.decisions import resolve_bound_text_decision, text_decision_response
+from robie_job_engine.models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
+from robie_job_engine.hitl import (
+    classify_human_reply,
+    human_reply_value,
+    interaction_for_blocker,
+)
+from robie_job_engine.pubsub_ack import PubSubAckCoordinator
+from robie_job_engine.runtime_env import chat_path_is_sandbox
+from robie_job_engine.request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
+from robie_job_engine.secrets import redact_text
+from robie_job_engine.test_runtime import dispatch_operational_chat, maybe_run_bounded_job
+from robie_job_engine.store import JobStore
+
+if _configured_job_engine_root:
+    _EXPECTED_JOB_ENGINE_ROOT = _Path(_configured_job_engine_root).resolve()
+    _LOADED_JOB_ENGINE_MODULE = _Path(
+        sys.modules[open_chat_job.__module__].__file__ or ""
+    ).resolve()
+    if os.path.commonpath(
+        (str(_EXPECTED_JOB_ENGINE_ROOT), str(_LOADED_JOB_ENGINE_MODULE))
+    ) != str(_EXPECTED_JOB_ENGINE_ROOT):
+        raise RuntimeError(
+            "Google Chat gateway loaded ROBIE Job Engine from a non-canonical path: "
+            f"{_LOADED_JOB_ENGINE_MODULE}"
+        )
+ROBIE_JOB_DB = os.environ.get(
+    "ROBIE_JOB_DB", "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
+)
 
 logger = logging.getLogger("gateway.platforms.google_chat")
 
@@ -327,6 +371,18 @@ _TRUSTED_ATTACHMENT_HOSTS = (
     "lh6.googleusercontent.com",
 )
 
+_MAX_INBOUND_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_DRIVE_EXPORT_TYPES: Dict[str, Tuple[str, str]] = {
+    "application/vnd.google-apps.document": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    "application/vnd.google-apps.spreadsheet": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+    "application/vnd.google-apps.presentation": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+    "application/vnd.google-apps.drawing": ("application/pdf", ".pdf"),
+}
+_GOOGLE_WORKSPACE_URL_RE = re.compile(
+    r"https://(?:docs\.google\.com/document/d/|drive\.google\.com/file/d/)"
+    r"(?P<id>[A-Za-z0-9_-]{10,})[^\s<>()]*"
+)
+
 
 def _is_google_owned_host(url: str) -> bool:
     """Return True iff *url* is https and targets a Google-owned domain."""
@@ -363,6 +419,7 @@ def _redact_sensitive(text: str) -> str:
         "projects/<redacted>/topics/<redacted>",
         text,
     )
+    text = redact_text(text)
     text = re.sub(
         r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.iam\.gserviceaccount\.com",
         "<sa>@<project>.iam.gserviceaccount.com",
@@ -784,9 +841,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._subscription_path: Optional[str] = None
         self._streaming_pull_future: Optional[Any] = None
         self._supervisor_task: Optional[asyncio.Task] = None
+        self._chat_queue: Optional[DurableChatEventQueue] = None
+        self._chat_queue_drain_task: Optional[asyncio.Task] = None
+        self._chat_queue_wakeup: Optional[asyncio.Event] = None
+        self._chat_queue_worker_id = DurableChatEventQueue.worker_id()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._bot_user_id: Optional[str] = None  # users/{id}
         self._dedup = MessageDeduplicator()
+        self._pubsub_ack = PubSubAckCoordinator(self._dedup)
         self._typing_messages: Dict[str, str] = {}
         self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
@@ -978,28 +1040,360 @@ class GoogleChatAdapter(BasePlatformAdapter):
     def _loop_accepts_callbacks(loop: Optional[asyncio.AbstractEventLoop]) -> bool:
         return loop is not None and not bool(getattr(loop, "is_closed", lambda: False)())
 
-    def _submit_on_loop(self, coro: Any) -> None:
+    def _submit_on_loop(self, coro: Any) -> Any:
         """Schedule a coroutine on the adapter loop from a Pub/Sub callback thread."""
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
-            # Loop already closed (shutdown race). Safe to drop; Pub/Sub will
-            # redeliver on next reconnect.
-            logger.warning("[GoogleChat] Loop not accepting callbacks; dropping event")
-            return
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            logger.warning("[GoogleChat] Loop not accepting callbacks; retaining event for retry")
+            return None
         try:
             from agent.async_utils import safe_schedule_threadsafe
-            future = safe_schedule_threadsafe(
+            return safe_schedule_threadsafe(
                 coro, loop,
                 logger=logger,
                 log_message="[GoogleChat] Failed to schedule background callback",
                 log_level=logging.WARNING,
             )
         except RuntimeError:
+            if asyncio.iscoroutine(coro):
+                coro.close()
             logger.warning("[GoogleChat] Loop closed between check and submit")
+            return None
+
+    def _schedule_pubsub_processing(
+        self, coro: Any, message: Any, msg_name: str = ""
+    ) -> None:
+        def report_failure(exc: BaseException) -> None:
+            logger.error(
+                "[GoogleChat] Pub/Sub handoff or settlement failed: %s",
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+        self._pubsub_ack.schedule(
+            coro=coro,
+            message=message,
+            message_id=msg_name,
+            submit=self._submit_on_loop,
+            on_error=report_failure,
+        )
+
+    def _durable_chat_queue(self) -> DurableChatEventQueue:
+        if self._chat_queue is None:
+            self._chat_queue = DurableChatEventQueue(ROBIE_JOB_DB)
+        return self._chat_queue
+
+    def _ensure_chat_queue_drain(self) -> None:
+        """Keep one restart-safe executable-work consumer on the event loop."""
+        if self._shutting_down:
             return
-        if future is None:
+        if self._chat_queue_wakeup is None:
+            self._chat_queue_wakeup = asyncio.Event()
+        if self._chat_queue_drain_task is None or self._chat_queue_drain_task.done():
+            self._chat_queue_drain_task = asyncio.create_task(
+                self._drain_chat_queue(), name="robie-google-chat-job-queue"
+            )
+
+    async def _enqueue_bounded_chat_job(
+        self,
+        event: MessageEvent,
+        job_id: str,
+        *,
+        related_only: bool,
+    ) -> bool:
+        """Commit bounded work before allowing the inbound message to ACK."""
+        job = await asyncio.to_thread(JobStore(ROBIE_JOB_DB).get_job, job_id)
+        if job["action_type"] not in BOUNDED_ENGINE_ACTIONS:
+            return False
+        source = event.source
+        conversation_id = getattr(source, "chat_id", None) or "google-chat:unknown"
+        message_id = event.message_id or f"job:{job_id}"
+        thread_id = getattr(source, "thread_id", None)
+        payload = {
+            "job_id": job_id,
+            "action_type": job["action_type"],
+            "request_sha256": hashlib.sha256(
+                str(event.text or "").encode("utf-8")
+            ).hexdigest(),
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "thread_id": thread_id,
+        }
+        queue = await asyncio.to_thread(self._durable_chat_queue)
+        queued = await asyncio.to_thread(
+            queue.enqueue,
+            event_id=message_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            payload=payload,
+            job_id=job_id,
+        )
+        await asyncio.to_thread(
+            queue.link_conversation_job,
+            conversation_id=conversation_id,
+            job_id=job_id,
+            message_id=message_id,
+            event_id=message_id,
+            relation="CORRECTION" if related_only else "CREATED",
+        )
+        logger.info(
+            "[GoogleChat] durable executable handoff event=%s job=%s duplicate=%s",
+            message_id,
+            job_id,
+            queued["duplicate"],
+        )
+        self._ensure_chat_queue_drain()
+        if self._chat_queue_wakeup is not None:
+            self._chat_queue_wakeup.set()
+        return True
+
+    def _fail_queued_job(self, job_id: str, error: str) -> None:
+        store = JobStore(ROBIE_JOB_DB)
+        job = store.get_job(job_id)
+        status = JobStatus(job["status"])
+        if status in TERMINAL_STATUSES or status in WAITING_STATUSES:
             return
-        future.add_done_callback(self._log_background_failure)
+        store.transition(
+            job_id,
+            JobStatus.FAILED,
+            expected={JobStatus.PENDING, JobStatus.RUNNING, JobStatus.VERIFYING},
+            error=f"durable Chat worker failed: {redact_text(error)}",
+            release_lease=True,
+        )
+
+    async def _maintain_chat_queue_lease(
+        self,
+        queue: DurableChatEventQueue,
+        event_id: str,
+        lease_seconds: int,
+    ) -> None:
+        """Heartbeat long Playwright work so another worker cannot overlap it."""
+        interval = max(5.0, min(float(lease_seconds) / 3.0, 30.0))
+        while True:
+            await asyncio.sleep(interval)
+            await asyncio.to_thread(
+                queue.renew_lease,
+                event_id,
+                self._chat_queue_worker_id,
+                lease_seconds=lease_seconds,
+            )
+
+    @staticmethod
+    async def _stop_chat_queue_heartbeat(task: asyncio.Task) -> None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _drain_chat_queue(self) -> None:
+        """Execute committed bounded Jobs outside the Pub/Sub ACK coroutine."""
+        queue = await asyncio.to_thread(self._durable_chat_queue)
+        lease_seconds = max(60, int(os.getenv("ROBIE_CHAT_QUEUE_LEASE_SECONDS", "1800")))
+        while not self._shutting_down:
+            item = await asyncio.to_thread(
+                queue.claim_next,
+                self._chat_queue_worker_id,
+                lease_seconds=lease_seconds,
+            )
+            if item is None:
+                # Sleep until an in-process enqueue arrives, with a bounded
+                # periodic recovery check for rows committed before restart.
+                if self._chat_queue_wakeup is None:
+                    self._chat_queue_wakeup = asyncio.Event()
+                self._chat_queue_wakeup.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._chat_queue_wakeup.wait(), timeout=30.0
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            event_id = item["event_id"]
+            payload = item["payload"]
+            job_id = item.get("job_id") or payload.get("job_id")
+            heartbeat = asyncio.create_task(
+                self._maintain_chat_queue_lease(queue, event_id, lease_seconds),
+                name=f"robie-chat-lease:{event_id}",
+            )
+            try:
+                if not job_id:
+                    raise RuntimeError("queued Chat event has no bound Job")
+                store = JobStore(ROBIE_JOB_DB)
+                await asyncio.to_thread(store.wake_due)
+                handled = await asyncio.to_thread(
+                    maybe_run_bounded_job, ROBIE_JOB_DB, job_id
+                )
+                if not handled:
+                    raise RuntimeError("queued Job is not a bounded executable action")
+                job = await asyncio.to_thread(store.get_job, job_id)
+                status = JobStatus(job["status"])
+                if status == JobStatus.RETRY_WAIT:
+                    await self._stop_chat_queue_heartbeat(heartbeat)
+                    await asyncio.to_thread(
+                        queue.defer,
+                        event_id,
+                        self._chat_queue_worker_id,
+                        available_at=job["next_wakeup_at"],
+                        error=job.get("last_error") or "bounded Job scheduled a retry",
+                    )
+                    continue
+                if status in {
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.VERIFYING,
+                }:
+                    retry_at = job.get("lease_expires_at") or (
+                        datetime.now(timezone.utc) + timedelta(seconds=5)
+                    ).isoformat()
+                    await self._stop_chat_queue_heartbeat(heartbeat)
+                    await asyncio.to_thread(
+                        queue.defer,
+                        event_id,
+                        self._chat_queue_worker_id,
+                        available_at=retry_at,
+                        error="durable Job is still owned by an active worker",
+                    )
+                    continue
+                if status == JobStatus.AWAITING_HUMAN_INPUT:
+                    job_payload = dict(job.get("payload") or {})
+                    interaction = interaction_for_blocker(
+                        job.get("last_error") or "PLAYWRIGHT_BLOCKED",
+                        action_type=job["action_type"],
+                        requester_name=(
+                            job_payload.get("requested_by")
+                            or payload.get("requested_by")
+                            or payload.get("sender_name")
+                        ),
+                        job_id=job_id,
+                        subject_name=(
+                            job_payload.get("company_name")
+                            or job_payload.get("client_name")
+                            or job_payload.get("account_name")
+                        ),
+                    )
+                    await self._stop_chat_queue_heartbeat(heartbeat)
+                    await asyncio.to_thread(
+                        queue.await_human_input,
+                        event_id,
+                        self._chat_queue_worker_id,
+                        interaction_state=interaction,
+                        error=job.get("last_error") or "PLAYWRIGHT_BLOCKED",
+                    )
+                    sent = await self.send(
+                        payload["conversation_id"],
+                        interaction["prompt"],
+                        reply_to=payload.get("message_id"),
+                        metadata={"thread_id": payload.get("thread_id")},
+                    )
+                    if not sent.success:
+                        raise RuntimeError(
+                            "human-input prompt could not be posted: "
+                            f"{sent.error or 'unknown Chat API error'}"
+                        )
+                    continue
+                reply_to = payload.get("message_id")
+                terminal_detail = "The durable background worker finished."
+                if job["action_type"] == "drive.skill_sync":
+                    action = await asyncio.to_thread(
+                        store.get_checkpoint, job_id, "action"
+                    )
+                    detail = dict((action or {}).get("detail") or {})
+                    terminal_detail = (
+                        "Drive Skill Sync finished. "
+                        f"Synced {detail.get('file_count', 0)} approved file(s) "
+                        "from 01_Core_Rules and 03_Active_Skills."
+                    )
+                terminal_message = await asyncio.to_thread(
+                    guard_chat_response,
+                    ROBIE_JOB_DB,
+                    job_id,
+                    terminal_detail,
+                )
+                sent = await self.send(
+                    payload["conversation_id"],
+                    terminal_message,
+                    reply_to=reply_to,
+                    metadata={"thread_id": payload.get("thread_id")},
+                )
+                if not sent.success:
+                    raise RuntimeError(
+                        "verified terminal status could not be posted: "
+                        f"{sent.error or 'unknown Chat API error'}"
+                    )
+                # Stop renewals before settling the lease so the heartbeat can
+                # never race a successful COMPLETE transition.
+                await self._stop_chat_queue_heartbeat(heartbeat)
+                await asyncio.to_thread(
+                    queue.complete, event_id, self._chat_queue_worker_id
+                )
+            except asyncio.CancelledError:
+                # Do not release immediately: cancelling asyncio.to_thread does
+                # not stop the underlying worker thread.  Let the heartbeat
+                # stop and the short lease expire so recovery cannot overlap
+                # work that is still winding down.
+                raise
+            except Exception as exc:
+                safe_error = redact_text(str(exc))
+                logger.exception(
+                    "[GoogleChat] durable executable worker failed event=%s job=%s",
+                    event_id,
+                    job_id,
+                )
+                try:
+                    await self._stop_chat_queue_heartbeat(heartbeat)
+                except Exception:
+                    logger.exception(
+                        "[GoogleChat] queue heartbeat failed event=%s", event_id
+                    )
+                if item["attempt_count"] < item.get("max_attempts", 3):
+                    retry_at = (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=min(60, 2 ** item["attempt_count"]))
+                    ).isoformat()
+                    try:
+                        await asyncio.to_thread(
+                            queue.defer,
+                            event_id,
+                            self._chat_queue_worker_id,
+                            available_at=retry_at,
+                            error=safe_error,
+                        )
+                        continue
+                    except Exception:
+                        logger.exception(
+                            "[GoogleChat] could not defer queue event=%s", event_id
+                        )
+                if job_id:
+                    try:
+                        await asyncio.to_thread(
+                            self._fail_queued_job, job_id, safe_error
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[GoogleChat] could not fail closed queued job=%s", job_id
+                        )
+                try:
+                    await asyncio.to_thread(
+                        queue.fail,
+                        event_id,
+                        self._chat_queue_worker_id,
+                        safe_error,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[GoogleChat] could not settle failed queue event=%s", event_id
+                    )
+            finally:
+                try:
+                    await self._stop_chat_queue_heartbeat(heartbeat)
+                except Exception:
+                    logger.exception(
+                        "[GoogleChat] queue heartbeat shutdown failed event=%s",
+                        event_id,
+                    )
 
     # ------------------------------------------------------------------
     # Bot identity resolution
@@ -1074,6 +1468,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Validate config, authenticate, start Pub/Sub pull, resolve bot id."""
+        self._shutting_down = False
         # First call into the heavy google-cloud stack — trigger the lazy
         # import. ``_load_google_modules()`` is idempotent and rebinds the
         # module globals (``pubsub_v1``, ``service_account``, ``HttpError``,
@@ -1226,6 +1621,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._supervisor_task = None
             inbound = "http"
 
+        # Recover executable Chat work that was committed before a previous
+        # gateway or worker restart. This task does not delay connection.
+        self._ensure_chat_queue_drain()
+
         self._mark_connected()
         logger.info(
             "[GoogleChat] Connected; project=%s, inbound=%s, subscription=%s, "
@@ -1242,6 +1641,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Clean shutdown: stop accepting new messages, wait in-flight, close clients."""
         self._shutting_down = True
+        if self._chat_queue_drain_task and not self._chat_queue_drain_task.done():
+            self._chat_queue_drain_task.cancel()
+            try:
+                await self._chat_queue_drain_task
+            except asyncio.CancelledError:
+                pass
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
             try:
@@ -1530,8 +1935,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             # --- Card-click events ---
             if _card_event_payload(envelope) is not None or "widget" in ce_type or "card" in ce_type.lower():
-                self._submit_on_loop(self._handle_card_event(envelope, notify=True))
-                message.ack()
+                self._schedule_pubsub_processing(
+                    self._handle_card_event(envelope, notify=True), message
+                )
                 return
 
             # --- Message events ---
@@ -1553,12 +1959,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 message.ack()
                 return
 
-            # Dedup guard — Pub/Sub is at-least-once.
+            # Completed-message deduplication and concurrent redelivery
+            # coordination are handled by PubSubAckCoordinator. An in-flight
+            # duplicate must never ACK before the original handoff settles.
             msg_name = msg.get("name") or ""
-            if msg_name and self._dedup.is_duplicate(msg_name):
-                logger.debug("[GoogleChat] Dedup drop for %s", msg_name)
-                message.ack()
-                return
 
             # Wrap msg with parent-level space so _build_message_event can find it.
             msg_with_space = dict(msg)
@@ -1571,12 +1975,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if "space" not in enriched_env and space:
                 enriched_env["space"] = space
 
-            self._submit_on_loop(self._dispatch_message(msg_with_space, enriched_env))
-            message.ack()
+            self._schedule_pubsub_processing(
+                self._dispatch_message(msg_with_space, enriched_env),
+                message,
+                msg_name,
+            )
         except Exception:
             logger.exception("[GoogleChat] Error in _on_pubsub_message")
             try:
-                message.ack()
+                message.nack()
             except Exception:
                 pass
 
@@ -1733,6 +2140,54 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             # Short-circuit /setup-files before the agent dispatch.
             text = (event.text or "").strip()
+            queue = None
+            context = None
+            interaction = {}
+            source_space = envelope.get("space") or msg.get("space") or {}
+            source_space_type = str(
+                source_space.get("type") or source_space.get("spaceType") or ""
+            ).upper()
+            if (
+                event.source is not None
+                and source_space_type in {"DIRECT_MESSAGE", "DM"}
+                and not text.casefold().startswith(("/approve", "/deny"))
+            ):
+                queue = await asyncio.to_thread(self._durable_chat_queue)
+                context = await asyncio.to_thread(
+                    queue.active_conversation_job, event.source.chat_id
+                )
+                interaction = dict((context or {}).get("interaction_state") or {})
+                if (
+                    interaction.get("awaiting") == "human_input"
+                    and classify_human_reply(text, interaction) == "NEW_INTENT"
+                ):
+                    # Preserve the old Job and queue row as diagnostic history,
+                    # but remove the active DM correlation before routing the
+                    # new request. It can no longer consume this message as a
+                    # missing-field reply.
+                    await asyncio.to_thread(
+                        queue.deactivate_conversation, event.source.chat_id
+                    )
+                    context = None
+                    interaction = {}
+            admin_response = await asyncio.to_thread(
+                handle_admin_command,
+                ROBIE_JOB_DB,
+                text,
+                actor=(
+                    getattr(event.source, "user_id", None)
+                    or getattr(event.source, "user_name", None)
+                    or "Google Chat administrator"
+                ),
+            )
+            if admin_response is not None and event.source is not None:
+                await self.send(
+                    event.source.chat_id,
+                    admin_response,
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                )
+                return
             if text.startswith("/setup-files") and event.source is not None:
             # The sender email (user_id) is the per-user OAuth key.
             # The bot stores this user token at
@@ -1753,8 +2208,131 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 if handled:
                     return
 
+            if text.casefold() in {"/reset", "/new"} and event.source is not None:
+                conversation_id = event.source.chat_id
+                queue = await asyncio.to_thread(self._durable_chat_queue)
+                await asyncio.to_thread(queue.deactivate_conversation, conversation_id)
+                await self.send(
+                    conversation_id,
+                    "The active ROBIE job context was cleared. Your next executable request will start a new job.",
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                )
+                return
+
+            if event.source is not None and not text.startswith("/"):
+                queue = queue or await asyncio.to_thread(self._durable_chat_queue)
+                if context is None:
+                    context = await asyncio.to_thread(
+                        queue.active_conversation_job, event.source.chat_id
+                    )
+                    interaction = dict((context or {}).get("interaction_state") or {})
+                if interaction.get("awaiting") == "human_input":
+                    message_id = event.message_id or f"human:{id(event)}"
+                    value = human_reply_value(text)
+                    accepts_value = interaction.get("accepts_value", True)
+                    reply_kind = classify_human_reply(value, interaction)
+                    if reply_kind == "INVALID":
+                        if accepts_value:
+                            field_label = interaction.get("field_label") or interaction.get("field_name") or "requested value"
+                            prompt = (
+                                f"That does not look like a valid {field_label}. "
+                                "Please reply with only the requested value, or send a new question to start fresh."
+                            )
+                        else:
+                            prompt = (
+                                "For security, do not send that sensitive value in Chat. "
+                                "Enter it directly in EZLynx, then reply RETRY."
+                            )
+                        await self.send(
+                            event.source.chat_id,
+                            prompt,
+                            reply_to=message_id,
+                            metadata={
+                                "thread_id": getattr(event.source, "thread_id", None)
+                            },
+                        )
+                        return
+                    resumed = await asyncio.to_thread(
+                        queue.resume_human_input,
+                        conversation_id=event.source.chat_id,
+                        job_id=context["job_id"],
+                        reply_message_id=message_id,
+                        field_name=(
+                            interaction.get("field_name")
+                            if accepts_value
+                            else "operator_response"
+                        ) or "operator_response",
+                        value=value,
+                    )
+                    await self.send(
+                        event.source.chat_id,
+                        f"Input received for ROBIE Job {context['job_id']}. Resuming from the saved checkpoint.",
+                        reply_to=message_id,
+                        metadata={
+                            "thread_id": getattr(event.source, "thread_id", None)
+                        },
+                    )
+                    if resumed.get("state") != "DIRECT_RESUME":
+                        self._ensure_chat_queue_drain()
+                        if self._chat_queue_wakeup is not None:
+                            self._chat_queue_wakeup.set()
+                        return
+                    # Direct Hermes browser work has no bounded queue event to
+                    # wake. Fall through with this same reply; open_chat_job
+                    # recognizes the persisted resume message and continues
+                    # the existing Job ID instead of creating a duplicate.
+
+            if text.casefold().startswith(("/approve", "/deny")) and event.source is not None:
+                queue = await asyncio.to_thread(self._durable_chat_queue)
+                context = await asyncio.to_thread(
+                    queue.active_conversation_job, event.source.chat_id
+                )
+                result = resolve_bound_text_decision(
+                    ROBIE_JOB_DB,
+                    text,
+                    actor=(
+                        getattr(event.source, "user_id", None)
+                        or getattr(event.source, "user_name", None)
+                        or ""
+                    ),
+                    active_job_id=context.get("job_id") if context else None,
+                    active_decision_id=(
+                        context.get("pending_decision_id") if context else None
+                    ),
+                )
+                await self.send(
+                    event.source.chat_id,
+                    text_decision_response(result),
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(event.source, "thread_id", None)},
+                )
+                return
+
+            expanded_text = await self._expand_workspace_text_links(
+                text,
+                sender_email=(
+                    getattr(event.source, "user_id", None)
+                    if event.source is not None
+                    else ""
+                ) or "",
+            )
+            if expanded_text != text:
+                text = expanded_text
+                try:
+                    event.text = text
+                except Exception:
+                    from dataclasses import replace
+
+                    event = replace(event, text=text)
+
             message_id = event.message_id or f"unidentified:{id(event)}"
-            job_id = open_chat_job(
+            text = redact_text(text)
+            attachment_count = len(
+                ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
+            )
+            job_id = await asyncio.to_thread(
+                open_chat_job,
                 ROBIE_JOB_DB,
                 message_id,
                 text,
@@ -1765,14 +2343,62 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     or "Google Chat user"
                 ),
                 conversation_id=getattr(event.source, "chat_id", None),
-                expected_attachment_count=len(
-                    ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
-                ),
+                expected_attachment_count=attachment_count,
             )
-            jobs = getattr(self, "_robie_jobs_by_reply", None)
-            if jobs is None:
-                jobs = self._robie_jobs_by_reply = {}
-            jobs[event.message_id] = job_id
+            related_only = chat_message_is_related_only(
+                text,
+                expected_attachment_count=attachment_count,
+            )
+            correction = classify_request(text, attachment_count=attachment_count)
+            if job_id:
+                queue = await asyncio.to_thread(self._durable_chat_queue)
+                relation = (
+                    "CORRECTION"
+                    if related_only and correction.action_type in BOUNDED_ENGINE_ACTIONS
+                    else "CONTINUATION" if related_only else "CREATED"
+                )
+                await asyncio.to_thread(
+                    queue.link_conversation_job,
+                    conversation_id=getattr(event.source, "chat_id", None)
+                    or "google-chat:unknown",
+                    job_id=job_id,
+                    message_id=message_id,
+                    event_id=message_id,
+                    relation=relation,
+                )
+            if related_only:
+                # A corrective reply may safely retarget the exact active
+                # zero-attempt Job to a bounded destination action. Execute
+                # that same Job ID instead of dispatching Hermes or creating
+                # a duplicate. Ordinary status/questions remain conversational.
+                if (
+                    job_id
+                    and correction.action_type in BOUNDED_ENGINE_ACTIONS
+                    and await self._enqueue_bounded_chat_job(
+                        event, job_id, related_only=True
+                    )
+                ):
+                    return
+                await self.handle_message(event)
+                return
+            # Test AND Production: operational bounded work goes through
+            # maybe_run_bounded_job → JobEngine.run → IsolatedRunStore +
+            # DurableWorkLedger. Ledger/path failures fail closed. Hermes
+            # is only for non-operational or explicit sandbox chat.
+            if job_id and await self._enqueue_bounded_chat_job(
+                event, job_id, related_only=False
+            ):
+                return
+            if dispatch_operational_chat(
+                ROBIE_JOB_DB,
+                job_id,
+                sandbox=chat_path_is_sandbox(
+                    conversation_id=getattr(event.source, "chat_id", None)
+                    if getattr(event, "source", None)
+                    else None
+                ),
+            ):
+                return
             execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, text)
             try:
                 event.text = execution_text
@@ -1782,6 +2408,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception:
             logger.exception("[GoogleChat] _dispatch_message failed")
+            # Pub/Sub may ACK only after the durable handoff succeeds. Let the
+            # coordinator NACK failures so Google can redeliver the same
+            # idempotent event instead of silently losing executable work.
+            raise
 
     async def _handle_setup_files_command(
         self,
@@ -2047,7 +2677,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         attachments = msg.get("attachment") or []
         for att in attachments:
             try:
-                local_path, mime = await self._download_attachment(att)
+                local_path, mime = await self._download_attachment(
+                    att, sender_email=sender_email,
+                )
             except Exception:
                 logger.exception("[GoogleChat] attachment download failed")
                 continue
@@ -2134,7 +2766,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
 
     async def _download_attachment(
-        self, attachment: Dict[str, Any]
+        self, attachment: Dict[str, Any], *, sender_email: str = ""
     ) -> Tuple[Optional[str], Optional[str]]:
         """Download an inbound attachment to the local cache; return (path, mime).
 
@@ -2156,6 +2788,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         name = attachment.get("name") or ""
         attachment_data_ref = attachment.get("attachmentDataRef") or {}
         resource_name = attachment_data_ref.get("resourceName") or ""
+        drive_file_id = (attachment.get("driveDataRef") or {}).get("driveFileId") or ""
         download_uri = attachment.get("downloadUri") or ""
 
         # NOTE on ``source == "DRIVE_FILE"``: Google Chat tags BOTH
@@ -2163,18 +2796,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # source string, but the two have different access models.
         # Drag-and-drop uploads come with an ``attachmentDataRef.resourceName``
         # that bot SA tokens CAN download via ``media.download_media``.
-        # Pure Drive-picker shares often lack that field and require
-        # user OAuth + Drive scope (which we deliberately don't request).
-        # So we only short-circuit when there's nothing the bot path
-        # can use — otherwise try the bot path first.
-        if source == "DRIVE_FILE" and not resource_name:
-            logger.info(
-                "[GoogleChat] Skipping Drive-picker attachment (no "
-                "resourceName, would need user-OAuth Drive scope)"
-            )
+        # Drive-picker shares use a structured Drive file reference.
+        if source == "DRIVE_FILE" and not resource_name and not drive_file_id:
+            logger.warning("[GoogleChat] Drive attachment has no supported data reference")
             return None, mime
 
         data: Optional[bytes] = None
+        filename = attachment.get("contentName") or (
+            name.split("/")[-1] if name else "attachment"
+        )
 
         # Path 1: media.download with attachmentDataRef.resourceName (bot-path).
         if resource_name:
@@ -2201,7 +2831,68 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
                 data = None
 
-        # Path 2: downloadUri fallback (rarely works with SA tokens, but try).
+
+        # Path 2: Drive picker. Accept IDs only from Google's structured event.
+        if data is None and drive_file_id:
+            candidates: List[Tuple[str, Any]] = []
+            if self._credentials is not None:
+                candidates.append(("app", self._credentials))
+            if sender_email:
+                try:
+                    from .oauth import load_user_credentials
+                    user_creds = await asyncio.to_thread(
+                        load_user_credentials, sender_email.strip().lower()
+                    )
+                    if user_creds is not None:
+                        candidates.append(("user", user_creds))
+                except Exception:
+                    logger.exception("[GoogleChat] Could not load user Drive credentials")
+
+            def _fetch_drive(creds: Any) -> Tuple[bytes, str, str]:
+                import io
+                from googleapiclient.http import MediaIoBaseDownload
+                drive = build_service("drive", "v3", credentials=creds, cache_discovery=False)
+                meta = drive.files().get(
+                    fileId=drive_file_id, fields="id,name,mimeType,size",
+                    supportsAllDrives=True,
+                ).execute()
+                source_mime = str(meta.get("mimeType") or mime or "")
+                resolved_name = str(meta.get("name") or filename)
+                if int(meta.get("size") or 0) > _MAX_INBOUND_ATTACHMENT_BYTES:
+                    raise ValueError("Drive attachment exceeds the 25 MB limit")
+                export = _DRIVE_EXPORT_TYPES.get(source_mime)
+                if source_mime.startswith("application/vnd.google-apps."):
+                    if export is None:
+                        raise ValueError(f"unsupported native Google Drive type: {source_mime}")
+                    resolved_mime, suffix = export
+                    if not resolved_name.casefold().endswith(suffix):
+                        resolved_name += suffix
+                    req = drive.files().export_media(fileId=drive_file_id, mimeType=resolved_mime)
+                else:
+                    resolved_mime = source_mime or "application/octet-stream"
+                    req = drive.files().get_media(fileId=drive_file_id, supportsAllDrives=True)
+                buf = io.BytesIO()
+                downloader = MediaIoBaseDownload(buf, req)
+                done = False
+                while not done:
+                    _status, done = downloader.next_chunk()
+                    if buf.tell() > _MAX_INBOUND_ATTACHMENT_BYTES:
+                        raise ValueError("Drive attachment exceeds the 25 MB limit")
+                return buf.getvalue(), resolved_mime, resolved_name
+
+            for identity, creds in candidates:
+                try:
+                    data, mime, filename = await asyncio.to_thread(_fetch_drive, creds)
+                    logger.info("[GoogleChat] Downloaded Drive attachment with %s identity", identity)
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "[GoogleChat] Drive download with %s identity failed: %s",
+                        identity, _redact_sensitive(str(exc)),
+                    )
+                    data = None
+
+        # Path 3: downloadUri fallback (rarely works with SA tokens, but try).
         if data is None and download_uri:
             if not _is_google_owned_host(download_uri):
                 logger.warning(
@@ -2233,7 +2924,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # Cache based on MIME. Upstream's cache_* helpers expect `ext` for
         # media (image/audio/video) and a positional `filename` for docs.
-        filename = attachment.get("contentName") or (name.split("/")[-1] if name else "attachment")
         if "." in filename:
             ext = "." + filename.rsplit(".", 1)[-1].lower()
         else:
@@ -2247,6 +2937,96 @@ class GoogleChatAdapter(BasePlatformAdapter):
         else:
             local = cache_document_from_bytes(data, filename)
         return local, mime
+
+    async def _expand_workspace_text_links(
+        self, text: str, *, sender_email: str = ""
+    ) -> str:
+        """Parse linked Google Docs/Markdown as text without local downloads."""
+        matches = list(_GOOGLE_WORKSPACE_URL_RE.finditer(text or ""))
+        if not matches:
+            return text
+        candidates: List[Tuple[str, Any]] = []
+        if sender_email:
+            try:
+                from .oauth import load_user_credentials
+
+                user_creds = await asyncio.to_thread(
+                    load_user_credentials, sender_email.strip().lower()
+                )
+                if user_creds is not None:
+                    candidates.append(("user", user_creds))
+            except Exception:
+                logger.exception("[GoogleChat] Could not load Workspace parser credentials")
+        if self._credentials is not None:
+            candidates.append(("app", self._credentials))
+
+        blocks: list[str] = []
+        seen: set[str] = set()
+        for match in matches:
+            file_id = match.group("id")
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            parsed: tuple[str, str] | None = None
+            for identity, creds in candidates:
+                def _fetch_workspace_text() -> tuple[str, str]:
+                    from robie_job_engine.skill_sync import (
+                        GOOGLE_DOC_MIME,
+                        GoogleDriveSkillSource,
+                    )
+
+                    drive = build_service(
+                        "drive", "v3", credentials=creds, cache_discovery=False
+                    )
+                    meta = drive.files().get(
+                        fileId=file_id,
+                        fields="id,name,mimeType,modifiedTime,webViewLink,size",
+                        supportsAllDrives=True,
+                    ).execute()
+                    name = str(meta.get("name") or "Google Workspace document")
+                    mime = str(meta.get("mimeType") or "")
+                    if mime != GOOGLE_DOC_MIME and not name.casefold().endswith(".md"):
+                        raise ValueError(
+                            "linked Drive file is not a Google Doc or Markdown file"
+                        )
+                    if int(meta.get("size") or 0) > _MAX_INBOUND_ATTACHMENT_BYTES:
+                        raise ValueError("linked Workspace document exceeds the size limit")
+                    data = GoogleDriveSkillSource(drive).read_file(meta)
+                    if len(data) > _MAX_INBOUND_ATTACHMENT_BYTES:
+                        raise ValueError("linked Workspace document exceeds the size limit")
+                    return name, data.decode("utf-8")
+
+                try:
+                    parsed = await asyncio.to_thread(_fetch_workspace_text)
+                    logger.info(
+                        "[GoogleChat] Parsed Workspace text link with %s identity",
+                        identity,
+                    )
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "[GoogleChat] Workspace link parse with %s identity failed: %s",
+                        identity,
+                        _redact_sensitive(str(exc)),
+                    )
+            if parsed:
+                name, content = parsed
+                blocks.append(
+                    f"SOURCE: {name} ({match.group(0)})\n{content[:100_000]}"
+                )
+            else:
+                blocks.append(
+                    f"SOURCE: {match.group(0)}\n"
+                    "Workspace text parser could not read this link with ROBIE's approved identity."
+                )
+        if not blocks:
+            return text
+        return (
+            text
+            + "\n\n[GOOGLE WORKSPACE TEXT PARSER]\n"
+            + "\n\n".join(blocks)
+            + "\n[END GOOGLE WORKSPACE TEXT PARSER]"
+        )
 
     # ------------------------------------------------------------------
     # Outbound send paths
@@ -2276,8 +3056,26 @@ class GoogleChatAdapter(BasePlatformAdapter):
         If ``content`` exceeds MAX_MESSAGE_LENGTH, the first chunk patches
         the typing card (if any), subsequent chunks are new messages.
         """
-        jobs = getattr(self, "_robie_jobs_by_reply", {})
-        job_id = jobs.pop(reply_to, None) if reply_to else None
+        job_id = None
+        if reply_to:
+            try:
+                queue = await asyncio.to_thread(self._durable_chat_queue)
+                link = await asyncio.to_thread(
+                    queue.conversation_job_for_event, reply_to
+                )
+                job_id = link.get("job_id") if link else None
+            except Exception:
+                # Fail closed: a transient durable-ledger error must not cause
+                # an unguarded completion claim.
+                logger.exception(
+                    "[GoogleChat] durable reply-to-Job lookup failed reply=%s",
+                    reply_to,
+                )
+                return SendResult(
+                    success=False,
+                    error="durable reply-to-Job lookup failed",
+                )
+        content = redact_text(content)
         content = guard_chat_response(ROBIE_JOB_DB, job_id, content)
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
         self.pause_typing_for_chat(chat_id)

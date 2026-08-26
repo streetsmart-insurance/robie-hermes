@@ -6,9 +6,14 @@ After=local-fs.target
 Type=oneshot
 User=streetsmart-hermes
 Group=streetsmart-hermes
-WorkingDirectory=/opt/streetsmart-hermes/robie-job-engine
-Environment=PYTHONPATH=/opt/streetsmart-hermes/robie-job-engine
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
 Environment=ROBIE_DASHBOARD_SHEET_ID=1Qj0-i4QJuNkfWtjdfAdpQpI1JmC44KmThr_rrzGG6EQ
+Environment=ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1
+Environment=ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME=05:30
+Environment=ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=America/New_York
+Environment=ROBIE_EZLYNX_SESSION_LOCK=/opt/streetsmart-hermes/robie-job-engine/data/ezlynx-session.lock
+Environment=ROBIE_EZLYNX_LOGIN_HELPER=/opt/streetsmart-hermes/releases/current/ezlynx_login_bootstrap.py
 ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.scheduler
 NoNewPrivileges=true
 PrivateTmp=true

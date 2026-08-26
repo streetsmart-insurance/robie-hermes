@@ -9,7 +9,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import JobStatus, TERMINAL_STATUSES, VerificationEvidence
+from .complete_guard import intended_destination_identity, require_complete_postcondition
+from .models import (
+    VERIFIER_AUTHORITY,
+    WAITING_STATUSES,
+    JobStatus,
+    TERMINAL_STATUSES,
+    VerificationEvidence,
+)
+from .secrets import redact_mapping, redact_text
 
 
 def utc_now() -> str:
@@ -115,6 +123,7 @@ class JobStore:
         idempotency_key: str | None = None,
         max_attempts: int = 3,
     ) -> dict[str, Any]:
+        payload = redact_mapping(payload)
         key = idempotency_key or hashlib.sha256(
             f"{action_type}:{canonical_json(payload)}".encode()
         ).hexdigest()
@@ -146,6 +155,119 @@ class JobStore:
             if owned:
                 conn.close()
 
+    def fail_orphaned_chat_jobs(
+        self,
+        *,
+        older_than_seconds: int = 300,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Fail generic zero-attempt Chat Jobs that no worker ever claimed."""
+        if older_than_seconds < 1:
+            raise ValueError("orphan timeout must be positive")
+        at = now or datetime.now(timezone.utc)
+        cutoff = (at - timedelta(seconds=older_than_seconds)).isoformat()
+        stamp = at.isoformat()
+        reason = (
+            "execution did not start: the generic Google Chat Job was not claimed "
+            f"within {older_than_seconds} seconds"
+        )
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status=? AND action_type='hermes.google_chat_task'
+                     AND attempt_count=0 AND lease_owner IS NULL
+                     AND updated_at<=?""",
+                (JobStatus.RUNNING.value, cutoff),
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            for job_id in job_ids:
+                conn.execute(
+                    """UPDATE jobs SET status=?,last_error=?,next_wakeup_at=NULL,
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                    (JobStatus.FAILED.value, reason, stamp, job_id),
+                )
+                conn.execute(
+                    """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                       VALUES (?, 'orphan_timeout', ?, ?)
+                       ON CONFLICT(job_id,kind) DO UPDATE SET
+                       data_json=excluded.data_json,created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        canonical_json({"reason": reason, "cutoff": cutoff}),
+                        stamp,
+                    ),
+                )
+        return job_ids
+
+    def retarget_unattempted(
+        self,
+        job_id: str,
+        action_type: str,
+        payload_updates: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Safely reroute a zero-attempt generic Job without changing its ID."""
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["attempt_count"] != 0:
+                raise ValueError("attempted jobs cannot be retargeted")
+            if row["lease_owner"]:
+                raise ValueError("leased jobs cannot be retargeted")
+            if row["action_type"] not in {
+                "hermes.google_chat_task",
+                "hermes.plain_english",
+                "hermes.needs_clarification",
+            }:
+                raise ValueError("only generic chat jobs can be retargeted")
+            if row["status"] not in {
+                JobStatus.PENDING.value,
+                JobStatus.RUNNING.value,
+                JobStatus.UNVERIFIED.value,
+                JobStatus.NEEDS_CLARIFICATION.value,
+            }:
+                raise ValueError(f"job status {row['status']} cannot be retargeted")
+            action = conn.execute(
+                "SELECT 1 FROM checkpoints WHERE job_id=? AND kind='action'", (job_id,)
+            ).fetchone()
+            if action is not None:
+                raise ValueError("jobs with destination action evidence cannot be retargeted")
+            payload = json.loads(row["payload_json"] or "{}")
+            payload.update(redact_mapping(payload_updates))
+            conn.execute(
+                """UPDATE jobs SET action_type=?,payload_json=?,status=?,resume_status=NULL,
+                   next_wakeup_at=NULL,lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,
+                   updated_at=? WHERE id=?""",
+                (
+                    action_type,
+                    canonical_json(payload),
+                    JobStatus.PENDING.value,
+                    now,
+                    job_id,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                   VALUES (?, 'route_correction', ?, ?)
+                   ON CONFLICT(job_id,kind) DO UPDATE SET
+                   data_json=excluded.data_json,created_at=excluded.created_at""",
+                (
+                    job_id,
+                    canonical_json(
+                        {
+                            "from_action_type": row["action_type"],
+                            "to_action_type": action_type,
+                            "reason": reason,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            return self.get_job(job_id, conn=conn)
+
     def claim(self, job_id: str, owner: str, lease_seconds: int = 120) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
@@ -153,15 +275,50 @@ class JobStore:
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
                 raise KeyError(job_id)
-            if JobStatus(row["status"]) in TERMINAL_STATUSES or row["status"] == JobStatus.PAUSED:
+            current = JobStatus(row["status"])
+            if (
+                current in TERMINAL_STATUSES
+                or current in WAITING_STATUSES
+                or current == JobStatus.RETRY_WAIT
+            ):
                 return None
             lease_expired = not row["lease_expires_at"] or row["lease_expires_at"] <= now.isoformat()
-            if row["lease_owner"] and row["lease_owner"] != owner and not lease_expired:
+            if row["lease_owner"] and not lease_expired:
                 return None
             conn.execute(
                 "UPDATE jobs SET lease_owner=?,lease_expires_at=?,updated_at=? WHERE id=?",
                 (owner, expiry, now.isoformat(), job_id),
             )
+            return self.get_job(job_id, conn=conn)
+
+    def release_lease(self, job_id: str) -> dict[str, Any]:
+        now = utc_now()
+        with self.transaction() as conn:
+            conn.execute(
+                """UPDATE jobs SET lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+                   WHERE id=?""",
+                (now, job_id),
+            )
+            return self.get_job(job_id, conn=conn)
+
+    def renew_lease(
+        self,
+        job_id: str,
+        owner: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> dict[str, Any]:
+        """Extend the exact worker-owned Job lease without changing attempts."""
+        now = datetime.now(timezone.utc)
+        expiry = (now + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        with self.transaction() as conn:
+            changed = conn.execute(
+                """UPDATE jobs SET lease_expires_at=?,updated_at=?
+                   WHERE id=? AND lease_owner=?""",
+                (expiry, now.isoformat(), job_id, owner),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("job lease is missing or owned by another worker")
             return self.get_job(job_id, conn=conn)
 
     def transition(
@@ -174,6 +331,7 @@ class JobStore:
         next_wakeup_at: str | None = None,
         resume_status: JobStatus | None = None,
         release_lease: bool = False,
+        authority: str = "job-engine",
     ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction() as conn:
@@ -183,13 +341,83 @@ class JobStore:
             current = JobStatus(row["status"])
             if expected is not None and current not in expected:
                 raise RuntimeError(f"invalid transition {current} -> {status}")
+            if status == JobStatus.COMPLETE:
+                evidence = conn.execute(
+                    """SELECT locator,expected_json,observed_json,captured_at,
+                              evidence_sha256,verified,authoritative,created_at
+                       FROM verification_evidence
+                       WHERE job_id=? AND verified=1 AND authoritative=1
+                       ORDER BY id DESC LIMIT 1""",
+                    (job_id,),
+                ).fetchone()
+                job_meta = conn.execute(
+                    "SELECT created_at, payload_json FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                perform = conn.execute(
+                    """SELECT created_at FROM attempts
+                       WHERE job_id=? AND phase='perform'
+                       ORDER BY id DESC LIMIT 1""",
+                    (job_id,),
+                ).fetchone()
+                action_ckpt = conn.execute(
+                    """SELECT created_at, data_json FROM checkpoints
+                       WHERE job_id=? AND kind='action'""",
+                    (job_id,),
+                ).fetchone()
+                attempt_floors = [
+                    perform["created_at"] if perform else None,
+                    action_ckpt["created_at"] if action_ckpt else None,
+                ]
+                stored_not_before = max(
+                    (item for item in attempt_floors if item),
+                    default=job_meta["created_at"] if job_meta else None,
+                )
+                action_data = (
+                    json.loads(action_ckpt["data_json"])
+                    if action_ckpt and action_ckpt["data_json"]
+                    else None
+                )
+                payload = (
+                    json.loads(job_meta["payload_json"])
+                    if job_meta and job_meta["payload_json"]
+                    else None
+                )
+                require_complete_postcondition(
+                    current=current,
+                    authority=authority,
+                    verified=bool(evidence and evidence["verified"]),
+                    authoritative=bool(evidence and evidence["authoritative"]),
+                    expected=json.loads(evidence["expected_json"]) if evidence else None,
+                    observed=json.loads(evidence["observed_json"]) if evidence else None,
+                    captured_at=evidence["captured_at"] if evidence else None,
+                    evidence_ref=evidence["evidence_sha256"] if evidence else None,
+                    locator=evidence["locator"] if evidence else None,
+                    job_id=job_id,
+                    verifier_authority=VERIFIER_AUTHORITY,
+                    not_before=job_meta["created_at"] if job_meta else None,
+                    stored_at=evidence["created_at"] if evidence else None,
+                    stored_not_before=stored_not_before,
+                    intended=intended_destination_identity(
+                        action=action_data, payload=payload
+                    ),
+                )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(
                 """UPDATE jobs SET status=?,resume_status=?,last_error=?,next_wakeup_at=?,
                 lease_owner=CASE WHEN ? THEN NULL ELSE lease_owner END,
                 lease_expires_at=CASE WHEN ? THEN NULL ELSE lease_expires_at END,
                 completed_at=?,updated_at=? WHERE id=?""",
-                (status, resume_status, error, next_wakeup_at, release_lease, release_lease, completed_at, now, job_id),
+                (
+                    status,
+                    resume_status,
+                    redact_text(error) if error else None,
+                    next_wakeup_at,
+                    release_lease,
+                    release_lease,
+                    completed_at,
+                    now,
+                    job_id,
+                ),
             )
             return self.get_job(job_id, conn=conn)
 
@@ -205,8 +433,51 @@ class JobStore:
             conn.execute(
                 """INSERT INTO checkpoints(job_id,kind,data_json,created_at) VALUES(?,?,?,?)
                 ON CONFLICT(job_id,kind) DO UPDATE SET data_json=excluded.data_json,created_at=excluded.created_at""",
-                (job_id, kind, canonical_json(data), utc_now()),
+                (job_id, kind, canonical_json(redact_mapping(data)), utc_now()),
             )
+
+    def fail_unpublished_completion(self, job_id: str, error: str) -> dict[str, Any]:
+        """Fail a verified Job whose required Control Center publication failed.
+
+        This narrow correction is allowed only before a successful publication
+        checkpoint exists.  It prevents a terminal Chat card from advertising
+        COMPLETE when the authoritative evidence or recording link is absent
+        from the operator ledger.
+        """
+        now = utc_now()
+        safe_error = redact_text(error)
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(job_id)
+            if JobStatus(row["status"]) != JobStatus.COMPLETE:
+                raise RuntimeError("only an unpublished COMPLETE Job may be failed")
+            published = conn.execute(
+                """SELECT 1 FROM checkpoints
+                   WHERE job_id=? AND kind='control_center_publication'""",
+                (job_id,),
+            ).fetchone()
+            if published:
+                raise RuntimeError("published COMPLETE Jobs are immutable")
+            conn.execute(
+                """UPDATE jobs SET status=?,last_error=?,completed_at=NULL,
+                   lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                (JobStatus.FAILED.value, safe_error, now, job_id),
+            )
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                   VALUES (?, 'control_center_publication_failed', ?, ?)
+                   ON CONFLICT(job_id,kind) DO UPDATE SET
+                   data_json=excluded.data_json,created_at=excluded.created_at""",
+                (
+                    job_id,
+                    canonical_json({"status": "FAILED", "error": safe_error}),
+                    now,
+                ),
+            )
+            return self.get_job(job_id, conn=conn)
 
     def get_checkpoint(self, job_id: str, kind: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -219,13 +490,15 @@ class JobStore:
         with self.transaction() as conn:
             conn.execute(
                 "INSERT INTO attempts(job_id,phase,attempt_number,outcome,detail_json,created_at) VALUES(?,?,?,?,?,?)",
-                (job_id, phase, number, outcome, canonical_json(detail), utc_now()),
+                (job_id, phase, number, outcome, canonical_json(redact_mapping(detail)), utc_now()),
             )
 
     def add_evidence(self, job_id: str, verified: bool, evidence: VerificationEvidence) -> None:
+        expected = redact_mapping(evidence.expected)
+        observed = redact_mapping(evidence.observed)
         body = canonical_json(
-            {"method": evidence.method, "source": evidence.source, "expected": evidence.expected,
-             "observed": evidence.observed, "authoritative": evidence.authoritative,
+            {"method": evidence.method, "source": evidence.source, "expected": expected,
+             "observed": observed, "authoritative": evidence.authoritative,
              "captured_at": evidence.captured_at, "locator": evidence.locator}
         )
         with self.transaction() as conn:
@@ -234,7 +507,7 @@ class JobStore:
                 (job_id,verified,method,source,authoritative,expected_json,observed_json,locator,
                  evidence_sha256,captured_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, int(verified), evidence.method, evidence.source, int(evidence.authoritative),
-                 canonical_json(evidence.expected), canonical_json(evidence.observed), evidence.locator,
+                 canonical_json(expected), canonical_json(observed), evidence.locator,
                  hashlib.sha256(body.encode()).hexdigest(), evidence.captured_at, utc_now()),
             )
 
@@ -247,10 +520,27 @@ class JobStore:
 
     def resume(self, job_id: str) -> dict[str, Any]:
         job = self.get_job(job_id)
-        if job["status"] != JobStatus.PAUSED:
+        current = JobStatus(job["status"])
+        if current not in WAITING_STATUSES:
             return job
         target = JobStatus(job["resume_status"] or JobStatus.PENDING)
-        return self.transition(job_id, target, expected={JobStatus.PAUSED}, release_lease=True)
+        return self.transition(job_id, target, expected=set(WAITING_STATUSES), release_lease=True)
+
+    def list_evidence(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT job_id,verified,method,source,authoritative,expected_json,
+                          observed_json,locator,evidence_sha256,captured_at,created_at
+                   FROM verification_evidence WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["expected"] = json.loads(item.pop("expected_json"))
+            item["observed"] = json.loads(item.pop("observed_json"))
+            result.append(item)
+        return result
 
     def wake_due(self, now: str | None = None) -> list[str]:
         now = now or utc_now()
@@ -265,6 +555,50 @@ class JobStore:
                     (row["resume_status"] or JobStatus.PENDING, now, row["id"]),
                 )
             return [row["id"] for row in rows]
+
+    def list_pending(self, action_types: set[str] | frozenset[str], limit: int = 25) -> list[str]:
+        """Return durable runnable IDs; JobEngine.claim remains the concurrency gate."""
+        if not action_types:
+            return []
+        values = sorted(action_types)
+        placeholders = ",".join("?" for _ in values)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT id FROM jobs
+                    WHERE status=? AND action_type IN ({placeholders})
+                    ORDER BY created_at LIMIT ?""",
+                [JobStatus.PENDING.value, *values, limit],
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def list_runnable(
+        self,
+        action_types: set[str] | frozenset[str],
+        limit: int = 25,
+    ) -> list[str]:
+        """Return executable Jobs that can continue from a durable checkpoint."""
+        if not action_types:
+            return []
+        values = sorted(action_types)
+        placeholders = ",".join("?" for _ in values)
+        now = utc_now()
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT id FROM jobs
+                    WHERE status IN (?,?,?)
+                      AND action_type IN ({placeholders})
+                      AND (lease_owner IS NULL OR lease_expires_at<=?)
+                    ORDER BY created_at LIMIT ?""",
+                [
+                    JobStatus.PENDING.value,
+                    JobStatus.RUNNING.value,
+                    JobStatus.VERIFYING.value,
+                    *values,
+                    now,
+                    limit,
+                ],
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     @staticmethod
     def _decode_job(row: sqlite3.Row) -> dict[str, Any]:

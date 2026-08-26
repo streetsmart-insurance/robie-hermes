@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import JobStatus, TERMINAL_STATUSES
+from .models import WAITING_STATUSES, JobStatus, TERMINAL_STATUSES
 from .store import JobStore, canonical_json
 
 
@@ -15,6 +15,11 @@ UTC = timezone.utc
 RESET_COMMANDS = {"/new", "/reset", "new job", "start fresh"}
 CONTINUATION_PREFIXES = (
     "continue ", "resume ", "pick up where we left off", "continue job ",
+)
+CORRECTION_PREFIXES = (
+    "actually ", "correction", "correct that", "do not ", "don't ",
+    "instead ", "make sure ", "retry", "try again", "use ", "set ",
+    "clear ", "keep ", "still ", "no ", "no,", "yes ", "yes,",
 )
 
 
@@ -110,9 +115,10 @@ class JobContextManager:
             self.archive(conversation_id, reason="two-hour inactivity expiration", now=at)
             return ContextDecision("NEW", None, f"expired context for {old_job or 'no job'}")
         explicit_continue = any(normalized.startswith(prefix) for prefix in CONTINUATION_PREFIXES)
-        if explicit_continue and current and current.get("active_job_id"):
+        corrective_reply = any(normalized.startswith(prefix) for prefix in CORRECTION_PREFIXES)
+        if (explicit_continue or corrective_reply) and current and current.get("active_job_id"):
             job = self.jobs.get_job(current["active_job_id"])
-            if job["status"] == JobStatus.PAUSED:
+            if JobStatus(job["status"]) in WAITING_STATUSES:
                 self.jobs.resume(job["id"])
             elif job["status"] == JobStatus.UNVERIFIED:
                 # UNVERIFIED is closed to automatic workers but remains open
@@ -131,7 +137,11 @@ class JobContextManager:
                     release_lease=True,
                 )
             self.touch(conversation_id, now=at)
-            return ContextDecision("RESUME", job["id"], "explicit continuation")
+            return ContextDecision(
+                "RESUME",
+                job["id"],
+                "explicit continuation" if explicit_continue else "corrective continuation",
+            )
         return ContextDecision("NEW", None, "new DM starts fresh by default")
 
     def bind_job(
@@ -263,8 +273,17 @@ class JobContextManager:
     ) -> str:
         current = self.get(conversation_id)
         summary = current.get("summary") if current and current.get("active_job_id") else {}
+        from .skill_sync import load_core_context
+
+        synced_core = load_core_context()
+        system_rules = "\n".join(permanent_rules)
+        if synced_core:
+            system_rules += (
+                "\n\nAPPROVED DRIVE-SYNCED GLOBAL CORE RULES\n"
+                + synced_core
+            )
         sections = [
-            "SYSTEM RULES\n" + "\n".join(permanent_rules),
+            "SYSTEM RULES\n" + system_rules,
             "ACTIVE JOB SUMMARY\n" + canonical_json(summary or {}),
         ]
         if relevant_skill:
