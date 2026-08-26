@@ -8,8 +8,10 @@ from robie_job_engine.decisions import (
     handle_google_chat_decision,
     parse_google_chat_interaction,
     resolve_google_chat_interaction,
+    resolve_bound_text_decision,
 )
 from robie_job_engine.models import JobStatus
+from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.store import JobStore
 from function_loader import load_function_tests
 
@@ -160,3 +162,68 @@ def test_client_cannot_expand_session_approval_scope(tmp_path):
     assert not decisions.session_is_approved(
         "space:attacker:production-admin", "carlo@streetsmart.insurance"
     )
+
+
+def test_text_approval_requires_exact_active_job_and_pending_operation(tmp_path):
+    jobs, decisions, job, decision = _decision(tmp_path)
+    rejected = resolve_bound_text_decision(
+        str(tmp_path / "jobs.db"),
+        "/approve",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=job["id"],
+    )
+    assert rejected.status == "REJECTED"
+    assert jobs.get_job(job["id"])["status"] == JobStatus.PAUSED
+    wrong_job = resolve_bound_text_decision(
+        str(tmp_path / "jobs.db"),
+        f"/approve wrong-job {decision['id']}",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=job["id"],
+    )
+    assert wrong_job.status == "REJECTED"
+    approved = resolve_bound_text_decision(
+        str(tmp_path / "jobs.db"),
+        f"/approve {job['id']} {decision['id']}",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=job["id"],
+        active_decision_id=decision["id"],
+    )
+    assert approved.status == "RESOLVED"
+    assert jobs.get_job(job["id"])["status"] == JobStatus.PENDING
+
+
+def test_pending_approval_is_bound_to_durable_conversation_state(tmp_path):
+    db = str(tmp_path / "jobs.db")
+    jobs = JobStore(db)
+    job = jobs.create_job("test", {"account": "123"}, idempotency_key="durable-approval")
+    decision = DecisionStore(db).create(
+        job_id=job["id"],
+        checkpoint_id="before-write",
+        prompt="Apply the verified change?",
+        choices=[
+            {"label": "Approve", "value": "approve"},
+            {"label": "Deny", "value": "deny"},
+        ],
+        authorized_users=["carlo@streetsmart.insurance"],
+        conversation_id="spaces/dm",
+        message_id="messages/approval-card",
+        event_id="events/approval-card",
+    )
+
+    reconstructed = DurableChatEventQueue(db)
+    link = reconstructed.active_conversation_job("spaces/dm")
+    assert link["job_id"] == job["id"]
+    assert link["pending_decision_id"] == decision["id"]
+    assert link["interaction_state"] == {"awaiting": "approval"}
+
+    result = resolve_bound_text_decision(
+        db,
+        f"/approve {job['id']} {decision['id']}",
+        actor="carlo@streetsmart.insurance",
+        active_job_id=link["job_id"],
+        active_decision_id=link["pending_decision_id"],
+    )
+    assert result.status == "RESOLVED"
+    cleared = reconstructed.active_conversation_job("spaces/dm")
+    assert cleared["pending_decision_id"] is None
+    assert cleared["interaction_state"] == {}

@@ -8,7 +8,14 @@ from .operations import OperationsStore
 
 
 UTC = timezone.utc
-ATTENTION_STATUSES = {"UNVERIFIED", "FAILED", "PAUSED"}
+ATTENTION_STATUSES = {
+    "UNVERIFIED",
+    "FAILED",
+    "PAUSED",
+    "WAITING",
+    "NEEDS_CLARIFICATION",
+    "NEEDS_SKILL",
+}
 
 
 @dataclass(frozen=True)

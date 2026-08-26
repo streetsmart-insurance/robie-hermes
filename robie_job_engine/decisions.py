@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from .models import JobStatus
+from .chat_queue import DurableChatEventQueue
 from .store import JobStore, canonical_json, utc_now
 
 
@@ -42,6 +43,7 @@ class DecisionStore:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         JobStore(db_path)
+        DurableChatEventQueue(db_path)
         self._migrate()
 
     def _connect(self) -> sqlite3.Connection:
@@ -137,6 +139,9 @@ class DecisionStore:
         authorized_users: Iterable[str],
         ttl_minutes: int = 60,
         session_scope: str | None = None,
+        conversation_id: str | None = None,
+        message_id: str | None = None,
+        event_id: str | None = None,
     ) -> dict[str, Any]:
         if ttl_minutes < 1 or ttl_minutes > 24 * 7:
             raise ValueError("decision TTL must be between 1 minute and 7 days")
@@ -194,6 +199,54 @@ class DecisionStore:
                     lease_expires_at=NULL,updated_at=? WHERE id=?""",
                     (JobStatus.PAUSED.value, resume_status, now, job_id),
                 )
+                if conversation_id or message_id or event_id:
+                    if not all((conversation_id, message_id, event_id)):
+                        raise DecisionError(
+                            "conversation_id, message_id, and event_id are required together"
+                        )
+                    conn.execute(
+                        """UPDATE conversation_job_links SET active=0,updated_at=?
+                           WHERE conversation_id=? AND active=1 AND job_id<>?""",
+                        (now, conversation_id, job_id),
+                    )
+                    existing_link = conn.execute(
+                        "SELECT job_id,pending_decision_id FROM conversation_job_links WHERE event_id=?",
+                        (event_id,),
+                    ).fetchone()
+                    if existing_link:
+                        if (
+                            existing_link["job_id"] != job_id
+                            or existing_link["pending_decision_id"] not in (None, decision_id)
+                        ):
+                            raise DecisionError(
+                                "approval prompt event is already bound to different work"
+                            )
+                        conn.execute(
+                            """UPDATE conversation_job_links
+                               SET relation='APPROVAL',pending_decision_id=?,
+                                   interaction_state_json=?,active=1,updated_at=?
+                               WHERE event_id=?""",
+                            (
+                                decision_id,
+                                canonical_json({"awaiting": "approval"}),
+                                now,
+                                event_id,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """INSERT INTO conversation_job_links
+                               (conversation_id,job_id,message_id,event_id,relation,
+                                pending_decision_id,interaction_state_json,
+                                active,created_at,updated_at)
+                               VALUES (?,?,?,?, 'APPROVAL',?,?,1,?,?)""",
+                            (
+                                conversation_id, job_id, message_id, event_id,
+                                decision_id,
+                                canonical_json({"awaiting": "approval"}),
+                                now, now,
+                            ),
+                        )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -312,6 +365,12 @@ class DecisionStore:
                         created_at=excluded.created_at""",
                         (str(uuid.uuid4()), stored_scope, actor_key, expiry, decision_id, now),
                     )
+                conn.execute(
+                    """UPDATE conversation_job_links
+                       SET pending_decision_id=NULL,interaction_state_json='{}',updated_at=?
+                       WHERE pending_decision_id=?""",
+                    (now, decision_id),
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -471,6 +530,62 @@ def resolve_google_chat_interaction(
         custom_text=interaction.custom_text,
         session_scope=interaction.session_scope,
     )
+
+
+def resolve_bound_text_decision(
+    db_path: str,
+    command: str,
+    *,
+    actor: str,
+    active_job_id: str | None,
+    active_decision_id: str | None = None,
+) -> DecisionResult:
+    """Resolve `/approve JOB DECISION` or `/deny JOB DECISION` fail-closed.
+
+    Plain approvals are intentionally insufficient: the command must name the
+    exact active Job and exact pending operation (decision id). This prevents a
+    late approval from being consumed by a newer or already-denied operation.
+    """
+    parts = str(command or "").strip().split()
+    if len(parts) != 3 or parts[0].casefold() not in {"/approve", "/deny"}:
+        return DecisionResult(
+            "", "REJECTED", None, None, None, False,
+            "Use /approve JOB_ID DECISION_ID or /deny JOB_ID DECISION_ID from the pending request.",
+        )
+    job_id, decision_id = parts[1], parts[2]
+    if not active_job_id or job_id != active_job_id:
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That approval does not match the active Job. Nothing was resumed.",
+        )
+    if not active_decision_id or decision_id != active_decision_id:
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That approval does not match the active pending operation. Nothing was resumed.",
+        )
+    decisions = DecisionStore(db_path)
+    try:
+        pending = decisions.get(decision_id)
+    except KeyError:
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That pending operation was not found. Nothing was resumed.",
+        )
+    if pending["job_id"] != job_id or pending["status"] != "PENDING":
+        return DecisionResult(
+            decision_id, "REJECTED", None, None, None, False,
+            "That operation is not pending for the named Job. Nothing was resumed.",
+        )
+    choice = "approve" if parts[0].casefold() == "/approve" else "deny"
+    return decisions.resolve(decision_id, actor=actor, choice=choice)
+
+
+def text_decision_response(result: DecisionResult) -> str:
+    if result.status == "RESOLVED":
+        if result.choice == "deny":
+            return "ROBIE denied the exact pending operation and stopped that Job."
+        return "ROBIE approved the exact pending operation for the named Job."
+    return result.message
 
 
 def google_chat_decision_response(result: DecisionResult) -> dict[str, Any]:

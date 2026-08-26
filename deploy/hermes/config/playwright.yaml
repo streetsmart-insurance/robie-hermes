@@ -1,0 +1,10 @@
+# Merge this fragment into the Hermes profile configuration during deployment.
+platform_toolsets:
+  cli:
+    - playwright
+  google_chat:
+    - playwright
+
+playwright:
+  cdp_url_env: ROBIE_PLAYWRIGHT_CDP_URL
+  fail_closed: true

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from pathlib import Path
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.email_guard import run_guarded_email_task
 from robie_job_engine.store import JobStore
@@ -10,7 +11,7 @@ from robie_job_engine.store import JobStore
 
 class EmailGuardTests(unittest.TestCase):
     def test_opaque_hermes_success_is_reported_unverified_and_deduplicated(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             calls = []
 

@@ -3,30 +3,103 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from .context_policy import JobContextManager
+from .chat_queue import DurableChatEventQueue
 from .operations import OperationsStore
 from .store import JobStore
+
+
+def _next_daily(
+    local_time: str,
+    timezone_name: str,
+    *,
+    now: datetime | None = None,
+) -> str:
+    hour, minute = (int(part) for part in local_time.split(":", 1))
+    zone = ZoneInfo(timezone_name)
+    now = now.astimezone(zone) if now is not None else datetime.now(zone)
+    candidate = datetime.combine(now.date(), time(hour=hour, minute=minute), tzinfo=zone)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc).isoformat()
+
+
+def _ensure_default_schedules(ops: OperationsStore) -> None:
+    if os.environ.get("ROBIE_ENABLE_EZLYNX_SESSION_REFRESH", "0") != "1":
+        return
+    local_time = os.environ.get("ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME", "05:30")
+    timezone_name = os.environ.get("ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE", "America/New_York")
+    payload = {
+        "worker": "session-refresh",
+        "resource_id": "ezlynx:authenticated-browser-session",
+        "profile_id": "robie-ezlynx-canonical-profile",
+        "perform_timeout_seconds": 210,
+        "_daily_local_time": local_time,
+        "_schedule_timezone": timezone_name,
+    }
+    next_run_at = _next_daily(local_time, timezone_name)
+    # Preserve the former table during migration, while scheduled_jobs is the
+    # canonical 60-second poller source for all new executions.
+    ops.ensure_schedule(
+        "Daily EZLynx and Gmail session refresh",
+        "ezlynx.session_refresh",
+        payload,
+        1440,
+        next_run_at=next_run_at,
+        reconcile=True,
+    )
+    cron = f"{int(local_time.split(':')[1])} {int(local_time.split(':')[0])} * * *"
+    ops.ensure_recurring_job(
+        "Daily EZLynx and Gmail session refresh",
+        "ezlynx.session_refresh",
+        payload,
+        cron,
+        timezone_name,
+        next_run_at=next_run_at,
+        target_ref="ezlynx:authenticated-browser-session",
+        reconcile=True,
+    )
 
 
 def run_once(db_path: str) -> dict[str, int]:
     jobs = JobStore(db_path)
     ops = OperationsStore(db_path)
+    _ensure_default_schedules(ops)
     woke = jobs.wake_due()
-    expired_contexts = JobContextManager(
-        db_path,
-        inactivity_minutes=int(os.environ.get("ROBIE_DM_CONTEXT_TTL_MINUTES", "120")),
-        context_char_budget=int(os.environ.get("ROBIE_CONTEXT_CHAR_BUDGET", "12000")),
-    ).expire_due()
+    orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
+    expired_contexts = DurableChatEventQueue(db_path).expire_inactive_conversations(
+        inactivity_minutes=int(os.environ.get("ROBIE_DM_CONTEXT_TTL_MINUTES", "120"))
+    )
     created = 0
-    for schedule in ops.claim_due_schedules():
+    from .chat_admin import next_cron_time
+
+    for schedule in ops.claim_due_recurring_jobs():
         # The persisted occurrence timestamp is the idempotency boundary. It
         # stays stable across restarts and clock/hour boundaries until the
         # schedule has been durably advanced.
         key = f"schedule:{schedule['id']}:{schedule['next_run_at']}"
-        job = jobs.create_job(schedule["action_type"], schedule["payload"], idempotency_key=key)
-        ops.advance_schedule(schedule["id"], job["id"])
+        payload = dict(schedule["parameters"])
+        payload.setdefault("task_name", schedule["task_name"])
+        job = jobs.create_job(schedule["action_type"], payload, idempotency_key=key)
+        ops.advance_recurring_job(
+            schedule["id"],
+            job["id"],
+            next_run_at=next_cron_time(
+                schedule["cron_spec"],
+                schedule["timezone"],
+                now=datetime.fromisoformat(schedule["next_run_at"]),
+            ),
+        )
         created += 1
+    executed = 0
+    from .request_routing import BOUNDED_ENGINE_ACTIONS
+    from .test_runtime import maybe_run_bounded_job
+
+    for job_id in jobs.list_runnable(BOUNDED_ENGINE_ACTIONS):
+        if maybe_run_bounded_job(db_path, job_id):
+            executed += 1
     synced = 0
     try:
         from .sheets_sync import sync_from_env
@@ -36,8 +109,10 @@ def run_once(db_path: str) -> dict[str, int]:
         print(json.dumps({"dashboard_sync_error": f"{type(exc).__name__}: {exc}"}))
     return {
         "woke": len(woke),
+        "orphaned_chat_jobs": len(orphaned_chat_jobs),
         "expired_contexts": len(expired_contexts),
         "created": created,
+        "executed": executed,
         "dashboard_synced": synced,
     }
 

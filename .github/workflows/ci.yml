@@ -23,9 +23,28 @@ jobs:
             echo "Sensitive or runtime file found in repository"
             exit 1
           fi
+      - name: Install Google Chat bridge dependencies
+        run: python -m pip install -r services/chat-http-bridge/requirements.txt
+      - name: Test Google Chat bridge
+        run: PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py' -v
       - name: Compile source
-        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q robie_job_engine tests
+        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine tests
       - name: Run acceptance suite
         run: PYTHONPATH=. python -m unittest discover -s tests -v
       - name: Build immutable release candidate
         run: bash scripts/build-release.sh "$RUNNER_TEMP/releases"
+
+  canonical-paths:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Canonical ephemeral-path tests (macOS /private/tmp)
+        run: |
+          PYTHONPATH=.:tests python -m unittest \
+            tests.test_engineering_report_p0p1.EngineeringReportP0P1Tests.test_canonical_ephemeral_paths_rejected_including_macos_private_tmp \
+            tests.test_engineering_report_p0p1.EngineeringReportP0P1Tests.test_phase04_durable_idempotency_at_most_one_action \
+            -v

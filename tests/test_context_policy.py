@@ -38,6 +38,17 @@ class ContextPolicyTests(unittest.TestCase):
         resume = self.context.decide("dm:carlo", "Continue the account audit", now=at + timedelta(minutes=6))
         self.assertEqual(resume.active_job_id, job["id"])
 
+    def test_corrective_reply_continues_the_exact_active_job(self):
+        at = datetime(2026, 8, 22, 10, tzinfo=UTC)
+        job = self._bind(at)
+        correction = self.context.decide(
+            "dm:carlo",
+            "No, clear My Submissions and keep Streetsmart Insurance",
+            now=at + timedelta(minutes=5),
+        )
+        self.assertEqual(correction.action, "RESUME")
+        self.assertEqual(correction.active_job_id, job["id"])
+
     def test_expiration_pauses_job_and_detaches_context_without_deleting_history(self):
         at = datetime(2026, 8, 22, 10, tzinfo=UTC)
         job = self._bind(at)

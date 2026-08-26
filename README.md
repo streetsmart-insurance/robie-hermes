@@ -36,6 +36,12 @@ Lifecycle:
 
 `PENDING -> RUNNING -> VERIFYING -> COMPLETE | UNVERIFIED | FAILED`
 
+Uncertain outcomes become `WAITING`, `NEEDS_CLARIFICATION`, `NEEDS_SKILL`,
+`UNVERIFIED`, or `FAILED`. They never become silent success. Only
+`JobEngine._verify` may set `COMPLETE`, and only after it reads fresh
+destination state and stores authoritative evidence. Action workers cannot
+authorize `COMPLETE`.
+
 Retries use persisted `RETRY_WAIT` wakeups with exponential backoff and jitter. The action
 checkpoint prevents a successful action from being repeated when only verification needs a
 retry. Idempotency keys deduplicate repeated Gmail/Google Chat delivery.
@@ -46,8 +52,13 @@ Integration boundaries:
   sync services unchanged.
 - Enqueue each inbound request with the Gmail message ID or Google Chat event ID as the
   `idempotency_key`.
-- Register the existing Hermes/cua-driver implementation as `hermes-cua`.
-- Route the three hardened EZLynx actions through `HermesCuaEzlynxWorker`.
+- Register the deterministic Playwright-backed browser port as `hermes-cua`;
+  the Job Engine remains the sole execution and completion authority.
+- Route carrier-proposal and browser-only read jobs through the bounded workers
+  in `carrier_proposal.py` and `browser_read.py`. Those workers never expose
+  terminal, raw-file, or code execution in staff Google Chat.
+- Route the three hardened EZLynx actions through `HermesCuaEzlynxWorker` using
+  the approved Playwright port described in `docs/PLAYWRIGHT_RUNTIME.md`.
 - Implement `EzlynxReadback.api_state` from an observed EZLynx network endpoint when available.
   Return `None` when it is not; the adapter must then create a fresh navigation/session and read
   the server-backed UI state.
@@ -60,3 +71,10 @@ Run the acceptance suite with:
 ```sh
 PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
+
+Test Hermes operators: see `docs/TEST_HERMES_OPERATOR_RUNBOOK.md` for copying
+the Razza quote into the Test artifact store, setting `ROBIE_ENV=TEST`,
+installing the Test-only systemd drop-in, and running
+`scripts/replay-quote-proposal.py`. That harness needs a real `--quote-pdf`
+path, refuses `COMPLETE` without stored verifier evidence, and never claims
+live Test `COMPLETE`.

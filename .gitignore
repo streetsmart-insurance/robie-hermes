@@ -28,6 +28,9 @@ browser-profile/
 chrome-profile/
 sessions/
 
+# Local durable test ledgers (must not live in /tmp)
+.robie-durable-test/
+
 # Python and test output
 __pycache__/
 *.py[cod]

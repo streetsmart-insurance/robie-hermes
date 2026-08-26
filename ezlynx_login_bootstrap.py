@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import re
 import time
@@ -13,26 +15,46 @@ from playwright.sync_api import sync_playwright
 
 CDP_URL = "http://127.0.0.1:9222"
 TOKEN_PATH = Path("/opt/streetsmart-hermes/.hermes/robie_google_token.json")
+EXPECTED_MAILBOX = "robie@streetsmart.insurance"
 OTP_PATTERNS = (
     re.compile(r"(?:verification|security|authentication|one[- ]time)\s+code\D{0,40}(\d{6})", re.I),
     re.compile(r"\bcode\D{0,20}(\d{6})\b", re.I),
 )
+AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
+SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
+LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
+INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def secret(name: str) -> str:
-    response = secretmanager.SecretManagerServiceClient().access_secret_version(
-        request={
-            "name": f"projects/streetsmart-hermes-poc/secrets/{name}/versions/latest"
-        }
+    client = secretmanager.SecretManagerServiceClient()
+    parent = f"projects/streetsmart-hermes-poc/secrets/{name}"
+    enabled = list(
+        client.list_secret_versions(
+            request={"parent": parent, "filter": "state:ENABLED"}
+        )
     )
+    if not enabled:
+        raise RuntimeError(f"No enabled version exists for required secret {name}")
+    newest = max(enabled, key=lambda version: version.create_time)
+    response = client.access_secret_version(request={"name": newest.name})
     return response.payload.data.decode("utf-8").strip()
+
+
+class MailboxIdentityError(RuntimeError):
+    pass
 
 
 def gmail_service():
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    profile = service.users().getProfile(userId="me").execute()
+    mailbox = str(profile.get("emailAddress") or "").strip().casefold()
+    if mailbox != EXPECTED_MAILBOX:
+        raise MailboxIdentityError("Robie mailbox identity did not match")
+    return service
 
 
 def decoded_body(payload: dict) -> str:
@@ -94,10 +116,32 @@ def visible_page(browser):
 
 def authenticated(page) -> bool:
     url = page.url.lower()
-    return "app.ezlynx.com" in url and "/auth/" not in url
+    if not url.startswith(AUTHENTICATED_APP_PREFIX):
+        return False
+    try:
+        login_controls = page.locator(LOGIN_CONTROL_SELECTOR).count()
+        internal_links = page.locator(INTERNAL_WEB_LINK_SELECTOR).count()
+    except Exception:
+        return False
+    return login_controls == 0 and internal_links > 0
+
+
+def navigate_to_submission_route(page) -> None:
+    page.goto(SUBMISSION_URL, wait_until="domcontentloaded")
+    page.wait_for_timeout(2_000)
 
 
 def main() -> int:
+    try:
+        # Verify the OAuth identity before retrieving credentials or requesting
+        # an MFA message. Carlo's mailbox must never be used as a fallback.
+        gmail_service()
+    except MailboxIdentityError:
+        print("MAILBOX_IDENTITY_MISMATCH")
+        return 25
+    except Exception:
+        print("ROBIE_MAILBOX_AUTH_REQUIRED")
+        return 26
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
         page = visible_page(browser)
@@ -108,6 +152,21 @@ def main() -> int:
             return 0
 
         url = page.url.lower()
+        recognized_auth_route = any(
+            route in url
+            for route in (
+                "/auth/account/login",
+                "/auth/twofactorverification/typeselection",
+                "/auth/twofactorverification/verificationcode",
+            )
+        )
+        if not recognized_auth_route:
+            navigate_to_submission_route(page)
+            if authenticated(page):
+                print("AUTHENTICATED")
+                return 0
+            url = page.url.lower()
+
         if "/auth/account/login" in url:
             page.locator("#txtUserName").fill(secret("ezlynx-username"))
             page.locator("#txtPassword").fill(secret("ezlynx-password"))
