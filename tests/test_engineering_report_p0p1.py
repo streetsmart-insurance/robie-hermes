@@ -569,7 +569,9 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         adapter = (root / "integrations/google_chat/adapter.py").read_text()
         chat_guard = (root / "robie_job_engine/chat_guard.py").read_text()
         engine = (root / "robie_job_engine/engine.py").read_text()
-        self.assertIn("maybe_run_bounded_job(ROBIE_JOB_DB, job_id)", adapter)
+        self.assertIn("_enqueue_bounded_chat_job", adapter)
+        self.assertIn("queue.claim_next", adapter)
+        self.assertIn("maybe_run_bounded_job, ROBIE_JOB_DB, job_id", adapter)
         self.assertIn("dispatch_operational_chat(", adapter)
         self.assertIn("DurableWorkLedger(db_path)", chat_guard)
         self.assertIn("IsolatedRunStore(db_path)", chat_guard)
@@ -830,6 +832,13 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         args = redact_tool_args({"authorization": "Bearer TESTVALUE123"})
         self.assertEqual(args["authorization"], REDACTED)
         self.assertNotIn("TESTVALUE123", str(args))
+
+    def test_fein_is_masked_from_logs_and_structured_traces(self):
+        fake_fein = "12-3456789"
+        self.assertNotIn(fake_fein, redact_text(f"FEIN={fake_fein}"))
+        args = redact_tool_args({"FEIN": fake_fein})
+        self.assertEqual(args["FEIN"], REDACTED)
+        self.assertNotIn(fake_fein, str(args))
 
     def test_concurrent_isolated_run_start_is_database_enforced(self):
         runs = IsolatedRunStore(self.db)

@@ -1,4 +1,9 @@
-from robie_job_engine.sheets_sync import _friendly_datetime, _friendly_jobs, _friendly_person
+from robie_job_engine.sheets_sync import (
+    _friendly_datetime,
+    _friendly_jobs,
+    _friendly_person,
+    _runtime_job_fields,
+)
 from function_loader import load_function_tests
 
 
@@ -73,3 +78,33 @@ def test_recording_column_surfaces_upload_failure():
         "recording_failure_stage": "UPLOAD",
     }])[0]
     assert row[11] == "Recording upload failed"
+
+
+def test_sensitive_recording_exemption_is_explicit_and_not_an_issue():
+    job = {
+        "id": "auth-refresh",
+        "action_type": "ezlynx.session_refresh",
+        "payload": {"task": "ezlynx.session_refresh"},
+        "status": "COMPLETE",
+        "verification_count": 1,
+        "verified_evidence_count": 1,
+        "authoritative_evidence_count": 1,
+        "recording_exemption": {"reason": "authentication may display credentials or MFA data"},
+    }
+    row = _friendly_jobs([job])[0]
+    assert row[9] == "HIGH — 98%"
+    assert row[10] == ""
+    assert row[11].startswith("Recording exempt — sensitive authentication flow")
+
+
+def test_complete_runtime_columns_are_derived_from_authoritative_evidence():
+    fields = _runtime_job_fields({
+        "status": "COMPLETE",
+        "verification_count": 1,
+        "verified_evidence_count": 3,
+        "authoritative_evidence_count": 1,
+        "updated_at": "2026-08-25T20:46:00+00:00",
+    })
+    assert fields["current_step"] == "Completed and independently verified"
+    assert fields["verification_status"] == "Verified"
+    assert fields["evidence_count"] == 3

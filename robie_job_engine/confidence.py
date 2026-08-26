@@ -17,6 +17,7 @@ def assess_job_confidence(job: dict[str, Any]) -> ConfidenceAssessment:
     authoritative = int(job.get("authoritative_evidence_count") or 0)
     verified = int(job.get("verified_evidence_count") or 0)
     recording_status = str(job.get("recording_status") or "")
+    recording_exempt = bool(job.get("recording_exemption"))
     issues: list[str] = []
 
     base = {
@@ -58,7 +59,7 @@ def assess_job_confidence(job: dict[str, Any]) -> ConfidenceAssessment:
         issues.append(str(job["last_error"])[:300])
     if recording_status == "FAILED":
         issues.append("Diagnostic recording failed")
-    elif recording_status not in {"READY", "RECORDING", "UPLOADING"}:
+    elif not recording_exempt and recording_status not in {"READY", "RECORDING", "UPLOADING"}:
         issues.append("No diagnostic recording is available yet")
 
     score = max(0, min(100, base))

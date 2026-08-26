@@ -220,10 +220,15 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         return JobEngine(self.store, workers, verifiers, recordings=self.recordings)
 
     def test_every_executable_skill_has_complete_contract(self):
-        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 7)
-        for contract in EXECUTABLE_SKILL_CONTRACTS.values():
+        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 9)
+        for action_type, contract in EXECUTABLE_SKILL_CONTRACTS.items():
             contract.validate()
-            self.assertEqual(contract.recording_policy, "REQUIRED")
+            expected_policy = (
+                "EXEMPT"
+                if action_type in {"ezlynx.session_refresh", "drive.skill_sync"}
+                else "REQUIRED"
+            )
+            self.assertEqual(contract.recording_policy, expected_policy)
             self.assertTrue(contract.expected_destination_result)
             self.assertTrue(contract.independent_verifier)
             self.assertGreaterEqual(contract.maximum_attempts, 1)

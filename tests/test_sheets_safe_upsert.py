@@ -59,6 +59,9 @@ class SheetsSafeUpsertTests(unittest.TestCase):
                 "action_type": "deployment.smoke",
                 "payload": {"task": "Live Test acceptance"},
                 "status": "COMPLETE",
+                "verification_count": 1,
+                "verified_evidence_count": 1,
+                "authoritative_evidence_count": 1,
                 "created_at": "2026-08-24T12:00:00+00:00",
                 "updated_at": "2026-08-24T12:01:00+00:00",
                 "completed_at": "2026-08-24T12:01:00+00:00",
@@ -75,7 +78,11 @@ class SheetsSafeUpsertTests(unittest.TestCase):
         self.assertEqual("sheet", request["spreadsheetId"])
         self.assertEqual("Jobs!A7:Y7", request["body"]["data"][0]["range"])
         self.assertEqual("target-job", request["body"]["data"][0]["values"][0][17])
-        self.assertEqual(1, len(request["body"]["data"]))
+        self.assertEqual(
+            ["Jobs!A7:Y7", "Jobs!Z7:AB7", "Jobs!AD7:AE7", "Jobs!AG7"],
+            [write["range"] for write in request["body"]["data"]],
+        )
+        self.assertEqual("Verified", request["body"]["data"][2]["values"][0][0])
 
     def test_upsert_job_rows_appends_without_clearing_existing_rows(self):
         values = MagicMock()

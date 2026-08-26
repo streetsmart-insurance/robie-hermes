@@ -273,8 +273,17 @@ class JobContextManager:
     ) -> str:
         current = self.get(conversation_id)
         summary = current.get("summary") if current and current.get("active_job_id") else {}
+        from .skill_sync import load_core_context
+
+        synced_core = load_core_context()
+        system_rules = "\n".join(permanent_rules)
+        if synced_core:
+            system_rules += (
+                "\n\nAPPROVED DRIVE-SYNCED GLOBAL CORE RULES\n"
+                + synced_core
+            )
         sections = [
-            "SYSTEM RULES\n" + "\n".join(permanent_rules),
+            "SYSTEM RULES\n" + system_rules,
             "ACTIVE JOB SUMMARY\n" + canonical_json(summary or {}),
         ]
         if relevant_skill:

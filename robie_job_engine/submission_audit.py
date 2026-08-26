@@ -12,6 +12,7 @@ from typing import Any
 
 from .models import JobStatus, WorkerResult
 from .secrets import redact_text
+from .ezlynx_session_lock import EzlynxSessionLockTimeout, exclusive_session
 
 
 RESOURCE_ID = "ezlynx:submission-center:overview:submissions"
@@ -141,8 +142,40 @@ class EzlynxSubmissionAuditWorker:
                 error="Submission Center audit is not marked read-only",
             )
         try:
-            ensure_ezlynx_login()
+            with exclusive_session():
+                ensure_ezlynx_login()
+                observed = run_submission_read(fresh=False)
+        except EzlynxSessionLockTimeout:
+            return WorkerResult(
+                False,
+                "ezlynx.submission_audit",
+                {},
+                retryable=True,
+                error="EZLYNX_SESSION_LOCK_TIMEOUT",
+            )
         except BoundedProcessError as exc:
+            if exc.code not in {
+                "MAILBOX_IDENTITY_MISMATCH",
+                "ROBIE_MAILBOX_AUTH_REQUIRED",
+                "MFA_CODE_NOT_FOUND",
+                "MFA_INPUT_NOT_FOUND",
+                "MFA_SUBMIT_NOT_FOUND",
+                "MFA_NOT_ACCEPTED",
+                "AUTH_STATE_REQUIRES_USERNAME_LOGIN",
+            }:
+                blocked = exc.code.startswith("PLAYWRIGHT_BLOCKED")
+                return WorkerResult(
+                    False,
+                    "ezlynx.submission_audit",
+                    {},
+                    retryable=(
+                        exc.code == "PLAYWRIGHT_TIMEOUT_RECOVERED" and not blocked
+                    ),
+                    error=exc.code,
+                    hold_status=(
+                        JobStatus.AWAITING_HUMAN_INPUT if blocked else None
+                    ),
+                )
             return WorkerResult(
                 False,
                 "ezlynx.submission_audit",
@@ -150,16 +183,6 @@ class EzlynxSubmissionAuditWorker:
                 retryable=False,
                 error=exc.code,
                 hold_status=JobStatus.NEEDS_AUTH,
-            )
-        try:
-            observed = run_submission_read(fresh=False)
-        except BoundedProcessError as exc:
-            return WorkerResult(
-                False,
-                "ezlynx.submission_audit",
-                {},
-                retryable=exc.code == "PLAYWRIGHT_TIMEOUT_RECOVERED",
-                error=exc.code,
             )
         required = dict(job["payload"].get("expected_postcondition") or {})
         for key, expected in required.items():
@@ -170,6 +193,7 @@ class EzlynxSubmissionAuditWorker:
                     {},
                     retryable=False,
                     error=f"PLAYWRIGHT_BLOCKED: {key} did not match the read-only contract",
+                    hold_status=JobStatus.AWAITING_HUMAN_INPUT,
                 )
         scope = dict(job["payload"].get("scope") or DEFAULT_SCOPE)
         return WorkerResult(
@@ -188,7 +212,11 @@ class SubprocessSubmissionReadback:
     """Independent fresh navigation/read-back used only by the Job verifier."""
 
     def fresh_authenticated_structured_read(self, scope: dict[str, Any]) -> dict[str, Any]:
-        observed = run_submission_read(fresh=True)
+        try:
+            with exclusive_session():
+                observed = run_submission_read(fresh=True)
+        except EzlynxSessionLockTimeout as exc:
+            raise BoundedProcessError("EZLYNX_SESSION_LOCK_TIMEOUT") from exc
         return {
             "resource_id": RESOURCE_ID,
             "authenticated": True,

@@ -5,8 +5,13 @@ from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
-from .context_policy import JobContextManager
+from .context_policy import (
+    CONTINUATION_PREFIXES,
+    CORRECTION_PREFIXES,
+)
+from .chat_queue import DurableChatEventQueue
 from .idempotency import DurableWorkLedger, IdempotencyError
+from .hitl import interaction_for_blocker, structured_blocker_reason
 from .job_schema import bounded_schema_hold_reason
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .runs import IsolatedRunStore, RunIsolationError
@@ -208,6 +213,18 @@ def chat_message_requires_job(
     if any(normalized.startswith(prefix) for prefix in _CONVERSATION_ONLY_PREFIXES):
         return False
     if (
+        "no operational work is requested" in normalized
+        and ("validation marker" in normalized or normalized.startswith("test only"))
+        and not any(
+            word in normalized
+            for word in (
+                "upload", "move", "delete", "apply", "send", "create",
+                "write", "update", "edit", "submit",
+            )
+        )
+    ):
+        return False
+    if (
         normalized.startswith("test only")
         and ("decision card" in normalized or "clarify" in normalized)
         and (
@@ -280,6 +297,9 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     """
     if not job_id:
         return text
+    from .skill_sync import add_synced_context
+
+    text = add_synced_context(text)
     store = JobStore(db_path)
     job = store.get_job(job_id)
     if job["status"] == JobStatus.FAILED:
@@ -292,13 +312,14 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         )
     ingestion = store.get_checkpoint(job_id, "ingestion") or {}
     artifacts = ingestion.get("artifacts") or []
-    if not artifacts:
-        return text
     lines = [
         "\n\n[ROBIE JOB ENGINE EXECUTION CONTRACT]",
         f"Job ID: {job_id}",
-        "Attachments below are trusted, private staged files owned by StreetSmart.",
     ]
+    if artifacts:
+        lines.append(
+            "Attachments below are trusted, private staged files owned by StreetSmart."
+        )
     for item in artifacts:
         lines.append(
             "- staged_path={path} filename={name} mime={mime} sha256={sha}".format(
@@ -313,6 +334,9 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Complete every requested mutation (including status, premium, document attachment, and note when requested).",
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
         "Never claim success from modal text, a local DOM value, or your own prior action. If any requested field is absent, say the action is not verified.",
+        "If execution is blocked because a required value is missing, stop and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <field name>.",
+        "If execution is blocked at an unresolved browser step or locator, stop and begin the response with exactly: ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: <specific step or locator>.",
+        "Do not emit ROBIE_BLOCKED for a completed action, a general question, or an ordinary explanation.",
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
     lines.extend(execution_contract_lines())
@@ -336,17 +360,52 @@ def open_chat_job(
 ) -> str | None:
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
-    context = JobContextManager(db_path)
+    store.fail_orphaned_chat_jobs()
+    queue = DurableChatEventQueue(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
+    files = list(attachments or [])
+    refs = list(attachment_refs or [])
+    classification = classify_request(
+        text, attachment_count=max(expected_attachment_count, len(files), len(refs))
+    )
     related_only = chat_message_is_related_only(
         text,
         expected_attachment_count=expected_attachment_count,
     )
-    if related_only:
-        current = context.get(context_key)
-        active_job_id = current.get("active_job_id") if current else None
+    normalized = " ".join(text.casefold().split())
+    explicit_continuation = any(
+        normalized.startswith(prefix)
+        for prefix in (*CONTINUATION_PREFIXES, *CORRECTION_PREFIXES)
+    )
+    resume_context = queue.active_conversation_job(context_key)
+    resume_state = dict((resume_context or {}).get("interaction_state") or {})
+    if (
+        resume_state.get("resume_mode") == "direct"
+        and resume_state.get("resumed_by_message_id") == message_id
+    ):
+        explicit_continuation = True
+    continued_job: dict[str, Any] | None = None
+    if related_only or explicit_continuation:
+        current = queue.active_conversation_job(context_key)
+        active_job_id = current.get("job_id") if current else None
         if not active_job_id:
             return None
+        active_job = store.get_job(active_job_id)
+        if JobStatus(active_job["status"]) in WAITING_STATUSES:
+            store.resume(active_job_id)
+        elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
+            target = (
+                JobStatus.VERIFYING
+                if store.get_checkpoint(active_job_id, "action")
+                else JobStatus.PENDING
+            )
+            store.transition(
+                active_job_id,
+                target,
+                expected={JobStatus.UNVERIFIED},
+                error=None,
+                release_lease=True,
+            )
         store.checkpoint(
             active_job_id,
             f"continuation:{message_id}",
@@ -354,28 +413,39 @@ def open_chat_job(
                 "message_id": message_id,
                 "text": text,
                 "requested_by": requested_by or "Google Chat user",
-                "related_only": True,
+                "related_only": related_only,
             },
         )
-        context.touch(context_key)
-        return active_job_id
-    context_decision = context.decide(context_key, text)
-    files = list(attachments or [])
-    refs = list(attachment_refs or [])
-    classification = classify_request(
-        text, attachment_count=max(expected_attachment_count, len(files), len(refs))
-    )
+        queue.link_conversation_job(
+            conversation_id=context_key,
+            job_id=active_job_id,
+            message_id=message_id,
+            event_id=message_id,
+            relation=(
+                "CORRECTION"
+                if classification.action_type in BOUNDED_ENGINE_ACTIONS
+                else "CONTINUATION"
+            ),
+        )
+        if related_only:
+            return active_job_id
+        continued_job = store.get_job(active_job_id)
     server_payload: dict[str, Any] = {}
+    if classification.action_type == "drive.skill_sync":
+        from .skill_sync import ALLOWED_FOLDERS, EXCLUDED_FOLDERS, skill_sync_root
+
+        server_payload.update(
+            {
+                "destination_root": str(skill_sync_root()),
+                "included_folders": list(ALLOWED_FOLDERS),
+                "excluded_folders": sorted(EXCLUDED_FOLDERS),
+            }
+        )
     if classification.action_type == "ezlynx.submission_audit":
         server_payload.update(_submission_audit_payload())
     server_payload.update(dict(action_payload or {}))
-    if context_decision.action == "RESUME" and context_decision.active_job_id:
-        job = store.get_job(context_decision.active_job_id)
-        store.checkpoint(job["id"], f"continuation:{message_id}", {
-            "message_id": message_id,
-            "text": text,
-            "requested_by": requested_by or "Google Chat user",
-        })
+    if continued_job is not None:
+        job = continued_job
     else:
         job = store.create_job(
             classification.action_type,
@@ -392,14 +462,12 @@ def open_chat_job(
             ),
             idempotency_key=f"gchat:{message_id}",
         )
-        context.bind_job(
-            context_key,
-            job["id"],
-            summary={
-                "objective": text[:1_000],
-                "status": job["status"].value if isinstance(job["status"], JobStatus) else str(job["status"]),
-                "next_action": "Execute the selected Skill and independently verify destination state.",
-            },
+        queue.link_conversation_job(
+            conversation_id=context_key,
+            job_id=job["id"],
+            message_id=message_id,
+            event_id=message_id,
+            relation="CREATED",
         )
     # Final routing invariant: destination-specific executable corrections can
     # never leave a zero-attempt generic Chat Job behind. Keeping this outside
@@ -569,7 +637,19 @@ def open_chat_job(
                 )
     current = store.get_job(job["id"])
     if current["status"] not in {JobStatus.COMPLETE, JobStatus.FAILED}:
-        RecordingManager(db_path).safe_start(job["id"])
+        from .job_schema import get_executable_skill_contract
+
+        contract = get_executable_skill_contract(job["action_type"])
+        if contract and contract.recording_policy == "EXEMPT":
+            reason = (
+                "recording exemption: read-only Drive ingestion has no browser UI and "
+                "is verified by immutable snapshot hash reread"
+                if job["action_type"] == "drive.skill_sync"
+                else "recording exemption: authentication may display credentials or MFA data"
+            )
+            store.checkpoint(job["id"], "recording_exemption", {"reason": reason})
+        else:
+            RecordingManager(db_path).safe_start(job["id"])
     return job["id"]
 
 
@@ -714,6 +794,7 @@ def _render_chat_terminal(
             f"ROBIE Job {job_id} — UNVERIFIED\n\n"
             "ROBIE attempted the work, but the destination state was not independently verified. "
             "Any success wording produced by the Computer Worker has been suppressed.\n\n"
+            f"Reason: {job.get('last_error') or 'destination verification produced no authoritative evidence'}.\n\n"
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
             + _recording_chat_note(recordings, job_id)
         )
@@ -739,6 +820,47 @@ def guard_chat_response(
     store = JobStore(db_path)
     job = store.get_job(job_id)
     recordings = recordings or RecordingManager(db_path)
+    blocker = structured_blocker_reason(content)
+    if blocker and JobStatus(job["status"]) in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
+        payload = dict(job.get("payload") or {})
+        interaction = interaction_for_blocker(
+            blocker,
+            action_type=job["action_type"],
+            requester_name=payload.get("requested_by"),
+            job_id=job_id,
+            subject_name=(
+                payload.get("company_name")
+                or payload.get("client_name")
+                or payload.get("account_name")
+            ),
+        )
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        if not conversation_id:
+            store.transition(
+                job_id,
+                JobStatus.AWAITING_HUMAN_INPUT,
+                expected={JobStatus(job["status"])},
+                error=blocker,
+                resume_status=(
+                    JobStatus.PENDING
+                    if JobStatus(job["status"]) == JobStatus.PENDING
+                    else JobStatus.RUNNING
+                ),
+                release_lease=True,
+            )
+        else:
+            DurableChatEventQueue(db_path).park_direct_human_input(
+                conversation_id=conversation_id,
+                job_id=job_id,
+                interaction_state=interaction,
+                error=blocker,
+            )
+        recordings.safe_stop(job_id, JobStatus.AWAITING_HUMAN_INPUT.value)
+        return interaction["prompt"]
     if job["status"] == JobStatus.COMPLETE:
         recordings.safe_stop(job_id, JobStatus.COMPLETE.value)
         job = _publish_terminal_job(db_path, store, store.get_job(job_id))
@@ -751,6 +873,20 @@ def guard_chat_response(
         recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
         job = _publish_terminal_job(db_path, store, store.get_job(job_id))
         return _render_chat_terminal(store, job, content, recordings)
+    if JobStatus(job["status"]) == JobStatus.AWAITING_HUMAN_INPUT:
+        recordings.safe_stop(job_id, JobStatus.AWAITING_HUMAN_INPUT.value)
+        payload = dict(job.get("payload") or {})
+        return interaction_for_blocker(
+            job.get("last_error") or "PLAYWRIGHT_BLOCKED",
+            action_type=job["action_type"],
+            requester_name=payload.get("requested_by"),
+            job_id=job_id,
+            subject_name=(
+                payload.get("company_name")
+                or payload.get("client_name")
+                or payload.get("account_name")
+            ),
+        )["prompt"]
     if JobStatus(job["status"]) in WAITING_STATUSES:
         status = JobStatus(job["status"]).value
         recordings.safe_stop(job_id, status)

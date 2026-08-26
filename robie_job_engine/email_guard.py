@@ -5,6 +5,7 @@ from typing import Callable
 from .engine import JobEngine
 from .models import JobStatus, WorkerResult
 from .store import JobStore
+from .skill_sync import add_synced_context, submission_center_sop_url
 
 
 class HermesEmailWorker:
@@ -32,6 +33,11 @@ def run_guarded_email_task(
     run_agent: Callable[[str], str],
 ) -> str:
     """Run once, checkpoint output, and fail closed without a destination verifier."""
+    prompt = add_synced_context(
+        prompt
+        + "\n\nSUBMISSION CENTER SOP REFERENCE\n"
+        + submission_center_sop_url()
+    )
     store = JobStore(db_path)
     job = store.create_job(
         "hermes.email_task",

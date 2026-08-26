@@ -1,10 +1,11 @@
 [Unit]
-Description=Run ROBIE scheduler every five minutes
+Description=Run ROBIE scheduler every 60 seconds
 
 [Timer]
-OnCalendar=*:0/5
+OnBootSec=60
+OnUnitActiveSec=60
 Persistent=true
-RandomizedDelaySec=20
+AccuracySec=1s
 Unit=robie-scheduler.service
 
 [Install]

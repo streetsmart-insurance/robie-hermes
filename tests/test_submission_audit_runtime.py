@@ -63,8 +63,9 @@ class SubmissionAuditRuntimeTests(unittest.TestCase):
 
     @patch("robie_job_engine.submission_audit.run_submission_read", return_value=OBSERVED)
     @patch("robie_job_engine.submission_audit.ensure_ezlynx_login")
+    @patch("robie_job_engine.submission_audit.exclusive_session")
     def test_worker_uses_allowlisted_login_and_returns_structured_read_only_action(
-        self, login, read
+        self, session_lock, login, read
     ):
         result = EzlynxSubmissionAuditWorker().perform(_job(), idempotency_key="audit-1")
         self.assertTrue(result.succeeded)
@@ -77,7 +78,8 @@ class SubmissionAuditRuntimeTests(unittest.TestCase):
         "robie_job_engine.submission_audit.ensure_ezlynx_login",
         side_effect=BoundedProcessError("MAILBOX_IDENTITY_MISMATCH"),
     )
-    def test_wrong_mailbox_fails_closed_as_needs_auth(self, login):
+    @patch("robie_job_engine.submission_audit.exclusive_session")
+    def test_wrong_mailbox_fails_closed_as_needs_auth(self, session_lock, login):
         result = EzlynxSubmissionAuditWorker().perform(_job(), idempotency_key="audit-2")
         self.assertFalse(result.succeeded)
         self.assertEqual(result.hold_status, JobStatus.NEEDS_AUTH)
@@ -88,11 +90,32 @@ class SubmissionAuditRuntimeTests(unittest.TestCase):
         "robie_job_engine.submission_audit.run_submission_read",
         side_effect=BoundedProcessError("PLAYWRIGHT_TIMEOUT_RECOVERED"),
     )
-    def test_playwright_timeout_is_recoverable_and_never_claims_success(self, read, login):
+    @patch("robie_job_engine.submission_audit.exclusive_session")
+    def test_playwright_timeout_is_recoverable_and_never_claims_success(
+        self, session_lock, read, login
+    ):
         result = EzlynxSubmissionAuditWorker().perform(_job(), idempotency_key="audit-3")
         self.assertFalse(result.succeeded)
         self.assertTrue(result.retryable)
         self.assertEqual(result.error, "PLAYWRIGHT_TIMEOUT_RECOVERED")
+
+    @patch("robie_job_engine.submission_audit.ensure_ezlynx_login")
+    @patch(
+        "robie_job_engine.submission_audit.run_submission_read",
+        side_effect=BoundedProcessError(
+            "PLAYWRIGHT_BLOCKED: required form field not found"
+        ),
+    )
+    @patch("robie_job_engine.submission_audit.exclusive_session")
+    def test_playwright_blocker_waits_for_bound_human_input(
+        self, session_lock, read, login
+    ):
+        result = EzlynxSubmissionAuditWorker().perform(
+            _job(), idempotency_key="audit-hitl"
+        )
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.retryable)
+        self.assertEqual(result.hold_status, JobStatus.AWAITING_HUMAN_INPUT)
 
 
 if __name__ == "__main__":

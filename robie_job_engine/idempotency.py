@@ -200,6 +200,36 @@ class DurableWorkLedger:
             conn.close()
         return self.get(namespace, work_item_key)
 
+    def renew_lease(
+        self,
+        namespace: str,
+        work_item_key: str,
+        *,
+        owner: str,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Heartbeat the exact durable-work reservation owned by a worker."""
+        now = datetime.now(timezone.utc)
+        expiry = (now + timedelta(seconds=max(1, timeout_seconds))).isoformat()
+        with self._connect() as conn:
+            changed = conn.execute(
+                """UPDATE durable_work_items
+                   SET lease_expires_at=?,updated_at=?
+                   WHERE namespace=? AND work_item_key=? AND lease_owner=?""",
+                (
+                    expiry,
+                    utc_now(),
+                    namespace,
+                    work_item_key,
+                    owner,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise IdempotencyError(
+                    "durable work lease is missing or owned by another worker"
+                )
+        return self.get(namespace, work_item_key)
+
     def mark_verified(self, namespace: str, work_item_key: str) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute(

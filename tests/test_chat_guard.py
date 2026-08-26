@@ -1,5 +1,6 @@
 import unittest
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from durable_temp import durable_temporary_directory
@@ -10,12 +11,37 @@ from robie_job_engine.chat_guard import (
     guard_chat_response,
     open_chat_job,
 )
+from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.store import JobStore
 from robie_job_engine.recording import RecordingStore
 from robie_job_engine.models import JobStatus
 
 
 class ChatGuardTests(unittest.TestCase):
+    def test_zero_attempt_generic_running_job_expires_with_precise_reason(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "message-orphan",
+                "Perform the destination workflow",
+                conversation_id="spaces/orphan",
+            )
+            old = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE jobs SET updated_at=? WHERE id=?", (old, job_id))
+            related = open_chat_job(
+                db,
+                "message-status",
+                "What did you do?",
+                conversation_id="spaces/orphan",
+            )
+            self.assertEqual(related, job_id)
+            job = JobStore(db).get_job(job_id)
+            self.assertEqual(job["status"], "FAILED")
+            self.assertIn("execution did not start", job["last_error"])
+            self.assertIsNotNone(JobStore(db).get_checkpoint(job_id, "orphan_timeout"))
+
     def test_conversation_only_messages_do_not_create_jobs(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
@@ -27,6 +53,10 @@ class ChatGuardTests(unittest.TestCase):
                 (
                     "TEST ONLY — show one decision card with Continue and Pause. "
                     "Do not perform any EZLynx action."
+                ),
+                (
+                    "HITL lifecycle validation marker FEIN-B577. "
+                    "No operational work is requested."
                 ),
             ]
             for index, text in enumerate(messages):
@@ -72,11 +102,115 @@ class ChatGuardTests(unittest.TestCase):
                 self.assertEqual(related, first_id)
             with sqlite3.connect(db) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+                self.assertIsNone(
+                    conn.execute(
+                        """SELECT name FROM sqlite_master
+                           WHERE type='table' AND name='conversation_contexts'"""
+                    ).fetchone()
+                )
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM conversation_job_links").fetchone()[0],
+                    5,
+                )
 
     def test_none_job_passes_prompt_and_response_through(self):
         self.assertFalse(chat_message_requires_job("Thank you"))
         self.assertEqual(build_chat_execution_text("unused.db", None, "Thank you"), "Thank you")
         self.assertEqual(guard_chat_response("unused.db", None, "You're welcome"), "You're welcome")
+
+    def test_awaiting_human_input_renders_friendly_specific_prompt(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job(
+                "ezlynx.submission_audit",
+                {
+                    "requested_by": "Carlo",
+                    "client_name": "Example Company",
+                },
+                idempotency_key="friendly-hitl",
+            )
+            store.transition(
+                job["id"],
+                JobStatus.AWAITING_HUMAN_INPUT,
+                expected={JobStatus.PENDING},
+                error="MISSING_REQUIRED_FIELD: FEIN",
+                resume_status=JobStatus.PENDING,
+                release_lease=True,
+            )
+            response = guard_chat_response(db, job["id"], "technical fallback")
+            self.assertIn("Hey Carlo, I need a quick hand!", response)
+            self.assertIn("Federal Employer Identification Number (FEIN)", response)
+            self.assertIn("Example Company", response)
+            self.assertIn(f"Job ID: `{job['id'][:8]}`", response)
+            self.assertNotIn("AWAITING_HUMAN_INPUT", response)
+
+    def test_structured_direct_blocker_parks_and_resumes_same_job(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "message-direct-hitl",
+                "Please finish the EZLynx form",
+                requested_by="Carlo",
+                conversation_id="spaces/direct-hitl",
+            )
+            response = guard_chat_response(
+                db,
+                job_id,
+                "ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: FEIN\nI cannot continue.",
+            )
+            self.assertIn("Federal Employer Identification Number (FEIN)", response)
+            self.assertNotIn("AWAITING_HUMAN_INPUT", response)
+            store = JobStore(db)
+            self.assertEqual(
+                store.get_job(job_id)["status"],
+                JobStatus.AWAITING_HUMAN_INPUT.value,
+            )
+            queue = DurableChatEventQueue(db)
+            context = queue.active_conversation_job("spaces/direct-hitl")
+            self.assertEqual(context["job_id"], job_id)
+            self.assertEqual(context["interaction_state"]["field_name"], "FEIN")
+
+            resumed = queue.resume_human_input(
+                conversation_id="spaces/direct-hitl",
+                job_id=job_id,
+                reply_message_id="message-fein-reply",
+                field_name="FEIN",
+                value="12-3456789",
+            )
+            self.assertEqual(resumed["state"], "DIRECT_RESUME")
+            continued = open_chat_job(
+                db,
+                "message-fein-reply",
+                "12-3456789",
+                requested_by="Carlo",
+                conversation_id="spaces/direct-hitl",
+            )
+            self.assertEqual(continued, job_id)
+            updated = store.get_job(job_id)
+            self.assertEqual(updated["status"], JobStatus.RUNNING.value)
+            self.assertEqual(updated["payload"]["human_input_values"]["FEIN"], "12-3456789")
+
+    def test_free_form_blocker_prose_does_not_solicit_human_input(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(db, "message-prose", "Please finish the form")
+            response = guard_chat_response(
+                db,
+                job_id,
+                "I might be blocked and may need a field.",
+            )
+            self.assertIn("UNVERIFIED", response)
+            self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
+
+    def test_execution_contract_is_added_without_attachments(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(db, "message-contract", "Please finish the form")
+            execution = build_chat_execution_text(db, job_id, "Please finish the form")
+            self.assertIn("ROBIE_BLOCKED: MISSING_REQUIRED_FIELD", execution)
+            self.assertIn("ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED", execution)
 
     def test_chat_response_is_checkpointed_and_unverified(self):
         with durable_temporary_directory() as tmp:
@@ -84,6 +218,8 @@ class ChatGuardTests(unittest.TestCase):
             job_id = open_chat_job(db, "spaces/s/messages/m1", "move it")
             response = guard_chat_response(db, job_id, "Done")
             self.assertIn("UNVERIFIED", response)
+            self.assertIn("Reason:", response)
+            self.assertIn("no structured destination action checkpoint", response)
             self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
 
     def test_chat_response_includes_ready_recording_link(self):

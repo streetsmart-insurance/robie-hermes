@@ -9,8 +9,9 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any, Iterable
 
 
@@ -43,10 +44,25 @@ class OperationsStore:
 
     def __init__(self, db_path: str, artifact_root: str | None = None) -> None:
         self.db_path = db_path
+        # Queue compatibility triggers reference the authoritative Job tables.
+        # Initialize them only for a brand-new DB; legacy fixture/upgrade DBs
+        # are migrated below without assuming modern columns already exist.
+        with sqlite3.connect(db_path) as probe:
+            has_jobs = probe.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+            ).fetchone()
+        if not has_jobs:
+            from .store import JobStore
+
+            JobStore(db_path)
         self.artifact_root = Path(
             artifact_root
             or os.environ.get("ROBIE_ARTIFACT_ROOT")
-            or "/opt/streetsmart-hermes/robie-job-engine/data/artifacts"
+            or (
+                "/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts"
+                if os.environ.get("ROBIE_ENV", "").strip().upper() == "TEST"
+                else "/opt/streetsmart-hermes/robie-job-engine/data/artifacts"
+            )
         )
         self.artifact_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.artifact_root, 0o700)
@@ -97,6 +113,33 @@ class OperationsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_schedules_due
                     ON schedules(enabled, next_run_at);
+
+                CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                    id TEXT PRIMARY KEY,
+                    task_name TEXT NOT NULL UNIQUE,
+                    action_type TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    cron_spec TEXT NOT NULL,
+                    timezone TEXT NOT NULL DEFAULT 'America/New_York',
+                    target_ref TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    next_run_at TEXT NOT NULL,
+                    last_run_at TEXT,
+                    last_job_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due
+                    ON scheduled_jobs(enabled, next_run_at);
+
+                CREATE TABLE IF NOT EXISTS job_queue (
+                    job_id TEXT PRIMARY KEY,
+                    task_name TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    checkpoint_state TEXT NOT NULL DEFAULT 'INTAKE',
+                    updated_at TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS assignments (
                     id TEXT PRIMARY KEY,
@@ -225,6 +268,85 @@ class OperationsStore:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_report_runs_dedupe ON report_runs(dedupe_key)"
             )
+            job_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)")
+            }
+            canonical_jobs = {"id", "payload_json", "action_type", "status", "updated_at"}.issubset(job_columns)
+            if canonical_jobs:
+                conn.executescript(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS trg_jobs_job_queue_insert
+                    AFTER INSERT ON jobs BEGIN
+                        INSERT OR REPLACE INTO job_queue
+                        (job_id,task_name,action_type,status,checkpoint_state,updated_at)
+                        VALUES (NEW.id,COALESCE(json_extract(NEW.payload_json,'$.task_name'),NEW.action_type),NEW.action_type,
+                            CASE WHEN NEW.status IN ('PENDING','RETRY_WAIT','WAITING','NEEDS_SKILL','NEEDS_CLARIFICATION','NEEDS_AUTH','PAUSED') THEN 'QUEUED'
+                                 WHEN NEW.status IN ('RUNNING','VERIFYING') THEN 'RUNNING'
+                                 WHEN NEW.status='AWAITING_HUMAN_INPUT' THEN 'AWAITING_HUMAN_INPUT'
+                                 WHEN NEW.status IN ('FAILED','UNVERIFIED') THEN 'FAILED' ELSE NEW.status END,
+                            'INTAKE',NEW.updated_at);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS trg_jobs_job_queue_update
+                    AFTER UPDATE OF status,updated_at,payload_json ON jobs BEGIN
+                        INSERT OR REPLACE INTO job_queue
+                        (job_id,task_name,action_type,status,checkpoint_state,updated_at)
+                        VALUES (NEW.id,COALESCE(json_extract(NEW.payload_json,'$.task_name'),NEW.action_type),NEW.action_type,
+                            CASE WHEN NEW.status IN ('PENDING','RETRY_WAIT','WAITING','NEEDS_SKILL','NEEDS_CLARIFICATION','NEEDS_AUTH','PAUSED') THEN 'QUEUED'
+                                 WHEN NEW.status IN ('RUNNING','VERIFYING') THEN 'RUNNING'
+                                 WHEN NEW.status='AWAITING_HUMAN_INPUT' THEN 'AWAITING_HUMAN_INPUT'
+                                 WHEN NEW.status IN ('FAILED','UNVERIFIED') THEN 'FAILED' ELSE NEW.status END,
+                            COALESCE((SELECT checkpoint_state FROM job_queue WHERE job_id=NEW.id),'INTAKE'),NEW.updated_at);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS trg_checkpoints_job_queue_update
+                    AFTER INSERT ON checkpoints BEGIN
+                        UPDATE job_queue SET checkpoint_state=NEW.kind,updated_at=NEW.created_at
+                        WHERE job_id=NEW.job_id;
+                    END;
+                    """
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO job_queue
+                       (job_id,task_name,action_type,status,checkpoint_state,updated_at)
+                       SELECT id,COALESCE(json_extract(payload_json,'$.task_name'),action_type),
+                              action_type,
+                              CASE WHEN status IN ('PENDING','RETRY_WAIT','WAITING','NEEDS_SKILL','NEEDS_CLARIFICATION','NEEDS_AUTH','PAUSED') THEN 'QUEUED'
+                                   WHEN status IN ('RUNNING','VERIFYING') THEN 'RUNNING'
+                                   WHEN status='AWAITING_HUMAN_INPUT' THEN 'AWAITING_HUMAN_INPUT'
+                                   WHEN status IN ('FAILED','UNVERIFIED') THEN 'FAILED' ELSE status END,
+                              COALESCE((SELECT kind FROM checkpoints c WHERE c.job_id=jobs.id ORDER BY c.id DESC LIMIT 1),'INTAKE'),
+                              updated_at FROM jobs"""
+                )
+            else:
+                conn.execute(
+                    """INSERT OR IGNORE INTO job_queue
+                       (job_id,task_name,action_type,status,checkpoint_state,updated_at)
+                       SELECT id,action_type,action_type,
+                              CASE WHEN status='RUNNING' THEN 'RUNNING'
+                                   WHEN status IN ('FAILED','UNVERIFIED') THEN 'FAILED'
+                                   ELSE 'QUEUED' END,
+                              'INTAKE',updated_at FROM jobs"""
+                )
+            legacy = conn.execute("SELECT * FROM schedules").fetchall()
+            for row in legacy:
+                payload = json.loads(row["payload_json"] or "{}")
+                local_time = payload.get("_daily_local_time")
+                cron = (
+                    f"{int(str(local_time).split(':')[1])} {int(str(local_time).split(':')[0])} * * *"
+                    if local_time
+                    else f"@every {int(row['interval_minutes'])}m"
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO scheduled_jobs
+                       (id,task_name,action_type,parameters_json,cron_spec,timezone,
+                        target_ref,enabled,next_run_at,last_run_at,last_job_id,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        row["id"], row["name"], row["action_type"], row["payload_json"],
+                        cron, payload.get("_schedule_timezone") or "America/New_York",
+                        payload.get("target_ref"), row["enabled"], row["next_run_at"],
+                        row["last_run_at"], row["last_job_id"], row["created_at"], row["updated_at"],
+                    ),
+                )
 
     def ingest_cached_file(
         self,
@@ -370,13 +492,37 @@ class OperationsStore:
         return self.get_schedule(sid)
 
     def ensure_schedule(
-        self, name: str, action_type: str, payload: dict[str, Any], interval_minutes: int
+        self, name: str, action_type: str, payload: dict[str, Any], interval_minutes: int,
+        *, next_run_at: str | None = None, reconcile: bool = False,
     ) -> dict[str, Any]:
         with self._connect() as conn:
-            row = conn.execute("SELECT id FROM schedules WHERE name=?", (name,)).fetchone()
+            row = conn.execute("SELECT * FROM schedules WHERE name=?", (name,)).fetchone()
         if row:
+            if reconcile:
+                changed = (
+                    row["action_type"] != action_type
+                    or json.loads(row["payload_json"] or "{}") != payload
+                    or int(row["interval_minutes"]) != int(interval_minutes)
+                )
+                if changed:
+                    with self._connect() as conn:
+                        conn.execute(
+                            """UPDATE schedules SET action_type=?,payload_json=?,
+                               interval_minutes=?,next_run_at=COALESCE(?,next_run_at),
+                               updated_at=? WHERE id=?""",
+                            (
+                                action_type,
+                                _json(payload),
+                                interval_minutes,
+                                next_run_at,
+                                _now(),
+                                row["id"],
+                            ),
+                        )
             return self.get_schedule(row["id"])
-        return self.create_schedule(name, action_type, payload, interval_minutes)
+        return self.create_schedule(
+            name, action_type, payload, interval_minutes, next_run_at=next_run_at
+        )
 
     def get_schedule(self, schedule_id: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -406,12 +552,145 @@ class OperationsStore:
         base = datetime.fromisoformat(from_time or _now())
         if base.tzinfo is None:
             base = base.replace(tzinfo=UTC)
-        next_at = (base + timedelta(minutes=schedule["interval_minutes"])).isoformat()
+        daily_at = schedule["payload"].get("_daily_local_time")
+        timezone_name = schedule["payload"].get("_schedule_timezone")
+        if daily_at and timezone_name:
+            hour, minute = (int(part) for part in str(daily_at).split(":", 1))
+            zone = ZoneInfo(str(timezone_name))
+            local_base = base.astimezone(zone)
+            next_local = datetime.combine(
+                local_base.date() + timedelta(days=1),
+                time(hour=hour, minute=minute),
+                tzinfo=zone,
+            )
+            next_at = next_local.astimezone(UTC).isoformat()
+        else:
+            next_at = (base + timedelta(minutes=schedule["interval_minutes"])).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """UPDATE schedules SET last_run_at=?, last_job_id=?, next_run_at=?, updated_at=?
                    WHERE id=?""", (_now(), job_id, next_at, _now(), schedule_id)
             )
+
+    def ensure_recurring_job(
+        self,
+        task_name: str,
+        action_type: str,
+        parameters: dict[str, Any],
+        cron_spec: str,
+        timezone_name: str,
+        *,
+        next_run_at: str,
+        target_ref: str | None = None,
+        reconcile: bool = False,
+    ) -> dict[str, Any]:
+        now = _now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE task_name=?", (task_name,)
+            ).fetchone()
+            if row is None:
+                schedule_id = str(uuid.uuid4())
+                conn.execute(
+                    """INSERT INTO scheduled_jobs
+                       (id,task_name,action_type,parameters_json,cron_spec,timezone,
+                        target_ref,next_run_at,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        schedule_id, task_name, action_type, _json(parameters),
+                        cron_spec, timezone_name, target_ref, next_run_at, now, now,
+                    ),
+                )
+            else:
+                schedule_id = str(row["id"])
+                if reconcile:
+                    conn.execute(
+                        """UPDATE scheduled_jobs SET action_type=?,parameters_json=?,
+                           cron_spec=?,timezone=?,target_ref=?,next_run_at=?,enabled=1,
+                           updated_at=? WHERE id=?""",
+                        (
+                            action_type, _json(parameters), cron_spec, timezone_name,
+                            target_ref, next_run_at, now, schedule_id,
+                        ),
+                    )
+        return self.get_recurring_job(schedule_id)
+
+    def get_recurring_job(self, schedule_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE id=?", (schedule_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(schedule_id)
+        result = dict(row)
+        result["parameters"] = json.loads(result.pop("parameters_json") or "{}")
+        return result
+
+    def list_recurring_jobs(self, *, enabled_only: bool = True) -> list[dict[str, Any]]:
+        query = "SELECT * FROM scheduled_jobs"
+        if enabled_only:
+            query += " WHERE enabled=1"
+        query += " ORDER BY next_run_at,task_name"
+        with self._connect() as conn:
+            rows = conn.execute(query).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["parameters"] = json.loads(item.pop("parameters_json") or "{}")
+            result.append(item)
+        return result
+
+    def claim_due_recurring_jobs(
+        self, *, now: str | None = None, limit: int = 25
+    ) -> list[dict[str, Any]]:
+        at = now or _now()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM scheduled_jobs
+                   WHERE enabled=1 AND next_run_at<=?
+                   ORDER BY next_run_at LIMIT ?""",
+                (at, limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["parameters"] = json.loads(item.pop("parameters_json") or "{}")
+            result.append(item)
+        return result
+
+    def advance_recurring_job(
+        self, schedule_id: str, job_id: str, *, next_run_at: str
+    ) -> None:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE scheduled_jobs SET last_run_at=?,last_job_id=?,
+                   next_run_at=?,updated_at=? WHERE id=? AND enabled=1""",
+                (now, job_id, next_run_at, now, schedule_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(schedule_id)
+
+    def disable_recurring_job(self, schedule_id: str) -> dict[str, Any]:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE scheduled_jobs SET enabled=0,updated_at=? WHERE id=?",
+                (now, schedule_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(schedule_id)
+        return self.get_recurring_job(schedule_id)
+
+    def list_job_queue(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM job_queue
+                   WHERE status IN ('QUEUED','RUNNING','AWAITING_HUMAN_INPUT','FAILED')
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def record_model_attempt(
         self,
@@ -755,6 +1034,14 @@ class OperationsStore:
                     {"segment": int(row["segment_number"]), "url": row["drive_url"]}
                     for row in segments if row["status"] == "READY" and row["drive_url"]
                 ]
+                exemption = conn.execute(
+                    """SELECT data_json FROM checkpoints
+                       WHERE job_id=? AND kind='recording_exemption'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (item["id"],),
+                ).fetchone()
+                if exemption:
+                    item["recording_exemption"] = json.loads(exemption["data_json"] or "{}")
                 item.update(self.model_usage(item["id"]))
             artifacts = [dict(r) for r in conn.execute(
                 """SELECT id,job_id,source_platform,original_name,mime_type,size_bytes,sha256,

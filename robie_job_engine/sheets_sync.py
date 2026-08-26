@@ -145,6 +145,11 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
                 if item.get("recording_failure_stage") == "UPLOAD"
                 else "Recording failed"
             )
+        elif item.get("recording_exemption"):
+            reason = str((item.get("recording_exemption") or {}).get("reason") or "").strip()
+            recording_url = "Recording exempt — sensitive authentication flow"
+            if reason:
+                recording_url = f"{recording_url}: {reason}"
         else:
             recording_url = ""
         reference_use = "Approved reference" if item.get("recording_reference_approved") else "Not approved for reference"
@@ -162,6 +167,36 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             item.get("estimated_cost_usd", 0),
         ])
     return output or [[""]]
+
+
+def _runtime_job_fields(item: dict[str, Any]) -> dict[str, Any]:
+    """Return the authoritative values for the Control Center runtime columns."""
+    status = str(item.get("status") or "")
+    current_step = {
+        "COMPLETE": "Completed and independently verified",
+        "UNVERIFIED": "Destination state was not independently verified",
+        "FAILED": "Execution failed",
+        "NEEDS_AUTH": "Waiting for authorization",
+        "VERIFYING": "Independently verifying destination result",
+        "RUNNING": "Executing bounded work",
+        "PENDING": "Queued for execution",
+    }.get(status, status.replace("_", " ").title())
+    checks = int(item.get("verification_count") or 0)
+    verified = int(item.get("verified_evidence_count") or 0)
+    authoritative = int(item.get("authoritative_evidence_count") or 0)
+    verification_status = (
+        "Verified" if status == "COMPLETE" and verified > 0 and authoritative > 0
+        else "Needs review" if status in {"UNVERIFIED", "FAILED"}
+        else "Pending"
+    )
+    return {
+        "current_step": current_step,
+        "step_progress": f"{checks} verification check{'s' if checks != 1 else ''}",
+        "last_activity": _friendly_datetime(item.get("updated_at")),
+        "verification_status": verification_status,
+        "evidence_count": verified,
+        "control_mode": "ROBIE",
+    }
 
 
 def upsert_job_rows(
@@ -207,7 +242,17 @@ def upsert_job_rows(
             appended += 1
         else:
             updated += 1
-        writes.append({"range": f"Jobs!A{sheet_row}:Y{sheet_row}", "values": [row]})
+        runtime = _runtime_job_fields(next(item for item in selected if str(item.get("id")) == job_id))
+        writes.extend([
+            {"range": f"Jobs!A{sheet_row}:Y{sheet_row}", "values": [row]},
+            {"range": f"Jobs!Z{sheet_row}:AB{sheet_row}", "values": [[
+                runtime["current_step"], runtime["step_progress"], runtime["last_activity"],
+            ]]},
+            {"range": f"Jobs!AD{sheet_row}:AE{sheet_row}", "values": [[
+                runtime["verification_status"], runtime["evidence_count"],
+            ]]},
+            {"range": f"Jobs!AG{sheet_row}", "values": [[runtime["control_mode"]]]},
+        ])
 
     if writes:
         api.batchUpdate(
@@ -250,8 +295,8 @@ def publish_job_to_control_center(
     if str(job.get("status")) == "COMPLETE":
         if int(job.get("authoritative_evidence_count") or 0) < 1:
             raise RuntimeError("COMPLETE publication requires authoritative evidence")
-        if not job.get("recording_links"):
-            raise RuntimeError("COMPLETE publication requires a READY recording link")
+        if not job.get("recording_links") and not job.get("recording_exemption"):
+            raise RuntimeError("COMPLETE publication requires a READY recording link or documented exemption")
 
     result = upsert_job_rows(db_path, spreadsheet_id, [job_id])
     api = _service().spreadsheets().values()

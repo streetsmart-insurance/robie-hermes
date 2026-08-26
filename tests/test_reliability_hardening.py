@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +20,7 @@ from robie_job_engine.ezlynx import (
     MemoryEzlynxDestination,
 )
 from robie_job_engine.models import JobStatus, VerificationEvidence, VerificationResult
+from robie_job_engine.idempotency import DurableWorkLedger
 from robie_job_engine.store import JobStore
 from robie_job_engine.test_runtime import build_test_engine
 
@@ -74,6 +75,54 @@ class ReliabilityHardeningTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_job_and_work_heartbeats_extend_exact_owner_leases(self):
+        job = self.store.create_job(
+            "browser.read",
+            {"worker": "browser-read", "url": "https://example.invalid"},
+            idempotency_key="heartbeat-owner",
+        )
+        claimed = self.store.claim(job["id"], "worker-a", lease_seconds=1)
+        renewed = self.store.renew_lease(
+            job["id"], "worker-a", lease_seconds=120
+        )
+        self.assertGreater(renewed["lease_expires_at"], claimed["lease_expires_at"])
+
+        ledger = DurableWorkLedger(self.db)
+        acquired = ledger.acquire(
+            "browser.read", "heartbeat-owner", owner="worker-a", timeout_seconds=1
+        )
+        refreshed = ledger.renew_lease(
+            "browser.read",
+            "heartbeat-owner",
+            owner="worker-a",
+            timeout_seconds=120,
+        )
+        self.assertGreater(refreshed["lease_expires_at"], acquired["lease_expires_at"])
+
+    def test_expired_running_and_verifying_jobs_are_runnable_from_checkpoints(self):
+        running = self.store.create_job(
+            "browser.read", {"worker": "browser-read"}, idempotency_key="running"
+        )
+        verifying = self.store.create_job(
+            "browser.read", {"worker": "browser-read"}, idempotency_key="verifying"
+        )
+        expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        with self.store.transaction() as conn:
+            conn.execute(
+                """UPDATE jobs SET status=?,lease_owner='dead-worker',lease_expires_at=?
+                   WHERE id=?""",
+                (JobStatus.RUNNING.value, expired, running["id"]),
+            )
+            conn.execute(
+                """UPDATE jobs SET status=?,lease_owner='dead-worker',lease_expires_at=?
+                   WHERE id=?""",
+                (JobStatus.VERIFYING.value, expired, verifying["id"]),
+            )
+        self.assertEqual(
+            set(self.store.list_runnable(frozenset({"browser.read"}))),
+            {running["id"], verifying["id"]},
+        )
 
     def test_browser_read_missing_locator_needs_clarification(self):
         browser = MemoryBrowser()

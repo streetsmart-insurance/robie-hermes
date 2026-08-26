@@ -60,6 +60,24 @@ def _contract(result: str, verifier: str, *, attempts: int = 3) -> ExecutableSki
 
 
 EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
+    "drive.skill_sync": ExecutableSkillContract(
+        expected_destination_result=(
+            "an immutable local snapshot contains only approved Core Rules and Active Skills"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="DriveSkillSyncVerifier",
+        maximum_attempts=3,
+        success_conditions=(
+            "the current snapshot pointer is reread from durable storage",
+            "every ingested file matches its recorded SHA-256",
+            "the include and exclusion folder sets match the server allowlist",
+        ),
+        failure_conditions=(
+            "the Drive folder path is missing or ambiguous",
+            "a source document cannot be downloaded or decoded",
+            "the immutable destination snapshot fails exact hash reread",
+        ),
+    ),
     "carrier.proposal": _contract(
         "the destination contains the generated proposal with the requested content",
         "CarrierProposalVerifier",
@@ -84,6 +102,25 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
         "a fresh authenticated Submission Center read matches the requested scope and postcondition",
         "EzlynxSubmissionAuditVerifier",
     ),
+    "ezlynx.session_refresh": ExecutableSkillContract(
+        expected_destination_result=(
+            "Robie's Gmail API identity is verified and the canonical EZLynx "
+            "browser profile has a fresh authenticated application session"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="EzlynxSessionVerifier",
+        maximum_attempts=2,
+        success_conditions=(
+            "Robie's Gmail API mailbox identity is independently verified",
+            "a fresh EZLynx application read contains authenticated internal navigation",
+            "no EZLynx login or MFA controls are present",
+        ),
+        failure_conditions=(
+            "Secret Manager or Gmail OAuth access is unavailable",
+            "MFA cannot be completed from Robie's mailbox",
+            "the canonical browser profile cannot be locked or verified",
+        ),
+    ),
     "filesystem.skill_update": _contract(
         "the allowlisted SKILL.md path contains the exact requested bytes and hash",
         "FilesystemSkillUpdateVerifier",
@@ -92,6 +129,11 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
 
 
 BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
+    "drive.skill_sync": {
+        "schema_verified": True,
+        "required": ("destination_root",),
+        "identity": ("destination_root",),
+    },
     "carrier.proposal": {
         "schema_verified": True,
         "required": (),
@@ -120,6 +162,11 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
     "ezlynx.submission_audit": {
         "schema_verified": True,
         "required": ("resource_id", "expected_postcondition"),
+        "identity": ("resource_id",),
+    },
+    "ezlynx.session_refresh": {
+        "schema_verified": True,
+        "required": ("resource_id", "profile_id"),
         "identity": ("resource_id",),
     },
     "filesystem.skill_update": {

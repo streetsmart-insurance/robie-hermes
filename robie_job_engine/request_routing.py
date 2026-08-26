@@ -5,12 +5,14 @@ from dataclasses import dataclass
 
 
 WORKER_FOR_ACTION = {
+    "drive.skill_sync": "drive-skill-sync",
     "carrier.proposal": "carrier-proposal",
     "browser.read": "browser-read",
     "ezlynx.reassign": "hermes-cua",
     "ezlynx.move_document": "hermes-cua",
     "ezlynx.apply_label": "hermes-cua",
     "ezlynx.submission_audit": "submission-audit",
+    "ezlynx.session_refresh": "session-refresh",
     "filesystem.skill_update": "hermes-cua",
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
@@ -19,12 +21,14 @@ WORKER_FOR_ACTION = {
 
 BOUNDED_ENGINE_ACTIONS = frozenset(
     {
+        "drive.skill_sync",
         "carrier.proposal",
         "browser.read",
         "ezlynx.reassign",
         "ezlynx.move_document",
         "ezlynx.apply_label",
         "ezlynx.submission_audit",
+        "ezlynx.session_refresh",
     }
 )
 
@@ -89,6 +93,10 @@ def _normalized(text: str) -> str:
 def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassification:
     """Deterministically classify a staff request before any worker runs."""
     normalized = _normalized(text)
+    if is_skill_sync_command(normalized):
+        return RequestClassification(
+            "drive.skill_sync", WORKER_FOR_ACTION["drive.skill_sync"]
+        )
     if _is_carrier_proposal(normalized):
         return RequestClassification("carrier.proposal", WORKER_FOR_ACTION["carrier.proposal"])
     if "ezlynx" in normalized and "reassign" in normalized:
@@ -118,6 +126,19 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
     return RequestClassification(
         "hermes.google_chat_task", WORKER_FOR_ACTION["hermes.google_chat_task"]
     )
+
+
+def is_skill_sync_command(text: str) -> bool:
+    """Recognize deterministic admin phrasing without catching Skill edits."""
+    normalized = _normalized(text).strip(" .!?")
+    return normalized in {
+        "/sync-skills",
+        "/sync skills",
+        "sync skills",
+        "update memory",
+        "refresh skills",
+        "refresh memory",
+    }
 
 
 def _is_carrier_proposal(text: str) -> bool:

@@ -19,6 +19,7 @@ from .idempotency import IdempotencyError
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .request_routing import BOUNDED_ENGINE_ACTIONS
 from .submission_audit import EzlynxSubmissionAuditWorker, SubprocessSubmissionReadback
+from .ezlynx_session import EzlynxSessionRefreshWorker, EzlynxSessionVerifier
 from .runtime_env import (
     PRODUCTION_ENV_NAMES,
     TEST_ENV_NAME,
@@ -109,6 +110,7 @@ def build_runtime_engine(
         ),
         "hermes-cua": ezlynx_worker,
         "submission-audit": EzlynxSubmissionAuditWorker(),
+        "session-refresh": EzlynxSessionRefreshWorker(),
     }
     verifiers: dict[str, Any] = {}
     if destination is not None:
@@ -126,10 +128,15 @@ def build_runtime_engine(
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
     from .chat_verifiers import EzlynxSubmissionAuditVerifier
+    from .skill_sync import DriveSkillSyncVerifier, DriveSkillSyncWorker
+
+    workers["drive-skill-sync"] = DriveSkillSyncWorker()
+    verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
 
     verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
         submission_readback or SubprocessSubmissionReadback()
     )
+    verifiers["ezlynx.session_refresh"] = EzlynxSessionVerifier()
     return JobEngine(
         store,
         workers,
@@ -171,7 +178,11 @@ def maybe_run_bounded_job(db_path: str, job_id: str | None) -> bool:
     job = store.get_job(job_id)
     if job["action_type"] not in BOUNDED_ENGINE_ACTIONS:
         return False
-    if JobStatus(job["status"]) != JobStatus.PENDING:
+    if JobStatus(job["status"]) not in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
         return True
     try:
         build_runtime_engine(store).run(job_id)

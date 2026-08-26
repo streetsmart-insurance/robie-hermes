@@ -10,6 +10,7 @@ class JobStatus(str, Enum):
     NEEDS_SKILL = "NEEDS_SKILL"
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
     NEEDS_AUTH = "NEEDS_AUTH"
+    AWAITING_HUMAN_INPUT = "AWAITING_HUMAN_INPUT"
     WAITING = "WAITING"
     RUNNING = "RUNNING"
     VERIFYING = "VERIFYING"
@@ -26,6 +27,7 @@ WAITING_STATUSES = {
     JobStatus.NEEDS_SKILL,
     JobStatus.NEEDS_CLARIFICATION,
     JobStatus.NEEDS_AUTH,
+    JobStatus.AWAITING_HUMAN_INPUT,
     JobStatus.WAITING,
 }
 # The action worker never receives this token. JobEngine._verify is the

@@ -46,14 +46,16 @@ _SECRET_KEYS = frozenset(
         "clientsecret",
         "credential",
         "credentials",
+        "fein",
+        "federal_employer_identification_number",
     }
 )
 _PARTIAL_KEY = re.compile(
-    r"(password|passwd|secret|token|cookie|authorization|mfa|otp|bearer|api[_-]?key)",
+    r"(password|passwd|secret|token|cookie|authorization|mfa|otp|bearer|api[_-]?key|fein|federal[_-]?employer[_-]?identification[_-]?number)",
     re.IGNORECASE,
 )
 _ASSIGNMENT = re.compile(
-    r"(?i)\b(password|passwd|pwd|secret|token|authorization|cookie|mfa|otp|bearer|api[_-]?key)"
+    r"(?i)\b(password|passwd|pwd|secret|token|authorization|cookie|mfa|otp|bearer|api[_-]?key|fein|federal[_-]?employer[_-]?identification[_-]?number)"
     r"\s*[:=]\s*([^\s,;]{2,})"
 )
 _AUTHORIZATION_HEADER = re.compile(

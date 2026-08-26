@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import random
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -50,6 +51,7 @@ class JobEngine:
         recordings: RecordingManager | None = None,
         perform_timeout_seconds: float = 120,
         enforce_recording_policy: bool = False,
+        lease_seconds: int = 120,
     ):
         self.store = store
         self.workers = workers
@@ -58,6 +60,7 @@ class JobEngine:
         self.recordings = recordings or RecordingManager(store.path)
         self.perform_timeout_seconds = perform_timeout_seconds
         self.enforce_recording_policy = enforce_recording_policy
+        self.lease_seconds = max(15, int(lease_seconds))
 
     def run(self, job_id: str) -> dict[str, Any]:
         lease_owner = f"{self.owner}:{uuid.uuid4()}"
@@ -67,14 +70,21 @@ class JobEngine:
             run = runs.start(owner=lease_owner, job_id=job_id)
         except RunIsolationError:
             return self.store.get_job(job_id)
-        job = self.store.claim(job_id, lease_owner)
+        job = self.store.claim(
+            job_id, lease_owner, lease_seconds=self.lease_seconds
+        )
         if not job:
             runs.terminate(run["id"], "BLOCKED")
             return self.store.get_job(job_id)
         runs.bind(run["id"], "lease", {"owner": lease_owner, "job_id": job_id})
         verify_only = False
         try:
-            ledger.acquire(job["action_type"], job["idempotency_key"], owner=lease_owner)
+            ledger.acquire(
+                job["action_type"],
+                job["idempotency_key"],
+                owner=lease_owner,
+                timeout_seconds=self.lease_seconds,
+            )
         except IdempotencyError:
             if self.store.get_checkpoint(job_id, "action") is None:
                 self.store.release_lease(job_id)
@@ -114,11 +124,51 @@ class JobEngine:
                 runs.terminate(run["id"], "FAILED")
                 return failed
         else:
+            if job["action_type"] == "drive.skill_sync":
+                reason = (
+                    "recording exemption: read-only Google Drive ingestion has no browser UI; "
+                    "the immutable snapshot is independently verified by exact SHA-256 reread"
+                )
+            elif contract and contract.recording_policy == "EXEMPT":
+                reason = (
+                    "registered Skill recording policy is EXEMPT because authentication "
+                    "may display credentials or MFA data"
+                )
+            else:
+                reason = "action is not registered as an executable Skill"
             self.store.checkpoint(
                 job_id,
                 "recording_exemption",
-                {"reason": "action is not registered as an executable Skill"},
+                {"reason": reason},
             )
+        heartbeat_stop = threading.Event()
+        heartbeat_errors: list[Exception] = []
+
+        def maintain_leases() -> None:
+            interval = max(5.0, min(float(self.lease_seconds) / 3.0, 30.0))
+            while not heartbeat_stop.wait(interval):
+                try:
+                    self.store.renew_lease(
+                        job_id,
+                        lease_owner,
+                        lease_seconds=self.lease_seconds,
+                    )
+                    ledger.renew_lease(
+                        job["action_type"],
+                        job["idempotency_key"],
+                        owner=lease_owner,
+                        timeout_seconds=self.lease_seconds,
+                    )
+                except Exception as exc:
+                    heartbeat_errors.append(exc)
+                    heartbeat_stop.set()
+
+        heartbeat = threading.Thread(
+            target=maintain_leases,
+            name=f"robie-job-lease:{job_id}",
+            daemon=True,
+        )
+        heartbeat.start()
         try:
             action = self.store.get_checkpoint(job_id, "action")
             if action is None and not verify_only:
@@ -149,7 +199,11 @@ class JobEngine:
                     JobStatus.VERIFYING,
                     expected={JobStatus.PENDING, JobStatus.RUNNING},
                 )
+            if heartbeat_errors:
+                raise RuntimeError("durable execution lease heartbeat failed")
             final = self._verify(self.store.get_job(job_id), action or {}, defer_complete=True)
+            if heartbeat_errors:
+                raise RuntimeError("durable execution lease heartbeat failed")
             if (
                 JobStatus(final["status"]) == JobStatus.VERIFYING
                 and self.store.get_checkpoint(job_id, "verification_passed")
@@ -194,6 +248,8 @@ class JobEngine:
                     pass
             return final
         finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=5)
             final = self.store.get_job(job_id)
             final_status = final["status"]
             status_name = (

@@ -155,6 +155,50 @@ class JobStore:
             if owned:
                 conn.close()
 
+    def fail_orphaned_chat_jobs(
+        self,
+        *,
+        older_than_seconds: int = 300,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Fail generic zero-attempt Chat Jobs that no worker ever claimed."""
+        if older_than_seconds < 1:
+            raise ValueError("orphan timeout must be positive")
+        at = now or datetime.now(timezone.utc)
+        cutoff = (at - timedelta(seconds=older_than_seconds)).isoformat()
+        stamp = at.isoformat()
+        reason = (
+            "execution did not start: the generic Google Chat Job was not claimed "
+            f"within {older_than_seconds} seconds"
+        )
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status=? AND action_type='hermes.google_chat_task'
+                     AND attempt_count=0 AND lease_owner IS NULL
+                     AND updated_at<=?""",
+                (JobStatus.RUNNING.value, cutoff),
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            for job_id in job_ids:
+                conn.execute(
+                    """UPDATE jobs SET status=?,last_error=?,next_wakeup_at=NULL,
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?""",
+                    (JobStatus.FAILED.value, reason, stamp, job_id),
+                )
+                conn.execute(
+                    """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                       VALUES (?, 'orphan_timeout', ?, ?)
+                       ON CONFLICT(job_id,kind) DO UPDATE SET
+                       data_json=excluded.data_json,created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        canonical_json({"reason": reason, "cutoff": cutoff}),
+                        stamp,
+                    ),
+                )
+        return job_ids
+
     def retarget_unattempted(
         self,
         job_id: str,
@@ -255,6 +299,26 @@ class JobStore:
                    WHERE id=?""",
                 (now, job_id),
             )
+            return self.get_job(job_id, conn=conn)
+
+    def renew_lease(
+        self,
+        job_id: str,
+        owner: str,
+        *,
+        lease_seconds: int = 120,
+    ) -> dict[str, Any]:
+        """Extend the exact worker-owned Job lease without changing attempts."""
+        now = datetime.now(timezone.utc)
+        expiry = (now + timedelta(seconds=max(1, lease_seconds))).isoformat()
+        with self.transaction() as conn:
+            changed = conn.execute(
+                """UPDATE jobs SET lease_expires_at=?,updated_at=?
+                   WHERE id=? AND lease_owner=?""",
+                (expiry, now.isoformat(), job_id, owner),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("job lease is missing or owned by another worker")
             return self.get_job(job_id, conn=conn)
 
     def transition(
@@ -491,6 +555,50 @@ class JobStore:
                     (row["resume_status"] or JobStatus.PENDING, now, row["id"]),
                 )
             return [row["id"] for row in rows]
+
+    def list_pending(self, action_types: set[str] | frozenset[str], limit: int = 25) -> list[str]:
+        """Return durable runnable IDs; JobEngine.claim remains the concurrency gate."""
+        if not action_types:
+            return []
+        values = sorted(action_types)
+        placeholders = ",".join("?" for _ in values)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT id FROM jobs
+                    WHERE status=? AND action_type IN ({placeholders})
+                    ORDER BY created_at LIMIT ?""",
+                [JobStatus.PENDING.value, *values, limit],
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def list_runnable(
+        self,
+        action_types: set[str] | frozenset[str],
+        limit: int = 25,
+    ) -> list[str]:
+        """Return executable Jobs that can continue from a durable checkpoint."""
+        if not action_types:
+            return []
+        values = sorted(action_types)
+        placeholders = ",".join("?" for _ in values)
+        now = utc_now()
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT id FROM jobs
+                    WHERE status IN (?,?,?)
+                      AND action_type IN ({placeholders})
+                      AND (lease_owner IS NULL OR lease_expires_at<=?)
+                    ORDER BY created_at LIMIT ?""",
+                [
+                    JobStatus.PENDING.value,
+                    JobStatus.RUNNING.value,
+                    JobStatus.VERIFYING.value,
+                    *values,
+                    now,
+                    limit,
+                ],
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     @staticmethod
     def _decode_job(row: sqlite3.Row) -> dict[str, Any]:

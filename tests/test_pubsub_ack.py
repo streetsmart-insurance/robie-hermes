@@ -1,7 +1,10 @@
 import asyncio
 import unittest
 from concurrent.futures import Future
+from pathlib import Path
 
+from tests.durable_temp import durable_temporary_directory
+from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.pubsub_ack import PubSubAckCoordinator
 
 
@@ -109,6 +112,35 @@ class PubSubAckTests(unittest.TestCase):
         self.assertEqual((message.acks, message.nacks), (0, 1))
         self.assertFalse(self.dedup.contains("m-schedule-failure"))
         coro.close()
+
+    def test_ack_follows_durable_enqueue_not_worker_completion(self):
+        """The handoff future settles while executable work is still queued."""
+        with durable_temporary_directory() as tmp:
+            queue = DurableChatEventQueue(Path(tmp) / "durable" / "jobs.db")
+            future = Future()
+            message = FakeMessage()
+            submitted = []
+
+            async def durable_handoff():
+                queue.enqueue(
+                    event_id="m-durable",
+                    conversation_id="spaces/dm",
+                    message_id="m-durable",
+                    payload={"job_id": "job-1", "action_type": "browser.read"},
+                    job_id="job-1",
+                )
+
+            self.coordinator.schedule(
+                coro=durable_handoff(),
+                message=message,
+                message_id="m-durable",
+                submit=lambda coro: (submitted.append(coro), future)[1],
+            )
+            self.assertEqual((message.acks, message.nacks), (0, 0))
+            asyncio.run(submitted.pop())
+            future.set_result(None)
+            self.assertEqual((message.acks, message.nacks), (1, 0))
+            self.assertEqual(queue.get("m-durable")["state"], "QUEUED")
 
 
 if __name__ == "__main__":
