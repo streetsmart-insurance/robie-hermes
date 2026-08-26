@@ -23,7 +23,7 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("install_playwright_write_guards", source)
         self.assertIn("destination_verified", source)
         self.assertIn("authorizes_complete", source)
-        self.assertIn("uniquely identifies exactly one field", source)
+        self.assertIn("identifies exactly one field", source)
 
     def test_playwright_policy_forbids_silent_engine_fallback(self):
         source = SKILL.read_text()

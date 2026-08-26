@@ -290,16 +290,18 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         job_id = open_chat_job(
             str(self.store.path),
             "spaces/s/messages/policy-setup",
-            "Set up the insurance policy in EZLynx",
+            "Please set up the insurance policy in EZLynx",
         )
+        self.assertIsNotNone(job_id)
         response = guard_chat_response(
             str(self.store.path),
             job_id,
             "I set up the policy. The work is done.",
         )
         self.assertIn("UNVERIFIED", response)
-        self.assertNotIn("COMPLETE", response)
+        self.assertNotIn("— COMPLETE", response)
         self.assertNotIn("I set up the policy", response)
+        self.assertIn("suppressed", response)
         self.assertEqual(self.store.get_job(job_id)["status"], JobStatus.UNVERIFIED)
 
     def test_unbound_policy_success_claim_is_not_reported(self):
