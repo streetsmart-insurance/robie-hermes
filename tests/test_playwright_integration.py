@@ -20,6 +20,10 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("start_new_session=True", source)
         self.assertIn("os.killpg", source)
         self.assertIn("persistent browser was preserved", source)
+        self.assertIn("install_playwright_write_guards", source)
+        self.assertIn("destination_verified", source)
+        self.assertIn("authorizes_complete", source)
+        self.assertIn("uniquely identifies exactly one field", source)
 
     def test_playwright_policy_forbids_silent_engine_fallback(self):
         source = SKILL.read_text()
@@ -27,6 +31,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
             self.assertIn(forbidden, source)
         self.assertIn("independently reread the destination", source)
         self.assertIn("stored Drive link", source)
+        self.assertIn("uniquely identifies exactly one", source)
+        self.assertIn("PLAYWRIGHT_BLOCKED", source)
 
     def test_runtime_fragments_enable_tool_and_preserve_completion_authority(self):
         config = CONFIG.read_text()
@@ -36,6 +42,7 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("fail_closed: true", config)
         self.assertIn("recordings are supporting", soul)
         self.assertIn("do not authorize Job Engine `COMPLETE`", soul)
+        self.assertIn("uniquely identify", soul)
 
 
 if __name__ == "__main__":

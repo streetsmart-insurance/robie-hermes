@@ -108,7 +108,12 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         self.assertTrue(screenshot_may_be_logged({"page": "account summary"}))
 
     def test_phase02_complete_requires_verifying_and_evidence(self):
-        job = self.store.create_job("browser.read", {"worker": "x"}, idempotency_key="p2")
+        locator = "https://example.test/rec-1"
+        job = self.store.create_job(
+            "browser.read",
+            {"worker": "x", "locator": {"url": locator}},
+            idempotency_key="p2",
+        )
         with self.assertRaises(PermissionError):
             self.store.transition(job["id"], JobStatus.COMPLETE)
         self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
@@ -118,7 +123,20 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
                 job["id"], JobStatus.COMPLETE, expected={JobStatus.VERIFYING},
                 authority=VERIFIER_AUTHORITY,
             )
-        self.store.add_evidence(job["id"], True, _evidence({"ok": True}, {"ok": True}))
+        self.store.checkpoint(
+            job["id"],
+            "action",
+            {"action": "browser.read", "destination": {"url": locator}},
+        )
+        self.store.add_evidence(
+            job["id"],
+            True,
+            _evidence(
+                {"url": locator, "title": "Account"},
+                {"url": locator, "title": "Account"},
+                locator=locator,
+            ),
+        )
         done = self.store.transition(
             job["id"], JobStatus.COMPLETE, expected={JobStatus.VERIFYING},
             authority=VERIFIER_AUTHORITY,
@@ -232,7 +250,12 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         class Verifier:
             def verify(self, current, action):
                 return VerificationResult(
-                    True, _evidence({"ok": True}, {"ok": True}, locator="wired")
+                    True,
+                    _evidence(
+                        {"record_id": "wired", "status": "done"},
+                        {"record_id": "wired", "status": "done"},
+                        locator="wired",
+                    ),
                 )
 
         owners = []
