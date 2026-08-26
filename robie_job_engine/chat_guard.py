@@ -73,6 +73,24 @@ _IN_PROGRESS_MARKERS = (
     "playwright_exec",
 )
 
+_UNBOUND_POLICY_SUCCESS_MARKERS = (
+    "i set up the policy",
+    "i created the policy",
+    "i finished setting up the policy",
+    "policy has been set up",
+    "policy was created",
+    "policy setup is complete",
+    "successfully set up the policy",
+    "successfully created the policy",
+    "the policy is set up",
+    "the insurance policy is set up",
+)
+
+
+def _looks_like_unbound_policy_success(content: str) -> bool:
+    normalized = " ".join(str(content or "").casefold().split())
+    return any(marker in normalized for marker in _UNBOUND_POLICY_SUCCESS_MARKERS)
+
 
 def _submission_audit_payload() -> dict[str, Any]:
     """Return the server-owned read-only scope for a Submission Center audit."""
@@ -816,6 +834,12 @@ def guard_chat_response(
 ) -> str:
     content = redact_text(content)
     if not job_id:
+        if _looks_like_unbound_policy_success(content):
+            return (
+                "ROBIE is not treating this as successful. "
+                "No bound Job and no fresh destination evidence were available, "
+                "so a policy setup cannot be reported as complete."
+            )
         return content
     store = JobStore(db_path)
     job = store.get_job(job_id)

@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
 from tools.registry import registry
 
@@ -12,6 +13,22 @@ from tools.registry import registry
 _DEFAULT_TIMEOUT_S = 45
 _MAX_TIMEOUT_S = 180
 _CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
+_USER_CODE_SEPARATOR = "\n##ROBIE_PLAYWRIGHT_USER_CODE##\n"
+
+
+def _write_guard_path() -> Path:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.with_name("playwright_write_guard.py"),
+        here.parents[2] / "robie_job_engine" / "playwright_write_guard.py",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise RuntimeError(
+        "PLAYWRIGHT_BLOCKED: unique-write guard source is missing; "
+        "refuse to run unconstrained Playwright writes"
+    )
 
 
 def _available():
@@ -30,9 +47,16 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
 
     wrapper = r'''
 import os, sys
-from playwright.sync_api import sync_playwright, expect
+from playwright.sync_api import Locator, Page, sync_playwright, expect
 
-source = sys.stdin.read()
+raw = sys.stdin.read()
+separator = "\n##ROBIE_PLAYWRIGHT_USER_CODE##\n"
+if separator not in raw:
+    raise RuntimeError(
+        "PLAYWRIGHT_BLOCKED: unique-write guard was not installed; "
+        "refuse to run unconstrained Playwright writes"
+    )
+guard_source, source = raw.split(separator, 1)
 cdp_url = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
 pw = sync_playwright().start()
 try:
@@ -50,13 +74,30 @@ try:
         "pages": pages,
         "page": page,
         "expect": expect,
+        "Locator": Locator,
+        "Page": Page,
     }
+    exec(compile(guard_source, "<playwright_write_guard>", "exec"), scope, scope)
+    installer = scope.get("install_playwright_write_guards")
+    if not callable(installer):
+        raise RuntimeError(
+            "PLAYWRIGHT_BLOCKED: unique-write guard installer is missing"
+        )
+    installer(scope)
+    if not scope.get("_robie_unique_write_guard"):
+        raise RuntimeError(
+            "PLAYWRIGHT_BLOCKED: unique-write guard did not install"
+        )
     exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
 finally:
     pw.stop()
 '''
     env = os.environ.copy()
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
+    try:
+        payload = _write_guard_path().read_text() + _USER_CODE_SEPARATOR + code
+    except Exception as exc:
+        return tool_error(f"PLAYWRIGHT_BLOCKED: {exc}")
     try:
         proc = subprocess.Popen(
             [sys.executable, "-u", "-c", wrapper],
@@ -68,7 +109,7 @@ finally:
             env=env,
         )
         stdout, stderr = proc.communicate(
-            input=code,
+            input=payload,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -98,6 +139,8 @@ finally:
             "exit_code": 0,
             "output": stdout,
             "engine": "playwright",
+            "destination_verified": False,
+            "authorizes_complete": False,
         }
     )
 
@@ -108,9 +151,11 @@ PLAYWRIGHT_EXEC_SCHEMA = {
         "Control Robie's existing signed-in Chrome session using Python Playwright only. "
         "The code runs with sync Playwright bindings already available: browser, context, "
         "pages, page, expect, and playwright. Reuse a matching page from pages before "
-        "opening or navigating another tab. Use semantic locators and assert the resulting "
-        "state after every action. Print structured data needed for the final answer. If "
-        "Playwright cannot attach or verify state, stop; do not use another browser engine."
+        "opening or navigating another tab. Writes fail closed unless the locator uniquely "
+        "identifies exactly one field; .first/.nth/.last guesses are PLAYWRIGHT_BLOCKED. "
+        "A zero exit code is not destination evidence and does not authorize Job Engine "
+        "COMPLETE. Print structured data needed for the final answer. If Playwright cannot "
+        "attach or verify state, stop; do not use another browser engine."
     ),
     "parameters": {
         "type": "object",

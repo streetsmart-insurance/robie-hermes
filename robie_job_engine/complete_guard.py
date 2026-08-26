@@ -43,6 +43,14 @@ IDENTITY_KEYS = (
     "locator",
     "id",
 )
+IDENTITY_FALLBACK_KEYS = (
+    "url",
+    "document_id",
+    "target_path",
+    "destination_root",
+    "destination_id",
+)
+WEAK_ONLY_EXPECTED_KEYS = frozenset({"ok"})
 WORKFLOW_EXPECTED_KEYS = frozenset(
     IDENTITY_KEYS
     + (
@@ -74,8 +82,7 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
 
 
 def _identity_from_blobs(*blobs: Any) -> str | None:
-    extra = ("url", "title", "document_id")
-    keys = IDENTITY_KEYS + extra
+    keys = IDENTITY_KEYS + IDENTITY_FALLBACK_KEYS
     for blob in blobs:
         if isinstance(blob, str) and blob.strip():
             return blob.strip()
@@ -123,6 +130,16 @@ def intended_destination_identity(
     )
 
 
+def identities_bound(record_id: str, intended: str) -> bool:
+    """True when evidence names the intended record or a path under it."""
+    if record_id == intended:
+        return True
+    if not record_id or not intended:
+        return False
+    prefix = str(intended).rstrip("/") + "/"
+    return str(record_id).startswith(prefix)
+
+
 def destination_identity_missing(
     *,
     locator: str | None,
@@ -139,7 +156,9 @@ def destination_identity_missing(
         return "COMPLETE prohibited: destination record identity is missing"
     if job_id and record_id == str(job_id):
         return "COMPLETE prohibited: destination record identity cannot be the Job ID"
-    if intended and record_id != str(intended):
+    if not intended:
+        return "COMPLETE prohibited: action target identity is missing"
+    if not identities_bound(record_id, str(intended)):
         return (
             f"COMPLETE prohibited: evidence identity {record_id!r} "
             f"does not match action target {intended!r}"
@@ -168,6 +187,16 @@ def expected_postcondition_missing(expected: dict[str, Any] | None) -> str | Non
         return "COMPLETE prohibited: expected postcondition is empty"
     if not any(key in WORKFLOW_EXPECTED_KEYS for key in expected):
         return "COMPLETE prohibited: expected postcondition has no workflow-relevant keys"
+    material = {
+        key: value
+        for key, value in expected.items()
+        if key not in WEAK_ONLY_EXPECTED_KEYS
+    }
+    if not material:
+        return (
+            "COMPLETE prohibited: expected postcondition is only a success flag; "
+            "the intended record was not proven"
+        )
     return None
 
 
