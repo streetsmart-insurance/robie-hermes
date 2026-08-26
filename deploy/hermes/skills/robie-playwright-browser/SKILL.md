@@ -21,6 +21,9 @@ teaches the business workflow; Robie owns the browser mechanics.
 
 1. Reuse an existing signed-in tab whose URL and account context match.
 2. Locate elements by stable roles, labels, test IDs, or documented selectors.
+   A write is allowed only when that locator uniquely identifies exactly one
+   field. `.first`, `.nth()`, `.last`, and other positional guesses are
+   `PLAYWRIGHT_BLOCKED`; do not fill a field you cannot uniquely name.
 3. Assert the URL, client or account, heading, and critical values before work.
 4. After every navigation, save, upload, selection, or sort, wait for and assert
    the authoritative state change.

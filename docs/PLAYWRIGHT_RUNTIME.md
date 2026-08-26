@@ -6,7 +6,10 @@ overlay. It does not modify a live Hermes installation in place.
 ## Release files
 
 - `deploy/hermes/tools/playwright_tool.py` registers the `playwright_exec`
-  toolset and connects only to the configured persistent Chrome CDP endpoint.
+  toolset, connects only to the configured persistent Chrome CDP endpoint,
+  and refuses form writes unless the locator uniquely identifies one field.
+- `deploy/hermes/tools/playwright_write_guard.py` is the unique-write guard
+  installed into every `playwright_exec` run.
 - `deploy/hermes/skills/robie-playwright-browser/SKILL.md` defines locator,
   assertion, evidence, and fail-closed rules.
 - `deploy/hermes/config/playwright.yaml` is the minimal configuration fragment

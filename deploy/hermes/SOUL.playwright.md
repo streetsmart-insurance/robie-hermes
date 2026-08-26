@@ -8,4 +8,7 @@
   assertion fails, stop and report `PLAYWRIGHT_BLOCKED` with the exact check.
 - A browser action is complete only after the destination state is verified by
   an authoritative assertion. Screenshots and recordings are supporting
-  evidence; they do not authorize Job Engine `COMPLETE`.
+  evidence; they do not authorize Job Engine `COMPLETE`. A Playwright write
+  that cannot uniquely identify its field is `PLAYWRIGHT_BLOCKED` and is never
+  success. A wrong or missing destination record cannot be reported as
+  complete.
