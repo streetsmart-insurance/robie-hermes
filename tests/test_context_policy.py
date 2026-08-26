@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+from durable_temp import durable_temporary_directory
 
 from robie_job_engine.context_policy import JobContextManager
 from robie_job_engine.models import JobStatus
@@ -17,7 +18,7 @@ UTC = timezone.utc
 
 class ContextPolicyTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = durable_temporary_directory()
         self.db = Path(self.temp.name) / "jobs.db"
         self.jobs = JobStore(self.db)
         self.context = JobContextManager(self.db, inactivity_minutes=120, context_char_budget=2_000)
