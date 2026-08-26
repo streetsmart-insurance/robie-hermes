@@ -36,14 +36,27 @@ class RecordingUploader(Protocol):
     def upload(self, path: Path, file_name: str) -> tuple[str, str]: ...
 
 
+class RecordingRequiredError(RuntimeError):
+    """Raised before executable work when required capture is unavailable."""
+
+
 class SubprocessTabCapture:
     """Capture only the persistent Chrome tab through CDP, never the desktop."""
 
-    def __init__(self, *, cdp_url: str = DEFAULT_CDP_URL, fps: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        cdp_url: str = DEFAULT_CDP_URL,
+        fps: int = 4,
+        ready_timeout: float = 20.0,
+    ) -> None:
         self.cdp_url = cdp_url
         self.fps = fps
+        self.ready_timeout = ready_timeout
 
     def start(self, output_path: Path, stop_file: Path) -> int:
+        ready_file = output_path.with_suffix(".ready")
+        ready_file.unlink(missing_ok=True)
         command = [
             sys.executable,
             "-m",
@@ -51,20 +64,38 @@ class SubprocessTabCapture:
             "--cdp-url", self.cdp_url,
             "--output", str(output_path),
             "--stop-file", str(stop_file),
+            "--ready-file", str(ready_file),
             "--fps", str(self.fps),
         ]
         log_path = output_path.with_suffix(".capture.log")
         log_handle = log_path.open("ab")
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-        log_handle.close()
-        return int(process.pid)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            log_handle.close()
+
+        deadline = time.monotonic() + self.ready_timeout
+        while time.monotonic() < deadline:
+            if ready_file.is_file():
+                return int(process.pid)
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"browser capture exited before readiness (code {process.returncode})"
+                )
+            time.sleep(0.05)
+
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        raise RuntimeError("browser capture did not become ready before timeout")
 
     def stop(self, pid: int, stop_file: Path, output_path: Path) -> None:
         stop_file.touch(mode=0o600, exist_ok=True)
@@ -90,6 +121,7 @@ class SubprocessTabCapture:
             time.sleep(1)
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise RuntimeError("browser capture produced no video")
+        output_path.with_suffix(".ready").unlink(missing_ok=True)
 
 
 class GoogleDriveUploader:
@@ -107,7 +139,10 @@ class GoogleDriveUploader:
         token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
         if token_file:
             from google.oauth2.credentials import Credentials
-            credentials = Credentials.from_authorized_user_file(token_file, scopes=[scope])
+            credentials = Credentials.from_authorized_user_file(token_file)
+            granted = set(credentials.scopes or ())
+            if scope not in granted:
+                raise PermissionError("Google token lacks required Drive scope")
         else:
             credentials, _ = google.auth.default(scopes=[scope])
         drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
@@ -153,6 +188,7 @@ class RecordingStore:
                     size_bytes INTEGER,
                     final_job_status TEXT,
                     failure TEXT,
+                    failure_stage TEXT,
                     reference_approved INTEGER NOT NULL DEFAULT 0,
                     training_approved INTEGER NOT NULL DEFAULT 0,
                     redacted INTEGER NOT NULL DEFAULT 0,
@@ -167,6 +203,9 @@ class RecordingStore:
                     ON job_recordings(job_id, segment_number DESC);
                 """
             )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(job_recordings)")}
+            if "failure_stage" not in columns:
+                conn.execute("ALTER TABLE job_recordings ADD COLUMN failure_stage TEXT")
 
     def create(self, job_id: str, local_path: Path, stop_file: Path) -> dict[str, Any]:
         with self._connect() as conn:
@@ -188,7 +227,7 @@ class RecordingStore:
             "status", "capture_pid", "drive_file_id", "drive_url", "sha256",
             "size_bytes", "final_job_status", "failure", "stopped_at", "uploaded_at",
             "reference_approved", "training_approved", "redacted", "review_notes",
-            "approved_by",
+            "approved_by", "failure_stage",
         }
         invalid = set(fields) - allowed
         if invalid:
@@ -225,6 +264,15 @@ class RecordingStore:
                 (job_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        """Return every recording segment for a Job, oldest segment first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM job_recordings WHERE job_id=? ORDER BY segment_number",
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def approve_reference(
         self, recording_id: str, *, approved_by: str, notes: str, redacted: bool
@@ -266,12 +314,21 @@ class RecordingManager:
         capture: CaptureBackend | None = None,
         uploader: RecordingUploader | None = None,
         enabled: bool | None = None,
+        keep_local: bool | None = None,
     ) -> None:
         self.store = RecordingStore(db_path)
         self.root = Path(root or os.environ.get("ROBIE_RECORDING_ROOT") or DEFAULT_RECORDING_ROOT)
         if enabled is None:
             enabled = os.environ.get("ROBIE_RECORD_ALL_JOBS", "0").lower() in {"1", "true", "yes"}
         self.enabled = enabled
+        if keep_local is None:
+            delete = os.environ.get("ROBIE_DELETE_LOCAL_RECORDING_AFTER_UPLOAD", "1").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            keep_local = not delete
+        self.keep_local = keep_local
         if self.enabled:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(self.root, 0o700)
@@ -291,7 +348,8 @@ class RecordingManager:
         job_dir = self.root / _safe(job_id)
         job_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        output = job_dir / f"{_safe(job_id)}-{stamp}.webm"
+        unique = uuid.uuid4().hex
+        output = job_dir / f"{_safe(job_id)}-{stamp}-{unique}.webm"
         stop_file = output.with_suffix(".stop")
         recording = self.store.create(job_id, output, stop_file)
         try:
@@ -299,8 +357,19 @@ class RecordingManager:
             return self.store.update(recording["id"], status="RECORDING", capture_pid=pid)
         except Exception as exc:
             return self.store.update(
-                recording["id"], status="FAILED", failure=f"{type(exc).__name__}: {exc}"
+                recording["id"], status="FAILED", failure_stage="START",
+                failure=f"{type(exc).__name__}: {exc}"
             )
+
+    def start_required(self, job_id: str) -> dict[str, Any]:
+        """Start capture and fail closed before any executable work."""
+        if not self.enabled:
+            raise RecordingRequiredError("recording is required but disabled")
+        recording = self.start(job_id)
+        if not recording or recording.get("status") != "RECORDING":
+            detail = (recording or {}).get("failure") or "capture did not enter RECORDING"
+            raise RecordingRequiredError(f"recording start failed: {detail}")
+        return recording
 
     def stop_and_upload(self, job_id: str, final_job_status: str) -> dict[str, Any] | None:
         recording = self.store.active(job_id)
@@ -327,13 +396,16 @@ class RecordingManager:
                 recording["id"], status="READY", drive_file_id=file_id,
                 drive_url=url, uploaded_at=_now(),
             )
-            if os.environ.get("ROBIE_DELETE_LOCAL_RECORDING_AFTER_UPLOAD", "1").lower() in {"1", "true", "yes"}:
+            if not self.keep_local:
                 output.unlink(missing_ok=True)
                 Path(recording["stop_file"]).unlink(missing_ok=True)
+                output.with_suffix(".ready").unlink(missing_ok=True)
             return ready
         except Exception as exc:
+            stage = "UPLOAD" if recording.get("status") == "UPLOADING" else "FINALIZE"
             return self.store.update(
-                recording["id"], status="FAILED", failure=f"{type(exc).__name__}: {exc}",
+                recording["id"], status="FAILED", failure_stage=stage,
+                failure=f"{type(exc).__name__}: {exc}",
                 stopped_at=_now(),
             )
 
@@ -348,3 +420,24 @@ class RecordingManager:
             self.stop_and_upload(job_id, final_job_status)
         except Exception:
             pass
+
+    def list_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        return self.store.list_for_job(job_id)
+
+    def completion_error(self, job_id: str) -> str | None:
+        """Explain why recording evidence cannot authorize COMPLETE."""
+        segments = self.list_for_job(job_id)
+        if not segments:
+            return "Recording failed: no recording segment exists"
+        for segment in segments:
+            if segment.get("status") != "READY" or not segment.get("drive_url"):
+                if segment.get("failure_stage") == "UPLOAD":
+                    return (
+                        "Recording upload failed for segment "
+                        f"{segment['segment_number']}: {segment.get('failure') or 'unknown error'}"
+                    )
+                return (
+                    "Recording failed for segment "
+                    f"{segment['segment_number']}: {segment.get('failure') or segment.get('status')}"
+                )
+        return None

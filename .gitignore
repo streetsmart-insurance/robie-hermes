@@ -1,0 +1,52 @@
+# Secrets and local authentication
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*.json
+*google_token*.json
+*oauth*.json
+*service-account*.json
+
+# Durable runtime state must remain in GCP, never Git
+data/
+backups/
+artifacts/
+recordings/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.webm
+*.mp4
+*.log
+
+# Browser and user state
+browser-profile/
+chrome-profile/
+sessions/
+
+# Local durable test ledgers (must not live in /tmp)
+.robie-durable-test/
+
+# Python and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# OS/editor files
+._*
+.DS_Store
+.idea/
+.vscode/
+
+# Generated deployment artifacts
+dist/
+build/
+release-artifacts/

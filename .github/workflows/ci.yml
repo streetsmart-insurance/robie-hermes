@@ -1,10 +1,9 @@
-name: Hermes tests
+name: ROBIE verification gate
 
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,26 +13,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install test dependency
-        run: python -m pip install pytest
-
-      - name: Reject committed secrets and runtime files
+      - name: Reject sensitive files
         run: |
           if find . -type f \( -name '.env' -o -name '*.pem' -o -name '*.key' -o -name '*.db' -o -name '*.sqlite*' -o -name '*credentials*.json' -o -name '*token*.json' \) -print -quit | grep -q .; then
             echo "Sensitive or runtime file found in repository"
             exit 1
           fi
-
+      - name: Install pytest for Phase 3 modules
+        run: python -m pip install "pytest>=8.3,<9"
+      - name: Install Google Chat bridge dependencies
+        run: python -m pip install -r services/chat-http-bridge/requirements.txt
+      - name: Test Google Chat bridge
+        run: PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py' -v
       - name: Compile source
-        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q robie_job_engine tests
+        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine tests
+      - name: Run acceptance suite
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
+      - name: Run Phase 3 pytest modules
+        run: PYTHONPATH=. python -m pytest tests/test_carrier_directory.py tests/test_ezlynx_poller.py tests/test_video_to_skill.py -q
+      - name: Build immutable release candidate
+        run: bash scripts/build-release.sh "$RUNNER_TEMP/releases"
 
-      - name: Run test suite
-        run: PYTHONPATH=. python -m pytest -q
+  canonical-paths:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Canonical ephemeral-path tests (macOS /private/tmp)
+        run: |
+          PYTHONPATH=.:tests python -m unittest \
+            tests.test_engineering_report_p0p1.EngineeringReportP0P1Tests.test_canonical_ephemeral_paths_rejected_including_macos_private_tmp \
+            tests.test_engineering_report_p0p1.EngineeringReportP0P1Tests.test_phase04_durable_idempotency_at_most_one_action \
+            -v
