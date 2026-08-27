@@ -1,5 +1,7 @@
-import unittest
+import os
 import sqlite3
+import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +12,8 @@ from robie_job_engine.chat_guard import (
     chat_message_requires_job,
     guard_chat_response,
     open_chat_job,
+    start_generic_chat_job_heartbeat,
+    stop_generic_chat_job_heartbeat,
 )
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.store import JobStore
@@ -27,8 +31,13 @@ class ChatGuardTests(unittest.TestCase):
                 "Perform the destination workflow",
                 conversation_id="spaces/orphan",
             )
+            stop_generic_chat_job_heartbeat(db, job_id)
             old = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
             with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "DELETE FROM checkpoints WHERE job_id=? AND kind='gateway_progress'",
+                    (job_id,),
+                )
                 conn.execute("UPDATE jobs SET updated_at=? WHERE id=?", (old, job_id))
             related = open_chat_job(
                 db,
@@ -41,6 +50,44 @@ class ChatGuardTests(unittest.TestCase):
             self.assertEqual(job["status"], "FAILED")
             self.assertIn("execution did not start", job["last_error"])
             self.assertIsNotNone(JobStore(db).get_checkpoint(job_id, "orphan_timeout"))
+
+    def test_generic_chat_heartbeat_writes_to_orphan_watcher_db(self):
+        with durable_temporary_directory() as tmp:
+            watcher_db = str(Path(tmp) / "jobs.db")
+            other_db = str(Path(tmp) / "other-jobs.db")
+            JobStore(other_db)
+            with unittest.mock.patch.dict(
+                os.environ, {"ROBIE_JOB_DB": other_db}, clear=False
+            ):
+                job_id = open_chat_job(
+                    watcher_db,
+                    "message-same-db-heartbeat",
+                    "Perform the destination workflow",
+                    conversation_id="spaces/same-db-heartbeat",
+                )
+                watcher = JobStore(watcher_db)
+                now = datetime.now(timezone.utc)
+                started = now - timedelta(seconds=300)
+                with sqlite3.connect(watcher_db) as conn:
+                    conn.execute(
+                        "UPDATE jobs SET created_at=?, updated_at=? WHERE id=?",
+                        (started.isoformat(), started.isoformat(), job_id),
+                    )
+                start_generic_chat_job_heartbeat(watcher_db, job_id, now=now)
+                failed = watcher.fail_orphaned_chat_jobs(now=now)
+                progress = watcher.get_checkpoint(job_id, "gateway_progress")
+            self.assertNotIn(job_id, failed)
+            self.assertEqual(progress["source"], "hermes-gateway")
+            self.assertEqual(watcher.get_job(job_id)["status"], "RUNNING")
+            with sqlite3.connect(other_db) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM checkpoints WHERE kind='gateway_progress'"
+                    ).fetchone()[0],
+                    0,
+                )
+            stop_generic_chat_job_heartbeat(watcher_db, job_id)
 
     def test_in_progress_generic_chat_job_is_not_orphan_failed_at_300s(self):
         with durable_temporary_directory() as tmp:
@@ -73,6 +120,7 @@ class ChatGuardTests(unittest.TestCase):
                 store.get_checkpoint(job_id, "gateway_progress")["source"],
                 "hermes-gateway",
             )
+            stop_generic_chat_job_heartbeat(db, job_id)
 
     def test_abandoned_generic_chat_job_fail_closes_without_gateway_heartbeat(self):
         with durable_temporary_directory() as tmp:
@@ -84,6 +132,7 @@ class ChatGuardTests(unittest.TestCase):
                 "Perform the destination workflow",
                 conversation_id="spaces/abandoned-gateway",
             )
+            stop_generic_chat_job_heartbeat(db, job_id)
             now = datetime.now(timezone.utc)
             stale = now - timedelta(seconds=301)
             store.heartbeat_generic_chat_job(job_id, now=stale)

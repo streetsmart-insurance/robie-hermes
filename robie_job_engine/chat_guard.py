@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
+import threading
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
@@ -24,7 +28,99 @@ from .submission_routing import resolve_submission_route, submission_verificatio
 from .store import JobStore
 
 
+logger = logging.getLogger(__name__)
+
 _CHAT_VERIFIERS: dict[str, Any] = {}
+_GENERIC_CHAT_HEARTBEATS: dict[tuple[str, str], tuple[threading.Event, threading.Thread]] = {}
+_GENERIC_CHAT_HEARTBEAT_LOCK = threading.Lock()
+_GENERIC_CHAT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+
+def _generic_chat_heartbeat_key(db_path: str, job_id: str) -> tuple[str, str]:
+    return (str(Path(db_path).resolve()), job_id)
+
+
+def stop_generic_chat_job_heartbeat(db_path: str, job_id: str) -> None:
+    """Stop a process-local generic Chat heartbeat. Tests use this to fail-close."""
+    key = _generic_chat_heartbeat_key(db_path, job_id)
+    with _GENERIC_CHAT_HEARTBEAT_LOCK:
+        existing = _GENERIC_CHAT_HEARTBEATS.pop(key, None)
+    if existing is None:
+        return
+    stop, thread = existing
+    stop.set()
+    thread.join(timeout=2.0)
+
+
+def start_generic_chat_job_heartbeat(
+    db_path: str,
+    job_id: str | None,
+    *,
+    now: datetime | None = None,
+    interval_seconds: float = _GENERIC_CHAT_HEARTBEAT_INTERVAL_SECONDS,
+    source: str = "hermes-gateway",
+) -> dict[str, Any] | None:
+    """Write ``gateway_progress`` to *this* jobs.db and keep writing while live.
+
+    hermes-gateway may load a stale ``.hermes/hermes-agent`` adapter that never
+    calls ``JobStore.heartbeat_generic_chat_job``. The live Job Engine path
+    (``open_chat_job`` / ``build_chat_execution_text``) still runs, so the
+    heartbeat has to start there and use the same ``db_path`` the orphan
+    watcher reads. The first write is synchronous. A daemon thread continues
+    on a 30s-or-better cadence. If this process dies or the thread errors,
+    heartbeats stop and ``fail_orphaned_chat_jobs`` still fail-closes.
+    """
+    if not job_id:
+        return None
+    if interval_seconds <= 0:
+        raise ValueError("heartbeat interval must be positive")
+    store = JobStore(db_path)
+    job = store.get_job(job_id)
+    if (
+        job["action_type"] != "hermes.google_chat_task"
+        or job["status"] != JobStatus.RUNNING.value
+    ):
+        return job
+    written = store.heartbeat_generic_chat_job(job_id, now=now, source=source)
+    key = _generic_chat_heartbeat_key(db_path, job_id)
+    with _GENERIC_CHAT_HEARTBEAT_LOCK:
+        existing = _GENERIC_CHAT_HEARTBEATS.get(key)
+        if existing is not None and existing[1].is_alive():
+            return written
+        if existing is not None:
+            existing[0].set()
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=_maintain_generic_chat_job_heartbeat,
+            args=(db_path, job_id, stop, interval_seconds, source),
+            name=f"robie-generic-chat-heartbeat:{job_id}",
+            daemon=True,
+        )
+        _GENERIC_CHAT_HEARTBEATS[key] = (stop, thread)
+        thread.start()
+    return written
+
+
+def _maintain_generic_chat_job_heartbeat(
+    db_path: str,
+    job_id: str,
+    stop: threading.Event,
+    interval_seconds: float,
+    source: str,
+) -> None:
+    store = JobStore(db_path)
+    while not stop.wait(interval_seconds):
+        try:
+            job = store.heartbeat_generic_chat_job(job_id, source=source)
+            if job["status"] != JobStatus.RUNNING.value:
+                return
+        except Exception:
+            logger.exception(
+                "generic Chat heartbeat failed; orphan watcher will fail-close job=%s db=%s",
+                job_id,
+                db_path,
+            )
+            return
 
 
 _CONVERSATION_ONLY_EXACT = {
@@ -320,6 +416,11 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     text = add_synced_context(text)
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    if (
+        job["action_type"] == "hermes.google_chat_task"
+        and job["status"] == JobStatus.RUNNING.value
+    ):
+        start_generic_chat_job_heartbeat(db_path, job_id)
     if job["status"] == JobStatus.FAILED:
         return (
             text
@@ -671,6 +772,12 @@ def open_chat_job(
             store.checkpoint(job["id"], "recording_exemption", {"reason": reason})
         else:
             RecordingManager(db_path).safe_start(job["id"])
+    current = store.get_job(job["id"])
+    if (
+        current["action_type"] == "hermes.google_chat_task"
+        and current["status"] == JobStatus.RUNNING.value
+    ):
+        start_generic_chat_job_heartbeat(db_path, current["id"])
     return job["id"]
 
 
