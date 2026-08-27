@@ -792,10 +792,16 @@ def open_chat_job(
     return job["id"]
 
 
-def _post_job_audit_note(db_path: str, job_id: str) -> str:
+def _post_job_audit_note(
+    db_path: str,
+    job_id: str,
+    recordings: RecordingManager | None = None,
+) -> str:
     """Append the four-answer audit. Posted by the existing Chat APP send()."""
     try:
         audit = maybe_audit_terminal_job(db_path, job_id)
+        if recordings is not None:
+            recordings.release_local_after_audit(job_id)
     except Exception as exc:
         return (
             f"\n\nROBIE post-job audit — {job_id} — UNKNOWN\n"
@@ -818,7 +824,7 @@ def _login_secret_chat_note(store: JobStore, job_id: str) -> str:
     from .login_secret_health import format_leftover_note
 
     note = format_leftover_note(report)
-    if not note:
+    if not note or "[REDACTED]" in note:
         return ""
     return f"\n\nLogin secret: {note}."
 
@@ -951,7 +957,7 @@ def _render_chat_terminal(
             + verified_summary
             + worker_detail
             + _recording_chat_note(recordings, job_id)
-            + _post_job_audit_note(str(store.path), job_id)
+            + _post_job_audit_note(str(store.path), job_id, recordings)
         )
     if status == JobStatus.FAILED:
         return (
@@ -960,7 +966,7 @@ def _render_chat_terminal(
             f"Reason: {job.get('last_error') or 'unknown error'}."
             + _recording_chat_note(recordings, job_id)
             + _login_secret_chat_note(store, job_id)
-            + _post_job_audit_note(str(store.path), job_id)
+            + _post_job_audit_note(str(store.path), job_id, recordings)
         )
     if status == JobStatus.UNVERIFIED:
         return (
@@ -971,7 +977,7 @@ def _render_chat_terminal(
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
             + _recording_chat_note(recordings, job_id)
             + _login_secret_chat_note(store, job_id)
-            + _post_job_audit_note(str(store.path), job_id)
+            + _post_job_audit_note(str(store.path), job_id, recordings)
         )
     return (
         f"ROBIE Job {job_id} — {status.value}\n\n"

@@ -183,23 +183,36 @@ def inspect_login_secrets(
         )
     else:
         result = "OK"
-        leftover = format_leftover_note({"secrets": secrets})
+        leftover = format_leftover_note({"watched": secrets})
         reason = leftover or "each watched secret has an ENABLED version"
     return {
         "result": result,
         "reason": reason,
         "project": project_id,
         "secrets": secrets,
+        "watched": secrets,
+        "leftover_note": leftover,
         "should_hold": should_hold,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def format_leftover_note(report: dict[str, Any]) -> str:
-    """Chat wording for DESTROYED latest + ENABLED older. Names/states only."""
+    """Chat wording for DESTROYED latest + ENABLED older. Names/states only.
+
+    Avoid ``secret:`` / ``password:`` assignment shape so JobStore redaction
+    does not turn this into ``[REDACTED]``. The ``secrets`` checkpoint key
+    is itself redacted (the key name matches the secret filter).
+    """
+    stored = str(report.get("leftover_note") or "").strip()
+    if stored and "[REDACTED]" not in stored:
+        return stored
+    raw = report.get("watched") or report.get("secrets") or []
+    if not isinstance(raw, list):
+        return ""
     notes: list[str] = []
-    for item in report.get("secrets") or []:
-        if not item.get("leftover_destroyed"):
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("leftover_destroyed"):
             continue
         enabled = item.get("newest_enabled_version") or (
             (item.get("enabled_versions") or [None])[0]
@@ -208,7 +221,7 @@ def format_leftover_note(report: dict[str, Any]) -> str:
         if not enabled:
             continue
         notes.append(
-            f"{item.get('secret_id')}: using ENABLED {enabled}; "
+            f"{item.get('secret_id')} using ENABLED {enabled}; "
             f"{newest} is DESTROYED leftover"
         )
     return "; ".join(notes)
@@ -226,7 +239,7 @@ def format_alert(report: dict[str, Any]) -> str:
         newest_enabled = item.get("newest_enabled_version") or "none"
         if item.get("leftover_destroyed"):
             lines.append(
-                f"secret {item.get('secret_id')} using ENABLED {newest_enabled}; "
+                f"watched {item.get('secret_id')} using ENABLED {newest_enabled}; "
                 f"{item.get('newest_version') or 'none'} is DESTROYED leftover; "
                 f"enabled={enabled}"
             )
@@ -296,7 +309,9 @@ def maybe_preflight_login_secrets(
     from .models import JobStatus
 
     inspect = inspector or inspect_login_secrets
-    report = inspect()
+    report = dict(inspect())
+    if not report.get("leftover_note"):
+        report["leftover_note"] = format_leftover_note(report)
     store.checkpoint(job["id"], CHECKPOINT, redact_mapping(dict(report)))
     if report.get("result") != "ALERT":
         return report

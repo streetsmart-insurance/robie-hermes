@@ -285,6 +285,8 @@ class JobEngine:
                     from .post_job_audit import maybe_audit_terminal_job
 
                     maybe_audit_terminal_job(self.store.path, job_id)
+                    if self.recordings is not None:
+                        self.recordings.release_local_after_audit(job_id)
                 except Exception:
                     pass
 

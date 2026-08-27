@@ -81,6 +81,9 @@ def run_once(db_path: str) -> dict[str, int]:
         for orphan_id in orphaned_chat_jobs:
             try:
                 maybe_audit_terminal_job(db_path, orphan_id)
+                from .recording import RecordingManager
+
+                RecordingManager(db_path).release_local_after_audit(orphan_id)
             except Exception:
                 pass
     expired_contexts = DurableChatEventQueue(db_path).expire_inactive_conversations(

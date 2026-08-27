@@ -480,7 +480,11 @@ class Job468d1575SecretHealthTests(unittest.TestCase):
             db = str(Path(tmp) / "jobs.db")
             report = {
                 "result": "OK",
-                "reason": "ezlynx-password: using ENABLED versions/1; versions/2 is DESTROYED leftover",
+                "reason": "ezlynx-password using ENABLED versions/1; versions/2 is DESTROYED leftover",
+                "leftover_note": (
+                    "ezlynx-password using ENABLED versions/1; "
+                    "versions/2 is DESTROYED leftover"
+                ),
                 "project": "streetsmart-hermes-poc",
                 "should_hold": False,
                 "secrets": [
