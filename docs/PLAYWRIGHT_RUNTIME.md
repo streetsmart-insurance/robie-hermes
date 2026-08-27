@@ -12,6 +12,14 @@ overlay. It does not modify a live Hermes installation in place.
   installed into every `playwright_exec` run.
 - `deploy/hermes/skills/robie-playwright-browser/SKILL.md` defines locator,
   assertion, evidence, and fail-closed rules.
+- `deploy/hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md` requires
+  Save and Continue Edit after a commercial auto SHELL, quote vehicles /
+  drivers / garaging / symbols / limits / banks, titled-discussion notes
+  that include `Robie was here`, and no bind.
+- `deploy/hermes/skills/ezlynx-gemini-fallback/SKILL.md` plus
+  `robie_job_engine/gemini_field_helper.py` are the fail-closed stuck-field
+  hook: after `PLAYWRIGHT_BLOCKED`, ask Gemini for one unique field, then
+  HITL if Gemini is unsure. Unique-write is not weakened.
 - `deploy/hermes/config/playwright.yaml` is the minimal configuration fragment
   that exposes the tool to CLI and Google Chat profiles.
 - `deploy/hermes/SOUL.playwright.md` is the browser invariant to merge into the

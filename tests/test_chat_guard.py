@@ -211,6 +211,12 @@ class ChatGuardTests(unittest.TestCase):
             execution = build_chat_execution_text(db, job_id, "Please finish the form")
             self.assertIn("ROBIE_BLOCKED: MISSING_REQUIRED_FIELD", execution)
             self.assertIn("ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED", execution)
+            self.assertIn("ask Gemini for one unique field", execution)
+            self.assertIn("HITL Carlo if Gemini is unsure", execution)
+            self.assertIn("exact phrase Robie was here", execution)
+            self.assertIn("Never write a note on Untitled", execution)
+            self.assertIn("Save and Continue Edit", execution)
+            self.assertIn("Do not bind", execution)
 
     def test_chat_response_is_checkpointed_and_unverified(self):
         with durable_temporary_directory() as tmp:

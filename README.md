@@ -84,3 +84,11 @@ profile authenticated using Google Secret Manager references. Credential values
 are never stored in this repository. Its systemd timer runs the session check at
 9:00 a.m. Eastern and stops for operator action when EZLynx requires MFA or a
 CAPTCHA. See the skill's provisioning reference for deployment and rotation.
+
+Backend EZLynx workflow Skills live in `deploy/hermes/skills/` (installed to
+`.hermes/skills`) and are mirrored under `skills/` for the EZLynx skill-folder
+layout. `ezlynx-commercial-auto-from-quote` requires Save and Continue Edit
+after a policy SHELL and titled-discussion notes that include `Robie was here`.
+`ezlynx-gemini-fallback` is the fail-closed stuck-field hook: ask Gemini for
+one unique field, then HITL Carlo if Gemini is unsure. Unique-write stays on.
+These Skills do not bind and do not take payment.

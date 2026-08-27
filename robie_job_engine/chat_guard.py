@@ -354,6 +354,9 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Never claim success from modal text, a local DOM value, or your own prior action. If any requested field is absent, say the action is not verified.",
         "If execution is blocked because a required value is missing, stop and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <field name>.",
         "If execution is blocked at an unresolved browser step or locator, stop and begin the response with exactly: ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: <specific step or locator>.",
+        "If a write is PLAYWRIGHT_BLOCKED or a modal cannot be uniquely named, stop, describe the dialog title and visible labels only (no passwords), ask Gemini for one unique field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use .first/.nth/.last.",
+        "EZLynx notes must go on an existing titled discussion only (New Business, New Policy, Renewal, Cancellation, Submission Center, or another existing titled discussion). Never write a note on Untitled. If the right title is missing, create a properly named discussion first. Always include the exact phrase Robie was here.",
+        "A commercial auto policy SHELL is not done. After the shell, click Save and Continue Edit (or Actions → Edit) and finish vehicles, drivers, garaging, symbols, limits, and banks from the quote. Do not bind. Keep the named insured on the file. Do not invent coverage.",
         "Do not emit ROBIE_BLOCKED for a completed action, a general question, or an ordinary explanation.",
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
