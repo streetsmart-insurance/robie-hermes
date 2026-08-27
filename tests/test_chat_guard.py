@@ -42,6 +42,63 @@ class ChatGuardTests(unittest.TestCase):
             self.assertIn("execution did not start", job["last_error"])
             self.assertIsNotNone(JobStore(db).get_checkpoint(job_id, "orphan_timeout"))
 
+    def test_in_progress_generic_chat_job_is_not_orphan_failed_at_300s(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = open_chat_job(
+                db,
+                "message-live-gateway",
+                "Perform the destination workflow",
+                conversation_id="spaces/live-gateway",
+            )
+            opened = store.get_job(job_id)
+            self.assertEqual(opened["status"], "RUNNING")
+            self.assertEqual(opened["attempt_count"], 0)
+            self.assertIsNone(opened["lease_owner"])
+            now = datetime.now(timezone.utc)
+            started = now - timedelta(seconds=300)
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "UPDATE jobs SET created_at=?, updated_at=? WHERE id=?",
+                    (started.isoformat(), started.isoformat(), job_id),
+                )
+            store.heartbeat_generic_chat_job(job_id, now=now)
+            failed = store.fail_orphaned_chat_jobs(now=now)
+            self.assertNotIn(job_id, failed)
+            job = store.get_job(job_id)
+            self.assertEqual(job["status"], "RUNNING")
+            self.assertIsNone(store.get_checkpoint(job_id, "orphan_timeout"))
+            self.assertEqual(
+                store.get_checkpoint(job_id, "gateway_progress")["source"],
+                "hermes-gateway",
+            )
+
+    def test_abandoned_generic_chat_job_fail_closes_without_gateway_heartbeat(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = open_chat_job(
+                db,
+                "message-abandoned-gateway",
+                "Perform the destination workflow",
+                conversation_id="spaces/abandoned-gateway",
+            )
+            now = datetime.now(timezone.utc)
+            stale = now - timedelta(seconds=301)
+            store.heartbeat_generic_chat_job(job_id, now=stale)
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "UPDATE jobs SET created_at=?, updated_at=? WHERE id=?",
+                    (stale.isoformat(), stale.isoformat(), job_id),
+                )
+            failed = store.fail_orphaned_chat_jobs(now=now)
+            self.assertEqual(failed, [job_id])
+            job = store.get_job(job_id)
+            self.assertEqual(job["status"], "FAILED")
+            self.assertIn("execution did not start", job["last_error"])
+            self.assertIsNotNone(store.get_checkpoint(job_id, "orphan_timeout"))
+
     def test_conversation_only_messages_do_not_create_jobs(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")

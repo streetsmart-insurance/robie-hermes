@@ -34,6 +34,8 @@ class GatewayJobEnginePathTests(unittest.TestCase):
         self.assertIn("queue.active_conversation_job", adapter)
         self.assertIn("queue.renew_lease", adapter)
         self.assertIn("queue.defer", adapter)
+        self.assertIn("heartbeat_generic_chat_job", adapter)
+        self.assertIn("_run_generic_chat_job(job_id, event)", adapter)
         self.assertNotIn(
             'JobContextManager(ROBIE_JOB_DB).get(event.source.chat_id)', adapter
         )

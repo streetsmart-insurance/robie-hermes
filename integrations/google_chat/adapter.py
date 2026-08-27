@@ -1180,6 +1180,33 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 lease_seconds=lease_seconds,
             )
 
+    async def _maintain_generic_chat_job_heartbeat(self, job_id: str) -> None:
+        """Keep a live generic Chat Job from being orphan-failed at 300s."""
+        interval = 30.0
+        while True:
+            job = await asyncio.to_thread(
+                JobStore(ROBIE_JOB_DB).heartbeat_generic_chat_job, job_id
+            )
+            if job["status"] != JobStatus.RUNNING.value:
+                return
+            await asyncio.sleep(interval)
+
+    async def _run_generic_chat_job(
+        self, job_id: str | None, event: MessageEvent
+    ) -> None:
+        """Run Hermes Chat work while heartbeating the unleased Job ledger row."""
+        if not job_id:
+            await self.handle_message(event)
+            return
+        heartbeat = asyncio.create_task(
+            self._maintain_generic_chat_job_heartbeat(job_id),
+            name=f"hermes-chat-job-heartbeat:{job_id}",
+        )
+        try:
+            await self.handle_message(event)
+        finally:
+            await self._stop_chat_queue_heartbeat(heartbeat)
+
     @staticmethod
     async def _stop_chat_queue_heartbeat(task: asyncio.Task) -> None:
         task.cancel()
@@ -2405,7 +2432,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             except Exception:
                 from dataclasses import replace
                 event = replace(event, text=execution_text)
-            await self.handle_message(event)
+            await self._run_generic_chat_job(job_id, event)
         except Exception:
             logger.exception("[GoogleChat] _dispatch_message failed")
             # Pub/Sub may ACK only after the durable handoff succeeds. Let the
