@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .job_type_gate import production_hold_reason
 from .request_routing import BOUNDED_ENGINE_ACTIONS
 
 
@@ -192,6 +193,9 @@ def bounded_schema_hold_reason(
     """Return a hold reason if a bounded Job must not start an action."""
     if action_type not in BOUNDED_ENGINE_ACTIONS:
         return None
+    production_hold = production_hold_reason(action_type)
+    if production_hold:
+        return production_hold
     payload = dict(payload or {})
     if payload.get("missing_schema"):
         return "missing_schema"

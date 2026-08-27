@@ -41,6 +41,10 @@ class GatewayJobEnginePathTests(unittest.TestCase):
         )
         self.assertIn("start_generic_chat_job_heartbeat(db_path, current[\"id\"])", chat_guard)
         self.assertIn("start_generic_chat_job_heartbeat(db_path, job_id)", chat_guard)
+        self.assertIn("maybe_audit_terminal_job", chat_guard)
+        self.assertIn("_post_job_audit_note", chat_guard)
+        engine = (ROOT / "robie_job_engine/engine.py").read_text(encoding="utf-8")
+        self.assertIn("maybe_audit_terminal_job(self.store.path, job_id)", engine)
         self.assertNotIn(
             'JobContextManager(ROBIE_JOB_DB).get(event.source.chat_id)', adapter
         )

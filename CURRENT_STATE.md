@@ -32,6 +32,22 @@ Zip loads: entire `robie_job_engine/` (`store.py`, `chat_guard.py`,
 PR 18 heartbeat (`start_generic_chat_job_heartbeat` in `chat_guard.py`) is on
 the zip path. That is why 18 can work without patching the plugin adapter.
 
+Recorder tab rebind (`robie_job_engine/browser_capture.py` +
+`recording_tab.py`) is on the zip path. Production capture is
+`python -m robie_job_engine.browser_capture`, so a zip flip + gateway restart
+stops first-ezlynx-wins. The optional Playwright hint write lives in
+`deploy/hermes/tools/playwright_tool.py` / write-guard; that is a second
+`.hermes` install if the live tool file is stale. Rebind still works without
+the hint.
+
+Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
+`guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
+four-answer audit to the existing Robie Chat APP reply. Production Chat already
+imports those functions via PYTHONPATH, so a Chat job close-out posts the audit
+without a second `.hermes` adapter install. `JobEngine.run` and the scheduler
+orphan path persist the same checkpoint. A zip-only adapter change would miss
+Production Chat; this hook does not live only in `integrations/google_chat/`.
+
 ## Two distinct `.hermes` homes
 
 Live check 2026-08-27: **not the same folder.**
@@ -85,3 +101,17 @@ code.
 `integrations/google_chat/adapter.py` (zip copy). Production imports the
 plugin adapter from `.hermes`, so the loop never ran. Job `e06d5e13` failed
 at 300s with zero `gateway_progress` rows while Playwright kept running.
+
+## EZLynx login secrets (on-call)
+
+Job `6cf6f6ae` HITL'd on a DESTROYED Secret Manager version. Operator
+runbook (no secret values): **[LOGIN_SECRETS.md](LOGIN_SECRETS.md)**.
+
+Production `hermes-poc-01` / project `streetsmart-hermes-poc` reads
+`ezlynx-username` and `ezlynx-password`. Live bootstrap uses newest
+**ENABLED** by `create_time`, not `versions/latest`. A DESTROYED version
+cannot be restored; add a new ENABLED version (Pawel), then RETRY in Chat.
+Chat text does not change the version. The zip-path preflight
+(`robie_job_engine/login_secret_health.py`, hooked from `open_chat_job` and
+the scheduler) ALERTs on missing ENABLED or newest-DESTROYED before a Chat
+job is mid-run. There is no EZLynx password-rotation webhook in this repo.

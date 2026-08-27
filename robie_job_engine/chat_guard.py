@@ -25,6 +25,7 @@ from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
 from .secrets import redact_mapping, redact_text
 from .sheets_sync import publish_job_to_control_center
 from .submission_routing import resolve_submission_route, submission_verification_requirements
+from .post_job_audit import format_audit_chat_message, maybe_audit_terminal_job
 from .store import JobStore
 
 
@@ -686,6 +687,15 @@ def open_chat_job(
             return job["id"]
     # Bounded workers stay PENDING so JobEngine can claim them. Hermes chat
     # tasks still move to RUNNING so the existing adapter path can proceed.
+    try:
+        from .login_secret_health import maybe_preflight_login_secrets
+
+        maybe_preflight_login_secrets(store, store.get_job(job["id"]))
+    except Exception:
+        logger.exception("login secret preflight failed; continuing fail-open")
+    job = store.get_job(job["id"])
+    if job["status"] == JobStatus.NEEDS_AUTH.value:
+        return job["id"]
     if (
         job["status"] == JobStatus.PENDING
         and classification.action_type not in BOUNDED_ENGINE_ACTIONS
@@ -779,6 +789,24 @@ def open_chat_job(
     ):
         start_generic_chat_job_heartbeat(db_path, current["id"])
     return job["id"]
+
+
+def _post_job_audit_note(db_path: str, job_id: str) -> str:
+    """Append the four-answer audit. Posted by the existing Chat APP send()."""
+    try:
+        audit = maybe_audit_terminal_job(db_path, job_id)
+    except Exception as exc:
+        return (
+            f"\n\nROBIE post-job audit — {job_id} — UNKNOWN\n"
+            f"1. Heartbeat gateway_progress: UNKNOWN ({type(exc).__name__})\n"
+            f"2. Destination evidence: UNKNOWN\n"
+            f"3. Recording motion: FAIL (audit crashed; fail-closed)\n"
+            f"4. Tool vs recording: UNKNOWN\n"
+            "Audit verdict: FAIL (does not authorize COMPLETE)"
+        )
+    if not audit:
+        return ""
+    return "\n\n" + format_audit_chat_message(audit)
 
 
 def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
@@ -909,6 +937,7 @@ def _render_chat_terminal(
             + verified_summary
             + worker_detail
             + _recording_chat_note(recordings, job_id)
+            + _post_job_audit_note(str(store.path), job_id)
         )
     if status == JobStatus.FAILED:
         return (
@@ -916,6 +945,7 @@ def _render_chat_terminal(
             "ROBIE could not safely finish the requested work. No success claims from the Computer Worker are being reported.\n\n"
             f"Reason: {job.get('last_error') or 'unknown error'}."
             + _recording_chat_note(recordings, job_id)
+            + _post_job_audit_note(str(store.path), job_id)
         )
     if status == JobStatus.UNVERIFIED:
         return (
@@ -925,6 +955,7 @@ def _render_chat_terminal(
             f"Reason: {job.get('last_error') or 'destination verification produced no authoritative evidence'}.\n\n"
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
             + _recording_chat_note(recordings, job_id)
+            + _post_job_audit_note(str(store.path), job_id)
         )
     return (
         f"ROBIE Job {job_id} — {status.value}\n\n"

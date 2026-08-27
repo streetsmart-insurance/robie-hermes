@@ -280,6 +280,13 @@ class JobEngine:
                     runs.terminate(run["id"], event)
                 except RunIsolationError:
                     pass
+            if status_name in {"COMPLETE", "FAILED", "UNVERIFIED"}:
+                try:
+                    from .post_job_audit import maybe_audit_terminal_job
+
+                    maybe_audit_terminal_job(self.store.path, job_id)
+                except Exception:
+                    pass
 
     def _perform(
         self,

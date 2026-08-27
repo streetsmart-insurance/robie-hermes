@@ -1,11 +1,11 @@
 # ROBIE release process
 
-Status: bootstrap specification. This process is not yet the accepted Production deployment path.
+Status: required Production gate. This is the accepted path, not a suggestion.
 
 ## Environments
 
-- **Test:** isolated GCP configuration, Job database, evidence, schedules, secrets, service identity, browser profile, Chat/testing ingress, and release pointer.
-- **Production:** existing always-on StreetSmart runtime. No direct source edits.
+- **Test (`hermes-test-01`):** isolated GCP configuration, Job database, evidence, schedules, secrets, service identity, browser profile, Chat/testing ingress, and release pointer.
+- **Production (`hermes-poc-01`):** existing always-on StreetSmart runtime. No direct source edits.
 
 Both profiles may be managed from one restricted Antigravity workspace, but they must never share writable state or deployment credentials.
 
@@ -30,6 +30,58 @@ commit, rejects sensitive/runtime paths, and emits its SHA-256. Test and
 Production must consume that exact archive and checksum. `scripts/verify-release.sh`
 revalidates the digest, compiles the extracted source, and runs the complete
 dependency-free acceptance suite before a deployment can proceed.
+
+## Required gate: new job types / LOB skills
+
+Carlo's standing rule: **before any new job type** (personal auto, homeowners,
+or any new LOB/skill) goes near Production (`hermes-poc-01`), it must run
+**3 clean jobs on Test (`hermes-test-01`) that PASS the automated post-job
+audit**, then promote. This is a required gate, not a suggestion.
+
+N = **3**. A clean job means the persisted `post_job_audit` checkpoint has
+`verdict=PASS` (heartbeat present, destination evidence nonzero when the
+contract requires it, recording shows motion, no tool-vs-recording MISMATCH).
+The audit never authorizes `COMPLETE`; destination verification remains the
+only COMPLETE authority.
+
+### How the gate is enforced (no SSH)
+
+1. **Skill flag.** New LOB skills declare `job_type` and `production_ready: false`
+   in SKILL.md frontmatter until the Test record exists.
+2. **In-repo promotion file.** After 3 passing Test audits, write
+   `deploy/job_type_gate/promotions/<job_type>.json` with:
+
+   ```sh
+   python3 scripts/check-job-type-gate.py record-from-db \
+     --db /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db \
+     --job-type ezlynx.personal_auto
+   ```
+
+   That script reads Test `jobs.db` and writes the record into the repo. Carlo
+   does not SSH to Production.
+3. **CI.** `.github/workflows/ci.yml` runs
+   `python3 scripts/check-job-type-gate.py check`. A new skill marked
+   `production_ready: true` without 3 Test PASS audits fails the build.
+4. **Runtime.** On `ROBIE_ENV=PRODUCTION`, `bounded_schema_hold_reason` refuses
+   a new (non-grandfathered) job type until the promotion record exists.
+
+**Grandfathered:** commercial auto (`ezlynx-commercial-auto-from-quote` /
+`ezlynx.commercial_auto`) and the already-live bounded Job Engine types. Those
+Production paths stay open. The gate applies to NEW types going forward.
+
+## Automated post-job audit
+
+On every Chat/Job Engine terminal state (`COMPLETE`, `FAILED`, `UNVERIFIED`),
+the Job Engine runs a four-answer audit and the Robie Chat APP posts it into
+the **same job thread**. It does not mark the job COMPLETE. It does not bind,
+pay, or write EZLynx. Check 3 (recording motion) and check 4 (tool vs
+recording) treat a recorder attached to a different tab than the Playwright
+page as **frozen / MISMATCH**. Job 30777947's first-ezlynx-wins CDP attach
+stayed on a stale Policies listing while playwright_exec drove documents /
+Policy Edit / FormEntry. Check 3 stays fail-closed: a frozen recording is
+FAIL even if tool logs are busy. The recorder change is not done until a
+TEST recording shows real motion (non-identical frames) while Playwright
+navigates the driven page. Carlo does not need to SSH to see that.
 
 ## Initial bounded proof
 

@@ -13,7 +13,9 @@ refused and the Job HITLs Carlo. Unique-write is never disabled.
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -274,8 +276,12 @@ def _wrap_write(
             require_unique_write_target(resolved)
             original = locator_originals.get(getattr(method, "__name__", ""), method)
             write_args = args[1:] if page_level else args
-            return original(resolved, *write_args, **kwargs)
-        return method(self, *args, **kwargs)
+            result = original(resolved, *write_args, **kwargs)
+            _publish_page_hint_from_page(page)
+            return result
+        result = method(self, *args, **kwargs)
+        _publish_page_hint_from_page(_page_from_target(self, page_level=page_level))
+        return result
 
     wrapped.__name__ = getattr(method, "__name__", "write")
     wrapped.__qualname__ = getattr(method, "__qualname__", wrapped.__name__)
@@ -316,3 +322,23 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
     scope["require_unique_write_target"] = require_unique_write_target
     scope["consult_gemini_for_blocked_write"] = consult_gemini_for_blocked_write
     return patched
+
+
+def _publish_page_hint_from_page(page: Any) -> None:
+    """Tell the zip-loaded recorder which tab a write actually hit.
+
+    Must not run at guard install: ``scope['page']`` is often pages[0], the
+    stale Policies tab on job 30777947. A listing hint would re-pin capture.
+    """
+    url = str(getattr(page, "url", "") or "")
+    if not url:
+        return
+    hint = os.environ.get("ROBIE_RECORDING_HINT_FILE", "").strip()
+    if not hint:
+        return
+    try:
+        from robie_job_engine.recording_tab import write_page_hint
+
+        write_page_hint(Path(hint), url=url)
+    except Exception:
+        return
