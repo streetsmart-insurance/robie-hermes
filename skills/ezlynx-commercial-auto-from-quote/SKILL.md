@@ -1,6 +1,8 @@
 ---
 name: "ezlynx-commercial-auto-from-quote"
 description: "Finish a commercial auto policy from an existing Progressive quote. A policy SHELL is not done. After the shell, Save and Continue Edit, then enter vehicles, drivers, garaging, symbols, limits, and banks from the quote. Notes only on titled discussions. Do not bind."
+job_type: "ezlynx.commercial_auto"
+production_ready: true
 ---
 
 # EZLynx commercial auto from quote

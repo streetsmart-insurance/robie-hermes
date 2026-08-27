@@ -69,6 +69,14 @@ def run_once(db_path: str) -> dict[str, int]:
     _ensure_default_schedules(ops)
     woke = jobs.wake_due()
     orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
+    if orphaned_chat_jobs:
+        from .post_job_audit import maybe_audit_terminal_job
+
+        for orphan_id in orphaned_chat_jobs:
+            try:
+                maybe_audit_terminal_job(db_path, orphan_id)
+            except Exception:
+                pass
     expired_contexts = DurableChatEventQueue(db_path).expire_inactive_conversations(
         inactivity_minutes=int(os.environ.get("ROBIE_DM_CONTEXT_TTL_MINUTES", "120"))
     )

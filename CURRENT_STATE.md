@@ -32,6 +32,14 @@ Zip loads: entire `robie_job_engine/` (`store.py`, `chat_guard.py`,
 PR 18 heartbeat (`start_generic_chat_job_heartbeat` in `chat_guard.py`) is on
 the zip path. That is why 18 can work without patching the plugin adapter.
 
+Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
+`guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
+four-answer audit to the existing Robie Chat APP reply. Production Chat already
+imports those functions via PYTHONPATH, so a Chat job close-out posts the audit
+without a second `.hermes` adapter install. `JobEngine.run` and the scheduler
+orphan path persist the same checkpoint. A zip-only adapter change would miss
+Production Chat; this hook does not live only in `integrations/google_chat/`.
+
 ## Two distinct `.hermes` homes
 
 Live check 2026-08-27: **not the same folder.**

@@ -32,6 +32,8 @@ jobs:
         run: PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py' -v
       - name: Compile source
         run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine tests
+      - name: New job-type Production gate
+        run: PYTHONPATH=. python3 scripts/check-job-type-gate.py check
       - name: Run acceptance suite
         run: PYTHONPATH=. python -m unittest discover -s tests -v
       - name: Run Phase 3 pytest modules

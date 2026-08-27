@@ -184,6 +184,19 @@ class JobStore:
                 "UPDATE jobs SET updated_at=? WHERE id=?",
                 (stamp, job_id),
             )
+            existing = conn.execute(
+                """SELECT data_json, created_at FROM checkpoints
+                   WHERE job_id=? AND kind='gateway_progress'""",
+                (job_id,),
+            ).fetchone()
+            first_at = stamp
+            if existing is not None:
+                previous = json.loads(existing["data_json"] or "{}")
+                first_at = (
+                    str(previous.get("first_at") or "").strip()
+                    or str(existing["created_at"] or "").strip()
+                    or stamp
+                )
             conn.execute(
                 """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
                    VALUES (?, 'gateway_progress', ?, ?)
@@ -191,7 +204,13 @@ class JobStore:
                    data_json=excluded.data_json,created_at=excluded.created_at""",
                 (
                     job_id,
-                    canonical_json({"source": source}),
+                    canonical_json(
+                        {
+                            "source": source,
+                            "first_at": first_at,
+                            "last_at": stamp,
+                        }
+                    ),
                     stamp,
                 ),
             )
@@ -535,11 +554,40 @@ class JobStore:
             return self.get_job(job_id, conn=conn)
 
     def get_checkpoint(self, job_id: str, kind: str) -> dict[str, Any] | None:
+        record = self.get_checkpoint_record(job_id, kind)
+        return None if record is None else record["data"]
+
+    def get_checkpoint_record(
+        self, job_id: str, kind: str
+    ) -> dict[str, Any] | None:
+        """Return checkpoint JSON plus the row timestamp. Missing row is None."""
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT data_json FROM checkpoints WHERE job_id=? AND kind=?", (job_id, kind)
+                """SELECT data_json, created_at FROM checkpoints
+                   WHERE job_id=? AND kind=?""",
+                (job_id, kind),
             ).fetchone()
-            return json.loads(row[0]) if row else None
+            if row is None:
+                return None
+            return {
+                "kind": kind,
+                "data": json.loads(row["data_json"]),
+                "created_at": row["created_at"],
+            }
+
+    def list_attempts(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT phase, attempt_number, outcome, detail_json, created_at
+                   FROM attempts WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = json.loads(item.pop("detail_json") or "{}")
+            result.append(item)
+        return result
 
     def add_attempt(self, job_id: str, phase: str, number: int, outcome: str, detail: dict[str, Any]) -> None:
         with self.transaction() as conn:
