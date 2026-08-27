@@ -85,6 +85,17 @@ stops first-ezlynx-wins. The optional Playwright hint write lives in
 `.hermes` install if the live tool file is stale. Rebind still works without
 the hint.
 
+Production pre-flight (`robie_job_engine/production_preflight.py`) is on the
+zip path. It is not a dashboard and not a zip-pointer check. After every
+pointer flip + `hermes-gateway` restart, the PYTHONPATH drop-in
+`ExecStartPost` runs five yes/no checks (gateway+Job Engine PYTHONPATH,
+CDP `/json/version`, an EZLynx `/web/` tab that is not login, Secret
+Manager ENABLED versions, no `conversation_job_links.active=1` terminal
+bind). A weekday oneshot timer (`robie-production-preflight.timer`) repeats
+that during 9am–5pm `America/New_York`. The first no posts one Robie Chat
+APP message and stops. It does not `@robie`, bind, or restart Chrome /
+`hermes-gateway` / the browser.
+
 Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
 `guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
 four-answer audit to the existing Robie Chat APP reply. Production Chat already
