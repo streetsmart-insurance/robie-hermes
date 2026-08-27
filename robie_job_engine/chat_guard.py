@@ -103,6 +103,77 @@ def start_generic_chat_job_heartbeat(
     return written
 
 
+def reopen_resumed_generic_chat_job(
+    db_path: str,
+    job_id: str | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Re-open a generic Chat Job after HITL. The Chat ack is not a claim.
+
+    ``resume_human_input`` writes ``human_input_resume`` and clears
+    ``lease_owner``. JobEngine never claims ``hermes.google_chat_task``, so
+    that unleased RUNNING row looks abandoned unless the same
+    ``open_chat_job`` claim signal (RUNNING + ``gateway_progress``) is
+    written again. Production jobs 6cf6f6ae and
+    da53765b-f2c7-4eef-8f48-72b8dc9d2157 died as
+    ``orphan_timeout`` for this reason.
+    """
+    if not job_id:
+        return None
+    store = JobStore(db_path)
+    job = store.get_job(job_id)
+    if job["action_type"] != "hermes.google_chat_task":
+        return job
+    if job["status"] == JobStatus.PENDING.value:
+        store.transition(job_id, JobStatus.RUNNING, expected={JobStatus.PENDING})
+        job = store.get_job(job_id)
+    if job["status"] != JobStatus.RUNNING.value:
+        return job
+    RecordingManager(db_path).safe_start(job_id)
+    return start_generic_chat_job_heartbeat(db_path, job_id, now=now)
+
+
+def notify_terminal_chat_job(
+    db_path: str,
+    job_id: str,
+    *,
+    poster: Any | None = None,
+) -> dict[str, Any] | None:
+    """Post the real terminal Chat status when no worker is left to send it.
+
+    The 300s orphan watcher fails unclaimed generic Chat Jobs in the
+    scheduler. That path used to persist ``post_job_audit`` and stay
+    silent in Chat.
+    """
+    store = JobStore(db_path)
+    try:
+        job = store.get_job(job_id)
+    except KeyError:
+        return None
+    if JobStatus(job["status"]) not in TERMINAL_STATUSES:
+        return None
+    message = guard_chat_response(
+        db_path, job_id, job.get("last_error") or "job ended"
+    )
+    from .chat_app_post import conversation_target, post_as_chat_app
+
+    target = conversation_target(job)
+    posted = False
+    if target is not None:
+        send = poster or post_as_chat_app
+        space, thread = target
+        try:
+            try:
+                send(space, message, thread_name=thread)
+            except TypeError:
+                send(space, message)
+            posted = True
+        except Exception:
+            logger.exception("terminal Chat post failed job=%s", job_id)
+    return {"job_id": job_id, "message": message, "posted": posted}
+
+
 def _maintain_generic_chat_job_heartbeat(
     db_path: str,
     job_id: str,
@@ -466,6 +537,15 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     ])
     payload = dict(job.get("payload") or {})
     lines.extend(account_nav_contract_lines(text, payload))
+    payload = dict(job.get("payload") or {})
+    original = str(payload.get("text") or "").strip()
+    if original and original != text:
+        lines.append(f"Original Chat request: {original}")
+    values = dict(payload.get("human_input_values") or {})
+    if values:
+        lines.append("Human operator replies from the HITL checkpoint:")
+        for field, value in values.items():
+            lines.append(f"- {redact_text(str(field))}: {redact_text(str(value))}")
     lines.extend(execution_contract_lines())
     lines.extend(_submission_contract(text))
     lines.append("[END ROBIE JOB ENGINE EXECUTION CONTRACT]")

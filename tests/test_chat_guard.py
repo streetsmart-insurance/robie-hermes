@@ -11,10 +11,12 @@ from robie_job_engine.chat_guard import (
     build_chat_execution_text,
     chat_message_requires_job,
     guard_chat_response,
+    notify_terminal_chat_job,
     open_chat_job,
     start_generic_chat_job_heartbeat,
     stop_generic_chat_job_heartbeat,
 )
+from robie_job_engine.scheduler import run_once
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.store import JobStore
 from robie_job_engine.recording import RecordingStore
@@ -297,6 +299,168 @@ class ChatGuardTests(unittest.TestCase):
             updated = store.get_job(job_id)
             self.assertEqual(updated["status"], JobStatus.RUNNING.value)
             self.assertEqual(updated["payload"]["human_input_values"]["FEIN"], "12-3456789")
+            stop_generic_chat_job_heartbeat(db, job_id)
+
+    def test_resume_reopens_unleased_generic_chat_job_without_second_open(self):
+        """HITL resume must re-claim the generic Job. Chat ack is not a claim.
+
+        Production 6cf6f6ae and da53765b-f2c7-4eef-8f48-72b8dc9d2157 wrote
+        human_input_resume, posted "Resuming from the saved checkpoint.",
+        then died as orphan_timeout: the generic Google Chat Job was not
+        claimed within 300 seconds.
+        """
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "message-unleased-hitl",
+                "finish policy 220250093",
+                requested_by="Carlo",
+                conversation_id="spaces/unleased-hitl",
+            )
+            store = JobStore(db)
+            opened = store.get_job(job_id)
+            self.assertEqual(opened["action_type"], "hermes.google_chat_task")
+            self.assertEqual(opened["attempt_count"], 0)
+            self.assertIsNone(opened["lease_owner"])
+            guard_chat_response(
+                db,
+                job_id,
+                (
+                    "ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: "
+                    "Could not find PENDING-PROGRESSIVE-CA-220250093 in dropdown"
+                ),
+            )
+            stop_generic_chat_job_heartbeat(db, job_id)
+            stale = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "UPDATE checkpoints SET created_at=? WHERE job_id=? AND kind='gateway_progress'",
+                    (stale, job_id),
+                )
+            queue = DurableChatEventQueue(db)
+            resumed = queue.resume_human_input(
+                conversation_id="spaces/unleased-hitl",
+                job_id=job_id,
+                reply_message_id="spaces/AAQAZbLJO78/messages/3EwF3i1F19Y.nLNTfFdEYQk",
+                field_name="operator_response",
+                value="just create a new shell for now as a test case",
+            )
+            self.assertEqual(resumed["state"], "DIRECT_RESUME")
+            updated = store.get_job(job_id)
+            self.assertEqual(updated["status"], JobStatus.RUNNING.value)
+            self.assertIsNone(updated["lease_owner"])
+            self.assertEqual(updated["attempt_count"], 0)
+            resume_record = store.get_checkpoint_record(job_id, "human_input_resume")
+            progress = store.get_checkpoint(job_id, "gateway_progress")
+            progress_record = store.get_checkpoint_record(job_id, "gateway_progress")
+            self.assertIsNotNone(resume_record)
+            self.assertIsNotNone(progress)
+            self.assertIsNotNone(progress_record)
+            self.assertGreaterEqual(
+                progress["last_at"],
+                resume_record["created_at"],
+            )
+            self.assertGreaterEqual(
+                progress_record["created_at"],
+                resume_record["created_at"],
+            )
+            self.assertEqual(progress["source"], "hermes-gateway")
+            self.assertNotIn("Resuming from the saved checkpoint", str(progress))
+            self.assertNotIn(job_id, store.fail_orphaned_chat_jobs())
+            later = datetime.now(timezone.utc) + timedelta(seconds=300)
+            store.heartbeat_generic_chat_job(job_id, now=later)
+            self.assertNotIn(job_id, store.fail_orphaned_chat_jobs(now=later))
+            self.assertIsNone(store.get_checkpoint(job_id, "orphan_timeout"))
+            self.assertEqual(store.get_job(job_id)["status"], JobStatus.RUNNING.value)
+            execution = build_chat_execution_text(
+                db, job_id, "finish policy 220250093"
+            )
+            self.assertIn("just create a new shell for now as a test case", execution)
+            stop_generic_chat_job_heartbeat(db, job_id)
+
+    def test_scheduler_posts_orphan_timeout_failed_status_to_chat(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "message-silent-orphan",
+                "Perform the destination workflow",
+                conversation_id="spaces/silent-orphan",
+            )
+            stop_generic_chat_job_heartbeat(db, job_id)
+            stale = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "UPDATE checkpoints SET created_at=? WHERE job_id=? AND kind='gateway_progress'",
+                    (stale, job_id),
+                )
+                conn.execute(
+                    "UPDATE jobs SET updated_at=?, created_at=? WHERE id=?",
+                    (stale, stale, job_id),
+                )
+            posted: list[tuple[str, str]] = []
+
+            def _poster(space, text, **_kwargs):
+                posted.append((space, text))
+                return {"name": "ok"}
+
+            with unittest.mock.patch.dict(
+                os.environ,
+                {"ROBIE_ARTIFACT_ROOT": str(Path(tmp) / "artifacts")},
+                clear=False,
+            ), unittest.mock.patch(
+                "robie_job_engine.chat_app_post.post_as_chat_app",
+                side_effect=_poster,
+            ):
+                result = run_once(db)
+            self.assertEqual(result["orphaned_chat_jobs"], 1)
+            job = JobStore(db).get_job(job_id)
+            self.assertEqual(job["status"], "FAILED")
+            self.assertIn(
+                "execution did not start: the generic Google Chat Job was not claimed "
+                "within 300 seconds",
+                job["last_error"],
+            )
+            self.assertEqual(len(posted), 1)
+            self.assertEqual(posted[0][0], "spaces/silent-orphan")
+            self.assertIn("FAILED", posted[0][1])
+            self.assertIn(
+                "the generic Google Chat Job was not claimed within 300 seconds",
+                posted[0][1],
+            )
+            self.assertNotIn("Resuming from the saved checkpoint", posted[0][1])
+
+    def test_notify_terminal_chat_job_posts_failed_status(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "message-notify-fail",
+                "Perform the destination workflow",
+                conversation_id="spaces/notify-fail",
+            )
+            stop_generic_chat_job_heartbeat(db, job_id)
+            JobStore(db).transition(
+                job_id,
+                JobStatus.FAILED,
+                expected={JobStatus.RUNNING},
+                error=(
+                    "execution did not start: the generic Google Chat Job was not "
+                    "claimed within 300 seconds"
+                ),
+                release_lease=True,
+            )
+            posted: list[tuple[str, str]] = []
+            result = notify_terminal_chat_job(
+                db,
+                job_id,
+                poster=lambda space, text, **_k: posted.append((space, text)),
+            )
+            self.assertTrue(result["posted"])
+            self.assertEqual(posted[0][0], "spaces/notify-fail")
+            self.assertIn("FAILED", posted[0][1])
+            self.assertIn("not claimed within 300 seconds", posted[0][1])
 
     def test_free_form_blocker_prose_does_not_solicit_human_input(self):
         with durable_temporary_directory() as tmp:
