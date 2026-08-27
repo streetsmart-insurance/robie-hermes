@@ -155,13 +155,62 @@ class JobStore:
             if owned:
                 conn.close()
 
+    def heartbeat_generic_chat_job(
+        self,
+        job_id: str,
+        *,
+        now: datetime | None = None,
+        source: str = "hermes-gateway",
+    ) -> dict[str, Any]:
+        """Record that hermes-gateway is still executing this generic Chat Job.
+
+        Generic ``hermes.google_chat_task`` Jobs are marked RUNNING with no
+        JobEngine lease so the gateway can proceed. This heartbeat is the
+        durable signal that distinguishes live gateway work from an abandoned
+        ledger row.
+        """
+        at = now or datetime.now(timezone.utc)
+        stamp = at.isoformat()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if (
+                row["action_type"] != "hermes.google_chat_task"
+                or row["status"] != JobStatus.RUNNING.value
+            ):
+                return self.get_job(job_id, conn=conn)
+            conn.execute(
+                "UPDATE jobs SET updated_at=? WHERE id=?",
+                (stamp, job_id),
+            )
+            conn.execute(
+                """INSERT INTO checkpoints(job_id,kind,data_json,created_at)
+                   VALUES (?, 'gateway_progress', ?, ?)
+                   ON CONFLICT(job_id,kind) DO UPDATE SET
+                   data_json=excluded.data_json,created_at=excluded.created_at""",
+                (
+                    job_id,
+                    canonical_json({"source": source}),
+                    stamp,
+                ),
+            )
+            return self.get_job(job_id, conn=conn)
+
     def fail_orphaned_chat_jobs(
         self,
         *,
         older_than_seconds: int = 300,
         now: datetime | None = None,
     ) -> list[str]:
-        """Fail generic zero-attempt Chat Jobs that no worker ever claimed."""
+        """Fail generic Chat Jobs that nothing is actually executing.
+
+        JobEngine never claims ``hermes.google_chat_task`` (it is not a
+        bounded action), so RUNNING + attempt 0 + ``lease_owner IS NULL`` is
+        the normal start state. A job is abandoned only when that ledger
+        state is stale *and* hermes-gateway has not written a recent
+        ``gateway_progress`` heartbeat.
+        """
         if older_than_seconds < 1:
             raise ValueError("orphan timeout must be positive")
         at = now or datetime.now(timezone.utc)
@@ -176,8 +225,14 @@ class JobStore:
                 """SELECT id FROM jobs
                    WHERE status=? AND action_type='hermes.google_chat_task'
                      AND attempt_count=0 AND lease_owner IS NULL
-                     AND updated_at<=?""",
-                (JobStatus.RUNNING.value, cutoff),
+                     AND updated_at<=?
+                     AND NOT EXISTS (
+                       SELECT 1 FROM checkpoints
+                       WHERE checkpoints.job_id=jobs.id
+                         AND checkpoints.kind='gateway_progress'
+                         AND checkpoints.created_at>?
+                     )""",
+                (JobStatus.RUNNING.value, cutoff, cutoff),
             ).fetchall()
             job_ids = [str(row["id"]) for row in rows]
             for job_id in job_ids:
