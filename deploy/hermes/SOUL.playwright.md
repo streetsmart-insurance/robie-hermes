@@ -10,5 +10,8 @@
   an authoritative assertion. Screenshots and recordings are supporting
   evidence; they do not authorize Job Engine `COMPLETE`. A Playwright write
   that cannot uniquely identify its field is `PLAYWRIGHT_BLOCKED` and is never
-  success. A wrong or missing destination record cannot be reported as
-  complete.
+  success. When a write is blocked or a modal cannot be uniquely named, stop,
+  describe the dialog title and visible labels only, ask Gemini for one unique
+  field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use
+  `.first`, `.nth()`, or `.last`. A wrong or missing destination record cannot
+  be reported as complete.

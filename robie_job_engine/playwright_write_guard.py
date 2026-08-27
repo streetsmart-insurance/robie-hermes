@@ -4,10 +4,16 @@ Hermes generates locator code at runtime. Playwright strict mode still lets
 ``.first`` / ``.nth()`` / ``.last`` pick an arbitrary match. That is how a
 policy form can be filled on the wrong insured, coverage, or date field.
 Writes must name exactly one target; positional guesses are refused.
+
+When a write is PLAYWRIGHT_BLOCKED, the guard may ask Gemini for one unique
+visible label and apply that locator only after unique-write still passes.
+If Gemini is missing, unsure, or the locator is not unique, the write is
+refused and the Job HITLs Carlo. Unique-write is never disabled.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 
@@ -23,6 +29,11 @@ WRITE_METHODS = (
 )
 POSITIONAL_MARKERS = ("nth=", " >> nth", ".first", ".last")
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
+HITL_OPERATOR = "Carlo"
+_SECRET_LABEL = re.compile(
+    r"\b(password|passwd|pwd|mfa|otp|totp|one[- ]time|secret|token|ssn|fein)\b",
+    re.IGNORECASE,
+)
 
 
 def locator_selector_text(target: Any) -> str:
@@ -106,10 +117,164 @@ def require_unique_write_target(
         raise RuntimeError(reason)
 
 
-def _wrap_write(method: Callable[..., Any], *, page_level: bool) -> Callable[..., Any]:
+def _safe_visible_label(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not text or _SECRET_LABEL.search(text):
+        return None
+    return text[:160]
+
+
+def _page_from_target(target: Any, *, page_level: bool) -> Any | None:
+    if page_level:
+        return target
+    for attr in ("page", "_page"):
+        page = getattr(target, attr, None)
+        if page is not None:
+            return page
+    return None
+
+
+def collect_blocked_dialog(page: Any) -> tuple[str, list[str]]:
+    """Read dialog title and visible labels only. Never include passwords."""
+    title = ""
+    labels: list[str] = []
+    if page is None:
+        return title, labels
+    for attr in ("dialog_title", "title"):
+        value = getattr(page, attr, None)
+        if callable(value):
+            try:
+                title = str(value() or "").strip()
+            except Exception:
+                title = ""
+        elif value:
+            title = str(value).strip()
+        if title:
+            break
+    preset = getattr(page, "visible_labels", None)
+    if preset:
+        raw_labels = list(preset)
+    else:
+        raw_labels = []
+        locator_fn = getattr(page, "locator", None)
+        if callable(locator_fn):
+            try:
+                nodes = locator_fn("label, legend")
+                all_texts = getattr(nodes, "all_inner_texts", None)
+                if callable(all_texts):
+                    raw_labels.extend(all_texts())
+            except Exception:
+                raw_labels = []
+    seen: set[str] = set()
+    for raw in raw_labels:
+        label = _safe_visible_label(raw)
+        if not label:
+            continue
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    return _safe_visible_label(title) or "", labels
+
+
+def unique_locator_from_gemini_label(page: Any, field_label: str) -> Any | None:
+    """Build one get_by_label / role locator. Apply only if unique-write passes."""
+    label = str(field_label or "").strip()
+    if page is None or not label:
+        return None
+    candidates: list[Any] = []
+    get_by_label = getattr(page, "get_by_label", None)
+    if callable(get_by_label):
+        try:
+            candidates.append(get_by_label(label, exact=True))
+        except TypeError:
+            candidates.append(get_by_label(label))
+        except Exception:
+            pass
+    get_by_role = getattr(page, "get_by_role", None)
+    if callable(get_by_role):
+        try:
+            candidates.append(get_by_role("textbox", name=label, exact=True))
+        except TypeError:
+            try:
+                candidates.append(get_by_role("textbox", name=label))
+            except Exception:
+                pass
+        except Exception:
+            pass
+    for candidate in candidates:
+        if unique_write_block_reason(candidate) is None:
+            return candidate
+    return None
+
+
+def consult_gemini_for_blocked_write(
+    *,
+    reason: str,
+    page: Any,
+    ask_gemini: Callable[..., Any] | None,
+) -> Any | None:
+    """Ask Gemini once for one unique label. Return that locator or None (HITL)."""
+    if not callable(ask_gemini):
+        return None
+    title, labels = collect_blocked_dialog(page)
+    if not labels:
+        return None
+    try:
+        decision = ask_gemini(
+            dialog_title=title,
+            visible_labels=labels,
+            block_reason=reason,
+        )
+    except Exception:
+        return None
+    if decision is None:
+        return None
+    if isinstance(decision, dict):
+        action = decision.get("action")
+        field_label = decision.get("field_label")
+    else:
+        action = getattr(decision, "action", None)
+        field_label = getattr(decision, "field_label", None)
+    if str(action or "").strip() != "APPLY" or not field_label:
+        return None
+    return unique_locator_from_gemini_label(page, str(field_label))
+
+
+def _hitl_blocked(reason: str) -> RuntimeError:
+    detail = reason if reason.startswith(PLAYWRIGHT_BLOCKED) else f"{PLAYWRIGHT_BLOCKED}: {reason}"
+    return RuntimeError(f"{detail}; HITL {HITL_OPERATOR}")
+
+
+def _wrap_write(
+    method: Callable[..., Any],
+    *,
+    page_level: bool,
+    scope: dict[str, Any],
+    locator_originals: dict[str, Callable[..., Any]],
+) -> Callable[..., Any]:
     def wrapped(self, *args, **kwargs):
         selector = args[0] if page_level and args else None
-        require_unique_write_target(self, selector=selector)
+        reason = unique_write_block_reason(self, selector=selector)
+        if reason:
+            if scope.get("_robie_gemini_unique_write_attempted"):
+                raise _hitl_blocked(f"{reason}; Gemini already consulted")
+            scope["_robie_gemini_unique_write_attempted"] = True
+            page = _page_from_target(self, page_level=page_level)
+            resolved = consult_gemini_for_blocked_write(
+                reason=reason,
+                page=page,
+                ask_gemini=scope.get("ask_gemini_unique_field"),
+            )
+            if resolved is None:
+                raise _hitl_blocked(
+                    f"{reason}; Gemini did not name one unique field"
+                )
+            require_unique_write_target(resolved)
+            original = locator_originals.get(getattr(method, "__name__", ""), method)
+            write_args = args[1:] if page_level else args
+            return original(resolved, *write_args, **kwargs)
         return method(self, *args, **kwargs)
 
     wrapped.__name__ = getattr(method, "__name__", "write")
@@ -120,6 +285,13 @@ def _wrap_write(method: Callable[..., Any], *, page_level: bool) -> Callable[...
 def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
     """Patch Locator/Page write methods in a Playwright exec scope."""
     patched: dict[str, Any] = {}
+    locator_originals: dict[str, Callable[..., Any]] = {}
+    locator_cls = scope.get("Locator")
+    if locator_cls is not None:
+        for method_name in WRITE_METHODS:
+            original = getattr(locator_cls, method_name, None)
+            if callable(original):
+                locator_originals[method_name] = original
     for name in ("Locator", "Page"):
         cls = scope.get(name)
         if cls is None:
@@ -129,8 +301,18 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
             original = getattr(cls, method_name, None)
             if not callable(original):
                 continue
-            setattr(cls, method_name, _wrap_write(original, page_level=page_level))
+            setattr(
+                cls,
+                method_name,
+                _wrap_write(
+                    original,
+                    page_level=page_level,
+                    scope=scope,
+                    locator_originals=locator_originals,
+                ),
+            )
             patched[f"{name}.{method_name}"] = True
     scope["_robie_unique_write_guard"] = True
     scope["require_unique_write_target"] = require_unique_write_target
+    scope["consult_gemini_for_blocked_write"] = consult_gemini_for_blocked_write
     return patched

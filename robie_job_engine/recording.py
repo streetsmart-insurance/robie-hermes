@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +29,73 @@ def _now() -> str:
 
 def _safe(value: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in value)[:120]
+
+
+def _enabled(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+
+def recording_health(
+    *,
+    environ: dict[str, str] | None = None,
+    check_cdp: bool = True,
+) -> dict[str, Any]:
+    """Return a secret-free readiness report for production recording."""
+    env = dict(os.environ if environ is None else environ)
+    issues: list[str] = []
+    warnings: list[str] = []
+    enabled = _enabled(env.get("ROBIE_RECORD_ALL_JOBS", "0"))
+    root = Path(env.get("ROBIE_RECORDING_ROOT") or DEFAULT_RECORDING_ROOT)
+    cdp_url = (env.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL).rstrip("/")
+    parsed_cdp = urllib.parse.urlsplit(cdp_url)
+    cdp_host = parsed_cdp.hostname or ""
+    if parsed_cdp.port:
+        cdp_host = f"{cdp_host}:{parsed_cdp.port}"
+    cdp_display = urllib.parse.urlunsplit((
+        parsed_cdp.scheme,
+        cdp_host,
+        parsed_cdp.path,
+        "",
+        "",
+    ))
+    folder_configured = bool(env.get("ROBIE_RECORDINGS_DRIVE_FOLDER_ID", "").strip())
+    token_file = env.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
+
+    if not enabled:
+        issues.append("ROBIE_RECORD_ALL_JOBS is not enabled")
+    if not folder_configured:
+        issues.append("ROBIE_RECORDINGS_DRIVE_FOLDER_ID is not configured")
+    if shutil.which("ffmpeg") is None:
+        issues.append("ffmpeg is not installed or is not on PATH")
+    if importlib.util.find_spec("playwright") is None:
+        issues.append("Python Playwright is not installed")
+    if token_file and not Path(token_file).is_file():
+        issues.append("ROBIE_GOOGLE_TOKEN_FILE does not exist")
+    elif not token_file:
+        warnings.append("Drive upload will use application-default credentials")
+
+    root_parent = root if root.exists() else root.parent
+    if not root_parent.exists() or not os.access(root_parent, os.W_OK):
+        issues.append("recording directory is not writable")
+
+    if check_cdp:
+        try:
+            with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=2) as response:
+                if int(getattr(response, "status", 200)) >= 400:
+                    raise RuntimeError(f"HTTP {response.status}")
+        except Exception as exc:
+            issues.append(f"Chrome CDP is unavailable at {cdp_display}: {type(exc).__name__}")
+
+    return {
+        "ready": not issues,
+        "enabled": enabled,
+        "recording_root": str(root),
+        "cdp_url": cdp_display,
+        "drive_folder_configured": folder_configured,
+        "google_token_configured": bool(token_file),
+        "issues": issues,
+        "warnings": warnings,
+    }
 
 
 class CaptureBackend(Protocol):
@@ -319,7 +390,7 @@ class RecordingManager:
         self.store = RecordingStore(db_path)
         self.root = Path(root or os.environ.get("ROBIE_RECORDING_ROOT") or DEFAULT_RECORDING_ROOT)
         if enabled is None:
-            enabled = os.environ.get("ROBIE_RECORD_ALL_JOBS", "0").lower() in {"1", "true", "yes"}
+            enabled = _enabled(os.environ.get("ROBIE_RECORD_ALL_JOBS", "0"))
         self.enabled = enabled
         if keep_local is None:
             delete = os.environ.get("ROBIE_DELETE_LOCAL_RECORDING_AFTER_UPLOAD", "1").lower() in {
