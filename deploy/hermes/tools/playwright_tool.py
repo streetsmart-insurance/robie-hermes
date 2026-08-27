@@ -16,6 +16,22 @@ _CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
 _USER_CODE_SEPARATOR = "\n##ROBIE_PLAYWRIGHT_USER_CODE##\n"
 
 
+def _job_engine_root() -> Path | None:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2],
+        here.parents[3] if len(here.parents) >= 4 else None,
+        Path("/opt/streetsmart-hermes/robie-job-engine"),
+        Path("/opt/streetsmart-hermes-test/robie-job-engine"),
+    ]
+    for path in candidates:
+        if path is None:
+            continue
+        if (path / "robie_job_engine" / "gemini_field_helper.py").is_file():
+            return path
+    return None
+
+
 def _write_guard_path() -> Path:
     here = Path(__file__).resolve()
     candidates = [
@@ -88,12 +104,27 @@ try:
         raise RuntimeError(
             "PLAYWRIGHT_BLOCKED: unique-write guard did not install"
         )
+    engine_root = os.environ.get("ROBIE_JOB_ENGINE_ROOT", "")
+    if engine_root and engine_root not in sys.path:
+        sys.path.insert(0, engine_root)
+    try:
+        from robie_job_engine.gemini_field_helper import ask_gemini_unique_field
+        scope["ask_gemini_unique_field"] = ask_gemini_unique_field
+    except Exception:
+        scope["ask_gemini_unique_field"] = None
     exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
 finally:
     pw.stop()
 '''
     env = os.environ.copy()
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
+    engine_root = _job_engine_root()
+    if engine_root is not None:
+        env["ROBIE_JOB_ENGINE_ROOT"] = str(engine_root)
+        current = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(engine_root) if not current else str(engine_root) + os.pathsep + current
+        )
     try:
         payload = _write_guard_path().read_text() + _USER_CODE_SEPARATOR + code
     except Exception as exc:

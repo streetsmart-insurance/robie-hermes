@@ -61,15 +61,11 @@ This note rule applies to every EZLynx note write, not only commercial auto.
 ## Blocked popup or selector
 
 When unique-write blocks the write, or a modal/selector cannot be uniquely
-named, follow `ezlynx-gemini-fallback`:
+named, follow `ezlynx-gemini-fallback`. Do **not** only stop and report.
 
-1. Stop. Do not guess a field.
-2. Describe the dialog title and visible labels only. Do not send passwords
-   or other secrets.
-3. Ask Gemini for one unique field.
-4. If Gemini returns one unique locator that still passes unique-write, apply
-   that one field.
-5. If Gemini is unsure, missing, or returns a positional guess, HITL Carlo.
+The unique-write guard asks Gemini for one unique visible label, then applies
+that locator only if unique-write still passes. If Gemini is unsure, missing,
+or the locator is not unique, HITL Carlo. Never guess a field.
 
 ## Completion
 

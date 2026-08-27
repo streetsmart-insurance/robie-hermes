@@ -9,7 +9,9 @@ overlay. It does not modify a live Hermes installation in place.
   toolset, connects only to the configured persistent Chrome CDP endpoint,
   and refuses form writes unless the locator uniquely identifies one field.
 - `deploy/hermes/tools/playwright_write_guard.py` is the unique-write guard
-  installed into every `playwright_exec` run.
+  installed into every `playwright_exec` run. A blocked write asks Gemini
+  for one unique visible label and applies that locator only if unique-write
+  still passes; otherwise it HITLs Carlo.
 - `deploy/hermes/skills/robie-playwright-browser/SKILL.md` defines locator,
   assertion, evidence, and fail-closed rules.
 - `deploy/hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md` requires

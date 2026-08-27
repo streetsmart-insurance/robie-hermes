@@ -28,6 +28,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("authorizes_complete", source)
         self.assertIn("identifies exactly one field", source)
         self.assertIn("gemini_unique_field", source)
+        self.assertIn("ask_gemini_unique_field", source)
+        self.assertIn("ROBIE_JOB_ENGINE_ROOT", source)
         self.assertIn("HITL Carlo", source)
 
     def test_playwright_policy_forbids_silent_engine_fallback(self):

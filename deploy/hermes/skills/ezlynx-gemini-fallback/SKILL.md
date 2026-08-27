@@ -28,8 +28,9 @@ This is a backend workflow Skill, not Chat small talk.
    - visible field labels
    - the exact `PLAYWRIGHT_BLOCKED` reason
    - Do not include passwords, MFA codes, cookies, tokens, or secret values.
-3. **Ask Gemini for one unique field** through the job-engine Gemini field
-   helper (`ask_gemini_unique_field`). The helper is fail-closed.
+3. **Ask Gemini for one unique field.** Unique-write now calls
+   `ask_gemini_unique_field` on the blocked write itself. Do not only
+   stop and report. The helper is fail-closed.
 4. **Apply only if Gemini returns exactly one unique locator** that:
    - names one visible label from the dialog
    - does not use `.first`, `.nth()`, `.last`, or other positional markers

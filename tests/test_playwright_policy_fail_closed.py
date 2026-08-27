@@ -22,6 +22,8 @@ from robie_job_engine.complete_guard import (
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 from robie_job_engine.playwright_write_guard import (
+    collect_blocked_dialog,
+    consult_gemini_for_blocked_write,
     install_playwright_write_guards,
     locator_is_positional_guess,
     require_unique_write_target,
@@ -37,9 +39,10 @@ OVERLAY_GUARD = ROOT / "deploy" / "hermes" / "tools" / "playwright_write_guard.p
 
 
 class FakeLocator:
-    def __init__(self, matches: int, selector: str):
+    def __init__(self, matches: int, selector: str, page=None):
         self.matches = matches
         self.selector = selector
+        self.page = page
         self.fills: list[str] = []
 
     def count(self):
@@ -47,10 +50,10 @@ class FakeLocator:
 
     @property
     def first(self):
-        return FakeLocator(1, f"{self.selector} >> nth=0")
+        return FakeLocator(1, f"{self.selector} >> nth=0", page=self.page)
 
     def nth(self, index: int):
-        return FakeLocator(1, f"{self.selector} >> nth={index}")
+        return FakeLocator(1, f"{self.selector} >> nth={index}", page=self.page)
 
     def fill(self, value: str):
         require_unique_write_target(self)
@@ -58,11 +61,18 @@ class FakeLocator:
 
 
 class FakePage:
-    def __init__(self, fields: dict[str, FakeLocator]):
+    def __init__(self, fields: dict[str, FakeLocator], *, title="Add Vehicle", visible_labels=None):
         self.fields = fields
+        self.dialog_title = title
+        self.visible_labels = list(visible_labels or ["VIN", "Year"])
+        for item in fields.values():
+            item.page = self
 
     def locator(self, selector: str):
-        return self.fields.get(selector, FakeLocator(0, selector))
+        return self.fields.get(selector, FakeLocator(0, selector, page=self))
+
+    def get_by_label(self, name: str, exact: bool = False):
+        return self.fields.get(name, FakeLocator(0, name, page=self))
 
     def fill(self, selector: str, value: str):
         require_unique_write_target(self, selector=selector)
@@ -131,6 +141,77 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "PLAYWRIGHT_BLOCKED"):
             FakePlaywrightLocator.fill(target, "12-3456789")
         self.assertEqual(target.fills, [])
+
+    def test_blocked_write_asks_gemini_and_applies_only_a_unique_label(self):
+        vin = FakeLocator(1, "VIN")
+        year = FakeLocator(1, "Year")
+        page = FakePage({"VIN": vin, "Year": year}, title="Add Vehicle")
+        ambiguous = FakeLocator(2, "input", page=page)
+        asked = []
+
+        def ask_gemini(*, dialog_title, visible_labels, block_reason):
+            asked.append((dialog_title, list(visible_labels), block_reason))
+            return {"action": "APPLY", "field_label": "VIN"}
+
+        scope = {
+            "Locator": FakePlaywrightLocator,
+            "ask_gemini_unique_field": ask_gemini,
+        }
+        install_playwright_write_guards(scope)
+        FakePlaywrightLocator.fill(ambiguous, "1HGCM82633A004352")
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][0], "Add Vehicle")
+        self.assertEqual(asked[0][1], ["VIN", "Year"])
+        self.assertEqual(vin.fills, ["1HGCM82633A004352"])
+        self.assertEqual(ambiguous.fills, [])
+        self.assertEqual(year.fills, [])
+
+    def test_blocked_write_hitls_carlo_when_gemini_is_unsure_or_not_unique(self):
+        vin = FakeLocator(2, "VIN")
+        page = FakePage({"VIN": vin}, title="Add Vehicle", visible_labels=["VIN"])
+        ambiguous = FakeLocator(2, "input", page=page)
+
+        def unsure(**_kwargs):
+            return {"action": "HITL", "field_label": None}
+
+        scope = {"Locator": FakePlaywrightLocator, "ask_gemini_unique_field": unsure}
+        install_playwright_write_guards(scope)
+        with self.assertRaisesRegex(RuntimeError, "HITL Carlo"):
+            FakePlaywrightLocator.fill(ambiguous, "guess")
+        self.assertEqual(ambiguous.fills, [])
+        self.assertEqual(vin.fills, [])
+
+        still_ambiguous = FakeLocator(2, "input", page=page)
+
+        def names_non_unique(**_kwargs):
+            return {"action": "APPLY", "field_label": "VIN"}
+
+        scope = {
+            "Locator": FakePlaywrightLocator,
+            "ask_gemini_unique_field": names_non_unique,
+        }
+        install_playwright_write_guards(scope)
+        with self.assertRaisesRegex(RuntimeError, "HITL Carlo"):
+            FakePlaywrightLocator.fill(still_ambiguous, "guess")
+        self.assertEqual(still_ambiguous.fills, [])
+        self.assertEqual(vin.fills, [])
+
+    def test_collect_blocked_dialog_drops_password_labels(self):
+        page = FakePage(
+            {},
+            title="Sign in",
+            visible_labels=["VIN", "Password", "Year"],
+        )
+        title, labels = collect_blocked_dialog(page)
+        self.assertEqual(title, "Sign in")
+        self.assertEqual(labels, ["VIN", "Year"])
+        self.assertIsNone(
+            consult_gemini_for_blocked_write(
+                reason="PLAYWRIGHT_BLOCKED: matched 2 fields",
+                page=page,
+                ask_gemini=None,
+            )
+        )
 
     def test_ok_only_postcondition_cannot_complete(self):
         self.assertIn("success flag", expected_postcondition_missing({"ok": True}))

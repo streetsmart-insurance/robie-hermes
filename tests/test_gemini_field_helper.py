@@ -83,6 +83,7 @@ class GeminiFieldHelperTests(unittest.TestCase):
             "ezlynx-gemini-fallback",
             "HITL Carlo",
             "PLAYWRIGHT_BLOCKED",
+            "Do **not** only stop and report",
         ):
             self.assertIn(required, text)
         self.assertNotIn("click Bind", text)
