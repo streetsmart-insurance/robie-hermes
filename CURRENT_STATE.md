@@ -1,20 +1,68 @@
 # CURRENT_STATE — what Production actually loads
 
-Verified 2026-08-27 ~9:26am America/New_York on **hermes-poc-01**
-(`streetsmart-hermes-poc`). Documentation only. A zip pointer is not “the
-whole process is that SHA.”
+Verified 2026-08-27 on **hermes-poc-01**
+(`hermes-poc-01.c.streetsmart-hermes-poc.internal`, project
+`streetsmart-hermes-poc`). Documentation only.
 
-## Live zip
+Production is **two code paths**. A zip pointer match is not enough for
+Chat / Playwright. A zip pointer is not “the whole process is that SHA.”
 
-- GitHub `main` merge of PR 18: `ea3405e51334a4d04edbd949c650c54f949d9efb`
-  (12-char `ea3405e51334`).
-- Both pointers:
+After a Chat job, prove a `checkpoints.kind=gateway_progress` row in
+`/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`.
+**Destination-verified evidence rows > 0 is success**, not Chat looking
+busy.
+
+## Live zip (PR 23 deploy, 2026-08-27)
+
+- GitHub `main` squash of PR 23:
+  `256bd8fa5e0b09de1ef287c63507a0d4875f5a3a`
+  (short `256bd8f` / 12-char `256bd8fa5e0b`).
+- Official zip tag: `production-256bd8fa5e0b` (pre-release).
+- Zip sha256:
+  `48f829bb721d02fbd7e7f727d92c6643d015459c7ca59192df62558cf4806444`.
+- Both pointers flipped **19:31:59 UTC**:
   - `/opt/streetsmart-hermes/current`
   - `/opt/streetsmart-hermes/releases/current`
-  - → `/opt/streetsmart-hermes/releases/ea3405e51334/robie-hermes-ea3405e51334`
-- `hermes-gateway` restarted `ActiveEnterTimestamp=2026-08-27 13:26:07 UTC`,
-  `MainPID=200329`.
-- Prior zip `a1b4774ee5e1` left on disk for rollback (PR 17).
+  - → `/opt/streetsmart-hermes/releases/256bd8fa5e0b/robie-hermes-256bd8fa5e0b`
+- `hermes-gateway` restarted after the pointer flip:
+  `ActiveEnterTimestamp=2026-08-27 19:34:09 UTC`.
+  Previous was `2026-08-27 18:25:05 UTC` on `b91e7bf6a3fa` (PR 22).
+- `robie-gateway` left inactive. `robie-ezlynx-browser` left active (not
+  restarted).
+- RUNNING jobs at deploy: **0**.
+- Old release dirs left in place (`b91e7bf6a3fa`, `9e8e0ba6684a`, and
+  others). Leftover dirs are not the live tree.
+
+## Zip overlay now live via PYTHONPATH / `current`
+
+Verified on the live `current` tree after the flip — not a full release
+listing:
+
+- `robie_job_engine/ezlynx_account_nav.py` is in the live `current` tree
+  (14690 bytes).
+- Job Engine / `chat_guard` / `playwright_write_guard` ride the zip.
+
+The zip is a PYTHONPATH overlay. It loads `robie_job_engine/` and
+`ezlynx_login_bootstrap.py`. Do not treat a pointer match as proof that
+Chat / Playwright loaded the new `.hermes` copies.
+
+## `.hermes` overlays copied after extract (PR 23)
+
+Zip flip does **not** install these. This deploy copied them from
+`deploy/hermes` after extract. Each dest was backed up as `.pre-23`.
+
+Live dests updated:
+
+- `/opt/streetsmart-hermes/.hermes/hermes-agent/tools/playwright_write_guard.py`
+- `/opt/streetsmart-hermes/.hermes/SOUL.playwright.md` (generic `SOUL.md`
+  untouched)
+- `/opt/streetsmart-hermes/.hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md`
+- `/opt/streetsmart-hermes/.hermes/skills/robie-playwright-browser/SKILL.md`
+
+That last path is the live dest. Do **not** claim
+`.hermes/hermes-agent/skills/` or
+`.hermes/skills/browser/robie-playwright-browser/` were updated — those
+were not the live files.
 
 ## Two code paths (intentional, not leftover)
 
@@ -25,9 +73,6 @@ whole process is that SHA.”
 2. **The robie-hermes zip is a PYTHONPATH overlay only.**
    `PYTHONPATH=/opt/streetsmart-hermes/releases/current:/srv/robie/current/vendor:/srv/robie/current`
    and `ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes/releases/current`.
-
-Zip loads: entire `robie_job_engine/` (`store.py`, `chat_guard.py`,
-`engine.py`, `scheduler.py`, …) and `ezlynx_login_bootstrap.py`.
 
 PR 18 heartbeat (`start_generic_chat_job_heartbeat` in `chat_guard.py`) is on
 the zip path. That is why 18 can work without patching the plugin adapter.
@@ -48,9 +93,15 @@ without a second `.hermes` adapter install. `JobEngine.run` and the scheduler
 orphan path persist the same checkpoint. A zip-only adapter change would miss
 Production Chat; this hook does not live only in `integrations/google_chat/`.
 
+PR 23 account-id nav (`robie_job_engine/ezlynx_account_nav.py`) is on the
+zip path with `chat_guard` and `playwright_write_guard`. The `.hermes`
+write-guard / skill / `SOUL.playwright.md` copies above are a second
+install.
+
 ## Two distinct `.hermes` homes
 
-Live check 2026-08-27: **not the same folder.**
+Live check 2026-08-27 (morning, before the PR 23 overlay copy): **not the
+same folder.**
 
 | Path | inode | owner | mtime |
 | --- | --- | --- | --- |
@@ -64,9 +115,13 @@ Plugin adapter exists **only** at
 (`adapter.py`, `oauth.py`, `plugin.yaml`). The `/home` path has no that
 directory.
 
+The PR 23 overlay copy targeted `/opt/streetsmart-hermes/.hermes` dests
+listed above. Inodes were not re-checked after that copy.
+
 ## What ignores the zip pointer
 
-Second, non-atomic deploy path. Zip flip does **not** update these:
+Second, non-atomic deploy path. Zip flip does **not** update these (a
+later `deploy/hermes` copy is a second step):
 
 - Chat adapter + oauth plugin under `.hermes/hermes-agent/plugins/platforms/google_chat/`
 - Hermes tools: `playwright_tool.py`, `playwright_write_guard.py`,
@@ -92,8 +147,11 @@ After every Production zip, all three must be true:
 3. For a Chat job, a `checkpoints.kind=gateway_progress` row exists in
    `/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`.
 
-Pointer-only is how PR 17 looked deployed while Chat still ran stale plugin
-code.
+A zip pointer match is **not** enough for Chat / Playwright. Pointer-only
+is how PR 17 looked deployed while Chat still ran stale plugin code.
+
+Job success is separate: **destination-verified evidence rows > 0**. Chat
+looking busy is not success.
 
 ## PR 17 lesson
 
