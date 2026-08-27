@@ -31,6 +31,12 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("ask_gemini_unique_field", source)
         self.assertIn("ROBIE_JOB_ENGINE_ROOT", source)
         self.assertIn("HITL Carlo", source)
+        self.assertIn("PLAYWRIGHT_FAIL_CLOSED", source)
+        self.assertIn("EmptyFileError", source)
+        self.assertIn("playwright-artifacts", source)
+        self.assertIn("do not retry the same download/screenshot/PDF parse", source)
+        self.assertIn(".hermes/hermes-agent/tools/playwright_tool.py", source)
+        self.assertIn("runner_failure_error", source)
 
     def test_playwright_policy_forbids_silent_engine_fallback(self):
         source = SKILL.read_text()

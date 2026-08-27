@@ -1,6 +1,15 @@
-"""Playwright-only browser tool for Robie's persistent Chrome session."""
+"""Playwright-only browser tool for Robie's persistent Chrome session.
+
+Production Hermes loads this file from
+``/opt/streetsmart-hermes/.hermes/hermes-agent/tools/playwright_tool.py``.
+The repo overlay is ``deploy/hermes/tools/playwright_tool.py``. A zip-only
+deploy does not install this tool; copy the overlay onto the .hermes path or
+the next install will keep relabeling empty-PDF / missing-artifact errors as
+retryable ``PLAYWRIGHT_BLOCKED``.
+"""
 
 import importlib.util
+import inspect
 import os
 import signal
 import subprocess
@@ -14,6 +23,50 @@ _DEFAULT_TIMEOUT_S = 45
 _MAX_TIMEOUT_S = 180
 _CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
 _USER_CODE_SEPARATOR = "\n##ROBIE_PLAYWRIGHT_USER_CODE##\n"
+_ARTIFACT_FAIL_CLOSED = (
+    "PLAYWRIGHT_FAIL_CLOSED: empty or missing browser artifact; "
+    "do not retry the same download/screenshot/PDF parse; "
+    "use the document already on the EZLynx file / HITL Carlo"
+)
+
+
+def empty_or_missing_artifact_error(detail: object) -> str | None:
+    """Return a non-retryable stop if this is an empty PDF or missing artifact.
+
+    EmptyFileError / pypdf empty-file and FileNotFoundError on
+    ``/tmp/playwright-artifacts-*`` are not unique-write or CDP failures.
+    Relabeling them as generic ``PLAYWRIGHT_BLOCKED`` makes the model retry
+    the same download/screenshot/PDF path and burn Vertex quota.
+    """
+    text = str(detail or "")
+    if not text.strip():
+        return None
+    if "PLAYWRIGHT_FAIL_CLOSED" in text:
+        return _ARTIFACT_FAIL_CLOSED
+    lowered = text.casefold()
+    if "emptyfileerror" in lowered or "cannot read an empty file" in lowered:
+        return _ARTIFACT_FAIL_CLOSED
+    if "pypdf" in lowered and "empty file" in lowered:
+        return _ARTIFACT_FAIL_CLOSED
+    if "filenotfounderror" in lowered and "playwright-artifacts" in lowered:
+        return _ARTIFACT_FAIL_CLOSED
+    return None
+
+
+def runner_failure_error(detail: str) -> str:
+    """Map a failed exec to fail-closed artifact text or PLAYWRIGHT_BLOCKED."""
+    return empty_or_missing_artifact_error(detail) or f"PLAYWRIGHT_BLOCKED: {detail}"
+
+
+def relabel_user_exec_exception(exc: BaseException) -> None:
+    """Re-raise empty/missing artifact errors as a non-retryable fail-closed stop."""
+    name = type(exc).__name__
+    text = f"{name}: {exc}"
+    path = str(getattr(exc, "filename", "") or "")
+    mapped = empty_or_missing_artifact_error(f"{path} {text}")
+    if mapped:
+        raise RuntimeError(mapped) from exc
+    raise exc
 
 
 def _job_engine_root() -> Path | None:
@@ -51,17 +104,16 @@ def _available():
     return importlib.util.find_spec("playwright") is not None
 
 
-def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
-    from tools.registry import tool_error, tool_result
-
-    if not code or not code.strip():
-        return tool_error("No Playwright code provided.")
-    try:
-        timeout = max(10, min(int(timeout_s), _MAX_TIMEOUT_S))
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_TIMEOUT_S
-
-    wrapper = r'''
+def _playwright_exec_wrapper() -> str:
+    """Return the subprocess helper that installs unique-write and fail-closed artifacts."""
+    helpers = (
+        f"_ARTIFACT_FAIL_CLOSED = {_ARTIFACT_FAIL_CLOSED!r}\n\n"
+        + inspect.getsource(empty_or_missing_artifact_error)
+        + "\n"
+        + inspect.getsource(relabel_user_exec_exception)
+        + "\n"
+    )
+    return helpers + r'''
 import os, sys
 from playwright.sync_api import Locator, Page, sync_playwright, expect
 
@@ -112,10 +164,26 @@ try:
         scope["ask_gemini_unique_field"] = ask_gemini_unique_field
     except Exception:
         scope["ask_gemini_unique_field"] = None
-    exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
+    try:
+        exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
+    except Exception as exc:
+        relabel_user_exec_exception(exc)
 finally:
     pw.stop()
 '''
+
+
+def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
+    from tools.registry import tool_error, tool_result
+
+    if not code or not code.strip():
+        return tool_error("No Playwright code provided.")
+    try:
+        timeout = max(10, min(int(timeout_s), _MAX_TIMEOUT_S))
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_TIMEOUT_S
+
+    wrapper = _playwright_exec_wrapper()
     env = os.environ.copy()
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
     engine_root = _job_engine_root()
@@ -163,7 +231,7 @@ finally:
 
     if proc.returncode != 0:
         detail = (stderr or stdout or "runner exited without details")[-12000:]
-        return tool_error(f"PLAYWRIGHT_BLOCKED: {detail}")
+        return tool_error(runner_failure_error(detail))
     return tool_result(
         {
             "success": True,
@@ -184,6 +252,9 @@ PLAYWRIGHT_EXEC_SCHEMA = {
         "pages, page, expect, and playwright. Reuse a matching page from pages before "
         "opening or navigating another tab. Writes fail closed unless the locator uniquely "
         "identifies exactly one field; .first/.nth/.last guesses are PLAYWRIGHT_BLOCKED. "
+        "An empty PDF (EmptyFileError) or missing /tmp/playwright-artifacts file is "
+        "PLAYWRIGHT_FAIL_CLOSED once: do not retry the same download/screenshot/PDF "
+        "parse; use the document already on the EZLynx file / HITL Carlo. "
         "After PLAYWRIGHT_BLOCKED or an unnamed modal, stop, describe the dialog title "
         "and visible labels only, call gemini_unique_field for one unique locator, and "
         "HITL Carlo if Gemini is unsure. Never guess a field. "
