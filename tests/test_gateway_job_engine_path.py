@@ -113,6 +113,19 @@ class GatewayJobEnginePathTests(unittest.TestCase):
         self.assertIn("def release_stale_human_input_bind(", chat_queue)
         self.assertIn("def is_stale_human_input_bind_error(", chat_queue)
 
+    def test_pubsub_ack_settles_before_logging_handoff_errors(self):
+        ack = (ROOT / "robie_job_engine/pubsub_ack.py").read_text(encoding="utf-8")
+        settle_at = ack.index("self._settle(", ack.index("def done("))
+        error_at = ack.index("self._invoke_on_error(on_error, error)", settle_at)
+        self.assertLess(settle_at, error_at)
+        self.assertIn("def _last_ditch_nack(", ack)
+        self.assertIn("max_messages=1", ack)
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Pub/Sub schedule failed", adapter)
+        self.assertIn("message.nack()", adapter)
+
     def test_google_chat_adapter_fails_closed_on_stale_job_engine_import(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
             encoding="utf-8"

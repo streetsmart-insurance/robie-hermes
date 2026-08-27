@@ -1070,19 +1070,32 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self, coro: Any, message: Any, msg_name: str = ""
     ) -> None:
         def report_failure(exc: BaseException) -> None:
-            logger.error(
-                "[GoogleChat] Pub/Sub handoff or settlement failed: %s",
-                exc,
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
+            try:
+                logger.error(
+                    "[GoogleChat] Pub/Sub handoff or settlement failed: %s",
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            except Exception:
+                # Logging must never prevent nack. journald backpressure
+                # after a HITL RuntimeError storm already silenced
+                # hermes-poc-01 while the process stayed active.
+                pass
 
-        self._pubsub_ack.schedule(
-            coro=coro,
-            message=message,
-            message_id=msg_name,
-            submit=self._submit_on_loop,
-            on_error=report_failure,
-        )
+        try:
+            self._pubsub_ack.schedule(
+                coro=coro,
+                message=message,
+                message_id=msg_name,
+                submit=self._submit_on_loop,
+                on_error=report_failure,
+            )
+        except Exception:
+            logger.exception("[GoogleChat] Pub/Sub schedule failed")
+            try:
+                message.nack()
+            except Exception:
+                pass
 
     def _durable_chat_queue(self) -> DurableChatEventQueue:
         if self._chat_queue is None:
