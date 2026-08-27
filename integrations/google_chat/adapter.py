@@ -218,6 +218,7 @@ from robie_job_engine.chat_guard import (
     chat_message_is_related_only,
     guard_chat_response,
     open_chat_job,
+    start_generic_chat_job_heartbeat,
 )
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.chat_admin import handle_admin_command
@@ -1181,15 +1182,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             )
 
     async def _maintain_generic_chat_job_heartbeat(self, job_id: str) -> None:
-        """Keep a live generic Chat Job from being orphan-failed at 300s."""
-        interval = 30.0
-        while True:
-            job = await asyncio.to_thread(
-                JobStore(ROBIE_JOB_DB).heartbeat_generic_chat_job, job_id
-            )
-            if job["status"] != JobStatus.RUNNING.value:
-                return
-            await asyncio.sleep(interval)
+        """Keep a live generic Chat Job from being orphan-failed at 300s.
+
+        The write goes through Job Engine so it always uses the same jobs.db
+        as ``fail_orphaned_chat_jobs``. The first commit is synchronous; a
+        process-local thread continues on a 30s cadence. This is a backup
+        for the ``open_chat_job`` / ``build_chat_execution_text`` hooks —
+        those run even when hermes-gateway loads a stale plugin adapter.
+        """
+        await asyncio.to_thread(start_generic_chat_job_heartbeat, ROBIE_JOB_DB, job_id)
 
     async def _run_generic_chat_job(
         self, job_id: str | None, event: MessageEvent
@@ -1198,14 +1199,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if not job_id:
             await self.handle_message(event)
             return
-        heartbeat = asyncio.create_task(
-            self._maintain_generic_chat_job_heartbeat(job_id),
-            name=f"hermes-chat-job-heartbeat:{job_id}",
-        )
-        try:
-            await self.handle_message(event)
-        finally:
-            await self._stop_chat_queue_heartbeat(heartbeat)
+        await self._maintain_generic_chat_job_heartbeat(job_id)
+        await self.handle_message(event)
 
     @staticmethod
     async def _stop_chat_queue_heartbeat(task: asyncio.Task) -> None:
