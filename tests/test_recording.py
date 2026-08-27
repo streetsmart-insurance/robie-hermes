@@ -92,6 +92,28 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(31337, pid)
         self.assertTrue(output.with_suffix(".ready").is_file())
 
+    def test_subprocess_capture_command_includes_hint_file(self) -> None:
+        output = self.root / "hinted.webm"
+        stop_file = self.root / "hinted.stop"
+        seen: list[list[str]] = []
+
+        def launch(command, **_kwargs):
+            seen.append(list(command))
+            Path(command[command.index("--ready-file") + 1]).touch(mode=0o600)
+            process = Mock(pid=31339, returncode=None)
+            process.poll.side_effect = lambda: None
+            return process
+
+        capture = SubprocessTabCapture(ready_timeout=0.2)
+        with patch("robie_job_engine.recording.subprocess.Popen", side_effect=launch):
+            capture.start(output, stop_file)
+        command = seen[0]
+        self.assertIn("--hint-file", command)
+        self.assertEqual(
+            command[command.index("--hint-file") + 1],
+            str(output.with_suffix(".hint.json")),
+        )
+
     def test_required_recording_fails_before_work_when_capture_never_ready(self) -> None:
         process = Mock(pid=31338, returncode=None)
         process.poll.return_value = None

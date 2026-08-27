@@ -168,6 +168,15 @@ try:
         exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
     except Exception as exc:
         relabel_user_exec_exception(exc)
+    finally:
+        try:
+            from robie_job_engine.recording_tab import write_page_hint
+            hint = os.environ.get("ROBIE_RECORDING_HINT_FILE", "").strip()
+            page = scope.get("page")
+            if hint and page is not None and getattr(page, "url", None):
+                write_page_hint(hint, url=page.url)
+        except Exception:
+            pass
 finally:
     pw.stop()
 '''

@@ -137,6 +137,7 @@ class SubprocessTabCapture:
             "--stop-file", str(stop_file),
             "--ready-file", str(ready_file),
             "--fps", str(self.fps),
+            "--hint-file", str(output_path.with_suffix(".hint.json")),
         ]
         log_path = output_path.with_suffix(".capture.log")
         log_handle = log_path.open("ab")
@@ -422,6 +423,8 @@ class RecordingManager:
         unique = uuid.uuid4().hex
         output = job_dir / f"{_safe(job_id)}-{stamp}-{unique}.webm"
         stop_file = output.with_suffix(".stop")
+        os.environ["ROBIE_RECORDING_HINT_FILE"] = str(output.with_suffix(".hint.json"))
+        os.environ["ROBIE_RECORDING_JOB_ID"] = str(job_id)
         recording = self.store.create(job_id, output, stop_file)
         try:
             pid = self.capture.start(output, stop_file)

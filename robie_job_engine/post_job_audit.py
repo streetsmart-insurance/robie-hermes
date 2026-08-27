@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterable
 
 from .models import TERMINAL_STATUSES, JobStatus
 from .recording import RecordingStore
+from .recording_tab import load_attach_log, recorder_tab_mismatch
 from .store import JobStore, utc_now
 
 
@@ -397,6 +398,7 @@ def audit_recording_motion(
     motion["recording_id"] = candidate.get("id")
     motion["drive_url"] = candidate.get("drive_url")
     motion["status"] = candidate.get("status")
+    motion["attach"] = load_attach_log(local_path)
     return motion
 
 
@@ -412,12 +414,23 @@ def audit_tool_vs_recording(
     combined = f"{ledger_text}\n{session_text}"
     claims = tool_calls_claim_mutation(combined)
     motion_result = str(motion.get("result") or "UNKNOWN")
-    if session["result"] == "UNKNOWN" and not claims:
+    tab = recorder_tab_mismatch(motion.get("attach"), combined)
+    if tab.get("result") == "MISMATCH":
+        return {
+            "result": "MISMATCH",
+            "reason": tab.get("reason"),
+            "tool_claims_mutation": claims,
+            "recording_motion": motion_result,
+            "recorder_tab": tab,
+            "session": session,
+        }
+    if session["result"] == "UNKNOWN" and not claims and tab.get("result") != "MATCH":
         return {
             "result": "UNKNOWN",
             "reason": session.get("reason") or "missing session",
             "tool_claims_mutation": False,
             "recording_motion": motion_result,
+            "recorder_tab": tab,
             "session": session,
         }
     if motion_result == "FAIL" and claims:
@@ -426,6 +439,7 @@ def audit_tool_vs_recording(
             "reason": "recording is frozen but playwright_exec / tool results claim navigation or edits",
             "tool_claims_mutation": True,
             "recording_motion": motion_result,
+            "recorder_tab": tab,
             "session": session,
         }
     if motion_result == "UNKNOWN":
@@ -492,6 +506,14 @@ def run_post_job_audit(
     heartbeat = audit_heartbeat(store, job_id)
     evidence = audit_destination_evidence(store, job_id)
     motion = audit_recording_motion(str(path), job_id, extract_frames=extract_frames)
+    session_text, _session = _session_text(hermes_home, job_id)
+    tool_text = f"{_tool_text_from_job(store, job_id)}\n{session_text}"
+    tab = recorder_tab_mismatch(motion.get("attach"), tool_text)
+    if tab.get("result") == "MISMATCH":
+        motion = dict(motion)
+        motion["result"] = "FAIL"
+        motion["reason"] = f"frozen / wrong-tab: {tab.get('reason')}"
+        motion["recorder_tab"] = tab
     mismatch = audit_tool_vs_recording(
         store, job_id, motion, session_root=hermes_home
     )

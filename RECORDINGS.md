@@ -38,6 +38,14 @@ Playwright has attached to the selected tab and delivered the first frame to the
 video encoder. Attach failures, early exits, and readiness timeouts are stored
 as `failure_stage=START` and fail the Job before the worker can change anything.
 
+The recorder must not bind forever to the first `ezlynx.com` tab in CDP
+enumeration order. Job 30777947's published webm stayed on a stale Policies
+list while playwright_exec drove documents / Policy Edit / FormEntry on another
+tab. Capture rebinds to the Playwright hint URL when present, otherwise to the
+most recently navigated EZLynx page (active Edit/FormEntry/documents over a
+listing). The attach log sits next to the webm as `*.attach.json`. A recorder
+tab that is not the Playwright page is an audit MISMATCH / frozen fail.
+
 The approved final statuses are `COMPLETE`, `FAILED`, `UNVERIFIED`, and
 `NEEDS_AUTH`. Authentication, MFA, CAPTCHA, or other human-login intervention
 must use `NEEDS_AUTH`; it never implies success.

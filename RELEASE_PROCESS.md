@@ -74,7 +74,11 @@ Production paths stay open. The gate applies to NEW types going forward.
 On every Chat/Job Engine terminal state (`COMPLETE`, `FAILED`, `UNVERIFIED`),
 the Job Engine runs a four-answer audit and the Robie Chat APP posts it into
 the **same job thread**. It does not mark the job COMPLETE. It does not bind,
-pay, or write EZLynx.
+pay, or write EZLynx. Check 3 (recording motion) and check 4 (tool vs
+recording) treat a recorder attached to a different tab than the Playwright
+page as **frozen / MISMATCH**. Job 30777947's first-ezlynx-wins CDP attach
+stayed on a stale Policies listing while playwright_exec drove documents /
+Policy Edit / FormEntry. Carlo does not need to SSH to see that.
 
 ## Initial bounded proof
 

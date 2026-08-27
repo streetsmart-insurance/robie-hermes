@@ -32,6 +32,14 @@ Zip loads: entire `robie_job_engine/` (`store.py`, `chat_guard.py`,
 PR 18 heartbeat (`start_generic_chat_job_heartbeat` in `chat_guard.py`) is on
 the zip path. That is why 18 can work without patching the plugin adapter.
 
+Recorder tab rebind (`robie_job_engine/browser_capture.py` +
+`recording_tab.py`) is on the zip path. Production capture is
+`python -m robie_job_engine.browser_capture`, so a zip flip + gateway restart
+stops first-ezlynx-wins. The optional Playwright hint write lives in
+`deploy/hermes/tools/playwright_tool.py` / write-guard; that is a second
+`.hermes` install if the live tool file is stale. Rebind still works without
+the hint.
+
 Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
 `guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
 four-answer audit to the existing Robie Chat APP reply. Production Chat already
