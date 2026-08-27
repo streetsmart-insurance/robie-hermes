@@ -75,3 +75,8 @@ A commercial auto-from-quote Job may be reported done only after a fresh
 read shows the named insured unchanged and the quote vehicles, drivers,
 garaging, symbols, limits, and required banks on that same policy. A shell
 alone is not done. Bind is out of scope.
+
+If there is no destination-action checkpoint and no destination-verified
+evidence, say you were stuck and made no verified progress. Do not write
+"Filling Policy Shell", "I identified" a carrier, or remaining-shell prose
+from the quote alone. Those sentences are not destination evidence.

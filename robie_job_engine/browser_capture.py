@@ -10,6 +10,7 @@ from pathlib import Path
 from .recording_tab import (
     TabCandidate,
     read_page_hint,
+    resolve_hint_file,
     select_recording_tab,
     write_attach_log,
 )
@@ -79,6 +80,8 @@ def _page_identity(page) -> str:
 
 def _hint_url(hint_file: Path | None) -> str | None:
     data = read_page_hint(hint_file)
+    if not data:
+        data = read_page_hint(resolve_hint_file())
     if not data:
         return None
     url = str(data.get("url") or "").strip()

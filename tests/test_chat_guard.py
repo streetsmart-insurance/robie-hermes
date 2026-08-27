@@ -323,6 +323,9 @@ class ChatGuardTests(unittest.TestCase):
             self.assertIn("Never write a note on Untitled", execution)
             self.assertIn("Save and Continue Edit", execution)
             self.assertIn("Do not bind", execution)
+            self.assertIn("Filling Policy Shell", execution)
+            self.assertIn("stuck", execution)
+            self.assertIn("no destination-verified evidence", execution)
 
     def test_chat_response_is_checkpointed_and_unverified(self):
         with durable_temporary_directory() as tmp:

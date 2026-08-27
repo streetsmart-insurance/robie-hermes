@@ -453,7 +453,8 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "When the request requires an upload, set the browser file chooser to the exact staged_path before clicking Upload.",
         "Complete every requested mutation (including status, premium, document attachment, and note when requested).",
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
-        "Never claim success from modal text, a local DOM value, or your own prior action. If any requested field is absent, say the action is not verified.",
+        "Never claim success from modal text, a local DOM value, quote data, or your own prior action. If any requested field is absent, say the action is not verified.",
+        "Do not write that you identified a carrier, are Filling Policy Shell, filled, saved, or uploaded unless a destination-action checkpoint already exists. With no destination-action checkpoint and no destination-verified evidence, say you were stuck and made no verified progress.",
         "If execution is blocked because a required value is missing, stop and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <field name>.",
         "If execution is blocked at an unresolved browser step or locator, stop and begin the response with exactly: ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: <specific step or locator>.",
         "If a write is PLAYWRIGHT_BLOCKED or a modal cannot be uniquely named, stop, describe the dialog title and visible labels only (no passwords), ask Gemini for one unique field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use .first/.nth/.last.",
@@ -791,10 +792,16 @@ def open_chat_job(
     return job["id"]
 
 
-def _post_job_audit_note(db_path: str, job_id: str) -> str:
+def _post_job_audit_note(
+    db_path: str,
+    job_id: str,
+    recordings: RecordingManager | None = None,
+) -> str:
     """Append the four-answer audit. Posted by the existing Chat APP send()."""
     try:
         audit = maybe_audit_terminal_job(db_path, job_id)
+        if recordings is not None:
+            recordings.release_local_after_audit(job_id)
     except Exception as exc:
         return (
             f"\n\nROBIE post-job audit — {job_id} — UNKNOWN\n"
@@ -807,6 +814,19 @@ def _post_job_audit_note(db_path: str, job_id: str) -> str:
     if not audit:
         return ""
     return "\n\n" + format_audit_chat_message(audit)
+
+
+def _login_secret_chat_note(store: JobStore, job_id: str) -> str:
+    """Surface leftover DESTROYED versions without calling the password destroyed."""
+    report = store.get_checkpoint(job_id, "login_secret_health") or {}
+    if not report:
+        return ""
+    from .login_secret_health import format_leftover_note
+
+    note = format_leftover_note(report)
+    if not note or "[REDACTED]" in note:
+        return ""
+    return f"\n\nLogin secret: {note}."
 
 
 def _recording_chat_note(recordings: RecordingManager, job_id: str) -> str:
@@ -937,7 +957,7 @@ def _render_chat_terminal(
             + verified_summary
             + worker_detail
             + _recording_chat_note(recordings, job_id)
-            + _post_job_audit_note(str(store.path), job_id)
+            + _post_job_audit_note(str(store.path), job_id, recordings)
         )
     if status == JobStatus.FAILED:
         return (
@@ -945,7 +965,8 @@ def _render_chat_terminal(
             "ROBIE could not safely finish the requested work. No success claims from the Computer Worker are being reported.\n\n"
             f"Reason: {job.get('last_error') or 'unknown error'}."
             + _recording_chat_note(recordings, job_id)
-            + _post_job_audit_note(str(store.path), job_id)
+            + _login_secret_chat_note(store, job_id)
+            + _post_job_audit_note(str(store.path), job_id, recordings)
         )
     if status == JobStatus.UNVERIFIED:
         return (
@@ -955,13 +976,15 @@ def _render_chat_terminal(
             f"Reason: {job.get('last_error') or 'destination verification produced no authoritative evidence'}.\n\n"
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
             + _recording_chat_note(recordings, job_id)
-            + _post_job_audit_note(str(store.path), job_id)
+            + _login_secret_chat_note(store, job_id)
+            + _post_job_audit_note(str(store.path), job_id, recordings)
         )
     return (
         f"ROBIE Job {job_id} — {status.value}\n\n"
         "ROBIE is not treating this request as successful. "
         f"Reason: {job.get('last_error') or 'waiting for a human or destination update'}."
         + _recording_chat_note(recordings, job_id)
+        + _login_secret_chat_note(store, job_id)
     )
 
 
@@ -1059,7 +1082,11 @@ def guard_chat_response(
 
     # The Computer Worker response is diagnostic only. A separate structured
     # action checkpoint and registered destination verifier are required.
-    store.checkpoint(job_id, "worker_response", {"response_text": content})
+    # Success-shaped fill/save prose without that checkpoint is rewritten so
+    # the ledger cannot look like progress (job 468d1575).
+    from .worker_contract import sanitize_worker_response
+
+    store.checkpoint(job_id, "worker_response", sanitize_worker_response(store, job_id, content))
     action = store.get_checkpoint(job_id, "action")
     registry = dict(verifiers or _default_chat_verifiers())
     verifier = registry.get(job["action_type"])

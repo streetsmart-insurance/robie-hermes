@@ -12,6 +12,7 @@ from durable_temp import durable_temporary_directory
 from robie_job_engine.chat_guard import open_chat_job
 from robie_job_engine.login_secret_health import (
     format_alert,
+    format_leftover_note,
     inspect_login_secrets,
     maybe_periodic_login_secret_check,
     maybe_preflight_login_secrets,
@@ -47,14 +48,16 @@ USERNAME_ENABLED = [
 
 
 class VersionStateTests(unittest.TestCase):
-    def test_newest_destroyed_with_older_enabled_is_alert(self):
+    def test_newest_destroyed_with_older_enabled_is_healthy(self):
         summary = summarize_secret_versions(
             PASSWORD_DESTROYED_NEWEST, secret_id="ezlynx-password"
         )
-        self.assertTrue(summary["alert"])
+        self.assertFalse(summary["alert"])
         self.assertTrue(summary["newest_destroyed"])
+        self.assertTrue(summary["leftover_destroyed"])
         self.assertFalse(summary["missing_enabled"])
         self.assertEqual(summary["newest_version"], "versions/2")
+        self.assertEqual(summary["newest_enabled_version"], "versions/1")
         self.assertEqual(summary["enabled_versions"], ["versions/1"])
 
     def test_no_enabled_version_holds(self):
@@ -80,9 +83,12 @@ class VersionStateTests(unittest.TestCase):
         report = inspect_login_secrets(
             client=client, project="streetsmart-hermes-poc"
         )
-        self.assertEqual(report["result"], "ALERT")
-        self.assertIn("DESTROYED", report["reason"])
+        self.assertEqual(report["result"], "OK")
         self.assertFalse(report["should_hold"])
+        leftover = format_leftover_note(report)
+        self.assertIn("using ENABLED versions/1", leftover)
+        self.assertIn("versions/2 is DESTROYED leftover", leftover)
+        self.assertNotIn("password is destroyed", leftover.casefold())
         client.access_secret_version.assert_not_called()
         self.assertEqual(client.list_secret_versions.call_count, 2)
         text = format_alert(report)
@@ -91,6 +97,7 @@ class VersionStateTests(unittest.TestCase):
         self.assertIn("RETRY", text)
         self.assertNotIn("[REDACTED]", text)
         self.assertNotIn("password=", text)
+        self.assertNotIn("password is destroyed", text.casefold())
 
     def test_all_enabled_newest_is_ok(self):
         client = Mock()
@@ -216,17 +223,19 @@ class PreflightAndSchedulerTests(unittest.TestCase):
             db = str(__import__("pathlib").Path(tmp) / "jobs.db")
             report = {
                 "result": "ALERT",
-                "reason": "ezlynx-password: newest versions/2 is DESTROYED",
+                "reason": "ezlynx-password has no ENABLED version",
                 "project": "streetsmart-hermes-poc",
-                "should_hold": False,
+                "should_hold": True,
                 "secrets": [
                     {
                         "secret_id": "ezlynx-password",
-                        "enabled_versions": ["versions/1"],
+                        "enabled_versions": [],
+                        "newest_enabled_version": None,
                         "newest_version": "versions/2",
                         "newest_state": "DESTROYED",
-                        "missing_enabled": False,
+                        "missing_enabled": True,
                         "newest_destroyed": True,
+                        "leftover_destroyed": False,
                         "alert": True,
                     }
                 ],

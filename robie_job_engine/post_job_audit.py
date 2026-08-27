@@ -434,9 +434,14 @@ def audit_tool_vs_recording(
             "session": session,
         }
     if motion_result == "FAIL" and claims:
+        missing = "missing" in str(motion.get("reason") or "").casefold()
         return {
             "result": "MISMATCH",
-            "reason": "recording is frozen but playwright_exec / tool results claim navigation or edits",
+            "reason": (
+                "recording file is missing but playwright_exec / tool results claim navigation or edits"
+                if missing
+                else "recording is frozen but playwright_exec / tool results claim navigation or edits"
+            ),
             "tool_claims_mutation": True,
             "recording_motion": motion_result,
             "recorder_tab": tab,

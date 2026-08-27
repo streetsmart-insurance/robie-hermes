@@ -113,5 +113,7 @@ Production `hermes-poc-01` / project `streetsmart-hermes-poc` reads
 cannot be restored; add a new ENABLED version (Pawel), then RETRY in Chat.
 Chat text does not change the version. The zip-path preflight
 (`robie_job_engine/login_secret_health.py`, hooked from `open_chat_job` and
-the scheduler) ALERTs on missing ENABLED or newest-DESTROYED before a Chat
-job is mid-run. There is no EZLynx password-rotation webhook in this repo.
+the scheduler) ALERTs / HOLDs only when there is no ENABLED version. A
+DESTROYED latest leftover with an older ENABLED version is healthy (bootstrap
+already uses newest ENABLED). There is no EZLynx password-rotation webhook
+in this repo.
