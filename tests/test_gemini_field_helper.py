@@ -84,6 +84,8 @@ class GeminiFieldHelperTests(unittest.TestCase):
             "HITL Carlo",
             "PLAYWRIGHT_BLOCKED",
             "Do **not** only stop and report",
+            "/web/account/<id>/policies",
+            "Do not guess Summary, Details, or Index",
         ):
             self.assertIn(required, text)
         self.assertNotIn("click Bind", text)

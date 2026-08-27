@@ -26,6 +26,25 @@ This is a backend workflow Skill, not Chat small talk.
   `PLAYWRIGHT_BLOCKED`.
 - Do not treat a policy SHELL as a completed commercial auto policy.
 
+## Open an existing EZLynx account
+
+If the Job or prompt already names an EZLynx account or applicant id, navigate
+directly to `https://app.ezlynx.com/web/account/<id>/policies` (or the
+`/web/account/<id>/…` URL already in the task). Do not open a search box.
+Do not guess Summary, Details, or Index URL variants. Job de9c530a burned
+36+ minutes doing that after the search locator failed for account 220250093.
+
+If search is required and the search locator fails:
+
+- Known id → one direct `/web/account/<id>/` navigation, then stop or proceed.
+  Never enumerate URL guesses.
+- No id → HITL Carlo or say stuck / no verified progress. Do not retry URL
+  guesses.
+
+Do not claim fills, saves, or COMPLETE without a destination-verified evidence
+row. Unique-write / PLAYWRIGHT_BLOCKED / FAIL_CLOSED stay. Never invent LOB
+steps. Never bind.
+
 ## After the shell — required
 
 Creating the commercial auto policy record is only the shell. It is not done.

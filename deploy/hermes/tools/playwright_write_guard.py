@@ -321,6 +321,12 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
     scope["_robie_unique_write_guard"] = True
     scope["require_unique_write_target"] = require_unique_write_target
     scope["consult_gemini_for_blocked_write"] = consult_gemini_for_blocked_write
+    try:
+        from robie_job_engine.ezlynx_account_nav import install_account_nav_guard
+    except ImportError:
+        install_account_nav_guard = None
+    if install_account_nav_guard is not None:
+        patched.update(install_account_nav_guard(scope))
     return patched
 
 

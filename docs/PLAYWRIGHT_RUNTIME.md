@@ -20,10 +20,17 @@ overlay. It does not modify a live Hermes installation in place.
   still passes; otherwise it HITLs Carlo.
 - `deploy/hermes/skills/robie-playwright-browser/SKILL.md` defines locator,
   assertion, evidence, and fail-closed rules.
+- `robie_job_engine/ezlynx_account_nav.py` is the zip-path helper that
+  `build_chat_execution_text` loads. When the Job already names an EZLynx
+  account id, first navigation is `/web/account/<id>/…`. Search-locator
+  failure with a known id is one direct-URL fallback; with no id it is HITL /
+  stuck. A zip flip loads this module. Skills and SOUL below are `.hermes`
+  copies and are not updated by a zip flip.
 - `deploy/hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md` requires
   Save and Continue Edit after a commercial auto SHELL, quote vehicles /
   drivers / garaging / symbols / limits / banks, titled-discussion notes
-  that include `Robie was here`, and no bind.
+  that include `Robie was here`, and no bind. It also forbids applicant
+  search / URL-guess loops when an account id is already known.
 - `deploy/hermes/skills/ezlynx-gemini-fallback/SKILL.md` plus
   `robie_job_engine/gemini_field_helper.py` are the fail-closed stuck-field
   hook: after `PLAYWRIGHT_BLOCKED`, ask Gemini for one unique field, then

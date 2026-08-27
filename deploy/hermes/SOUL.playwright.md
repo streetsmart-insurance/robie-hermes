@@ -20,3 +20,8 @@
   destination-action checkpoint. If you have no destination-action checkpoint
   and no destination-verified evidence, say you were stuck and made no
   verified progress.
+- If an EZLynx account or applicant id is already in the Job or prompt, the
+  first navigation is `/web/account/<id>/…` (default `…/policies`). Do not
+  search. Do not enumerate Summary/Details/Index URL variants. Search-locator
+  failure with a known id is one direct-URL fallback, then stop. No id is
+  HITL Carlo / stuck. Never invent LOB steps. Never bind.

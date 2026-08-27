@@ -326,6 +326,8 @@ class ChatGuardTests(unittest.TestCase):
             self.assertIn("Filling Policy Shell", execution)
             self.assertIn("stuck", execution)
             self.assertIn("no destination-verified evidence", execution)
+            self.assertIn("/web/account/<id>/", execution)
+            self.assertIn("Do not enumerate Summary, Details, or Index", execution)
 
     def test_chat_response_is_checkpointed_and_unverified(self):
         with durable_temporary_directory() as tmp:
