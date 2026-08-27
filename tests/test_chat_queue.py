@@ -11,6 +11,7 @@ from robie_job_engine.chat_queue import (
     ChatEventConflict,
     ConversationJobLinkConflict,
     DurableChatEventQueue,
+    is_stale_human_input_bind_error,
 )
 from robie_job_engine.context_policy import JobContextManager
 from robie_job_engine.models import JobStatus
@@ -255,6 +256,121 @@ class DurableChatEventQueueTests(unittest.TestCase):
         from robie_job_engine.chat_guard import stop_generic_chat_job_heartbeat
 
         stop_generic_chat_job_heartbeat(str(self.db), job["id"])
+
+    def test_release_stale_human_input_bind_clears_terminal_job(self):
+        store = JobStore(self.db)
+        conversation_id = "spaces/AAQAZbLJO78"
+        for status in (
+            JobStatus.FAILED,
+            JobStatus.UNVERIFIED,
+            JobStatus.COMPLETE,
+        ):
+            with self.subTest(status=status.value):
+                job = store.create_job(
+                    "hermes.google_chat_task",
+                    {
+                        "worker": "hermes-cua",
+                        "text": "finish the commercial auto form",
+                        "conversation_id": conversation_id,
+                    },
+                    idempotency_key=f"stale-hitl-{status.value}",
+                )
+                if status != JobStatus.COMPLETE:
+                    store.transition(
+                        job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING}
+                    )
+                    store.transition(
+                        job["id"],
+                        status,
+                        expected={JobStatus.RUNNING},
+                        error="TimeoutError: computer_use no-DISPLAY",
+                        release_lease=True,
+                    )
+                else:
+                    with store.transaction() as conn:
+                        conn.execute(
+                            "UPDATE jobs SET status=? WHERE id=?",
+                            (JobStatus.COMPLETE.value, job["id"]),
+                        )
+                self.queue.link_conversation_job(
+                    conversation_id=conversation_id,
+                    job_id=job["id"],
+                    message_id=f"message-{status.value}",
+                    event_id=f"event-{status.value}",
+                    interaction_state={
+                        "awaiting": "human_input",
+                        "field_name": "operator_response",
+                        "accepts_value": True,
+                    },
+                )
+                released = self.queue.release_stale_human_input_bind(conversation_id)
+                self.assertIsNotNone(released)
+                self.assertEqual(released["job_id"], job["id"])
+                self.assertEqual(released["job_status"], status.value)
+                self.assertEqual(released["released_reason"], "terminal_job")
+                self.assertIsNone(self.queue.active_conversation_job(conversation_id))
+
+    def test_release_stale_human_input_bind_keeps_live_hitl(self):
+        store = JobStore(self.db)
+        job = store.create_job(
+            "hermes.google_chat_task",
+            {
+                "worker": "hermes-cua",
+                "text": "finish policy 220250093",
+                "conversation_id": "spaces/live-hitl",
+                "human_input_values": {},
+            },
+            idempotency_key="live-hitl-keep",
+        )
+        store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+        self.queue.link_conversation_job(
+            conversation_id="spaces/live-hitl",
+            job_id=job["id"],
+            message_id="message-live-hitl",
+            event_id="event-live-hitl",
+            interaction_state={
+                "awaiting": "human_input",
+                "field_name": "operator_response",
+                "accepts_value": True,
+            },
+        )
+        self.queue.park_direct_human_input(
+            conversation_id="spaces/live-hitl",
+            job_id=job["id"],
+            interaction_state={
+                "awaiting": "human_input",
+                "field_name": "operator_response",
+                "checkpoint": "playwright_blocked:dropdown",
+                "accepts_value": True,
+            },
+            error="PLAYWRIGHT_BLOCKED: dropdown",
+        )
+        self.assertIsNone(self.queue.release_stale_human_input_bind("spaces/live-hitl"))
+        context = self.queue.active_conversation_job("spaces/live-hitl")
+        self.assertEqual(context["job_id"], job["id"])
+        self.assertEqual(context["interaction_state"]["awaiting"], "human_input")
+        self.assertEqual(
+            store.get_job(job["id"])["status"],
+            JobStatus.AWAITING_HUMAN_INPUT.value,
+        )
+
+    def test_stale_human_input_bind_error_matches_dead_bind_only(self):
+        self.assertTrue(
+            is_stale_human_input_bind_error(
+                RuntimeError("bound Job is not awaiting human input")
+            )
+        )
+        self.assertTrue(
+            is_stale_human_input_bind_error(
+                RuntimeError("active human-input correlation is missing")
+            )
+        )
+        self.assertFalse(
+            is_stale_human_input_bind_error(
+                RuntimeError("parked queue event changed during resume")
+            )
+        )
+        self.assertFalse(is_stale_human_input_bind_error(RuntimeError("exhausted")))
 
     def test_heartbeat_renews_lease_without_incrementing_attempt(self):
         self.queue.enqueue(

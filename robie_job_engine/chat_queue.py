@@ -26,6 +26,24 @@ class ConversationJobLinkConflict(RuntimeError):
     """A Chat event was rebound to a different durable Job."""
 
 
+# resume_human_input raises these when the conversation_job_links row still
+# looks like HITL but the bound Job cannot accept a reply. The adapter must
+# treat them as a dead bind (deactivate + open_chat_job) instead of letting
+# the exception abort _dispatch_message and wedge Pub/Sub.
+_STALE_HUMAN_INPUT_BIND_ERRORS = frozenset(
+    {
+        "bound Job is not awaiting human input",
+        "active human-input correlation is missing",
+        "conversation is not awaiting human input",
+    }
+)
+
+
+def is_stale_human_input_bind_error(exc: BaseException) -> bool:
+    """True when resume_human_input failed because the bind cannot resume."""
+    return str(exc) in _STALE_HUMAN_INPUT_BIND_ERRORS
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -469,6 +487,64 @@ class DurableChatEventQueue:
                 (_stamp(), conversation_id),
             ).rowcount
         return changed
+
+    def release_stale_human_input_bind(
+        self, conversation_id: str
+    ) -> dict[str, Any] | None:
+        """Deactivate a HITL bind whose Job is already terminal or missing.
+
+        conversation_job_links can remain ``active=1`` with
+        ``interaction_state.awaiting=human_input`` after the Job is
+        FAILED / UNVERIFIED / COMPLETE. resume_human_input then raises
+        ``RuntimeError("bound Job is not awaiting human input")`` and
+        aborts Chat intake before open_chat_job.
+
+        Returns the released link (plus ``job_status`` / ``released_reason``)
+        when a stale bind was cleared. Returns None when there is no active
+        HITL bind, or when the bound Job is still awaiting human input.
+        """
+        from .models import TERMINAL_STATUSES, JobStatus
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            link = conn.execute(
+                """SELECT * FROM conversation_job_links
+                   WHERE conversation_id=? AND active=1
+                   ORDER BY created_at DESC,id DESC LIMIT 1""",
+                (conversation_id,),
+            ).fetchone()
+            if link is None:
+                conn.rollback()
+                return None
+            state = json.loads(link["interaction_state_json"] or "{}")
+            if state.get("awaiting") != "human_input":
+                conn.rollback()
+                return None
+            job = conn.execute(
+                "SELECT status FROM jobs WHERE id=?",
+                (link["job_id"],),
+            ).fetchone()
+            status = str(job["status"]) if job is not None else None
+            try:
+                terminal = job is None or JobStatus(status) in TERMINAL_STATUSES
+            except ValueError:
+                terminal = False
+            if not terminal:
+                conn.rollback()
+                return None
+            conn.execute(
+                """UPDATE conversation_job_links
+                   SET active=0,updated_at=?
+                   WHERE id=? AND active=1""",
+                (_stamp(), link["id"]),
+            )
+            released = self._decode_link(link)
+            released["job_status"] = status
+            released["released_reason"] = (
+                "missing_job" if job is None else "terminal_job"
+            )
+            conn.commit()
+        return released
 
     def expire_inactive_conversations(
         self,

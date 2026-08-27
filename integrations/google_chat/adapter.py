@@ -220,7 +220,10 @@ from robie_job_engine.chat_guard import (
     open_chat_job,
     start_generic_chat_job_heartbeat,
 )
-from robie_job_engine.chat_queue import DurableChatEventQueue
+from robie_job_engine.chat_queue import (
+    DurableChatEventQueue,
+    is_stale_human_input_bind_error,
+)
 from robie_job_engine.chat_admin import handle_admin_command
 from robie_job_engine.decisions import resolve_bound_text_decision, text_decision_response
 from robie_job_engine.models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
@@ -2297,6 +2300,27 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     )
                     interaction = dict((context or {}).get("interaction_state") or {})
                 if interaction.get("awaiting") == "human_input":
+                    # A FAILED/UNVERIFIED/COMPLETE Job can leave
+                    # conversation_job_links.active=1 with stale
+                    # interaction_state.awaiting=human_input. classify_human_reply
+                    # then treats a new @robie as a HITL answer (accepts_value),
+                    # resume_human_input raises, and Pub/Sub retries forever.
+                    released = await asyncio.to_thread(
+                        queue.release_stale_human_input_bind,
+                        event.source.chat_id,
+                    )
+                    if released:
+                        logger.warning(
+                            "[GoogleChat] released stale HITL bind conversation=%s "
+                            "job=%s status=%s reason=%s; opening a new Chat job",
+                            event.source.chat_id,
+                            released.get("job_id"),
+                            released.get("job_status"),
+                            released.get("released_reason"),
+                        )
+                        context = None
+                        interaction = {}
+                if interaction.get("awaiting") == "human_input":
                     message_id = event.message_id or f"human:{id(event)}"
                     value = human_reply_value(text)
                     accepts_value = interaction.get("accepts_value", True)
@@ -2322,44 +2346,63 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             },
                         )
                         return
-                    resumed = await asyncio.to_thread(
-                        queue.resume_human_input,
-                        conversation_id=event.source.chat_id,
-                        job_id=context["job_id"],
-                        reply_message_id=message_id,
-                        field_name=(
-                            interaction.get("field_name")
-                            if accepts_value
-                            else "operator_response"
-                        ) or "operator_response",
-                        value=value,
-                    )
-                    await self.send(
-                        event.source.chat_id,
-                        f"Input received for ROBIE Job {context['job_id']}. Resuming from the saved checkpoint.",
-                        reply_to=message_id,
-                        metadata={
-                            "thread_id": getattr(event.source, "thread_id", None)
-                        },
-                    )
-                    if resumed.get("state") != "DIRECT_RESUME":
-                        self._ensure_chat_queue_drain()
-                        if self._chat_queue_wakeup is not None:
-                            self._chat_queue_wakeup.set()
+                    try:
+                        resumed = await asyncio.to_thread(
+                            queue.resume_human_input,
+                            conversation_id=event.source.chat_id,
+                            job_id=context["job_id"],
+                            reply_message_id=message_id,
+                            field_name=(
+                                interaction.get("field_name")
+                                if accepts_value
+                                else "operator_response"
+                            ) or "operator_response",
+                            value=value,
+                        )
+                    except RuntimeError as exc:
+                        if not is_stale_human_input_bind_error(exc):
+                            raise
+                        # Belt-and-suspenders: a race or non-terminal dead bind
+                        # (RUNNING leftover HITL state) must not wedge Pub/Sub.
+                        logger.warning(
+                            "[GoogleChat] resume_human_input rejected dead bind "
+                            "conversation=%s job=%s error=%s; opening a new Chat job",
+                            event.source.chat_id,
+                            (context or {}).get("job_id"),
+                            exc,
+                        )
+                        await asyncio.to_thread(
+                            queue.deactivate_conversation, event.source.chat_id
+                        )
+                        context = None
+                        interaction = {}
+                    else:
+                        await self.send(
+                            event.source.chat_id,
+                            f"Input received for ROBIE Job {context['job_id']}. Resuming from the saved checkpoint.",
+                            reply_to=message_id,
+                            metadata={
+                                "thread_id": getattr(event.source, "thread_id", None)
+                            },
+                        )
+                        if resumed.get("state") != "DIRECT_RESUME":
+                            self._ensure_chat_queue_drain()
+                            if self._chat_queue_wakeup is not None:
+                                self._chat_queue_wakeup.set()
+                            return
+                        # The Chat ack is not a claim. Direct Hermes work has no
+                        # bounded queue event to wake, so re-open / re-lease the
+                        # same generic Job and start the worker without a new
+                        # @robie. Fall-through is not enough: a stale adapter
+                        # would stop here and the 300s orphan watcher would
+                        # fail the unleased row (6cf6f6ae, da53765b).
+                        await self._resume_direct_generic_chat_job(
+                            event,
+                            context["job_id"],
+                            message_id,
+                            text,
+                        )
                         return
-                    # The Chat ack is not a claim. Direct Hermes work has no
-                    # bounded queue event to wake, so re-open / re-lease the
-                    # same generic Job and start the worker without a new
-                    # @robie. Fall-through is not enough: a stale adapter
-                    # would stop here and the 300s orphan watcher would
-                    # fail the unleased row (6cf6f6ae, da53765b).
-                    await self._resume_direct_generic_chat_job(
-                        event,
-                        context["job_id"],
-                        message_id,
-                        text,
-                    )
-                    return
 
             if text.casefold().startswith(("/approve", "/deny")) and event.source is not None:
                 queue = await asyncio.to_thread(self._durable_chat_queue)

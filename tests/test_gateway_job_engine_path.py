@@ -93,6 +93,26 @@ class GatewayJobEnginePathTests(unittest.TestCase):
         )
         self.assertIn("notify_terminal_chat_job(db_path, orphan_id)", scheduler)
 
+    def test_stale_terminal_hitl_bind_releases_before_resume_and_falls_through(self):
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
+            encoding="utf-8"
+        )
+        release_at = adapter.index("queue.release_stale_human_input_bind")
+        resume_at = adapter.index("queue.resume_human_input", release_at)
+        stale_at = adapter.index("is_stale_human_input_bind_error", resume_at)
+        deactivate_at = adapter.index("queue.deactivate_conversation", stale_at)
+        open_at = adapter.index("open_chat_job,", deactivate_at)
+        self.assertLess(release_at, resume_at)
+        self.assertLess(resume_at, stale_at)
+        self.assertLess(stale_at, deactivate_at)
+        self.assertLess(deactivate_at, open_at)
+        self.assertIn("except RuntimeError", adapter)
+        chat_queue = (ROOT / "robie_job_engine/chat_queue.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def release_stale_human_input_bind(", chat_queue)
+        self.assertIn("def is_stale_human_input_bind_error(", chat_queue)
+
     def test_google_chat_adapter_fails_closed_on_stale_job_engine_import(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
             encoding="utf-8"
