@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -9,6 +10,17 @@ class ConfidenceAssessment:
     score: int
     level: str
     issues: tuple[str, ...]
+
+
+def _recording_failure_summary(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    text = re.sub(
+        r"(?i)\b(access[_-]?token|refresh[_-]?token|authorization|password|secret)\b\s*[:=]\s*\S+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", text)
+    return text[:240]
 
 
 def assess_job_confidence(job: dict[str, Any]) -> ConfidenceAssessment:
@@ -58,7 +70,11 @@ def assess_job_confidence(job: dict[str, Any]) -> ConfidenceAssessment:
     if job.get("last_error"):
         issues.append(str(job["last_error"])[:300])
     if recording_status == "FAILED":
-        issues.append("Diagnostic recording failed")
+        failure = _recording_failure_summary(job.get("recording_failure"))
+        issues.append(
+            f"Diagnostic recording failed: {failure}"
+            if failure else "Diagnostic recording failed"
+        )
     elif not recording_exempt and recording_status not in {"READY", "RECORDING", "UPLOADING"}:
         issues.append("No diagnostic recording is available yet")
 
