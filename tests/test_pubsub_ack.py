@@ -113,6 +113,126 @@ class PubSubAckTests(unittest.TestCase):
         self.assertFalse(self.dedup.contains("m-schedule-failure"))
         coro.close()
 
+    def test_resume_exception_nacks_before_on_error_and_keeps_pulling(self):
+        """A HITL RuntimeError must nack first so max_messages=1 cannot stall.
+
+        Production hermes-poc-01 2026-08-27: resume_human_input raised
+        inside the done callback, journalctl went silent after 21:30:09 UTC,
+        and a later RETRY created no jobs.db row. Settlement before logging
+        keeps the streaming-pull callback able to take the next delivery.
+        """
+        future = Future()
+        message = FakeMessage()
+        order: list[str] = []
+
+        def on_error(exc: BaseException) -> None:
+            order.append(f"error:{exc}")
+            raise RuntimeError("logger/journald failed")
+
+        original_nack = message.nack
+
+        def nack_and_record() -> None:
+            order.append("nack")
+            original_nack()
+
+        message.nack = nack_and_record  # type: ignore[method-assign]
+        self.coordinator.schedule(
+            coro=work(),
+            message=message,
+            message_id="spaces/AAQAZbLJO78/messages/retry",
+            submit=lambda submitted: (submitted.close(), future)[1],
+            on_error=on_error,
+        )
+        future.set_exception(RuntimeError("bound Job is not awaiting human input"))
+        self.assertEqual(order[0], "nack")
+        self.assertEqual(order[1], "error:bound Job is not awaiting human input")
+        self.assertEqual((message.acks, message.nacks), (0, 1))
+        self.assertFalse(self.dedup.contains("spaces/AAQAZbLJO78/messages/retry"))
+
+        nxt = Future()
+        follow = FakeMessage()
+        self.coordinator.schedule(
+            coro=work(),
+            message=follow,
+            message_id="spaces/AAQAZbLJO78/messages/later-retry",
+            submit=lambda submitted: (submitted.close(), nxt)[1],
+        )
+        nxt.set_result(None)
+        self.assertEqual((follow.acks, follow.nacks), (1, 0))
+
+    def test_missing_correlation_exception_nacks_when_on_error_raises(self):
+        future = Future()
+        message = FakeMessage()
+
+        def on_error(exc: BaseException) -> None:
+            raise RuntimeError(f"on_error exploded: {exc}")
+
+        self.coordinator.schedule(
+            coro=work(),
+            message=message,
+            message_id="m-missing-correlation",
+            submit=lambda submitted: (submitted.close(), future)[1],
+            on_error=on_error,
+        )
+        future.set_exception(
+            RuntimeError("active human-input correlation is missing")
+        )
+        self.assertEqual((message.acks, message.nacks), (0, 1))
+        self.assertNotIn("m-missing-correlation", self.coordinator._inflight)
+
+    def test_done_callback_does_not_raise_out_of_set_exception(self):
+        future = Future()
+        message = FakeMessage()
+        self.coordinator.schedule(
+            coro=work(),
+            message=message,
+            message_id="m-done-isolated",
+            submit=lambda submitted: (submitted.close(), future)[1],
+            on_error=lambda exc: (_ for _ in ()).throw(exc),
+        )
+        future.set_exception(RuntimeError("bound Job is not awaiting human input"))
+        self.assertEqual(message.nacks, 1)
+
+    def test_nack_failure_last_ditch_does_not_escape_or_wedge(self):
+        future = Future()
+
+        class PoisonNack:
+            def __init__(self) -> None:
+                self.acks = 0
+                self.nacks = 0
+                self.attempts = 0
+
+            def ack(self) -> None:
+                self.acks += 1
+
+            def nack(self) -> None:
+                self.attempts += 1
+                self.nacks += 1
+                if self.attempts == 1:
+                    raise RuntimeError("subscriber nack failed")
+
+        message = PoisonNack()
+        self.coordinator.schedule(
+            coro=work(),
+            message=message,
+            message_id="m-poison-nack",
+            submit=lambda submitted: (submitted.close(), future)[1],
+        )
+        future.set_exception(RuntimeError("bound Job is not awaiting human input"))
+        self.assertGreaterEqual(message.nacks, 1)
+        self.assertNotIn("m-poison-nack", self.coordinator._inflight)
+
+        nxt = Future()
+        follow = FakeMessage()
+        self.coordinator.schedule(
+            coro=work(),
+            message=follow,
+            message_id="m-after-poison",
+            submit=lambda submitted: (submitted.close(), nxt)[1],
+        )
+        nxt.set_result(None)
+        self.assertEqual((follow.acks, follow.nacks), (1, 0))
+
     def test_ack_follows_durable_enqueue_not_worker_completion(self):
         """The handoff future settles while executable work is still queued."""
         with durable_temporary_directory() as tmp:
