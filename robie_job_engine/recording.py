@@ -423,8 +423,12 @@ class RecordingManager:
         unique = uuid.uuid4().hex
         output = job_dir / f"{_safe(job_id)}-{stamp}-{unique}.webm"
         stop_file = output.with_suffix(".stop")
-        os.environ["ROBIE_RECORDING_HINT_FILE"] = str(output.with_suffix(".hint.json"))
+        hint = output.with_suffix(".hint.json")
+        os.environ["ROBIE_RECORDING_HINT_FILE"] = str(hint)
         os.environ["ROBIE_RECORDING_JOB_ID"] = str(job_id)
+        from .recording_tab import publish_active_hint_pointer
+
+        publish_active_hint_pointer(hint, root=self.root)
         recording = self.store.create(job_id, output, stop_file)
         try:
             pid = self.capture.start(output, stop_file)
@@ -470,10 +474,9 @@ class RecordingManager:
                 recording["id"], status="READY", drive_file_id=file_id,
                 drive_url=url, uploaded_at=_now(),
             )
-            if not self.keep_local:
-                output.unlink(missing_ok=True)
-                Path(recording["stop_file"]).unlink(missing_ok=True)
-                output.with_suffix(".ready").unlink(missing_ok=True)
+            # Job 468d1575: READY + deleted local file made post_job_audit
+            # report "missing recording" and treat it as a frozen MISMATCH.
+            # Keep the webm until release_local_after_audit() runs.
             return ready
         except Exception as exc:
             stage = "UPLOAD" if recording.get("status") == "UPLOADING" else "FINALIZE"
@@ -482,6 +485,21 @@ class RecordingManager:
                 failure=f"{type(exc).__name__}: {exc}",
                 stopped_at=_now(),
             )
+
+    def release_local_after_audit(self, job_id: str) -> None:
+        """Delete local webms only after audit has had a chance to open them."""
+        if self.keep_local:
+            return
+        for segment in self.list_for_job(job_id):
+            local = segment.get("local_path")
+            if not local:
+                continue
+            output = Path(local)
+            output.unlink(missing_ok=True)
+            stop = segment.get("stop_file")
+            if stop:
+                Path(stop).unlink(missing_ok=True)
+            output.with_suffix(".ready").unlink(missing_ok=True)
 
     def safe_start(self, job_id: str) -> None:
         try:

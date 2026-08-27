@@ -53,8 +53,10 @@ can read Production versions.
 **Not possible from this repo.** There is no EZLynx-side password-rotation
 webhook or callback here. Do not invent one. The recurrence guard is a
 preflight / scheduler check that lists **version states** (never payloads)
-and ALERTs in Chat if there is no ENABLED version or the newest version is
-DESTROYED — before a Chat job is mid-run.
+and ALERTs / HOLDs only when there is no ENABLED version. A DESTROYED
+`versions/latest` leftover (password v2 on 468d1575) is healthy when an older
+ENABLED version exists (password v1). Chat wording is
+`using ENABLED v1; v2 is DESTROYED leftover`, never `password is destroyed`.
 
 ## Recurrence guard (code)
 
@@ -62,8 +64,9 @@ Zip path: `robie_job_engine/login_secret_health.py`.
 
 - `open_chat_job` preflight (before RUNNING / recorder).
 - Scheduler tick (periodic; skipped when Secret Manager is unavailable).
-- No ENABLED → `NEEDS_AUTH` + Chat alert. Newest DESTROYED but an older
-  ENABLED exists → Chat alert, job may proceed (bootstrap still has a version).
-- Alert text is states and version names only.
+- No ENABLED → `NEEDS_AUTH` + Chat alert.
+- Newest DESTROYED but an older ENABLED exists → healthy (result `OK`). Chat
+  may note `using ENABLED v1; v2 is DESTROYED leftover`. Job proceeds.
+- Alert / leftover text is states and version names only. Never payloads.
 
 `python -m robie_job_engine.login_secret_health` prints the same state report.

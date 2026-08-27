@@ -15,3 +15,8 @@
   field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use
   `.first`, `.nth()`, or `.last`. A wrong or missing destination record cannot
   be reported as complete.
+- Do not claim you identified a carrier, are Filling Policy Shell, filled,
+  saved, or uploaded from quote data alone. Those sentences require a
+  destination-action checkpoint. If you have no destination-action checkpoint
+  and no destination-verified evidence, say you were stuck and made no
+  verified progress.

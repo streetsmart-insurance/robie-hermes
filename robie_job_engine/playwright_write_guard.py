@@ -333,12 +333,12 @@ def _publish_page_hint_from_page(page: Any) -> None:
     url = str(getattr(page, "url", "") or "")
     if not url:
         return
-    hint = os.environ.get("ROBIE_RECORDING_HINT_FILE", "").strip()
-    if not hint:
-        return
     try:
-        from robie_job_engine.recording_tab import write_page_hint
+        from robie_job_engine.recording_tab import resolve_hint_file, write_page_hint
 
-        write_page_hint(Path(hint), url=url)
+        hint = resolve_hint_file()
+        if hint is None:
+            return
+        write_page_hint(hint, url=url)
     except Exception:
         return

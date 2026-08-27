@@ -19,7 +19,9 @@ uploaded to Drive and has a stored link.
   at the same persistent Chrome session.
 - `ROBIE_RECORDING_FPS` defaults to 4 to control size and CPU use.
 - `ROBIE_DELETE_LOCAL_RECORDING_AFTER_UPLOAD=1` removes the VM copy only after
-  Drive confirms the upload. The Drive copy is retained until a user deletes it.
+  post-job audit has opened the local file. Job 468d1575 marked a recording
+  READY then deleted the webm, so audit reported "missing recording" and a
+  frozen tool-vs-video MISMATCH. Drive keeps its copy until a user deletes it.
 
 Executable Skills are registered in `robie_job_engine/job_schema.py`. Each
 contract declares the expected destination result, recording policy,

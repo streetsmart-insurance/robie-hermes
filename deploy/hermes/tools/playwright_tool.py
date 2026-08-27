@@ -170,10 +170,10 @@ try:
         relabel_user_exec_exception(exc)
     finally:
         try:
-            from robie_job_engine.recording_tab import write_page_hint
-            hint = os.environ.get("ROBIE_RECORDING_HINT_FILE", "").strip()
+            from robie_job_engine.recording_tab import resolve_hint_file, write_page_hint
+            hint = resolve_hint_file()
             page = scope.get("page")
-            if hint and page is not None and getattr(page, "url", None):
+            if hint is not None and page is not None and getattr(page, "url", None):
                 write_page_hint(hint, url=page.url)
         except Exception:
             pass

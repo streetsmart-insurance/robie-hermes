@@ -19,6 +19,8 @@ from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 
+DEFAULT_RECORDING_ROOT = "/opt/streetsmart-hermes/robie-job-engine/data/recordings"
+ACTIVE_HINT_POINTER = "active_hint_path"
 ACTIVE_PATH_MARKERS = (
     "/policy/actions/edit/",
     "/applicantportal/",
@@ -187,6 +189,38 @@ def follow_screencast_frames(
         "initial_url": attached[0] if attached else "",
         "final_url": last_url,
     }
+
+
+def recording_root() -> Path:
+    return Path(os.environ.get("ROBIE_RECORDING_ROOT") or DEFAULT_RECORDING_ROOT)
+
+
+def publish_active_hint_pointer(hint_path: str | Path, *, root: str | Path | None = None) -> Path:
+    """Write a filesystem pointer the .hermes Playwright tool can find.
+
+    Job Engine and hermes-gateway do not share os.environ. Capture already
+    knows ``--hint-file``; playwright_exec only sees this pointer or
+    ``ROBIE_RECORDING_HINT_FILE``.
+    """
+    base = Path(root) if root is not None else recording_root()
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    pointer = base / ACTIVE_HINT_POINTER
+    pointer.write_text(str(Path(hint_path)), encoding="utf-8")
+    return pointer
+
+
+def resolve_hint_file(*, root: str | Path | None = None) -> Path | None:
+    """Find the live Job's hint file without requiring versions/latest-style env."""
+    env_path = os.environ.get("ROBIE_RECORDING_HINT_FILE", "").strip()
+    if env_path:
+        return Path(env_path)
+    base = Path(root) if root is not None else recording_root()
+    pointer = base / ACTIVE_HINT_POINTER
+    if pointer.is_file():
+        text = pointer.read_text(encoding="utf-8").strip()
+        if text:
+            return Path(text)
+    return None
 
 
 def read_page_hint(path: str | Path | None) -> dict[str, Any] | None:

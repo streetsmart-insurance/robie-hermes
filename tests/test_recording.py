@@ -68,6 +68,7 @@ class RecordingTests(unittest.TestCase):
         result = manager.stop_and_upload(self.job["id"], "UNVERIFIED")
         self.assertEqual("READY", result["status"])
         self.assertEqual("drive-file-123", result["drive_file_id"])
+        self.assertTrue(Path(result["local_path"]).is_file())
         self.assertTrue(result["sha256"])
         self.assertGreater(result["size_bytes"], 0)
         segments = manager.list_for_job(self.job["id"])

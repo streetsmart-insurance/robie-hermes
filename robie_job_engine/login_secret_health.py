@@ -2,8 +2,10 @@
 
 Job 6cf6f6ae HITL'd when the newest password version was DESTROYED. Live
 login (`ezlynx_login_bootstrap.secret`) uses newest ENABLED by create_time,
-not ``versions/latest``. This module ALERTs before a Chat job is mid-run if
-there is no ENABLED version or the newest version is DESTROYED.
+not ``versions/latest``. Job 468d1575 then ALERTed on DESTROYED password v2
+while ENABLED v1 still logged in. This module ALERTs / HOLDs only when there
+is no ENABLED version. A DESTROYED ``versions/latest`` leftover is healthy
+when an older ENABLED version exists.
 
 No EZLynx-side password-rotation webhook exists in this repo. Do not invent
 one. Pawel owns rotation. Never print or store the password.
@@ -95,17 +97,23 @@ def summarize_secret_versions(versions: list[Any], *, secret_id: str) -> dict[st
     rows.sort(key=lambda item: item["create_time"], reverse=True)
     enabled = [item for item in rows if item["state"] == "ENABLED"]
     newest = rows[0] if rows else None
+    newest_enabled = enabled[0] if enabled else None
     missing_enabled = not enabled
     newest_destroyed = bool(newest and newest["state"] == "DESTROYED")
-    alert = missing_enabled or newest_destroyed
+    leftover_destroyed = newest_destroyed and not missing_enabled
+    # Align with ezlynx_login_bootstrap.secret: newest ENABLED is healthy.
+    # DESTROYED latest must not ALERT when an older ENABLED version exists.
+    alert = missing_enabled
     return {
         "secret_id": secret_id,
         "versions": [{"version": item["version"], "state": item["state"]} for item in rows],
         "enabled_versions": [item["version"] for item in enabled],
+        "newest_enabled_version": None if newest_enabled is None else newest_enabled["version"],
         "newest_version": None if newest is None else newest["version"],
         "newest_state": None if newest is None else newest["state"],
         "missing_enabled": missing_enabled,
         "newest_destroyed": newest_destroyed,
+        "leftover_destroyed": leftover_destroyed,
         "alert": alert,
     }
 
@@ -145,10 +153,12 @@ def inspect_login_secrets(
                     "secret_id": secret_id,
                     "versions": [],
                     "enabled_versions": [],
+                    "newest_enabled_version": None,
                     "newest_version": None,
                     "newest_state": None,
                     "missing_enabled": True,
                     "newest_destroyed": False,
+                    "leftover_destroyed": False,
                     "alert": True,
                     "error": type(exc).__name__,
                 }
@@ -173,7 +183,8 @@ def inspect_login_secrets(
         )
     else:
         result = "OK"
-        reason = "each watched secret has an ENABLED version and newest is not DESTROYED"
+        leftover = format_leftover_note({"secrets": secrets})
+        reason = leftover or "each watched secret has an ENABLED version"
     return {
         "result": result,
         "reason": reason,
@@ -184,14 +195,42 @@ def inspect_login_secrets(
     }
 
 
+def format_leftover_note(report: dict[str, Any]) -> str:
+    """Chat wording for DESTROYED latest + ENABLED older. Names/states only."""
+    notes: list[str] = []
+    for item in report.get("secrets") or []:
+        if not item.get("leftover_destroyed"):
+            continue
+        enabled = item.get("newest_enabled_version") or (
+            (item.get("enabled_versions") or [None])[0]
+        )
+        newest = item.get("newest_version") or "versions/unknown"
+        if not enabled:
+            continue
+        notes.append(
+            f"{item.get('secret_id')}: using ENABLED {enabled}; "
+            f"{newest} is DESTROYED leftover"
+        )
+    return "; ".join(notes)
+
+
 def format_alert(report: dict[str, Any]) -> str:
     """Chat / ops text. States and version names only. No payloads."""
+    leftover = format_leftover_note(report)
     lines = [
         f"ROBIE login-secret alert — {report.get('project') or _project()}",
-        str(report.get("reason") or "login secret version state is unsafe"),
+        str(report.get("reason") or leftover or "login secret version state is unsafe"),
     ]
     for item in report.get("secrets") or []:
         enabled = ",".join(item.get("enabled_versions") or []) or "none"
+        newest_enabled = item.get("newest_enabled_version") or "none"
+        if item.get("leftover_destroyed"):
+            lines.append(
+                f"secret {item.get('secret_id')} using ENABLED {newest_enabled}; "
+                f"{item.get('newest_version') or 'none'} is DESTROYED leftover; "
+                f"enabled={enabled}"
+            )
+            continue
         lines.append(
             f"secret {item.get('secret_id')} newest={item.get('newest_version') or 'none'} "
             f"state={item.get('newest_state') or 'UNKNOWN'}; enabled={enabled}"
