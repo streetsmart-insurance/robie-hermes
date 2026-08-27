@@ -25,6 +25,11 @@ class GatewayJobEnginePathTests(unittest.TestCase):
             "PYTHONPATH=/opt/streetsmart-hermes/robie-job-engine:", drop_in
         )
         self.assertIn("ROBIE_CHAT_QUEUE_LEASE_SECONDS=120", drop_in)
+        self.assertIn(
+            "ExecStartPost=-/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python "
+            "-m robie_job_engine.production_preflight",
+            drop_in,
+        )
 
     def test_gateway_uses_durable_reply_links_and_lease_heartbeats(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(

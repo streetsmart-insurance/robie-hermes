@@ -1,0 +1,24 @@
+[Unit]
+Description=ROBIE Production pre-flight (fail-closed; Chat on no only)
+After=local-fs.target network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+Environment=ROBIE_SECRET_PROJECT=streetsmart-hermes-poc
+Environment=ROBIE_PREFLIGHT_CHAT_SPACE=spaces/AAQAZbLJO78
+EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.production_preflight
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
