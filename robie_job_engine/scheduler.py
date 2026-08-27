@@ -68,6 +68,12 @@ def run_once(db_path: str) -> dict[str, int]:
     ops = OperationsStore(db_path)
     _ensure_default_schedules(ops)
     woke = jobs.wake_due()
+    try:
+        from .login_secret_health import maybe_periodic_login_secret_check
+
+        maybe_periodic_login_secret_check(db_path)
+    except Exception:
+        pass
     orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
     if orphaned_chat_jobs:
         from .post_job_audit import maybe_audit_terminal_job

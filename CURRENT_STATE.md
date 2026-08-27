@@ -101,3 +101,17 @@ code.
 `integrations/google_chat/adapter.py` (zip copy). Production imports the
 plugin adapter from `.hermes`, so the loop never ran. Job `e06d5e13` failed
 at 300s with zero `gateway_progress` rows while Playwright kept running.
+
+## EZLynx login secrets (on-call)
+
+Job `6cf6f6ae` HITL'd on a DESTROYED Secret Manager version. Operator
+runbook (no secret values): **[LOGIN_SECRETS.md](LOGIN_SECRETS.md)**.
+
+Production `hermes-poc-01` / project `streetsmart-hermes-poc` reads
+`ezlynx-username` and `ezlynx-password`. Live bootstrap uses newest
+**ENABLED** by `create_time`, not `versions/latest`. A DESTROYED version
+cannot be restored; add a new ENABLED version (Pawel), then RETRY in Chat.
+Chat text does not change the version. The zip-path preflight
+(`robie_job_engine/login_secret_health.py`, hooked from `open_chat_job` and
+the scheduler) ALERTs on missing ENABLED or newest-DESTROYED before a Chat
+job is mid-run. There is no EZLynx password-rotation webhook in this repo.

@@ -687,6 +687,15 @@ def open_chat_job(
             return job["id"]
     # Bounded workers stay PENDING so JobEngine can claim them. Hermes chat
     # tasks still move to RUNNING so the existing adapter path can proceed.
+    try:
+        from .login_secret_health import maybe_preflight_login_secrets
+
+        maybe_preflight_login_secrets(store, store.get_job(job["id"]))
+    except Exception:
+        logger.exception("login secret preflight failed; continuing fail-open")
+    job = store.get_job(job["id"])
+    if job["status"] == JobStatus.NEEDS_AUTH.value:
+        return job["id"]
     if (
         job["status"] == JobStatus.PENDING
         and classification.action_type not in BOUNDED_ENGINE_ACTIONS
