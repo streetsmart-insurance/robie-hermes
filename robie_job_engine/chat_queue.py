@@ -819,12 +819,24 @@ class DurableChatEventQueue:
             )
             conn.commit()
         if event is None:
-            return {
+            result = {
                 "event_id": None,
                 "job_id": job_id,
                 "state": "DIRECT_RESUME",
             }
-        return self.get(str(event["event_id"]))
+        else:
+            result = self.get(str(event["event_id"]))
+        # Chat "Resuming from the saved checkpoint" is not a claim.
+        # Generic hermes.google_chat_task rows stay unleased; reopen
+        # writes gateway_progress so the 300s orphan watcher does not
+        # fail the Job as unclaimed (6cf6f6ae, da53765b).
+        self._reopen_resumed_generic_chat_job(job_id)
+        return result
+
+    def _reopen_resumed_generic_chat_job(self, job_id: str) -> None:
+        from .chat_guard import reopen_resumed_generic_chat_job
+
+        reopen_resumed_generic_chat_job(str(self.path), job_id)
 
     def _finish(
         self, event_id: str, owner: str, state: str, error: str | None

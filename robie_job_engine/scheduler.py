@@ -76,13 +76,12 @@ def run_once(db_path: str) -> dict[str, int]:
         pass
     orphaned_chat_jobs = jobs.fail_orphaned_chat_jobs()
     if orphaned_chat_jobs:
-        from .post_job_audit import maybe_audit_terminal_job
+        from .chat_guard import notify_terminal_chat_job
+        from .recording import RecordingManager
 
         for orphan_id in orphaned_chat_jobs:
             try:
-                maybe_audit_terminal_job(db_path, orphan_id)
-                from .recording import RecordingManager
-
+                notify_terminal_chat_job(db_path, orphan_id)
                 RecordingManager(db_path).release_local_after_audit(orphan_id)
             except Exception:
                 pass

@@ -1192,6 +1192,53 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """
         await asyncio.to_thread(start_generic_chat_job_heartbeat, ROBIE_JOB_DB, job_id)
 
+    async def _resume_direct_generic_chat_job(
+        self,
+        event: MessageEvent,
+        job_id: str,
+        message_id: str,
+        text: str,
+    ) -> None:
+        """Re-open a HITL-resumed generic Chat Job and start the worker."""
+        reopened = await asyncio.to_thread(
+            open_chat_job,
+            ROBIE_JOB_DB,
+            message_id,
+            text,
+            attachments=list(zip(event.media_urls or [], event.media_types or [])),
+            requested_by=(
+                getattr(event.source, "user_name", None)
+                or getattr(event.source, "user_id", None)
+                or "Google Chat user"
+            ),
+            conversation_id=getattr(event.source, "chat_id", None),
+            expected_attachment_count=len(
+                ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
+            ),
+        )
+        job_id = reopened or job_id
+        queue = await asyncio.to_thread(self._durable_chat_queue)
+        await asyncio.to_thread(
+            queue.link_conversation_job,
+            conversation_id=getattr(event.source, "chat_id", None)
+            or "google-chat:unknown",
+            job_id=job_id,
+            message_id=message_id,
+            event_id=message_id,
+            relation="CONTINUATION",
+        )
+        store = JobStore(ROBIE_JOB_DB)
+        job = await asyncio.to_thread(store.get_job, job_id)
+        original = str((job.get("payload") or {}).get("text") or text)
+        execution_text = build_chat_execution_text(ROBIE_JOB_DB, job_id, original)
+        try:
+            event.text = execution_text
+        except Exception:
+            from dataclasses import replace
+
+            event = replace(event, text=execution_text)
+        await self._run_generic_chat_job(job_id, event)
+
     async def _run_generic_chat_job(
         self, job_id: str | None, event: MessageEvent
     ) -> None:
@@ -2300,10 +2347,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         if self._chat_queue_wakeup is not None:
                             self._chat_queue_wakeup.set()
                         return
-                    # Direct Hermes browser work has no bounded queue event to
-                    # wake. Fall through with this same reply; open_chat_job
-                    # recognizes the persisted resume message and continues
-                    # the existing Job ID instead of creating a duplicate.
+                    # The Chat ack is not a claim. Direct Hermes work has no
+                    # bounded queue event to wake, so re-open / re-lease the
+                    # same generic Job and start the worker without a new
+                    # @robie. Fall-through is not enough: a stale adapter
+                    # would stop here and the 300s orphan watcher would
+                    # fail the unleased row (6cf6f6ae, da53765b).
+                    await self._resume_direct_generic_chat_job(
+                        event,
+                        context["job_id"],
+                        message_id,
+                        text,
+                    )
+                    return
 
             if text.casefold().startswith(("/approve", "/deny")) and event.source is not None:
                 queue = await asyncio.to_thread(self._durable_chat_queue)

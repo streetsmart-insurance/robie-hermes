@@ -63,6 +63,36 @@ class GatewayJobEnginePathTests(unittest.TestCase):
         self.assertLess(admin_at, resume_at)
         self.assertIn('source_space_type in {"DIRECT_MESSAGE", "DM"}', adapter)
 
+    def test_hitl_direct_resume_reopens_and_runs_generic_chat_job(self):
+        adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
+            encoding="utf-8"
+        )
+        resume_at = adapter.index("queue.resume_human_input")
+        ack_at = adapter.index(
+            "Resuming from the saved checkpoint.", resume_at
+        )
+        reopen_at = adapter.index("_resume_direct_generic_chat_job(", ack_at)
+        open_at = adapter.index("open_chat_job,", reopen_at)
+        run_at = adapter.index("_run_generic_chat_job(job_id, event)", reopen_at)
+        self.assertLess(resume_at, ack_at)
+        self.assertLess(ack_at, reopen_at)
+        self.assertLess(reopen_at, open_at)
+        self.assertLess(open_at, run_at)
+        self.assertIn("The Chat ack is not a claim", adapter)
+        chat_queue = (ROOT / "robie_job_engine/chat_queue.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_reopen_resumed_generic_chat_job(job_id)", chat_queue)
+        chat_guard = (ROOT / "robie_job_engine/chat_guard.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def reopen_resumed_generic_chat_job(", chat_guard)
+        self.assertIn("def notify_terminal_chat_job(", chat_guard)
+        scheduler = (ROOT / "robie_job_engine/scheduler.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("notify_terminal_chat_job(db_path, orphan_id)", scheduler)
+
     def test_google_chat_adapter_fails_closed_on_stale_job_engine_import(self):
         adapter = (ROOT / "integrations/google_chat/adapter.py").read_text(
             encoding="utf-8"

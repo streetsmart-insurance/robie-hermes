@@ -196,6 +196,66 @@ class DurableChatEventQueueTests(unittest.TestCase):
         self.assertNotIn("541611", str(checkpoint))
         self.assertEqual(restarted.claim_next("worker-b")["job_id"], job["id"])
 
+    def test_generic_chat_hitl_resume_reopens_unleased_job(self):
+        store = JobStore(self.db)
+        job = store.create_job(
+            "hermes.google_chat_task",
+            {
+                "worker": "hermes-cua",
+                "text": "finish policy 220250093",
+                "conversation_id": "spaces/generic-hitl",
+                "human_input_values": {},
+            },
+            idempotency_key="generic-hitl-resume",
+        )
+        store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
+        self.assertIsNone(store.get_job(job["id"])["lease_owner"])
+        self.queue.link_conversation_job(
+            conversation_id="spaces/generic-hitl",
+            job_id=job["id"],
+            message_id="message-generic-hitl",
+            event_id="event-generic-hitl",
+            interaction_state={
+                "awaiting": "human_input",
+                "field_name": "operator_response",
+                "accepts_value": True,
+            },
+        )
+        self.queue.park_direct_human_input(
+            conversation_id="spaces/generic-hitl",
+            job_id=job["id"],
+            interaction_state={
+                "awaiting": "human_input",
+                "field_name": "operator_response",
+                "checkpoint": "playwright_blocked:dropdown",
+                "accepts_value": True,
+            },
+            error="PLAYWRIGHT_BLOCKED: Could not find PENDING-PROGRESSIVE-CA-220250093 in dropdown",
+        )
+        self.assertEqual(
+            store.get_job(job["id"])["status"],
+            JobStatus.AWAITING_HUMAN_INPUT.value,
+        )
+        resumed = self.queue.resume_human_input(
+            conversation_id="spaces/generic-hitl",
+            job_id=job["id"],
+            reply_message_id="reply-generic-hitl",
+            field_name="operator_response",
+            value="just create a new shell for now as a test case",
+        )
+        self.assertEqual(resumed["state"], "DIRECT_RESUME")
+        updated = store.get_job(job["id"])
+        self.assertEqual(updated["status"], JobStatus.RUNNING.value)
+        self.assertIsNone(updated["lease_owner"])
+        resume_record = store.get_checkpoint_record(job["id"], "human_input_resume")
+        progress = store.get_checkpoint(job["id"], "gateway_progress")
+        self.assertIsNotNone(progress)
+        self.assertGreaterEqual(progress["last_at"], resume_record["created_at"])
+        self.assertEqual(progress["source"], "hermes-gateway")
+        from robie_job_engine.chat_guard import stop_generic_chat_job_heartbeat
+
+        stop_generic_chat_job_heartbeat(str(self.db), job["id"])
+
     def test_heartbeat_renews_lease_without_incrementing_attempt(self):
         self.queue.enqueue(
             event_id="event-heartbeat",
