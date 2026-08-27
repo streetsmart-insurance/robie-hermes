@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
+from .ezlynx_account_nav import account_nav_contract_lines
 from .context_policy import (
     CONTINUATION_PREFIXES,
     CORRECTION_PREFIXES,
@@ -463,6 +464,8 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "Do not emit ROBIE_BLOCKED for a completed action, a general question, or an ordinary explanation.",
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
+    payload = dict(job.get("payload") or {})
+    lines.extend(account_nav_contract_lines(text, payload))
     lines.extend(execution_contract_lines())
     lines.extend(_submission_contract(text))
     lines.append("[END ROBIE JOB ENGINE EXECUTION CONTRACT]")

@@ -17,6 +17,18 @@ teaches the business workflow; Robie owns the browser mechanics.
   assertion fails, stop with `PLAYWRIGHT_BLOCKED` and the exact failed check.
 - Do not install or upgrade browser software during an executable Job.
 
+## Open an existing EZLynx account
+
+If the Job or prompt already names an EZLynx account or applicant id, the
+first navigation is `https://app.ezlynx.com/web/account/<id>/policies` (or
+the `/web/account/<id>/…` URL already in the task). Do not treat "open
+applicant" as a search-box problem. Do not enumerate Summary, Details, or Index URL variants.
+
+If a search locator fails and an account id is already known, try that
+direct account URL once, then stop or proceed. If no account id is known,
+HITL Carlo or say stuck / no verified progress. Never spend the Job
+URL-guessing.
+
 ## Reliable workflow
 
 1. Reuse an existing signed-in tab whose URL and account context match.

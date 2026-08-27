@@ -46,6 +46,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("stored Drive link", source)
         self.assertIn("uniquely identifies exactly one", source)
         self.assertIn("PLAYWRIGHT_BLOCKED", source)
+        self.assertIn("/web/account/<id>/policies", source)
+        self.assertIn("Do not enumerate Summary, Details, or Index", source)
 
     def test_runtime_fragments_enable_tool_and_preserve_completion_authority(self):
         config = CONFIG.read_text()
@@ -58,6 +60,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("uniquely identify", soul)
         self.assertIn("ask Gemini for one unique", soul)
         self.assertIn("HITL Carlo", soul)
+        self.assertIn("/web/account/<id>/", soul)
+        self.assertIn("Do not enumerate Summary/Details/Index", soul)
 
     def test_gemini_unique_field_tool_is_fail_closed(self):
         source = GEMINI_TOOL.read_text()
@@ -77,6 +81,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("Robie was here", commercial)
         self.assertIn("Do not bind", commercial)
         self.assertIn("named insured", commercial)
+        self.assertIn("/web/account/<id>/policies", commercial)
+        self.assertIn("Do not guess Summary, Details, or Index", commercial)
         self.assertIn("vehicles", commercial.casefold())
         self.assertIn("PLAYWRIGHT_BLOCKED", fallback)
         self.assertIn("ask Gemini for one unique field", fallback)
