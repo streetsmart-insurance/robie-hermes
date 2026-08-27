@@ -52,7 +52,7 @@ RuntimeError: PLAYWRIGHT_BLOCKED: write target was chosen by position, not uniqu
 SUCCESS_OUTPUT = "named_insured=ROBIE Test LLC\n"
 
 
-def _load_playwright_tool():
+def _install_hermes_registry_stub():
     tools_pkg = ModuleType("tools")
     tools_pkg.__path__ = []
     registry_mod = ModuleType("tools.registry")
@@ -70,12 +70,31 @@ def _load_playwright_tool():
     registry_mod.registry = DummyRegistry()
     registry_mod.tool_error = tool_error
     registry_mod.tool_result = tool_result
+    previous = {name: sys.modules.get(name) for name in ("tools", "tools.registry")}
+    sys.modules["tools"] = tools_pkg
+    sys.modules["tools.registry"] = registry_mod
+    return previous
+
+
+def _restore_modules(previous: dict[str, ModuleType | None]) -> None:
+    for name, module in previous.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
+
+def _load_playwright_tool():
+    previous = _install_hermes_registry_stub()
     spec = importlib.util.spec_from_file_location("robie_playwright_tool_under_test", TOOL)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
-    with patch.dict(sys.modules, {"tools": tools_pkg, "tools.registry": registry_mod}):
+    try:
         spec.loader.exec_module(module)
-    return module
+    except Exception:
+        _restore_modules(previous)
+        raise
+    return module, previous
 
 
 class FakeLocator:
@@ -121,7 +140,11 @@ class _FakeProc:
 class PlaywrightArtifactFailClosedTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tool = _load_playwright_tool()
+        cls.tool, cls._registry_modules = _load_playwright_tool()
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_modules(cls._registry_modules)
 
     def test_empty_pdf_is_fail_closed_once_not_retryable_blocked(self):
         mapped = self.tool.empty_or_missing_artifact_error(EMPTY_PDF_TRACE)
