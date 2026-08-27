@@ -1,0 +1,33 @@
+name: GCP Test WIF smoke test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/wif-smoke-test.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Authenticate to StreetSmart ROBIE Test
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Verify Test runner is visible and running
+        shell: bash
+        run: |
+          actual_status="$(gcloud compute instances describe antigravity-test-01 --project=streetsmart-robie-test --zone=us-east1-b --format='value(status)')"
+          test "$actual_status" = "RUNNING"
+          printf 'Verified Test runner status: %s\n' "$actual_status"
