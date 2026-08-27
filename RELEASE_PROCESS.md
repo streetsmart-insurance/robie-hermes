@@ -78,7 +78,10 @@ pay, or write EZLynx. Check 3 (recording motion) and check 4 (tool vs
 recording) treat a recorder attached to a different tab than the Playwright
 page as **frozen / MISMATCH**. Job 30777947's first-ezlynx-wins CDP attach
 stayed on a stale Policies listing while playwright_exec drove documents /
-Policy Edit / FormEntry. Carlo does not need to SSH to see that.
+Policy Edit / FormEntry. Check 3 stays fail-closed: a frozen recording is
+FAIL even if tool logs are busy. The recorder change is not done until a
+TEST recording shows real motion (non-identical frames) while Playwright
+navigates the driven page. Carlo does not need to SSH to see that.
 
 ## Initial bounded proof
 

@@ -285,10 +285,58 @@ class PostJobAuditTests(unittest.TestCase):
                 session_root=session,
                 extract_frames=_extract(frozen),
             )
+            self.assertEqual(audit["recording_motion"]["result"], "FAIL")
+            self.assertIn("frozen", audit["recording_motion"]["reason"])
             self.assertEqual(audit["tool_vs_recording"]["result"], "MISMATCH")
             self.assertIn("MISMATCH", format_audit_chat_message(audit))
             self.assertFalse(audit["authorizes_complete"])
             self.assertNotEqual(store.get_job(job_id)["status"], JobStatus.COMPLETE.value)
+
+    def test_check3_frozen_fails_even_when_tool_logs_are_busy(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job_id = open_chat_job(db, "message-busy-frozen", "edit policy")
+            store.checkpoint(
+                job_id,
+                "worker_response",
+                {
+                    "response_text": (
+                        "37 unique playwright_exec calls; page.goto Edit; "
+                        "page.click('Save and Continue')"
+                    )
+                },
+            )
+            store.transition(
+                job_id,
+                JobStatus.UNVERIFIED,
+                expected={JobStatus.RUNNING},
+                error="fixture",
+                release_lease=True,
+            )
+            video = Path(tmp) / "busy-frozen.webm"
+            video.write_bytes(b"static")
+            _ready_recording(db, job_id, video)
+            session = Path(tmp) / "sessions"
+            session.mkdir()
+            (session / "tools.log").write_text(
+                f"{job_id} playwright_exec page.goto FormEntry page.fill",
+                encoding="utf-8",
+            )
+            frozen = [rgb_frame(8, 6, (40, 40, 40))] * 8
+            audit = run_post_job_audit(
+                db,
+                job_id,
+                session_root=session,
+                extract_frames=_extract(frozen),
+            )
+            self.assertEqual(audit["recording_motion"]["result"], "FAIL")
+            self.assertIn("frozen", audit["recording_motion"]["reason"])
+            self.assertTrue(
+                tool_calls_claim_mutation(
+                    "37 unique playwright_exec calls; page.goto Edit; page.click"
+                )
+            )
 
     def test_missing_jobs_db_and_session_are_unknown_fail(self):
         missing_db = Path("/workspace/.robie-durable-test/does-not-exist-jobs.db")

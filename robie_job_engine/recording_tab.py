@@ -15,7 +15,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 
@@ -131,6 +131,62 @@ def select_recording_tab(
         scored.append((score, tab))
     scored.sort(key=lambda item: item[0], reverse=True)
     return scored[0][1]
+
+
+def first_ezlynx_wins(
+    tabs: Iterable[TabCandidate],
+    *,
+    previous_identity: str | None = None,
+    hint_url: str | None = None,
+) -> TabCandidate | None:
+    """The 30777947 attach. First ``ezlynx.com`` URL in enumeration order.
+
+    Capture must not call this. Tests use it to prove the old bind stays on
+    the stale Policies tab while Playwright drives another page.
+    """
+    del previous_identity, hint_url
+    for tab in tabs:
+        if tab and is_ezlynx_url(tab.url):
+            return tab
+    return None
+
+
+def follow_screencast_frames(
+    ticks: Iterable[Iterable[TabCandidate]],
+    snapshot: Callable[[TabCandidate], bytes],
+    *,
+    selector: Callable[..., TabCandidate | None] | None = None,
+) -> dict[str, Any]:
+    """Bind / rebind Page.startScreencast the same way capture does.
+
+    Each tick is the live tab list. ``snapshot`` is one encoded frame of the
+    bound page. Selector defaults to ``select_recording_tab``.
+    """
+    pick = selector or select_recording_tab
+    frames: list[bytes] = []
+    attached: list[str] = []
+    previous: str | None = None
+    rebinds = 0
+    last_url = ""
+    for listed in ticks:
+        tabs = [tab for tab in listed if tab]
+        chosen = pick(tabs, previous_identity=previous)
+        if chosen is None:
+            continue
+        if previous is not None and chosen.identity != previous:
+            rebinds += 1
+        if previous != chosen.identity or chosen.url not in attached:
+            attached.append(chosen.url)
+            previous = chosen.identity
+        last_url = chosen.url
+        frames.append(snapshot(chosen))
+    return {
+        "frames": frames,
+        "attached_urls": attached,
+        "rebinds": rebinds,
+        "initial_url": attached[0] if attached else "",
+        "final_url": last_url,
+    }
 
 
 def read_page_hint(path: str | Path | None) -> dict[str, Any] | None:

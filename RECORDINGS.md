@@ -45,6 +45,11 @@ tab. Capture rebinds to the Playwright hint URL when present, otherwise to the
 most recently navigated EZLynx page (active Edit/FormEntry/documents over a
 listing). The attach log sits next to the webm as `*.attach.json`. A recorder
 tab that is not the Playwright page is an audit MISMATCH / frozen fail.
+The close-out test (`test_30777947_driven_page_recording_shows_motion`)
+binds two ezlynx-like pages, proves first-ezlynx-wins stays frozen on the
+stale first tab, and requires the fixed selector's captured frames to change
+with the page Playwright drives. Audit check 3 still fails a frozen
+recording when tool logs are busy.
 
 The approved final statuses are `COMPLETE`, `FAILED`, `UNVERIFIED`, and
 `NEEDS_AUTH`. Authentication, MFA, CAPTCHA, or other human-login intervention

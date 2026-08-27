@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,13 +20,17 @@ from robie_job_engine.chat_guard import open_chat_job
 from robie_job_engine.models import JobStatus
 from robie_job_engine.playwright_write_guard import install_playwright_write_guards
 from robie_job_engine.post_job_audit import (
+    analyze_recording_motion,
     format_audit_chat_message,
+    frames_show_motion,
     rgb_frame,
     run_post_job_audit,
 )
 from robie_job_engine.recording import RecordingStore, SubprocessTabCapture
 from robie_job_engine.recording_tab import (
     TabCandidate,
+    first_ezlynx_wins,
+    follow_screencast_frames,
     read_page_hint,
     recorder_tab_mismatch,
     select_recording_tab,
@@ -108,6 +115,139 @@ class SelectRecordingTabTests(unittest.TestCase):
             data = read_page_hint(path)
             self.assertEqual(data["url"], EDIT)
             self.assertEqual(data["job_id"], "30777947")
+
+
+FRAME_W = 24
+FRAME_H = 16
+STALE_RED = (200, 10, 10)
+DOC_GREEN = (10, 200, 10)
+EDIT_BLUE = (10, 10, 220)
+FORM_YELLOW = (220, 220, 10)
+
+
+class PlaywrightDrivenPage:
+    """One Chrome tab. ``goto`` is the playwright_exec surface."""
+
+    def __init__(self, identity: str, url: str, color: tuple[int, int, int]) -> None:
+        self.identity = identity
+        self.url = url
+        self.color = color
+        self.last_navigated_at = 0.0
+
+    def goto(self, url: str, color: tuple[int, int, int]) -> None:
+        self.url = url
+        self.color = color
+        self.last_navigated_at = time.monotonic()
+
+    def candidate(self) -> TabCandidate:
+        return TabCandidate(self.identity, self.url, self.last_navigated_at)
+
+    def frame(self) -> bytes:
+        return rgb_frame(FRAME_W, FRAME_H, self.color)
+
+
+def _snapshot_from(pages: list[PlaywrightDrivenPage]):
+    by_id = {page.identity: page for page in pages}
+
+    def snapshot(tab: TabCandidate) -> bytes:
+        return by_id[tab.identity].frame()
+
+    return snapshot
+
+
+def _write_webm(path: Path, frames: list[bytes]) -> None:
+    binary = shutil.which("ffmpeg")
+    if not binary:
+        raise unittest.SkipTest("ffmpeg is required for the TEST recording encode")
+    raw = b"".join(frames)
+    command = [
+        binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{FRAME_W}x{FRAME_H}",
+        "-r",
+        "4",
+        "-i",
+        "pipe:0",
+        "-c:v",
+        "libvpx",
+        "-b:v",
+        "80k",
+        str(path),
+    ]
+    result = subprocess.run(command, input=raw, check=False, capture_output=True)
+    if result.returncode != 0:
+        raise unittest.SkipTest(
+            f"ffmpeg could not encode TEST webm: {result.stderr[-200:]!r}"
+        )
+
+
+class Job30777947MotionCloseoutTests(unittest.TestCase):
+    def test_30777947_driven_page_recording_shows_motion(self):
+        """Would have caught 30777947: first tab stale, Playwright drives the second.
+
+        Old first-ezlynx-wins stays on Policies (identical frames = frozen).
+        After the fix, captured frames must change with the driven page.
+        """
+        stale = PlaywrightDrivenPage("tab-stale-first", POLICIES, STALE_RED)
+        driven = PlaywrightDrivenPage("tab-playwright", "about:blank", (0, 0, 0))
+        pages = [stale, driven]
+        snapshot = _snapshot_from(pages)
+        ticks: list[list[TabCandidate]] = []
+
+        def snap() -> None:
+            ticks.append([page.candidate() for page in pages])
+
+        snap()
+        driven.goto(DOCUMENTS, DOC_GREEN)
+        snap()
+        driven.goto(EDIT, EDIT_BLUE)
+        snap()
+        driven.goto(FORMENTRY, FORM_YELLOW)
+        snap()
+
+        self.assertEqual(first_ezlynx_wins(ticks[0]).identity, stale.identity)
+        self.assertEqual(first_ezlynx_wins(ticks[-1]).identity, stale.identity)
+
+        old = follow_screencast_frames(ticks, snapshot, selector=first_ezlynx_wins)
+        new = follow_screencast_frames(ticks, snapshot, selector=select_recording_tab)
+
+        self.assertEqual(old["attached_urls"], [POLICIES])
+        self.assertEqual(old["rebinds"], 0)
+        old_motion = frames_show_motion(old["frames"])
+        self.assertEqual(old_motion["result"], "FAIL")
+        self.assertIn("frozen", old_motion["reason"])
+        self.assertTrue(all(frame == stale.frame() for frame in old["frames"]))
+
+        self.assertEqual(new["initial_url"], POLICIES)
+        self.assertGreaterEqual(new["rebinds"], 1)
+        self.assertIn(EDIT, new["attached_urls"])
+        self.assertEqual(new["final_url"], FORMENTRY)
+        new_motion = frames_show_motion(new["frames"])
+        self.assertEqual(new_motion["result"], "PASS")
+        self.assertGreater(new_motion["max_mean_abs"], 2.5)
+        self.assertGreater(len({frame for frame in new["frames"]}), 1)
+        self.assertEqual(new["frames"][-1], driven.frame())
+        self.assertNotEqual(new["frames"][-1], stale.frame())
+
+        if shutil.which("ffmpeg"):
+            with durable_temporary_directory() as tmp:
+                old_webm = Path(tmp) / "first-ezlynx-wins.webm"
+                new_webm = Path(tmp) / "follow-playwright.webm"
+                _write_webm(old_webm, old["frames"])
+                _write_webm(new_webm, new["frames"])
+                self.assertEqual(analyze_recording_motion(old_webm)["result"], "FAIL")
+                self.assertIn("frozen", analyze_recording_motion(old_webm)["reason"])
+                followed = analyze_recording_motion(new_webm)
+                self.assertEqual(followed["result"], "PASS")
+                self.assertIn("motion", followed["reason"])
 
 
 class RecorderTabMismatchTests(unittest.TestCase):
