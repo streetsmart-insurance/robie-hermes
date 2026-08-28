@@ -38,6 +38,7 @@ from robie_job_engine.regression_battery import (
     open_draft_fix_pr,
     parity_gap_results,
     run_regression_battery,
+    run_logic_suite,
     run_replay_scenarios,
     run_secret_health_scenario,
 )
@@ -212,6 +213,27 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("ROBIE_JOB_DB", env)
         self.assertNotIn("ROBIE_ARTIFACT_ROOT", env)
         self.assertEqual(env["PATH"], "/usr/bin")
+
+    def test_logic_suite_marks_only_its_synthetic_subprocess_as_test(self):
+        seen: list[str] = []
+
+        class Result:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        def runner(*args, **kwargs):
+            del args
+            seen.append(kwargs["env"].get("ROBIE_ENV", ""))
+            return Result()
+
+        results = run_logic_suite(
+            repo_root=ROOT,
+            runner=runner,
+            include_pytest=False,
+        )
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(seen, ["TEST", "TEST"])
 
     def test_unittest_discover_skips_pytest_only_modules_without_importing_them(self):
         self.assertEqual(

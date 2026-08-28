@@ -360,6 +360,11 @@ def run_logic_suite(
     root = Path(repo_root or REPO_ROOT)
     run = runner or subprocess.run
     env = isolated_env()
+    # Logic tests are synthetic and may execute from an extracted release
+    # beneath either live installation tree.  Mark the subprocess as TEST so
+    # durable-path guards permit only the isolated fixtures they create; test
+    # cases that exercise Production refusal set PRODUCTION explicitly.
+    env["ROBIE_ENV"] = "TEST"
     env["PYTHONPATH"] = str(root) + (
         (":" + os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else ""
     )
