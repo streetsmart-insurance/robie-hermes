@@ -28,6 +28,7 @@ from robie_job_engine.playwright_write_guard import (
     locator_is_positional_guess,
     require_unique_write_target,
     unique_write_block_reason,
+    unwritable_control_block_reason,
 )
 from robie_job_engine.release_gate import production_release_decision
 from robie_job_engine.store import JobStore
@@ -141,6 +142,77 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "PLAYWRIGHT_BLOCKED"):
             FakePlaywrightLocator.fill(target, "12-3456789")
         self.assertEqual(target.fills, [])
+
+    def test_timeout_on_hidden_combobox_fill_is_playwright_blocked_not_bare_timeout(self):
+        """c31f9c69: unique hidden/combobox fill TimeoutError must HITL, not retry."""
+
+        class PlaywrightTimeoutError(Exception):
+            """playwright.sync_api.TimeoutError is not builtin TimeoutError."""
+
+        PlaywrightTimeoutError.__name__ = "TimeoutError"
+        PlaywrightTimeoutError.__module__ = "playwright.sync_api"
+
+        class TimeoutComboboxLocator:
+            def __init__(self):
+                self.selector = "input[name='quotes.0.carrier_id']"
+                self.fills = []
+
+            def count(self):
+                return 1
+
+            def fill(self, value):
+                raise PlaywrightTimeoutError(
+                    "Timeout 30000ms exceeded.\n"
+                    "waiting for locator(\"input[name='quotes.0.carrier_id']\") "
+                    "to be visible; element is hidden / combobox"
+                )
+
+        class HiddenComboboxLocator(TimeoutComboboxLocator):
+            def is_hidden(self):
+                return True
+
+            def is_visible(self):
+                return False
+
+            def get_attribute(self, name):
+                return {
+                    "aria-hidden": "true",
+                    "type": "hidden",
+                    "role": "combobox",
+                }.get(name)
+
+        class LocatorTimeout:
+            fill = TimeoutComboboxLocator.fill
+
+        class LocatorHidden:
+            fill = HiddenComboboxLocator.fill
+
+        hidden = HiddenComboboxLocator()
+        hidden_reason = unwritable_control_block_reason(hidden)
+        self.assertIsNotNone(hidden_reason)
+        self.assertIn("PLAYWRIGHT_BLOCKED", hidden_reason)
+        self.assertIn("quotes.0.carrier_id", hidden_reason)
+        self.assertIn("ask Gemini then HITL Carlo", hidden_reason)
+        self.assertIn("do not retry-loop", hidden_reason)
+
+        for cls, factory in (
+            (LocatorTimeout, TimeoutComboboxLocator),
+            (LocatorHidden, HiddenComboboxLocator),
+        ):
+            scope = {"Locator": cls}
+            install_playwright_write_guards(scope)
+            target = factory()
+            with self.assertRaises(RuntimeError) as ctx:
+                cls.fill(target, "invented-carrier")
+            msg = str(ctx.exception)
+            self.assertIn("PLAYWRIGHT_BLOCKED", msg)
+            self.assertIn("quotes.0.carrier_id", msg)
+            self.assertIn("ask Gemini then HITL Carlo", msg)
+            self.assertIn("do not retry-loop", msg)
+            self.assertIn("HITL Carlo", msg)
+            self.assertEqual(type(ctx.exception).__name__, "RuntimeError")
+            self.assertNotIsInstance(ctx.exception, TimeoutError)
+            self.assertEqual(target.fills, [])
 
     def test_blocked_write_asks_gemini_and_applies_only_a_unique_label(self):
         vin = FakeLocator(1, "VIN")

@@ -187,6 +187,17 @@ is how PR 17 looked deployed while Chat still ran stale plugin code.
 Job success is separate: **destination-verified evidence rows > 0**. Chat
 looking busy is not success.
 
+## Write-guard TimeoutError gap (c31f9c69 vs da53765b)
+
+Job `da53765b` HITL'd correctly when unique-write raised `PLAYWRIGHT_BLOCKED`
+on an ambiguous EZLynx field. Job `c31f9c69` (PAWIVA Ascend, 2026-08-28)
+uniquely resolved `quotes.0.carrier_id` then sat on a Playwright
+`TimeoutError` filling a hidden / combobox control until the worker timed
+out with zero destination evidence (UNVERIFIED/FAILED). The write-guard only
+wrapped locator uniqueness, not fill/click/select_option/type timeouts or
+hidden / aria-hidden / not-visible / combobox-hidden targets, so the model
+retried instead of asking Gemini then HITL Carlo.
+
 ## PR 17 lesson
 
 17 added `heartbeat_generic_chat_job` in `store.py` (zip) and called it from

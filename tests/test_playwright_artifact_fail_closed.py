@@ -292,6 +292,23 @@ class PlaywrightArtifactFailClosedTests(unittest.TestCase):
         self.assertIn(".first/.nth/.last", str(raised.exception))
         self.assertNotIn("PLAYWRIGHT_FAIL_CLOSED", str(raised.exception))
 
+        class PlaywrightTimeoutError(Exception):
+            """playwright.sync_api.TimeoutError is not builtin TimeoutError."""
+
+        PlaywrightTimeoutError.__name__ = "TimeoutError"
+        PlaywrightTimeoutError.__module__ = "playwright.sync_api"
+        with self.assertRaisesRegex(RuntimeError, "PLAYWRIGHT_BLOCKED") as timeout_raised:
+            self.tool.relabel_user_exec_exception(
+                PlaywrightTimeoutError(
+                    "Timeout 30000ms exceeded.\n"
+                    "waiting for locator(\"input[name='quotes.0.carrier_id']\")\n"
+                    "attempting fill action; element is hidden / combobox"
+                )
+            )
+        self.assertIn("ask Gemini then HITL Carlo", str(timeout_raised.exception))
+        self.assertIn("do not retry-loop", str(timeout_raised.exception))
+        self.assertNotIn("PLAYWRIGHT_FAIL_CLOSED", str(timeout_raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
