@@ -19,6 +19,7 @@ from .ascend_create_combobox import (
     intended_option_for_field,
     listbox_audit_should_abort,
     option_locator,
+    option_starts_with,
     quote_fields_from_payload,
     quote_mentions_forbidden_account,
     quote_path_from_payload,
@@ -204,11 +205,39 @@ def wait_create_form_ready(
 
 
 def _field_value(target: Any) -> str:
-    for name in ("input_value", "inner_text", "text_content"):
+    for name in ("input_value",):
         reader = getattr(target, name, None)
         if callable(reader):
             try:
-                return str(reader() or "")
+                value = str(reader() or "").strip()
+                if value:
+                    return value
+            except Exception:  # noqa: BLE001 — try the next reader
+                continue
+    evaluate = getattr(target, "evaluate", None)
+    if callable(evaluate):
+        try:
+            value = str(
+                evaluate(
+                    """element => {
+                        const control = element.closest('.select__control');
+                        const selected = control?.querySelector('.select__single-value');
+                        return (selected?.innerText || selected?.textContent || '').trim();
+                    }"""
+                )
+                or ""
+            ).strip()
+            if value:
+                return value
+        except Exception:  # noqa: BLE001 — non-React control
+            pass
+    for name in ("inner_text", "text_content"):
+        reader = getattr(target, name, None)
+        if callable(reader):
+            try:
+                value = str(reader() or "").strip()
+                if value:
+                    return value
             except Exception:  # noqa: BLE001 — try the next reader
                 continue
     get_attr = getattr(target, "get_attribute", None)
@@ -218,6 +247,21 @@ def _field_value(target: Any) -> str:
         except Exception:  # noqa: BLE001
             return ""
     return ""
+
+
+def _verified_role_value(
+    visible_value: str,
+    *,
+    resolved_name: str,
+    exact_option: str,
+    uniquely_selected: bool,
+) -> str:
+    """Preserve the exact email-qualified choice when React renders name-only."""
+    visible = " ".join(str(visible_value or "").split())
+    resolved = " ".join(str(resolved_name or "").split())
+    if uniquely_selected and visible.casefold() == resolved.casefold():
+        return str(exact_option or "").strip()
+    return visible
 
 
 def _count(target: Any) -> int:
@@ -309,13 +353,20 @@ def _wait_options_gone(page: Any, *, timeout_ms: int = LISTBOX_SETTLE_TIMEOUT_MS
 
 
 def _wait_open_listbox_options(
-    page: Any, *, timeout_ms: int = LISTBOX_SETTLE_TIMEOUT_MS
+    page: Any,
+    *,
+    intended: str = "",
+    timeout_ms: int = LISTBOX_SETTLE_TIMEOUT_MS,
 ) -> list[str]:
+    """Wait for an open listbox, and for searched results when intended is set."""
     started = time.monotonic()
     last: list[str] = []
     while time.monotonic() - started < timeout_ms / 1000.0:
         last = _scoped_option_names(page)
-        if last:
+        if last and (
+            not intended
+            or any(option_starts_with(item, intended) for item in last)
+        ):
             return last
         time.sleep(LISTBOX_POLL_S)
     return last
@@ -405,7 +456,9 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
                 click()
             if field.get("quote_sourced"):
                 searched = _search_open_combobox(target, intended)
-            names = _wait_open_listbox_options(page)
+            names = _wait_open_listbox_options(
+                page, intended=intended if searched else ""
+            )
             control_type = "combobox"
         report = classify_listbox_options(
             field=str(field["label"]),
@@ -669,15 +722,32 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
         if roles.get("hitl_required") or not roles.get("resolved"):
             raise RuntimeError(unknown_sender_hitl(requested_by=roles.get("requested_by") or ""))
         target_option = str(roles.get("option") or roles.get("resolved") or "")
+        selection_report: dict[str, Any] | None = None
         if should_overwrite_role(current, target_option):
             field = "Producer" if spec_id == "producer_role" else "Account Manager"
-            _select_unique_option(page, target, target_option, field=field)
+            selection_report = _select_unique_option(
+                page, target, target_option, field=field
+            )
         after = _field_value(target)
+        verified_after = _verified_role_value(
+            after,
+            resolved_name=str(roles.get("resolved") or ""),
+            exact_option=target_option,
+            uniquely_selected=bool(
+                selection_report and selection_report.get("status") == "PASS"
+            ),
+        )
         leak = log_role_defaults(
             requested_by=str(roles.get("requested_by") or ""),
-            producer=after if spec_id == "producer_role" else str(roles.get("producer") or after),
+            producer=(
+                verified_after
+                if spec_id == "producer_role"
+                else str(roles.get("producer") or verified_after)
+            ),
             account_manager=(
-                after if spec_id == "account_manager_role" else str(roles.get("account_manager") or after)
+                verified_after
+                if spec_id == "account_manager_role"
+                else str(roles.get("account_manager") or verified_after)
             ),
         ).get("error")
         if leak:
@@ -687,6 +757,8 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
             "set_value": target_option,
             "requested_by": roles.get("requested_by"),
             "prefill_logged": logged.get("logged"),
+            "visible_value": after,
+            "unique_option_selected": bool(selection_report),
         }
     if spec_id == "address_autocomplete":
         if str(payload.get("exact_address") or ""):

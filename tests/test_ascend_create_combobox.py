@@ -30,8 +30,11 @@ from robie_job_engine.ascend_create_combobox import (
     unique_option_hitl,
 )
 from robie_job_engine.ascend_locator_audit_runner import (
+    _field_value,
     _scoped_option_names,
     _upload_test_quote,
+    _verified_role_value,
+    _wait_open_listbox_options,
     audit_live_comboboxes,
 )
 from robie_job_engine.ascend_locator_audit import (
@@ -326,6 +329,65 @@ class _FakePage:
 
 
 class LiveComboboxAuditTests(unittest.TestCase):
+    def test_wait_for_searched_options_does_not_return_initial_list(self):
+        class DelayedSearchPage:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def get_by_role(self, role: str):
+                self.reads += 1
+                names = (
+                    ["CNA", "Philadelphia Indemnity Insurance Company"]
+                    if self.reads < 3
+                    else [
+                        "Drive New Jersey Insurance Company\n"
+                        "Office: P.O. Box 89490, Cleveland OH"
+                    ]
+                )
+                return _FakeListbox(names, present=role == "listbox")
+
+        page = DelayedSearchPage()
+        names = _wait_open_listbox_options(
+            page,
+            intended="Drive New Jersey Insurance Company",
+            timeout_ms=1_000,
+        )
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].startswith("Drive New Jersey Insurance Company"))
+
+    def test_field_value_reads_react_select_single_value_when_input_is_empty(self):
+        class ReactSelectInput:
+            def input_value(self) -> str:
+                return ""
+
+            def evaluate(self, expression: str) -> str:
+                self.assert_expression = expression
+                return "Carlo Ferrara"
+
+        target = ReactSelectInput()
+        self.assertEqual(_field_value(target), "Carlo Ferrara")
+        self.assertIn("select__single-value", target.assert_expression)
+
+    def test_name_only_role_is_trusted_only_after_unique_email_option_selection(self):
+        self.assertEqual(
+            _verified_role_value(
+                "Carlo Ferrara",
+                resolved_name="Carlo Ferrara",
+                exact_option=CARLO_OPTION,
+                uniquely_selected=True,
+            ),
+            CARLO_OPTION,
+        )
+        self.assertEqual(
+            _verified_role_value(
+                "Carlo Ferrara",
+                resolved_name="Carlo Ferrara",
+                exact_option=CARLO_OPTION,
+                uniquely_selected=False,
+            ),
+            "Carlo Ferrara",
+        )
+
     def test_live_audit_fails_duplicate_option_and_logs_field(self):
         page = _FakePage(
             {
