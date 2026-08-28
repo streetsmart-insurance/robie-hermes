@@ -11,10 +11,12 @@ No live EZLynx. No Production jobs.db. No @robie.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from .chat_guard import (
     guard_chat_response,
@@ -124,6 +126,19 @@ FOLLOW_TAB_CHAT = (
     "Not proven on a live job until recorder URL == Playwright URL."
 )
 
+ACTION_GATE_CHAT = (
+    "ACTION GATE class returned (807f8920, 38c0fa79): Production Chat jobs "
+    "that target Ascend / premium finance / PAWIVA / create-program must be "
+    "REFUSED before Playwright, CDP, or any Ascend click unless a recorded "
+    "clean Test punch-list PASS exists for that exact action. HITL after a "
+    "miss is not the gate. The Job Engine refuses; this is not a memory item."
+)
+
+ACTION_GATE_SCENARIO_ID = "action-gate:test-pass-required-before-production"
+CHAT_SHAPED_ASCEND = (
+    "@robie create a program in Ascend for PAWIVA premium finance"
+)
+
 I_DID_IT_PROSE = (
     "I did it. The job is complete. Completed successfully — COMPLETE."
 )
@@ -152,6 +167,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "ascend-create:unique-listbox-option",
         "ascend-customer-type:lob",
         "recording:follow-live-playwright-tab",
+        "action-gate:test-pass-required-before-production",
     }
 )
 
@@ -866,6 +882,151 @@ def run_follow_live_playwright_tab_scenario(*, work_dir: Path) -> dict[str, Any]
             stop_generic_chat_job_heartbeat(db, job_id)
 
 
+def run_action_gate_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """Production Chat Ascend/create-program without a Test pass must REFUSE.
+
+    Named class: 807f8920 / 38c0fa79 skipped the written Test gate. The
+    Job Engine must refuse before Playwright / CDP / Ascend. Test env may
+    run. A recorded clean Test pass unblocks N=1. Leftover Production ids
+    must not RETRY around the gate.
+    """
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing action-gate scenario on live Hermes path: {work_dir}"
+        )
+    from .action_gate import (
+        CREATE_PROGRAM_ACTION,
+        REFUSAL_TOKEN,
+        classify_action,
+        hold_reason_for_job,
+        record_test_action_pass,
+        refuse_playwright_start,
+    )
+    from .recording import RecordingStore
+
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    db = str(work_dir / "action-gate.db")
+    passes = work_dir / "passes"
+    passes.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    refused_id: str | None = None
+    try:
+        classified = classify_action(
+            CHAT_SHAPED_ASCEND,
+            payload={"text": CHAT_SHAPED_ASCEND, "skill": "ascend-locator-artifact-audit"},
+            action_type="hermes.google_chat_task",
+        )
+        if classified != CREATE_PROGRAM_ACTION:
+            errors.append(f"Chat payload hid the action: {classified!r}")
+
+        with patch("robie_job_engine.action_gate.PASSES_DIR", passes):
+            prod_reason = hold_reason_for_job(
+                {
+                    "id": "new-chat",
+                    "action_type": "hermes.google_chat_task",
+                    "payload": {"text": CHAT_SHAPED_ASCEND},
+                },
+                env="PRODUCTION",
+            )
+            if not prod_reason or REFUSAL_TOKEN not in prod_reason:
+                errors.append(f"Production without a record did not refuse: {prod_reason!r}")
+            if prod_reason and "PLAYWRIGHT_BLOCKED" in prod_reason:
+                errors.append("refuse reason used PLAYWRIGHT_BLOCKED")
+            test_reason = hold_reason_for_job(
+                {
+                    "id": "new-chat",
+                    "action_type": "hermes.google_chat_task",
+                    "payload": {"text": CHAT_SHAPED_ASCEND},
+                },
+                env="TEST",
+            )
+            if test_reason:
+                errors.append(f"Test env was refused: {test_reason!r}")
+
+            with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+                refused_id = open_chat_job(
+                    db,
+                    "spaces/action-gate/messages/prod",
+                    CHAT_SHAPED_ASCEND,
+                    requested_by="Carlo Ferrara",
+                    conversation_id="spaces/action-gate-prod",
+                )
+            if not refused_id:
+                errors.append("Production Chat job was not opened so it could be refused")
+            else:
+                store = JobStore(db)
+                refused = store.get_job(refused_id)
+                if refused["status"] != JobStatus.FAILED.value:
+                    errors.append(f"Production Chat status={refused['status']} not FAILED")
+                if REFUSAL_TOKEN not in str(refused.get("last_error") or ""):
+                    errors.append(f"missing refuse token: {refused.get('last_error')}")
+                if RecordingStore(db).latest(refused_id):
+                    errors.append("Production refuse started a recorder")
+                if refused["action_type"] != "hermes.google_chat_task":
+                    errors.append("Chat job type changed; gate must see through it")
+
+            leftover_reason = hold_reason_for_job(
+                {
+                    "id": "807f8920-leftover",
+                    "action_type": "hermes.google_chat_task",
+                    "payload": {"text": "RETRY"},
+                },
+                env="PRODUCTION",
+            )
+            if not leftover_reason or "807f8920" not in (leftover_reason or ""):
+                errors.append(f"leftover 807f8920 was allowed to RETRY: {leftover_reason!r}")
+
+            pw = refuse_playwright_start(
+                'page.goto("https://dashboard.useascend.com/create/new")',
+                env="PRODUCTION",
+            )
+            if not pw or REFUSAL_TOKEN not in pw:
+                errors.append(f"Playwright start was not refused: {pw!r}")
+            if pw and "PLAYWRIGHT_BLOCKED" in pw:
+                errors.append("Playwright refuse used PLAYWRIGHT_BLOCKED")
+
+            record_test_action_pass(
+                CREATE_PROGRAM_ACTION,
+                job_id="test-punch-list-pass",
+                verdict="PASS",
+                extra={"source": "named-scenario"},
+            )
+            allowed = hold_reason_for_job(
+                {
+                    "id": "after-pass",
+                    "action_type": "hermes.google_chat_task",
+                    "payload": {"text": CHAT_SHAPED_ASCEND},
+                },
+                env="PRODUCTION",
+            )
+            if allowed:
+                errors.append(f"record present still refused: {allowed!r}")
+            leftover_after_pass = hold_reason_for_job(
+                {
+                    "id": "38c0fa79",
+                    "action_type": "hermes.google_chat_task",
+                    "payload": {"text": CHAT_SHAPED_ASCEND},
+                },
+                env="PRODUCTION",
+            )
+            if not leftover_after_pass:
+                errors.append("leftover 38c0fa79 RETRY was allowed after a Test pass")
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash
+        return _fail(ACTION_GATE_SCENARIO_ID, f"{type(exc).__name__}: {exc}")
+    finally:
+        try:
+            stop_generic_chat_job_heartbeat(db, refused_id)  # type: ignore[name-defined]
+        except Exception:
+            pass
+    ok = not errors
+    return _result(
+        ACTION_GATE_SCENARIO_ID,
+        ok=ok,
+        outcome="PASS" if ok else "FAILED",
+        evidence=ACTION_GATE_CHAT if ok else "; ".join(errors),
+    )
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -889,4 +1050,5 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(
         run_follow_live_playwright_tab_scenario(work_dir=work_dir / "follow-tab")
     )
+    results.append(run_action_gate_scenario(work_dir=work_dir / "action-gate"))
     return results

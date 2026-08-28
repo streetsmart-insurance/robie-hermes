@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from .action_gate import hold_reason_for_job
 from .complete_guard import (
     complete_is_prohibited,
     destination_identity_missing,
@@ -297,6 +298,15 @@ class JobEngine:
         ledger: DurableWorkLedger,
         run_id: str,
     ) -> dict[str, Any]:
+        action_hold = hold_reason_for_job(job)
+        if action_hold:
+            return self.store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={JobStatus.PENDING, JobStatus.RUNNING},
+                error=action_hold,
+                release_lease=True,
+            )
         schema_hold = bounded_schema_hold_reason(job["action_type"], job["payload"])
         if schema_hold:
             return self.store.transition(

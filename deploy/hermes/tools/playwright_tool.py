@@ -278,6 +278,14 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
     if not code or not code.strip():
         return tool_error("No Playwright code provided.")
     try:
+        from robie_job_engine.action_gate import refuse_playwright_start
+
+        refused = refuse_playwright_start(code)
+        if refused:
+            return tool_error(refused)
+    except ImportError:
+        pass
+    try:
         timeout = max(10, min(int(timeout_s), _MAX_TIMEOUT_S))
     except (TypeError, ValueError):
         timeout = _DEFAULT_TIMEOUT_S

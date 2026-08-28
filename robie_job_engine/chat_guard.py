@@ -18,6 +18,7 @@ from .context_policy import (
 from .chat_queue import DurableChatEventQueue
 from .idempotency import DurableWorkLedger, IdempotencyError
 from .hitl import interaction_for_blocker, structured_blocker_reason
+from .action_gate import apply_action_gate, is_action_gate_refusal
 from .job_schema import bounded_schema_hold_reason
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .runs import IsolatedRunStore, RunIsolationError
@@ -124,6 +125,9 @@ def reopen_resumed_generic_chat_job(
         return None
     store = JobStore(db_path)
     job = store.get_job(job_id)
+    refused = apply_action_gate(store, job, text=str((job.get("payload") or {}).get("text") or ""))
+    if refused is not None:
+        return refused
     if job["action_type"] != "hermes.google_chat_task":
         return job
     if job["status"] == JobStatus.PENDING.value:
@@ -496,6 +500,15 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     ):
         start_generic_chat_job_heartbeat(db_path, job_id)
     if job["status"] == JobStatus.FAILED:
+        if is_action_gate_refusal(job):
+            return (
+                text
+                + "\n\n[ROBIE JOB ENGINE EXECUTION CONTRACT]\n"
+                + "Do not attempt this Job: the Job Engine refused because Test "
+                + "has no clean pass for this action. Do not open Ascend, "
+                + "Playwright, or CDP. HITL after a miss is not the gate.\n"
+                + "[END ROBIE JOB ENGINE EXECUTION CONTRACT]"
+            )
         return (
             text
             + "\n\n[ROBIE JOB ENGINE EXECUTION CONTRACT]\n"
@@ -601,6 +614,14 @@ def open_chat_job(
         if not active_job_id:
             return None
         active_job = store.get_job(active_job_id)
+        would_resume = (
+            explicit_continuation
+            or JobStatus(active_job["status"]) in WAITING_STATUSES
+        )
+        if would_resume:
+            refused = apply_action_gate(store, active_job, text=text)
+            if refused is not None:
+                return refused["id"]
         if JobStatus(active_job["status"]) in WAITING_STATUSES:
             store.resume(active_job_id)
         elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
@@ -697,6 +718,9 @@ def open_chat_job(
     )
     if route_failed:
         return job["id"]
+    refused = apply_action_gate(store, store.get_job(job["id"]), text=text)
+    if refused is not None:
+        return refused["id"]
     try:
         ledger = DurableWorkLedger(db_path)
         ledger.reserve(job["action_type"], job["idempotency_key"])
@@ -734,6 +758,9 @@ def open_chat_job(
             "source": "google-chat-intake",
         },
     )
+    job = store.get_job(job["id"])
+    if is_action_gate_refusal(job) or job["status"] == JobStatus.FAILED.value:
+        return job["id"]
     schema_hold = bounded_schema_hold_reason(job["action_type"], job["payload"])
     if schema_hold:
         current = store.get_job(job["id"])

@@ -151,6 +151,41 @@ Job Engine job must pass on `hermes-test-01`:
 - Skill: `ascend-locator-artifact-audit` (`production_ready: false`)
 - New job-type / `production_ready` flip still needs N = **3** clean Test jobs
 
+**Action gate (enforced by the Job Engine — not a memory item):**
+
+Jake / ChatGPT / Claude pastes will skip a written rule. Production
+(`ROBIE_ENV=PRODUCTION`, hermes-poc-01) must **REFUSE** to start a live
+job for a new action unless a recorded clean Test pass exists for that
+exact action id. The Job Engine refuses. This is not a memory item.
+HITL after a miss is not the gate.
+
+An action is more specific than a job type. Chat `@robie` + skill uses
+`hermes.google_chat_task`, which is grandfathered at the job-type layer.
+A generic Chat job type must not hide the action. Classify the action
+from payload / skill / URL / site / text. First registered action:
+
+- `ascend.create_program` (new site + create form + Import document /
+  Agency Fee / Producer-AM mappings)
+
+Grandfather only what is already live and proven: commercial auto
+(`ezlynx.commercial_auto`). Do not grandfather Ascend.
+
+On Production, before Playwright, before CDP, before opening Ascend:
+if the job is (or will perform) a gated action and there is no recorded
+clean Test pass for that exact action id, refuse with
+`ACTION_GATE_REFUSED`. Do not start the walk. Dry HITL / Chat note is
+fine: the system refused because Test has no clean pass for this action.
+Not `PLAYWRIGHT_BLOCKED` after a miss. Leftover Production job ids
+(`807f8920`, `38c0fa79`) must not RETRY around the gate.
+
+Test (`hermes-test-01`, `ROBIE_ENV=TEST`) may run the audit / action so
+a pass can be recorded. One recorded clean Test pass
+(`deploy/action_gate/passes/<action>.json` or Test `jobs.db`
+`post_job_audit` verdict=PASS / punch-list PASS for that action)
+unblocks N=1. Keep N=3 for flipping `production_ready` on a brand-new
+job type. Never PAWIVA for the Test recorder. Never bind / email / Save
+from that walk.
+
 **Test gate (Carlo 2026-08-28 — ChatGPT / Claude / Jake-paste cannot skip this):**
 
 Ascend / premium-finance / PAWIVA changes must get a clean pass on

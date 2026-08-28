@@ -42,6 +42,7 @@ from robie_job_engine.regression_battery import (
     run_secret_health_scenario,
 )
 from robie_job_engine.regression_scenarios import (
+    ACTION_GATE_CHAT,
     ASCEND_ACCESSIBLE_NAME_CHAT,
     ASCEND_AGENCY_FEE_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
@@ -60,6 +61,7 @@ from robie_job_engine.regression_scenarios import (
     close_new_failure_incident,
     IncidentCloseError,
     load_scenario_catalog,
+    run_action_gate_scenario,
     run_agency_fee_default_scenario,
     run_ascend_locator_audit_scenario,
     run_concat_job_id_eb96f620_scenario,
@@ -635,6 +637,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
                 incidents[job_id]["scenario"],
                 "recording:follow-live-playwright-tab",
             )
+        self.assertEqual(
+            incidents["test-gate-skipped-807f8920-38c0fa79"]["scenario"],
+            "action-gate:test-pass-required-before-production",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -669,6 +675,27 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         )
         self.assertIn(FOLLOW_TAB_CHAT, text)
         self.assertIn("807f8920", text)
+        self.assertNotIn("@robie", text.casefold())
+
+    def test_action_gate_scenario_refuses_production_chat_without_test_pass(self):
+        with durable_temporary_directory() as tmp:
+            result = run_action_gate_scenario(work_dir=Path(tmp) / "action-gate")
+        self.assertTrue(result["ok"], result.get("evidence"))
+        self.assertEqual(result["id"], "action-gate:test-pass-required-before-production")
+        self.assertEqual(result["outcome"], "PASS")
+        text = format_new_failure_chat(
+            [
+                {
+                    "id": "action-gate:test-pass-required-before-production",
+                    "outcome": "FAILED",
+                    "evidence": "Production Chat started Ascend",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ACTION_GATE_CHAT, text)
+        self.assertIn("807f8920", text)
+        self.assertIn("38c0fa79", text)
         self.assertNotIn("@robie", text.casefold())
 
     def test_ascend_locator_audit_scenario_is_ci_only_and_passes(self):

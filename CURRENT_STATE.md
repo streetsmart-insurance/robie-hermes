@@ -166,6 +166,31 @@ battery again — pointer-only is not live; (5) ChatGPT / Claude /
 Jake-paste must follow this written gate. Do not skip the battery or
 the Dusty walk because a model is “just trying it.”
 
+**Action gate (enforced by the Job Engine — not a memory item):**
+
+Jake / ChatGPT / Claude pastes will skip a written rule. Production
+must **REFUSE** to start a live job for a new action unless a recorded
+clean Test pass exists for that exact action id. The Job Engine refuses.
+This is not a memory item. HITL after a miss is not the gate.
+
+An action is more specific than a job type. Chat `@robie` + skill uses
+`hermes.google_chat_task`. A generic Chat job type must not hide the
+action. First registered action: `ascend.create_program` (new site +
+create form + Import document / Agency Fee / Producer-AM mappings).
+Grandfather only commercial auto (`ezlynx.commercial_auto`). Do not
+grandfather Ascend.
+
+On `ROBIE_ENV=PRODUCTION` the engine classifies the action from
+payload / skill / URL / site / text and, if gated with no recorded
+clean Test pass, refuses with `ACTION_GATE_REFUSED` before Playwright,
+before CDP, before opening Ascend. Dry Chat note is fine. Not
+`PLAYWRIGHT_BLOCKED` after a miss. Leftover Production job ids
+`807f8920` and `38c0fa79` must not RETRY around the gate. Test
+(`hermes-test-01`) may run so a pass can be recorded. N=1 recorded
+clean Test punch-list PASS unblocks the action. N=3 still applies to
+flipping `production_ready` on a brand-new job type. Named scenario:
+`action-gate:test-pass-required-before-production`.
+
 **Test gate (Carlo 2026-08-28 — ChatGPT / Claude / Jake-paste cannot skip this):**
 
 Ascend / premium-finance / PAWIVA changes must get a clean pass on

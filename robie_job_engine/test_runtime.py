@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .action_gate import is_action_gate_refusal
 from .browser_read import BoundedBrowserReadWorker, BrowserReadVerifier
 from .carrier_proposal import (
     BoundedCarrierProposalWorker,
@@ -222,6 +223,8 @@ def dispatch_operational_chat(
     except Exception:
         return True
     error = str(job.get("last_error") or "")
+    if is_action_gate_refusal(job):
+        return True
     durable_failed = (
         "durable intake failed" in error
         or "durable engine failed" in error
