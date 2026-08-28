@@ -18,6 +18,7 @@ WORKER_FOR_ACTION = {
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
     "ascend.locator_artifact_audit": "ascend-locator-audit",
+    "ascend.create_program": "ascend-api",
 }
 
 BOUNDED_ENGINE_ACTIONS = frozenset(
@@ -31,6 +32,7 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.submission_audit",
         "ezlynx.session_refresh",
         "ascend.locator_artifact_audit",
+        "ascend.create_program",
     }
 )
 
