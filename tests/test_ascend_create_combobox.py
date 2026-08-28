@@ -198,6 +198,10 @@ class _FakeControl:
     def click(self) -> None:
         self._page.open_label = self._label
 
+    def fill(self, value: str) -> None:
+        self._page.open_label = self._label
+        self._page.search_by_label[self._label] = value
+
 
 class _FakeOptions:
     def __init__(self, names: list[str]) -> None:
@@ -272,6 +276,7 @@ class _FakePage:
         self.options_by_label = options_by_label
         self.leaked = list(leaked or [])
         self.open_label = ""
+        self.search_by_label: dict[str, str] = {}
         self.keyboard = _FakeKeyboard(self)
         self.file_input = _FakeFileInput()
 
@@ -289,6 +294,9 @@ class _FakePage:
         if role == "listbox":
             present = bool(self.open_label)
             names = self.options_by_label.get(self.open_label, []) if present else []
+            search = self.search_by_label.get(self.open_label, "").casefold()
+            if search:
+                names = [item for item in names if search in item.casefold()]
             return _FakeListbox(names, present=present)
         if role != "option":
             return _FakeOptions([])
@@ -444,6 +452,53 @@ class LiveComboboxAuditTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             parse_quote_fields("Carrier: PAWIVA\nCoverage type: Commercial Package")
+
+    def test_quote_parser_reads_progressive_commercial_auto_pdf_labels(self):
+        text = """
+        Commercial Auto Insurance Quote
+        I am pleased to provide you with a quote from Drive New
+        Jersey Insurance Company, a company that offers competitive rates.
+        Form QUOTE NJ (01/25)
+        """
+        self.assertEqual(
+            parse_quote_fields(text),
+            {
+                "carrier": "Drive New Jersey Insurance Company",
+                "coverage_type": "Commercial Auto",
+                "state": "New Jersey",
+            },
+        )
+
+    def test_quote_sourced_comboboxes_are_searched_before_exact_match(self):
+        carrier = "Drive New Jersey Insurance Company"
+        page = _FakePage(
+            {
+                "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Carrier": [
+                    "Philadelphia Indemnity Insurance Company",
+                    f"{carrier}\nOffice: 1 Test Way, Trenton NJ",
+                ],
+                "Coverage type": ["Commercial Package", "Commercial Auto"],
+                "State": ["Georgia", "New Jersey"],
+            }
+        )
+        observed = audit_live_comboboxes(
+            page,
+            {
+                "requested_by": "carlo@streetsmart.insurance",
+                "quote_text": (
+                    "Commercial Auto Insurance Quote\n"
+                    "quote from Drive New Jersey Insurance Company\n"
+                    "Form QUOTE NJ (01/25)"
+                ),
+            },
+        )
+        self.assertTrue(observed["ok"], observed)
+        for name in ("Carrier", "Coverage type", "State"):
+            field = next(item for item in observed["fields"] if item["field"] == name)
+            self.assertTrue(field["searched"], field)
+            self.assertEqual(field["match_count"], 1)
 
     def test_import_uploads_test_quote_file(self):
         page = _FakePage({})

@@ -321,6 +321,22 @@ def _wait_open_listbox_options(
     return last
 
 
+def _search_open_combobox(target: Any, intended: str) -> bool:
+    """Search a quote-sourced combobox before auditing its exact option."""
+    value = str(intended or "").strip()
+    if not value:
+        return False
+    fill = getattr(target, "fill", None)
+    if callable(fill):
+        fill(value)
+        return True
+    press = getattr(target, "press_sequentially", None)
+    if callable(press):
+        press(value)
+        return True
+    return False
+
+
 def _close_open_listbox(page: Any) -> None:
     keyboard = getattr(page, "keyboard", None)
     press = getattr(keyboard, "press", None) if keyboard is not None else None
@@ -364,6 +380,9 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
         click = getattr(target, "click", None)
         if callable(click):
             click()
+        searched = False
+        if field.get("quote_sourced"):
+            searched = _search_open_combobox(target, intended)
         names = _wait_open_listbox_options(page)
         report = classify_listbox_options(
             field=str(field["label"]),
@@ -375,6 +394,7 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
         )
         chosen = str(report.get("intended") or intended)
         report["locator"] = option_locator(chosen, exact=True) if chosen else locator
+        report["searched"] = searched
         reports.append(report)
         if report.get("blocked_field"):
             blocked.append(str(report["blocked_field"]))
