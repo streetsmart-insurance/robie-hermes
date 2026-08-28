@@ -337,6 +337,23 @@ def _search_open_combobox(target: Any, intended: str) -> bool:
     return False
 
 
+def _native_select_option_names(target: Any) -> list[str] | None:
+    """Return a native select's own options, or None for non-select controls."""
+    evaluate = getattr(target, "evaluate", None)
+    if not callable(evaluate):
+        return None
+    try:
+        tag = str(evaluate("element => element.tagName") or "").upper()
+    except Exception:  # noqa: BLE001 — use the combobox path instead
+        return None
+    if tag != "SELECT":
+        return None
+    locator = getattr(target, "locator", None)
+    if not callable(locator):
+        return []
+    return _option_texts(locator("option"))
+
+
 def _close_open_listbox(page: Any) -> None:
     keyboard = getattr(page, "keyboard", None)
     press = getattr(keyboard, "press", None) if keyboard is not None else None
@@ -377,13 +394,19 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
             reports.append(report)
             continue
         require_unique_locator(target, locator=locator)
-        click = getattr(target, "click", None)
-        if callable(click):
-            click()
         searched = False
-        if field.get("quote_sourced"):
-            searched = _search_open_combobox(target, intended)
-        names = _wait_open_listbox_options(page)
+        native_options = _native_select_option_names(target)
+        if native_options is not None:
+            names = native_options
+            control_type = "select"
+        else:
+            click = getattr(target, "click", None)
+            if callable(click):
+                click()
+            if field.get("quote_sourced"):
+                searched = _search_open_combobox(target, intended)
+            names = _wait_open_listbox_options(page)
+            control_type = "combobox"
         report = classify_listbox_options(
             field=str(field["label"]),
             intended=intended,
@@ -395,6 +418,7 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
         chosen = str(report.get("intended") or intended)
         report["locator"] = option_locator(chosen, exact=True) if chosen else locator
         report["searched"] = searched
+        report["control_type"] = control_type
         reports.append(report)
         if report.get("blocked_field"):
             blocked.append(str(report["blocked_field"]))
