@@ -19,6 +19,7 @@ from .ascend_create_combobox import (
     intended_option_for_field,
     listbox_audit_should_abort,
     option_locator,
+    option_matches,
     option_starts_with,
     quote_fields_from_payload,
     quote_mentions_forbidden_account,
@@ -396,6 +397,41 @@ def _search_open_combobox(target: Any, intended: str) -> bool:
     return False
 
 
+def _allow_first_identical_coverage_option(
+    report: dict[str, Any], *, field: str
+) -> dict[str, Any]:
+    """Carlo-approved exception: first of identical exact Coverage type rows."""
+    if field != "Coverage type":
+        return report
+    intended = str(report.get("intended") or "").strip()
+    matches = [
+        str(item or "")
+        for item in report.get("options") or []
+        if option_matches(str(item or ""), intended, exact=True)
+    ]
+    if len(matches) < 2:
+        return report
+    normalized = {" ".join(item.split()).casefold() for item in matches}
+    if normalized != {" ".join(intended.split()).casefold()}:
+        return report
+    allowed = dict(report)
+    allowed.update(
+        {
+            "status": "PASS",
+            "blocked_field": None,
+            "error": None,
+            "hitl_required": False,
+            "hitl_text": "",
+            "selection_strategy": "first_active_identical_exact",
+            "locator": (
+                'get_by_label("Coverage type").press("Enter") '
+                "after exact search"
+            ),
+        }
+    )
+    return allowed
+
+
 def _native_select_option_names(target: Any) -> list[str] | None:
     """Return a native select's own options, or None for non-select controls."""
     evaluate = getattr(target, "evaluate", None)
@@ -476,8 +512,14 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
             field_present=True,
             optional=bool(field.get("optional")),
         )
+        report = _allow_first_identical_coverage_option(
+            report, field=str(field["label"])
+        )
         chosen = str(report.get("intended") or intended)
-        report["locator"] = option_locator(chosen, exact=True) if chosen else locator
+        if not report.get("selection_strategy"):
+            report["locator"] = (
+                option_locator(chosen, exact=True) if chosen else locator
+            )
         report["searched"] = searched
         report["control_type"] = control_type
         reports.append(report)
@@ -628,12 +670,15 @@ def _upload_test_quote(page: Any, quote_path: str) -> dict[str, Any]:
 
 
 def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) -> dict[str, Any]:
-    """Click the combobox, then the unique exact option. Log the field on block."""
+    """Select the exact option; Coverage type may use approved first-identical."""
     _close_open_listbox(page)
     click = getattr(target, "click", None)
     if callable(click):
         click()
-    names = _wait_open_listbox_options(page)
+    searched = _search_open_combobox(target, intended)
+    names = _wait_open_listbox_options(
+        page, intended=intended if searched else ""
+    )
     report = classify_listbox_options(
         field=field,
         intended=intended,
@@ -641,6 +686,7 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
         exact=True,
         field_present=True,
     )
+    report = _allow_first_identical_coverage_option(report, field=field)
     if report.get("blocked_field"):
         if report.get("hitl_required"):
             raise RuntimeError(report.get("hitl_text") or unique_option_hitl(
@@ -654,6 +700,16 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
                 match_count=int(report.get("match_count") or 0),
             )
         )
+    if report.get("selection_strategy") == "first_active_identical_exact":
+        press = getattr(target, "press", None)
+        if not callable(press):
+            raise RuntimeError(
+                "PLAYWRIGHT_BLOCKED: Coverage type cannot select the active "
+                "first identical exact option"
+            )
+        press("Enter")
+        _close_open_listbox(page)
+        return report
     intended = str(report.get("intended") or intended)
     option = page.get_by_role("option", name=intended, exact=True)
     require_unique_locator(option, locator=option_locator(intended, exact=True))
