@@ -213,6 +213,13 @@ if _configured_job_engine_root:
     _canonical_import_root = str(_Path(_configured_job_engine_root).resolve())
     if _canonical_import_root not in sys.path:
         sys.path.insert(0, _canonical_import_root)
+from robie_job_engine.attachments import (
+    CallableDrivePort,
+    drive_chip_download_failed_message,
+    is_attachment_ingestion_error,
+    proven_drive_share_identity,
+    unmatched_drive_chip_refs,
+)
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
     chat_message_is_related_only,
@@ -263,11 +270,11 @@ _SUBSCRIPTION_PATH_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/subscriptions/(?P<sub>[^/]+)$"
 )
 
-# SA scopes — chat.bot is sufficient for the bot's own messaging operations
-# (messages.create / patch / delete, spaces metadata, memberships,
-# media.download for inbound user attachments). The bot CANNOT call
-# media.upload — Google requires user OAuth for that endpoint, no scope
-# adjustment changes it.
+# SA scopes — chat.bot covers messaging, memberships, and media.download
+# for paperclip uploads. Drive picker chips (driveDataRef.driveFileId)
+# have no Chat media resource; they need drive.readonly so the same app
+# identity can fetch a file that has been shared with it. The bot still
+# CANNOT call media.upload — Google requires user OAuth for that endpoint.
 #
 # Native attachment delivery (bot → user) is handled via a separate user-
 # OAuth flow in ``oauth.py`` (this plugin's helper module): the user grants the bot
@@ -277,6 +284,7 @@ _SUBSCRIPTION_PATH_RE = re.compile(
 _CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.bot",
     "https://www.googleapis.com/auth/pubsub",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 
 # Google Chat text-message size limit is 4096; leave margin.
@@ -382,6 +390,44 @@ _DRIVE_EXPORT_TYPES: Dict[str, Tuple[str, str]] = {
     "application/vnd.google-apps.presentation": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
     "application/vnd.google-apps.drawing": ("application/pdf", ".pdf"),
 }
+
+
+def _fetch_drive_bytes(
+    creds: Any, drive_file_id: str, *, mime: str = "", filename: str = "attachment"
+) -> Tuple[bytes, str, str]:
+    """Download or export one Drive file. Raises on API / size / type errors."""
+    import io
+    from googleapiclient.http import MediaIoBaseDownload
+
+    drive = build_service("drive", "v3", credentials=creds, cache_discovery=False)
+    meta = drive.files().get(
+        fileId=drive_file_id,
+        fields="id,name,mimeType,size",
+        supportsAllDrives=True,
+    ).execute()
+    source_mime = str(meta.get("mimeType") or mime or "")
+    resolved_name = str(meta.get("name") or filename)
+    if int(meta.get("size") or 0) > _MAX_INBOUND_ATTACHMENT_BYTES:
+        raise ValueError("Drive attachment exceeds the 25 MB limit")
+    export = _DRIVE_EXPORT_TYPES.get(source_mime)
+    if source_mime.startswith("application/vnd.google-apps."):
+        if export is None:
+            raise ValueError(f"unsupported native Google Drive type: {source_mime}")
+        resolved_mime, suffix = export
+        if not resolved_name.casefold().endswith(suffix):
+            resolved_name += suffix
+        req = drive.files().export_media(fileId=drive_file_id, mimeType=resolved_mime)
+    else:
+        resolved_mime = source_mime or "application/octet-stream"
+        req = drive.files().get_media(fileId=drive_file_id, supportsAllDrives=True)
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, req)
+    done = False
+    while not done:
+        _status, done = downloader.next_chunk()
+        if buf.tell() > _MAX_INBOUND_ATTACHMENT_BYTES:
+            raise ValueError("Drive attachment exceeds the 25 MB limit")
+    return buf.getvalue(), resolved_mime, resolved_name
 _GOOGLE_WORKSPACE_URL_RE = re.compile(
     r"https://(?:docs\.google\.com/document/d/|drive\.google\.com/file/d/)"
     r"(?P<id>[A-Za-z0-9_-]{10,})[^\s<>()]*"
@@ -1216,21 +1262,22 @@ class GoogleChatAdapter(BasePlatformAdapter):
         text: str,
     ) -> None:
         """Re-open a HITL-resumed generic Chat Job and start the worker."""
+        attachment_kwargs = self._chat_job_attachment_kwargs(event)
         reopened = await asyncio.to_thread(
             open_chat_job,
             ROBIE_JOB_DB,
             message_id,
             text,
-            attachments=list(zip(event.media_urls or [], event.media_types or [])),
+            attachments=attachment_kwargs["attachments"],
             requested_by=(
                 getattr(event.source, "user_name", None)
                 or getattr(event.source, "user_id", None)
                 or "Google Chat user"
             ),
             conversation_id=getattr(event.source, "chat_id", None),
-            expected_attachment_count=len(
-                ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
-            ),
+            expected_attachment_count=attachment_kwargs["expected_attachment_count"],
+            attachment_refs=attachment_kwargs["attachment_refs"],
+            drive_port=attachment_kwargs["drive_port"],
         )
         job_id = reopened or job_id
         queue = await asyncio.to_thread(self._durable_chat_queue)
@@ -1243,6 +1290,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             event_id=message_id,
             relation="CONTINUATION",
         )
+        if await self._halt_failed_drive_ingestion(
+            event, job_id, attachment_kwargs["attachment_refs"]
+        ):
+            return
         store = JobStore(ROBIE_JOB_DB)
         job = await asyncio.to_thread(store.get_job, job_id)
         original = str((job.get("payload") or {}).get("text") or text)
@@ -2462,15 +2513,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             message_id = event.message_id or f"unidentified:{id(event)}"
             text = redact_text(text)
-            attachment_count = len(
-                ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
-            )
+            attachment_kwargs = self._chat_job_attachment_kwargs(event)
+            attachment_count = attachment_kwargs["expected_attachment_count"]
             job_id = await asyncio.to_thread(
                 open_chat_job,
                 ROBIE_JOB_DB,
                 message_id,
                 text,
-                attachments=list(zip(event.media_urls or [], event.media_types or [])),
+                attachments=attachment_kwargs["attachments"],
                 requested_by=(
                     getattr(event.source, "user_name", None)
                     or getattr(event.source, "user_id", None)
@@ -2478,6 +2528,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 ),
                 conversation_id=getattr(event.source, "chat_id", None),
                 expected_attachment_count=attachment_count,
+                attachment_refs=attachment_kwargs["attachment_refs"],
+                drive_port=attachment_kwargs["drive_port"],
             )
             related_only = chat_message_is_related_only(
                 text,
@@ -2500,6 +2552,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     event_id=message_id,
                     relation=relation,
                 )
+            if job_id and await self._halt_failed_drive_ingestion(
+                event, job_id, attachment_kwargs["attachment_refs"]
+            ):
+                return
             if related_only:
                 # A corrective reply may safely retarget the exact active
                 # zero-attempt Job to a bounded destination action. Execute
@@ -2899,6 +2955,111 @@ class GoogleChatAdapter(BasePlatformAdapter):
             media_types=media_types,
         )
 
+    def _drive_scoped_credentials(self, creds: Any) -> Any:
+        """Request drive.readonly on a copy of *creds* when the client supports it."""
+        if creds is None:
+            return None
+        try:
+            if hasattr(creds, "with_scopes"):
+                return creds.with_scopes(list(_CHAT_SCOPES))
+        except Exception:
+            logger.debug("[GoogleChat] with_scopes(drive.readonly) failed", exc_info=True)
+        return creds
+
+    def _fetch_drive_file_sync(
+        self, drive_file_id: str, *, sender_email: str = ""
+    ) -> Optional[Tuple[bytes, str, str]]:
+        """Fetch a Drive picker chip. Returns ``(bytes, mime, filename)`` or None."""
+        if not drive_file_id:
+            return None
+        candidates: List[Tuple[str, Any]] = []
+        if self._credentials is not None:
+            candidates.append(("app", self._drive_scoped_credentials(self._credentials)))
+        if sender_email:
+            try:
+                from .oauth import load_user_credentials
+
+                user_creds = load_user_credentials(sender_email.strip().lower())
+                if user_creds is not None:
+                    candidates.append(("user", user_creds))
+            except Exception:
+                logger.exception("[GoogleChat] Could not load user Drive credentials")
+
+        for identity, creds in candidates:
+            if creds is None:
+                continue
+            try:
+                result = _fetch_drive_bytes(creds, drive_file_id)
+                logger.info(
+                    "[GoogleChat] Downloaded Drive attachment with %s identity",
+                    identity,
+                )
+                return result
+            except Exception as exc:
+                logger.warning(
+                    "[GoogleChat] Drive download with %s identity failed: %s",
+                    identity,
+                    _redact_sensitive(str(exc)),
+                )
+        return None
+
+    def _drive_file_port(self, sender_email: str = "") -> CallableDrivePort:
+        """Job-engine Drive port bound to this adapter's fetch identities."""
+
+        def _fetch(drive_file_id: str) -> Tuple[bytes, str, str]:
+            result = self._fetch_drive_file_sync(
+                drive_file_id, sender_email=sender_email
+            )
+            if result is None:
+                raise RuntimeError("Drive file did not download")
+            return result
+
+        return CallableDrivePort(_fetch)
+
+    def _chat_job_attachment_kwargs(
+        self, event: MessageEvent
+    ) -> Dict[str, Any]:
+        """Build open_chat_job attachment arguments without double-counting."""
+        raw_attachments = list(
+            ((getattr(event, "raw_message", None) or {}).get("attachment") or [])
+        )
+        staged_files = list(zip(event.media_urls or [], event.media_types or []))
+        drive_refs = unmatched_drive_chip_refs(raw_attachments, len(staged_files))
+        sender_email = ""
+        if event.source is not None:
+            sender_email = str(getattr(event.source, "user_id", None) or "")
+        return {
+            "attachments": staged_files,
+            "expected_attachment_count": len(raw_attachments),
+            "attachment_refs": drive_refs,
+            "drive_port": self._drive_file_port(sender_email) if drive_refs else None,
+        }
+
+    async def _halt_failed_drive_ingestion(
+        self, event: MessageEvent, job_id: str, drive_refs: List[Any]
+    ) -> bool:
+        """Post one honest Chat note and stop the job when a Drive chip failed."""
+        if not job_id or not drive_refs:
+            return False
+        job = await asyncio.to_thread(JobStore(ROBIE_JOB_DB).get_job, job_id)
+        if not is_attachment_ingestion_error(job.get("last_error")):
+            return False
+        if job.get("status") != JobStatus.FAILED.value:
+            return False
+        identity = proven_drive_share_identity(self._credentials)
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        if not chat_id:
+            return True
+        # No reply_to: send() would resolve the FAILED job and rewrite this
+        # into the generic terminal template. Thread via metadata only.
+        await self.send(
+            chat_id,
+            drive_chip_download_failed_message(identity),
+            reply_to=None,
+            metadata={"thread_id": getattr(event.source, "thread_id", None)},
+        )
+        return True
+
     async def _download_attachment(
         self, attachment: Dict[str, Any], *, sender_email: str = ""
     ) -> Tuple[Optional[str], Optional[str]]:
@@ -2910,8 +3071,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
              the supported bot path. The Service Account bearer token has
              ``chat.bot`` scope which the Chat API authorises against the
              space membership.
-          2. Drive-hosted files (``source == 'DRIVE_FILE'``) require user
-             OAuth and Drive scope; skip with a log.
+          2. Drive picker chips (``driveDataRef.driveFileId``) via Drive
+             API using the app identity (now includes ``drive.readonly``)
+             then the sender's ``/setup-files`` user OAuth token.
           3. Direct HTTP fetch of ``downloadUri`` only as a last resort —
              that URL is meant for user OAuth tokens (chat.google.com
              returns 401 for SA bearer tokens) and is unlikely to work,
@@ -2968,63 +3130,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # Path 2: Drive picker. Accept IDs only from Google's structured event.
         if data is None and drive_file_id:
-            candidates: List[Tuple[str, Any]] = []
-            if self._credentials is not None:
-                candidates.append(("app", self._credentials))
-            if sender_email:
-                try:
-                    from .oauth import load_user_credentials
-                    user_creds = await asyncio.to_thread(
-                        load_user_credentials, sender_email.strip().lower()
-                    )
-                    if user_creds is not None:
-                        candidates.append(("user", user_creds))
-                except Exception:
-                    logger.exception("[GoogleChat] Could not load user Drive credentials")
-
-            def _fetch_drive(creds: Any) -> Tuple[bytes, str, str]:
-                import io
-                from googleapiclient.http import MediaIoBaseDownload
-                drive = build_service("drive", "v3", credentials=creds, cache_discovery=False)
-                meta = drive.files().get(
-                    fileId=drive_file_id, fields="id,name,mimeType,size",
-                    supportsAllDrives=True,
-                ).execute()
-                source_mime = str(meta.get("mimeType") or mime or "")
-                resolved_name = str(meta.get("name") or filename)
-                if int(meta.get("size") or 0) > _MAX_INBOUND_ATTACHMENT_BYTES:
-                    raise ValueError("Drive attachment exceeds the 25 MB limit")
-                export = _DRIVE_EXPORT_TYPES.get(source_mime)
-                if source_mime.startswith("application/vnd.google-apps."):
-                    if export is None:
-                        raise ValueError(f"unsupported native Google Drive type: {source_mime}")
-                    resolved_mime, suffix = export
-                    if not resolved_name.casefold().endswith(suffix):
-                        resolved_name += suffix
-                    req = drive.files().export_media(fileId=drive_file_id, mimeType=resolved_mime)
-                else:
-                    resolved_mime = source_mime or "application/octet-stream"
-                    req = drive.files().get_media(fileId=drive_file_id, supportsAllDrives=True)
-                buf = io.BytesIO()
-                downloader = MediaIoBaseDownload(buf, req)
-                done = False
-                while not done:
-                    _status, done = downloader.next_chunk()
-                    if buf.tell() > _MAX_INBOUND_ATTACHMENT_BYTES:
-                        raise ValueError("Drive attachment exceeds the 25 MB limit")
-                return buf.getvalue(), resolved_mime, resolved_name
-
-            for identity, creds in candidates:
-                try:
-                    data, mime, filename = await asyncio.to_thread(_fetch_drive, creds)
-                    logger.info("[GoogleChat] Downloaded Drive attachment with %s identity", identity)
-                    break
-                except Exception as exc:
-                    logger.warning(
-                        "[GoogleChat] Drive download with %s identity failed: %s",
-                        identity, _redact_sensitive(str(exc)),
-                    )
-                    data = None
+            fetched = await asyncio.to_thread(
+                self._fetch_drive_file_sync,
+                drive_file_id,
+                sender_email=sender_email,
+            )
+            if fetched is not None:
+                data, mime, filename = fetched
 
         # Path 3: downloadUri fallback (rarely works with SA tokens, but try).
         if data is None and download_uri:
