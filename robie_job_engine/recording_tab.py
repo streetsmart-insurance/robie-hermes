@@ -16,11 +16,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.error import URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 DEFAULT_RECORDING_ROOT = "/opt/streetsmart-hermes/robie-job-engine/data/recordings"
+DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 ACTIVE_HINT_POINTER = "active_hint_path"
+PAGE_TARGET_TYPES = frozenset({"", "page", "tab"})
 ACTIVE_PATH_MARKERS = (
     "/policy/actions/edit/",
     "/applicantportal/",
@@ -204,6 +208,7 @@ def follow_screencast_frames(
     snapshot: Callable[[TabCandidate], bytes],
     *,
     selector: Callable[..., TabCandidate | None] | None = None,
+    hint_url: str | None = None,
 ) -> dict[str, Any]:
     """Bind / rebind Page.startScreencast the same way capture does.
 
@@ -218,7 +223,7 @@ def follow_screencast_frames(
     last_url = ""
     for listed in ticks:
         tabs = [tab for tab in listed if tab]
-        chosen = pick(tabs, previous_identity=previous)
+        chosen = pick(tabs, previous_identity=previous, hint_url=hint_url)
         if chosen is None:
             continue
         if previous is not None and chosen.identity != previous:
@@ -234,6 +239,201 @@ def follow_screencast_frames(
         "rebinds": rebinds,
         "initial_url": attached[0] if attached else "",
         "final_url": last_url,
+    }
+
+
+def _http_get(url: str, *, timeout: float = 2.0) -> tuple[int, bytes]:
+    request = Request(url, method="GET")
+    with urlopen(request, timeout=timeout) as response:
+        status = int(getattr(response, "status", 200) or 200)
+        return status, response.read()
+
+
+def _cdp_http_url(cdp_url: str | None = None) -> str:
+    return (cdp_url or os.environ.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL).rstrip(
+        "/"
+    )
+
+
+def tab_candidates_from_cdp_payload(payload: Any) -> list[TabCandidate]:
+    """Parse Chrome ``/json/list`` or ``Target.getTargets`` into TabCandidates."""
+    if isinstance(payload, dict):
+        payload = (
+            payload.get("targetInfos")
+            or payload.get("value")
+            or payload.get("items")
+            or []
+        )
+    if not isinstance(payload, list):
+        return []
+    tabs: list[TabCandidate] = []
+    for index, item in enumerate(payload):
+        if isinstance(item, str):
+            tabs.append(TabCandidate(identity=f"url-{index}", url=item))
+            continue
+        if not isinstance(item, dict):
+            continue
+        target_type = str(item.get("type") or "page")
+        if target_type not in PAGE_TARGET_TYPES:
+            continue
+        url = str(item.get("url") or "").strip()
+        identity = str(item.get("id") or item.get("targetId") or "").strip()
+        if not identity:
+            identity = f"url-{index}:{url}"
+        tabs.append(
+            TabCandidate(
+                identity=identity,
+                url=url,
+                title=str(item.get("title") or ""),
+            )
+        )
+    return tabs
+
+
+def list_cdp_page_candidates(
+    *,
+    cdp_url: str | None = None,
+    http_get: Callable[[str], tuple[int, bytes]] | None = None,
+) -> list[TabCandidate]:
+    """All Chrome page targets. Playwright ``context.pages`` can miss the other CDP client.
+
+    Job 807f8920: capture connected first and only saw the listing tab.
+    playwright_exec (hermes-gateway) opened Edit/FormEntry on a second tab.
+    Capture's Playwright connection never listed that page, so hint matching
+    and work_rank had only the listing to pick. Chrome ``/json/list`` is the
+    source of truth — same endpoint tab cleanup already uses.
+    """
+    url = _cdp_http_url(cdp_url)
+    getter = http_get or _http_get
+    for suffix in ("/json/list", "/json"):
+        try:
+            status, body = getter(f"{url}{suffix}")
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError):
+            continue
+        if int(status) != 200:
+            continue
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        return tab_candidates_from_cdp_payload(payload)
+    return []
+
+
+def merge_capture_tabs(
+    playwright_tabs: Iterable[TabCandidate],
+    cdp_tabs: Iterable[TabCandidate] | None = None,
+) -> list[TabCandidate]:
+    """Prefer Chrome ``/json/list``. Playwright ``context.pages`` is a subset."""
+    cdp_list = [tab for tab in (cdp_tabs or []) if tab and str(tab.url or "").strip()]
+    if cdp_list:
+        return cdp_list
+    return [tab for tab in playwright_tabs if tab and str(tab.url or "").strip()]
+
+
+def playwright_connection_missing_cdp_tabs(
+    playwright_tabs: Iterable[TabCandidate],
+    cdp_tabs: Iterable[TabCandidate],
+) -> list[TabCandidate]:
+    """Tabs Chrome has that this Playwright CDP connection did not list."""
+    seen = {
+        normalize_url(tab.url)
+        for tab in playwright_tabs
+        if tab and str(tab.url or "").strip()
+    }
+    missing: list[TabCandidate] = []
+    for tab in cdp_tabs:
+        raw = str(getattr(tab, "url", "") or "").strip()
+        if not raw:
+            continue
+        folded = raw.casefold()
+        if folded.startswith(("chrome://", "devtools://", "chrome-extension://")):
+            continue
+        if normalize_url(raw) not in seen:
+            missing.append(tab)
+    return missing
+
+
+def should_refresh_cdp_connection(
+    playwright_tabs: Iterable[TabCandidate],
+    cdp_tabs: Iterable[TabCandidate],
+    *,
+    hint_url: str | None = None,
+) -> bool:
+    """Reconnect capture's Playwright view when Chrome has a live tab it missed."""
+    missing = playwright_connection_missing_cdp_tabs(playwright_tabs, cdp_tabs)
+    if not missing:
+        return False
+    if hint_url and any(_hint_matches(tab.url, hint_url) for tab in missing):
+        return True
+    return any(
+        is_ezlynx_url(tab.url) or path_looks_like_active_work(tab.url) for tab in missing
+    )
+
+
+def pair_playwright_pages_to_tabs(
+    playwright_listed: Iterable[tuple[TabCandidate, Any]],
+    cdp_tabs: Iterable[TabCandidate] | None = None,
+) -> list[tuple[TabCandidate, Any]]:
+    """Attach a Playwright page object to each Chrome tab when the URL matches."""
+    listed = [(tab, live) for tab, live in playwright_listed if tab]
+    by_norm: dict[str, list[Any]] = {}
+    for candidate, live in listed:
+        by_norm.setdefault(normalize_url(candidate.url), []).append(live)
+    cdp_list = [tab for tab in (cdp_tabs or []) if tab and str(tab.url or "").strip()]
+    if not cdp_list:
+        return listed
+    paired: list[tuple[TabCandidate, Any]] = []
+    for tab in cdp_list:
+        lives = by_norm.get(normalize_url(tab.url), [])
+        live = lives.pop(0) if lives else None
+        paired.append((tab, live))
+    seen = {normalize_url(tab.url) for tab, _live in paired}
+    for candidate, live in listed:
+        if normalize_url(candidate.url) not in seen:
+            paired.append((candidate, live))
+    return paired
+
+
+def follow_capture_ticks(
+    playwright_ticks: Iterable[Iterable[TabCandidate]],
+    cdp_ticks: Iterable[Iterable[TabCandidate]],
+    snapshot: Callable[[TabCandidate], bytes],
+    *,
+    hint_url: str | None = None,
+    selector: Callable[..., TabCandidate | None] | None = None,
+) -> dict[str, Any]:
+    """Capture selection: Chrome ``/json/list`` plus the Playwright hint.
+
+    ``playwright_ticks`` is what capture's own ``context.pages`` saw.
+    ``cdp_ticks`` is what Chrome reported. Job 807f8920's capture tick was
+    listing-only while CDP already had the Edit tab.
+    """
+    pick = selector or select_recording_tab
+    frames: list[bytes] = []
+    attached: list[str] = []
+    previous: str | None = None
+    rebinds = 0
+    last_url = ""
+    for playwright_listed, cdp_listed in zip(playwright_ticks, cdp_ticks):
+        tabs = merge_capture_tabs(playwright_listed, cdp_listed)
+        chosen = pick(tabs, previous_identity=previous, hint_url=hint_url)
+        if chosen is None:
+            continue
+        if previous is not None and chosen.identity != previous:
+            rebinds += 1
+        if previous != chosen.identity or chosen.url not in attached:
+            attached.append(chosen.url)
+            previous = chosen.identity
+        last_url = chosen.url
+        frames.append(snapshot(chosen))
+    return {
+        "frames": frames,
+        "attached_urls": attached,
+        "rebinds": rebinds,
+        "initial_url": attached[0] if attached else "",
+        "final_url": last_url,
+        "selection_mode": "hint" if hint_url else "cdp_list",
     }
 
 
@@ -295,6 +495,37 @@ def write_page_hint(path: str | Path, *, url: str, job_id: str | None = None) ->
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {"url": url, "job_id": job_id or os.environ.get("ROBIE_RECORDING_JOB_ID") or ""}
     target.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def publish_live_playwright_hint(
+    pages: Iterable[Any] | None = None,
+    *,
+    page: Any | None = None,
+    hint_path: str | Path | None = None,
+    job_id: str | None = None,
+) -> str | None:
+    """Write the live Playwright tab URL. Never pages[0] / listing-only pin.
+
+    Job 807f8920: ``scope['page']`` stayed on the listing while the worker
+    drove Edit on a second page object. Hinting that listing URL cannot
+    match a tab capture never listed. Select across every current page.
+    """
+    listed = [item for item in (pages or []) if item is not None]
+    if page is not None and page not in listed:
+        listed.append(page)
+    chosen = select_playwright_page(listed) if listed else None
+    if chosen is None:
+        chosen = page
+    url = str(getattr(chosen, "url", "") or "") if chosen is not None else ""
+    if not url:
+        return None
+    if path_looks_like_listing(url):
+        return None
+    hint = Path(hint_path) if hint_path is not None else resolve_hint_file()
+    if hint is None:
+        return None
+    write_page_hint(hint, url=url, job_id=job_id)
+    return url
 
 
 def attach_log_path(recording_path: str | Path | None) -> Path | None:

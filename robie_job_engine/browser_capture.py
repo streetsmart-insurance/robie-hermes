@@ -9,9 +9,12 @@ from pathlib import Path
 
 from .recording_tab import (
     TabCandidate,
+    list_cdp_page_candidates,
+    pair_playwright_pages_to_tabs,
     read_page_hint,
     resolve_hint_file,
     select_recording_tab,
+    should_refresh_cdp_connection,
     write_attach_log,
 )
 
@@ -236,16 +239,43 @@ def capture(
             last_urls: dict[str, str] = {}
             watched: set[str] = set()
             page = None
-            while page is None and time.monotonic() < deadline and not stop_file.exists():
+            bound_identity: str | None = None
+
+            def refresh_listed():
+                nonlocal browser
                 listed = _note_url_changes(
                     _list_tabs(browser, nav_times), nav_times, last_urls
                 )
                 _watch_navigations(listed, nav_times, watched)
-                chosen = select_recording_tab(
+                hint = _hint_url(hint_file)
+                cdp_tabs = list_cdp_page_candidates(cdp_url=cdp_url)
+                if should_refresh_cdp_connection(
                     [item[0] for item in listed],
-                    hint_url=_hint_url(hint_file),
+                    cdp_tabs,
+                    hint_url=hint,
+                ):
+                    # Fresh CDP snapshot sees every current Chrome page.
+                    # Do not browser.close() — that closes the shared Chrome.
+                    browser = playwright.chromium.connect_over_cdp(cdp_url)
+                    nav_times.clear()
+                    last_urls.clear()
+                    watched.clear()
+                    listed = _note_url_changes(
+                        _list_tabs(browser, nav_times), nav_times, last_urls
+                    )
+                    _watch_navigations(listed, nav_times, watched)
+                    cdp_tabs = list_cdp_page_candidates(cdp_url=cdp_url)
+                return pair_playwright_pages_to_tabs(listed, cdp_tabs), hint
+
+            while page is None and time.monotonic() < deadline and not stop_file.exists():
+                paired, hint = refresh_listed()
+                chosen = select_recording_tab(
+                    [item[0] for item in paired],
+                    hint_url=hint,
                 )
-                page = _live_for(listed, chosen)
+                page = _live_for(paired, chosen)
+                if chosen is not None:
+                    bound_identity = chosen.identity
                 if page is None:
                     time.sleep(0.25)
             if page is None:
@@ -254,6 +284,8 @@ def capture(
             attach["attached_urls"].append(page.url)
             if _hint_url(hint_file):
                 attach["selection_mode"] = "hint"
+            else:
+                attach["selection_mode"] = "cdp_list"
             _mask_sensitive_fields(page)
             bound = _bind_screencast(page, ffmpeg, stop_file, ready_file, False)
             session = bound["session"]
@@ -262,28 +294,29 @@ def capture(
                     # Playwright's synchronous API dispatches CDP event callbacks
                     # while it is inside a Playwright call. A plain time.sleep here
                     # starves Page.screencastFrame and produces an empty video.
-                    listed = _note_url_changes(
-                        _list_tabs(browser, nav_times), nav_times, last_urls
-                    )
-                    _watch_navigations(listed, nav_times, watched)
+                    paired, hint = refresh_listed()
                     chosen = select_recording_tab(
-                        [item[0] for item in listed],
-                        previous_identity=_page_identity(page),
-                        hint_url=_hint_url(hint_file),
+                        [item[0] for item in paired],
+                        previous_identity=bound_identity,
+                        hint_url=hint,
                     )
-                    next_page = _live_for(listed, chosen, page)
-                    if next_page is not page:
+                    next_page = _live_for(paired, chosen)
+                    next_identity = chosen.identity if chosen is not None else None
+                    if (
+                        next_page is not None
+                        and next_identity is not None
+                        and next_identity != bound_identity
+                    ):
                         try:
                             session.send("Page.stopScreencast")
                         except Exception:
                             pass
                         _remove_capture_masks(page)
                         page = next_page
+                        bound_identity = next_identity
                         attach["rebinds"] += 1
                         attach["attached_urls"].append(page.url)
-                        attach["selection_mode"] = (
-                            "hint" if _hint_url(hint_file) else "recent_navigation"
-                        )
+                        attach["selection_mode"] = "hint" if hint else "cdp_list"
                         _mask_sensitive_fields(page)
                         bound = _bind_screencast(
                             page,
@@ -293,9 +326,12 @@ def capture(
                             bound["first_frame_written"],
                         )
                         session = bound["session"]
-                    else:
+                    elif page is not None:
                         _mask_sensitive_fields(page)
-                    page.wait_for_timeout(250)
+                    if page is None:
+                        time.sleep(0.25)
+                    else:
+                        page.wait_for_timeout(250)
                 try:
                     session.send("Page.stopScreencast")
                 except Exception:

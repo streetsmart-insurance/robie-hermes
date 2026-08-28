@@ -42,6 +42,7 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn(".hermes/hermes-agent/tools/playwright_tool.py", source)
         self.assertIn("runner_failure_error", source)
         self.assertIn("select_playwright_page", source)
+        self.assertIn("publish_live_playwright_hint", source)
         self.assertNotIn("page = pages[0] if pages else context.new_page()", source)
         self.assertIn("refusing pages[0] / first-ezlynx-wins", source)
 

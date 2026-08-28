@@ -206,12 +206,14 @@ try:
     page = None
     try:
         from robie_job_engine.recording_tab import (
+            publish_live_playwright_hint,
             read_page_hint,
             resolve_hint_file,
             select_playwright_page,
         )
         hinted = read_page_hint(resolve_hint_file()) or {}
         page = select_playwright_page(pages, hint_url=hinted.get("url") or None)
+        publish_live_playwright_hint(pages, page=page)
     except Exception:
         page = None
     if page is None and not pages:
@@ -253,11 +255,16 @@ try:
         relabel_user_exec_exception(exc)
     finally:
         try:
-            from robie_job_engine.recording_tab import resolve_hint_file, write_page_hint
-            hint = resolve_hint_file()
-            page = scope.get("page")
-            if hint is not None and page is not None and getattr(page, "url", None):
-                write_page_hint(hint, url=page.url)
+            from robie_job_engine.recording_tab import (
+                publish_live_playwright_hint,
+                select_playwright_page,
+            )
+            live_pages = [item for ctx in browser.contexts for item in ctx.pages]
+            scope["pages"] = live_pages
+            live = select_playwright_page(live_pages) or scope.get("page")
+            if live is not None:
+                scope["page"] = live
+            publish_live_playwright_hint(live_pages, page=scope.get("page"))
         except Exception:
             pass
 finally:

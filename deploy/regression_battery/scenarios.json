@@ -114,6 +114,22 @@
       "scenario": "ascend-create:unique-listbox-option",
       "closed": true,
       "note": "Live Production job 38c0fa79 HITL'd PLAYWRIGHT_BLOCKED at 12:18Z on hermes-poc-01: create/new dropdown options were not unique (multiple matching options / selector not unique for the active listbox). Still on /create/new. No Save. Carlo will not RETRY. Test pass must open each create-form combobox and require a unique exact option locator. Log the blocked field. Never PAWIVA."
+    },
+    {
+      "id": "807f8920",
+      "class": "follow-tab",
+      "new_failure_mode": true,
+      "scenario": "recording:follow-live-playwright-tab",
+      "closed": true,
+      "note": "Recorder stayed on a stale listing while Playwright drove Edit/FormEntry/documents. Same pattern as 468d1575 / 30777947 wrong-tab. CI proves the second tab is what the recording analyzes. Not proven on a live job until recorder attach URL == Playwright URL."
+    },
+    {
+      "id": "468d1575",
+      "class": "follow-tab",
+      "new_failure_mode": true,
+      "scenario": "recording:follow-live-playwright-tab",
+      "closed": true,
+      "note": "PR 22 kept the local webm and added a hint pointer. 807f8920 proved follow-tab was still open: capture's Playwright connection never saw the second tab."
     }
   ]
 }

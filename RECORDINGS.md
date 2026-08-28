@@ -41,17 +41,25 @@ video encoder. Attach failures, early exits, and readiness timeouts are stored
 as `failure_stage=START` and fail the Job before the worker can change anything.
 
 The recorder must not bind forever to the first `ezlynx.com` tab in CDP
-enumeration order. Job 30777947's published webm stayed on a stale Policies
-list while playwright_exec drove documents / Policy Edit / FormEntry on another
-tab. Capture rebinds to the Playwright hint URL when present, otherwise to the
-most recently navigated EZLynx page (active Edit/FormEntry/documents over a
-listing). The attach log sits next to the webm as `*.attach.json`. A recorder
-tab that is not the Playwright page is an audit MISMATCH / frozen fail.
-The close-out test (`test_30777947_driven_page_recording_shows_motion`)
-binds two ezlynx-like pages, proves first-ezlynx-wins stays frozen on the
-stale first tab, and requires the fixed selector's captured frames to change
-with the page Playwright drives. Audit check 3 still fails a frozen
-recording when tool logs are busy.
+enumeration order, and it must not trust only Playwright `context.pages`
+on the capture connection. Job 30777947 / 468d1575 / 807f8920 published a
+webm that stayed on a stale Policies list while playwright_exec drove
+documents / Policy Edit / FormEntry on another tab. Capture and
+playwright_exec are separate CDP clients. Capture's `context.pages` often
+never lists the second tab, so a hint URL and first-ezlynx-wins both stay
+on the listing. Capture reads Chrome `/json/list` as the source of truth
+and refreshes its CDP view when that list has a live tab the Playwright
+connection missed. It then follows the Playwright hint URL when present,
+otherwise the most recently navigated EZLynx page (active
+Edit/FormEntry/documents over a listing). The attach log sits next to the
+webm as `*.attach.json`. A recorder tab that is not the Playwright page
+is an audit MISMATCH / frozen fail.
+
+Named scenario `recording:follow-live-playwright-tab` proves a
+Playwright-driven second tab is what the recording analyzes, and FAILS if
+the recording stays on the listing. Follow-tab is not proven on Production
+until a live job shows matching URLs (recorder attach tab == Playwright
+tab). Audit check 3 still fails a frozen recording when tool logs are busy.
 
 The approved final statuses are `COMPLETE`, `FAILED`, `UNVERIFIED`, and
 `NEEDS_AUTH`. Authentication, MFA, CAPTCHA, or other human-login intervention

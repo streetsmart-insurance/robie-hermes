@@ -43,6 +43,7 @@ from .regression_scenarios import (
     ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
+    FOLLOW_TAB_CHAT,
     HITL_RESUME_CHAT,
     HITL_TONE_CHAT,
     run_named_scenarios,
@@ -558,6 +559,8 @@ def format_new_failure_chat(
             lines.append(FALSE_SUCCESS_CHAT)
         if item_id.startswith("hitl-resume:"):
             lines.append(HITL_RESUME_CHAT)
+        if item_id.startswith("recording:follow-live-playwright-tab"):
+            lines.append(FOLLOW_TAB_CHAT)
         if item_id.startswith("ascend:"):
             lines.append(ASCEND_AUDIT_CHAT)
         if item_id.startswith("artifact-path:"):
