@@ -91,7 +91,7 @@ pointer flip + `hermes-gateway` restart, the PYTHONPATH drop-in
 `ExecStartPost` runs five yes/no checks (gateway+Job Engine PYTHONPATH,
 CDP `/json/version`, an EZLynx `/web/` tab that is not login, Secret
 Manager ENABLED versions, no `conversation_job_links.active=1` terminal
-bind). A weekday oneshot timer (`robie-production-preflight.timer`) repeats
+bind). An every-day oneshot timer (`robie-production-preflight.timer`) repeats
 that during 9am–5pm `America/New_York`. The first no posts one Robie Chat
 APP message and stops. It does not `@robie`, bind, or restart Chrome /
 `hermes-gateway` / the browser.

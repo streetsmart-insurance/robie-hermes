@@ -1,8 +1,8 @@
 [Unit]
-Description=ROBIE Production pre-flight on weekdays 9am-5pm Eastern
+Description=ROBIE Production pre-flight every day 9am-5pm Eastern
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 09..17:00:00 America/New_York
+OnCalendar=*-*-* 09..17:00:00 America/New_York
 Persistent=true
 AccuracySec=1min
 Unit=robie-production-preflight.service

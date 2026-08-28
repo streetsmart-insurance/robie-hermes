@@ -122,7 +122,7 @@ class CheckContractTests(unittest.TestCase):
         self.assertNotIn("<users/", folded)
         self.assertIn("mode=ro", SOURCE)
 
-    def test_systemd_units_match_scheduler_oneshot_and_weekday_window(self):
+    def test_systemd_units_match_scheduler_oneshot_and_daily_window(self):
         self.assertIn("Type=oneshot", SERVICE)
         self.assertIn(
             "ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python "
@@ -136,7 +136,7 @@ class CheckContractTests(unittest.TestCase):
         self.assertIn("ROBIE_PREFLIGHT_CHAT_SPACE=spaces/AAQAZbLJO78", SERVICE)
         self.assertNotIn("robie-job-engine.service", SERVICE)
         self.assertNotIn("systemctl restart", SERVICE)
-        self.assertIn("OnCalendar=Mon..Fri *-*-* 09..17:00:00 America/New_York", TIMER)
+        self.assertIn("OnCalendar=*-*-* 09..17:00:00 America/New_York", TIMER)
         self.assertIn("Unit=robie-production-preflight.service", TIMER)
         self.assertIn("WantedBy=timers.target", TIMER)
 
