@@ -137,13 +137,23 @@ It does not `@robie`, bind, or restart Chrome / `hermes-gateway` / the
 browser.
 
 The regression battery (`robie_job_engine/regression_battery.py`) is the
-job-type / logic / Test-replay detector. It is not pre-flight and not
-post-job audit. It **only guarantees previously seen failures have not
-come back**. Simulator passed means nothing we have already seen is
+**PR 35 automatic simulator**. It is not pre-flight, not post-job audit,
+and not PR 36 (one-load-path only — do not call 36 the simulator). It
+**only guarantees previously seen failures have not come back**.
+Simulator passed means nothing we have already seen is
 wrong — known scenarios did not regress — never that nothing is wrong.
 Every Production incident that was a NEW failure mode gets a named
 deterministic scenario in `deploy/regression_battery/scenarios.json`
 before we call the incident closed. That is how the simulator grows.
+
+Written gate (Carlo 2026-08-28): (1) PR 35 battery (CI on the PR) must
+be green before merge for a NEW failure mode or NEW site/workflow;
+(2) Dusty walks the live site himself before a NEW website/portal is
+tried on a real account (same as the 2026-08-28 Ascend look); (3) Test
+job on `hermes-test-01` (N=3), then Production zip; (4) after Production
+zip, run the PR 35 battery again — pointer-only is not live; (5)
+ChatGPT / Claude / Jake-paste must follow this written gate. Do not skip
+the battery or the Dusty walk because a model is “just trying it.”
 
 `ascend:locator-and-artifact-audit` is the named Test-only Job Engine
 scenario for a NEW site/workflow (Ascend locator walk + quote-PDF
@@ -158,10 +168,12 @@ programs spinner and clicks only the unique primary + New program.
 `ascend-customer-type:lob` sets Commercial vs Personal from line of
 business (not the form default, not LLC vs person-name).
 GitHub CI asserts the punch list and that the artifact
-folder equals the job id. The live Ascend walk is `hermes-test-01` only.
-This tree does **not** flip that job type onto Production. Commercial
-auto already on Production is not a free pass. N=3 clean Test jobs still
-applies. Loom `ascend-finance` is never overwritten.
+folder equals the job id. The live Ascend walk is `hermes-test-01` only
+(N=3 Test jobs), after the PR 35 battery is green and after Dusty
+walks the live site himself. This tree does **not** flip that job type
+onto Production. Commercial auto already on Production is not a free
+pass. N=3 clean Test jobs still applies. Loom `ascend-finance` is never
+overwritten.
 
 `hermes-test-01` is **not** a clone of Production: different service-account
 permissions, isolated Job DB / browser / ingress, and Test must not read

@@ -8,9 +8,24 @@ production_ready: false
 # Ascend locator + artifact audit (Test only)
 
 This is a **full Job Engine job**, not a UI click-through script. It is the
-required Test gate before a **NEW** site or workflow (Ascend, next carrier
-portal, anything that is not already live) may run on a real Production
-account.
+`hermes-test-01` Test job (step 3) in the written NEW-site gate. It is
+**not** the automatic simulator.
+
+Written gate (Carlo 2026-08-28) — ChatGPT / Claude / Jake-paste must
+follow this. Do not skip the battery or the Dusty walk because a model
+is “just trying it.”
+
+1. **PR 35 battery (CI on the PR)** is the automatic simulator. Must be
+   green before merge when it is a NEW failure mode or NEW site/workflow.
+2. **Dusty walks the live site himself** before a NEW website/portal is
+   tried on a real account (same as the 2026-08-28 Ascend look).
+3. **This Test job on `hermes-test-01` (N=3).** Then Production zip.
+4. **After Production zip, run the PR 35 battery again.** Pointer-only
+   is not live.
+5. Do not skip the battery or the Dusty walk because a model is “just
+   trying it.”
+
+PR 36 is one-load-path only — do not call 36 the simulator.
 
 Commercial auto already on Production is **not** a free pass. N clean Test
 jobs still applies (Carlo: N=3). This skill stays `production_ready: false`.

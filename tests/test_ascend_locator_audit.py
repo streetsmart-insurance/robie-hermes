@@ -248,6 +248,11 @@ class WorkerAndGateTests(unittest.TestCase):
         self.assertIn("ascend-finance", text)
         self.assertIn("Do not overwrite", text)
         self.assertNotIn("production_ready: true", text)
+        self.assertIn("PR 35 battery", text)
+        self.assertIn("automatic simulator", text)
+        self.assertIn("do not call 36 the simulator", text)
+        self.assertIn("Dusty walks the live site himself", text)
+        self.assertIn("just trying it", text)
 
     def test_classify_request_and_stop_before(self):
         self.assertEqual(

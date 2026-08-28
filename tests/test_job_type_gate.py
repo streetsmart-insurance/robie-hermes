@@ -124,6 +124,12 @@ class JobTypeGateTests(unittest.TestCase):
         self.assertIn("NEW site / workflow", text)
         self.assertIn("ascend:locator-and-artifact-audit", text)
         self.assertIn("Commercial auto already on Production is **not** a free pass", text)
+        self.assertIn("PR 35 battery", text)
+        self.assertIn("automatic simulator", text)
+        self.assertIn("do not call 36 the simulator", text)
+        self.assertIn("Dusty walks the live site himself", text)
+        self.assertIn("just trying it", text)
+        self.assertIn("ChatGPT", text)
 
     def test_audit_record_from_jobs_db_requires_pass_verdict(self):
         with durable_temporary_directory() as tmp:
