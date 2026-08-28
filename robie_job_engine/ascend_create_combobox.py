@@ -207,6 +207,36 @@ _QUOTE_LABEL_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+_QUOTE_FROM_CARRIER_RE = re.compile(
+    r"\bquote\s+from\s+(?P<value>[A-Z][A-Za-z0-9&,'’.\- ]{2,160}?"
+    r"(?:Insurance Company|Indemnity Company|Insurance Companies))\b",
+    re.IGNORECASE,
+)
+_INSURANCE_QUOTE_HEADING_RE = re.compile(
+    r"\b(?P<value>Commercial Auto|Personal Auto|Commercial Package|"
+    r"General Liability|Workers(?:'|’) Compensation)\s+Insurance Quote\b",
+    re.IGNORECASE,
+)
+_FORM_QUOTE_STATE_RE = re.compile(
+    r"\bForm\s+QUOTE\s+(?P<code>[A-Z]{2})\b",
+    re.IGNORECASE,
+)
+_US_STATE_NAMES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
+
 
 def option_locator(name: str, *, exact: bool = True) -> str:
     flag = ", exact=True" if exact else ""
@@ -285,6 +315,19 @@ def parse_quote_fields(text: str) -> dict[str, str]:
     for field, values in found.items():
         if len(values) == 1:
             resolved[field] = next(iter(values))
+    flattened = " ".join(str(text or "").split())
+    if not resolved.get("carrier"):
+        match = _QUOTE_FROM_CARRIER_RE.search(flattened)
+        if match:
+            resolved["carrier"] = " ".join(match.group("value").split())
+    if not resolved.get("coverage_type"):
+        match = _INSURANCE_QUOTE_HEADING_RE.search(flattened)
+        if match:
+            resolved["coverage_type"] = " ".join(match.group("value").split()).title()
+    if not resolved.get("state"):
+        match = _FORM_QUOTE_STATE_RE.search(flattened)
+        if match:
+            resolved["state"] = _US_STATE_NAMES.get(match.group("code").upper(), "")
     return resolved
 
 
