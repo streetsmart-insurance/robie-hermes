@@ -126,22 +126,30 @@ def wait_programs_ready(
         raise UniqueLocatorError("refusing split-menu caret; unique New program required")
     require_unique_locator(button, locator=NEW_PROGRAM_LOCATOR)
     enabled = getattr(button, "is_enabled", None)
-    if callable(enabled) and not enabled():
-        seconds = spinner_seconds(started, time.monotonic())
-        raise RuntimeError(
-            programs_spinner_timeout_error(
-                f"primary New program is not enabled; logged {seconds}s"
-            )
-        )
     kpi = page.get_by_text("Programs at risk")
     table = page.get_by_role("table")
-    kpi_count = int(kpi.count()) if callable(getattr(kpi, "count", None)) else 0
-    table_count = int(table.count()) if callable(getattr(table, "count", None)) else 0
-    if kpi_count < 1 and table_count < 1:
+    ready = False
+    button_enabled = not callable(enabled)
+    kpi_count = 0
+    table_count = 0
+    while time.monotonic() - started < timeout_ms / 1000.0:
+        button_enabled = bool(enabled()) if callable(enabled) else True
+        kpi_count = int(kpi.count()) if callable(getattr(kpi, "count", None)) else 0
+        table_count = int(table.count()) if callable(getattr(table, "count", None)) else 0
+        if button_enabled and (kpi_count >= 1 or table_count >= 1):
+            ready = True
+            break
+        time.sleep(LISTBOX_POLL_S)
+    if not ready:
         seconds = spinner_seconds(started, time.monotonic())
+        detail = (
+            "primary New program is not enabled"
+            if not button_enabled
+            else "programs table or KPI cards are not present"
+        )
         raise RuntimeError(
             programs_spinner_timeout_error(
-                f"programs table or KPI cards are not present; logged {seconds}s"
+                f"{detail}; logged {seconds}s"
             )
         )
     seconds = spinner_seconds(started, time.monotonic())
