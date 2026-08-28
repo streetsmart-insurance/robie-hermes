@@ -71,15 +71,22 @@ HITL_TONE_CHAT = (
 )
 
 ASCEND_ROLES_CHAT = (
-    "ASCEND roles class returned: Producer and Account Manager must be the "
-    "Chat sender (requested_by). Jake → Jake Ferrara. Carlo → Carlo Ferrara. "
-    "Unknown sender HITL. Never leave Robie AI when requested_by is known."
+    "ASCEND roles class returned: log the Producer and Account Manager "
+    "prefills. Jake → Jake Ferrara. Carlo → Carlo Ferrara. FAIL if they "
+    "stay Robie AI when requested_by is Carlo Ferrara or Jake Ferrara. "
+    "Unknown sender HITL."
 )
 
 ASCEND_SPINNER_CHAT = (
-    "ASCEND + New program class returned: wait out the programs spinner; "
-    "click the unique primary + New program only, never the split-menu caret. "
-    "Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+    "ASCEND + New program class returned: log seconds until the unique "
+    "primary + New program is ready; click that primary, never the caret; "
+    "wait_for_url /create/new. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+)
+
+ASCEND_AGENCY_FEE_CHAT = (
+    "ASCEND Agency Fee default class returned: log the /create/new default "
+    "(expect $0.00 or empty); set 500 in the Test run if the field exists; "
+    "then STOP before Save program / Send email / checkout / payment / bind."
 )
 
 ASCEND_CUSTOMER_TYPE_CHAT = (
@@ -109,6 +116,8 @@ NAMED_SCENARIO_IDS = frozenset(
         "hitl-tone:dry-playwright-blocked",
         "ascend-roles:sender-not-robie-ai",
         "ascend-new-program:wait-spinner",
+        "ascend-new-program:spinner-timing",
+        "ascend-create:agency-fee-default",
         "ascend-customer-type:lob",
     }
 )
@@ -570,6 +579,24 @@ def run_customer_type_lob_scenario() -> dict[str, Any]:
         return _fail("ascend-customer-type:lob", f"{type(exc).__name__}: {exc}")
 
 
+def run_spinner_timing_scenario() -> dict[str, Any]:
+    from .ascend_create_defaults import run_spinner_timing_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-new-program:spinner-timing", f"{type(exc).__name__}: {exc}")
+
+
+def run_agency_fee_default_scenario() -> dict[str, Any]:
+    from .ascend_create_defaults import run_agency_fee_default_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-create:agency-fee-default", f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -584,5 +611,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_hitl_tone_scenario())
     results.append(run_sender_not_robie_ai_scenario())
     results.append(run_wait_spinner_scenario())
+    results.append(run_spinner_timing_scenario())
+    results.append(run_agency_fee_default_scenario())
     results.append(run_customer_type_lob_scenario())
     return results

@@ -129,22 +129,34 @@ Job Engine job must pass on `hermes-test-01`:
   (`job_id[:-11]+artifact_id` lookup is FAIL; folder must be the full job id)
 - HITL Chat tone: `hitl-tone:dry-playwright-blocked` (cowboy/slang rewritten
   to dry `PLAYWRIGHT_BLOCKED` + path + ask before send)
-- Sender roles: `ascend-roles:sender-not-robie-ai` (Producer / Account
-  Manager from `requested_by`; never Robie AI when Jake or Carlo sent)
+- Sender roles: `ascend-roles:sender-not-robie-ai` (log Producer / Account
+  Manager prefills; FAIL if they stay Robie AI when Jake or Carlo sent)
 - Programs spinner: `ascend-new-program:wait-spinner` (unique `+ New program`,
   never the caret; timeout is `PLAYWRIGHT_BLOCKED`)
+- Spinner timing: `ascend-new-program:spinner-timing` (log seconds until the
+  primary is ready; click primary not caret; `wait_for_url /create/new`)
+- Agency Fee: `ascend-create:agency-fee-default` (log the default, expect
+  $0.00 / empty; set 500 if the field exists; then STOP before Save)
 - Customer type: `ascend-customer-type:lob` (Commercial vs Personal from
   line of business, not the form default and not LLC vs person-name)
 - Skill: `ascend-locator-artifact-audit` (`production_ready: false`)
-- N = **3** clean Test jobs still applies
+- New job-type / `production_ready` flip still needs N = **3** clean Test jobs
+
+**No new live Ascend / PAWIVA Production job until N=1 clean Test Ascend
+pass.** Carlo asked for at least one. Use the Robie Test-account username
++ email 2SV. Never PAWIVA / 221398001 / a live client. Never bind. Never
+email. Follow-tab is separately proven (`select_recording_tab` /
+`follow_screencast_frames`) and is not this audit. This PR does not ship
+a Production zip.
 
 The job is a **full Job Engine job**, not a UI click-through script. It
-walks the Ascend new-program flow with Playwright strict mode (unique
-locator required; non-unique is FAIL; no Gemini; no `.first` / `.nth` /
-`.last`) and saves / looks up a quote PDF the same way a live Chat job
-does (artifacts under the real job id). It fails if the worker cannot
-open the PDF it just saved (mangled / concatenated job-id folder). It
-stops before Save program, Send email, Copy checkout, payment, or bind.
+walks the full Ascend create-program flow with Playwright strict mode
+(unique locator required; non-unique is FAIL; no Gemini; no `.first` /
+`.nth` / `.last`), logs spinner seconds + field defaults, and saves /
+looks up a quote PDF the same way a live Chat job does (artifacts under
+the real job id). It fails if the worker cannot open the PDF it just
+saved (mangled / concatenated job-id folder). It stops before Save
+program, Send email, Copy checkout, payment, or bind.
 Test account only. Never PAWIVA / 221398001 / a real client.
 
 GitHub-hosted CI must not talk to live Ascend or EZLynx. CI unit-tests

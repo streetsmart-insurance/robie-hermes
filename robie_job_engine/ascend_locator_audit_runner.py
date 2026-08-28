@@ -9,8 +9,24 @@ program, Send email, Copy checkout, payment, or bind.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Callable
 
+from .ascend_create_defaults import (
+    CREATE_PATH,
+    CREATE_URL_RE,
+    TEST_AGENCY_FEE,
+    WAIT_FOR_URL,
+    classify_document_labels,
+    log_role_defaults,
+    refuse_unexpected_agency_fee_default,
+    require_create_new_url,
+    require_spinner_seconds_logged,
+    should_set_test_agency_fee,
+    spinner_seconds,
+    test_agency_fee_set_value,
+    unclear_document_label_hitl,
+)
 from .ascend_locator_audit import (
     FLOW_STEPS,
     PROGRAMS_URL,
@@ -67,29 +83,108 @@ def _new_program_target(page: Any) -> Any:
     return page.get_by_role("button", name="+ New program", exact=True)
 
 
-def wait_programs_ready(page: Any, *, timeout_ms: int = PROGRAMS_READY_TIMEOUT_MS) -> None:
-    """Do not click + New program until the spinner is gone and the page is usable."""
+def wait_programs_ready(
+    page: Any, *, timeout_ms: int = PROGRAMS_READY_TIMEOUT_MS
+) -> dict[str, Any]:
+    """Wait out the spinner. Log seconds until the unique primary is ready."""
+    started = time.monotonic()
     button = _new_program_target(page)
     try:
         button.wait_for(state="visible", timeout=timeout_ms)
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(programs_spinner_timeout_error(str(exc))) from exc
+        seconds = spinner_seconds(started, time.monotonic())
+        raise RuntimeError(
+            programs_spinner_timeout_error(f"{exc}; logged {seconds}s")
+        ) from exc
     if locator_is_new_program_caret(NEW_PROGRAM_LOCATOR):
         raise UniqueLocatorError("refusing split-menu caret; unique + New program required")
     require_unique_locator(button, locator=NEW_PROGRAM_LOCATOR)
     enabled = getattr(button, "is_enabled", None)
     if callable(enabled) and not enabled():
-        raise RuntimeError(programs_spinner_timeout_error("primary + New program is not enabled"))
+        seconds = spinner_seconds(started, time.monotonic())
+        raise RuntimeError(
+            programs_spinner_timeout_error(
+                f"primary + New program is not enabled; logged {seconds}s"
+            )
+        )
     kpi = page.get_by_text("Programs at risk")
     table = page.get_by_role("table")
     kpi_count = int(kpi.count()) if callable(getattr(kpi, "count", None)) else 0
     table_count = int(table.count()) if callable(getattr(table, "count", None)) else 0
     if kpi_count < 1 and table_count < 1:
+        seconds = spinner_seconds(started, time.monotonic())
         raise RuntimeError(
             programs_spinner_timeout_error(
-                "programs table or KPI cards are not present"
+                f"programs table or KPI cards are not present; logged {seconds}s"
             )
         )
+    seconds = spinner_seconds(started, time.monotonic())
+    leak = require_spinner_seconds_logged(seconds)
+    if leak:
+        raise RuntimeError(leak)
+    return {
+        "seconds": seconds,
+        "locator": NEW_PROGRAM_LOCATOR,
+        "primary_enabled": True,
+        "kpi_or_table": True,
+    }
+
+
+def wait_create_new_url(
+    page: Any, *, timeout_ms: int = PROGRAMS_READY_TIMEOUT_MS
+) -> str:
+    """After clicking primary + New program, follow /create/new. Not follow-tab."""
+    waiter = getattr(page, "wait_for_url", None)
+    if callable(waiter):
+        waiter(CREATE_URL_RE, timeout=timeout_ms)
+    url = str(getattr(page, "url", "") or "")
+    leak = require_create_new_url(url)
+    if leak:
+        raise RuntimeError(leak)
+    return url
+
+
+def _field_value(target: Any) -> str:
+    for name in ("input_value", "inner_text", "text_content"):
+        reader = getattr(target, name, None)
+        if callable(reader):
+            try:
+                return str(reader() or "")
+            except Exception:  # noqa: BLE001 — try the next reader
+                continue
+    get_attr = getattr(target, "get_attribute", None)
+    if callable(get_attr):
+        try:
+            return str(get_attr("value") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
+
+
+def _count(target: Any) -> int:
+    counter = getattr(target, "count", None)
+    if callable(counter):
+        try:
+            return int(counter())
+        except Exception:  # noqa: BLE001
+            return 0
+    return 0
+
+
+def _visible_text(page: Any) -> str:
+    inner = getattr(page, "inner_text", None)
+    if callable(inner):
+        try:
+            return str(inner("body") or "")
+        except Exception:  # noqa: BLE001
+            pass
+    content = getattr(page, "content", None)
+    if callable(content):
+        try:
+            return str(content() or "")
+        except Exception:  # noqa: BLE001
+            return ""
+    return ""
 
 
 def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str]:
@@ -170,19 +265,19 @@ def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str
     return builder(), text
 
 
-def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> None:
+def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[str, Any]:
     require_unique_locator(target)
     if spec_id == "wait_programs_ready":
-        wait_programs_ready(page)
-        return
+        return wait_programs_ready(page)
     if spec_id == "stop_before_save":
-        return
+        return {"stop_before": ["Save program", "Send email", "Copy checkout", "payment", "bind"]}
     if spec_id == "new_program":
         if locator_is_new_program_caret(NEW_PROGRAM_LOCATOR):
             raise UniqueLocatorError("refusing split-menu caret")
         wait_programs_ready(page)
         target.click()
-        return
+        url = wait_create_new_url(page)
+        return {"url": url, "wait_for_url": WAIT_FOR_URL, "path": CREATE_PATH}
     if spec_id == "customer_type":
         decision = resolve_customer_type(payload)
         if decision.get("hitl_required") or not decision.get("resolved"):
@@ -190,28 +285,83 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> None:
         require_unique_locator(target, locator=str(decision.get("locator") or ""))
         checked = getattr(target, "is_checked", None)
         if callable(checked) and checked():
-            return
+            return {"radio": decision.get("radio")}
         target.check() if hasattr(target, "check") else target.click()
-        return
+        return {"radio": decision.get("radio")}
     if spec_id == "import_document":
-        return
+        labels = classify_document_labels(_visible_text(page))
+        import_count = _count(page.get_by_role("button", name="Import document"))
+        upload_count = _count(page.get_by_role("button", name="Upload document"))
+        labels["import_document"] = labels["import_document"] or import_count >= 1
+        labels["upload_document"] = labels["upload_document"] or upload_count >= 1
+        labels["labels"] = [
+            name
+            for name, present in (
+                ("Import document", labels["import_document"]),
+                ("Upload document", labels["upload_document"]),
+                ("dropzone", labels["dropzone"]),
+            )
+            if present
+        ]
+        if not labels["import_document"] and not labels["upload_document"] and not labels["dropzone"]:
+            raise RuntimeError(unclear_document_label_hitl(labels=labels["labels"]))
+        return labels
     if spec_id in {"producer_role", "account_manager_role"}:
         roles = roles_for_requested_by(requested_by_from_payload(payload))
+        current = _field_value(target)
+        logged = log_role_defaults(
+            requested_by=str(roles.get("requested_by") or ""),
+            producer=current if spec_id == "producer_role" else current,
+            account_manager=current if spec_id == "account_manager_role" else current,
+        )
         if roles.get("hitl_required") or not roles.get("resolved"):
             raise RuntimeError(unknown_sender_hitl(requested_by=roles.get("requested_by") or ""))
-        current = ""
-        inner = getattr(target, "input_value", None)
-        if callable(inner):
-            current = str(inner() or "")
         if should_overwrite_role(current, str(roles["resolved"])):
             fill = getattr(target, "fill", None)
             if callable(fill):
                 fill(str(roles["resolved"]))
-        return
+        after = _field_value(target)
+        leak = log_role_defaults(
+            requested_by=str(roles.get("requested_by") or ""),
+            producer=after if spec_id == "producer_role" else str(roles.get("producer") or after),
+            account_manager=(
+                after if spec_id == "account_manager_role" else str(roles.get("account_manager") or after)
+            ),
+        ).get("error")
+        if leak:
+            raise RuntimeError(leak)
+        return {
+            "producer_default" if spec_id == "producer_role" else "account_manager_default": current,
+            "set_value": roles.get("resolved"),
+            "requested_by": roles.get("requested_by"),
+            "prefill_logged": logged.get("logged"),
+        }
     if spec_id == "address_autocomplete":
         if str(payload.get("exact_address") or ""):
             target.click()
-        return
+        return {}
+    if spec_id == "agency_fee":
+        count = _count(target)
+        if count > 1:
+            raise UniqueLocatorError(
+                f"strict mode violation: Agency Fee locator resolved to {count} elements"
+            )
+        present = count == 1
+        default = _field_value(target) if present else None
+        leak = refuse_unexpected_agency_fee_default(default, field_present=present)
+        if leak:
+            raise RuntimeError(leak)
+        set_value = None
+        if should_set_test_agency_fee(field_present=present):
+            fill = getattr(target, "fill", None)
+            set_value = str(payload.get("test_agency_fee") or test_agency_fee_set_value())
+            if callable(fill):
+                fill(set_value)
+        return {
+            "default": default,
+            "set_value": set_value,
+            "field_present": present,
+        }
     fill = getattr(target, "fill", None)
     value = {
         "insured_fields": str(payload.get("test_insured") or "ROBIE Test LLC"),
@@ -222,10 +372,11 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> None:
         "dates": str(payload.get("test_effective") or "01/01/2027"),
         "premium": str(payload.get("test_premium") or "1000"),
         "taxes": str(payload.get("test_taxes") or "50"),
-        "agency_fee": str(payload.get("test_agency_fee") or "350"),
+        "agency_fee": str(payload.get("test_agency_fee") or TEST_AGENCY_FEE),
     }.get(spec_id)
     if callable(fill) and value is not None:
         fill(value)
+    return {"set_value": value} if value is not None else {}
 
 
 def run_live_walk(payload: dict[str, Any]) -> list[PunchStep]:
@@ -288,21 +439,40 @@ def run_live_walk(payload: dict[str, Any]) -> list[PunchStep]:
                 locator = spec.get("locator") or ""
                 try:
                     if spec_id == "wait_programs_ready":
-                        wait_programs_ready(page)
+                        observed = wait_programs_ready(page)
                         steps.append(
                             pass_step(
                                 spec_id,
                                 locator=PROGRAMS_KPI_LOCATOR + "|" + PROGRAMS_TABLE_LOCATOR,
+                                description=f"programs spinner {observed.get('seconds')}s",
+                                observed=observed,
                             )
                         )
                         continue
                     target, locator = _resolve(page, spec_id, payload)
-                    require_unique_locator(target, locator=locator)
+                    if spec_id != "agency_fee":
+                        require_unique_locator(target, locator=locator)
                     if spec_id == "stop_before_save":
-                        steps.append(pass_step(spec_id, locator=locator))
+                        steps.append(
+                            pass_step(
+                                spec_id,
+                                locator=locator,
+                                observed={
+                                    "stop_before": [
+                                        "Save program",
+                                        "Send email",
+                                        "Copy checkout",
+                                        "payment",
+                                        "bind",
+                                    ]
+                                },
+                            )
+                        )
                         continue
-                    _act(page, spec_id, target, payload)
-                    steps.append(pass_step(spec_id, locator=locator))
+                    observed = _act(page, spec_id, target, payload)
+                    steps.append(
+                        pass_step(spec_id, locator=locator, observed=observed)
+                    )
                 except UniqueLocatorError as exc:
                     steps.append(fail_step(spec_id, exc, locator=locator))
                     return steps

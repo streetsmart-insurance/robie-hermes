@@ -253,6 +253,9 @@ class WorkerAndGateTests(unittest.TestCase):
         self.assertIn("do not call 36 the simulator", text)
         self.assertIn("Dusty walks the live site himself", text)
         self.assertIn("just trying it", text)
+        self.assertIn("N=1", text)
+        self.assertIn("follow-tab", text.casefold())
+        self.assertIn("500", text)
 
     def test_classify_request_and_stop_before(self):
         self.assertEqual(

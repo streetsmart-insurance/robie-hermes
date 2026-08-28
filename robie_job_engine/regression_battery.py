@@ -35,6 +35,7 @@ from .quote_replay import (
     run_quote_replay,
 )
 from .regression_scenarios import (
+    ASCEND_AGENCY_FEE_CHAT,
     ASCEND_AUDIT_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
     ASCEND_ROLES_CHAT,
@@ -566,6 +567,8 @@ def format_new_failure_chat(
             lines.append(ASCEND_ROLES_CHAT)
         if item_id.startswith("ascend-new-program:"):
             lines.append(ASCEND_SPINNER_CHAT)
+        if item_id.startswith("ascend-create:"):
+            lines.append(ASCEND_AGENCY_FEE_CHAT)
         if item_id.startswith("ascend-customer-type:"):
             lines.append(ASCEND_CUSTOMER_TYPE_CHAT)
     lines.append(HUMAN_GATE)

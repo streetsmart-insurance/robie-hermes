@@ -102,27 +102,27 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
     },
     {
         "id": "wait_programs_ready",
-        "description": "Wait out programs spinner; table or KPI cards present",
+        "description": "Log seconds until unique + New program primary is ready",
         "locator": 'get_by_text("Programs at risk")',
     },
     {
         "id": "new_program",
-        "description": "Unique primary + New program (never the split-menu caret)",
+        "description": "Click unique primary + New program (never the caret); wait_for_url /create/new",
         "locator": 'get_by_role("button", name="+ New program", exact=True)',
     },
     {
         "id": "import_document",
-        "description": "Import document / upload (not Hawksoft/AMS360/Epic)",
+        "description": "Log Import document vs Upload document vs dropzone labels",
         "locator": 'get_by_role("button", name="Import document")',
     },
     {
         "id": "producer_role",
-        "description": "Overwrite Producer from requested_by (never leave Robie AI)",
+        "description": "Log Producer prefill; overwrite from requested_by (never leave Robie AI)",
         "locator": 'get_by_label("Producer")',
     },
     {
         "id": "account_manager_role",
-        "description": "Overwrite Account Manager from requested_by (never leave Robie AI)",
+        "description": "Log Account Manager prefill; overwrite from requested_by (never leave Robie AI)",
         "locator": 'get_by_label("Account Manager")',
     },
     {
@@ -177,7 +177,7 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
     },
     {
         "id": "agency_fee",
-        "description": "Agency Fee field",
+        "description": "Log Agency Fee default (expect $0.00 / empty); set 500 if the field exists",
         "locator": 'get_by_label("Agency Fee")',
     },
     {
@@ -231,9 +231,10 @@ class PunchStep:
     locator: str = ""
     artifact_path: str = ""
     error: str | None = None
+    observed: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        blob = {
             "id": self.id,
             "description": self.description,
             "status": self.status,
@@ -241,6 +242,9 @@ class PunchStep:
             "artifact_path": self.artifact_path or None,
             "error": self.error,
         }
+        if self.observed:
+            blob["observed"] = self.observed
+        return blob
 
 
 @dataclass
@@ -281,7 +285,26 @@ class PunchList:
             where = step.locator or step.artifact_path or ""
             extra = f" {where}" if where else ""
             err = f" — {step.error}" if step.error else ""
-            lines.append(f"- {step.id}: {step.status}{extra}{err}")
+            observed = ""
+            if step.observed:
+                bits = []
+                if "seconds" in step.observed:
+                    bits.append(f"seconds={step.observed['seconds']}")
+                if step.observed.get("default") is not None:
+                    bits.append(f"default={step.observed['default']!r}")
+                if step.observed.get("set_value") is not None:
+                    bits.append(f"set={step.observed['set_value']!r}")
+                if step.observed.get("labels"):
+                    bits.append("labels=" + ",".join(str(item) for item in step.observed["labels"]))
+                if step.observed.get("producer_default") is not None:
+                    bits.append(f"producer={step.observed['producer_default']!r}")
+                if step.observed.get("account_manager_default") is not None:
+                    bits.append(f"am={step.observed['account_manager_default']!r}")
+                if step.observed.get("url"):
+                    bits.append(f"url={step.observed['url']}")
+                if bits:
+                    observed = " [" + "; ".join(bits) + "]"
+            lines.append(f"- {step.id}: {step.status}{extra}{err}{observed}")
         return "\n".join(lines)
 
 
@@ -603,6 +626,7 @@ def pass_step(
     locator: str = "",
     artifact_path: str = "",
     description: str = "",
+    observed: dict[str, Any] | None = None,
 ) -> PunchStep:
     spec = _step_spec(step_id)
     return PunchStep(
@@ -611,6 +635,7 @@ def pass_step(
         status="PASS",
         locator=locator or spec.get("locator") or "",
         artifact_path=artifact_path,
+        observed=dict(observed or {}),
     )
 
 
@@ -621,9 +646,11 @@ def fail_step(
     locator: str = "",
     artifact_path: str = "",
     description: str = "",
+    observed: dict[str, Any] | None = None,
 ) -> PunchStep:
     spec = _step_spec(step_id)
     loc = locator or spec.get("locator") or ""
+    notes = dict(observed or {})
     if step_id.startswith("quote_pdf") or artifact_path:
         return PunchStep(
             id=step_id,
@@ -632,13 +659,17 @@ def fail_step(
             locator=loc,
             artifact_path=artifact_path,
             error=str(error),
+            observed=notes,
         )
-    return classify_locator_failure(
+    step = classify_locator_failure(
         error,
         locator=loc,
         step_id=step_id,
         description=description or spec.get("description") or step_id,
     )
+    if notes:
+        step.observed = notes
+    return step
 
 
 def _step_spec(step_id: str) -> dict[str, str]:
@@ -761,6 +792,7 @@ def persist_punch_list(
 
 
 def default_audit_payload(*, live: bool = False, requested_by: str = "") -> dict[str, Any]:
+    from .ascend_create_defaults import TEST_AGENCY_FEE
     from .ascend_sender_roles import requested_by_from_payload, roles_for_requested_by
 
     sender = str(requested_by or "").strip()
@@ -778,6 +810,7 @@ def default_audit_payload(*, live: bool = False, requested_by: str = "") -> dict
         "forbidden_accounts": sorted(FORBIDDEN_ACCOUNTS),
         "test_insured": TEST_INSURED,
         "test_quote_number": TEST_QUOTE_NUMBER,
+        "test_agency_fee": TEST_AGENCY_FEE,
         "programs_url": PROGRAMS_URL,
         "expected_postcondition": {
             "report_id": SCENARIO_ID,
@@ -934,19 +967,64 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     )
                 )
         return steps
+    from .ascend_create_defaults import (
+        CREATE_PATH,
+        CREATE_URL,
+        PAWIVA_SPINNER_SECONDS,
+        TEST_AGENCY_FEE,
+        WAIT_FOR_URL,
+        classify_document_labels,
+        log_role_defaults,
+        refuse_unexpected_agency_fee_default,
+        require_create_new_url,
+        require_spinner_seconds_logged,
+        test_agency_fee_set_value,
+    )
     from .ascend_sender_roles import (
         NEW_PROGRAM_LOCATOR,
-        refuse_robie_ai_when_sender_known,
+        ROBIE_AI,
         requested_by_from_payload,
         roles_for_requested_by,
     )
 
     sender = requested_by_from_payload(payload)
     roles = roles_for_requested_by(sender)
+    fixture_seconds = payload.get("fixture_spinner_seconds", PAWIVA_SPINNER_SECONDS)
+    fixture_fee_default = payload.get("fixture_agency_fee_default", "$0.00")
+    fixture_labels = classify_document_labels(
+        payload.get("fixture_document_labels") or "Import document"
+    )
     for spec in FLOW_STEPS:
         if spec["id"].startswith("quote_pdf"):
             continue
+        if spec["id"] == "wait_programs_ready":
+            leak = require_spinner_seconds_logged(fixture_seconds)
+            observed = {"seconds": fixture_seconds, "primary": "+ New program"}
+            if leak:
+                steps.append(
+                    fail_step(spec["id"], leak, locator=spec["locator"], observed=observed)
+                )
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=f"{spec['description']}: {fixture_seconds}s",
+                        observed=observed,
+                    )
+                )
+            continue
         if spec["id"] in {"producer_role", "account_manager_role"}:
+            prefill = str(payload.get("fixture_role_default") or ROBIE_AI)
+            logged = log_role_defaults(
+                requested_by=sender,
+                producer=prefill if spec["id"] == "producer_role" else str(roles.get("producer") or prefill),
+                account_manager=(
+                    prefill
+                    if spec["id"] == "account_manager_role"
+                    else str(roles.get("account_manager") or prefill)
+                ),
+            )
             if roles.get("hitl_required") or not roles.get("resolved"):
                 steps.append(
                     pass_step(
@@ -956,22 +1034,45 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                             "HITL required; did not write Robie AI "
                             f"({roles.get('hitl_text') or 'unknown requested_by'})"
                         ),
+                        observed={
+                            "producer_default": logged.get("producer_default"),
+                            "account_manager_default": logged.get("account_manager_default"),
+                            "requested_by": sender,
+                        },
                     )
                 )
                 continue
-            leak = refuse_robie_ai_when_sender_known(
+            leak = logged.get("error")
+            # Prefill Robie AI is expected; FAIL only if we would leave it.
+            if leak and prefill == ROBIE_AI:
+                leak = None
+            overwritten = log_role_defaults(
                 requested_by=sender,
                 producer=str(roles.get("producer") or ""),
                 account_manager=str(roles.get("account_manager") or ""),
             )
+            leak = overwritten.get("error") or leak
+            observed = {
+                "producer_default": prefill if spec["id"] == "producer_role" else overwritten.get("producer_default"),
+                "account_manager_default": (
+                    prefill
+                    if spec["id"] == "account_manager_role"
+                    else overwritten.get("account_manager_default")
+                ),
+                "set_value": roles.get("resolved"),
+                "requested_by": sender,
+            }
             if leak:
-                steps.append(fail_step(spec["id"], leak, locator=spec["locator"]))
+                steps.append(
+                    fail_step(spec["id"], leak, locator=spec["locator"], observed=observed)
+                )
             else:
                 steps.append(
                     pass_step(
                         spec["id"],
                         locator=spec["locator"],
-                        description=f"{spec['description']}: {roles['resolved']}",
+                        description=f"{spec['description']}: logged {prefill!r} then {roles['resolved']}",
+                        observed=observed,
                     )
                 )
             continue
@@ -999,14 +1100,67 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     )
                 )
             continue
-        if spec["id"] == "new_program":
+        if spec["id"] == "import_document":
             steps.append(
                 pass_step(
                     spec["id"],
-                    locator=NEW_PROGRAM_LOCATOR,
-                    description=spec["description"],
+                    locator=spec["locator"],
+                    description=f"{spec['description']}: {fixture_labels['labels']}",
+                    observed=fixture_labels,
                 )
             )
+            continue
+        if spec["id"] == "new_program":
+            url_error = require_create_new_url(CREATE_URL)
+            observed = {
+                "url": CREATE_URL,
+                "wait_for_url": WAIT_FOR_URL,
+                "path": CREATE_PATH,
+            }
+            if url_error:
+                steps.append(
+                    fail_step(
+                        spec["id"],
+                        url_error,
+                        locator=NEW_PROGRAM_LOCATOR,
+                        observed=observed,
+                    )
+                )
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=NEW_PROGRAM_LOCATOR,
+                        description=f"{spec['description']}: {WAIT_FOR_URL}",
+                        observed=observed,
+                    )
+                )
+            continue
+        if spec["id"] == "agency_fee":
+            leak = refuse_unexpected_agency_fee_default(
+                fixture_fee_default, field_present=True
+            )
+            observed = {
+                "default": fixture_fee_default,
+                "set_value": test_agency_fee_set_value(),
+                "field_present": True,
+            }
+            if leak:
+                steps.append(
+                    fail_step(spec["id"], leak, locator=spec["locator"], observed=observed)
+                )
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=(
+                            f"{spec['description']}: default {fixture_fee_default!r} "
+                            f"set {TEST_AGENCY_FEE}"
+                        ),
+                        observed=observed,
+                    )
+                )
             continue
         if spec["id"] == "stop_before_save":
             steps.append(
@@ -1014,6 +1168,7 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     spec["id"],
                     locator=spec["locator"],
                     description=spec["description"],
+                    observed={"stop_before": list(STOP_BEFORE)},
                 )
             )
             continue
@@ -1306,6 +1461,11 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         checks.append(fail_step("eb96f620_sliced_concat", exc))
 
+    from .ascend_create_defaults import (
+        run_agency_fee_default_scenario,
+        run_role_default_log_scenario,
+        run_spinner_timing_scenario,
+    )
     from .ascend_customer_type import run_customer_type_lob_scenario
     from .ascend_sender_roles import (
         run_sender_not_robie_ai_scenario,
@@ -1318,11 +1478,29 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         if roles_report.get("ok")
         else fail_step("sender_not_robie_ai", roles_report.get("evidence") or "FAIL")
     )
+    role_defaults = run_role_default_log_scenario()
+    checks.append(
+        pass_step("role_defaults_logged")
+        if role_defaults.get("ok")
+        else fail_step("role_defaults_logged", role_defaults.get("evidence") or "FAIL")
+    )
     spinner_report = run_wait_spinner_scenario()
     checks.append(
         pass_step("wait_spinner")
         if spinner_report.get("ok")
         else fail_step("wait_spinner", spinner_report.get("evidence") or "FAIL")
+    )
+    timing_report = run_spinner_timing_scenario()
+    checks.append(
+        pass_step("spinner_timing")
+        if timing_report.get("ok")
+        else fail_step("spinner_timing", timing_report.get("evidence") or "FAIL")
+    )
+    fee_report = run_agency_fee_default_scenario()
+    checks.append(
+        pass_step("agency_fee_default")
+        if fee_report.get("ok")
+        else fail_step("agency_fee_default", fee_report.get("evidence") or "FAIL")
     )
     customer_report = run_customer_type_lob_scenario()
     checks.append(
@@ -1415,6 +1593,7 @@ def run_live_test_job(
     *,
     db_path: str,
     artifact_root: str,
+    requested_by: str = "",
 ) -> dict[str, Any]:
     """Full Job Engine job on hermes-test-01. Never Production. Never CI live."""
     refuse_production_env()
@@ -1426,7 +1605,7 @@ def run_live_test_job(
     job = store.create_job(
         JOB_TYPE,
         {
-            **default_audit_payload(live=True),
+            **default_audit_payload(live=True, requested_by=requested_by),
             "worker": WORKER_NAME,
             "db_path": db_path,
             "artifact_root": artifact_root,
@@ -1462,6 +1641,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default="")
     parser.add_argument("--artifact-root", default="")
     parser.add_argument("--work-dir", default="")
+    parser.add_argument(
+        "--requested-by",
+        default="",
+        help="Chat sender (Carlo Ferrara / Jake Ferrara). Empty is dry HITL.",
+    )
     args = parser.parse_args(argv)
     if args.live:
         refuse_production_env()
@@ -1479,7 +1663,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 2
-        report = run_live_test_job(db_path=db, artifact_root=artifacts)
+        report = run_live_test_job(
+            db_path=db,
+            artifact_root=artifacts,
+            requested_by=str(args.requested_by or ""),
+        )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if report.get("succeeded") else 2
     work = Path(args.work_dir) if args.work_dir else Path(".robie-durable-test") / "ascend-locator-audit"

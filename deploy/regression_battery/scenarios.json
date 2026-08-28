@@ -73,7 +73,7 @@
       "new_failure_mode": true,
       "scenario": "ascend-roles:sender-not-robie-ai",
       "closed": true,
-      "note": "Create a program prefills Producer and Account Manager as Robie AI. Carlo rule: overwrite both from requested_by (Jake Ferrara / Carlo Ferrara). Unknown sender HITL. Never leave Robie AI when the sender is known."
+      "note": "Create a program prefills Producer and Account Manager as Robie AI. The Test audit must log those prefills. Carlo rule: overwrite both from requested_by (Jake Ferrara / Carlo Ferrara). FAIL if they stay Robie AI when Carlo or Jake sent the job. Unknown sender HITL."
     },
     {
       "id": "eb96f620-vision-spinner",
@@ -90,6 +90,22 @@
       "scenario": "ascend-customer-type:lob",
       "closed": true,
       "note": "Carlo 2026-08-28: Commercial vs Personal is from line of business, not the form default and not LLC vs person-name. Missing LOB is HITL. Do not guess."
+    },
+    {
+      "id": "pawiva-spinner-seconds",
+      "class": "ascend-new-program",
+      "new_failure_mode": true,
+      "scenario": "ascend-new-program:spinner-timing",
+      "closed": true,
+      "note": "Live PAWIVA job: programs spinner ~12s before + New program was ready. PR 37 waited but never logged seconds or wait_for_url /create/new. Missing seconds is FAIL. Click primary, not caret. Follow-tab is a separate proof."
+    },
+    {
+      "id": "pawiva-agency-fee-default",
+      "class": "ascend-create",
+      "new_failure_mode": true,
+      "scenario": "ascend-create:agency-fee-default",
+      "closed": true,
+      "note": "Live PAWIVA job: Agency Fee defaulted to $0.00 on /create/new. Test audit must log that default, expect $0.00 / empty, set 500 if the field exists, then STOP before Save. Never bind. Never email. Never PAWIVA on the Test pass."
     }
   ]
 }
