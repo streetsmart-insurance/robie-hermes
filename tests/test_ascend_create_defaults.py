@@ -36,7 +36,10 @@ from robie_job_engine.ascend_create_defaults import (
     test_agency_fee_set_value,
     too_soon_zero_element_lookup_is_fail,
 )
-from robie_job_engine.ascend_locator_audit_runner import wait_create_form_ready
+from robie_job_engine.ascend_locator_audit_runner import (
+    wait_create_form_ready,
+    wait_programs_ready,
+)
 from robie_job_engine.ascend_locator_audit import (
     JOB_TYPE,
     AscendLocatorAuditWorker,
@@ -77,6 +80,46 @@ class SpinnerTimingTests(unittest.TestCase):
             require_create_new_url("https://dashboard.useascend.com/programs")
         )
         self.assertIn(CREATE_PATH, WAIT_FOR_URL)
+
+    def test_waits_for_visible_new_program_button_to_become_enabled(self):
+        class CountLocator:
+            def count(self) -> int:
+                return 1
+
+        class DelayedButton:
+            def __init__(self) -> None:
+                self.enabled_reads = 0
+
+            def wait_for(self, state: str, timeout: int) -> None:
+                self.waited = (state, timeout)
+
+            def count(self) -> int:
+                return 1
+
+            def is_enabled(self) -> bool:
+                self.enabled_reads += 1
+                return self.enabled_reads >= 3
+
+        class ProgramsPage:
+            def __init__(self) -> None:
+                self.button = DelayedButton()
+
+            def get_by_role(
+                self, role: str, name: str | None = None, exact: bool = False
+            ):
+                if role == "button" and name == "New program" and exact:
+                    return self.button
+                if role == "table":
+                    return CountLocator()
+                return CountLocator()
+
+            def get_by_text(self, _text: str):
+                return CountLocator()
+
+        page = ProgramsPage()
+        observed = wait_programs_ready(page, timeout_ms=1_000)
+        self.assertTrue(observed["primary_enabled"])
+        self.assertGreaterEqual(page.button.enabled_reads, 3)
 
     def test_named_timing_scenario_passes(self):
         report = run_spinner_timing_scenario()
