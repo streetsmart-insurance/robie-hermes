@@ -35,6 +35,7 @@ from .quote_replay import (
     run_quote_replay,
 )
 from .regression_scenarios import (
+    ACTION_GATE_CHAT,
     ASCEND_ACCESSIBLE_NAME_CHAT,
     ASCEND_AGENCY_FEE_CHAT,
     ASCEND_AUDIT_CHAT,
@@ -585,6 +586,8 @@ def format_new_failure_chat(
                 lines.append(ASCEND_AGENCY_FEE_CHAT)
         if item_id.startswith("ascend-customer-type:"):
             lines.append(ASCEND_CUSTOMER_TYPE_CHAT)
+        if item_id.startswith("action-gate:"):
+            lines.append(ACTION_GATE_CHAT)
     lines.append(HUMAN_GATE)
     text = "\n".join(lines)
     if "@robie" in text.casefold():

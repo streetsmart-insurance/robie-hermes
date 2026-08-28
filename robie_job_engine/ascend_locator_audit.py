@@ -1711,6 +1711,19 @@ def run_live_test_job(
     job["db_path"] = db_path
     worker = AscendLocatorAuditWorker(artifact_root=artifact_root)
     result = worker.perform(job, idempotency_key=job["idempotency_key"])
+    overall = ""
+    if result.detail:
+        overall = str(result.detail.get("overall") or "")
+    if result.succeeded and overall.upper() == "PASS":
+        from .action_gate import CREATE_PROGRAM_ACTION, maybe_record_live_test_punch_list
+
+        maybe_record_live_test_punch_list(
+            action_id=CREATE_PROGRAM_ACTION,
+            job_id=str(job["id"]),
+            overall=overall,
+            live=True,
+            extra={"job_type": JOB_TYPE, "never_pawiva": True},
+        )
     return {
         "job_id": job["id"],
         "succeeded": result.succeeded,

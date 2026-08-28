@@ -220,6 +220,10 @@ from robie_job_engine.attachments import (
     proven_drive_share_identity,
     unmatched_drive_chip_refs,
 )
+from robie_job_engine.action_gate import (
+    format_action_gate_chat_note,
+    is_action_gate_refusal,
+)
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
     chat_message_is_related_only,
@@ -1293,6 +1297,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if await self._halt_failed_drive_ingestion(
             event, job_id, attachment_kwargs["attachment_refs"]
         ):
+            return
+        if await self._halt_action_gate_refuse(event, job_id):
             return
         store = JobStore(ROBIE_JOB_DB)
         job = await asyncio.to_thread(store.get_job, job_id)
@@ -2556,6 +2562,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 event, job_id, attachment_kwargs["attachment_refs"]
             ):
                 return
+            if job_id and await self._halt_action_gate_refuse(event, job_id):
+                return
             if related_only:
                 # A corrective reply may safely retarget the exact active
                 # zero-attempt Job to a bounded destination action. Execute
@@ -3034,6 +3042,26 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "attachment_refs": drive_refs,
             "drive_port": self._drive_file_port(sender_email) if drive_refs else None,
         }
+
+    async def _halt_action_gate_refuse(
+        self, event: MessageEvent, job_id: Optional[str]
+    ) -> bool:
+        """Post a dry refuse note and stop Hermes before any Ascend click."""
+        if not job_id:
+            return False
+        job = await asyncio.to_thread(JobStore(ROBIE_JOB_DB).get_job, job_id)
+        if not is_action_gate_refusal(job):
+            return False
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        if not chat_id:
+            return True
+        await self.send(
+            chat_id,
+            format_action_gate_chat_note(job),
+            reply_to=None,
+            metadata={"thread_id": getattr(event.source, "thread_id", None)},
+        )
+        return True
 
     async def _halt_failed_drive_ingestion(
         self, event: MessageEvent, job_id: str, drive_refs: List[Any]
