@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 import pytest
-from playwright.sync_api import sync_playwright
 
 from robie_job_engine.locator_registry import LocatorRegistry
 from robie_job_engine.playwright_tracing import PlaywrightTraceManager
@@ -62,6 +61,9 @@ EZLYNX_MOCK_HTML = """
 
 
 def test_route_interception_ascend_locators():
+    pw_sync = pytest.importorskip("playwright.sync_api")
+    sync_playwright = pw_sync.sync_playwright
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
@@ -93,6 +95,9 @@ def test_route_interception_ascend_locators():
 
 
 def test_route_interception_ezlynx_locators():
+    pw_sync = pytest.importorskip("playwright.sync_api")
+    sync_playwright = pw_sync.sync_playwright
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
@@ -114,6 +119,9 @@ def test_route_interception_ezlynx_locators():
 
 
 def test_playwright_tracing_produces_trace_zip(tmp_path: Path):
+    pw_sync = pytest.importorskip("playwright.sync_api")
+    sync_playwright = pw_sync.sync_playwright
+
     trace_mgr = PlaywrightTraceManager(artifact_root=tmp_path)
     job_id = "test-trace-job-001"
 
