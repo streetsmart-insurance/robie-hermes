@@ -25,5 +25,4 @@ release_root="$(find "${work_dir}" -mindepth 1 -maxdepth 1 -type d -print -quit)
 test -n "${release_root}"
 cd "${release_root}"
 PYTHONPYCACHEPREFIX="${work_dir}/pycache" python3 -m compileall -q robie_job_engine tests
-PYTHONPATH=. python3 scripts/check-job-type-gate.py check
-PYTHONPATH=. python3 -m unittest discover -s tests -v
+PYTHONPATH=. python3 -m robie_job_engine.regression_battery --ci

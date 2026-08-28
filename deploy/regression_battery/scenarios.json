@@ -1,0 +1,47 @@
+{
+  "updated": "2026-08-28",
+  "rule": "Every Production incident that was a NEW failure mode gets a named deterministic scenario in this catalog before we call the incident closed. That is how the simulator grows. Simulator passed still only means known scenarios did not regress — never that nothing is wrong.",
+  "maintain": "Add a named scenario the same day a NEW Production failure mode is found. Do not mark the incident closed until the scenario id exists in the battery. Update this list when a deploy or HITL shows a new class.",
+  "incidents": [
+    {
+      "id": "09d69760",
+      "class": "hitl-resume-orphan",
+      "new_failure_mode": true,
+      "scenario": "hitl-resume:re-lease-after-gateway-restart",
+      "closed": true,
+      "note": "AWAITING_HUMAN_INPUT lost the lease after a gateway restart. Resume must re-lease the same job."
+    },
+    {
+      "id": "da53765b",
+      "class": "hitl-resume-orphan",
+      "new_failure_mode": true,
+      "scenario": "hitl-resume:re-lease-after-gateway-restart",
+      "closed": true,
+      "note": "HITL resume posted an ack, then died as orphan_timeout because the generic Chat job was not re-claimed."
+    },
+    {
+      "id": "6cf6f6ae",
+      "class": "hitl-resume-orphan",
+      "new_failure_mode": true,
+      "scenario": "hitl-resume:re-lease-after-gateway-restart",
+      "closed": true,
+      "note": "Same HITL resume orphan class as da53765b."
+    },
+    {
+      "id": "30777947",
+      "class": "false-success",
+      "new_failure_mode": true,
+      "scenario": "false-success:complete-prose-zero-evidence",
+      "closed": true,
+      "note": "Worker looked done (busy Playwright / COMPLETE-shaped close-out) with 0 destination evidence."
+    },
+    {
+      "id": "c31f9c69",
+      "class": "false-success",
+      "new_failure_mode": true,
+      "scenario": "false-success:complete-prose-zero-evidence",
+      "closed": true,
+      "note": "COMPLETE-shaped / I-did-it close-out with zero destination evidence must stay UNVERIFIED or FAILED."
+    }
+  ]
+}

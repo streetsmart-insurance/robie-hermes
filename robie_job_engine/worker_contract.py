@@ -49,6 +49,16 @@ _SUCCESS_PROGRESS_MARKERS = (
     "the insurance policy is set up",
     "the destination looks good",
     "destination looks good",
+    "i did it",
+    "i've done it",
+    "the job is complete",
+    "job is complete",
+    "completed successfully",
+    "i completed",
+    "marked complete",
+    "status: complete",
+    "— complete",
+    "- complete",
 )
 
 

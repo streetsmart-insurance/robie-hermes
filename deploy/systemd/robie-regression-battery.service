@@ -1,0 +1,27 @@
+[Unit]
+Description=ROBIE regression battery (logic + Test replay; Chat on NEW fail only)
+After=local-fs.target network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_REGRESSION_CHAT_SPACE=spaces/AAQAZbLJO78
+# Isolated replay workdir. Must not be the Production jobs.db or any
+# /opt/streetsmart-hermes/ live path — quote_replay refuses those.
+Environment=ROBIE_REGRESSION_WORK_DIR=/var/lib/robie-regression-battery
+# Do not inherit Production job-db or ROBIE_ENV=PRODUCTION into the suite.
+# The module also scrubs these for child processes.
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.regression_battery --notify
+# Detection only. Do not merge. Do not deploy. Do not restart hermes-gateway.
+TimeoutStartSec=15min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/robie-regression-battery /opt/streetsmart-hermes/releases/current
+
+[Install]
+WantedBy=multi-user.target
