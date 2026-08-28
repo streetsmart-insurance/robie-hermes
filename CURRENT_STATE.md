@@ -104,6 +104,41 @@ already-existing DM). There is no outbound email API on `hermes-poc-01`.
 It does not `@robie`, bind, or restart Chrome / `hermes-gateway` / the
 browser.
 
+The regression battery (`robie_job_engine/regression_battery.py`) is the
+job-type / logic / Test-replay detector. It is not pre-flight and not
+post-job audit. It **only guarantees previously seen failures have not
+come back**. Simulator passed means nothing we have already seen is
+wrong — known scenarios did not regress — never that nothing is wrong.
+Every Production incident that was a NEW failure mode gets a named
+deterministic scenario in `deploy/regression_battery/scenarios.json`
+before we call the incident closed. That is how the simulator grows.
+
+`hermes-test-01` is **not** a clone of Production: different service-account
+permissions, isolated Job DB / browser / ingress, and Test must not read
+Production secrets. A Test all-clear is **not** a Production all-clear.
+A check that cannot be proven on Test because of a known
+permission / secret / browser gap is **INCONCLUSIVE** (never green).
+Chat may note that once. The living diff list is
+`deploy/regression_battery/parity.json` — update a row when a deploy or
+HITL shows drift; do not treat it as a one-time snapshot.
+
+GitHub Actions job `test` (same ROBIE verification gate family as
+`canonical-paths`) runs the battery on every PR via `--ci`. That runner
+never talks to EZLynx or `hermes-test-01`. After every Production zip
+pointer flip + `hermes-gateway` restart, the same drop-in starts
+`--notify --detach`. A NEW fail (not a known-accepted Test outcome, and
+not DESTROYED-latest + older ENABLED which is HEALTHY) posts one Robie
+Chat APP message to `spaces/AAQAZbLJO78` and may open a **draft** GitHub
+PR. Flaky / timeout / network evidence does not open a PR. The same
+failure signature comments on an existing unmerged auto-draft instead of
+piling another. HITL resume after a gateway restart must re-lease the
+same job (09d69760, da53765b, 6cf6f6ae) — no second job, no RETRY of
+leftover failed ids. COMPLETE-shaped / I-did-it prose with 0 destination
+evidence stays UNVERIFIED or FAILED (30777947, c31f9c69); Chat names
+that class if it returns. Owners: Carlo + Jake. Jake Approves, Carlo
+Confirms, Dusty pings if it sits. It does not `@robie`, bind, email the
+insured, merge, flip Production, or restart `hermes-gateway`.
+
 Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
 `guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
 four-answer audit to the existing Robie Chat APP reply. Production Chat already

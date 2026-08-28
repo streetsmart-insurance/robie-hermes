@@ -24,7 +24,11 @@ class VerifyReleasePathTests(unittest.TestCase):
     def test_verify_release_script_uses_durable_helper_not_tmp(self):
         text = VERIFY_SCRIPT.read_text()
         self.assertIn("durable_verify_workdir", text)
-        self.assertIn("check-job-type-gate.py check", text)
+        self.assertIn("regression_battery --ci", text)
+        battery = (
+            REPO_ROOT / "robie_job_engine" / "regression_battery.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("check-job-type-gate.py", battery)
         self.assertNotRegex(text, r"mktemp\s+-d(?:\s|$)")
         self.assertNotIn('temp_dir="$(mktemp -d)"', text)
         for ephemeral in ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"):
