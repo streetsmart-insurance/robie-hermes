@@ -52,7 +52,12 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
    Leave them only if they already equal that name. Unknown sender → HITL
    in dry English. Never leave Robie AI / SSRobie when requested_by is
    known. Unique locators. No `.first` / `.nth` / `.last`.
-6. Commercial customer radio is already selected by default.
+6. Commercial vs Personal radio from **line of business**, not the form
+   default and not LLC vs person-name. Commercial auto / commercial
+   package / BOP / CGL / workers comp / trucking / garage → Commercial
+   customer. Homeowners / personal auto / renters / personal umbrella /
+   dwelling fire → Personal customer. Missing or unclear LOB → HITL in
+   dry English. Unique radio locator. No `.first` / `.nth` / `.last`.
 7. Customer Name (Test account only), address autocomplete (exact row)
 8. Quote number, carrier, wholesaler, coverage type
 9. Dates, premium, taxes, Agency Fee field

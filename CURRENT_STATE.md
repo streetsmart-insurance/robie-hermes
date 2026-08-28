@@ -155,6 +155,8 @@ send. `ascend-roles:sender-not-robie-ai` overwrites Producer and
 Account Manager from `requested_by` (never Robie AI when Jake/Carlo
 sent the job). `ascend-new-program:wait-spinner` waits out the
 programs spinner and clicks only the unique primary + New program.
+`ascend-customer-type:lob` sets Commercial vs Personal from line of
+business (not the form default, not LLC vs person-name).
 GitHub CI asserts the punch list and that the artifact
 folder equals the job id. The live Ascend walk is `hermes-test-01` only.
 This tree does **not** flip that job type onto Production. Commercial

@@ -24,9 +24,14 @@ from .ascend_locator_audit import (
     require_unique_locator,
     save_and_lookup_quote_pdf,
 )
+from .ascend_customer_type import (
+    COMMERCIAL,
+    COMMERCIAL_LOCATOR,
+    resolve_customer_type,
+    unknown_lob_hitl,
+)
 from .ascend_sender_roles import (
     ACCOUNT_MANAGER_LOCATOR,
-    COMMERCIAL_LOCATOR,
     IMPORT_DOCUMENT_LOCATOR,
     NEW_PROGRAM_LOCATOR,
     PRODUCER_LOCATOR,
@@ -110,9 +115,16 @@ def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str
             lambda: page.get_by_label("Account Manager"),
             ACCOUNT_MANAGER_LOCATOR,
         ),
-        "commercial_customer": (
-            lambda: page.get_by_role("radio", name="Commercial customer"),
-            COMMERCIAL_LOCATOR,
+        "customer_type": (
+            lambda: page.get_by_role(
+                "radio",
+                name=(
+                    "Commercial customer"
+                    if resolve_customer_type(payload).get("resolved") == COMMERCIAL
+                    else "Personal customer"
+                ),
+            ),
+            resolve_customer_type(payload).get("locator") or COMMERCIAL_LOCATOR,
         ),
         "insured_fields": (
             lambda: page.get_by_label("Name"),
@@ -171,7 +183,11 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> None:
         wait_programs_ready(page)
         target.click()
         return
-    if spec_id == "commercial_customer":
+    if spec_id == "customer_type":
+        decision = resolve_customer_type(payload)
+        if decision.get("hitl_required") or not decision.get("resolved"):
+            raise RuntimeError(unknown_lob_hitl(lob=str(decision.get("lob") or "")))
+        require_unique_locator(target, locator=str(decision.get("locator") or ""))
         checked = getattr(target, "is_checked", None)
         if callable(checked) and checked():
             return

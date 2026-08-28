@@ -136,7 +136,7 @@ class ProgramsSpinnerWaitTests(unittest.TestCase):
         self.assertIn("+ New program", blob)
         self.assertIn("Jake Ferrara", blob)
         self.assertIn("Import document", blob)
-        self.assertIn("Commercial customer is already selected", blob)
+        self.assertIn("line of business", blob.casefold())
         self.assertNotIn(ROBIE_AI, blob)
 
 

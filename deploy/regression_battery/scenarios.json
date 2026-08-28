@@ -82,6 +82,14 @@
       "scenario": "ascend-new-program:wait-spinner",
       "closed": true,
       "note": "Programs page can hang on a spinner ~20s. Production eb96f620 first HITL was a vision miss after that wait, not a missing + New program. Wait until the unique primary button is visible and enabled and KPI/table are present. Never the caret. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+    },
+    {
+      "id": "ascend-customer-type-lob",
+      "class": "ascend-customer-type",
+      "new_failure_mode": true,
+      "scenario": "ascend-customer-type:lob",
+      "closed": true,
+      "note": "Carlo 2026-08-28: Commercial vs Personal is from line of business, not the form default and not LLC vs person-name. Missing LOB is HITL. Do not guess."
     }
   ]
 }

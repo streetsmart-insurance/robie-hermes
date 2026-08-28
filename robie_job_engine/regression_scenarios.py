@@ -82,6 +82,12 @@ ASCEND_SPINNER_CHAT = (
     "Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
 )
 
+ASCEND_CUSTOMER_TYPE_CHAT = (
+    "ASCEND customer type class returned: Commercial vs Personal is from "
+    "line of business, not the form default and not LLC vs person-name. "
+    "Missing LOB is HITL. Do not guess."
+)
+
 I_DID_IT_PROSE = (
     "I did it. The job is complete. Completed successfully — COMPLETE."
 )
@@ -103,6 +109,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "hitl-tone:dry-playwright-blocked",
         "ascend-roles:sender-not-robie-ai",
         "ascend-new-program:wait-spinner",
+        "ascend-customer-type:lob",
     }
 )
 
@@ -554,6 +561,15 @@ def run_wait_spinner_scenario() -> dict[str, Any]:
         return _fail("ascend-new-program:wait-spinner", f"{type(exc).__name__}: {exc}")
 
 
+def run_customer_type_lob_scenario() -> dict[str, Any]:
+    from .ascend_customer_type import run_customer_type_lob_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-customer-type:lob", f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -568,4 +584,5 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_hitl_tone_scenario())
     results.append(run_sender_not_robie_ai_scenario())
     results.append(run_wait_spinner_scenario())
+    results.append(run_customer_type_lob_scenario())
     return results

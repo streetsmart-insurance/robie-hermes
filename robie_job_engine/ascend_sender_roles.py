@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .ascend_customer_type import customer_type_instruction
 from .hitl import dry_playwright_hitl_text
 
 
@@ -317,9 +318,9 @@ def ascend_new_program_contract_lines(
     lines = [
         programs_page_ready_instruction(),
         ascend_role_overwrite_instruction(roles.get("resolved")),
+        customer_type_instruction(payload),
         (
             "Ascend Import document only (that panel has no Hawksoft/AMS360/Epic). "
-            "Commercial customer is already selected by default. "
             "Stop before Save program, Send email, Copy checkout, payment, or bind."
         ),
     ]

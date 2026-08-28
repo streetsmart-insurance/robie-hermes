@@ -106,6 +106,8 @@ Test-only Job Engine job on `hermes-test-01`:
   Manager from `requested_by`; never Robie AI when Jake or Carlo sent)
 - Programs spinner: `ascend-new-program:wait-spinner` (unique `+ New program`,
   never the caret; timeout is `PLAYWRIGHT_BLOCKED`)
+- Customer type: `ascend-customer-type:lob` (Commercial vs Personal from
+  line of business, not the form default and not LLC vs person-name)
 - Skill: `ascend-locator-artifact-audit` (`production_ready: false`)
 - N = **3** clean Test jobs still applies
 

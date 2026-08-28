@@ -42,6 +42,7 @@ from robie_job_engine.regression_battery import (
     run_secret_health_scenario,
 )
 from robie_job_engine.regression_scenarios import (
+    ASCEND_CUSTOMER_TYPE_CHAT,
     ASCEND_ROLES_CHAT,
     ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
@@ -60,6 +61,7 @@ from robie_job_engine.regression_scenarios import (
     run_hitl_tone_scenario,
     run_named_scenarios,
     run_same_day_scenario_rule,
+    run_customer_type_lob_scenario,
     run_sender_not_robie_ai_scenario,
     run_wait_spinner_scenario,
     run_ascend_locator_audit_scenario,
@@ -374,6 +376,7 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["hitl-tone:dry-playwright-blocked"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-roles:sender-not-robie-ai"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-new-program:wait-spinner"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-customer-type:lob"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -579,6 +582,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["eb96f620-vision-spinner"]["scenario"],
             "ascend-new-program:wait-spinner",
         )
+        self.assertEqual(
+            incidents["ascend-customer-type-lob"]["scenario"],
+            "ascend-customer-type:lob",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -661,6 +668,19 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             trigger="post-deploy",
         )
         self.assertIn(ASCEND_SPINNER_CHAT, spinner_text)
+        customer = run_customer_type_lob_scenario()
+        self.assertTrue(customer["ok"], customer.get("evidence"))
+        customer_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-customer-type:lob",
+                    "outcome": "FAILED",
+                    "evidence": "left Commercial default",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_CUSTOMER_TYPE_CHAT, customer_text)
 
     def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
         with durable_temporary_directory() as tmp:

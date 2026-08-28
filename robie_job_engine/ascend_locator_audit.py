@@ -126,8 +126,8 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
         "locator": 'get_by_label("Account Manager")',
     },
     {
-        "id": "commercial_customer",
-        "description": "Commercial customer radio (already selected by default)",
+        "id": "customer_type",
+        "description": "Commercial vs Personal radio from line of business (not the form default)",
         "locator": 'get_by_role("radio", name="Commercial customer")',
     },
     {
@@ -975,6 +975,30 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     )
                 )
             continue
+        if spec["id"] == "customer_type":
+            from .ascend_customer_type import resolve_customer_type
+
+            decision = resolve_customer_type(payload)
+            if decision.get("hitl_required") or not decision.get("resolved"):
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=(
+                            "HITL required; did not keep form default or guess from name "
+                            f"({decision.get('hitl_text') or 'missing LOB'})"
+                        ),
+                    )
+                )
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=str(decision.get("locator") or spec["locator"]),
+                        description=f"{spec['description']}: {decision['radio']}",
+                    )
+                )
+            continue
         if spec["id"] == "new_program":
             steps.append(
                 pass_step(
@@ -1282,6 +1306,7 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         checks.append(fail_step("eb96f620_sliced_concat", exc))
 
+    from .ascend_customer_type import run_customer_type_lob_scenario
     from .ascend_sender_roles import (
         run_sender_not_robie_ai_scenario,
         run_wait_spinner_scenario,
@@ -1298,6 +1323,12 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         pass_step("wait_spinner")
         if spinner_report.get("ok")
         else fail_step("wait_spinner", spinner_report.get("evidence") or "FAIL")
+    )
+    customer_report = run_customer_type_lob_scenario()
+    checks.append(
+        pass_step("customer_type_lob")
+        if customer_report.get("ok")
+        else fail_step("customer_type_lob", customer_report.get("evidence") or "FAIL")
     )
 
     missing = Path(artifacts) / job_id / "missing-quote.pdf"
