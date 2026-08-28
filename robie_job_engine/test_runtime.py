@@ -113,6 +113,7 @@ def build_runtime_engine(
         "submission-audit": EzlynxSubmissionAuditWorker(),
         "session-refresh": EzlynxSessionRefreshWorker(),
         "ascend-locator-audit": _UnavailableWorker(),
+        "ascend-api": _UnavailableWorker(),
     }
     verifiers: dict[str, Any] = {}
     if destination is not None:
@@ -130,13 +131,16 @@ def build_runtime_engine(
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
     from .ascend_locator_audit import AscendLocatorAuditVerifier, AscendLocatorAuditWorker
+    from .ascend_api import AscendCreateProgramVerifier, AscendCreateProgramWorker
     from .chat_verifiers import EzlynxSubmissionAuditVerifier
     from .skill_sync import DriveSkillSyncVerifier, DriveSkillSyncWorker
 
     workers["drive-skill-sync"] = DriveSkillSyncWorker()
     workers["ascend-locator-audit"] = AscendLocatorAuditWorker()
+    workers["ascend-api"] = AscendCreateProgramWorker()
     verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
     verifiers["ascend.locator_artifact_audit"] = AscendLocatorAuditVerifier()
+    verifiers["ascend.create_program"] = AscendCreateProgramVerifier()
 
     verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
         submission_readback or SubprocessSubmissionReadback()

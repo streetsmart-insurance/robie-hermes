@@ -145,6 +145,25 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
             "the worker cannot open the PDF it just saved",
         ),
     ),
+    "ascend.create_program": ExecutableSkillContract(
+        expected_destination_result=(
+            "the Ascend API returns a program id and every requested billable is "
+            "independently read back under that program"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="AscendCreateProgramVerifier",
+        maximum_attempts=1,
+        success_conditions=(
+            "a fresh authoritative GET matches the requested insured and assigned users",
+            "every created billable is freshly read back under the created program id",
+            "verification evidence is persisted",
+        ),
+        failure_conditions=(
+            "the API integration or matching environment host is not explicitly enabled",
+            "the bounded payload is incomplete or contains a forbidden account",
+            "the program or any requested billable cannot be independently read back",
+        ),
+    ),
 }
 
 
@@ -198,6 +217,11 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": True,
         "required": ("scenario", "report_only", "test_account_only"),
         "identity": ("report_id", "scenario"),
+    },
+    "ascend.create_program": {
+        "schema_verified": True,
+        "required": ("program", "billables", "execute"),
+        "identity": ("insured_id",),
     },
 }
 
