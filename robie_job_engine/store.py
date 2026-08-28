@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from .complete_guard import intended_destination_identity, require_complete_postcondition
 from .models import (
@@ -702,6 +702,29 @@ class JobStore:
                 ],
             ).fetchall()
         return [str(row["id"]) for row in rows]
+
+    def list_jobs_by_status(
+        self,
+        statuses: Iterable[JobStatus | str],
+    ) -> list[dict[str, Any]]:
+        """Return full job rows for the given statuses, oldest first."""
+        values = sorted(
+            {
+                item.value if isinstance(item, JobStatus) else str(item)
+                for item in statuses
+            }
+        )
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM jobs
+                    WHERE status IN ({placeholders})
+                    ORDER BY created_at""",
+                values,
+            ).fetchall()
+        return [self._decode_job(row) for row in rows]
 
     @staticmethod
     def _decode_job(row: sqlite3.Row) -> dict[str, Any]:

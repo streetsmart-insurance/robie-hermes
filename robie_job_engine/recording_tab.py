@@ -98,6 +98,52 @@ def _hint_matches(url: str, hint_url: str) -> bool:
     return left == right or left.endswith(right) or right.endswith(left) or right in left or left in right
 
 
+def page_identity(page: Any) -> str:
+    """Stable id for a Playwright page object. Used by capture and cleanup."""
+    guid = getattr(page, "_guid", None) or getattr(page, "guid", None)
+    return str(guid or id(page))
+
+
+def pages_as_candidates(pages: Iterable[Any]) -> list[tuple[TabCandidate, Any]]:
+    """Pair Playwright pages with TabCandidate rows. Skips empty objects."""
+    listed: list[tuple[TabCandidate, Any]] = []
+    for page in pages:
+        if page is None:
+            continue
+        listed.append(
+            (
+                TabCandidate(
+                    identity=page_identity(page),
+                    url=str(getattr(page, "url", "") or ""),
+                    title=str(getattr(page, "title", "") or ""),
+                ),
+                page,
+            )
+        )
+    return listed
+
+
+def select_playwright_page(
+    pages: Iterable[Any],
+    *,
+    previous_identity: str | None = None,
+    hint_url: str | None = None,
+) -> Any | None:
+    """Pick the Playwright page for the current job. Never pages[0] / first-ezlynx."""
+    listed = pages_as_candidates(pages)
+    chosen = select_recording_tab(
+        [item[0] for item in listed],
+        previous_identity=previous_identity,
+        hint_url=hint_url,
+    )
+    if chosen is None:
+        return None
+    for candidate, live in listed:
+        if candidate.identity == chosen.identity:
+            return live
+    return None
+
+
 def select_recording_tab(
     tabs: Iterable[TabCandidate],
     *,
