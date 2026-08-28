@@ -19,7 +19,15 @@ is “just trying it.”
    green before merge when it is a NEW failure mode or NEW site/workflow.
 2. **Dusty walks the live site himself** before a NEW website/portal is
    tried on a real account (same as the 2026-08-28 Ascend look).
-3. **This Test job on `hermes-test-01` (N=3).** Then Production zip.
+3. **This Test job on `hermes-test-01` is the Test gate.** A visual walk
+   on Dusty's computer is not the Test gate. PR 35 CI is not the Test
+   gate. Shipping a zip to `hermes-poc-01` is not the Test gate.
+   Production is not the first test. Jobs `807f8920` and `38c0fa79`
+   (2026-08-28) skipped this gate on a live client; the safety net
+   caught them. No new live Ascend / PAWIVA Production job until
+   **N=1** clean Test pass (Carlo asked for at least one). New
+   job-type / `production_ready` flip still needs N=3. Follow-tab is
+   separately proven.
 4. **After Production zip, run the PR 35 battery again.** Pointer-only
    is not live.
 5. Do not skip the battery or the Dusty walk because a model is “just
@@ -35,7 +43,8 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 
 ## Hard stops
 
-- Test account only. Never PAWIVA / 221398001 / a real client.
+- Test account only: Robie username + email 2SV. Never PAWIVA /
+  221398001 / a real client.
 - Stop **before** Save program, Send email, Copy checkout, payment, bind.
 - Playwright strict mode: every element needs a unique locator. A
   non-unique locator is **FAIL**. No Gemini. No `.first` / `.nth` / `.last`.
@@ -52,32 +61,46 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 ## Expected flow
 
 1. Open `https://dashboard.useascend.com/programs`
-2. Wait out the programs spinner (~20s is normal). Do not click until the
-   unique primary `+ New program` is visible and enabled AND the programs
-   table or KPI cards are present. Never the split-menu caret. If the
+2. Wait out the programs spinner (~12s was seen live; ~20s is still
+   normal). **Log the seconds** until the unique primary `+ New program`
+   is visible and enabled AND the programs table or KPI cards are
+   present. Missing seconds is FAIL. Never the split-menu caret. If the
    spinner or button is not ready past timeout: `PLAYWRIGHT_BLOCKED` then
    HITL. No Gemini.
 3. Click the unique primary `+ New program` only
-   (`get_by_role("button", name="+ New program", exact=True)`).
-4. Create a program (`/create/new`): **Import document** only (that panel
-   has no Hawksoft / AMS360 / Epic).
-5. Producer and Account Manager prefill `Robie AI`. Overwrite both with
-   the agent who SENT the job (`payload.requested_by` — Google Chat
-   `user_name` / `user_id`). Jake → Jake Ferrara. Carlo → Carlo Ferrara.
-   Leave them only if they already equal that name. Unknown sender → HITL
-   in dry English. Never leave Robie AI / SSRobie when requested_by is
-   known. Unique locators. No `.first` / `.nth` / `.last`.
-6. Commercial vs Personal radio from **line of business**, not the form
+   (`get_by_role("button", name="+ New program", exact=True)`). Then
+   `wait_for_url /create/new`. That is not follow-tab proof.
+4. Create a program (`/create/new`): **log** Import document vs Upload
+   document vs dropzone labels. Prefer Import document (that panel has
+   no Hawksoft / AMS360 / Epic). Unclear → dry HITL.
+5. **Log** the Producer and Account Manager prefills (live default is
+   `Robie AI`). Overwrite both with the agent who SENT the job
+   (`payload.requested_by` — Google Chat `user_name` / `user_id`).
+   Jake → Jake Ferrara. Carlo → Carlo Ferrara. Leave them only if they
+   already equal that name. **FAIL** if they stay Robie AI when
+   requested_by is Carlo Ferrara or Jake Ferrara. Unknown sender → HITL
+   in dry English. Unique locators. No `.first` / `.nth` / `.last`.
+6. Open each create-form combobox the job would use (Producer, Account
+   Manager, Carrier / Writing company, Coverage type, State, etc.).
+   The visible list must have a **unique** locator for the intended
+   option (`get_by_role("option", name=…, exact=True)`). Two options
+   matching the same selector is `PLAYWRIGHT_BLOCKED` (job `38c0fa79`).
+   Log the blocked field. Dry HITL if the intended option is missing.
+   Carlo will not RETRY `38c0fa79`. No `.first` / `.nth` / `.last`.
+7. Commercial vs Personal radio from **line of business**, not the form
    default and not LLC vs person-name. Commercial auto / commercial
    package / BOP / CGL / workers comp / trucking / garage → Commercial
    customer. Homeowners / personal auto / renters / personal umbrella /
    dwelling fire → Personal customer. Missing or unclear LOB → HITL in
    dry English. Unique radio locator. No `.first` / `.nth` / `.last`.
-7. Customer Name (Test account only), address autocomplete (exact row)
-8. Quote number, carrier, wholesaler, coverage type
-9. Dates, premium, taxes, Agency Fee field
-10. Stop before Save program / Send email / Copy checkout / payment / bind
-11. Save and reopen the quote PDF under `{artifact_root}/{job_id}/`
+8. Customer Name (Test account only), address autocomplete (exact row)
+9. Quote number, carrier, wholesaler, coverage type (unique listbox
+   option — see step 6)
+10. Dates, premium, taxes. **Log** the Agency Fee default (expect $0.00
+   / empty). If the fee field exists, **set 500** in this Test run.
+11. Stop before Save program / Send email / Copy checkout / payment / bind
+    (same PR 37 stop; Loom `ascend-finance` is not overwritten).
+12. Save and reopen the quote PDF under `{artifact_root}/{job_id}/`
 
 ## Where it runs
 
@@ -90,6 +113,8 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 
 ## Punch list
 
-Each step is PASS or FAIL with the locator or artifact path and the exact
-error (strict mode violation, TimeoutError, missing artifact dir, concatenated
-job-id folder, missing PDF after save).
+Each step is PASS or FAIL with the locator or artifact path, the logged
+default / seconds / labels when the step has them, and the exact error
+(strict mode violation, TimeoutError, missing artifact dir, concatenated
+job-id folder, missing PDF after save, missing spinner seconds, unlogged
+role or Agency Fee default).

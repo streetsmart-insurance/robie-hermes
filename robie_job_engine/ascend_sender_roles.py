@@ -267,8 +267,9 @@ def programs_page_ready_instruction() -> str:
         "On https://dashboard.useascend.com/programs do not click + New program "
         "until the unique primary button is visible and enabled AND the programs "
         "table or KPI cards (Programs at risk) are present — the page can hang "
-        f"on a spinner ~20 seconds. Timeout {PROGRAMS_READY_TIMEOUT_MS}ms. "
-        f"Locator: {NEW_PROGRAM_LOCATOR}. Never the split-menu caret. "
+        f"on a spinner ~12–20 seconds. Log those seconds. Timeout "
+        f"{PROGRAMS_READY_TIMEOUT_MS}ms. Locator: {NEW_PROGRAM_LOCATOR}. "
+        "Never the split-menu caret. After click, wait_for_url /create/new. "
         "If spinner or button is not ready past timeout: "
         f"{programs_spinner_timeout_error()} then HITL. "
         "No Gemini. No .first/.nth/.last."
@@ -315,15 +316,19 @@ def ascend_new_program_contract_lines(
         return []
     requested = requested_by_from_payload(payload)
     roles = roles_for_requested_by(requested)
+    from .ascend_create_defaults import create_program_contract_lines
+
     lines = [
         programs_page_ready_instruction(),
         ascend_role_overwrite_instruction(roles.get("resolved")),
         customer_type_instruction(payload),
         (
             "Ascend Import document only (that panel has no Hawksoft/AMS360/Epic). "
+            "Log Import document vs Upload document vs dropzone. "
             "Stop before Save program, Send email, Copy checkout, payment, or bind."
         ),
     ]
+    lines.extend(create_program_contract_lines(roles.get("resolved")))
     if roles.get("hitl_required"):
         lines.append(roles["hitl_text"])
     return lines
@@ -360,6 +365,17 @@ def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
         )
         if ok is not None:
             errors.append(f"{requested!r} rejected correct {expected}: {ok}")
+        from .ascend_create_defaults import log_role_defaults
+
+        logged = log_role_defaults(
+            requested_by=requested,
+            producer=ROBIE_AI,
+            account_manager=ROBIE_AI,
+        )
+        if logged.get("producer_default") != ROBIE_AI or not logged.get("logged"):
+            errors.append(f"{requested!r} did not log Robie AI prefills")
+        if logged.get("error") is None:
+            errors.append(f"{requested!r} allowed leaving logged Robie AI prefills")
     for unknown in ("Robie AI", "SSRobie", "robie@streetsmart.insurance", "", "Google Chat user"):
         roles = roles_for_requested_by(unknown)
         if roles.get("resolved") is not None or not roles.get("hitl_required"):
@@ -381,7 +397,8 @@ def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
         "outcome": "PASS" if ok else "FAILED",
         "evidence": (
             "Jake/Carlo requested_by overwrite Producer and Account Manager; "
-            "unknown sender HITL and never writes Robie AI"
+            "log the Robie AI prefill; FAIL if it stays; unknown sender HITL "
+            "and never writes Robie AI"
             if ok
             else "; ".join(errors)
         ),

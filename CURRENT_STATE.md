@@ -150,10 +150,34 @@ Written gate (Carlo 2026-08-28): (1) PR 35 battery (CI on the PR) must
 be green before merge for a NEW failure mode or NEW site/workflow;
 (2) Dusty walks the live site himself before a NEW website/portal is
 tried on a real account (same as the 2026-08-28 Ascend look); (3) Test
-job on `hermes-test-01` (N=3), then Production zip; (4) after Production
-zip, run the PR 35 battery again — pointer-only is not live; (5)
-ChatGPT / Claude / Jake-paste must follow this written gate. Do not skip
-the battery or the Dusty walk because a model is “just trying it.”
+job on `hermes-test-01` (N=3 for a new job-type / `production_ready`
+flip), then Production zip; (4) after Production zip, run the PR 35
+battery again — pointer-only is not live; (5) ChatGPT / Claude /
+Jake-paste must follow this written gate. Do not skip the battery or
+the Dusty walk because a model is “just trying it.”
+
+**Test gate (Carlo 2026-08-28 — ChatGPT / Claude / Jake-paste cannot skip this):**
+
+Ascend / premium-finance / PAWIVA changes must get a clean pass on
+hermes-test-01 (Test account, Robie login, never PAWIVA 221398001,
+never a live client) BEFORE any Production Chat job on a real account.
+Jobs 807f8920 and 38c0fa79 on 2026-08-28 were the first test of the
+Ascend change on a live client. The safety net (HITL / UNVERIFIED /
+no destination evidence) caught them. The Test gate was skipped. That
+is a process miss. Production is not the first test.
+
+A visual walk on Dusty's computer is not the Test gate. PR 35 CI is
+not the Test gate. Shipping a zip to hermes-poc-01 is not the Test
+gate. The Test gate is a clean Job Engine job on hermes-test-01.
+
+**No new live Ascend / PAWIVA Production job until N=1 clean Test
+Ascend pass.** Carlo asked for at least one. That Test job is
+`ascend.locator_artifact_audit` on `hermes-test-01` with the Robie
+Test-account username + email 2SV — never PAWIVA / 221398001 / a live
+client, never bind, never email. Follow-tab (`select_recording_tab` /
+`follow_screencast_frames`) is separately proven and is not this
+audit. A punch-list PASS is not follow-tab evidence. This tree does
+**not** flip Production and does **not** ship a Production zip.
 
 `ascend:locator-and-artifact-audit` is the named Test-only Job Engine
 scenario for a NEW site/workflow (Ascend locator walk + quote-PDF
@@ -161,19 +185,28 @@ artifact path). `artifact-path:concat-job-id-eb96f620` is the
 deterministic FAIL for Production job `eb96f620` (lookup was
 `{job_id[:-11]}{artifact_id}/`; required `{full_job_id}/`).
 `hitl-tone:dry-playwright-blocked` rewrites cowboy/slang HITL before
-send. `ascend-roles:sender-not-robie-ai` overwrites Producer and
-Account Manager from `requested_by` (never Robie AI when Jake/Carlo
-sent the job). `ascend-new-program:wait-spinner` waits out the
-programs spinner and clicks only the unique primary + New program.
+send. `ascend-roles:sender-not-robie-ai` logs the Producer and Account
+Manager prefills and FAILs if they stay Robie AI when Jake/Carlo sent
+the job. `ascend-new-program:wait-spinner` waits out the programs
+spinner and clicks only the unique primary + New program.
+`ascend-new-program:spinner-timing` logs seconds until that primary is
+ready and `wait_for_url /create/new` (live PAWIVA was ~12s).
+`ascend-create:agency-fee-default` logs the Agency Fee default (expect
+$0.00 / empty), sets 500 if the field exists, then stops before Save.
+`ascend-create:unique-listbox-option` is job `38c0fa79`: open each
+create-form combobox (Producer, Account Manager, Carrier / Writing
+company, Coverage type, State, etc.) and require a unique locator for
+the intended option. Two matches is PLAYWRIGHT_BLOCKED; log the blocked
+field. Carlo will not RETRY `38c0fa79`.
 `ascend-customer-type:lob` sets Commercial vs Personal from line of
 business (not the form default, not LLC vs person-name).
 GitHub CI asserts the punch list and that the artifact
 folder equals the job id. The live Ascend walk is `hermes-test-01` only
-(N=3 Test jobs), after the PR 35 battery is green and after Dusty
-walks the live site himself. This tree does **not** flip that job type
-onto Production. Commercial auto already on Production is not a free
-pass. N=3 clean Test jobs still applies. Loom `ascend-finance` is never
-overwritten.
+after the PR 35 battery is green and after Dusty walks the live site
+himself. This tree does **not** flip that job type onto Production.
+Commercial auto already on Production is not a free pass. New job-type
+`production_ready` still needs N=3 clean Test jobs. Loom
+`ascend-finance` is never overwritten.
 
 `hermes-test-01` is **not** a clone of Production: different service-account
 permissions, isolated Job DB / browser / ingress, and Test must not read

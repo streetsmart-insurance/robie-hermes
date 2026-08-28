@@ -42,7 +42,9 @@ from robie_job_engine.regression_battery import (
     run_secret_health_scenario,
 )
 from robie_job_engine.regression_scenarios import (
+    ASCEND_AGENCY_FEE_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
+    ASCEND_LISTBOX_CHAT,
     ASCEND_ROLES_CHAT,
     ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
@@ -55,16 +57,19 @@ from robie_job_engine.regression_scenarios import (
     close_new_failure_incident,
     IncidentCloseError,
     load_scenario_catalog,
+    run_agency_fee_default_scenario,
+    run_ascend_locator_audit_scenario,
     run_concat_job_id_eb96f620_scenario,
+    run_customer_type_lob_scenario,
     run_false_success_scenario,
     run_hitl_resume_scenarios,
     run_hitl_tone_scenario,
     run_named_scenarios,
     run_same_day_scenario_rule,
-    run_customer_type_lob_scenario,
     run_sender_not_robie_ai_scenario,
+    run_spinner_timing_scenario,
+    run_unique_listbox_option_scenario,
     run_wait_spinner_scenario,
-    run_ascend_locator_audit_scenario,
 )
 from robie_job_engine.worker_contract import claims_unverified_destination_progress
 from robie_job_engine.test_runtime import ProductionGuardError
@@ -376,6 +381,9 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["hitl-tone:dry-playwright-blocked"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-roles:sender-not-robie-ai"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-new-program:wait-spinner"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-new-program:spinner-timing"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-create:agency-fee-default"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-create:unique-listbox-option"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-customer-type:lob"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
@@ -452,6 +460,8 @@ class ParityAndScopeTests(unittest.TestCase):
             self.assertIn("do not call 36 the simulator", flat)
             self.assertIn("Dusty walks the live site", flat)
             self.assertIn("just trying it", flat)
+            self.assertIn("N=1", flat)
+            self.assertIn("follow-tab", flat.casefold())
         self.assertTrue(PARITY_PATH.is_file())
         self.assertTrue(SCENARIOS_PATH.is_file())
 
@@ -591,6 +601,18 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["ascend-customer-type-lob"]["scenario"],
             "ascend-customer-type:lob",
         )
+        self.assertEqual(
+            incidents["pawiva-spinner-seconds"]["scenario"],
+            "ascend-new-program:spinner-timing",
+        )
+        self.assertEqual(
+            incidents["pawiva-agency-fee-default"]["scenario"],
+            "ascend-create:agency-fee-default",
+        )
+        self.assertEqual(
+            incidents["38c0fa79"]["scenario"],
+            "ascend-create:unique-listbox-option",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -686,6 +708,49 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             trigger="post-deploy",
         )
         self.assertIn(ASCEND_CUSTOMER_TYPE_CHAT, customer_text)
+        timing = run_spinner_timing_scenario()
+        self.assertTrue(timing["ok"], timing.get("evidence"))
+        self.assertEqual(timing["id"], "ascend-new-program:spinner-timing")
+        fee = run_agency_fee_default_scenario()
+        self.assertTrue(fee["ok"], fee.get("evidence"))
+        self.assertEqual(fee["id"], "ascend-create:agency-fee-default")
+        timing_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-new-program:spinner-timing",
+                    "outcome": "FAILED",
+                    "evidence": "seconds not logged",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_SPINNER_CHAT, timing_text)
+        fee_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-create:agency-fee-default",
+                    "outcome": "FAILED",
+                    "evidence": "default not logged",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_AGENCY_FEE_CHAT, fee_text)
+        listbox = run_unique_listbox_option_scenario()
+        self.assertTrue(listbox["ok"], listbox.get("evidence"))
+        self.assertEqual(listbox["id"], "ascend-create:unique-listbox-option")
+        listbox_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-create:unique-listbox-option",
+                    "outcome": "FAILED",
+                    "evidence": "selector not unique",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_LISTBOX_CHAT, listbox_text)
+        self.assertIn("38c0fa79", listbox_text)
 
     def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
         with durable_temporary_directory() as tmp:

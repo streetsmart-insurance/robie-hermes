@@ -137,7 +137,10 @@ class ProgramsSpinnerWaitTests(unittest.TestCase):
         self.assertIn("Jake Ferrara", blob)
         self.assertIn("Import document", blob)
         self.assertIn("line of business", blob.casefold())
-        self.assertNotIn(ROBIE_AI, blob)
+        self.assertIn("seconds", blob.casefold())
+        self.assertIn("/create/new", blob)
+        self.assertIn("500", blob)
+        self.assertNotIn("write Robie AI", blob)
 
 
 class ExistingGuardsStillHoldTests(unittest.TestCase):
