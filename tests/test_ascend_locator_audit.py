@@ -74,6 +74,19 @@ class UniqueLocatorTests(unittest.TestCase):
         self.assertIn("strict mode violation", step.error or "")
         self.assertIn("New program", step.locator)
 
+    def test_too_soon_zero_element_strict_mode_is_fail(self):
+        step = classify_locator_failure(
+            RuntimeError(
+                'strict mode violation: locator resolved to 0 elements: '
+                'get_by_role("button", name="Import document", exact=True)'
+            ),
+            locator='get_by_role("button", name="Import document", exact=True)',
+            step_id="import_document",
+        )
+        self.assertEqual(step.status, "FAIL")
+        self.assertIn("strict mode violation", step.error or "")
+        self.assertIn("resolved to 0 elements", step.error or "")
+
     def test_positional_first_nth_last_is_fail(self):
         for locator in (
             'page.locator("button").first',
@@ -102,6 +115,16 @@ class UniqueLocatorTests(unittest.TestCase):
             require_unique_locator(_CountTarget(2))
         self.assertIn("strict mode violation", str(raised.exception))
         require_unique_locator(_CountTarget(1))
+
+    def test_too_soon_zero_element_lookup_is_fail(self):
+        with self.assertRaises(UniqueLocatorError) as raised:
+            require_unique_locator(
+                _CountTarget(0),
+                locator='get_by_role("button", name="Import document", exact=True)',
+            )
+        text = str(raised.exception)
+        self.assertIn("strict mode violation", text)
+        self.assertIn("resolved to 0 elements", text)
 
     def test_no_gemini_and_no_positional_in_audit_source(self):
         source = Path("robie_job_engine/ascend_locator_audit.py").read_text(

@@ -36,7 +36,11 @@ from .playwright_write_guard import locator_is_positional_guess, locator_selecto
 from .quote_replay import is_live_hermes_path, refuse_production_targets
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, ProductionGuardError, current_robie_env
 from .store import JobStore
-from .ascend_sender_roles import NEW_PROGRAM_ACCESSIBLE_NAME, NEW_PROGRAM_LOCATOR
+from .ascend_sender_roles import (
+    IMPORT_DOCUMENT_LOCATOR,
+    NEW_PROGRAM_ACCESSIBLE_NAME,
+    NEW_PROGRAM_LOCATOR,
+)
 
 
 JOB_TYPE = "ascend.locator_artifact_audit"
@@ -77,6 +81,7 @@ MINIMAL_PDF = (
 STRICT_MARKERS = (
     "strict mode violation",
     "resolved to 2 elements",
+    "resolved to 0 elements",
     "resolved to more than one",
     "locator resolved to",
 )
@@ -113,8 +118,11 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
     },
     {
         "id": "import_document",
-        "description": "Log Import document vs Upload document vs dropzone labels",
-        "locator": 'get_by_role("button", name="Import document")',
+        "description": (
+            "Wait until unique Import document is visible after /create/new "
+            "(log seconds); then log Import vs Upload vs dropzone"
+        ),
+        "locator": IMPORT_DOCUMENT_LOCATOR,
     },
     {
         "id": "unique_listbox_options",
@@ -982,6 +990,7 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
         classify_document_labels,
         log_role_defaults,
         refuse_unexpected_agency_fee_default,
+        require_create_form_seconds_logged,
         require_create_new_url,
         require_spinner_seconds_logged,
         test_agency_fee_set_value,
@@ -1000,6 +1009,7 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
     fixture_labels = classify_document_labels(
         payload.get("fixture_document_labels") or "Import document"
     )
+    fixture_form_seconds = payload.get("fixture_create_form_seconds", 2.0)
     for spec in FLOW_STEPS:
         if spec["id"].startswith("quote_pdf"):
             continue
@@ -1107,14 +1117,28 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                 )
             continue
         if spec["id"] == "import_document":
-            steps.append(
-                pass_step(
-                    spec["id"],
-                    locator=spec["locator"],
-                    description=f"{spec['description']}: {fixture_labels['labels']}",
-                    observed=fixture_labels,
+            leak = require_create_form_seconds_logged(fixture_form_seconds)
+            observed = {
+                **fixture_labels,
+                "seconds": fixture_form_seconds,
+                "primary": "Import document",
+            }
+            if leak:
+                steps.append(
+                    fail_step(spec["id"], leak, locator=spec["locator"], observed=observed)
                 )
-            )
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=(
+                            f"{spec['description']}: {fixture_form_seconds}s "
+                            f"{fixture_labels['labels']}"
+                        ),
+                        observed=observed,
+                    )
+                )
             continue
         if spec["id"] == "unique_listbox_options":
             from .ascend_create_combobox import (
@@ -1523,6 +1547,7 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         run_agency_fee_default_scenario,
         run_role_default_log_scenario,
         run_spinner_timing_scenario,
+        run_too_soon_zero_element_scenario,
     )
     from .ascend_customer_type import run_customer_type_lob_scenario
     from .ascend_sender_roles import (
@@ -1553,6 +1578,14 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         pass_step("spinner_timing")
         if timing_report.get("ok")
         else fail_step("spinner_timing", timing_report.get("evidence") or "FAIL")
+    )
+    too_soon_report = run_too_soon_zero_element_scenario()
+    checks.append(
+        pass_step("too_soon_zero_element")
+        if too_soon_report.get("ok")
+        else fail_step(
+            "too_soon_zero_element", too_soon_report.get("evidence") or "FAIL"
+        )
     )
     fee_report = run_agency_fee_default_scenario()
     checks.append(

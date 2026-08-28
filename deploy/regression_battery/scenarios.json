@@ -116,6 +116,14 @@
       "note": "Live PAWIVA job: Agency Fee defaulted to $0.00 on /create/new. Test audit must log that default, expect $0.00 / empty, set 500 if the field exists, then STOP before Save. Never bind. Never email. Never PAWIVA on the Test pass."
     },
     {
+      "id": "ascend-import-document-too-soon",
+      "class": "ascend-create",
+      "new_failure_mode": true,
+      "scenario": "ascend-create:too-soon-zero-element",
+      "closed": true,
+      "note": "Live Test audit after PR 41: New program PASSed and wait_for_url /create/new, then import_document FAILed strict mode get_by_role(button, name='Import document') resolved to 0 elements. A later dump of the same /create/new page showed the unique Import document button visible+enabled (exact ASCII, space 32). Same class as the programs spinner: URL change is not form-ready. Wait for the unique primary; log seconds. No Gemini. Never PAWIVA."
+    },
+    {
       "id": "38c0fa79",
       "class": "ascend-create",
       "new_failure_mode": true,

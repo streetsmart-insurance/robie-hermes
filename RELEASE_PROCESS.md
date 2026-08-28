@@ -136,7 +136,11 @@ Job Engine job must pass on `hermes-test-01`:
 - Accessible name: `ascend-new-program:accessible-name` (job `f7653a85`:
   dumped name is exactly `New program`; plus-exact locator must FAIL)
 - Spinner timing: `ascend-new-program:spinner-timing` (log seconds until the
-  primary is ready; click primary not caret; `wait_for_url /create/new`)
+  primary is ready; click primary not caret; `wait_for_url /create/new`;
+  the create form is not instant after that URL)
+- Create-form ready: `ascend-create:too-soon-zero-element` (after
+  `/create/new` wait until unique exact `Import document` is visible;
+  log seconds; a too-soon 0-element lookup is FAIL)
 - Agency Fee: `ascend-create:agency-fee-default` (log the default, expect
   $0.00 / empty; set 500 if the field exists; then STOP before Save)
 - Unique listbox: `ascend-create:unique-listbox-option` (job `38c0fa79`:

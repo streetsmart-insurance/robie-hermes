@@ -23,12 +23,19 @@ from typing import Any
 from .ascend_sender_roles import (
     ACCOUNT_MANAGER_LOCATOR,
     CARLO_FERRARA,
+    CREATE_FORM_READY_TIMEOUT_MS,
     CREATE_URL,
+    DUMPED_CREATE_FORM_IMPORT_BUTTON,
+    IMPORT_DOCUMENT_ACCESSIBLE_NAME,
+    IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES,
+    IMPORT_DOCUMENT_LOCATOR,
     JAKE_FERRARA,
     NEW_PROGRAM_LOCATOR,
     PLUS_PREFIXED_NEW_PROGRAM_LOCATOR,
     PRODUCER_LOCATOR,
     ROBIE_AI,
+    create_form_timeout_error,
+    import_document_locator_is_unique_primary,
     locator_is_new_program_caret,
     new_program_locator_is_unique_primary,
     refuse_robie_ai_when_sender_known,
@@ -40,6 +47,7 @@ from .hitl import dry_playwright_hitl_text
 
 SPINNER_TIMING_SCENARIO_ID = "ascend-new-program:spinner-timing"
 AGENCY_FEE_SCENARIO_ID = "ascend-create:agency-fee-default"
+TOO_SOON_ZERO_ELEMENT_SCENARIO_ID = "ascend-create:too-soon-zero-element"
 ROLES_DEFAULTS_SCENARIO_ID = "ascend-roles:sender-not-robie-ai"
 DOCUMENT_LABELS_ID = "import_document"
 
@@ -77,13 +85,22 @@ PAWIVA_SPINNER_SECONDS = 12.0
 SPINNER_TIMING_CHAT = (
     "ASCEND programs spinner timing class returned: log seconds until the "
     "unique primary New program is ready; click that primary, never the "
-    "caret; wait_for_url /create/new. Missing seconds is FAIL."
+    "caret; wait_for_url /create/new. The create form is not instant after "
+    "that URL. Missing seconds is FAIL."
 )
 
 AGENCY_FEE_CHAT = (
     "ASCEND Agency Fee default class returned: log the /create/new default "
     "(expect $0.00 or empty); set 500 in the Test run if the field exists; "
     "then STOP before Save program / Send email / checkout / payment / bind."
+)
+
+TOO_SOON_ZERO_ELEMENT_CHAT = (
+    "ASCEND create/new too-soon 0-element class returned: after "
+    "wait_for_url /create/new the form is not ready. Wait until the unique "
+    "exact Import document primary is visible; log seconds. Immediate "
+    "get_by_role(button, name='Import document') resolving to 0 elements "
+    "is FAIL. No Gemini. No .first/.nth/.last."
 )
 
 
@@ -93,6 +110,54 @@ def spinner_seconds(started_monotonic: float, ready_monotonic: float) -> float:
     if raw < 0:
         raw = 0.0
     return round(raw, 3)
+
+
+def require_create_form_seconds_logged(seconds: Any) -> str | None:
+    """Missing / non-numeric create-form seconds is FAIL. Same class as spinner."""
+    if seconds is None or seconds == "":
+        return (
+            f"{TOO_SOON_ZERO_ELEMENT_SCENARIO_ID} FAIL: /create/new form "
+            "ready seconds were not logged"
+        )
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return (
+            f"{TOO_SOON_ZERO_ELEMENT_SCENARIO_ID} FAIL: create-form seconds "
+            f"{seconds!r} is not a number"
+        )
+    if value < 0:
+        return (
+            f"{TOO_SOON_ZERO_ELEMENT_SCENARIO_ID} FAIL: create-form seconds "
+            f"{value} is negative"
+        )
+    return None
+
+
+def too_soon_zero_element_lookup_is_fail(count: int) -> bool:
+    """Immediate Import document count of 0 after URL change is FAIL."""
+    return int(count) == 0
+
+
+def classify_too_soon_zero_element(
+    count: int, *, locator: str = IMPORT_DOCUMENT_LOCATOR
+) -> str:
+    """Same wording the live walk uses: strict mode, resolved to 0 elements."""
+    return (
+        f"strict mode violation: locator resolved to {int(count)} elements: "
+        f"{locator}"
+    )
+
+
+def create_form_ready_instruction() -> str:
+    return (
+        f"After {WAIT_FOR_URL} the create form is not instant. "
+        "Do not query Import document until the unique primary button is "
+        f"visible and enabled. Locator: {IMPORT_DOCUMENT_LOCATOR}. "
+        "Log those seconds. A too-soon 0-element lookup is FAIL. "
+        f"Timeout {CREATE_FORM_READY_TIMEOUT_MS}ms is PLAYWRIGHT_BLOCKED then HITL. "
+        "No Gemini. No .first/.nth/.last."
+    )
 
 
 def require_spinner_seconds_logged(seconds: Any) -> str | None:
@@ -248,7 +313,9 @@ def programs_spinner_timing_instruction() -> str:
         "On https://dashboard.useascend.com/programs log the seconds until "
         f"the unique primary {NEW_PROGRAM_LOCATOR} is visible and enabled. "
         "Click that primary, never the split-menu caret. Then "
-        f"{WAIT_FOR_URL} ({CREATE_URL}). A ~12s spinner is normal. "
+        f"{WAIT_FOR_URL} ({CREATE_URL}). The create form is not instant after "
+        "that URL — wait until unique exact Import document is visible and "
+        "log those seconds. A ~12s spinner is normal. "
         "Missing seconds is FAIL. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
     )
 
@@ -265,7 +332,9 @@ def agency_fee_instruction() -> str:
 
 def document_label_instruction() -> str:
     return (
-        f"On {CREATE_URL} log whether the page shows "
+        f"After {WAIT_FOR_URL} wait until unique exact "
+        f"{IMPORT_DOCUMENT_LOCATOR} is visible and enabled. Log those seconds. "
+        "A too-soon 0-element lookup is FAIL. Then log whether the page shows "
         f"{IMPORT_DOCUMENT_LABEL}, {UPLOAD_DOCUMENT_LABEL}, and/or a "
         "dropzone. Prefer Import document. Do not guess. Dry HITL if unclear."
     )
@@ -347,6 +416,131 @@ def run_spinner_timing_scenario() -> dict[str, Any]:
         "observed": {
             "seconds": PAWIVA_SPINNER_SECONDS,
             "wait_for_url": CREATE_PATH,
+        },
+    }
+
+
+def run_too_soon_zero_element_scenario() -> dict[str, Any]:
+    """Named scenario: too-soon 0-element Import document lookup is FAIL.
+
+    After PR 41 the live Test walk PASSed New program and wait_for_url
+    /create/new, then FAILed import_document: unique exact Import document
+    resolved to 0 elements. A later dump of the same page showed the
+    button. URL change is not form-ready. Same class as the programs spinner.
+    """
+    from pathlib import Path
+
+    from .ascend_locator_audit import FLOW_STEPS, UniqueLocatorError, require_unique_locator
+
+    errors: list[str] = []
+    instruction = create_form_ready_instruction()
+    if "seconds" not in instruction.casefold():
+        errors.append("instruction missing seconds log")
+    if WAIT_FOR_URL not in instruction and CREATE_PATH not in instruction:
+        errors.append("instruction missing wait_for_url /create/new")
+    if "0-element" not in instruction.casefold() and "0 element" not in instruction.casefold():
+        errors.append("instruction missing too-soon 0-element FAIL")
+    if IMPORT_DOCUMENT_LOCATOR not in instruction:
+        errors.append("instruction missing unique exact Import document locator")
+    if "gemini" not in instruction.casefold():
+        errors.append("instruction missing no-Gemini")
+    if ".first" not in instruction and "nth" not in instruction.casefold():
+        errors.append("instruction does not refuse .first/.nth/.last")
+    if not import_document_locator_is_unique_primary(IMPORT_DOCUMENT_LOCATOR):
+        errors.append("IMPORT_DOCUMENT_LOCATOR is not unique exact Import document")
+    if import_document_locator_is_unique_primary("page.locator(\"button\").first"):
+        errors.append(".first locator was accepted as Import document")
+    dumped = str(DUMPED_CREATE_FORM_IMPORT_BUTTON["accessible_name"])
+    dumped_codes = tuple(ord(char) for char in dumped)
+    expected_codes = tuple(
+        DUMPED_CREATE_FORM_IMPORT_BUTTON["accessible_name_char_codes"]
+    )
+    if dumped != IMPORT_DOCUMENT_ACCESSIBLE_NAME:
+        errors.append(f"dumped Import document name drifted: {dumped!r}")
+    if dumped_codes != expected_codes:
+        errors.append(f"dumped Import document char codes drifted: {dumped_codes}")
+    if dumped_codes != IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES:
+        errors.append("IMPORT_DOCUMENT_ACCESSIBLE_NAME char codes drifted")
+    if 32 not in dumped_codes:
+        errors.append("dumped Import document name is missing ASCII space 32")
+    if not too_soon_zero_element_lookup_is_fail(0):
+        errors.append("0-element too-soon lookup was not classified as FAIL")
+    if too_soon_zero_element_lookup_is_fail(1):
+        errors.append("unique Import document count of 1 was classified as FAIL")
+    zero_error = classify_too_soon_zero_element(0)
+    if "resolved to 0 elements" not in zero_error:
+        errors.append("0-element classifier missing resolved-to-0 wording")
+    if "strict mode" not in zero_error.casefold():
+        errors.append("0-element classifier missing strict mode")
+
+    class _ZeroTarget:
+        def count(self) -> int:
+            return 0
+
+    try:
+        require_unique_locator(_ZeroTarget(), locator=IMPORT_DOCUMENT_LOCATOR)
+        errors.append("require_unique_locator accepted a 0-element too-soon lookup")
+    except UniqueLocatorError as exc:
+        text = str(exc)
+        if "resolved to 0 elements" not in text:
+            errors.append(f"0-element UniqueLocatorError drifted: {text}")
+        if "strict mode" not in text.casefold():
+            errors.append("0-element UniqueLocatorError missing strict mode")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"0-element lookup raised {type(exc).__name__}: {exc}")
+
+    missing = require_create_form_seconds_logged(None)
+    if missing is None:
+        errors.append("missing create-form seconds was accepted")
+    if require_create_form_seconds_logged(2.837) is not None:
+        errors.append("logged 2.837s create-form wait was rejected")
+    timeout = create_form_timeout_error("TimeoutError after 30000ms")
+    if not timeout.startswith("PLAYWRIGHT_BLOCKED"):
+        errors.append("create-form timeout is not PLAYWRIGHT_BLOCKED")
+    if "gemini" not in timeout.casefold():
+        errors.append("create-form timeout missing no-Gemini")
+    import_step = next(
+        (item for item in FLOW_STEPS if item.get("id") == "import_document"),
+        None,
+    )
+    if import_step is None:
+        errors.append("FLOW_STEPS missing import_document")
+    else:
+        step_locator = str(import_step.get("locator") or "")
+        if step_locator != IMPORT_DOCUMENT_LOCATOR:
+            errors.append(
+                f"FLOW_STEPS import_document locator drifted: {step_locator!r}"
+            )
+        if "exact=True" not in step_locator.replace(" ", ""):
+            errors.append("FLOW_STEPS import_document locator is not exact")
+    runner = Path(__file__).with_name("ascend_locator_audit_runner.py")
+    runner_src = runner.read_text(encoding="utf-8")
+    if "wait_create_form_ready" not in runner_src:
+        errors.append("live runner does not wait for create form")
+    if "IMPORT_DOCUMENT_ACCESSIBLE_NAME" not in runner_src:
+        errors.append("live runner does not use IMPORT_DOCUMENT_ACCESSIBLE_NAME")
+    if "require_create_form_seconds_logged" not in runner_src:
+        errors.append("live runner does not log create-form seconds")
+    if "No Gemini" not in runner_src:
+        errors.append("live runner missing No Gemini")
+    ok = not errors
+    return {
+        "id": TOO_SOON_ZERO_ELEMENT_SCENARIO_ID,
+        "kind": "logic",
+        "ok": ok,
+        "outcome": "PASS" if ok else "FAILED",
+        "evidence": (
+            "too-soon 0-element Import document lookup is FAIL; live walk "
+            "waits for unique exact Import document after /create/new and "
+            "logs seconds"
+            if ok
+            else "; ".join(errors)
+        ),
+        "finance_agreement": False,
+        "observed": {
+            "accessible_name": dumped,
+            "too_soon_zero_element_is_fail": True,
+            "locator": IMPORT_DOCUMENT_LOCATOR,
         },
     }
 
@@ -472,6 +666,7 @@ def create_program_contract_lines(resolved: str | None) -> list[str]:
 
     return [
         programs_spinner_timing_instruction(),
+        create_form_ready_instruction(),
         role_default_instruction(resolved),
         document_label_instruction(),
         combobox_instruction(),

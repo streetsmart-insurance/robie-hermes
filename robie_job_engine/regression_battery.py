@@ -42,6 +42,7 @@ from .regression_scenarios import (
     ASCEND_LISTBOX_CHAT,
     ASCEND_ROLES_CHAT,
     ASCEND_SPINNER_CHAT,
+    ASCEND_TOO_SOON_CHAT,
     CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
     FOLLOW_TAB_CHAT,
@@ -578,6 +579,8 @@ def format_new_failure_chat(
         if item_id.startswith("ascend-create:"):
             if "listbox" in item_id or "unique-listbox" in item_id:
                 lines.append(ASCEND_LISTBOX_CHAT)
+            elif "too-soon" in item_id or "zero-element" in item_id:
+                lines.append(ASCEND_TOO_SOON_CHAT)
             else:
                 lines.append(ASCEND_AGENCY_FEE_CHAT)
         if item_id.startswith("ascend-customer-type:"):

@@ -70,10 +70,17 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
    timeout: `PLAYWRIGHT_BLOCKED` then HITL. No Gemini.
 3. Click the unique primary `New program` only
    (`get_by_role("button", name="New program", exact=True)`). Then
-   `wait_for_url /create/new`. That is not follow-tab proof.
-4. Create a program (`/create/new`): **log** Import document vs Upload
-   document vs dropzone labels. Prefer Import document (that panel has
-   no Hawksoft / AMS360 / Epic). Unclear → dry HITL.
+   `wait_for_url /create/new`. That is not follow-tab proof. The create
+   form is **not instant** after that URL (same class as the programs
+   spinner).
+4. Create a program (`/create/new`): **wait** until the unique primary
+   `Import document` is visible and enabled
+   (`get_by_role("button", name="Import document", exact=True)`).
+   **Log the seconds.** A too-soon 0-element lookup is FAIL. Then
+   **log** Import document vs Upload document vs dropzone labels.
+   Prefer Import document (that panel has no Hawksoft / AMS360 / Epic).
+   Unclear → dry HITL. If the button is not ready past timeout:
+   `PLAYWRIGHT_BLOCKED` then HITL. No Gemini.
 5. **Log** the Producer and Account Manager prefills (live default is
    `Robie AI`). Overwrite both with the agent who SENT the job
    (`payload.requested_by` — Google Chat `user_name` / `user_id`).
@@ -117,5 +124,5 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 Each step is PASS or FAIL with the locator or artifact path, the logged
 default / seconds / labels when the step has them, and the exact error
 (strict mode violation, TimeoutError, missing artifact dir, concatenated
-job-id folder, missing PDF after save, missing spinner seconds, unlogged
-role or Agency Fee default).
+job-id folder, missing PDF after save, missing spinner seconds, missing
+create-form seconds after /create/new, unlogged role or Agency Fee default).

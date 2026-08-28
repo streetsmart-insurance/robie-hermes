@@ -48,6 +48,7 @@ from robie_job_engine.regression_scenarios import (
     ASCEND_LISTBOX_CHAT,
     ASCEND_ROLES_CHAT,
     ASCEND_SPINNER_CHAT,
+    ASCEND_TOO_SOON_CHAT,
     CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
     FOLLOW_TAB_CHAT,
@@ -72,6 +73,7 @@ from robie_job_engine.regression_scenarios import (
     run_same_day_scenario_rule,
     run_sender_not_robie_ai_scenario,
     run_spinner_timing_scenario,
+    run_too_soon_zero_element_scenario,
     run_unique_listbox_option_scenario,
     run_wait_spinner_scenario,
 )
@@ -388,6 +390,7 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["ascend-new-program:accessible-name"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-new-program:spinner-timing"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-create:agency-fee-default"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-create:too-soon-zero-element"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-create:unique-listbox-option"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-customer-type:lob"]["outcome"], "PASS")
         self.assertEqual(ids["recording:follow-live-playwright-tab"]["outcome"], "PASS")
@@ -620,6 +623,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             "ascend-create:agency-fee-default",
         )
         self.assertEqual(
+            incidents["ascend-import-document-too-soon"]["scenario"],
+            "ascend-create:too-soon-zero-element",
+        )
+        self.assertEqual(
             incidents["38c0fa79"]["scenario"],
             "ascend-create:unique-listbox-option",
         )
@@ -765,6 +772,20 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         fee = run_agency_fee_default_scenario()
         self.assertTrue(fee["ok"], fee.get("evidence"))
         self.assertEqual(fee["id"], "ascend-create:agency-fee-default")
+        too_soon = run_too_soon_zero_element_scenario()
+        self.assertTrue(too_soon["ok"], too_soon.get("evidence"))
+        self.assertEqual(too_soon["id"], "ascend-create:too-soon-zero-element")
+        too_soon_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-create:too-soon-zero-element",
+                    "outcome": "FAILED",
+                    "evidence": "0-element lookup accepted",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_TOO_SOON_CHAT, too_soon_text)
         timing_text = format_new_failure_chat(
             [
                 {

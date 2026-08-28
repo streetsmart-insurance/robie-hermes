@@ -71,7 +71,47 @@ DUMPED_PROGRAMS_PRIMARY_BUTTON = {
 PRODUCER_LOCATOR = 'get_by_label("Producer")'
 ACCOUNT_MANAGER_LOCATOR = 'get_by_label("Account Manager")'
 COMMERCIAL_LOCATOR = 'get_by_role("radio", name="Commercial customer")'
-IMPORT_DOCUMENT_LOCATOR = 'get_by_role("button", name="Import document")'
+# Verified 2026-08-28 on hermes-test-01 Test Chrome (Robie logged in,
+# dashboard.useascend.com/create/new). Unique primary BUTTON accessible
+# name is exactly "Import document" (space is ASCII 32). Visible+enabled.
+# After wait_for_url /create/new the form is not painted yet — a too-soon
+# get_by_role query resolves to 0 elements. Same class as the programs
+# spinner. Also present when ready: unique "Upload document", dropzone
+# "Upload a file or drag and drop / PDF and DOCX up to 20MB", hidden
+# input#file_upload accept pdf/docx.
+IMPORT_DOCUMENT_ACCESSIBLE_NAME = "Import document"
+IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES = (
+    73,
+    109,
+    112,
+    111,
+    114,
+    116,
+    32,
+    100,
+    111,
+    99,
+    117,
+    109,
+    101,
+    110,
+    116,
+)
+IMPORT_DOCUMENT_LOCATOR = (
+    f'get_by_role("button", name="{IMPORT_DOCUMENT_ACCESSIBLE_NAME}", exact=True)'
+)
+DUMPED_CREATE_FORM_IMPORT_BUTTON = {
+    "role": "button",
+    "accessible_name": IMPORT_DOCUMENT_ACCESSIBLE_NAME,
+    "accessible_name_char_codes": IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES,
+    "visible": True,
+    "enabled": True,
+}
+UPLOAD_DOCUMENT_ACCESSIBLE_NAME = "Upload document"
+UPLOAD_DOCUMENT_LOCATOR = (
+    f'get_by_role("button", name="{UPLOAD_DOCUMENT_ACCESSIBLE_NAME}", exact=True)'
+)
+CREATE_FORM_READY_TIMEOUT_MS = 30_000
 PROGRAMS_KPI_LOCATOR = 'get_by_text("Programs at risk")'
 PROGRAMS_TABLE_LOCATOR = 'get_by_role("table")'
 PROGRAMS_READY_TIMEOUT_MS = 30_000
@@ -322,6 +362,24 @@ def programs_spinner_timeout_error(detail: str = "") -> str:
     )
 
 
+def create_form_timeout_error(detail: str = "") -> str:
+    extra = f": {detail}" if detail else ""
+    return (
+        "PLAYWRIGHT_BLOCKED: /create/new form or Import document "
+        f"not ready{extra}. Do not click a nearby control. No Gemini."
+    )
+
+
+def import_document_locator_is_unique_primary(locator: str) -> bool:
+    folded = str(locator or "")
+    if locator_is_new_program_caret(folded):
+        return False
+    return (
+        f'name="{IMPORT_DOCUMENT_ACCESSIBLE_NAME}"' in folded
+        and "exact=True" in folded.replace(" ", "")
+    )
+
+
 def programs_page_ready_instruction() -> str:
     return (
         "On https://dashboard.useascend.com/programs do not click New program "
@@ -332,6 +390,9 @@ def programs_page_ready_instruction() -> str:
         "The plus is an icon/SVG, not text. Accessible name is exactly "
         f"{NEW_PROGRAM_ACCESSIBLE_NAME!r}. Never the split-menu caret "
         f"({CARET_ACCESSIBLE_NAME!r}). After click, wait_for_url /create/new. "
+        "The create form is not instant after that URL — wait until the unique "
+        f"exact {IMPORT_DOCUMENT_ACCESSIBLE_NAME!r} primary is visible and "
+        "enabled, and log those seconds. A too-soon 0-element lookup is FAIL. "
         "If spinner or button is not ready past timeout: "
         f"{programs_spinner_timeout_error()} then HITL. "
         "No Gemini. No .first/.nth/.last."
@@ -386,6 +447,9 @@ def ascend_new_program_contract_lines(
         customer_type_instruction(payload),
         (
             "Ascend Import document only (that panel has no Hawksoft/AMS360/Epic). "
+            "After wait_for_url /create/new wait until the unique exact "
+            f"{IMPORT_DOCUMENT_LOCATOR} is visible — the form is not instant. "
+            "Log those seconds. A too-soon 0-element lookup is FAIL. "
             "Log Import document vs Upload document vs dropzone. "
             "Stop before Save program, Send email, Copy checkout, payment, or bind."
         ),
