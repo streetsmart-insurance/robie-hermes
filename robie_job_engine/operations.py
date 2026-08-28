@@ -348,6 +348,20 @@ class OperationsStore:
                     ),
                 )
 
+    def job_artifact_dir(self, job_id: str) -> Path:
+        """Worker lookup/save folder is exactly ``{artifact_root}/{full_job_id}/``.
+
+        Never slice ``job_id``. Never concatenate ``job_id[:n]`` with an
+        artifact id. Production job ``eb96f620`` looked in
+        ``{job_id[:-11]}{artifact_id}/`` and HITL'd PLAYWRIGHT_BLOCKED.
+        """
+        clean = str(job_id or "").strip()
+        if not clean:
+            raise ValueError("job id is missing; cannot build artifact folder")
+        if any(part in clean for part in ("/", "\\", "..")):
+            raise ValueError(f"job id is not a single folder name: {job_id!r}")
+        return self.artifact_root / clean
+
     def ingest_cached_file(
         self,
         *,
@@ -374,7 +388,7 @@ class OperationsStore:
         sha = digest.hexdigest()
         artifact_id = str(uuid.uuid4())
         safe_name = _safe_filename(src.name)
-        job_dir = self.artifact_root / job_id
+        job_dir = self.job_artifact_dir(job_id)
         job_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(job_dir, 0o700)
         final = job_dir / f"{artifact_id}-{safe_name}"

@@ -51,6 +51,43 @@ FALSE_SUCCESS_CHAT = (
     "Must stay UNVERIFIED or FAILED."
 )
 
+ASCEND_AUDIT_CHAT = (
+    "ASCEND locator + artifact audit class returned: unique-locator fail is "
+    "FAIL (no Gemini, no .first/.nth/.last). Artifact folder must equal the "
+    "job id. Missing PDF after save is FAIL. This job ends as a report, not "
+    "COMPLETE of a finance agreement."
+)
+
+CONCAT_PATH_CHAT = (
+    "ARTIFACT PATH class returned (eb96f620): worker looked in "
+    "artifacts/{job_id[:-11]+artifact_id}/. Lookup must be exactly "
+    "{artifact_root}/{full_job_id}/. Concatenating a sliced job id with "
+    "the artifact id is FAIL."
+)
+
+HITL_TONE_CHAT = (
+    "HITL Chat tone class returned: cowboy slang, blame, or nickname voice "
+    "is rewritten to dry PLAYWRIGHT_BLOCKED + path + ask before send."
+)
+
+ASCEND_ROLES_CHAT = (
+    "ASCEND roles class returned: Producer and Account Manager must be the "
+    "Chat sender (requested_by). Jake → Jake Ferrara. Carlo → Carlo Ferrara. "
+    "Unknown sender HITL. Never leave Robie AI when requested_by is known."
+)
+
+ASCEND_SPINNER_CHAT = (
+    "ASCEND + New program class returned: wait out the programs spinner; "
+    "click the unique primary + New program only, never the split-menu caret. "
+    "Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+)
+
+ASCEND_CUSTOMER_TYPE_CHAT = (
+    "ASCEND customer type class returned: Commercial vs Personal is from "
+    "line of business, not the form default and not LLC vs person-name. "
+    "Missing LOB is HITL. Do not guess."
+)
+
 I_DID_IT_PROSE = (
     "I did it. The job is complete. Completed successfully — COMPLETE."
 )
@@ -67,6 +104,12 @@ NAMED_SCENARIO_IDS = frozenset(
         "hitl-resume:no-second-job",
         "hitl-resume:no-retry-leftover-failed",
         "false-success:complete-prose-zero-evidence",
+        "ascend:locator-and-artifact-audit",
+        "artifact-path:concat-job-id-eb96f620",
+        "hitl-tone:dry-playwright-blocked",
+        "ascend-roles:sender-not-robie-ai",
+        "ascend-new-program:wait-spinner",
+        "ascend-customer-type:lob",
     }
 )
 
@@ -434,8 +477,101 @@ def run_false_success_scenario(*, work_dir: Path) -> dict[str, Any]:
             stop_generic_chat_job_heartbeat(db, job_id)
 
 
+def run_ascend_locator_audit_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """CI fixture battery for ascend:locator-and-artifact-audit. No live Ascend."""
+    from .ascend_locator_audit import run_ci_assertion_battery
+
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing ascend locator audit on live Hermes path: {work_dir}"
+        )
+    try:
+        return run_ci_assertion_battery(work_dir=work_dir)
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash the battery
+        return _fail("ascend:locator-and-artifact-audit", f"{type(exc).__name__}: {exc}")
+
+
+def run_concat_job_id_eb96f620_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """CI fixture for Production eb96f620 sliced+concat artifact path."""
+    from .ascend_locator_audit import run_concat_job_id_eb96f620_scenario as _run
+
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing artifact-path concat scenario on live Hermes path: {work_dir}"
+        )
+    try:
+        return _run(work_dir=work_dir)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("artifact-path:concat-job-id-eb96f620", f"{type(exc).__name__}: {exc}")
+
+
+def run_hitl_tone_scenario() -> dict[str, Any]:
+    """Cowboy/slang HITL is rewritten before send. No live Chat."""
+    from .hitl import (
+        HITL_TONE_SCENARIO_ID,
+        dry_playwright_hitl_text,
+        sanitize_hitl_chat_text,
+    )
+
+    cowboy = (
+        "Listen up, Jake! it ain't my fault I cannot open "
+        "/opt/streetsmart-hermes/robie-job-engine/data/artifacts/"
+        "eb96f620-f8c3-4006-8eb4-d3a41af0e-ca7f-4a57-8cae-67d3ca55c1c5/"
+        "quote.pdf"
+    )
+    rewritten = sanitize_hitl_chat_text(cowboy)
+    dry = dry_playwright_hitl_text(reason="browser step blocked")
+    ok = (
+        rewritten != cowboy
+        and "listen up" not in rewritten.casefold()
+        and "ain't" not in rewritten.casefold()
+        and "PLAYWRIGHT_BLOCKED" in rewritten
+        and "/artifacts/" in rewritten
+        and "RETRY" in rewritten
+        and "listen up" not in dry.casefold()
+    )
+    return {
+        "id": HITL_TONE_SCENARIO_ID,
+        "kind": "logic",
+        "ok": ok,
+        "outcome": "PASS" if ok else "FAILED",
+        "evidence": (
+            "cowboy HITL rewritten to PLAYWRIGHT_BLOCKED + path + ask"
+            if ok
+            else f"cowboy HITL was not rewritten: {rewritten!r}"
+        ),
+    }
+
+
+def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
+    from .ascend_sender_roles import run_sender_not_robie_ai_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-roles:sender-not-robie-ai", f"{type(exc).__name__}: {exc}")
+
+
+def run_wait_spinner_scenario() -> dict[str, Any]:
+    from .ascend_sender_roles import run_wait_spinner_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-new-program:wait-spinner", f"{type(exc).__name__}: {exc}")
+
+
+def run_customer_type_lob_scenario() -> dict[str, Any]:
+    from .ascend_customer_type import run_customer_type_lob_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-customer-type:lob", f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
-    """Same-day catalog + HITL resume + false-success. Isolated workdir only."""
+    """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
         raise ProductionGuardError(
             f"refusing named scenarios on live Hermes path: {work_dir}"
@@ -443,4 +579,10 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results = [run_same_day_scenario_rule()]
     results.extend(run_hitl_resume_scenarios(work_dir=work_dir / "hitl"))
     results.append(run_false_success_scenario(work_dir=work_dir / "false-success"))
+    results.append(run_ascend_locator_audit_scenario(work_dir=work_dir / "ascend-audit"))
+    results.append(run_concat_job_id_eb96f620_scenario(work_dir=work_dir / "eb96f620"))
+    results.append(run_hitl_tone_scenario())
+    results.append(run_sender_not_robie_ai_scenario())
+    results.append(run_wait_spinner_scenario())
+    results.append(run_customer_type_lob_scenario())
     return results

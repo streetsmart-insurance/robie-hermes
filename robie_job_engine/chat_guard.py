@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
+from .ascend_sender_roles import ascend_new_program_contract_lines
 from .ezlynx_account_nav import account_nav_contract_lines
 from .context_policy import (
     CONTINUATION_PREFIXES,
@@ -536,7 +537,9 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
     payload = dict(job.get("payload") or {})
+    payload.setdefault("action_type", job.get("action_type"))
     lines.extend(account_nav_contract_lines(text, payload))
+    lines.extend(ascend_new_program_contract_lines(text, payload))
     payload = dict(job.get("payload") or {})
     original = str(payload.get("text") or "").strip()
     if original and original != text:
@@ -650,6 +653,10 @@ def open_chat_job(
         )
     if classification.action_type == "ezlynx.submission_audit":
         server_payload.update(_submission_audit_payload())
+    if classification.action_type == "ascend.locator_artifact_audit":
+        from .ascend_locator_audit import default_audit_payload
+
+        server_payload.update(default_audit_payload(live=False))
     server_payload.update(dict(action_payload or {}))
     if continued_job is not None:
         job = continued_job
@@ -1080,6 +1087,9 @@ def guard_chat_response(
     recordings: RecordingManager | None = None,
 ) -> str:
     content = redact_text(content)
+    from .hitl import sanitize_hitl_chat_text
+
+    content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
     if not job_id:
         if _looks_like_unbound_policy_success(content):
             return (

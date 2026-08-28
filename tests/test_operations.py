@@ -56,6 +56,30 @@ def test_ingestion_is_durable_hashed_private_and_idempotent(tmp_path: Path):
     assert staged.stat().st_mode & 0o777 == 0o600
 
 
+def test_job_artifact_dir_is_exactly_full_job_id(tmp_path: Path):
+    db, root = tmp_path / "jobs.db", tmp_path / "artifacts"
+    seed_jobs(db)
+    ops = OperationsStore(str(db), str(root))
+    job_id = "eb96f620-f8c3-4006-8eb4-d938d2a44c73"
+    artifact_id = "3a41af0e-ca7f-4a57-8cae-67d3ca55c1c5"
+    folder = ops.job_artifact_dir(job_id)
+    assert folder == Path(root) / job_id
+    assert folder.name == job_id
+    assert artifact_id not in str(folder)
+    assert str(folder).endswith(job_id)
+    src = tmp_path / "quote.pdf"
+    src.write_bytes(b"%PDF test")
+    record = ops.ingest_cached_file(
+        job_id=job_id,
+        source_path=str(src),
+        source_external_id="message:quote",
+        mime_type="application/pdf",
+    )
+    stored = Path(record["stored_path"])
+    assert stored.parent == folder
+    assert stored.parent.name == job_id
+
+
 def test_artifact_cannot_be_marked_uploaded_without_independent_evidence(tmp_path: Path):
     db, root = tmp_path / "jobs.db", tmp_path / "artifacts"
     seed_jobs(db)

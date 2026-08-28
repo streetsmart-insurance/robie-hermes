@@ -94,7 +94,18 @@ def sanitize_worker_response(
     content: str,
 ) -> dict[str, Any]:
     """Return the checkpoint payload. Success-shaped prose is rewritten."""
+    from .hitl import hitl_text_is_slang_or_blame, sanitize_hitl_chat_text
+
     text = str(content or "")
+    if hitl_text_is_slang_or_blame(text):
+        return {
+            "response_text": sanitize_hitl_chat_text(text, job_id=str(job_id or "")),
+            "rewritten": True,
+            "reason": (
+                "HITL Chat tone must be dry/technical "
+                "(PLAYWRIGHT_BLOCKED + path + ask)"
+            ),
+        }
     if has_destination_action_checkpoint(store, job_id) or has_destination_verified_evidence(
         store, job_id
     ):

@@ -42,6 +42,54 @@
       "scenario": "false-success:complete-prose-zero-evidence",
       "closed": true,
       "note": "COMPLETE-shaped / I-did-it close-out with zero destination evidence must stay UNVERIFIED or FAILED."
+    },
+    {
+      "id": "artifact-concat-job-id",
+      "class": "artifact-path",
+      "new_failure_mode": true,
+      "scenario": "ascend:locator-and-artifact-audit",
+      "closed": true,
+      "note": "Mangled/concatenated job-id folder under artifacts/. Worker cannot open the PDF it just saved. Unique-locator fail is FAIL. This Test audit is required before a NEW site/workflow (Ascend, next carrier portal) may run on a real Production account. Commercial auto is not a free pass."
+    },
+    {
+      "id": "eb96f620",
+      "class": "artifact-path",
+      "new_failure_mode": true,
+      "scenario": "artifact-path:concat-job-id-eb96f620",
+      "closed": true,
+      "note": "Production job eb96f620 HITL PLAYWRIGHT_BLOCKED because the worker looked in artifacts/{job_id[:-11]+artifact_id}/. Real dir is artifacts/{full_job_id}/. Concatenating a sliced job id with the artifact id is FAIL."
+    },
+    {
+      "id": "hitl-cowboy-tone",
+      "class": "hitl-tone",
+      "new_failure_mode": true,
+      "scenario": "hitl-tone:dry-playwright-blocked",
+      "closed": true,
+      "note": "Worker model ad-libbed Chat HITL after RETRY ('Listen up, Jake!', 'it ain't my fault'). Templates stay HITL Carlo in plain English. Outbound HITL must be dry/technical: PLAYWRIGHT_BLOCKED + path + ask."
+    },
+    {
+      "id": "ascend-roles-robie-ai",
+      "class": "ascend-roles",
+      "new_failure_mode": true,
+      "scenario": "ascend-roles:sender-not-robie-ai",
+      "closed": true,
+      "note": "Create a program prefills Producer and Account Manager as Robie AI. Carlo rule: overwrite both from requested_by (Jake Ferrara / Carlo Ferrara). Unknown sender HITL. Never leave Robie AI when the sender is known."
+    },
+    {
+      "id": "eb96f620-vision-spinner",
+      "class": "ascend-new-program",
+      "new_failure_mode": true,
+      "scenario": "ascend-new-program:wait-spinner",
+      "closed": true,
+      "note": "Programs page can hang on a spinner ~20s. Production eb96f620 first HITL was a vision miss after that wait, not a missing + New program. Wait until the unique primary button is visible and enabled and KPI/table are present. Never the caret. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+    },
+    {
+      "id": "ascend-customer-type-lob",
+      "class": "ascend-customer-type",
+      "new_failure_mode": true,
+      "scenario": "ascend-customer-type:lob",
+      "closed": true,
+      "note": "Carlo 2026-08-28: Commercial vs Personal is from line of business, not the form default and not LLC vs person-name. Missing LOB is HITL. Do not guess."
     }
   ]
 }

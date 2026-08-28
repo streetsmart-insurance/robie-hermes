@@ -44,6 +44,12 @@ overlay. It does not modify a live Hermes installation in place.
   hook for any Playwright site (EZLynx, Ascend, carrier portals, anything):
   after `PLAYWRIGHT_BLOCKED`, ask Gemini for one unique field, then HITL if
   Gemini is unsure. Unique-write is not weakened.
+- `ascend.locator_artifact_audit` / `ascend:locator-and-artifact-audit` is
+  the Test-only Job Engine gate for a NEW Ascend (or next-portal) workflow.
+  Playwright strict mode: unique locator or FAIL. No Gemini. No
+  `.first` / `.nth` / `.last`. Artifact folder must equal the job id.
+  GitHub CI does not open Ascend. Live walk is `hermes-test-01` only. This
+  audit ends as a report, not COMPLETE of a finance agreement.
 - `deploy/hermes/config/playwright.yaml` is the minimal configuration fragment
   that exposes the tool to CLI and Google Chat profiles.
 - `deploy/hermes/SOUL.playwright.md` is the browser invariant to merge into the

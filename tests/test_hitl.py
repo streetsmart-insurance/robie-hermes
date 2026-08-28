@@ -6,6 +6,7 @@ from robie_job_engine.hitl import (
     classify_human_reply,
     human_reply_value,
     interaction_for_blocker,
+    sanitize_hitl_chat_text,
 )
 
 
@@ -27,6 +28,71 @@ class HumanInTheLoopContractTests(unittest.TestCase):
         )
         self.assertEqual(state["field_name"], "operator_response")
         self.assertIn("RETRY", state["prompt"])
+        self.assertIn("PLAYWRIGHT_BLOCKED", state["prompt"])
+        self.assertNotIn("Listen up", state["prompt"])
+        self.assertNotIn("ain't", state["prompt"])
+
+    def test_cowboy_slang_hitl_is_rewritten_before_send(self):
+        cowboy = (
+            "Listen up, Jake! it ain't my fault I cannot open "
+            "/opt/streetsmart-hermes/robie-job-engine/data/artifacts/"
+            "eb96f620-f8c3-4006-8eb4-d3a41af0e-ca7f-4a57-8cae-67d3ca55c1c5/"
+            "quote.pdf"
+        )
+        rewritten = sanitize_hitl_chat_text(cowboy)
+        self.assertNotEqual(rewritten, cowboy)
+        self.assertIn("PLAYWRIGHT_BLOCKED", rewritten)
+        self.assertIn("/artifacts/", rewritten)
+        self.assertIn("RETRY", rewritten)
+        self.assertNotIn("Listen up", rewritten)
+        self.assertNotIn("ain't", rewritten)
+        self.assertNotIn("Jake!", rewritten)
+
+        posted: list[str] = []
+
+        class _Create:
+            def __init__(self, kwargs: dict) -> None:
+                posted.append(kwargs["body"]["text"])
+
+            def execute(self) -> dict:
+                return {
+                    "name": "spaces/x/messages/1",
+                    "thread": {"name": "spaces/x/threads/1"},
+                }
+
+        class _Messages:
+            def create(self, **kwargs):
+                return _Create(kwargs)
+
+        class _Spaces:
+            def messages(self) -> _Messages:
+                return _Messages()
+
+        class _Chat:
+            def spaces(self) -> _Spaces:
+                return _Spaces()
+
+        from robie_job_engine.chat_app_post import post_as_chat_app
+
+        post_as_chat_app("spaces/hitl", cowboy, chat=_Chat())
+        self.assertEqual(len(posted), 1)
+        self.assertIn("PLAYWRIGHT_BLOCKED", posted[0])
+        self.assertNotIn("Listen up", posted[0])
+        self.assertNotIn("ain't", posted[0])
+
+        import tempfile
+
+        from robie_job_engine.store import JobStore
+        from robie_job_engine.worker_contract import sanitize_worker_response
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(f"{tmp}/jobs.db")
+            job = store.create_job("hermes.google_chat_task", {"text": "retry"})
+            payload = sanitize_worker_response(store, job["id"], cowboy)
+        self.assertTrue(payload["rewritten"])
+        self.assertIn("PLAYWRIGHT_BLOCKED", payload["response_text"])
+        self.assertNotIn("Listen up", payload["response_text"])
+        self.assertNotIn("ain't", payload["response_text"])
 
     def test_fein_value_may_be_requested_in_chat(self):
         state = interaction_for_blocker(

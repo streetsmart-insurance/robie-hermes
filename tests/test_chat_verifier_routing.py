@@ -370,6 +370,10 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             "ezlynx.submission_audit",
         )
         self.assertEqual(
+            classify_request("Run the Ascend locator-and-artifact-audit").action_type,
+            "ascend.locator_artifact_audit",
+        )
+        self.assertEqual(
             classify_request(
                 "Run a read-only Submission Center audit. "
                 "Do not modify records or send emails."

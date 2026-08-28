@@ -35,8 +35,14 @@ from .quote_replay import (
     run_quote_replay,
 )
 from .regression_scenarios import (
+    ASCEND_AUDIT_CHAT,
+    ASCEND_CUSTOMER_TYPE_CHAT,
+    ASCEND_ROLES_CHAT,
+    ASCEND_SPINNER_CHAT,
+    CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
     HITL_RESUME_CHAT,
+    HITL_TONE_CHAT,
     run_named_scenarios,
 )
 from .runtime_env import PRODUCTION_ENV_NAMES, ProductionGuardError, current_robie_env
@@ -550,6 +556,18 @@ def format_new_failure_chat(
             lines.append(FALSE_SUCCESS_CHAT)
         if item_id.startswith("hitl-resume:"):
             lines.append(HITL_RESUME_CHAT)
+        if item_id.startswith("ascend:"):
+            lines.append(ASCEND_AUDIT_CHAT)
+        if item_id.startswith("artifact-path:"):
+            lines.append(CONCAT_PATH_CHAT)
+        if item_id.startswith("hitl-tone:"):
+            lines.append(HITL_TONE_CHAT)
+        if item_id.startswith("ascend-roles:"):
+            lines.append(ASCEND_ROLES_CHAT)
+        if item_id.startswith("ascend-new-program:"):
+            lines.append(ASCEND_SPINNER_CHAT)
+        if item_id.startswith("ascend-customer-type:"):
+            lines.append(ASCEND_CUSTOMER_TYPE_CHAT)
     lines.append(HUMAN_GATE)
     text = "\n".join(lines)
     if "@robie" in text.casefold():
