@@ -118,6 +118,19 @@ class VersionStateTests(unittest.TestCase):
             return
         self.assertFalse(report["should_hold"])
 
+    def test_list_failure_is_unknown_with_empty_leftover_note(self):
+        client = Mock()
+        client.list_secret_versions.side_effect = RuntimeError("unavailable")
+        report = inspect_login_secrets(
+            client=client,
+            project="streetsmart-hermes-poc",
+            secret_ids=("ezlynx-username", "ezlynx-password"),
+        )
+        self.assertEqual(report["result"], "UNKNOWN")
+        self.assertFalse(report["should_hold"])
+        self.assertEqual(report["leftover_note"], "")
+        client.access_secret_version.assert_not_called()
+
 
 class PreflightAndSchedulerTests(unittest.TestCase):
     def test_preflight_holds_before_running_when_no_enabled(self):

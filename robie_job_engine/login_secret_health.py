@@ -167,9 +167,11 @@ def inspect_login_secrets(
         secrets.append(summarize_secret_versions(listed, secret_id=secret_id))
     alerting = [item for item in secrets if item.get("alert")]
     should_hold = any(item.get("missing_enabled") for item in secrets)
+    leftover = ""
     if errors and not any(item.get("versions") for item in secrets):
         result = "UNKNOWN"
         reason = "secret manager list failed (" + ",".join(errors) + ")"
+        should_hold = False
     elif alerting:
         result = "ALERT"
         reason = "; ".join(
