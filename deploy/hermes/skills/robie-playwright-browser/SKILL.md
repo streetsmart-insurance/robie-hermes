@@ -36,10 +36,10 @@ URL-guessing.
    A write is allowed only when that locator uniquely identifies exactly one
    field. `.first`, `.nth()`, `.last`, and other positional guesses are
    `PLAYWRIGHT_BLOCKED`; do not fill a field you cannot uniquely name.
-   When a write is blocked or a modal cannot be uniquely named, follow
-   `ezlynx-gemini-fallback`: stop, describe the dialog title and visible
-   labels only (no passwords), ask Gemini for one unique field, and HITL
-   Carlo if Gemini is unsure. Never guess a field.
+   When a write is blocked or a modal cannot be uniquely named on any
+   Playwright site, follow `ezlynx-gemini-fallback`: stop, describe the
+   dialog title and visible labels only (no passwords), ask Gemini for one
+   unique field, and HITL Carlo if Gemini is unsure. Never guess a field.
 3. Assert the URL, client or account, heading, and critical values before work.
 4. After every navigation, save, upload, selection, or sort, wait for and assert
    the authoritative state change.

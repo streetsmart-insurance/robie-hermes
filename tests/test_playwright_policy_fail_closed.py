@@ -214,6 +214,76 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
             self.assertNotIsInstance(ctx.exception, TimeoutError)
             self.assertEqual(target.fills, [])
 
+    def test_ascend_hidden_field_uses_same_gemini_apply_or_hitl(self):
+        page = FakePage(
+            {"Carrier": FakeLocator(1, "Carrier")},
+            title="Quote Details",
+            visible_labels=["Carrier"],
+        )
+        page.url = "https://app.ascend.com/quotes/123"
+
+        class HiddenAscendLocator:
+            def __init__(self):
+                self.selector = "input[name='quotes.0.carrier_id']"
+                self.fills = []
+                self.page = page
+
+            def count(self):
+                return 1
+
+            def is_hidden(self):
+                return True
+
+            def is_visible(self):
+                return False
+
+            def get_attribute(self, name):
+                return {
+                    "aria-hidden": "true",
+                    "type": "hidden",
+                    "role": "combobox",
+                }.get(name)
+
+            def fill(self, value):
+                self.fills.append(value)
+
+        class LocatorHidden:
+            fill = HiddenAscendLocator.fill
+
+        asked = []
+
+        def ask_hitl(*, dialog_title, visible_labels, block_reason, page_url=""):
+            asked.append((dialog_title, list(visible_labels), block_reason, page_url))
+            return {"action": "HITL", "field_label": None}
+
+        scope = {"Locator": LocatorHidden, "ask_gemini_unique_field": ask_hitl}
+        install_playwright_write_guards(scope)
+        hidden = HiddenAscendLocator()
+        with self.assertRaisesRegex(RuntimeError, "HITL Carlo"):
+            LocatorHidden.fill(hidden, "invented-carrier")
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][0], "Quote Details")
+        self.assertEqual(asked[0][1], ["Carrier"])
+        self.assertIn("hidden", asked[0][2])
+        self.assertEqual(asked[0][3], "https://app.ascend.com/quotes/123")
+        self.assertEqual(hidden.fills, [])
+        self.assertEqual(page.fields["Carrier"].fills, [])
+
+        asked.clear()
+
+        def ask_apply(*, dialog_title, visible_labels, block_reason, page_url=""):
+            asked.append((dialog_title, list(visible_labels), block_reason, page_url))
+            return {"action": "APPLY", "field_label": "Carrier"}
+
+        scope = {"Locator": LocatorHidden, "ask_gemini_unique_field": ask_apply}
+        install_playwright_write_guards(scope)
+        still_hidden = HiddenAscendLocator()
+        LocatorHidden.fill(still_hidden, "travelers")
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][3], "https://app.ascend.com/quotes/123")
+        self.assertEqual(still_hidden.fills, [])
+        self.assertEqual(page.fields["Carrier"].fills, ["travelers"])
+
     def test_blocked_write_asks_gemini_and_applies_only_a_unique_label(self):
         vin = FakeLocator(1, "VIN")
         year = FakeLocator(1, "Year")
@@ -221,8 +291,8 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         ambiguous = FakeLocator(2, "input", page=page)
         asked = []
 
-        def ask_gemini(*, dialog_title, visible_labels, block_reason):
-            asked.append((dialog_title, list(visible_labels), block_reason))
+        def ask_gemini(*, dialog_title, visible_labels, block_reason, page_url=""):
+            asked.append((dialog_title, list(visible_labels), block_reason, page_url))
             return {"action": "APPLY", "field_label": "VIN"}
 
         scope = {
@@ -234,6 +304,7 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         self.assertEqual(len(asked), 1)
         self.assertEqual(asked[0][0], "Add Vehicle")
         self.assertEqual(asked[0][1], ["VIN", "Year"])
+        self.assertEqual(asked[0][3], "")
         self.assertEqual(vin.fills, ["1HGCM82633A004352"])
         self.assertEqual(ambiguous.fills, [])
         self.assertEqual(year.fills, [])

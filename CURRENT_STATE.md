@@ -198,6 +198,12 @@ wrapped locator uniqueness, not fill/click/select_option/type timeouts or
 hidden / aria-hidden / not-visible / combobox-hidden targets, so the model
 retried instead of asking Gemini then HITL Carlo.
 
+Gemini stuck-field help (`gemini_field_helper.py` / `ezlynx-gemini-fallback`)
+is for a stuck Playwright write on any site Robie drives (EZLynx, Ascend,
+carrier portals, anything), not EZLynx-only. The prompt names the current
+page (host/title); unique-write, no `.first`/`.nth`/`.last`, no bind, and
+HITL Carlo stay the same.
+
 ## PR 17 lesson
 
 17 added `heartbeat_generic_chat_job` in `store.py` (zip) and called it from

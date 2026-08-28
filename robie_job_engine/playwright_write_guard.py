@@ -275,6 +275,19 @@ def _page_from_target(target: Any, *, page_level: bool) -> Any | None:
     return None
 
 
+def _page_url_text(page: Any) -> str:
+    """Best-effort page URL. Host is extracted later; query is never sent."""
+    if page is None:
+        return ""
+    value = getattr(page, "url", None)
+    if callable(value):
+        try:
+            value = value()
+        except Exception:
+            return ""
+    return str(value or "").strip()
+
+
 def collect_blocked_dialog(page: Any) -> tuple[str, list[str]]:
     """Read dialog title and visible labels only. Never include passwords."""
     title = ""
@@ -367,6 +380,7 @@ def consult_gemini_for_blocked_write(
             dialog_title=title,
             visible_labels=labels,
             block_reason=reason,
+            page_url=_page_url_text(page),
         )
     except Exception:
         return None

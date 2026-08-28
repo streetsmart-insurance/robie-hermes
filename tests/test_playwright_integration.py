@@ -92,6 +92,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("ask Gemini for one unique field", fallback)
         self.assertIn("HITL Carlo", fallback)
         self.assertIn("Never write a note on Untitled", fallback)
+        self.assertIn("stuck Playwright write on any site", fallback)
+        self.assertNotIn("EZLynx Gemini fallback", fallback)
         self.assertIn("ezlynx-gemini-fallback", skill)
 
 

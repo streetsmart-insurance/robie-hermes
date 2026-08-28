@@ -38,8 +38,9 @@ overlay. It does not modify a live Hermes installation in place.
   search / URL-guess loops when an account id is already known.
 - `deploy/hermes/skills/ezlynx-gemini-fallback/SKILL.md` plus
   `robie_job_engine/gemini_field_helper.py` are the fail-closed stuck-field
-  hook: after `PLAYWRIGHT_BLOCKED`, ask Gemini for one unique field, then
-  HITL if Gemini is unsure. Unique-write is not weakened.
+  hook for any Playwright site (EZLynx, Ascend, carrier portals, anything):
+  after `PLAYWRIGHT_BLOCKED`, ask Gemini for one unique field, then HITL if
+  Gemini is unsure. Unique-write is not weakened.
 - `deploy/hermes/config/playwright.yaml` is the minimal configuration fragment
   that exposes the tool to CLI and Google Chat profiles.
 - `deploy/hermes/SOUL.playwright.md` is the browser invariant to merge into the
