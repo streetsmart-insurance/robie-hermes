@@ -675,7 +675,11 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
     click = getattr(target, "click", None)
     if callable(click):
         click()
-    searched = _search_open_combobox(target, intended)
+    searched = (
+        _search_open_combobox(target, intended)
+        if field in {"Carrier", "Coverage type", "Wholesaler"}
+        else False
+    )
     names = _wait_open_listbox_options(
         page, intended=intended if searched else ""
     )
