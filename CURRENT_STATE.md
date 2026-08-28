@@ -111,11 +111,21 @@ the zip path. That is why 18 can work without patching the plugin adapter.
 
 Recorder tab rebind (`robie_job_engine/browser_capture.py` +
 `recording_tab.py`) is on the zip path. Production capture is
-`python -m robie_job_engine.browser_capture`, so a zip flip + gateway restart
-stops first-ezlynx-wins. The optional Playwright hint write lives in
-`deploy/hermes/tools/playwright_tool.py` / write-guard; that is a second
-`.hermes` install if the live tool file is stale. Rebind still works without
-the hint.
+`python -m robie_job_engine.browser_capture`. Job `807f8920` (2026-08-28)
+proved that Playwright `context.pages` on the capture connection is not
+enough: that list stayed on the first open listing tab while
+`playwright_exec` (a second CDP client) drove Edit/FormEntry/documents.
+A hint file cannot match a tab capture never listed. Capture now reads
+Chrome `/json/list` (same endpoint tab cleanup already uses) and
+refreshes its CDP view when that list has a live tab the Playwright
+connection missed. The hint write is backup, not sufficient. CI
+scenario `recording:follow-live-playwright-tab` proves a Playwright-driven
+second tab is what the recording analyzes.
+
+**Follow-tab is not proven until a live job shows matching URLs
+(recorder attach tab == Playwright tab).** Code review and CI are not
+that proof. Carlo will not run another live PAWIVA client job until
+that live match exists.
 
 Production pre-flight (`robie_job_engine/production_preflight.py`) is on the
 zip path. It is infra only: host/intake health, not a job-type gate. A
@@ -175,8 +185,10 @@ Ascend pass.** Carlo asked for at least one. That Test job is
 `ascend.locator_artifact_audit` on `hermes-test-01` with the Robie
 Test-account username + email 2SV — never PAWIVA / 221398001 / a live
 client, never bind, never email. Follow-tab (`select_recording_tab` /
-`follow_screencast_frames`) is separately proven and is not this
-audit. A punch-list PASS is not follow-tab evidence. This tree does
+`follow_screencast_frames`) is a separate proof and is **not** this
+audit. Follow-tab is not proven until a live job shows matching URLs
+(recorder attach tab == Playwright tab). A punch-list PASS is not
+follow-tab evidence. This tree does
 **not** flip Production and does **not** ship a Production zip.
 
 `ascend:locator-and-artifact-audit` is the named Test-only Job Engine
@@ -230,7 +242,10 @@ piling another. HITL resume after a gateway restart must re-lease the
 same job (09d69760, da53765b, 6cf6f6ae) — no second job, no RETRY of
 leftover failed ids. COMPLETE-shaped / I-did-it prose with 0 destination
 evidence stays UNVERIFIED or FAILED (30777947, c31f9c69); Chat names
-that class if it returns. Owners: Carlo + Jake. Jake Approves, Carlo
+that class if it returns. Recorder on a stale listing while Playwright
+is on Edit/FormEntry/documents (807f8920, 468d1575) is
+`recording:follow-live-playwright-tab` — CI must fail that class; a live
+job with matching URLs is still required. Owners: Carlo + Jake. Jake Approves, Carlo
 Confirms, Dusty pings if it sits. It does not `@robie`, bind, email the
 insured, merge, flip Production, or restart `hermes-gateway`.
 
@@ -254,8 +269,10 @@ no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job claims, and keeps exactly
 one authenticated `https://app.ezlynx.com/web/` session tab. Recorder and
 Playwright select the current job tab with `select_recording_tab` /
 `select_playwright_page` after cleanup — not `pages[0]` / first-ezlynx-wins.
-The Playwright hint write still lives in
-`deploy/hermes/tools/playwright_tool.py` (a second `.hermes` install).
+Capture also reads Chrome `/json/list` so a second Playwright tab is
+visible. The Playwright hint write still lives in
+`deploy/hermes/tools/playwright_tool.py`. Follow-tab is not proven until
+a live job shows matching URLs.
 
 PR 23 account-id nav (`robie_job_engine/ezlynx_account_nav.py`) is on the
 zip path with `chat_guard` and `playwright_write_guard`. The `.hermes`

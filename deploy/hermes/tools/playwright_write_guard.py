@@ -552,16 +552,11 @@ def _publish_page_hint_from_page(page: Any) -> None:
 
     Must not run at guard install: ``scope['page']`` is often pages[0], the
     stale Policies tab on job 30777947. A listing hint would re-pin capture.
+    Never write that listing URL when an Edit/FormEntry/documents page exists.
     """
-    url = str(getattr(page, "url", "") or "")
-    if not url:
-        return
     try:
-        from robie_job_engine.recording_tab import resolve_hint_file, write_page_hint
+        from robie_job_engine.recording_tab import publish_live_playwright_hint
 
-        hint = resolve_hint_file()
-        if hint is None:
-            return
-        write_page_hint(hint, url=url)
+        publish_live_playwright_hint(page=page)
     except Exception:
         return

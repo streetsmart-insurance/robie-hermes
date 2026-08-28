@@ -102,6 +102,13 @@ ASCEND_CUSTOMER_TYPE_CHAT = (
     "Missing LOB is HITL. Do not guess."
 )
 
+FOLLOW_TAB_CHAT = (
+    "FOLLOW-TAB class returned (807f8920, 468d1575, 30777947): "
+    "recorder stayed on a stale listing while Playwright drove "
+    "Edit/FormEntry/documents. Capture must follow the live Playwright tab. "
+    "Not proven on a live job until recorder URL == Playwright URL."
+)
+
 I_DID_IT_PROSE = (
     "I did it. The job is complete. Completed successfully — COMPLETE."
 )
@@ -127,6 +134,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "ascend-create:agency-fee-default",
         "ascend-create:unique-listbox-option",
         "ascend-customer-type:lob",
+        "recording:follow-live-playwright-tab",
     }
 )
 
@@ -614,6 +622,213 @@ def run_unique_listbox_option_scenario() -> dict[str, Any]:
         return _fail("ascend-create:unique-listbox-option", f"{type(exc).__name__}: {exc}")
 
 
+def run_follow_live_playwright_tab_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """Recorder must analyze the Playwright-driven second tab, not the listing.
+
+    Job 807f8920: capture's Playwright connection only saw the first listing
+    tab. Chrome already had Edit/FormEntry/documents. first-ezlynx-wins and
+    pages-only selection stay on the listing (frozen + MISMATCH). The fix
+    merges Chrome /json/list and follows the live tab.
+    """
+    from .chat_guard import open_chat_job
+    from .post_job_audit import frames_show_motion, rgb_frame, run_post_job_audit
+    from .recording import RecordingStore
+    from .recording_tab import (
+        TabCandidate,
+        first_ezlynx_wins,
+        follow_capture_ticks,
+        follow_screencast_frames,
+        merge_capture_tabs,
+        recorder_tab_mismatch,
+        select_recording_tab,
+        should_refresh_cdp_connection,
+        tab_candidates_from_cdp_payload,
+        write_attach_log,
+    )
+
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing follow-tab scenario on live Hermes path: {work_dir}"
+        )
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    policies = "https://app.ezlynx.com/applicantportal/Policies"
+    documents = "https://app.ezlynx.com/applicantportal/Documents"
+    edit = "https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83184565"
+    formentry = "https://app.ezlynx.com/applicantportal/FormEntry/220250093"
+    playwright_text = (
+        f"playwright_exec page.goto({edit!r}) then FormEntry {formentry} "
+        "and Save and Continue on account 220250093"
+    )
+    listing = TabCandidate("cdp-listing", policies, 1.0)
+    driven = [
+        TabCandidate("cdp-driven", documents, 2.0),
+        TabCandidate("cdp-driven", edit, 3.0),
+        TabCandidate("cdp-driven", formentry, 4.0),
+    ]
+    colors = {
+        policies: (200, 10, 10),
+        documents: (10, 200, 10),
+        edit: (10, 10, 220),
+        formentry: (220, 220, 10),
+    }
+
+    def snapshot(tab: TabCandidate) -> bytes:
+        return rgb_frame(24, 16, colors.get(tab.url, (0, 0, 0)))
+
+    playwright_ticks = [[listing], *[[listing] for _ in driven]]
+    cdp_ticks = [[listing], *[[listing, tab] for tab in driven]]
+    old = follow_screencast_frames(
+        playwright_ticks, snapshot, selector=first_ezlynx_wins
+    )
+    pages_only = follow_screencast_frames(
+        playwright_ticks, snapshot, selector=select_recording_tab, hint_url=edit
+    )
+    new = follow_capture_ticks(
+        playwright_ticks, cdp_ticks, snapshot, hint_url=edit
+    )
+    old_motion = frames_show_motion(old["frames"])
+    pages_only_motion = frames_show_motion(pages_only["frames"])
+    new_motion = frames_show_motion(new["frames"])
+    payload = [
+        {
+            "id": "cdp-listing",
+            "type": "page",
+            "url": policies,
+            "title": "Policies",
+        },
+        {
+            "id": "cdp-driven",
+            "type": "page",
+            "url": edit,
+            "title": "Edit",
+        },
+    ]
+    from_cdp = tab_candidates_from_cdp_payload(payload)
+    merged = merge_capture_tabs([listing], from_cdp)
+    refresh = should_refresh_cdp_connection([listing], from_cdp, hint_url=edit)
+    old_tab = recorder_tab_mismatch(
+        {
+            "initial_url": old["initial_url"],
+            "final_url": old["final_url"],
+            "attached_urls": old["attached_urls"],
+            "rebinds": old["rebinds"],
+            "selection_mode": "first_ezlynx",
+        },
+        playwright_text,
+    )
+    new_tab = recorder_tab_mismatch(
+        {
+            "initial_url": new["initial_url"],
+            "final_url": new["final_url"],
+            "attached_urls": new["attached_urls"],
+            "rebinds": new["rebinds"],
+            "selection_mode": new["selection_mode"],
+        },
+        playwright_text,
+    )
+    job_id = None
+    try:
+        db = str(work_dir / "follow-tab.db")
+        job_id = open_chat_job(
+            db,
+            "spaces/follow-tab/messages/open",
+            "edit policy 220250093 documents FormEntry",
+            requested_by="Carlo",
+            conversation_id="spaces/follow-tab",
+        )
+        store = JobStore(db)
+        store.checkpoint(job_id, "worker_response", {"response_text": playwright_text})
+        store.transition(
+            job_id,
+            JobStatus.UNVERIFIED,
+            expected={JobStatus.RUNNING},
+            error="fixture",
+            release_lease=True,
+        )
+        video = work_dir / "follow-live-playwright-tab.webm"
+        video.write_bytes(b"follow-tab-webm")
+        write_attach_log(
+            video,
+            {
+                "initial_url": new["initial_url"],
+                "final_url": new["final_url"],
+                "attached_urls": new["attached_urls"],
+                "rebinds": new["rebinds"],
+                "selection_mode": new["selection_mode"],
+            },
+        )
+        recordings = RecordingStore(db)
+        recording = recordings.create(job_id, video, video.with_suffix(".stop"))
+        recordings.update(
+            recording["id"],
+            status="READY",
+            drive_url="https://drive.google.com/file/d/follow-tab/view",
+            drive_file_id="follow-tab",
+        )
+        session = work_dir / "sessions"
+        session.mkdir(parents=True, exist_ok=True)
+        (session / "job.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "tool": "playwright_exec",
+                    "code": f"page.goto({edit!r}); page.click('text=Save and Continue')",
+                }
+            ),
+            encoding="utf-8",
+        )
+        audit = run_post_job_audit(
+            db,
+            job_id,
+            session_root=session,
+            extract_frames=lambda _path: new["frames"],
+        )
+        stale_stayed = (
+            old["final_url"] == policies
+            and pages_only["final_url"] == policies
+            and old_motion["result"] == "FAIL"
+            and pages_only_motion["result"] == "FAIL"
+            and old_tab["result"] == "MISMATCH"
+        )
+        followed = (
+            refresh
+            and any(tab.url == edit for tab in merged)
+            and new["final_url"] == formentry
+            and edit in new["attached_urls"]
+            and new["rebinds"] >= 1
+            and new_motion["result"] == "PASS"
+            and new_tab["result"] == "MATCH"
+            and audit["recording_motion"]["result"] == "PASS"
+            and audit["tool_vs_recording"]["result"] == "MATCH"
+            and "wrong-tab" not in str(audit["recording_motion"].get("reason") or "")
+        )
+        ok = stale_stayed and followed
+        return _result(
+            "recording:follow-live-playwright-tab",
+            ok=ok,
+            outcome="PASS" if ok else "FAILED",
+            evidence=(
+                "Playwright-driven second tab is what the recording analyzes "
+                "(807f8920 / 468d1575); pages-only / first-ezlynx stays on listing"
+                if ok
+                else (
+                    f"follow-tab leaked: old={old['final_url']} "
+                    f"pages_only={pages_only['final_url']} new={new['final_url']} "
+                    f"motion={new_motion['result']} tab={new_tab['result']} "
+                    f"audit={audit['tool_vs_recording']['result']}"
+                )
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash the battery
+        return _fail(
+            "recording:follow-live-playwright-tab",
+            f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        if job_id:
+            stop_generic_chat_job_heartbeat(db, job_id)
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -632,4 +847,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_agency_fee_default_scenario())
     results.append(run_unique_listbox_option_scenario())
     results.append(run_customer_type_lob_scenario())
+    results.append(
+        run_follow_live_playwright_tab_scenario(work_dir=work_dir / "follow-tab")
+    )
     return results

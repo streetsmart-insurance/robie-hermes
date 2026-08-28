@@ -49,6 +49,7 @@ from robie_job_engine.regression_scenarios import (
     ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
+    FOLLOW_TAB_CHAT,
     HITL_RESUME_CHAT,
     HITL_TONE_CHAT,
     I_DID_IT_PROSE,
@@ -62,6 +63,7 @@ from robie_job_engine.regression_scenarios import (
     run_concat_job_id_eb96f620_scenario,
     run_customer_type_lob_scenario,
     run_false_success_scenario,
+    run_follow_live_playwright_tab_scenario,
     run_hitl_resume_scenarios,
     run_hitl_tone_scenario,
     run_named_scenarios,
@@ -385,6 +387,7 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["ascend-create:agency-fee-default"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-create:unique-listbox-option"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-customer-type:lob"]["outcome"], "PASS")
+        self.assertEqual(ids["recording:follow-live-playwright-tab"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -613,6 +616,11 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["38c0fa79"]["scenario"],
             "ascend-create:unique-listbox-option",
         )
+        for job_id in ("807f8920", "468d1575"):
+            self.assertEqual(
+                incidents[job_id]["scenario"],
+                "recording:follow-live-playwright-tab",
+            )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -626,6 +634,28 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         )
         self.assertTrue(closed["closed"])
         self.assertEqual(run_same_day_scenario_rule()["outcome"], "PASS")
+
+    def test_follow_live_playwright_tab_scenario_fails_if_recording_stays_on_listing(self):
+        with durable_temporary_directory() as tmp:
+            result = run_follow_live_playwright_tab_scenario(
+                work_dir=Path(tmp) / "follow-tab"
+            )
+        self.assertTrue(result["ok"], result.get("evidence"))
+        self.assertEqual(result["id"], "recording:follow-live-playwright-tab")
+        self.assertEqual(result["outcome"], "PASS")
+        text = format_new_failure_chat(
+            [
+                {
+                    "id": "recording:follow-live-playwright-tab",
+                    "outcome": "FAILED",
+                    "evidence": "recorder stayed on listing",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(FOLLOW_TAB_CHAT, text)
+        self.assertIn("807f8920", text)
+        self.assertNotIn("@robie", text.casefold())
 
     def test_ascend_locator_audit_scenario_is_ci_only_and_passes(self):
         with durable_temporary_directory() as tmp:

@@ -8,7 +8,8 @@ overlay. It does not modify a live Hermes installation in place.
 - `deploy/hermes/tools/playwright_tool.py` registers the `playwright_exec`
   toolset, connects only to the configured persistent Chrome CDP endpoint,
   selects the current job tab with `select_playwright_page` (never `pages[0]`
-  / first-ezlynx-wins), and refuses form writes unless the locator uniquely identifies one field.
+  / first-ezlynx-wins), writes the live-tab hint from every current page
+  (not stale `scope['page']`), and refuses form writes unless the locator uniquely identifies one field.
   An empty PDF (`EmptyFileError` / pypdf empty file) or a missing
   `/tmp/playwright-artifacts-*` file is `PLAYWRIGHT_FAIL_CLOSED` once — not
   a retryable `PLAYWRIGHT_BLOCKED`. Production Hermes loads this file from
