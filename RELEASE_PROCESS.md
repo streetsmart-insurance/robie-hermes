@@ -145,18 +145,19 @@ Job Engine job must pass on `hermes-test-01`:
 - Skill: `ascend-locator-artifact-audit` (`production_ready: false`)
 - New job-type / `production_ready` flip still needs N = **3** clean Test jobs
 
-**The Test gate is a clean Job Engine job on `hermes-test-01`.**
-Ascend / premium-finance / PAWIVA changes must get that clean pass
-(Test account, Robie login, never PAWIVA 221398001, never a live
-client) **before any Production Chat job on a real account.** Jobs
-`807f8920` and `38c0fa79` on 2026-08-28 were the first test of the
+**Test gate (Carlo 2026-08-28 — ChatGPT / Claude / Jake-paste cannot skip this):**
+
+Ascend / premium-finance / PAWIVA changes must get a clean pass on
+hermes-test-01 (Test account, Robie login, never PAWIVA 221398001,
+never a live client) BEFORE any Production Chat job on a real account.
+Jobs 807f8920 and 38c0fa79 on 2026-08-28 were the first test of the
 Ascend change on a live client. The safety net (HITL / UNVERIFIED /
 no destination evidence) caught them. The Test gate was skipped. That
-is a process miss. **Production is not the first test.**
+is a process miss. Production is not the first test.
 
-A visual walk on Dusty's computer is **not** the Test gate. PR 35 CI
-is **not** the Test gate. Shipping a zip to `hermes-poc-01` is **not**
-the Test gate.
+A visual walk on Dusty's computer is not the Test gate. PR 35 CI is
+not the Test gate. Shipping a zip to hermes-poc-01 is not the Test
+gate. The Test gate is a clean Job Engine job on hermes-test-01.
 
 **No new live Ascend / PAWIVA Production job until N=1 clean Test Ascend
 pass.** Carlo asked for at least one. Use the Robie Test-account username

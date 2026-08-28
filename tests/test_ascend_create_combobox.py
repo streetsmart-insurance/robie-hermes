@@ -258,9 +258,18 @@ class FixtureAndDocsTests(unittest.TestCase):
         )
         for text in (state, release):
             flat = " ".join(text.replace("**", "").replace("`", "").split())
+            self.assertIn(
+                "must get a clean pass on hermes-test-01",
+                flat,
+            )
+            self.assertIn(
+                "BEFORE any Production Chat job on a real account",
+                flat,
+            )
             self.assertIn("Production is not the first test", flat)
             self.assertIn("807f8920", text)
             self.assertIn("38c0fa79", text)
+            self.assertIn("The Test gate was skipped. That is a process miss.", flat)
             self.assertIn("A visual walk on Dusty's computer is not the Test gate", flat)
             self.assertIn("PR 35 CI is not the Test gate", flat)
             self.assertIn("Shipping a zip to hermes-poc-01 is not the Test gate", flat)
