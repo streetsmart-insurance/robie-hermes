@@ -503,13 +503,16 @@ def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str
     return builder(), text
 
 
-FILE_UPLOAD_LOCATOR = 'locator("#file_upload")'
+FILE_UPLOAD_LOCATOR = 'locator("input[aria-label=\'file_upload\'][type=\'file\']")'
 
 
 def _quote_file_input(page: Any) -> tuple[Any | None, str]:
     for selector, text in (
-        ("#file_upload", FILE_UPLOAD_LOCATOR),
-        ("input#file_upload", 'locator("input#file_upload")'),
+        (
+            "input[aria-label='file_upload'][type='file']",
+            FILE_UPLOAD_LOCATOR,
+        ),
+        ("input#file_upload[type='file']", 'locator("input#file_upload[type=\'file\']")'),
         ("input[type='file']", 'locator("input[type=\'file\']")'),
     ):
         locator_fn = getattr(page, "locator", None)
