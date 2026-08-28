@@ -89,6 +89,7 @@ ISOLATED_UNSET = (
     "ROBIE_ARTIFACT_ROOT",
     "ROBIE_BROWSER_CDP_URL",
     "ROBIE_QUOTE_PDF",
+    "ROBIE_SKILL_SYNC_ROOT",
 )
 LIVE_PRODUCTION_JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
 LIVE_PRODUCTION_ARTIFACTS = "/opt/streetsmart-hermes/robie-job-engine/data/artifacts"
@@ -365,6 +366,9 @@ def run_logic_suite(
     # durable-path guards permit only the isolated fixtures they create; test
     # cases that exercise Production refusal set PRODUCTION explicitly.
     env["ROBIE_ENV"] = "TEST"
+    env["ROBIE_SKILL_SYNC_ROOT"] = str(
+        root / ".robie-durable-test" / "regression-skill-sync-empty"
+    )
     env["PYTHONPATH"] = str(root) + (
         (":" + os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else ""
     )

@@ -206,16 +206,18 @@ class ContractTests(unittest.TestCase):
                 "ROBIE_ENV": "PRODUCTION",
                 "ROBIE_JOB_DB": LIVE_PRODUCTION_JOB_DB,
                 "ROBIE_ARTIFACT_ROOT": "/opt/streetsmart-hermes/robie-job-engine/data/artifacts",
+                "ROBIE_SKILL_SYNC_ROOT": "/opt/streetsmart-hermes/.hermes/drive-skills",
                 "PATH": "/usr/bin",
             }
         )
         self.assertNotIn("ROBIE_ENV", env)
         self.assertNotIn("ROBIE_JOB_DB", env)
         self.assertNotIn("ROBIE_ARTIFACT_ROOT", env)
+        self.assertNotIn("ROBIE_SKILL_SYNC_ROOT", env)
         self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_logic_suite_marks_only_its_synthetic_subprocess_as_test(self):
-        seen: list[str] = []
+        seen: list[tuple[str, str]] = []
 
         class Result:
             returncode = 0
@@ -224,7 +226,12 @@ class ContractTests(unittest.TestCase):
 
         def runner(*args, **kwargs):
             del args
-            seen.append(kwargs["env"].get("ROBIE_ENV", ""))
+            seen.append(
+                (
+                    kwargs["env"].get("ROBIE_ENV", ""),
+                    kwargs["env"].get("ROBIE_SKILL_SYNC_ROOT", ""),
+                )
+            )
             return Result()
 
         results = run_logic_suite(
@@ -233,7 +240,10 @@ class ContractTests(unittest.TestCase):
             include_pytest=False,
         )
         self.assertTrue(all(item["ok"] for item in results))
-        self.assertEqual(seen, ["TEST", "TEST"])
+        self.assertEqual([item[0] for item in seen], ["TEST", "TEST"])
+        self.assertTrue(
+            all(item[1].endswith("regression-skill-sync-empty") for item in seen)
+        )
 
     def test_unittest_discover_skips_pytest_only_modules_without_importing_them(self):
         self.assertEqual(
