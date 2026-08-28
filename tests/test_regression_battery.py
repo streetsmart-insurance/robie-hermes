@@ -447,6 +447,11 @@ class ParityAndScopeTests(unittest.TestCase):
             self.assertIn("INCONCLUSIVE", flat)
             self.assertIn("how the simulator grows", flat)
             self.assertIn("named deterministic scenario", flat)
+            self.assertIn("PR 35", flat)
+            self.assertIn("automatic simulator", flat)
+            self.assertIn("do not call 36 the simulator", flat)
+            self.assertIn("Dusty walks the live site", flat)
+            self.assertIn("just trying it", flat)
         self.assertTrue(PARITY_PATH.is_file())
         self.assertTrue(SCENARIOS_PATH.is_file())
 

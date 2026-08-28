@@ -51,6 +51,26 @@ script does not `git pull`, bind, print secrets, restart Chrome, or
 overwrite user-owned Loom `ascend-finance`. Skills stay a separate Drive →
 `.hermes` install. See CURRENT_STATE.md.
 
+## Written gate (Carlo 2026-08-28)
+
+The **automatic simulator is the PR 35 regression battery** (CI on every
+PR, and again after every Production zip). It is **not** Dusty personally
+opening a website. **PR 36 is one-load-path only — do not call 36 the simulator.**
+
+ChatGPT / Claude / Jake-paste must follow this written gate. Do not skip
+the battery or the Dusty walk because a model is “just trying it.”
+
+1. **PR 35 battery (CI on the PR)** is the automatic simulator. Must be
+   green before merge when it is a NEW failure mode or NEW site/workflow.
+2. **Dusty walks the live site himself** before a NEW website/portal is
+   tried on a real account (same as the 2026-08-28 Ascend look).
+3. **Test job on `hermes-test-01` (N=3).** Then Production zip.
+4. **After Production zip, run the PR 35 battery again.** Pointer-only is
+   not live.
+5. **ChatGPT / Claude / Jake-paste** must follow this written gate. Do
+   not skip the battery or the Dusty walk because a model is “just trying
+   it.”
+
 ## Required gate: new job types / LOB skills
 
 Carlo's standing rule: **before any new job type** (personal auto, homeowners,
@@ -91,10 +111,17 @@ Production paths stay open. The gate applies to NEW types going forward.
 
 ## Required gate: NEW site / workflow (Ascend, next carrier portal)
 
+Follow the written gate above. The automatic simulator is the **PR 35
+battery**, not Dusty opening a website, and not PR 36. Dusty still walks
+the live site himself before a NEW website/portal is tried on a real
+account (same as the 2026-08-28 Ascend look). ChatGPT / Claude / Jake-paste
+must run that battery before trying something live.
+
 Commercial auto already on Production is **not** a free pass for a NEW site
 or workflow. Before Ascend, the next carrier portal, or any other new
-browser workflow may run on a real Production account, it must pass this
-Test-only Job Engine job on `hermes-test-01`:
+browser workflow may run on a real Production account, the PR 35 battery
+must be green, Dusty must have walked the live site, and this Test-only
+Job Engine job must pass on `hermes-test-01`:
 
 - Job type: `ascend.locator_artifact_audit`
 - Battery scenario: `ascend:locator-and-artifact-audit`
@@ -145,6 +172,10 @@ New job types still need **N clean Test (`hermes-test-01`) jobs** before
 Production on a real account. N = **3**. See the required gate above.
 
 ## Automated regression battery
+
+This **PR 35 battery is the automatic simulator**. It runs on every PR
+and again after every Production zip. PR 36 is one-load-path only — do
+not call 36 the simulator.
 
 What runs automatically — do not reconstruct this from Chat.
 
