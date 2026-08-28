@@ -391,7 +391,31 @@ class JobEngine:
                 release_lease=True,
             )
         if not result.succeeded:
-            return self._retry_or_fail(job, number, result.error or "worker failed", result.retryable, JobStatus.PENDING)
+            from .retry_policy import classify_failure
+
+            classification = classify_failure(result.error)
+            hold = classification.suggested_hold_status or result.hold_status
+            if hold is not None and hold in WAITING_STATUSES:
+                return self.store.transition(
+                    job["id"],
+                    hold,
+                    expected={JobStatus.RUNNING},
+                    error=result.error,
+                    resume_status=JobStatus.PENDING,
+                    release_lease=True,
+                )
+            retryable = (
+                classification.is_retryable
+                if result.error and not result.retryable
+                else (result.retryable and classification.is_retryable)
+            )
+            return self._retry_or_fail(
+                job,
+                number,
+                result.error or "worker failed",
+                retryable,
+                JobStatus.PENDING,
+            )
         action = {"action": result.action, "destination": result.destination, "detail": result.detail}
         self.store.checkpoint(job["id"], "action", action)
         return self.store.transition(job["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING})

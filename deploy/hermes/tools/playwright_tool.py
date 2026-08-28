@@ -249,11 +249,25 @@ try:
         scope["ask_gemini_unique_field"] = ask_gemini_unique_field
     except Exception:
         scope["ask_gemini_unique_field"] = None
+    _trace_mgr = None
+    _job_id = os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID")
+    if _job_id:
+        try:
+            from robie_job_engine.playwright_tracing import PlaywrightTraceManager
+            _trace_mgr = PlaywrightTraceManager()
+            _trace_mgr.start_tracing(context)
+        except Exception:
+            _trace_mgr = None
     try:
         exec(compile(source, "<playwright_exec>", "exec"), scope, scope)
     except Exception as exc:
         relabel_user_exec_exception(exc)
     finally:
+        if _trace_mgr and _job_id:
+            try:
+                _trace_mgr.stop_tracing(context, _job_id)
+            except Exception:
+                pass
         try:
             from robie_job_engine.recording_tab import (
                 publish_live_playwright_hint,

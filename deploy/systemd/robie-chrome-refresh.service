@@ -1,7 +1,7 @@
 [Unit]
-Description=Refresh Robie's persistent Chrome session
+Description=Refresh Robie's persistent Chrome session if idle
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/systemctl restart robie-ezlynx-browser.service
+ExecStart=/usr/bin/python3 /opt/streetsmart-hermes/releases/current/scripts/chrome_refresh_if_idle.py
