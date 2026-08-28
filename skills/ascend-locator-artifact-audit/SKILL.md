@@ -79,8 +79,9 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
    **Log the seconds.** A too-soon 0-element lookup is FAIL. Then
    **log** Import document vs Upload document vs dropzone labels.
    Prefer Import document (that panel has no Hawksoft / AMS360 / Epic).
-   Unclear → dry HITL. If the button is not ready past timeout:
-   `PLAYWRIGHT_BLOCKED` then HITL. No Gemini.
+   When a Test-account quote path is supplied, **upload that file**.
+   Never PAWIVA / a live client. Unclear → dry HITL. If the button is
+   not ready past timeout: `PLAYWRIGHT_BLOCKED` then HITL. No Gemini.
 5. **Log** the Producer and Account Manager prefills (live default is
    `Robie AI`). LOGIN is Robie (browser session only) — do **not** put
    Robie AI on Producer or Account Manager. Overwrite both with the
@@ -97,13 +98,22 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
    HITL in dry English. Unique locators. No `.first` / `.nth` / `.last`.
 6. Open each create-form combobox the job would use (Producer, Account
    Manager, Carrier / Writing company, Coverage type, State, etc.).
-   The visible list must have a **unique** locator for the intended
-   option (`get_by_role("option", name=…, exact=True)`). For Producer
+   Scope options to the **open listbox** (page-wide `role=option`
+   leftover leak is FAIL to count). After Escape, wait until the
+   previous options are gone. The visible list must have a **unique**
+   locator for the intended option
+   (`get_by_role("option", name=…, exact=True)`). For Producer
    and Account Manager that name is the concatenated Name+email label
    (`Carlo Ferrara carlo@streetsmart.insurance`), not `Carlo Ferrara`.
-   Two options matching the same selector is `PLAYWRIGHT_BLOCKED` (job
-   `38c0fa79`). Log the blocked field. Dry HITL if the intended option
-   is missing. Carlo will not RETRY `38c0fa79`. No `.first` / `.nth` /
+   Carrier, State, and Coverage type intended values come from the
+   **imported Test quote**, same as a new-program-from-quote job.
+   If Import did not run or the quote has no value, intended stays
+   empty and that field is HITL. Do not invent a carrier or coverage.
+   Loom example coverage is Commercial Package only when the quote
+   says Commercial Package. Two options matching the same selector is
+   `PLAYWRIGHT_BLOCKED` (job `38c0fa79`). Log the blocked field.
+   Empty-intended HITL does not abort the walk — continue to Agency
+   Fee. Carlo will not RETRY `38c0fa79`. No `.first` / `.nth` /
    `.last`.
 7. Commercial vs Personal radio from **line of business**, not the form
    default and not LLC vs person-name. Commercial auto / commercial
@@ -125,7 +135,7 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 - **GitHub CI:** punch-list reporter + artifact-path assertions only. No
   live Ascend. No EZLynx.
 - **hermes-test-01:** `ROBIE_ENV=TEST` and
-  `python -m robie_job_engine.ascend_locator_audit --live --db … --artifact-root …`
+  `python -m robie_job_engine.ascend_locator_audit --live --db … --artifact-root … --requested-by carlo@streetsmart.insurance --quote /path/to/test-quote.pdf`
 - **hermes-poc-01:** never. Production hold stays. Jake Approves, Carlo
   Confirms later. Hermes stays on.
 

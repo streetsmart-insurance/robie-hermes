@@ -128,7 +128,8 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
         "id": "unique_listbox_options",
         "description": (
             "Open each create-form combobox; unique Name+email option "
-            "for Producer/AM (not name-only Carlo Ferrara) (38c0fa79)"
+            "for Producer/AM (not name-only Carlo Ferrara); Carrier / "
+            "State / Coverage type from the imported Test quote (38c0fa79)"
         ),
         "locator": 'get_by_role("option", name=intended, exact=True)',
     },
@@ -808,33 +809,66 @@ def persist_punch_list(
     return record
 
 
-def default_audit_payload(*, live: bool = False, requested_by: str = "") -> dict[str, Any]:
+def default_audit_payload(
+    *,
+    live: bool = False,
+    requested_by: str = "",
+    quote_path: str = "",
+    quote_text: str = "",
+) -> dict[str, Any]:
+    from .ascend_create_combobox import (
+        combobox_payload_from_audit,
+        default_test_combobox_payload,
+    )
     from .ascend_create_defaults import TEST_AGENCY_FEE
     from .ascend_sender_roles import requested_by_from_payload, roles_for_requested_by
 
     sender = str(requested_by or "").strip()
     roles = roles_for_requested_by(sender) if sender else roles_for_requested_by("")
-    return {
+    combobox = default_test_combobox_payload(requested_by=sender)
+    merged = combobox_payload_from_audit(
+        {
+            **combobox,
+            "requested_by": sender,
+            "quote_path": str(quote_path or "").strip(),
+            "quote_text": str(quote_text or "").strip(),
+        }
+    )
+    payload = {
         "scenario": SCENARIO_ID,
         "resource_id": SCENARIO_ID,
         "report_only": True,
         "test_account_only": True,
         "live": bool(live),
         "requested_by": sender or requested_by_from_payload({}),
-        "producer": roles.get("producer"),
-        "account_manager": roles.get("account_manager"),
+        "producer": roles.get("producer") or combobox.get("producer"),
+        "account_manager": roles.get("account_manager") or combobox.get("account_manager"),
         "stop_before": list(STOP_BEFORE),
         "forbidden_accounts": sorted(FORBIDDEN_ACCOUNTS),
         "test_insured": TEST_INSURED,
         "test_quote_number": TEST_QUOTE_NUMBER,
         "test_agency_fee": TEST_AGENCY_FEE,
         "programs_url": PROGRAMS_URL,
+        "quote_fields": merged.get("quote_fields") or {},
         "expected_postcondition": {
             "report_id": SCENARIO_ID,
             "kind": REPORT_KIND,
             "finance_agreement": False,
         },
     }
+    if merged.get("quote_path"):
+        payload["quote_path"] = merged["quote_path"]
+    if merged.get("quote_text"):
+        payload["quote_text"] = merged["quote_text"]
+    if merged.get("quote_carrier"):
+        payload["quote_carrier"] = merged["quote_carrier"]
+    if merged.get("quote_coverage"):
+        payload["quote_coverage"] = merged["quote_coverage"]
+        payload.setdefault("coverage_type", merged["quote_coverage"])
+        payload.setdefault("line_of_business", merged["quote_coverage"])
+    if merged.get("quote_state"):
+        payload["quote_state"] = merged["quote_state"]
+    return payload
 
 
 class AscendLocatorAuditWorker:
@@ -858,6 +892,9 @@ class AscendLocatorAuditWorker:
             payload.get("client"),
             payload.get("text"),
             payload.get("insured"),
+            payload.get("quote_path"),
+            payload.get("quote_text"),
+            payload.get("test_quote_path"),
         )
         live = bool(payload.get("live"))
         if live:
@@ -1149,17 +1186,21 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
         if spec["id"] == "unique_listbox_options":
             from .ascend_create_combobox import (
                 audit_fixture_comboboxes,
+                combobox_payload_from_audit,
             )
 
-            combobox_payload = {
-                **payload,
-                "producer": roles.get("option")
-                or roles.get("producer")
-                or payload.get("producer"),
-                "account_manager": roles.get("option")
-                or roles.get("account_manager")
-                or payload.get("account_manager"),
-            }
+            combobox_payload = combobox_payload_from_audit(
+                {
+                    **payload,
+                    "requested_by": sender,
+                    "producer": roles.get("option")
+                    or roles.get("producer")
+                    or payload.get("producer"),
+                    "account_manager": roles.get("option")
+                    or roles.get("account_manager")
+                    or payload.get("account_manager"),
+                }
+            )
             if roles.get("option"):
                 combobox_payload["producer"] = roles["option"]
                 combobox_payload["account_manager"] = roles["option"]
@@ -1697,6 +1738,7 @@ def run_live_test_job(
     db_path: str,
     artifact_root: str,
     requested_by: str = "",
+    quote_path: str = "",
 ) -> dict[str, Any]:
     """Full Job Engine job on hermes-test-01. Never Production. Never CI live."""
     refuse_production_env()
@@ -1708,7 +1750,9 @@ def run_live_test_job(
     job = store.create_job(
         JOB_TYPE,
         {
-            **default_audit_payload(live=True, requested_by=requested_by),
+            **default_audit_payload(
+                live=True, requested_by=requested_by, quote_path=quote_path
+            ),
             "worker": WORKER_NAME,
             "db_path": db_path,
             "artifact_root": artifact_root,
@@ -1762,6 +1806,15 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Chat sender (Carlo Ferrara / Jake Ferrara). Empty is dry HITL.",
     )
+    parser.add_argument(
+        "--quote",
+        default="",
+        help=(
+            "Test-account quote to Import (pdf/txt). Carrier / State / "
+            "Coverage type come from this file. Never PAWIVA. Empty leaves "
+            "those fields HITL and continues to Agency Fee."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.live:
         refuse_production_env()
@@ -1783,6 +1836,7 @@ def main(argv: list[str] | None = None) -> int:
             db_path=db,
             artifact_root=artifacts,
             requested_by=str(args.requested_by or ""),
+            quote_path=str(args.quote or ""),
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if report.get("succeeded") else 2
