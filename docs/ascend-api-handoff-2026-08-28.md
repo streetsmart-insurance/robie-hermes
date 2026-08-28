@@ -80,8 +80,10 @@ chat. Only the Secret Manager resource name belongs in configuration.
 - PR 61: explicitly scoped synthetic release logic subprocesses to Test.
 - PR 62: isolated release verification from live Drive-synced core rules.
 
-GitHub `main` after these changes:
-`4df60a0955f3500bdf51de2e81526dbe15a5a802`.
+Application baseline after these changes:
+`4df60a0955f3500bdf51de2e81526dbe15a5a802`. Documentation-only handoff
+commits may advance GitHub `main`; Test intentionally remains on this
+application release until another application change is verified.
 
 ## Test deployment proof
 
