@@ -255,7 +255,11 @@ class CdpAndTabCheckTests(unittest.TestCase):
             ]
         )
         no = check_ezlynx_tab(tabs=["https://app.ezlynx.com/auth/account/login"])
+        empty = check_ezlynx_tab(tabs=[])
         self.assertTrue(yes["ok"])
+        self.assertFalse(empty["ok"])
+        self.assertIn("empty CDP target list", empty["evidence"])
+        self.assertIn("session is not fine", empty["evidence"])
         self.assertEqual(yes["name"], CHECK_EZLYNX_TAB)
         self.assertTrue(yes["evidence"].startswith(AUTHENTICATED_APP_PREFIX))
         self.assertFalse(no["ok"])

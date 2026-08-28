@@ -15,17 +15,31 @@ A zip pointer match is not “Chat is that SHA.” Pointer-only is how PR 17
 looked live while the Chat adapter still ran stale `.hermes` code (no
 `gateway_progress`).
 
-**Official install is now one proof.** `scripts/install-official-release.sh`
-flips both pointers and installs every Chat-loaded overlay (adapter,
-oauth, Playwright tools) as a zip-load shim, then refuses `OFFICIAL
-INSTALL DONE` until dest inode/md5 or the shim equals that zip. Skills
-stay a separate Drive → `.hermes` install. User-owned Loom
-`ascend-finance` is never overwritten here.
+**Official install is the only supported Production flip.**
+`scripts/install-official-release.sh` — not a long typed SSH cookbook —
+flips both pointers and installs every Chat-critical file (adapter,
+oauth, Playwright tools, write-guard, gemini helper) as a zip-load shim
+or zip PYTHONPATH load, then refuses `OFFICIAL INSTALL DONE` until live
+proof holds. Skills stay a separate Drive → `.hermes` install. User-owned
+Loom `ascend-finance` is never overwritten here.
+
+Live proof cannot lie. Done requires all of: both pointers match,
+`hermes-gateway` `ActiveEnterTimestamp` after the flip, Chat-loaded
+adapter/tools equal that zip (md5/inode or zip-load shim), and an
+`install_proof` row in jobs.db. Pointer-only is not live. Chat looking
+busy is not live.
 
 After a Chat job, prove a `checkpoints.kind=gateway_progress` row in
 `/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`.
 **Destination-verified evidence rows > 0 is success**, not Chat looking
-busy.
+busy. COMPLETE still requires that evidence. Success prose without it
+stays UNVERIFIED/FAILED.
+
+The install/preflight path must not leave Production at 0 CDP tabs.
+Attach-only bootstrap fails with `Persistent EZLynx browser has no page`.
+Empty CDP target list is INCONCLUSIVE / fail — never “session fine”. Open one
+seed page then AUTHENTICATE, or stop. Do not dump secrets. Do not restart
+Chrome.
 
 This tree is **not** deployed to `hermes-poc-01`. Jake Approves, Carlo
 Confirms later.
@@ -195,7 +209,7 @@ official zip proof:
 “Live” is **not** GitHub `main` alone, and **not** zip pointer alone.
 Pointer-only is not live.
 
-After every official Production zip, all four must be true:
+After every official Production zip, all of these must be true:
 
 1. Both pointers match the SHA
    (`/opt/streetsmart-hermes/current` and
@@ -204,10 +218,16 @@ After every official Production zip, all four must be true:
 3. Chat load path equals that zip: each Chat-loaded dest
    (`adapter.py`, `oauth.py`, `playwright_tool.py`,
    `playwright_write_guard.py`, `gemini_field_tool.py`) is a zip-load shim
-   or the same bytes/md5 as the zip file. Preflight check `chat-runtime`
-   and `python3 -m robie_job_engine.deploy_truth prove` are this proof.
-4. For a Chat job, a `checkpoints.kind=gateway_progress` row exists in
-   `/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`.
+   or the same bytes/md5 as the zip file, and
+   `robie_job_engine/gemini_field_helper.py` is on that zip PYTHONPATH.
+4. An `install_proof` row exists in
+   `/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`. That row is
+   not COMPLETE and does not authorize COMPLETE.
+5. For a Chat job, a `checkpoints.kind=gateway_progress` row exists.
+
+`scripts/install-official-release.sh` records `flip_at` even when not yet
+done, then `prove` writes the `install_proof` row. Pointer-only and Chat
+looking busy are not live. The row is never COMPLETE.
 
 Skills stay in `.hermes` on purpose (Drive sync, including user-owned Loom
 `ascend-finance`). They are a separate install. Official zip install does
@@ -218,16 +238,20 @@ looking busy is not success.
 
 ## Official install (one source of truth for adapter / tools / Job Engine)
 
-`scripts/install-official-release.sh` is the accepted zip path. It does
-not `git pull` on the VM. It does not bind. It does not print secrets.
-It does not restart `hermes-gateway` (operator does that after approval).
+`scripts/install-official-release.sh` is the **only** supported Production
+zip flip. Long typed SSH commands are not the install path. It does not
+`git pull` on the VM. It does not bind. It does not print secrets. It
+does not restart `hermes-gateway` or Chrome (operator restarts the
+gateway after approval, then re-runs `prove`; `flip_at` is already
+recorded so prove does not need a remembered timestamp).
 
 What was two paths: pointer flip (Job Engine) plus a later hand copy into
 `.hermes` (Chat adapter / Playwright tools). What is now one proof: the
 same script flips both pointers, writes zip-load shims for every
-Chat-loaded Python file, and refuses `OFFICIAL INSTALL DONE` until dest
-equals that zip. A later zip flip then loads Chat from the new SHA
-without a file-by-file `.hermes` patch.
+Chat-critical Python file, and refuses `OFFICIAL INSTALL DONE` until
+pointers + Chat dests + gateway-after-flip + `install_proof` row all
+hold. A later zip flip then loads Chat from the new SHA without a
+file-by-file `.hermes` patch.
 
 What still lives in `.hermes` on purpose: Hermes-agent itself, plugin
 loader, `plugin.yaml`, tokens, browser profile, config/SOUL merges, and

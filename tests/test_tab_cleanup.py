@@ -27,8 +27,10 @@ from robie_job_engine.recording_tab import (
 )
 from robie_job_engine.store import JobStore
 from robie_job_engine.tab_cleanup import (
+    EMPTY_TARGET_EVIDENCE,
     BrowserTab,
     cleanup_terminal_job_tabs,
+    ensure_one_browser_page,
     flush_orphaned_tabs,
     plan_tab_cleanup,
     retarget_recorder_hint,
@@ -270,6 +272,39 @@ class FlushCleanupTests(unittest.TestCase):
                 [page.url for page in pages if not page.closed],
                 [SESSION, LIVE_DOCUMENTS],
             )
+
+    def test_flush_empty_targets_is_inconclusive_not_session_fine(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            JobStore(db)
+            result = flush_orphaned_tabs(
+                db,
+                tabs=[],
+                http_get=lambda url: (_ for _ in ()).throw(OSError("no cdp")),
+            )
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["session_fine"])
+            self.assertEqual(result.get("session_status"), "INCONCLUSIVE")
+            self.assertIn(EMPTY_TARGET_EVIDENCE, result.get("evidence") or "")
+            cleanup_source = (
+                Path(__file__).resolve().parents[1]
+                / "robie_job_engine"
+                / "tab_cleanup.py"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("systemctl restart", cleanup_source)
+
+        opened: list[str] = []
+
+        def opener() -> object:
+            opened.append(SESSION)
+            return type("Page", (), {"url": SESSION})()
+
+        seed = ensure_one_browser_page(tabs=[], opener=opener)
+        self.assertTrue(seed["ok"])
+        self.assertTrue(seed["opened"])
+        self.assertFalse(seed["session_fine"])
+        self.assertEqual(seed["status"], "OPENED_SEED_PAGE")
+        self.assertEqual(opened, [SESSION])
 
 
 class RecorderHintAfterCleanupTests(unittest.TestCase):

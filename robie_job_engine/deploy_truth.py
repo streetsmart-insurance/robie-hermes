@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 
 class DeployTruthError(RuntimeError):
@@ -32,8 +32,14 @@ DEFAULT_HERMES_HOME = DEFAULT_OPT_ROOT / ".hermes"
 USER_OWNED_SKILLS = ("ascend-finance",)
 SKILL_DIR_NAME = "skills"
 PROOF_FILENAME = "official-install-proof.json"
+FLIP_RECORD_FILENAME = "official-install-flip.json"
 DONE_BANNER = "OFFICIAL INSTALL DONE"
 NOT_DONE_BANNER = "OFFICIAL INSTALL NOT DONE"
+INSTALL_PROOF_KIND = "install_proof"
+INSTALL_PROOF_ACTION = "robie.official_install"
+INSTALL_PROOF_KEY = "official-install-proof"
+DEFAULT_JOBS_DB = Path("/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
+GATEWAY_UNIT = "hermes-gateway"
 
 @dataclass(frozen=True)
 class ChatRuntimeFile:
@@ -70,6 +76,15 @@ CHAT_RUNTIME_FILES: tuple[ChatRuntimeFile, ...] = (
         name="gemini-field-tool",
         zip_relpath="deploy/hermes/tools/gemini_field_tool.py",
         dest_relpath="hermes-agent/tools/gemini_field_tool.py",
+    ),
+)
+
+# Zip PYTHONPATH only — Hermes does not load these from .hermes.
+ZIP_ONLY_FILES: tuple[ChatRuntimeFile, ...] = (
+    ChatRuntimeFile(
+        name="gemini-field-helper",
+        zip_relpath="robie_job_engine/gemini_field_helper.py",
+        dest_relpath="",
     ),
 )
 
@@ -322,14 +337,31 @@ def prove_chat_runtime_matches_zip(
     zip_root = Path(release_root)
     dest_root = _as_path(hermes_home, DEFAULT_HERMES_HOME)
     rows: list[dict[str, Any]] = []
-    for item in files or CHAT_RUNTIME_FILES:
+    declared = tuple(files) if files is not None else CHAT_RUNTIME_FILES + ZIP_ONLY_FILES
+    for item in declared:
         _refuse_skill_path(item.zip_relpath)
-        _refuse_skill_path(item.dest_relpath)
-        row = dest_matches_zip(
-            dest_root / item.dest_relpath,
-            zip_root / item.zip_relpath,
-            item.zip_relpath,
-        )
+        if item.dest_relpath:
+            _refuse_skill_path(item.dest_relpath)
+            row = dest_matches_zip(
+                dest_root / item.dest_relpath,
+                zip_root / item.zip_relpath,
+                item.zip_relpath,
+            )
+        else:
+            zip_file = zip_root / item.zip_relpath
+            present = zip_file.is_file()
+            row = {
+                "dest": None,
+                "zip_file": str(zip_file),
+                "zip_relpath": item.zip_relpath,
+                "ok": present,
+                "mode": "zip-path" if present else "zip-missing",
+                "evidence": (
+                    f"{item.name} on zip PYTHONPATH"
+                    if present
+                    else f"zip source missing: {zip_file}"
+                ),
+            }
         row["name"] = item.name
         rows.append(row)
     stale = [row for row in rows if not row["ok"]]
@@ -396,42 +428,301 @@ def prove_pointers_match_release(
     }
 
 
+def parse_timestamp(value: str | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    text = str(value).strip()
+    if not text or text.casefold() in {"n/a", "none", "0"}:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S %Z"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def probe_gateway_active_enter(
+    *,
+    runner: Callable[[list[str]], Any] | None = None,
+) -> datetime | None:
+    """Read hermes-gateway ActiveEnterTimestamp. Never restarts the unit."""
+    if runner is None:
+        import subprocess
+
+        def runner(argv: list[str]) -> Any:
+            return subprocess.run(
+                argv, check=False, capture_output=True, text=True, timeout=5
+            )
+
+    proc = runner(
+        [
+            "systemctl",
+            "show",
+            GATEWAY_UNIT,
+            "-p",
+            "ActiveEnterTimestamp",
+            "--value",
+            "--no-pager",
+        ]
+    )
+    text = (getattr(proc, "stdout", None) or "") if proc is not None else ""
+    return parse_timestamp(str(text).strip())
+
+
+def prove_gateway_after_flip(
+    *,
+    flip_at: str | datetime | None,
+    active_enter: str | datetime | None = None,
+    gateway_probe: Callable[[], datetime | None] | None = None,
+) -> dict[str, Any]:
+    flipped = parse_timestamp(flip_at)
+    entered = parse_timestamp(active_enter)
+    if entered is None and gateway_probe is not None:
+        entered = parse_timestamp(gateway_probe())
+    if entered is None and active_enter is None and gateway_probe is None:
+        entered = probe_gateway_active_enter()
+    if flipped is None:
+        return {
+            "ok": False,
+            "kind": "gateway-after-flip",
+            "flip_at": None,
+            "active_enter": entered.isoformat() if entered else None,
+            "evidence": "missing pointer-flip timestamp; pointer-only is not live",
+        }
+    if entered is None:
+        return {
+            "ok": False,
+            "kind": "gateway-after-flip",
+            "flip_at": flipped.isoformat(),
+            "active_enter": None,
+            "evidence": (
+                f"{GATEWAY_UNIT} ActiveEnterTimestamp missing; "
+                "restart after the flip is required; pointer-only is not live"
+            ),
+        }
+    ok = entered > flipped
+    return {
+        "ok": ok,
+        "kind": "gateway-after-flip",
+        "flip_at": flipped.isoformat(),
+        "active_enter": entered.isoformat(),
+        "evidence": (
+            f"{GATEWAY_UNIT} ActiveEnterTimestamp {entered.isoformat()} "
+            f"after flip {flipped.isoformat()}"
+            if ok
+            else (
+                f"{GATEWAY_UNIT} ActiveEnterTimestamp {entered.isoformat()} "
+                f"is not after flip {flipped.isoformat()}; pointer-only is not live"
+            )
+        ),
+    }
+
+
+def write_flip_record(
+    *,
+    opt_root: str | Path,
+    release_root: str | Path,
+    sha: str | None,
+    flip_at: str | datetime,
+) -> dict[str, Any]:
+    """Persist flip time so later prove does not need a remembered --flip-at."""
+    parsed = parse_timestamp(flip_at)
+    if parsed is None:
+        raise DeployTruthError("cannot record flip without a timestamp")
+    record = {
+        "flip_at": parsed.isoformat(),
+        "sha": sha,
+        "release_root": str(Path(release_root).resolve()),
+        "chat_busy_is_not_live": True,
+        "authorizes_complete": False,
+        "destination_verified": False,
+    }
+    for dest in (
+        Path(release_root) / FLIP_RECORD_FILENAME,
+        Path(opt_root) / FLIP_RECORD_FILENAME,
+    ):
+        write_install_proof(dest, record)
+    return record
+
+
+def load_recorded_flip(
+    *,
+    opt_root: str | Path | None = None,
+    release_root: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Read the last official-install flip timestamp. Not live by itself."""
+    candidates: list[Path] = []
+    if release_root:
+        root = Path(release_root)
+        candidates.append(root / FLIP_RECORD_FILENAME)
+        candidates.append(root / PROOF_FILENAME)
+    if opt_root:
+        candidates.append(Path(opt_root) / FLIP_RECORD_FILENAME)
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen or not path.is_file():
+            continue
+        seen.add(key)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        flip_at = data.get("flip_at")
+        if parse_timestamp(flip_at) is None:
+            continue
+        return {
+            "flip_at": flip_at,
+            "sha": data.get("sha"),
+            "release_root": data.get("release_root"),
+            "path": str(path),
+        }
+    return None
+
+
+def persist_install_proof_row(
+    db_path: str | Path,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Write an install_proof checkpoint. Never COMPLETE. Never secrets."""
+    from .store import JobStore
+
+    store = JobStore(str(db_path))
+    sha = str(payload.get("sha") or "unknown")
+    job = store.create_job(
+        INSTALL_PROOF_ACTION,
+        {
+            "kind": INSTALL_PROOF_KIND,
+            "sha": sha,
+            "authorizes_complete": False,
+            "destination_verified": False,
+            "chat_busy_is_not_live": True,
+        },
+        idempotency_key=f"{INSTALL_PROOF_KEY}:{sha}",
+    )
+    from .models import JobStatus
+
+    if job["status"] == JobStatus.COMPLETE.value:
+        raise DeployTruthError("install proof job must not be COMPLETE")
+    data = {
+        "sha": sha,
+        "live": bool(payload.get("live")),
+        "pointer_only": False,
+        "chat_busy_is_not_live": True,
+        "authorizes_complete": False,
+        "destination_verified": False,
+        "destination_evidence_required_for_complete": True,
+        "flip_at": payload.get("flip_at"),
+        "gateway_active_enter": payload.get("gateway_active_enter"),
+        "evidence": payload.get("evidence"),
+    }
+    store.checkpoint(job["id"], INSTALL_PROOF_KIND, data)
+    stored = store.get_checkpoint(job["id"], INSTALL_PROOF_KIND) or {}
+    return {
+        "job_id": job["id"],
+        "kind": INSTALL_PROOF_KIND,
+        "status": job["status"],
+        "data": stored,
+    }
+
+
 def prove_official_install(
     *,
     opt_root: str | Path,
     release_root: str | Path,
     hermes_home: str | Path | None = None,
     sha: str | None = None,
+    flip_at: str | datetime | None = None,
+    gateway_active_enter: str | datetime | None = None,
+    gateway_probe: Callable[[], datetime | None] | None = None,
+    db_path: str | Path | None = None,
+    persist_row: bool = False,
 ) -> dict[str, Any]:
-    """Install is done only when pointers and Chat-loaded dests agree."""
+    """Live/done only when pointers, Chat dests, and gateway-after-flip agree.
+
+    Pointer-only is not live. Chat looking busy is not live. COMPLETE still
+    requires destination-verified evidence > 0; this proof never authorizes it.
+    """
+    if flip_at is None:
+        recorded = load_recorded_flip(opt_root=opt_root, release_root=release_root)
+        if recorded is not None:
+            flip_at = recorded.get("flip_at")
     pointers = prove_pointers_match_release(
         opt_root=opt_root, release_root=release_root, sha=sha
     )
     chat = prove_chat_runtime_matches_zip(
         release_root=release_root, hermes_home=hermes_home
     )
-    ok = bool(pointers["ok"] and chat["ok"])
-    if not ok and not pointers["ok"]:
+    gateway = prove_gateway_after_flip(
+        flip_at=flip_at,
+        active_enter=gateway_active_enter,
+        gateway_probe=gateway_probe,
+    )
+    files_ok = bool(pointers["ok"] and chat["ok"])
+    live = bool(files_ok and gateway["ok"])
+    if not pointers["ok"]:
         evidence = pointers["evidence"]
-    elif not ok:
+    elif not chat["ok"]:
         evidence = chat["evidence"]
+    elif not gateway["ok"]:
+        evidence = gateway["evidence"]
     else:
-        evidence = f"{pointers['evidence']}; {chat['evidence']}"
-    return {
-        "ok": ok,
-        "done": ok,
+        evidence = (
+            f"{pointers['evidence']}; {chat['evidence']}; {gateway['evidence']}"
+        )
+    payload = {
+        "ok": live,
+        "done": live,
+        "live": live,
+        "pointer_only": bool(pointers["ok"] and not chat["ok"]),
+        "chat_busy_is_not_live": True,
+        "authorizes_complete": False,
+        "destination_verified": False,
+        "sha": sha,
+        "flip_at": gateway.get("flip_at") or (parse_timestamp(flip_at).isoformat() if parse_timestamp(flip_at) else None),
+        "gateway_active_enter": gateway.get("active_enter"),
         "pointers": pointers,
         "chat_runtime": chat,
+        "gateway": gateway,
         "evidence": evidence,
-        "live": {
-            "pointer_only": False,
-            "requires": (
-                "pointers + Chat load path equals that zip; "
-                "gateway ActiveEnterTimestamp after the flip; "
-                "gateway_progress on the next Chat job"
-            ),
-        },
+        "install_proof_row": None,
     }
+    if persist_row:
+        db = db_path or os.environ.get("ROBIE_JOB_DB") or str(DEFAULT_JOBS_DB)
+        can_write = Path(db).is_file() or db_path is not None
+        if can_write:
+            payload["install_proof_row"] = persist_install_proof_row(db, payload)
+        elif live:
+            payload["ok"] = False
+            payload["done"] = False
+            payload["live"] = False
+            payload["evidence"] = (
+                "install proof row missing; refuse to call live without a "
+                f"{INSTALL_PROOF_KIND} checkpoint"
+            )
+            return payload
+        if live and not payload.get("install_proof_row"):
+            payload["ok"] = False
+            payload["done"] = False
+            payload["live"] = False
+            payload["evidence"] = (
+                "install proof row missing; refuse to call live without a "
+                f"{INSTALL_PROOF_KIND} checkpoint"
+            )
+    return payload
 
 
 def is_pointer_only_live(
@@ -540,13 +831,17 @@ def official_install(
     hermes_home: str | Path | None = None,
     sha: str | None = None,
     restart_gateway: bool = False,
+    flip_at: str | datetime | None = None,
+    gateway_active_enter: str | datetime | None = None,
+    gateway_probe: Callable[[], datetime | None] | None = None,
+    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Flip pointers, install Chat-loaded overlays, refuse done without proof.
+    """Flip pointers, install Chat-loaded overlays, refuse done without live proof.
 
-    Does not git pull. Does not bind. Does not print secrets. Does not
-    overwrite user-owned Loom skills. Does not restart Hermes unless the
-    caller passes ``restart_gateway`` (default false; this PR never deploys
-    to hermes-poc-01).
+    Done requires pointers + Chat dests equal that zip + hermes-gateway
+    ActiveEnterTimestamp after the flip + an install_proof row. Pointer-only
+    is not live. Chat looking busy is not live. Does not git pull, bind,
+    print secrets, overwrite Loom ascend-finance, or restart Hermes.
     """
     if restart_gateway:
         raise DeployTruthError(
@@ -559,21 +854,29 @@ def official_install(
     if not zip_root.is_dir():
         raise DeployTruthError(f"release root is not a directory: {zip_root}")
     if sha and sha not in str(zip_root) and sha not in zip_root.name:
-        # SHA may live on the parent release dir (releases/<sha>/robie-hermes-<sha>).
         parent_name = zip_root.parent.name
         if sha not in parent_name:
             raise DeployTruthError(
                 f"release root {zip_root} does not contain SHA {sha}"
             )
+    flipped = parse_timestamp(flip_at) or datetime.now(timezone.utc)
     overlays = install_chat_runtime_overlays(
         release_root=zip_root, hermes_home=dest_root
     )
     pointers = flip_release_pointers(opt_root=root, release_root=zip_root)
+    write_flip_record(
+        opt_root=root, release_root=zip_root, sha=sha, flip_at=flipped
+    )
     proof = prove_official_install(
         opt_root=root,
         release_root=zip_root,
         hermes_home=dest_root,
         sha=sha,
+        flip_at=flipped,
+        gateway_active_enter=gateway_active_enter,
+        gateway_probe=gateway_probe,
+        db_path=db_path,
+        persist_row=True,
     )
     payload = {
         "sha": sha,
@@ -583,6 +886,7 @@ def official_install(
         "overlays": overlays,
         "pointers": pointers,
         "proof": proof,
+        "flip_at": flipped.isoformat(),
         "skills": (
             "not installed; Drive -> .hermes including user-owned "
             "Loom ascend-finance"
@@ -590,14 +894,17 @@ def official_install(
         "git_pull": False,
         "bind": False,
         "restart_gateway": False,
+        "authorizes_complete": False,
+        "chat_busy_is_not_live": True,
         "created_at": _utc_now(),
         "done": bool(proof["ok"]),
+        "live": bool(proof.get("live")),
         "banner": DONE_BANNER if proof["ok"] else NOT_DONE_BANNER,
     }
     proof_path = zip_root / PROOF_FILENAME
+    write_install_proof(proof_path, payload)
+    payload["proof_path"] = str(proof_path)
     if proof["ok"]:
-        write_install_proof(proof_path, payload)
-        payload["proof_path"] = str(proof_path)
         return payload
     raise DeployTruthError(
         f"{NOT_DONE_BANNER}: {proof['evidence']}"
@@ -629,6 +936,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         item.add_argument("--release-root", required=True)
         item.add_argument("--hermes-home", default="")
         item.add_argument("--sha", default="")
+        item.add_argument("--db", default="")
+        item.add_argument("--flip-at", default="")
+        item.add_argument("--gateway-active-enter", default="")
     return parser.parse_args(argv)
 
 
@@ -637,12 +947,19 @@ def main(argv: list[str] | None = None) -> int:
     opt_root = args.opt_root or str(DEFAULT_OPT_ROOT)
     hermes_home = args.hermes_home or None
     sha = args.sha or None
+    db_path = args.db or None
+    flip_at = args.flip_at or None
+    gateway_active_enter = args.gateway_active_enter or None
     if args.command == "prove":
         proof = prove_official_install(
             opt_root=opt_root,
             release_root=args.release_root,
             hermes_home=hermes_home,
             sha=sha,
+            flip_at=flip_at,
+            gateway_active_enter=gateway_active_enter,
+            db_path=db_path,
+            persist_row=True,
         )
         print(json.dumps(_public_payload(proof), indent=2, sort_keys=True))
         print(format_proof_report(proof), flush=True)
@@ -653,6 +970,9 @@ def main(argv: list[str] | None = None) -> int:
             release_root=args.release_root,
             hermes_home=hermes_home,
             sha=sha,
+            flip_at=flip_at,
+            gateway_active_enter=gateway_active_enter,
+            db_path=db_path,
         )
     except DeployTruthError as exc:
         print(json.dumps({"done": False, "error": str(exc)}, indent=2, sort_keys=True))

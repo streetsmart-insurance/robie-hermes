@@ -31,7 +31,9 @@ overlay. It does not modify a live Hermes installation in place.
 - `robie_job_engine/tab_cleanup.py` closes leftover EZLynx / login /
   `about:blank` / Ascend tabs on COMPLETE / FAILED / UNVERIFIED and on the
   production pre-flight sweep. It keeps one authenticated `/web/` session
-  tab and never restarts Chrome. A zip flip loads this module.
+  tab. An empty CDP target list is INCONCLUSIVE / fail — never “session
+  fine”. Open one seed page or stop. It never restarts Chrome. A zip flip
+  loads this module.
 - `deploy/hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md` requires
   Save and Continue Edit after a commercial auto SHELL, quote vehicles /
   drivers / garaging / symbols / limits / banks, titled-discussion notes

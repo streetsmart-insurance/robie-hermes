@@ -287,8 +287,24 @@ def check_ezlynx_tab(
             last_error = f"{url}{suffix} empty tab list"
             break
         tabs = listed
-        if not tabs and last_error:
-            return _result(CHECK_EZLYNX_TAB, False, last_error)
+        if not tabs:
+            if "empty tab list" in last_error:
+                return _result(
+                    CHECK_EZLYNX_TAB,
+                    False,
+                    "empty CDP target list; session is not fine",
+                )
+            return _result(
+                CHECK_EZLYNX_TAB,
+                False,
+                last_error or "empty CDP target list; session is not fine",
+            )
+    if not tabs:
+        return _result(
+            CHECK_EZLYNX_TAB,
+            False,
+            "empty CDP target list; session is not fine",
+        )
     matching = [item for item in tabs if ezlynx_web_tab_ok(item)]
     if matching:
         return _result(CHECK_EZLYNX_TAB, True, matching[0].split("?", 1)[0])

@@ -109,9 +109,19 @@ def newest_ezlynx_code(
 
 def visible_page(browser):
     pages = [page for context in browser.contexts for page in context.pages]
-    if not pages:
-        raise RuntimeError("Persistent EZLynx browser has no page")
-    return pages[-1]
+    if pages:
+        return pages[-1]
+    contexts = list(getattr(browser, "contexts", None) or [])
+    if contexts:
+        opener = getattr(contexts[0], "new_page", None)
+        if callable(opener):
+            page = opener()
+            if page is not None:
+                return page
+    raise RuntimeError(
+        "INCONCLUSIVE: Persistent EZLynx browser has no page and no context; "
+        "session is not fine"
+    )
 
 
 def authenticated(page) -> bool:
@@ -144,7 +154,13 @@ def main() -> int:
         return 26
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
-        page = visible_page(browser)
+        try:
+            page = visible_page(browser)
+        except RuntimeError as exc:
+            if str(exc).startswith("INCONCLUSIVE"):
+                print("INCONCLUSIVE")
+                return 27
+            raise
         page.set_default_timeout(20_000)
 
         if authenticated(page):

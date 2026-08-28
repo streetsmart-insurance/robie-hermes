@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from durable_temp import durable_temporary_directory
@@ -17,23 +18,30 @@ from durable_temp import durable_temporary_directory
 from robie_job_engine.deploy_truth import (
     CHAT_RUNTIME_FILES,
     DONE_BANNER,
+    FLIP_RECORD_FILENAME,
+    INSTALL_PROOF_KIND,
     NOT_DONE_BANNER,
     PROOF_FILENAME,
     USER_OWNED_SKILLS,
     ZIP_LOAD_MARKER,
+    ZIP_ONLY_FILES,
     DeployTruthError,
     dest_matches_zip,
     file_md5,
     flip_release_pointers,
     is_pointer_only_live,
     is_zip_load_shim,
+    load_recorded_flip,
     official_install,
+    parse_timestamp,
     prove_chat_runtime_matches_zip,
     prove_official_install,
     resolve_job_engine_root,
     resolve_write_guard_path,
     zip_load_shim_source,
 )
+from robie_job_engine.models import JobStatus
+from robie_job_engine.store import JobStore
 from robie_job_engine.production_preflight import (
     CHECK_CHAT_RUNTIME,
     check_chat_runtime,
@@ -62,6 +70,10 @@ def _copy_zip_sources(release_root: Path) -> None:
     guard = ROOT / "robie_job_engine" / "playwright_write_guard.py"
     (release_root / "robie_job_engine" / "playwright_write_guard.py").write_bytes(
         guard.read_bytes()
+    )
+    helper = ROOT / "robie_job_engine" / "gemini_field_helper.py"
+    (release_root / "robie_job_engine" / "gemini_field_helper.py").write_bytes(
+        helper.read_bytes()
     )
 
 
@@ -112,6 +124,20 @@ def _layout(tmp: str, sha: str = SHA_NEW) -> dict[str, Path]:
     }
 
 
+def _jobs_db(opt: Path) -> str:
+    path = str(opt / "jobs.db")
+    JobStore(path)
+    return path
+
+
+def _after_flip(flip_at: datetime | None = None) -> dict[str, object]:
+    flipped = flip_at or datetime.now(timezone.utc)
+    return {
+        "flip_at": flipped,
+        "gateway_active_enter": flipped + timedelta(seconds=5),
+    }
+
+
 class ManifestContractTests(unittest.TestCase):
     def test_chat_runtime_manifest_excludes_skills_and_includes_adapter_tools(self):
         names = {item.name for item in CHAT_RUNTIME_FILES}
@@ -121,6 +147,8 @@ class ManifestContractTests(unittest.TestCase):
         self.assertIn("playwright-tool", names)
         self.assertIn("playwright-write-guard", names)
         self.assertIn("gemini-field-tool", names)
+        zip_only = {item.name for item in ZIP_ONLY_FILES}
+        self.assertIn("gemini-field-helper", zip_only)
         self.assertNotIn("skills", rels)
         self.assertNotIn("ascend-finance", rels)
         self.assertNotIn("SKILL.md", zips)
@@ -150,7 +178,14 @@ class ManifestContractTests(unittest.TestCase):
         self.assertIn("ActiveEnterTimestamp", text)
         self.assertIn("ascend-finance", text)
         self.assertIn("scripts/install-official-release.sh", text)
+        self.assertIn("only supported Production flip", text)
+        self.assertIn("install_proof", text)
+        self.assertIn("Empty CDP target list", text)
+        self.assertIn("destination-verified evidence rows > 0", text)
         self.assertIn("**not** deployed to `hermes-poc-01`", text)
+        script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("ONLY supported Production flip", script)
+        self.assertIn("Long typed SSH commands are not the install path", script)
 
 
 class StaleChatFileFailsTests(unittest.TestCase):
@@ -227,24 +262,41 @@ class OfficialInstallProofTests(unittest.TestCase):
             paths = _layout(tmp)
             skill_before = paths["skill"].read_text(encoding="utf-8")
             skill_mtime = paths["skill"].stat().st_mtime_ns
+            db = _jobs_db(paths["opt"])
             payload = official_install(
                 opt_root=paths["opt"],
                 release_root=paths["release"],
                 hermes_home=paths["hermes"],
                 sha=SHA_NEW,
+                db_path=db,
+                **_after_flip(),
             )
             self.assertTrue(payload["done"])
+            self.assertTrue(payload["live"])
             self.assertEqual(payload["banner"], DONE_BANNER)
             self.assertFalse(payload["git_pull"])
             self.assertFalse(payload["bind"])
             self.assertFalse(payload["restart_gateway"])
+            self.assertFalse(payload["authorizes_complete"])
             proof = prove_official_install(
                 opt_root=paths["opt"],
                 release_root=paths["release"],
                 hermes_home=paths["hermes"],
                 sha=SHA_NEW,
+                db_path=db,
+                persist_row=False,
+                **_after_flip(),
             )
             self.assertTrue(proof["ok"])
+            self.assertTrue(proof["live"])
+            row = payload["proof"]["install_proof_row"]
+            self.assertEqual(row["kind"], INSTALL_PROOF_KIND)
+            self.assertNotEqual(row["status"], JobStatus.COMPLETE.value)
+            stored = JobStore(db).get_checkpoint(row["job_id"], INSTALL_PROOF_KIND)
+            self.assertTrue(stored["live"])
+            self.assertFalse(stored["authorizes_complete"])
+            self.assertFalse(stored["destination_verified"])
+            self.assertTrue(stored["chat_busy_is_not_live"])
             self.assertFalse(
                 is_pointer_only_live(
                     opt_root=paths["opt"],
@@ -286,8 +338,11 @@ class OfficialInstallProofTests(unittest.TestCase):
                 release_root=paths["release"], hermes_home=paths["hermes"]
             )
             self.assertTrue(chat["ok"])
-            modes = {row["mode"] for row in chat["files"]}
-            self.assertEqual(modes, {"bytes-match"})
+            dest_modes = {
+                row["mode"] for row in chat["files"] if row.get("dest")
+            }
+            self.assertEqual(dest_modes, {"bytes-match"})
+            self.assertIn("zip-path", {row["mode"] for row in chat["files"]})
             adapter = paths["hermes"] / (
                 "hermes-agent/plugins/platforms/google_chat/adapter.py"
             )
@@ -302,6 +357,8 @@ class OfficialInstallProofTests(unittest.TestCase):
                 release_root=paths["release"],
                 hermes_home=paths["hermes"],
                 sha=SHA_NEW,
+                db_path=_jobs_db(paths["opt"]),
+                **_after_flip(),
             )
             paths["skill"].write_text(
                 "Carlo edited ascend-finance after the zip\n", encoding="utf-8"
@@ -314,6 +371,8 @@ class OfficialInstallProofTests(unittest.TestCase):
                 release_root=paths["release"],
                 hermes_home=paths["hermes"],
                 sha=SHA_NEW,
+                persist_row=False,
+                **_after_flip(),
             )
             self.assertTrue(proof["ok"])
             self.assertIn("ascend-finance is not proof", proof["chat_runtime"]["skills"])
@@ -331,6 +390,76 @@ class OfficialInstallProofTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(DeployTruthError, "skill"):
                 zip_load_shim_source("deploy/hermes/skills/ascend-finance/SKILL.md")
+
+    def test_pointer_and_chat_match_without_gateway_after_flip_is_not_live(self):
+        with durable_temporary_directory() as tmp:
+            paths = _layout(tmp)
+            db = _jobs_db(paths["opt"])
+            flipped = datetime.now(timezone.utc)
+            with self.assertRaisesRegex(DeployTruthError, "not after flip|ActiveEnterTimestamp missing"):
+                official_install(
+                    opt_root=paths["opt"],
+                    release_root=paths["release"],
+                    hermes_home=paths["hermes"],
+                    sha=SHA_NEW,
+                    db_path=db,
+                    flip_at=flipped,
+                    gateway_active_enter=flipped - timedelta(seconds=30),
+                )
+            proof = prove_official_install(
+                opt_root=paths["opt"],
+                release_root=paths["release"],
+                hermes_home=paths["hermes"],
+                sha=SHA_NEW,
+                flip_at=flipped,
+                gateway_active_enter=flipped - timedelta(seconds=30),
+                persist_row=False,
+            )
+            self.assertTrue(proof["pointers"]["ok"])
+            self.assertTrue(proof["chat_runtime"]["ok"])
+            self.assertFalse(proof["live"])
+            self.assertFalse(proof["ok"])
+            self.assertFalse(proof["authorizes_complete"])
+            recorded = load_recorded_flip(
+                opt_root=paths["opt"], release_root=paths["release"]
+            )
+            self.assertIsNotNone(recorded)
+            self.assertEqual(
+                parse_timestamp(recorded["flip_at"]), parse_timestamp(flipped)
+            )
+            self.assertTrue((paths["release"] / FLIP_RECORD_FILENAME).is_file())
+            self.assertTrue((paths["release"] / PROOF_FILENAME).is_file())
+            unfinished = prove_official_install(
+                opt_root=paths["opt"],
+                release_root=paths["release"],
+                hermes_home=paths["hermes"],
+                sha=SHA_NEW,
+                flip_at=flipped,
+                gateway_active_enter=flipped - timedelta(seconds=30),
+                db_path=db,
+                persist_row=True,
+            )
+            self.assertFalse(unfinished["live"])
+            self.assertIsNotNone(unfinished["install_proof_row"])
+            self.assertFalse(unfinished["install_proof_row"]["data"]["live"])
+            self.assertNotEqual(
+                unfinished["install_proof_row"]["status"], JobStatus.COMPLETE.value
+            )
+            later = prove_official_install(
+                opt_root=paths["opt"],
+                release_root=paths["release"],
+                hermes_home=paths["hermes"],
+                sha=SHA_NEW,
+                gateway_active_enter=flipped + timedelta(seconds=8),
+                db_path=db,
+                persist_row=True,
+            )
+            self.assertTrue(later["live"])
+            self.assertTrue(later["ok"])
+            self.assertIsNotNone(later["install_proof_row"])
+            self.assertNotEqual(
+                later["install_proof_row"]["status"], JobStatus.COMPLETE.value
+            )
 
     def test_cli_install_is_not_done_until_proof(self):
         with durable_temporary_directory() as tmp:
@@ -360,10 +489,14 @@ class OfficialInstallProofTests(unittest.TestCase):
             )
             self.assertEqual(prove.returncode, 2)
             self.assertIn(NOT_DONE_BANNER, prove.stdout)
+            flipped = datetime.now(timezone.utc)
+            entered = flipped + timedelta(seconds=5)
+            db = _jobs_db(paths["opt"])
             installed = subprocess.run(
                 [
                     "bash",
                     str(INSTALL_SCRIPT),
+                    "install",
                     "--opt-root",
                     str(paths["opt"]),
                     "--release-root",
@@ -372,6 +505,12 @@ class OfficialInstallProofTests(unittest.TestCase):
                     str(paths["hermes"]),
                     "--sha",
                     SHA_NEW,
+                    "--db",
+                    db,
+                    "--flip-at",
+                    flipped.isoformat(),
+                    "--gateway-active-enter",
+                    entered.isoformat(),
                 ],
                 cwd=str(ROOT),
                 env=env,
@@ -452,5 +591,26 @@ class ZipLoadAndPathTests(unittest.TestCase):
             self.assertEqual(row["mode"], "bytes-match")
 
 
+class CompleteLawAndBootstrapTests(unittest.TestCase):
+    def test_live_proof_never_authorizes_complete_or_reads_secrets(self):
+        module = DEPLOY_TRUTH.read_text(encoding="utf-8")
+        self.assertIn('"authorizes_complete": False', module)
+        self.assertIn("destination_evidence_required_for_complete", module)
+        self.assertNotIn("access_secret_version", module)
+        from robie_job_engine.release_gate import production_release_decision
+
+        self.assertEqual(production_release_decision(), "FAIL")
+
+    def test_bootstrap_opens_one_page_or_prints_inconclusive(self):
+        bootstrap = (ROOT / "ezlynx_login_bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn('print("INCONCLUSIVE")', bootstrap)
+        self.assertIn("new_page", bootstrap)
+        self.assertIn("session is not fine", bootstrap)
+        self.assertNotIn("session is fine", bootstrap)
+        self.assertNotIn("systemctl restart", bootstrap)
+        self.assertNotIn("print(secret(", bootstrap)
+
+
 if __name__ == "__main__":
     unittest.main()
+
