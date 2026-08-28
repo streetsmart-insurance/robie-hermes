@@ -98,6 +98,10 @@ Test-only Job Engine job on `hermes-test-01`:
 
 - Job type: `ascend.locator_artifact_audit`
 - Battery scenario: `ascend:locator-and-artifact-audit`
+- Named Production path bug: `artifact-path:concat-job-id-eb96f620`
+  (`job_id[:-11]+artifact_id` lookup is FAIL; folder must be the full job id)
+- HITL Chat tone: `hitl-tone:dry-playwright-blocked` (cowboy/slang rewritten
+  to dry `PLAYWRIGHT_BLOCKED` + path + ask before send)
 - Skill: `ascend-locator-artifact-audit` (`production_ready: false`)
 - N = **3** clean Test jobs still applies
 

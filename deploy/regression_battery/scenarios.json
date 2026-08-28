@@ -50,6 +50,22 @@
       "scenario": "ascend:locator-and-artifact-audit",
       "closed": true,
       "note": "Mangled/concatenated job-id folder under artifacts/. Worker cannot open the PDF it just saved. Unique-locator fail is FAIL. This Test audit is required before a NEW site/workflow (Ascend, next carrier portal) may run on a real Production account. Commercial auto is not a free pass."
+    },
+    {
+      "id": "eb96f620",
+      "class": "artifact-path",
+      "new_failure_mode": true,
+      "scenario": "artifact-path:concat-job-id-eb96f620",
+      "closed": true,
+      "note": "Production job eb96f620 HITL PLAYWRIGHT_BLOCKED because the worker looked in artifacts/{job_id[:-11]+artifact_id}/. Real dir is artifacts/{full_job_id}/. Concatenating a sliced job id with the artifact id is FAIL."
+    },
+    {
+      "id": "hitl-cowboy-tone",
+      "class": "hitl-tone",
+      "new_failure_mode": true,
+      "scenario": "hitl-tone:dry-playwright-blocked",
+      "closed": true,
+      "note": "Worker model ad-libbed Chat HITL after RETRY ('Listen up, Jake!', 'it ain't my fault'). Templates stay HITL Carlo in plain English. Outbound HITL must be dry/technical: PLAYWRIGHT_BLOCKED + path + ask."
     }
   ]
 }

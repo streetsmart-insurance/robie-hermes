@@ -42,16 +42,20 @@ from robie_job_engine.regression_battery import (
     run_secret_health_scenario,
 )
 from robie_job_engine.regression_scenarios import (
+    CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
     HITL_RESUME_CHAT,
+    HITL_TONE_CHAT,
     I_DID_IT_PROSE,
     SAME_DAY_RULE,
     SCENARIOS_PATH,
     close_new_failure_incident,
     IncidentCloseError,
     load_scenario_catalog,
+    run_concat_job_id_eb96f620_scenario,
     run_false_success_scenario,
     run_hitl_resume_scenarios,
+    run_hitl_tone_scenario,
     run_named_scenarios,
     run_same_day_scenario_rule,
     run_ascend_locator_audit_scenario,
@@ -362,6 +366,8 @@ class ReplayGuardTests(unittest.TestCase):
             {"UNVERIFIED", "FAILED"},
         )
         self.assertEqual(ids["ascend:locator-and-artifact-audit"]["outcome"], "PASS")
+        self.assertEqual(ids["artifact-path:concat-job-id-eb96f620"]["outcome"], "PASS")
+        self.assertEqual(ids["hitl-tone:dry-playwright-blocked"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -551,6 +557,14 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["artifact-concat-job-id"]["scenario"],
             "ascend:locator-and-artifact-audit",
         )
+        self.assertEqual(
+            incidents["eb96f620"]["scenario"],
+            "artifact-path:concat-job-id-eb96f620",
+        )
+        self.assertEqual(
+            incidents["hitl-cowboy-tone"]["scenario"],
+            "hitl-tone:dry-playwright-blocked",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -573,6 +587,40 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         self.assertTrue(result["ok"], result.get("evidence"))
         self.assertEqual(result["id"], "ascend:locator-and-artifact-audit")
         self.assertFalse(result.get("finance_agreement"))
+
+    def test_eb96f620_concat_path_and_hitl_tone_scenarios_pass(self):
+        with durable_temporary_directory() as tmp:
+            path_result = run_concat_job_id_eb96f620_scenario(
+                work_dir=Path(tmp) / "eb96-named"
+            )
+        self.assertTrue(path_result["ok"], path_result.get("evidence"))
+        self.assertEqual(path_result["id"], "artifact-path:concat-job-id-eb96f620")
+        tone = run_hitl_tone_scenario()
+        self.assertTrue(tone["ok"], tone.get("evidence"))
+        self.assertEqual(tone["id"], "hitl-tone:dry-playwright-blocked")
+        text = format_new_failure_chat(
+            [
+                {
+                    "id": "artifact-path:concat-job-id-eb96f620",
+                    "outcome": "FAILED",
+                    "evidence": "concat folder accepted",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(CONCAT_PATH_CHAT, text)
+        self.assertIn("eb96f620", text)
+        tone_text = format_new_failure_chat(
+            [
+                {
+                    "id": "hitl-tone:dry-playwright-blocked",
+                    "outcome": "FAILED",
+                    "evidence": "cowboy HITL posted",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(HITL_TONE_CHAT, tone_text)
 
     def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
         with durable_temporary_directory() as tmp:

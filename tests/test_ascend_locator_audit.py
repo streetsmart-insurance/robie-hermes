@@ -10,9 +10,13 @@ from unittest.mock import patch
 from durable_temp import durable_temporary_directory
 
 from robie_job_engine.ascend_locator_audit import (
+    CONCAT_SCENARIO_ID,
     FORBIDDEN_ACCOUNTS,
     JOB_TYPE,
     MINIMAL_PDF,
+    PRODUCTION_EB96_ARTIFACT_ID,
+    PRODUCTION_EB96_JOB_ID,
+    PRODUCTION_EB96_WRONG_FOLDER,
     REPORT_KIND,
     SCENARIO_ID,
     STOP_BEFORE,
@@ -28,14 +32,18 @@ from robie_job_engine.ascend_locator_audit import (
     assert_quote_pdf_openable,
     classify_locator_failure,
     default_audit_payload,
+    is_sliced_job_id_plus_artifact_id,
     looks_concatenated_job_id,
     refuse_complete_without_destination_evidence,
     refuse_finance_agreement_complete,
     refuse_forbidden_account,
     require_unique_locator,
     run_ci_assertion_battery,
+    run_concat_job_id_eb96f620_scenario,
     save_and_lookup_quote_pdf,
     site_workflow_hold_reason,
+    sliced_concat_job_folder,
+    worker_lookup_artifact_dir,
 )
 from robie_job_engine.job_type_gate import is_job_type_production_ready
 from robie_job_engine.models import JobStatus
@@ -125,6 +133,36 @@ class ArtifactPathTests(unittest.TestCase):
             self.assertIn("concatenat", str(raised.exception).casefold())
             self.assertTrue(looks_concatenated_job_id(f"{job_id}{job_id}"))
             self.assertFalse(looks_concatenated_job_id(job_id))
+
+    def test_eb96f620_sliced_job_id_plus_artifact_id_is_fail(self):
+        job_id = PRODUCTION_EB96_JOB_ID
+        artifact_id = PRODUCTION_EB96_ARTIFACT_ID
+        wrong = sliced_concat_job_folder(job_id, artifact_id)
+        self.assertEqual(wrong, PRODUCTION_EB96_WRONG_FOLDER)
+        self.assertEqual(wrong, f"{job_id[:-11]}{artifact_id}")
+        self.assertTrue(is_sliced_job_id_plus_artifact_id(wrong, job_id, artifact_id))
+        self.assertTrue(looks_concatenated_job_id(wrong))
+        self.assertFalse(is_sliced_job_id_plus_artifact_id(job_id, job_id, artifact_id))
+        with durable_temporary_directory() as tmp:
+            root = Path(tmp) / "artifacts"
+            legal = worker_lookup_artifact_dir(root, job_id, artifact_id=artifact_id)
+            self.assertEqual(legal, root / job_id)
+            self.assertEqual(legal.name, job_id)
+            wrong_pdf = root / wrong / f"{artifact_id}-quote.pdf"
+            wrong_pdf.parent.mkdir(parents=True)
+            wrong_pdf.write_bytes(MINIMAL_PDF)
+            with self.assertRaises(ArtifactPathError) as raised:
+                assert_artifact_path_matches_job_id(
+                    wrong_pdf,
+                    job_id=job_id,
+                    artifact_root=root,
+                    artifact_id=artifact_id,
+                )
+            message = str(raised.exception).casefold()
+            self.assertTrue(
+                "concatenat" in message or "job_id[:n]" in message or "full_job_id" in message,
+                message,
+            )
 
     def test_missing_pdf_after_save_is_fail(self):
         with durable_temporary_directory() as tmp:
@@ -270,6 +308,15 @@ class WorkerAndGateTests(unittest.TestCase):
                 steps=[],
             )
             self.assertEqual(punch.overall, "FAIL")
+
+    def test_named_eb96f620_scenario_fails_sliced_concat_and_passes_full_id(self):
+        with durable_temporary_directory() as tmp:
+            report = run_concat_job_id_eb96f620_scenario(work_dir=Path(tmp) / "eb96")
+        self.assertEqual(report["id"], CONCAT_SCENARIO_ID)
+        self.assertTrue(report["ok"], report.get("evidence"))
+        self.assertEqual(report["outcome"], "PASS")
+        self.assertIn(PRODUCTION_EB96_JOB_ID, report["evidence"])
+        self.assertIn(PRODUCTION_EB96_WRONG_FOLDER, report["evidence"])
 
     def test_ci_battery_scenario_passes_without_live_ascend(self):
         source = Path("robie_job_engine/ascend_locator_audit.py").read_text(

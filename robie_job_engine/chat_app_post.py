@@ -93,6 +93,9 @@ def post_as_chat_app(
     """POST spaces.messages.create as the Chat APP. Fail-closed on auth errors."""
     if not space_name.startswith("spaces/"):
         raise ValueError("Chat APP posts stay in an existing space")
+    from .hitl import sanitize_hitl_chat_text
+
+    text = sanitize_hitl_chat_text(text)
     client = chat if chat is not None else _chat_app_client()
     body: dict[str, Any] = {"text": text}
     kwargs: dict[str, Any] = {"parent": space_name, "body": body}

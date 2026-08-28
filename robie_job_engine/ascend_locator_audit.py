@@ -41,9 +41,18 @@ from .store import JobStore
 JOB_TYPE = "ascend.locator_artifact_audit"
 WORKER_NAME = "ascend-locator-audit"
 SCENARIO_ID = "ascend:locator-and-artifact-audit"
+CONCAT_SCENARIO_ID = "artifact-path:concat-job-id-eb96f620"
 SKILL_NAME = "ascend-locator-artifact-audit"
 PROGRAMS_URL = "https://dashboard.useascend.com/programs"
 REPORT_KIND = "locator_artifact_audit_report"
+
+# Production job eb96f620 HITL PLAYWRIGHT_BLOCKED: worker looked in
+# artifacts/{job_id[:-11]}{artifact_id}/ instead of artifacts/{full_job_id}/.
+PRODUCTION_EB96_JOB_ID = "eb96f620-f8c3-4006-8eb4-d938d2a44c73"
+PRODUCTION_EB96_ARTIFACT_ID = "3a41af0e-ca7f-4a57-8cae-67d3ca55c1c5"
+PRODUCTION_EB96_WRONG_FOLDER = (
+    "eb96f620-f8c3-4006-8eb4-d3a41af0e-ca7f-4a57-8cae-67d3ca55c1c5"
+)
 
 FORBIDDEN_ACCOUNTS = frozenset({"PAWIVA", "221398001"})
 FORBIDDEN_ACTIONS = (
@@ -73,6 +82,14 @@ STRICT_MARKERS = (
 POSITIONAL_MARKERS = (".first", ".nth(", ".last", "nth=", " >> nth")
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+UUID_PREFIX_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-",
+    re.IGNORECASE,
+)
+UUID_SEARCH_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
 NEW_SITE_WORKFLOWS = frozenset({"ascend", "next-carrier-portal"})
@@ -373,6 +390,55 @@ def canonical_job_artifact_dir(artifact_root: str | Path, job_id: str) -> Path:
     return Path(artifact_root) / job_id
 
 
+def worker_lookup_artifact_dir(
+    artifact_root: str | Path,
+    job_id: str,
+    *,
+    artifact_id: str | None = None,
+) -> Path:
+    """The only legal worker lookup folder: ``{artifact_root}/{full_job_id}/``.
+
+    Slicing ``job_id`` or concatenating ``job_id[:n]`` with ``artifact_id``
+    is FAIL. This is the construction workers must use — not
+    ``job_id[:-11] + artifact_id`` (Production ``eb96f620``).
+    """
+    if artifact_id:
+        forbidden = sliced_concat_job_folder(job_id, artifact_id)
+        if forbidden == job_id:
+            raise ArtifactPathError(
+                "artifact id must not replace the job-id folder"
+            )
+    return canonical_job_artifact_dir(artifact_root, job_id)
+
+
+def sliced_concat_job_folder(job_id: str, artifact_id: str) -> str:
+    """Reproduce Production ``eb96f620``: ``job_id[:-11] + artifact_id``.
+
+    Always illegal as a lookup folder. Tests use this to prove FAIL.
+    """
+    prefix = job_id[:-11] if len(job_id) >= 11 else job_id
+    return f"{prefix}{artifact_id}"
+
+
+def is_sliced_job_id_plus_artifact_id(
+    folder: str,
+    job_id: str,
+    artifact_id: str,
+) -> bool:
+    """True when the folder is any ``job_id[:n] + artifact_id`` mash-up."""
+    name = str(folder or "").strip()
+    if not name or not job_id or not artifact_id:
+        return False
+    if name == job_id:
+        return False
+    if name == sliced_concat_job_folder(job_id, artifact_id):
+        return True
+    for index in range(1, len(job_id)):
+        if name == f"{job_id[:index]}{artifact_id}":
+            return True
+    return False
+
+
 def looks_concatenated_job_id(name: str) -> bool:
     text = str(name or "").strip()
     if not text:
@@ -382,6 +448,10 @@ def looks_concatenated_job_id(name: str) -> bool:
     if len(text) >= 72 and UUID_RE.fullmatch(text[:36]) and UUID_RE.fullmatch(text[36:72]):
         return True
     if UUID_RE.fullmatch(text[:36]) and len(text) > 36:
+        return True
+    # Production eb96f620: job_id prefix + artifact UUID. First 36 chars
+    # are not themselves a UUID (the splice sits inside the last group).
+    if len(text) > 36 and UUID_PREFIX_RE.match(text) and UUID_SEARCH_RE.search(text):
         return True
     return False
 
@@ -405,9 +475,15 @@ def assert_artifact_path_matches_job_id(
     *,
     job_id: str,
     artifact_root: str | Path,
+    artifact_id: str | None = None,
 ) -> Path:
     """FAIL when the job folder is concatenated or not exactly the job id."""
     folder = artifact_folder_for_path(stored_path, artifact_root)
+    if artifact_id and is_sliced_job_id_plus_artifact_id(folder, job_id, artifact_id):
+        raise ArtifactPathError(
+            f"lookup path is job_id[:n]+artifact_id ({folder!r}); "
+            f"required {{artifact_root}}/{{full_job_id}}/ = {job_id!r}"
+        )
     if looks_concatenated_job_id(folder):
         raise ArtifactPathError(
             f"mangled/concatenated job-id folder {folder!r} "
@@ -421,6 +497,14 @@ def assert_artifact_path_matches_job_id(
         )
         raise ArtifactPathError(
             f"artifact job folder {folder!r} does not equal job id {job_id!r}{extra}"
+        )
+    legal = worker_lookup_artifact_dir(
+        artifact_root, job_id, artifact_id=artifact_id
+    )
+    if Path(stored_path).resolve().parent != legal.resolve():
+        raise ArtifactPathError(
+            f"lookup path parent {Path(stored_path).resolve().parent} "
+            f"is not exactly {legal}"
         )
     return Path(stored_path)
 
@@ -474,8 +558,20 @@ def save_and_lookup_quote_pdf(
         source_platform="google_chat",
     )
     stored = str(record.get("stored_path") or "")
+    artifact_id = str(record.get("id") or "")
+    lookup_dir = worker_lookup_artifact_dir(
+        artifact_root, job_id, artifact_id=artifact_id or None
+    )
+    if Path(stored).resolve().parent != lookup_dir.resolve():
+        raise ArtifactPathError(
+            f"worker lookup dir must be {lookup_dir}; stored parent is "
+            f"{Path(stored).resolve().parent}"
+        )
     assert_artifact_path_matches_job_id(
-        stored, job_id=job_id, artifact_root=artifact_root
+        stored,
+        job_id=job_id,
+        artifact_root=artifact_root,
+        artifact_id=artifact_id or None,
     )
     found = ops.list_artifacts(job_id)
     if not any(item.get("id") == record.get("id") for item in found):
@@ -914,6 +1010,117 @@ class AscendLocatorAuditVerifier:
         return VerificationResult(verified, evidence, retryable=False, error=error)
 
 
+def run_concat_job_id_eb96f620_assertion(*, work_dir: Path) -> dict[str, Any]:
+    """Deterministic FAIL for Production job eb96f620 sliced+concat lookup."""
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing artifact-path concat assertion on live Hermes path: {work_dir}"
+        )
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    job_id = PRODUCTION_EB96_JOB_ID
+    artifact_id = PRODUCTION_EB96_ARTIFACT_ID
+    wrong_folder = sliced_concat_job_folder(job_id, artifact_id)
+    if wrong_folder != PRODUCTION_EB96_WRONG_FOLDER:
+        return {
+            "ok": False,
+            "error": (
+                f"sliced_concat_job_folder reproduced {wrong_folder!r}, "
+                f"expected {PRODUCTION_EB96_WRONG_FOLDER!r}"
+            ),
+        }
+    artifacts = Path(work_dir) / "artifacts"
+    legal_dir = worker_lookup_artifact_dir(
+        artifacts, job_id, artifact_id=artifact_id
+    )
+    if legal_dir != artifacts / job_id:
+        return {
+            "ok": False,
+            "error": f"legal lookup dir {legal_dir} is not {{artifact_root}}/{{full_job_id}}/",
+            "legal_dir": str(legal_dir),
+            "wrong_dir": str(artifacts / wrong_folder),
+        }
+    legal_dir.mkdir(parents=True, exist_ok=True)
+    pdf = legal_dir / f"{artifact_id}-quote.pdf"
+    pdf.write_bytes(MINIMAL_PDF)
+    wrong_dir = artifacts / wrong_folder
+    wrong_dir.mkdir(parents=True, exist_ok=True)
+    wrong_pdf = wrong_dir / f"{artifact_id}-quote.pdf"
+    wrong_pdf.write_bytes(MINIMAL_PDF)
+    if not looks_concatenated_job_id(wrong_folder):
+        return {
+            "ok": False,
+            "error": "Production concat folder was not classified as concatenated",
+            "legal_dir": str(legal_dir),
+            "wrong_dir": str(wrong_dir),
+        }
+    if not is_sliced_job_id_plus_artifact_id(wrong_folder, job_id, artifact_id):
+        return {
+            "ok": False,
+            "error": "Production folder was not detected as job_id[:n]+artifact_id",
+            "legal_dir": str(legal_dir),
+            "wrong_dir": str(wrong_dir),
+        }
+    try:
+        assert_artifact_path_matches_job_id(
+            wrong_pdf,
+            job_id=job_id,
+            artifact_root=artifacts,
+            artifact_id=artifact_id,
+        )
+        return {
+            "ok": False,
+            "error": "Production concat lookup path was accepted",
+            "legal_dir": str(legal_dir),
+            "wrong_dir": str(wrong_dir),
+        }
+    except ArtifactPathError:
+        pass
+    assert_artifact_path_matches_job_id(
+        pdf,
+        job_id=job_id,
+        artifact_root=artifacts,
+        artifact_id=artifact_id,
+    )
+    assert_quote_pdf_openable(pdf)
+    return {
+        "ok": True,
+        "legal_dir": str(legal_dir),
+        "wrong_dir": str(wrong_dir),
+        "job_id": job_id,
+        "artifact_id": artifact_id,
+    }
+
+
+def run_concat_job_id_eb96f620_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """Named scenario: artifact-path:concat-job-id-eb96f620. Isolated only."""
+    try:
+        result = run_concat_job_id_eb96f620_assertion(work_dir=work_dir)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "id": CONCAT_SCENARIO_ID,
+            "kind": "logic",
+            "ok": False,
+            "outcome": "FAILED",
+            "evidence": f"{type(exc).__name__}: {exc}",
+            "finance_agreement": False,
+        }
+    ok = bool(result.get("ok"))
+    return {
+        "id": CONCAT_SCENARIO_ID,
+        "kind": "logic",
+        "ok": ok,
+        "outcome": "PASS" if ok else "FAILED",
+        "evidence": (
+            f"lookup must be {{artifact_root}}/{PRODUCTION_EB96_JOB_ID}/; "
+            f"job_id[:-11]+artifact_id = {PRODUCTION_EB96_WRONG_FOLDER} is FAIL"
+            if ok
+            else str(result.get("error") or "concat lookup was accepted")
+        ),
+        "job_id": PRODUCTION_EB96_JOB_ID,
+        "finance_agreement": False,
+    }
+
+
 def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
     """Named scenario for GitHub CI. No live Ascend. No Production paths."""
     if is_live_hermes_path(work_dir):
@@ -985,6 +1192,26 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         checks.append(pass_step("concatenated_job_id", artifact_path=str(concat_pdf)))
         if "concatenat" not in str(exc).casefold() and job_id not in str(exc):
             checks[-1] = fail_step("concatenated_job_id", exc, artifact_path=str(concat_pdf))
+
+    try:
+        prod = run_concat_job_id_eb96f620_assertion(work_dir=work_dir / "eb96f620")
+        if prod.get("ok"):
+            checks.append(
+                pass_step(
+                    "eb96f620_sliced_concat",
+                    artifact_path=str(prod.get("legal_dir") or ""),
+                )
+            )
+        else:
+            checks.append(
+                fail_step(
+                    "eb96f620_sliced_concat",
+                    prod.get("error") or "Production concat path was accepted",
+                    artifact_path=str(prod.get("wrong_dir") or ""),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        checks.append(fail_step("eb96f620_sliced_concat", exc))
 
     missing = Path(artifacts) / job_id / "missing-quote.pdf"
     try:

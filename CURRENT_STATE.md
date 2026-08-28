@@ -147,7 +147,11 @@ before we call the incident closed. That is how the simulator grows.
 
 `ascend:locator-and-artifact-audit` is the named Test-only Job Engine
 scenario for a NEW site/workflow (Ascend locator walk + quote-PDF
-artifact path). GitHub CI asserts the punch list and that the artifact
+artifact path). `artifact-path:concat-job-id-eb96f620` is the
+deterministic FAIL for Production job `eb96f620` (lookup was
+`{job_id[:-11]}{artifact_id}/`; required `{full_job_id}/`).
+`hitl-tone:dry-playwright-blocked` rewrites cowboy/slang HITL before
+send. GitHub CI asserts the punch list and that the artifact
 folder equals the job id. The live Ascend walk is `hermes-test-01` only.
 This tree does **not** flip that job type onto Production. Commercial
 auto already on Production is not a free pass. N=3 clean Test jobs still

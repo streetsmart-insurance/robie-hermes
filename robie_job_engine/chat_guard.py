@@ -1084,6 +1084,9 @@ def guard_chat_response(
     recordings: RecordingManager | None = None,
 ) -> str:
     content = redact_text(content)
+    from .hitl import sanitize_hitl_chat_text
+
+    content = sanitize_hitl_chat_text(content, job_id=str(job_id or ""))
     if not job_id:
         if _looks_like_unbound_policy_success(content):
             return (

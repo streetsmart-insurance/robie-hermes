@@ -26,7 +26,11 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
   non-unique locator is **FAIL**. No Gemini. No `.first` / `.nth` / `.last`.
 - Generate / save / look up a quote PDF the same way a live Chat job does
   (artifacts under the real job id). Fail if the worker cannot open the PDF
-  it just saved (concatenated / mangled job-id folder).
+  it just saved (concatenated / mangled job-id folder). Production
+  `eb96f620` looked in `{job_id[:-11]}{artifact_id}/`. Lookup must be
+  exactly `{artifact_root}/{full_job_id}/`.
+- HITL Chat posts are dry/technical only (`PLAYWRIGHT_BLOCKED` + path +
+  ask). Cowboy slang, blame, and nickname voice are rewritten before send.
 - This job ends as a **punch-list report**, not COMPLETE of a finance
   agreement. COMPLETE is never allowed without destination evidence.
 

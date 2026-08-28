@@ -57,6 +57,34 @@ _NEW_INTENT_PREFIXES = (
     "please ",
 )
 _FEIN_REPLY = re.compile(r"^(?:FEIN\s*[:#-]?\s*)?\d{2}-?\d{7}$", re.IGNORECASE)
+HITL_SLANG_MARKERS = (
+    "listen up",
+    "listen here",
+    "ain't",
+    "aint my fault",
+    "it ain't my fault",
+    "it aint my fault",
+    "not my fault",
+    "ain't my fault",
+    "howdy",
+    "y'all",
+    "ya'll",
+    "partner,",
+    "cowboy",
+    "shucks",
+    "blame me",
+    "don't blame",
+    "dont blame",
+    "it aint",
+)
+_NICKNAME_VOICE = re.compile(
+    r"\b(?:listen up,?\s+)?(?:jake|pal|buddy|chief|sport|boss)!",
+    re.IGNORECASE,
+)
+HITL_TONE_SCENARIO_ID = "hitl-tone:dry-playwright-blocked"
+DRY_HITL_ASK = (
+    "Reply RETRY after the page is corrected, or reply with the needed correction."
+)
 _NAICS_REPLY = re.compile(
     r"^(?:NAICS(?:\s+code)?\s*[:#-]?\s*)?\d{2,6}$",
     re.IGNORECASE,
@@ -83,6 +111,83 @@ def _job_note(job_id: str | None) -> str:
     return f"\n\nJob ID: `{clean[:8]}`" if clean else ""
 
 
+def hitl_text_is_slang_or_blame(text: str) -> bool:
+    """True for cowboy / slang / blame / nickname-voice HITL ad-libs."""
+    folded = " ".join(str(text or "").casefold().split())
+    if not folded:
+        return False
+    if any(marker in folded for marker in HITL_SLANG_MARKERS):
+        return True
+    return _NICKNAME_VOICE.search(str(text or "")) is not None
+
+
+def extract_artifact_path(text: str) -> str:
+    for token in str(text or "").replace("`", " ").split():
+        cleaned = token.strip(".,;:\"')")
+        if "/artifacts/" in cleaned:
+            return cleaned
+    return ""
+
+
+def extract_playwright_reason(text: str) -> str:
+    safe = redact_text(str(text or ""))
+    match = re.search(
+        r"PLAYWRIGHT_BLOCKED\s*:\s*([^\r\n]+)",
+        safe,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()[:500]
+    path = extract_artifact_path(safe)
+    if path:
+        return f"cannot open artifact at {path}"
+    return ""
+
+
+def dry_playwright_hitl_text(
+    *,
+    reason: str,
+    artifact_path: str = "",
+    job_id: str = "",
+    robie_blocked: bool = False,
+) -> str:
+    detail = str(reason or "browser step blocked").strip() or "browser step blocked"
+    lines = [f"PLAYWRIGHT_BLOCKED: {detail}"]
+    if artifact_path:
+        lines.append(f"Path: {artifact_path}")
+    if job_id:
+        lines.append(f"Job ID: {job_id}")
+    lines.append(DRY_HITL_ASK)
+    body = "\n".join(lines)
+    if robie_blocked:
+        return f"ROBIE_BLOCKED: {body}"
+    return body
+
+
+def sanitize_hitl_chat_text(
+    text: str,
+    *,
+    artifact_path: str = "",
+    job_id: str = "",
+) -> str:
+    """Rewrite cowboy/slang HITL to dry PLAYWRIGHT_BLOCKED + path + ask.
+
+    Templates stay plain English (HITL Carlo). Model ad-libs such as
+    "Listen up, Jake!" / "it ain't my fault" are rewritten before send.
+    """
+    raw = str(text or "")
+    if not hitl_text_is_slang_or_blame(raw):
+        return raw
+    reason = extract_playwright_reason(raw) or "browser step blocked"
+    path = artifact_path or extract_artifact_path(raw)
+    return dry_playwright_hitl_text(
+        reason=reason,
+        artifact_path=path,
+        job_id=str(job_id or ""),
+        robie_blocked="ROBIE_BLOCKED" in raw,
+    )
+
+
 def structured_blocker_reason(text: str) -> str | None:
     """Return only an explicit machine-readable worker blocker."""
     safe = redact_text(str(text or ""))
@@ -97,6 +202,7 @@ def interaction_for_blocker(
     requester_name: str | None = None,
     job_id: str | None = None,
     subject_name: str | None = None,
+    artifact_path: str | None = None,
 ) -> dict[str, Any]:
     """Convert a bounded Playwright blocker into a resumable public prompt."""
     safe = redact_text(str(error or "PLAYWRIGHT_BLOCKED"))[:1_000]
@@ -131,14 +237,16 @@ def interaction_for_blocker(
         detail = safe.split(":", 1)[-1].strip() or "browser step blocked"
         field_name = "operator_response"
         accepts_value = True
-        prompt = (
-            f"{_friendly_greeting(requester_name)}\n\n"
-            "I paused at an EZLynx browser step because "
-            f"{detail}. Please reply with the needed correction, or reply RETRY after "
-            f"you have corrected the page, so I can continue."
-            f"{_job_note(job_id)}"
+        path = str(artifact_path or "").strip() or extract_artifact_path(safe)
+        prompt = dry_playwright_hitl_text(
+            reason=detail,
+            artifact_path=path,
+            job_id=str(job_id or "").strip(),
         )
         checkpoint = f"playwright_blocked:{detail}"
+    prompt = sanitize_hitl_chat_text(
+        prompt, artifact_path=str(artifact_path or ""), job_id=str(job_id or "")
+    )
     return {
         "awaiting": "human_input",
         "action_type": action_type,
