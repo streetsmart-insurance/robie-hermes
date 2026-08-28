@@ -57,6 +57,7 @@ from .ascend_customer_type import (
 from .ascend_sender_roles import (
     ACCOUNT_MANAGER_LOCATOR,
     IMPORT_DOCUMENT_LOCATOR,
+    NEW_PROGRAM_ACCESSIBLE_NAME,
     NEW_PROGRAM_LOCATOR,
     PRODUCER_LOCATOR,
     PROGRAMS_KPI_LOCATOR,
@@ -88,7 +89,7 @@ def _label_text(label: str) -> str:
 
 
 def _new_program_target(page: Any) -> Any:
-    return page.get_by_role("button", name="+ New program", exact=True)
+    return page.get_by_role("button", name=NEW_PROGRAM_ACCESSIBLE_NAME, exact=True)
 
 
 def wait_programs_ready(
@@ -105,14 +106,14 @@ def wait_programs_ready(
             programs_spinner_timeout_error(f"{exc}; logged {seconds}s")
         ) from exc
     if locator_is_new_program_caret(NEW_PROGRAM_LOCATOR):
-        raise UniqueLocatorError("refusing split-menu caret; unique + New program required")
+        raise UniqueLocatorError("refusing split-menu caret; unique New program required")
     require_unique_locator(button, locator=NEW_PROGRAM_LOCATOR)
     enabled = getattr(button, "is_enabled", None)
     if callable(enabled) and not enabled():
         seconds = spinner_seconds(started, time.monotonic())
         raise RuntimeError(
             programs_spinner_timeout_error(
-                f"primary + New program is not enabled; logged {seconds}s"
+                f"primary New program is not enabled; logged {seconds}s"
             )
         )
     kpi = page.get_by_text("Programs at risk")
@@ -141,7 +142,7 @@ def wait_programs_ready(
 def wait_create_new_url(
     page: Any, *, timeout_ms: int = PROGRAMS_READY_TIMEOUT_MS
 ) -> str:
-    """After clicking primary + New program, follow /create/new. Not follow-tab."""
+    """After clicking primary New program, follow /create/new. Not follow-tab."""
     waiter = getattr(page, "wait_for_url", None)
     if callable(waiter):
         waiter(CREATE_URL_RE, timeout=timeout_ms)

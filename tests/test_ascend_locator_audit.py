@@ -67,7 +67,7 @@ class UniqueLocatorTests(unittest.TestCase):
             RuntimeError(
                 "strict mode violation: get_by_role('button') resolved to 2 elements"
             ),
-            locator='get_by_role("button", name="+ New program", exact=True)',
+            locator='get_by_role("button", name="New program", exact=True)',
             step_id="new_program",
         )
         self.assertEqual(step.status, "FAIL")

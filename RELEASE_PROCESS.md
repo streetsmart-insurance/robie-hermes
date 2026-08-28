@@ -131,8 +131,10 @@ Job Engine job must pass on `hermes-test-01`:
   to dry `PLAYWRIGHT_BLOCKED` + path + ask before send)
 - Sender roles: `ascend-roles:sender-not-robie-ai` (log Producer / Account
   Manager prefills; FAIL if they stay Robie AI when Jake or Carlo sent)
-- Programs spinner: `ascend-new-program:wait-spinner` (unique `+ New program`,
+- Programs spinner: `ascend-new-program:wait-spinner` (unique `New program`,
   never the caret; timeout is `PLAYWRIGHT_BLOCKED`)
+- Accessible name: `ascend-new-program:accessible-name` (job `f7653a85`:
+  dumped name is exactly `New program`; plus-exact locator must FAIL)
 - Spinner timing: `ascend-new-program:spinner-timing` (log seconds until the
   primary is ready; click primary not caret; `wait_for_url /create/new`)
 - Agency Fee: `ascend-create:agency-fee-default` (log the default, expect

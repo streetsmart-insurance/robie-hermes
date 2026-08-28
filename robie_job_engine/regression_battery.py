@@ -35,6 +35,7 @@ from .quote_replay import (
     run_quote_replay,
 )
 from .regression_scenarios import (
+    ASCEND_ACCESSIBLE_NAME_CHAT,
     ASCEND_AGENCY_FEE_CHAT,
     ASCEND_AUDIT_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
@@ -570,7 +571,10 @@ def format_new_failure_chat(
         if item_id.startswith("ascend-roles:"):
             lines.append(ASCEND_ROLES_CHAT)
         if item_id.startswith("ascend-new-program:"):
-            lines.append(ASCEND_SPINNER_CHAT)
+            if "accessible-name" in item_id:
+                lines.append(ASCEND_ACCESSIBLE_NAME_CHAT)
+            else:
+                lines.append(ASCEND_SPINNER_CHAT)
         if item_id.startswith("ascend-create:"):
             if "listbox" in item_id or "unique-listbox" in item_id:
                 lines.append(ASCEND_LISTBOX_CHAT)

@@ -48,7 +48,9 @@ overlay. It does not modify a live Hermes installation in place.
 - `ascend.locator_artifact_audit` / `ascend:locator-and-artifact-audit` is
   the Test-only Job Engine gate for a NEW Ascend (or next-portal) workflow.
   Playwright strict mode: unique locator or FAIL. No Gemini. No
-  `.first` / `.nth` / `.last`. Artifact folder must equal the job id.
+  `.first` / `.nth` / `.last`. The programs-page primary is
+  `get_by_role("button", name="New program", exact=True)` — the plus is
+  an icon, not text; never the caret. Artifact folder must equal the job id.
   The live walk logs programs-spinner seconds, Agency Fee default
   (expect $0.00 / empty, set 500, stop before Save), Producer /
   Account Manager prefills (FAIL if they stay Robie AI when Carlo or

@@ -5,21 +5,31 @@ from __future__ import annotations
 import unittest
 
 from robie_job_engine.ascend_sender_roles import (
+    ACCESSIBLE_NAME_SCENARIO_ID,
     CARLO_FERRARA,
+    CARET_ACCESSIBLE_NAME,
+    DUMPED_PROGRAMS_PRIMARY_BUTTON,
     JAKE_FERRARA,
+    NEW_PROGRAM_ACCESSIBLE_NAME,
+    NEW_PROGRAM_ACCESSIBLE_NAME_CHAR_CODES,
     NEW_PROGRAM_LOCATOR,
+    PLUS_PREFIXED_NEW_PROGRAM_LOCATOR,
+    PLUS_PREFIXED_NEW_PROGRAM_NAME,
     ROBIE_AI,
     ROLES_SCENARIO_ID,
     SPINNER_SCENARIO_ID,
     SSROBIE,
     ascend_new_program_contract_lines,
     locator_is_new_program_caret,
+    plus_prefixed_exact_locator_matches_dump,
     programs_spinner_timeout_error,
+    playwright_exact_name_matches,
     refuse_robie_ai_when_sender_known,
     requested_by_from_job,
     requested_by_from_payload,
     resolve_sender_agent,
     roles_for_requested_by,
+    run_accessible_name_scenario,
     run_sender_not_robie_ai_scenario,
     run_wait_spinner_scenario,
     unknown_sender_hitl,
@@ -112,11 +122,33 @@ class SenderAgentResolverTests(unittest.TestCase):
 
 class ProgramsSpinnerWaitTests(unittest.TestCase):
     def test_unique_new_program_not_caret(self):
-        self.assertIn("+ New program", NEW_PROGRAM_LOCATOR)
+        self.assertIn(NEW_PROGRAM_ACCESSIBLE_NAME, NEW_PROGRAM_LOCATOR)
+        self.assertNotIn(PLUS_PREFIXED_NEW_PROGRAM_NAME, NEW_PROGRAM_LOCATOR)
         self.assertIn("exact=True", NEW_PROGRAM_LOCATOR)
         self.assertTrue(locator_is_new_program_caret("split-menu caret"))
         self.assertTrue(locator_is_new_program_caret('page.locator("button").nth(1)'))
         self.assertFalse(locator_is_new_program_caret(NEW_PROGRAM_LOCATOR))
+
+    def test_plus_exact_locator_fails_against_dumped_accessible_name(self):
+        dumped = str(DUMPED_PROGRAMS_PRIMARY_BUTTON["accessible_name"])
+        self.assertEqual(dumped, "New program")
+        self.assertEqual(
+            tuple(ord(char) for char in dumped),
+            NEW_PROGRAM_ACCESSIBLE_NAME_CHAR_CODES,
+        )
+        self.assertNotIn("+", dumped)
+        self.assertIsNone(DUMPED_PROGRAMS_PRIMARY_BUTTON["aria_label"])
+        self.assertFalse(plus_prefixed_exact_locator_matches_dump(dumped))
+        self.assertFalse(
+            playwright_exact_name_matches(PLUS_PREFIXED_NEW_PROGRAM_NAME, dumped)
+        )
+        self.assertTrue(playwright_exact_name_matches(NEW_PROGRAM_ACCESSIBLE_NAME, dumped))
+        self.assertNotEqual(PLUS_PREFIXED_NEW_PROGRAM_LOCATOR, NEW_PROGRAM_LOCATOR)
+        self.assertEqual(CARET_ACCESSIBLE_NAME, "Open split button menu")
+        report = run_accessible_name_scenario()
+        self.assertEqual(report["id"], ACCESSIBLE_NAME_SCENARIO_ID)
+        self.assertTrue(report["ok"], report.get("evidence"))
+        self.assertFalse(report["observed"]["plus_exact_matches_dump"])
 
     def test_spinner_timeout_is_playwright_blocked_no_gemini(self):
         text = programs_spinner_timeout_error("TimeoutError")
@@ -133,7 +165,8 @@ class ProgramsSpinnerWaitTests(unittest.TestCase):
         )
         blob = "\n".join(lines)
         self.assertIn("spinner", blob.casefold())
-        self.assertIn("+ New program", blob)
+        self.assertIn(NEW_PROGRAM_LOCATOR, blob)
+        self.assertNotIn(PLUS_PREFIXED_NEW_PROGRAM_NAME, blob)
         self.assertIn("Jake Ferrara", blob)
         self.assertIn("Import document", blob)
         self.assertIn("line of business", blob.casefold())

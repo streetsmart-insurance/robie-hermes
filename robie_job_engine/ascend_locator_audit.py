@@ -36,6 +36,7 @@ from .playwright_write_guard import locator_is_positional_guess, locator_selecto
 from .quote_replay import is_live_hermes_path, refuse_production_targets
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, ProductionGuardError, current_robie_env
 from .store import JobStore
+from .ascend_sender_roles import NEW_PROGRAM_ACCESSIBLE_NAME, NEW_PROGRAM_LOCATOR
 
 
 JOB_TYPE = "ascend.locator_artifact_audit"
@@ -102,13 +103,13 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
     },
     {
         "id": "wait_programs_ready",
-        "description": "Log seconds until unique + New program primary is ready",
+        "description": "Log seconds until unique New program primary is ready",
         "locator": 'get_by_text("Programs at risk")',
     },
     {
         "id": "new_program",
-        "description": "Click unique primary + New program (never the caret); wait_for_url /create/new",
-        "locator": 'get_by_role("button", name="+ New program", exact=True)',
+        "description": "Click unique primary New program (never the caret); wait_for_url /create/new",
+        "locator": NEW_PROGRAM_LOCATOR,
     },
     {
         "id": "import_document",
@@ -1004,7 +1005,7 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
             continue
         if spec["id"] == "wait_programs_ready":
             leak = require_spinner_seconds_logged(fixture_seconds)
-            observed = {"seconds": fixture_seconds, "primary": "+ New program"}
+            observed = {"seconds": fixture_seconds, "primary": NEW_PROGRAM_ACCESSIBLE_NAME}
             if leak:
                 steps.append(
                     fail_step(spec["id"], leak, locator=spec["locator"], observed=observed)

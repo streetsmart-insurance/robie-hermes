@@ -81,7 +81,15 @@
       "new_failure_mode": true,
       "scenario": "ascend-new-program:wait-spinner",
       "closed": true,
-      "note": "Programs page can hang on a spinner ~20s. Production eb96f620 first HITL was a vision miss after that wait, not a missing + New program. Wait until the unique primary button is visible and enabled and KPI/table are present. Never the caret. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+      "note": "Programs page can hang on a spinner ~20s. Production eb96f620 first HITL was a vision miss after that wait, not a missing New program button. Wait until the unique primary button is visible and enabled and KPI/table are present. Never the caret. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+    },
+    {
+      "id": "f7653a85",
+      "class": "ascend-new-program",
+      "new_failure_mode": true,
+      "scenario": "ascend-new-program:accessible-name",
+      "closed": true,
+      "note": "Live Test audit f7653a85 failed wait_programs_ready after 30.003s waiting for get_by_role(button, name='+ New program', exact=True). Verified 2026-08-28 on hermes-test-01: unique primary accessible name is exactly New program (plus is SVG, not text). Never the caret. No Gemini."
     },
     {
       "id": "ascend-customer-type-lob",
@@ -97,7 +105,7 @@
       "new_failure_mode": true,
       "scenario": "ascend-new-program:spinner-timing",
       "closed": true,
-      "note": "Live PAWIVA job: programs spinner ~12s before + New program was ready. PR 37 waited but never logged seconds or wait_for_url /create/new. Missing seconds is FAIL. Click primary, not caret. Follow-tab is a separate proof."
+      "note": "Live PAWIVA job: programs spinner ~12s before New program was ready. PR 37 waited but never logged seconds or wait_for_url /create/new. Missing seconds is FAIL. Click primary, not caret. Follow-tab is a separate proof."
     },
     {
       "id": "pawiva-agency-fee-default",

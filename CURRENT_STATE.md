@@ -200,7 +200,10 @@ deterministic FAIL for Production job `eb96f620` (lookup was
 send. `ascend-roles:sender-not-robie-ai` logs the Producer and Account
 Manager prefills and FAILs if they stay Robie AI when Jake/Carlo sent
 the job. `ascend-new-program:wait-spinner` waits out the programs
-spinner and clicks only the unique primary + New program.
+spinner and clicks only the unique primary New program
+(accessible name is exactly `New program`; the plus is an icon, not
+text). `ascend-new-program:accessible-name` is live job `f7653a85`:
+`get_by_role("button", name="+ New program", exact=True)` never matches.
 `ascend-new-program:spinner-timing` logs seconds until that primary is
 ready and `wait_for_url /create/new` (live PAWIVA was ~12s).
 `ascend-create:agency-fee-default` logs the Agency Fee default (expect

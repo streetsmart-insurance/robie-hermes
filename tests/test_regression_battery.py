@@ -42,6 +42,7 @@ from robie_job_engine.regression_battery import (
     run_secret_health_scenario,
 )
 from robie_job_engine.regression_scenarios import (
+    ASCEND_ACCESSIBLE_NAME_CHAT,
     ASCEND_AGENCY_FEE_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
     ASCEND_LISTBOX_CHAT,
@@ -67,6 +68,7 @@ from robie_job_engine.regression_scenarios import (
     run_hitl_resume_scenarios,
     run_hitl_tone_scenario,
     run_named_scenarios,
+    run_accessible_name_scenario,
     run_same_day_scenario_rule,
     run_sender_not_robie_ai_scenario,
     run_spinner_timing_scenario,
@@ -383,6 +385,7 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["hitl-tone:dry-playwright-blocked"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-roles:sender-not-robie-ai"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-new-program:wait-spinner"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-new-program:accessible-name"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-new-program:spinner-timing"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-create:agency-fee-default"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-create:unique-listbox-option"]["outcome"], "PASS")
@@ -601,6 +604,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             "ascend-new-program:wait-spinner",
         )
         self.assertEqual(
+            incidents["f7653a85"]["scenario"],
+            "ascend-new-program:accessible-name",
+        )
+        self.assertEqual(
             incidents["ascend-customer-type-lob"]["scenario"],
             "ascend-customer-type:lob",
         )
@@ -703,6 +710,9 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         self.assertTrue(roles["ok"], roles.get("evidence"))
         spinner = run_wait_spinner_scenario()
         self.assertTrue(spinner["ok"], spinner.get("evidence"))
+        accessible = run_accessible_name_scenario()
+        self.assertTrue(accessible["ok"], accessible.get("evidence"))
+        self.assertEqual(accessible["id"], "ascend-new-program:accessible-name")
         roles_text = format_new_failure_chat(
             [
                 {
@@ -725,6 +735,17 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             trigger="post-deploy",
         )
         self.assertIn(ASCEND_SPINNER_CHAT, spinner_text)
+        accessible_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-new-program:accessible-name",
+                    "outcome": "FAILED",
+                    "evidence": "plus-exact locator accepted",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_ACCESSIBLE_NAME_CHAT, accessible_text)
         customer = run_customer_type_lob_scenario()
         self.assertTrue(customer["ok"], customer.get("evidence"))
         customer_text = format_new_failure_chat(
