@@ -337,6 +337,7 @@ class PlanAndAuditHookTests(unittest.TestCase):
                     ],
                 },
                 db_path=db,
+                journal="[GoogleChat] Connected; inbound=pubsub\n",
                 poster=lambda *_args, **_kwargs: None,
             )
         self.assertTrue(report["ok"])
