@@ -240,8 +240,14 @@ $0.00 / empty), sets 500 if the field exists, then stops before Save.
 `ascend-create:unique-listbox-option` is job `38c0fa79`: open each
 create-form combobox (Producer, Account Manager, Carrier / Writing
 company, Coverage type, State, etc.) and require a unique locator for
-the intended option. Two matches is PLAYWRIGHT_BLOCKED; log the blocked
-field. Carlo will not RETRY `38c0fa79`.
+the intended option. Producer / Account Manager unique option is the
+concatenated Name+email label (`Carlo Ferrara carlo@streetsmart.insurance`
+/ `Jake Ferrara jake@streetsmart.insurance`), not the display name alone
+— two Carlo rows exist (`carlo@ssinj.com` is the other). Name-only
+`Carlo Ferrara` is FAIL. If the sender email is missing from the list,
+HITL/FAIL; do not fall back to Robie AI or the other Carlo. LOGIN is
+Robie (browser session only). Two matches is PLAYWRIGHT_BLOCKED; log the
+blocked field. Carlo will not RETRY `38c0fa79`.
 `ascend-customer-type:lob` sets Commercial vs Personal from line of
 business (not the form default, not LLC vs person-name).
 GitHub CI asserts the punch list and that the artifact

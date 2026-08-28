@@ -56,9 +56,11 @@ overlay. It does not modify a live Hermes installation in place.
   is visible (log those seconds; a too-soon 0-element lookup is FAIL),
   Agency Fee default (expect $0.00 / empty, set 500, stop before Save),
   Producer / Account Manager prefills (FAIL if they stay Robie AI when
-  Carlo or Jake sent the job), and unique create/new listbox options (job
-  `38c0fa79`: two matching options is PLAYWRIGHT_BLOCKED; log the
-  blocked field). GitHub CI does not open Ascend. Live walk is
+  Carlo or Jake sent the job; unique option is the concatenated
+  Name+email label, not name-only `Carlo Ferrara`), and unique create/new
+  listbox options (job `38c0fa79`: two matching options is
+  PLAYWRIGHT_BLOCKED; log the blocked field). GitHub CI does not open
+  Ascend. Live walk is
   `hermes-test-01` only (Robie Test account + email 2SV; never PAWIVA).
   Production is not the first test. No new live Ascend / PAWIVA
   Production job until N=1 clean Test pass. Follow-tab is separately

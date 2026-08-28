@@ -126,7 +126,10 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
     },
     {
         "id": "unique_listbox_options",
-        "description": "Open each create-form combobox; unique locator for the intended option (38c0fa79)",
+        "description": (
+            "Open each create-form combobox; unique Name+email option "
+            "for Producer/AM (not name-only Carlo Ferrara) (38c0fa79)"
+        ),
         "locator": 'get_by_role("option", name=intended, exact=True)',
     },
     {
@@ -1075,7 +1078,7 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     if spec["id"] == "account_manager_role"
                     else overwritten.get("account_manager_default")
                 ),
-                "set_value": roles.get("resolved"),
+                "set_value": roles.get("option") or roles.get("resolved"),
                 "requested_by": sender,
             }
             if leak:
@@ -1087,7 +1090,10 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     pass_step(
                         spec["id"],
                         locator=spec["locator"],
-                        description=f"{spec['description']}: logged {prefill!r} then {roles['resolved']}",
+                        description=(
+                            f"{spec['description']}: logged {prefill!r} then "
+                            f"{roles.get('option') or roles['resolved']}"
+                        ),
                         observed=observed,
                     )
                 )
@@ -1147,16 +1153,16 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
 
             combobox_payload = {
                 **payload,
-                "producer": roles.get("producer") or payload.get("producer"),
-                "account_manager": roles.get("account_manager")
+                "producer": roles.get("option")
+                or roles.get("producer")
+                or payload.get("producer"),
+                "account_manager": roles.get("option")
+                or roles.get("account_manager")
                 or payload.get("account_manager"),
             }
-            if roles.get("resolved"):
-                combobox_payload.setdefault("producer", roles["resolved"])
-                combobox_payload.setdefault("account_manager", roles["resolved"])
-            else:
-                combobox_payload.setdefault("producer", "Carlo Ferrara")
-                combobox_payload.setdefault("account_manager", "Carlo Ferrara")
+            if roles.get("option"):
+                combobox_payload["producer"] = roles["option"]
+                combobox_payload["account_manager"] = roles["option"]
             audit = audit_fixture_comboboxes(combobox_payload)
             observed = {
                 "blocked_fields": audit.get("blocked_fields") or [],

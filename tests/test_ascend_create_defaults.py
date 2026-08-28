@@ -46,6 +46,7 @@ from robie_job_engine.ascend_locator_audit import (
 from robie_job_engine.store import JobStore
 from robie_job_engine.ascend_sender_roles import (
     CARLO_FERRARA,
+    CARLO_OPTION,
     DUMPED_CREATE_FORM_IMPORT_BUTTON,
     IMPORT_DOCUMENT_ACCESSIBLE_NAME,
     IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES,
@@ -186,9 +187,9 @@ class AgencyFeeDefaultTests(unittest.TestCase):
 
 class RoleDefaultLogTests(unittest.TestCase):
     def test_logs_prefill_and_fails_if_robie_ai_stays(self):
-        for requested, expected in (
-            ("Carlo Ferrara", CARLO_FERRARA),
-            ("Jake Ferrara", JAKE_FERRARA),
+        for requested, display, option in (
+            ("Carlo Ferrara", CARLO_FERRARA, CARLO_OPTION),
+            ("Jake Ferrara", JAKE_FERRARA, "Jake Ferrara jake@streetsmart.insurance"),
         ):
             with self.subTest(requested=requested):
                 logged = log_role_defaults(
@@ -199,10 +200,16 @@ class RoleDefaultLogTests(unittest.TestCase):
                 self.assertTrue(logged["logged"])
                 self.assertEqual(logged["producer_default"], ROBIE_AI)
                 self.assertIsNotNone(logged["error"])
+                name_only = log_role_defaults(
+                    requested_by=requested,
+                    producer=display,
+                    account_manager=display,
+                )
+                self.assertIsNotNone(name_only["error"])
                 overwritten = log_role_defaults(
                     requested_by=requested,
-                    producer=expected,
-                    account_manager=expected,
+                    producer=option,
+                    account_manager=option,
                 )
                 self.assertIsNone(overwritten["error"])
         missing = log_role_defaults(
@@ -263,7 +270,7 @@ class FixtureAndDocsTests(unittest.TestCase):
             self.assertEqual(walked["agency_fee"]["observed"]["default"], "$0.00")
             self.assertEqual(walked["agency_fee"]["observed"]["set_value"], "500")
             self.assertEqual(walked["producer_role"]["observed"]["producer_default"], ROBIE_AI)
-            self.assertEqual(walked["producer_role"]["observed"]["set_value"], CARLO_FERRARA)
+            self.assertEqual(walked["producer_role"]["observed"]["set_value"], CARLO_OPTION)
             self.assertIn("Import document", walked["import_document"]["observed"]["labels"])
             self.assertIn("seconds", walked["import_document"]["observed"])
             self.assertEqual(walked["import_document"]["observed"]["seconds"], 2.0)
@@ -285,6 +292,7 @@ class FixtureAndDocsTests(unittest.TestCase):
         self.assertIn("Upload document", blob)
         self.assertIn("dropzone", blob.casefold())
         self.assertIn(CARLO_FERRARA, blob)
+        self.assertIn(CARLO_OPTION, blob)
         self.assertIn(IMPORT_DOCUMENT_LOCATOR, blob)
         state = Path("CURRENT_STATE.md").read_text(encoding="utf-8")
         release = Path("RELEASE_PROCESS.md").read_text(encoding="utf-8")

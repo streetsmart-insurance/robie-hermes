@@ -15,6 +15,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from .ascend_sender_roles import (
+    CARLO_FERRARA,
+    CARLO_OPTION,
+    CARLO_SSINJ_OPTION,
+    JAKE_OPTION,
+    ROBIE_OPTION,
+    extract_email,
+    role_option_label,
+    roles_for_requested_by,
+)
 from .hitl import dry_playwright_hitl_text
 
 
@@ -65,7 +75,9 @@ COMBOBOX_FIELDS: tuple[dict[str, Any], ...] = (
 COMBOBOX_CHAT = (
     "ASCEND create/new listbox class returned (38c0fa79): open each "
     "create-form combobox; the intended option needs a unique locator "
-    "in the visible list. Two options matching the same selector is "
+    "in the visible list. Producer / Account Manager unique option is "
+    "the concatenated Name+email label, not the display name alone "
+    f"({CARLO_OPTION}). Two options matching the same selector is "
     "PLAYWRIGHT_BLOCKED. Log the blocked field. Dry HITL if unclear. "
     "No Save / email / bind. No PAWIVA."
 )
@@ -78,20 +90,34 @@ DUPLICATE_PREFIX_FIXTURE = {
     "exact": False,
 }
 
+# Proven 2026-08-28 on hermes-test-01 /create/new (Robie logged in).
+# Two Carlo Ferrara rows. Name-only is FAIL. Never pick Robie AI or ssinj
+# when requested_by is carlo@streetsmart.insurance.
+LIVE_ROLE_LISTBOX_OPTIONS = (
+    CARLO_OPTION,
+    CARLO_SSINJ_OPTION,
+    JAKE_OPTION,
+    ROBIE_OPTION,
+)
+
 
 def option_locator(name: str, *, exact: bool = True) -> str:
     flag = ", exact=True" if exact else ""
     return f'get_by_role("option", name="{name}"{flag})'
 
 
+def _folded_option(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
 def option_matches(option: str, intended: str, *, exact: bool) -> bool:
-    left = str(option or "").strip()
-    right = str(intended or "").strip()
+    left = _folded_option(option)
+    right = _folded_option(intended)
     if not left or not right:
         return False
     if exact:
-        return left.casefold() == right.casefold()
-    return right.casefold() in left.casefold()
+        return left == right
+    return right in left
 
 
 def matching_option_count(
@@ -155,10 +181,34 @@ def classify_listbox_options(
             "hitl_text": text,
         }
     count = matching_option_count(options, intended, exact=exact)
+    matched = next(
+        (item for item in options if option_matches(item, intended, exact=exact)),
+        "",
+    )
+    intended_email = extract_email(intended)
+    if count != 1 and exact and intended and not intended_email:
+        # Name-only "Carlo Ferrara" vs two Name+email rows (38c0fa79 class).
+        loose = matching_option_count(options, intended, exact=False)
+        if loose >= 2:
+            count = loose
+    elif count != 1 and exact and intended_email:
+        email_hits = [
+            item
+            for item in options
+            if intended_email.casefold() in _folded_option(item)
+        ]
+        if len(email_hits) == 1:
+            matched = email_hits[0]
+            intended = matched
+            locator = option_locator(intended, exact=True)
+            count = 1
+        else:
+            count = len(email_hits)
     if count == 1:
         return {
             "field": field,
             "intended": intended,
+            "matched": matched or intended,
             "options": list(options),
             "match_count": 1,
             "locator": locator,
@@ -243,14 +293,12 @@ def refuse_non_unique_listbox(
 
 
 def default_test_combobox_payload(*, requested_by: str = "Carlo Ferrara") -> dict[str, Any]:
-    from .ascend_sender_roles import roles_for_requested_by
-
     roles = roles_for_requested_by(requested_by)
-    resolved = str(roles.get("resolved") or "")
+    option = str(roles.get("option") or role_option_label(requested_by=requested_by) or "")
     return {
         "requested_by": requested_by,
-        "producer": resolved,
-        "account_manager": resolved,
+        "producer": option,
+        "account_manager": option,
         "test_carrier": "Test Carrier",
         "test_coverage": "Commercial Auto",
         "test_state": "Florida",
@@ -259,10 +307,13 @@ def default_test_combobox_payload(*, requested_by: str = "Carlo Ferrara") -> dic
 
 
 def fixture_options_for_field(field_id: str, intended: str) -> tuple[str, ...]:
-    """CI options. Unique exact match. Never PAWIVA."""
+    """CI options. Producer/AM use the live two-Carlo Name+email dump."""
+    if field_id in {"producer", "account_manager"}:
+        options = list(LIVE_ROLE_LISTBOX_OPTIONS)
+        if intended and intended not in options and extract_email(intended):
+            options.insert(0, intended)
+        return tuple(options)
     extras = {
-        "producer": ("Jake Ferrara", "Robie AI"),
-        "account_manager": ("Jake Ferrara", "Robie AI"),
         "carrier": ("Hartford", "Travelers"),
         "coverage_type": ("General Liability", "Homeowners"),
         "state": ("Georgia", "New York"),
@@ -307,6 +358,11 @@ def combobox_instruction() -> str:
         f"On /create/new open each create-form combobox / listbox the job "
         f"would use ({names}, etc.). Assert the visible listbox has a unique "
         "locator for the intended option (get_by_role option + exact=True). "
+        "Producer and Account Manager intended option is the concatenated "
+        f"Name+email label ({CARLO_OPTION} / {JAKE_OPTION}), not "
+        f"{CARLO_FERRARA!r} alone — two Carlo rows exist. If the sender "
+        "email is missing from the list, HITL/FAIL that field. Do not fall "
+        "back to Robie AI or the other Carlo. "
         "FAIL or dry HITL if two options match the same selector. "
         "Log the blocked field. Job 38c0fa79 HITL'd here on a live "
         "client — do not RETRY that job. Test account only. Never PAWIVA. "
@@ -319,7 +375,15 @@ def run_unique_listbox_option_scenario() -> dict[str, Any]:
     """Named scenario: 38c0fa79 non-unique create/new listbox option."""
     errors: list[str] = []
     instruction = combobox_instruction()
-    for needle in ("38c0fa79", "unique", "listbox", "blocked field", "PAWIVA"):
+    for needle in (
+        "38c0fa79",
+        "unique",
+        "listbox",
+        "blocked field",
+        "PAWIVA",
+        CARLO_OPTION,
+        "Name+email",
+    ):
         if needle.casefold() not in instruction.casefold():
             errors.append(f"instruction missing {needle!r}")
     if "exact=True" not in instruction.replace(" ", ""):
@@ -359,7 +423,56 @@ def run_unique_listbox_option_scenario() -> dict[str, Any]:
         errors.append("missing intended option must dry HITL")
     if missing.get("blocked_field") != "Coverage type":
         errors.append("missing intended did not log Coverage type")
-    audit = audit_fixture_comboboxes()
+    name_only = classify_listbox_options(
+        field="Producer",
+        intended=CARLO_FERRARA,
+        options=LIVE_ROLE_LISTBOX_OPTIONS,
+        exact=True,
+    )
+    if name_only.get("status") != "FAIL" or int(name_only.get("match_count") or 0) < 2:
+        errors.append(
+            "name-only Carlo Ferrara must FAIL against the two-email fixture"
+        )
+    email_ok = classify_listbox_options(
+        field="Producer",
+        intended=CARLO_OPTION,
+        options=LIVE_ROLE_LISTBOX_OPTIONS,
+        exact=True,
+    )
+    if email_ok.get("status") != "PASS" or email_ok.get("intended") != CARLO_OPTION:
+        errors.append("email-qualified Carlo option must PASS")
+    email_from_sender = classify_listbox_options(
+        field="Account Manager",
+        intended="carlo@streetsmart.insurance",
+        options=LIVE_ROLE_LISTBOX_OPTIONS,
+        exact=True,
+    )
+    if (
+        email_from_sender.get("status") != "PASS"
+        or email_from_sender.get("intended") != CARLO_OPTION
+    ):
+        errors.append("sender email must uniquely match the streetsmart Carlo option")
+    missing_email = classify_listbox_options(
+        field="Producer",
+        intended=CARLO_OPTION,
+        options=(CARLO_SSINJ_OPTION, ROBIE_OPTION, JAKE_OPTION),
+        exact=True,
+    )
+    if missing_email.get("status") not in {"HITL", "FAIL"}:
+        errors.append("missing sender email must HITL/FAIL")
+    if missing_email.get("status") == "PASS":
+        errors.append("missing streetsmart email fell back to another option")
+    carlo_payload = default_test_combobox_payload(
+        requested_by="carlo@streetsmart.insurance"
+    )
+    if carlo_payload.get("producer") != CARLO_OPTION:
+        errors.append(
+            f"requested_by carlo@streetsmart.insurance produced "
+            f"{carlo_payload.get('producer')!r}"
+        )
+    audit = audit_fixture_comboboxes(
+        default_test_combobox_payload(requested_by="carlo@streetsmart.insurance")
+    )
     if not audit.get("ok"):
         errors.append(f"fixture comboboxes failed: {audit.get('blocked_fields')}")
     if len(audit.get("reports") or []) < len(COMBOBOX_FIELDS):
@@ -382,6 +495,7 @@ def run_unique_listbox_option_scenario() -> dict[str, Any]:
         "outcome": "PASS" if ok else "FAILED",
         "evidence": (
             "open each create/new combobox; unique exact option locator; "
+            f"Producer/AM is {CARLO_OPTION} not name-only; "
             "two matches is PLAYWRIGHT_BLOCKED and logs the field (38c0fa79)"
             if ok
             else "; ".join(errors)

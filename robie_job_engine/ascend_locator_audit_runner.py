@@ -271,7 +271,10 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
     roles = roles_for_requested_by(requested_by_from_payload(payload))
     blob = dict(payload)
-    if roles.get("resolved"):
+    if roles.get("option"):
+        blob["producer"] = roles["option"]
+        blob["account_manager"] = roles["option"]
+    elif roles.get("resolved"):
         blob.setdefault("producer", roles["resolved"])
         blob.setdefault("account_manager", roles["resolved"])
     reports: list[dict[str, Any]] = []
@@ -301,7 +304,8 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
             exact=True,
             field_present=True,
         )
-        report["locator"] = option_locator(intended, exact=True) if intended else locator
+        chosen = str(report.get("intended") or intended)
+        report["locator"] = option_locator(chosen, exact=True) if chosen else locator
         reports.append(report)
         if report.get("blocked_field"):
             blocked.append(str(report["blocked_field"]))
@@ -434,6 +438,7 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
                 match_count=int(report.get("match_count") or 0),
             )
         )
+    intended = str(report.get("intended") or intended)
     option = page.get_by_role("option", name=intended, exact=True)
     require_unique_locator(option, locator=option_locator(intended, exact=True))
     option_click = getattr(option, "click", None)
@@ -495,9 +500,10 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
         )
         if roles.get("hitl_required") or not roles.get("resolved"):
             raise RuntimeError(unknown_sender_hitl(requested_by=roles.get("requested_by") or ""))
-        if should_overwrite_role(current, str(roles["resolved"])):
+        target_option = str(roles.get("option") or roles.get("resolved") or "")
+        if should_overwrite_role(current, target_option):
             field = "Producer" if spec_id == "producer_role" else "Account Manager"
-            _select_unique_option(page, target, str(roles["resolved"]), field=field)
+            _select_unique_option(page, target, target_option, field=field)
         after = _field_value(target)
         leak = log_role_defaults(
             requested_by=str(roles.get("requested_by") or ""),
@@ -510,7 +516,7 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
             raise RuntimeError(leak)
         return {
             "producer_default" if spec_id == "producer_role" else "account_manager_default": current,
-            "set_value": roles.get("resolved"),
+            "set_value": target_option,
             "requested_by": roles.get("requested_by"),
             "prefill_logged": logged.get("logged"),
         }

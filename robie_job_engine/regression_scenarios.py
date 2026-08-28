@@ -74,9 +74,10 @@ HITL_TONE_CHAT = (
 
 ASCEND_ROLES_CHAT = (
     "ASCEND roles class returned: log the Producer and Account Manager "
-    "prefills. Jake → Jake Ferrara. Carlo → Carlo Ferrara. FAIL if they "
-    "stay Robie AI when requested_by is Carlo Ferrara or Jake Ferrara. "
-    "Unknown sender HITL."
+    "prefills. Jake → Jake Ferrara jake@streetsmart.insurance. "
+    "Carlo → Carlo Ferrara carlo@streetsmart.insurance. Name-only "
+    "Carlo Ferrara is FAIL (two Carlo rows). FAIL if they stay Robie AI "
+    "when requested_by is Carlo or Jake. Unknown sender HITL."
 )
 
 ASCEND_SPINNER_CHAT = (
@@ -101,8 +102,10 @@ ASCEND_AGENCY_FEE_CHAT = (
 ASCEND_LISTBOX_CHAT = (
     "ASCEND create/new listbox class returned (38c0fa79): open each "
     "create-form combobox; the intended option needs a unique locator. "
-    "Two matches is PLAYWRIGHT_BLOCKED. Log the blocked field. No Save. "
-    "No PAWIVA. Carlo will not RETRY 38c0fa79."
+    "Producer / Account Manager unique option is the concatenated "
+    "Name+email label, not the display name alone. Two matches is "
+    "PLAYWRIGHT_BLOCKED. Log the blocked field. No Save. No PAWIVA. "
+    "Carlo will not RETRY 38c0fa79."
 )
 
 ASCEND_TOO_SOON_CHAT = (

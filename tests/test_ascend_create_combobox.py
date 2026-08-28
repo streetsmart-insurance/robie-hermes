@@ -10,7 +10,9 @@ from durable_temp import durable_temporary_directory
 from robie_job_engine.ascend_create_combobox import (
     COMBOBOX_FIELDS,
     COMBOBOX_SCENARIO_ID,
+    LIVE_ROLE_LISTBOX_OPTIONS,
     classify_listbox_options,
+    default_test_combobox_payload,
     matching_option_count,
     option_locator,
     refuse_non_unique_listbox,
@@ -23,7 +25,12 @@ from robie_job_engine.ascend_locator_audit import (
     AscendLocatorAuditWorker,
     default_audit_payload,
 )
-from robie_job_engine.ascend_sender_roles import ascend_new_program_contract_lines
+from robie_job_engine.ascend_sender_roles import (
+    CARLO_FERRARA,
+    CARLO_OPTION,
+    JAKE_OPTION,
+    ascend_new_program_contract_lines,
+)
 from robie_job_engine.store import JobStore
 
 
@@ -76,8 +83,12 @@ class UniqueListboxOptionTests(unittest.TestCase):
         hitl = unique_option_hitl(field="Producer", intended="", match_count=0)
         self.assertIn("Producer", hitl)
         self.assertEqual(
-            option_locator("Carlo Ferrara", exact=True),
-            'get_by_role("option", name="Carlo Ferrara", exact=True)',
+            option_locator(CARLO_OPTION, exact=True),
+            f'get_by_role("option", name="{CARLO_OPTION}", exact=True)',
+        )
+        self.assertNotEqual(
+            option_locator(CARLO_FERRARA, exact=True),
+            option_locator(CARLO_OPTION, exact=True),
         )
 
     def test_named_scenario_covers_required_fields(self):
@@ -94,6 +105,68 @@ class UniqueListboxOptionTests(unittest.TestCase):
         self.assertEqual(report["id"], COMBOBOX_SCENARIO_ID)
         self.assertTrue(report["ok"], report.get("evidence"))
         self.assertEqual(report["observed"]["job_id"], "38c0fa79")
+
+
+    def test_name_only_carlo_fails_two_email_fixture(self):
+        name_only = classify_listbox_options(
+            field="Producer",
+            intended=CARLO_FERRARA,
+            options=LIVE_ROLE_LISTBOX_OPTIONS,
+            exact=True,
+        )
+        self.assertEqual(name_only["status"], "FAIL")
+        self.assertGreaterEqual(name_only["match_count"], 2)
+        self.assertEqual(name_only["blocked_field"], "Producer")
+        self.assertIn("PLAYWRIGHT_BLOCKED", name_only["error"] or "")
+        self.assertIsNotNone(
+            refuse_non_unique_listbox(
+                field="Producer",
+                intended=CARLO_FERRARA,
+                options=LIVE_ROLE_LISTBOX_OPTIONS,
+                exact=True,
+            )
+        )
+
+
+    def test_email_qualified_carlo_passes_for_streetsmart_requested_by(self):
+        payload = default_test_combobox_payload(
+            requested_by="carlo@streetsmart.insurance"
+        )
+        self.assertEqual(payload["producer"], CARLO_OPTION)
+        self.assertEqual(payload["account_manager"], CARLO_OPTION)
+        report = classify_listbox_options(
+            field="Producer",
+            intended=payload["producer"],
+            options=LIVE_ROLE_LISTBOX_OPTIONS,
+            exact=True,
+        )
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["match_count"], 1)
+        self.assertEqual(report["intended"], CARLO_OPTION)
+        self.assertEqual(
+            report["locator"],
+            f'get_by_role("option", name="{CARLO_OPTION}", exact=True)',
+        )
+        self.assertIsNone(
+            refuse_non_unique_listbox(
+                field="Producer",
+                intended=CARLO_OPTION,
+                options=LIVE_ROLE_LISTBOX_OPTIONS,
+                exact=True,
+            )
+        )
+        missing = classify_listbox_options(
+            field="Producer",
+            intended=CARLO_OPTION,
+            options=(
+                "Carlo Ferrara carlo@ssinj.com",
+                "Robie AI robie@streetsmart.insurance",
+                JAKE_OPTION,
+            ),
+            exact=True,
+        )
+        self.assertIn(missing["status"], {"HITL", "FAIL"})
+        self.assertNotEqual(missing.get("intended"), "Carlo Ferrara carlo@ssinj.com")
 
 
 class _FakeControl:
@@ -151,8 +224,8 @@ class LiveComboboxAuditTests(unittest.TestCase):
     def test_live_audit_fails_duplicate_option_and_logs_field(self):
         page = _FakePage(
             {
-                "Producer": ["Carlo Ferrara", "Jake Ferrara"],
-                "Account Manager": ["Carlo Ferrara"],
+                "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
                 "Carrier": ["Progressive", "Progressive Specialty"],
                 "Coverage type": ["Commercial Auto"],
                 "State": ["Florida", "Florida"],
@@ -162,9 +235,7 @@ class LiveComboboxAuditTests(unittest.TestCase):
         observed = audit_live_comboboxes(
             page,
             {
-                "requested_by": "Carlo Ferrara",
-                "producer": "Carlo Ferrara",
-                "account_manager": "Carlo Ferrara",
+                "requested_by": "carlo@streetsmart.insurance",
                 "test_carrier": "Progressive",
                 "test_coverage": "Commercial Auto",
                 "test_state": "Florida",
@@ -181,8 +252,8 @@ class LiveComboboxAuditTests(unittest.TestCase):
     def test_live_audit_opens_every_create_form_combobox(self):
         page = _FakePage(
             {
-                "Producer": ["Carlo Ferrara"],
-                "Account Manager": ["Carlo Ferrara"],
+                "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
                 "Writing company": ["Test Carrier"],
                 "Coverage type": ["Commercial Auto"],
                 "State": ["Florida"],
@@ -192,7 +263,7 @@ class LiveComboboxAuditTests(unittest.TestCase):
         observed = audit_live_comboboxes(
             page,
             {
-                "requested_by": "Carlo Ferrara",
+                "requested_by": "carlo@streetsmart.insurance",
                 "test_carrier": "Test Carrier",
                 "test_coverage": "Commercial Auto",
                 "test_state": "Florida",
@@ -201,6 +272,13 @@ class LiveComboboxAuditTests(unittest.TestCase):
         )
         self.assertTrue(observed["ok"], observed)
         self.assertEqual(observed["blocked_fields"], [])
+        producer = next(item for item in observed["fields"] if item["field"] == "Producer")
+        self.assertEqual(producer["intended"], CARLO_OPTION)
+        self.assertEqual(producer["match_count"], 1)
+        self.assertEqual(
+            producer["locator"],
+            f'get_by_role("option", name="{CARLO_OPTION}", exact=True)',
+        )
         labels = {item["field"] for item in observed["fields"]}
         for required in (
             "Producer",
@@ -221,7 +299,9 @@ class FixtureAndDocsTests(unittest.TestCase):
             job = store.create_job(
                 JOB_TYPE,
                 {
-                    **default_audit_payload(live=False, requested_by="Carlo Ferrara"),
+                    **default_audit_payload(
+                        live=False, requested_by="carlo@streetsmart.insurance"
+                    ),
                     "db_path": db,
                     "artifact_root": artifacts,
                     "line_of_business": "commercial auto",
@@ -241,6 +321,12 @@ class FixtureAndDocsTests(unittest.TestCase):
             fields = walked["unique_listbox_options"]["observed"]["fields"]
             self.assertGreaterEqual(len(fields), 5)
             self.assertEqual(walked["unique_listbox_options"]["observed"]["blocked_fields"], [])
+            producer = next(
+                item for item in fields if item["field"] == "Producer"
+            )
+            self.assertEqual(producer["intended"], CARLO_OPTION)
+            self.assertEqual(producer["match_count"], 1)
+            self.assertEqual(producer["status"], "PASS")
 
     def test_docs_lock_test_gate_and_live_jobs(self):
         lines = ascend_new_program_contract_lines(
@@ -251,6 +337,8 @@ class FixtureAndDocsTests(unittest.TestCase):
         self.assertIn("38c0fa79", blob)
         self.assertIn("listbox", blob.casefold())
         self.assertIn("blocked field", blob.casefold())
+        self.assertIn(CARLO_OPTION, blob)
+        self.assertIn("Name+email", blob)
         state = Path("CURRENT_STATE.md").read_text(encoding="utf-8")
         release = Path("RELEASE_PROCESS.md").read_text(encoding="utf-8")
         skill = Path("skills/ascend-locator-artifact-audit/SKILL.md").read_text(
@@ -278,6 +366,8 @@ class FixtureAndDocsTests(unittest.TestCase):
                 flat,
             )
         self.assertIn("38c0fa79", skill)
+        self.assertIn(CARLO_OPTION, skill)
+        self.assertIn("carlo@ssinj.com", skill)
         self.assertIn("production_ready: false", skill)
         self.assertNotIn("PAWIVA", default_audit_payload()["test_insured"])
 

@@ -23,6 +23,7 @@ from typing import Any
 from .ascend_sender_roles import (
     ACCOUNT_MANAGER_LOCATOR,
     CARLO_FERRARA,
+    CARLO_OPTION,
     CREATE_FORM_READY_TIMEOUT_MS,
     CREATE_URL,
     DUMPED_CREATE_FORM_IMPORT_BUTTON,
@@ -30,6 +31,7 @@ from .ascend_sender_roles import (
     IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES,
     IMPORT_DOCUMENT_LOCATOR,
     JAKE_FERRARA,
+    JAKE_OPTION,
     NEW_PROGRAM_LOCATOR,
     PLUS_PREFIXED_NEW_PROGRAM_LOCATOR,
     PRODUCER_LOCATOR,
@@ -40,6 +42,7 @@ from .ascend_sender_roles import (
     new_program_locator_is_unique_primary,
     refuse_robie_ai_when_sender_known,
     resolve_sender_agent,
+    role_option_label,
     roles_for_requested_by,
 )
 from .hitl import dry_playwright_hitl_text
@@ -351,8 +354,10 @@ def role_default_instruction(resolved: str | None) -> str:
     return (
         f"On {CREATE_URL} log the prefilled Producer and Account Manager "
         f"values, then overwrite both with {resolved} unless they already "
-        f"equal {resolved}. FAIL if they stay {ROBIE_AI} when the sender "
-        f"is {CARLO_FERRARA} or {JAKE_FERRARA}."
+        f"equal {resolved}. The unique option is the concatenated Name+email "
+        f"label ({CARLO_OPTION} / {JAKE_OPTION}), not the display name alone. "
+        f"FAIL if they stay {ROBIE_AI} when the sender is {CARLO_FERRARA} or "
+        f"{JAKE_FERRARA}."
     )
 
 
@@ -613,12 +618,13 @@ def run_agency_fee_default_scenario() -> dict[str, Any]:
 def run_role_default_log_scenario() -> dict[str, Any]:
     """Named scenario expansion: log prefills; FAIL if they stay Robie AI."""
     errors: list[str] = []
-    for requested, expected in (
+    for requested, display in (
         ("Carlo Ferrara", CARLO_FERRARA),
         ("Jake Ferrara", JAKE_FERRARA),
         ("carlo@streetsmart.insurance", CARLO_FERRARA),
         ("StreetSmartJake", JAKE_FERRARA),
     ):
+        option = role_option_label(resolved=display, requested_by=requested)
         logged = log_role_defaults(
             requested_by=requested,
             producer=ROBIE_AI,
@@ -628,10 +634,17 @@ def run_role_default_log_scenario() -> dict[str, Any]:
             errors.append(f"{requested!r} allowed logged Robie AI defaults")
         if logged.get("producer_default") != ROBIE_AI:
             errors.append(f"{requested!r} did not log Producer default")
+        name_only = log_role_defaults(
+            requested_by=requested,
+            producer=display,
+            account_manager=display,
+        )
+        if name_only.get("error") is None:
+            errors.append(f"{requested!r} accepted name-only {display}")
         overwritten = log_role_defaults(
             requested_by=requested,
-            producer=expected,
-            account_manager=expected,
+            producer=option,
+            account_manager=option,
         )
         if overwritten.get("error") is not None:
             errors.append(f"{requested!r} rejected correct overwrite: {overwritten['error']}")
@@ -643,8 +656,10 @@ def run_role_default_log_scenario() -> dict[str, Any]:
         if missing.get("error") is None or missing.get("logged"):
             errors.append(f"{requested!r} accepted unlogged role defaults")
         roles = roles_for_requested_by(requested)
-        if roles.get("resolved") != expected:
+        if roles.get("resolved") != display:
             errors.append(f"{requested!r} resolved to {roles.get('resolved')!r}")
+        if roles.get("option") != option:
+            errors.append(f"{requested!r} option {roles.get('option')!r} is not {option!r}")
     ok = not errors
     return {
         "id": ROLES_DEFAULTS_SCENARIO_ID,
