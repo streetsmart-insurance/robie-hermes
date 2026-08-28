@@ -62,13 +62,14 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 
 1. Open `https://dashboard.useascend.com/programs`
 2. Wait out the programs spinner (~12s was seen live; ~20s is still
-   normal). **Log the seconds** until the unique primary `+ New program`
+   normal). **Log the seconds** until the unique primary `New program`
    is visible and enabled AND the programs table or KPI cards are
-   present. Missing seconds is FAIL. Never the split-menu caret. If the
-   spinner or button is not ready past timeout: `PLAYWRIGHT_BLOCKED` then
-   HITL. No Gemini.
-3. Click the unique primary `+ New program` only
-   (`get_by_role("button", name="+ New program", exact=True)`). Then
+   present. Missing seconds is FAIL. The plus is an icon/SVG, not text.
+   Accessible name is exactly `New program`. Never the split-menu caret
+   (`Open split button menu`). If the spinner or button is not ready past
+   timeout: `PLAYWRIGHT_BLOCKED` then HITL. No Gemini.
+3. Click the unique primary `New program` only
+   (`get_by_role("button", name="New program", exact=True)`). Then
    `wait_for_url /create/new`. That is not follow-tab proof.
 4. Create a program (`/create/new`): **log** Import document vs Upload
    document vs dropzone labels. Prefer Import document (that panel has

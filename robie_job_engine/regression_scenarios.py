@@ -78,9 +78,16 @@ ASCEND_ROLES_CHAT = (
 )
 
 ASCEND_SPINNER_CHAT = (
-    "ASCEND + New program class returned: log seconds until the unique "
-    "primary + New program is ready; click that primary, never the caret; "
+    "ASCEND New program class returned: log seconds until the unique "
+    "primary New program is ready; click that primary, never the caret; "
     "wait_for_url /create/new. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+)
+
+ASCEND_ACCESSIBLE_NAME_CHAT = (
+    "ASCEND New program accessible-name class returned (f7653a85): the "
+    "unique primary accessible name is exactly New program. The plus is "
+    "an icon, not text. get_by_role(button, name='+ New program', "
+    "exact=True) never matches. Never the caret. No Gemini."
 )
 
 ASCEND_AGENCY_FEE_CHAT = (
@@ -130,6 +137,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "hitl-tone:dry-playwright-blocked",
         "ascend-roles:sender-not-robie-ai",
         "ascend-new-program:wait-spinner",
+        "ascend-new-program:accessible-name",
         "ascend-new-program:spinner-timing",
         "ascend-create:agency-fee-default",
         "ascend-create:unique-listbox-option",
@@ -586,6 +594,15 @@ def run_wait_spinner_scenario() -> dict[str, Any]:
         return _fail("ascend-new-program:wait-spinner", f"{type(exc).__name__}: {exc}")
 
 
+def run_accessible_name_scenario() -> dict[str, Any]:
+    from .ascend_sender_roles import run_accessible_name_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-new-program:accessible-name", f"{type(exc).__name__}: {exc}")
+
+
 def run_customer_type_lob_scenario() -> dict[str, Any]:
     from .ascend_customer_type import run_customer_type_lob_scenario as _run
 
@@ -843,6 +860,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_hitl_tone_scenario())
     results.append(run_sender_not_robie_ai_scenario())
     results.append(run_wait_spinner_scenario())
+    results.append(run_accessible_name_scenario())
     results.append(run_spinner_timing_scenario())
     results.append(run_agency_fee_default_scenario())
     results.append(run_unique_listbox_option_scenario())

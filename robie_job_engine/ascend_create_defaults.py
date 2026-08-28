@@ -3,7 +3,7 @@
 PR 37 already walked locators. A live PAWIVA job then showed three things
 Dusty never caught on hermes-test-01:
 
-1. Programs spinner ~12s before the unique primary + New program is ready
+1. Programs spinner ~12s before the unique primary New program is ready
 2. Agency Fee default $0.00 / empty on /create/new
 3. Producer and Account Manager prefilled Robie AI
 
@@ -26,6 +26,7 @@ from .ascend_sender_roles import (
     CREATE_URL,
     JAKE_FERRARA,
     NEW_PROGRAM_LOCATOR,
+    PLUS_PREFIXED_NEW_PROGRAM_LOCATOR,
     PRODUCER_LOCATOR,
     ROBIE_AI,
     locator_is_new_program_caret,
@@ -75,7 +76,7 @@ PAWIVA_SPINNER_SECONDS = 12.0
 
 SPINNER_TIMING_CHAT = (
     "ASCEND programs spinner timing class returned: log seconds until the "
-    "unique primary + New program is ready; click that primary, never the "
+    "unique primary New program is ready; click that primary, never the "
     "caret; wait_for_url /create/new. Missing seconds is FAIL."
 )
 
@@ -87,7 +88,7 @@ AGENCY_FEE_CHAT = (
 
 
 def spinner_seconds(started_monotonic: float, ready_monotonic: float) -> float:
-    """Seconds until + New program primary is ready. Always log this."""
+    """Seconds until New program primary is ready. Always log this."""
     raw = float(ready_monotonic) - float(started_monotonic)
     if raw < 0:
         raw = 0.0
@@ -124,7 +125,7 @@ def require_create_new_url(url: str) -> str | None:
     if create_url_is_new_program(url):
         return None
     return (
-        f"{SPINNER_TIMING_SCENARIO_ID} FAIL: after + New program expected "
+        f"{SPINNER_TIMING_SCENARIO_ID} FAIL: after New program expected "
         f"{CREATE_PATH}, got {url!r}"
     )
 
@@ -308,7 +309,9 @@ def run_spinner_timing_scenario() -> dict[str, Any]:
     if "caret" not in instruction.casefold():
         errors.append("instruction does not refuse the caret")
     if not new_program_click_is_primary(NEW_PROGRAM_LOCATOR):
-        errors.append("primary + New program locator was not accepted")
+        errors.append("primary New program locator was not accepted")
+    if new_program_click_is_primary(PLUS_PREFIXED_NEW_PROGRAM_LOCATOR):
+        errors.append("plus-prefixed locator was accepted as the unique primary")
     if new_program_click_is_primary("split-menu caret"):
         errors.append("caret locator was accepted")
     missing = require_spinner_seconds_logged(None)
@@ -335,7 +338,7 @@ def run_spinner_timing_scenario() -> dict[str, Any]:
         "ok": ok,
         "outcome": "PASS" if ok else "FAILED",
         "evidence": (
-            "log seconds until + New program; click primary not caret; "
+            "log seconds until New program; click primary not caret; "
             "wait_for_url /create/new; missing seconds is FAIL"
             if ok
             else "; ".join(errors)

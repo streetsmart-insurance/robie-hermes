@@ -13,6 +13,7 @@ Unknown sender → dry HITL. Do not guess.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from .ascend_customer_type import customer_type_instruction
@@ -26,10 +27,47 @@ SSROBIE = "SSRobie"
 
 ROLES_SCENARIO_ID = "ascend-roles:sender-not-robie-ai"
 SPINNER_SCENARIO_ID = "ascend-new-program:wait-spinner"
+ACCESSIBLE_NAME_SCENARIO_ID = "ascend-new-program:accessible-name"
 
 PROGRAMS_URL = "https://dashboard.useascend.com/programs"
 CREATE_URL = "https://dashboard.useascend.com/create/new"
-NEW_PROGRAM_LOCATOR = 'get_by_role("button", name="+ New program", exact=True)'
+# Verified 2026-08-28 on hermes-test-01 Test Chrome (Robie logged in,
+# dashboard.useascend.com/programs, readyState complete, no spinner).
+# Unique primary BUTTON innerText / accessible name is exactly "New program"
+# (char codes 78,101,119,32,112,114,111,103,114,97,109). The plus is an
+# icon/SVG, not text. No aria-label. Job f7653a85 waited for "+ New program"
+# exact and timed out — that locator never matches this page.
+NEW_PROGRAM_ACCESSIBLE_NAME = "New program"
+NEW_PROGRAM_ACCESSIBLE_NAME_CHAR_CODES = (
+    78,
+    101,
+    119,
+    32,
+    112,
+    114,
+    111,
+    103,
+    114,
+    97,
+    109,
+)
+PLUS_PREFIXED_NEW_PROGRAM_NAME = "+ New program"
+CARET_ACCESSIBLE_NAME = "Open split button menu"
+NEW_PROGRAM_LOCATOR = (
+    f'get_by_role("button", name="{NEW_PROGRAM_ACCESSIBLE_NAME}", exact=True)'
+)
+PLUS_PREFIXED_NEW_PROGRAM_LOCATOR = (
+    f'get_by_role("button", name="{PLUS_PREFIXED_NEW_PROGRAM_NAME}", exact=True)'
+)
+DUMPED_PROGRAMS_PRIMARY_BUTTON = {
+    "role": "button",
+    "accessible_name": NEW_PROGRAM_ACCESSIBLE_NAME,
+    "accessible_name_char_codes": NEW_PROGRAM_ACCESSIBLE_NAME_CHAR_CODES,
+    "aria_label": None,
+    "visible": True,
+    "enabled": True,
+    "plus_is_icon": True,
+}
 PRODUCER_LOCATOR = 'get_by_label("Producer")'
 ACCOUNT_MANAGER_LOCATOR = 'get_by_label("Account Manager")'
 COMMERCIAL_LOCATOR = 'get_by_role("radio", name="Commercial customer")'
@@ -247,29 +285,53 @@ def locator_is_new_program_caret(locator: str) -> bool:
     return any(marker in folded for marker in CARET_MARKERS)
 
 
+def playwright_exact_name_matches(locator_name: str, accessible_name: str) -> bool:
+    """Playwright get_by_role(..., name=..., exact=True) string equality."""
+    return str(locator_name) == str(accessible_name)
+
+
+def plus_prefixed_exact_locator_matches_dump(
+    accessible_name: str | None = None,
+) -> bool:
+    """The old plus-exact locator never matches the dumped programs primary."""
+    dumped = (
+        accessible_name
+        if accessible_name is not None
+        else str(DUMPED_PROGRAMS_PRIMARY_BUTTON["accessible_name"])
+    )
+    return playwright_exact_name_matches(PLUS_PREFIXED_NEW_PROGRAM_NAME, dumped)
+
+
 def new_program_locator_is_unique_primary(locator: str) -> bool:
     folded = str(locator or "")
     if locator_is_new_program_caret(folded):
         return False
-    return "+ New program" in folded and "exact=True" in folded.replace(" ", "")
+    if PLUS_PREFIXED_NEW_PROGRAM_NAME in folded:
+        return False
+    return (
+        f'name="{NEW_PROGRAM_ACCESSIBLE_NAME}"' in folded
+        and "exact=True" in folded.replace(" ", "")
+    )
 
 
 def programs_spinner_timeout_error(detail: str = "") -> str:
     extra = f": {detail}" if detail else ""
     return (
-        "PLAYWRIGHT_BLOCKED: programs page spinner or + New program "
+        "PLAYWRIGHT_BLOCKED: programs page spinner or New program "
         f"not ready{extra}. Do not click a nearby control. No Gemini."
     )
 
 
 def programs_page_ready_instruction() -> str:
     return (
-        "On https://dashboard.useascend.com/programs do not click + New program "
+        "On https://dashboard.useascend.com/programs do not click New program "
         "until the unique primary button is visible and enabled AND the programs "
         "table or KPI cards (Programs at risk) are present — the page can hang "
         f"on a spinner ~12–20 seconds. Log those seconds. Timeout "
         f"{PROGRAMS_READY_TIMEOUT_MS}ms. Locator: {NEW_PROGRAM_LOCATOR}. "
-        "Never the split-menu caret. After click, wait_for_url /create/new. "
+        "The plus is an icon/SVG, not text. Accessible name is exactly "
+        f"{NEW_PROGRAM_ACCESSIBLE_NAME!r}. Never the split-menu caret "
+        f"({CARET_ACCESSIBLE_NAME!r}). After click, wait_for_url /create/new. "
         "If spinner or button is not ready past timeout: "
         f"{programs_spinner_timeout_error()} then HITL. "
         "No Gemini. No .first/.nth/.last."
@@ -407,13 +469,15 @@ def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
 
 
 def run_wait_spinner_scenario() -> dict[str, Any]:
-    """Named scenario: wait out programs spinner; unique + New program only."""
+    """Named scenario: wait out programs spinner; unique New program only."""
     instruction = programs_page_ready_instruction()
     errors: list[str] = []
     if "spinner" not in instruction.casefold():
         errors.append("instruction missing spinner wait")
     if NEW_PROGRAM_LOCATOR not in instruction:
-        errors.append("instruction missing unique + New program locator")
+        errors.append("instruction missing unique New program locator")
+    if PLUS_PREFIXED_NEW_PROGRAM_NAME in NEW_PROGRAM_LOCATOR:
+        errors.append("live locator still uses plus-prefixed name")
     if "caret" not in instruction.casefold():
         errors.append("instruction does not refuse the caret")
     if "gemini" not in instruction.casefold():
@@ -431,7 +495,9 @@ def run_wait_spinner_scenario() -> dict[str, Any]:
     if new_program_locator_is_unique_primary(NEW_PROGRAM_LOCATOR):
         pass
     else:
-        errors.append("primary + New program locator was not accepted")
+        errors.append("primary New program locator was not accepted")
+    if new_program_locator_is_unique_primary(PLUS_PREFIXED_NEW_PROGRAM_LOCATOR):
+        errors.append("plus-prefixed locator was accepted as the unique primary")
     timeout = programs_spinner_timeout_error("TimeoutError after 30000ms")
     if not timeout.startswith("PLAYWRIGHT_BLOCKED"):
         errors.append("spinner timeout is not PLAYWRIGHT_BLOCKED")
@@ -444,9 +510,86 @@ def run_wait_spinner_scenario() -> dict[str, Any]:
         "ok": ok,
         "outcome": "PASS" if ok else "FAILED",
         "evidence": (
-            "wait spinner then unique + New program; timeout is PLAYWRIGHT_BLOCKED"
+            "wait spinner then unique New program; timeout is PLAYWRIGHT_BLOCKED"
             if ok
             else "; ".join(errors)
         ),
         "finance_agreement": False,
+    }
+
+
+def run_accessible_name_scenario() -> dict[str, Any]:
+    """Named scenario: plus-exact locator must FAIL against the dumped name.
+
+    Live job f7653a85 waited 30s for get_by_role(button, name="+ New program",
+    exact=True). The dumped accessible name is exactly "New program".
+    Putting the plus back must FAIL this class in CI.
+    """
+    from .ascend_locator_audit import FLOW_STEPS
+
+    errors: list[str] = []
+    dumped = str(DUMPED_PROGRAMS_PRIMARY_BUTTON["accessible_name"])
+    dumped_codes = tuple(ord(char) for char in dumped)
+    expected_codes = tuple(
+        DUMPED_PROGRAMS_PRIMARY_BUTTON["accessible_name_char_codes"]
+    )
+    if dumped != NEW_PROGRAM_ACCESSIBLE_NAME:
+        errors.append(f"dumped accessible name drifted: {dumped!r}")
+    if dumped_codes != expected_codes:
+        errors.append(f"dumped name char codes drifted: {dumped_codes}")
+    if dumped_codes != NEW_PROGRAM_ACCESSIBLE_NAME_CHAR_CODES:
+        errors.append("NEW_PROGRAM_ACCESSIBLE_NAME char codes drifted")
+    if "+" in dumped:
+        errors.append("dumped accessible name contains a plus")
+    if DUMPED_PROGRAMS_PRIMARY_BUTTON.get("aria_label") is not None:
+        errors.append("dumped primary unexpectedly has an aria-label")
+    if plus_prefixed_exact_locator_matches_dump(dumped):
+        errors.append("plus-exact locator unexpectedly matched the dumped name")
+    if not playwright_exact_name_matches(NEW_PROGRAM_ACCESSIBLE_NAME, dumped):
+        errors.append("unique New program name did not match the dump")
+    if PLUS_PREFIXED_NEW_PROGRAM_NAME in NEW_PROGRAM_LOCATOR:
+        errors.append("NEW_PROGRAM_LOCATOR still requires the plus prefix")
+    if not new_program_locator_is_unique_primary(NEW_PROGRAM_LOCATOR):
+        errors.append("current NEW_PROGRAM_LOCATOR is not the unique primary")
+    if new_program_locator_is_unique_primary(PLUS_PREFIXED_NEW_PROGRAM_LOCATOR):
+        errors.append("plus-prefixed locator was accepted as unique primary")
+    new_program_step = next(
+        (item for item in FLOW_STEPS if item.get("id") == "new_program"),
+        None,
+    )
+    if new_program_step is None:
+        errors.append("FLOW_STEPS missing new_program")
+    else:
+        step_locator = str(new_program_step.get("locator") or "")
+        if step_locator != NEW_PROGRAM_LOCATOR:
+            errors.append(
+                f"FLOW_STEPS new_program locator drifted: {step_locator!r}"
+            )
+        if PLUS_PREFIXED_NEW_PROGRAM_NAME in step_locator:
+            errors.append("FLOW_STEPS new_program still uses plus-prefixed name")
+    runner = Path(__file__).with_name("ascend_locator_audit_runner.py")
+    runner_src = runner.read_text(encoding="utf-8")
+    if 'name="+ New program"' in runner_src:
+        errors.append("live runner still waits for plus-prefixed name")
+    if "NEW_PROGRAM_ACCESSIBLE_NAME" not in runner_src:
+        errors.append("live runner does not use NEW_PROGRAM_ACCESSIBLE_NAME")
+    ok = not errors
+    return {
+        "id": ACCESSIBLE_NAME_SCENARIO_ID,
+        "kind": "logic",
+        "ok": ok,
+        "outcome": "PASS" if ok else "FAILED",
+        "evidence": (
+            "plus-exact locator fails against dumped accessible name "
+            f"{NEW_PROGRAM_ACCESSIBLE_NAME!r}; live locator is unique exact "
+            "New program; caret stays out"
+            if ok
+            else "; ".join(errors)
+        ),
+        "finance_agreement": False,
+        "observed": {
+            "accessible_name": dumped,
+            "plus_exact_matches_dump": False,
+            "caret": CARET_ACCESSIBLE_NAME,
+        },
     }
