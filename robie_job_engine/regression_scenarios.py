@@ -70,6 +70,18 @@ HITL_TONE_CHAT = (
     "is rewritten to dry PLAYWRIGHT_BLOCKED + path + ask before send."
 )
 
+ASCEND_ROLES_CHAT = (
+    "ASCEND roles class returned: Producer and Account Manager must be the "
+    "Chat sender (requested_by). Jake → Jake Ferrara. Carlo → Carlo Ferrara. "
+    "Unknown sender HITL. Never leave Robie AI when requested_by is known."
+)
+
+ASCEND_SPINNER_CHAT = (
+    "ASCEND + New program class returned: wait out the programs spinner; "
+    "click the unique primary + New program only, never the split-menu caret. "
+    "Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
+)
+
 I_DID_IT_PROSE = (
     "I did it. The job is complete. Completed successfully — COMPLETE."
 )
@@ -89,6 +101,8 @@ NAMED_SCENARIO_IDS = frozenset(
         "ascend:locator-and-artifact-audit",
         "artifact-path:concat-job-id-eb96f620",
         "hitl-tone:dry-playwright-blocked",
+        "ascend-roles:sender-not-robie-ai",
+        "ascend-new-program:wait-spinner",
     }
 )
 
@@ -522,6 +536,24 @@ def run_hitl_tone_scenario() -> dict[str, Any]:
     }
 
 
+def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
+    from .ascend_sender_roles import run_sender_not_robie_ai_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-roles:sender-not-robie-ai", f"{type(exc).__name__}: {exc}")
+
+
+def run_wait_spinner_scenario() -> dict[str, Any]:
+    from .ascend_sender_roles import run_wait_spinner_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-new-program:wait-spinner", f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -534,4 +566,6 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_ascend_locator_audit_scenario(work_dir=work_dir / "ascend-audit"))
     results.append(run_concat_job_id_eb96f620_scenario(work_dir=work_dir / "eb96f620"))
     results.append(run_hitl_tone_scenario())
+    results.append(run_sender_not_robie_ai_scenario())
+    results.append(run_wait_spinner_scenario())
     return results

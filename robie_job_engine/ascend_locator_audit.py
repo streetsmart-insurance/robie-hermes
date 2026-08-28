@@ -101,14 +101,14 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
         "locator": f'page.goto("{PROGRAMS_URL}")',
     },
     {
-        "id": "new_program",
-        "description": "+ New program (first live HITL)",
-        "locator": 'get_by_role("button", name="New program")',
+        "id": "wait_programs_ready",
+        "description": "Wait out programs spinner; table or KPI cards present",
+        "locator": 'get_by_text("Programs at risk")',
     },
     {
-        "id": "commercial_customer",
-        "description": "Commercial customer radio",
-        "locator": 'get_by_role("radio", name="Commercial")',
+        "id": "new_program",
+        "description": "Unique primary + New program (never the split-menu caret)",
+        "locator": 'get_by_role("button", name="+ New program", exact=True)',
     },
     {
         "id": "import_document",
@@ -116,9 +116,24 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
         "locator": 'get_by_role("button", name="Import document")',
     },
     {
+        "id": "producer_role",
+        "description": "Overwrite Producer from requested_by (never leave Robie AI)",
+        "locator": 'get_by_label("Producer")',
+    },
+    {
+        "id": "account_manager_role",
+        "description": "Overwrite Account Manager from requested_by (never leave Robie AI)",
+        "locator": 'get_by_label("Account Manager")',
+    },
+    {
+        "id": "commercial_customer",
+        "description": "Commercial customer radio (already selected by default)",
+        "locator": 'get_by_role("radio", name="Commercial customer")',
+    },
+    {
         "id": "insured_fields",
-        "description": "Insured fields (Test account only)",
-        "locator": 'get_by_label("Insured")',
+        "description": "Customer Name (Test account only)",
+        "locator": 'get_by_label("Name")',
     },
     {
         "id": "address_autocomplete",
@@ -745,13 +760,20 @@ def persist_punch_list(
     return record
 
 
-def default_audit_payload(*, live: bool = False) -> dict[str, Any]:
+def default_audit_payload(*, live: bool = False, requested_by: str = "") -> dict[str, Any]:
+    from .ascend_sender_roles import requested_by_from_payload, roles_for_requested_by
+
+    sender = str(requested_by or "").strip()
+    roles = roles_for_requested_by(sender) if sender else roles_for_requested_by("")
     return {
         "scenario": SCENARIO_ID,
         "resource_id": SCENARIO_ID,
         "report_only": True,
         "test_account_only": True,
         "live": bool(live),
+        "requested_by": sender or requested_by_from_payload({}),
+        "producer": roles.get("producer"),
+        "account_manager": roles.get("account_manager"),
         "stop_before": list(STOP_BEFORE),
         "forbidden_accounts": sorted(FORBIDDEN_ACCOUNTS),
         "test_insured": TEST_INSURED,
@@ -912,8 +934,55 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                     )
                 )
         return steps
+    from .ascend_sender_roles import (
+        NEW_PROGRAM_LOCATOR,
+        refuse_robie_ai_when_sender_known,
+        requested_by_from_payload,
+        roles_for_requested_by,
+    )
+
+    sender = requested_by_from_payload(payload)
+    roles = roles_for_requested_by(sender)
     for spec in FLOW_STEPS:
         if spec["id"].startswith("quote_pdf"):
+            continue
+        if spec["id"] in {"producer_role", "account_manager_role"}:
+            if roles.get("hitl_required") or not roles.get("resolved"):
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=(
+                            "HITL required; did not write Robie AI "
+                            f"({roles.get('hitl_text') or 'unknown requested_by'})"
+                        ),
+                    )
+                )
+                continue
+            leak = refuse_robie_ai_when_sender_known(
+                requested_by=sender,
+                producer=str(roles.get("producer") or ""),
+                account_manager=str(roles.get("account_manager") or ""),
+            )
+            if leak:
+                steps.append(fail_step(spec["id"], leak, locator=spec["locator"]))
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=f"{spec['description']}: {roles['resolved']}",
+                    )
+                )
+            continue
+        if spec["id"] == "new_program":
+            steps.append(
+                pass_step(
+                    spec["id"],
+                    locator=NEW_PROGRAM_LOCATOR,
+                    description=spec["description"],
+                )
+            )
             continue
         if spec["id"] == "stop_before_save":
             steps.append(
@@ -1212,6 +1281,24 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
             )
     except Exception as exc:  # noqa: BLE001
         checks.append(fail_step("eb96f620_sliced_concat", exc))
+
+    from .ascend_sender_roles import (
+        run_sender_not_robie_ai_scenario,
+        run_wait_spinner_scenario,
+    )
+
+    roles_report = run_sender_not_robie_ai_scenario()
+    checks.append(
+        pass_step("sender_not_robie_ai")
+        if roles_report.get("ok")
+        else fail_step("sender_not_robie_ai", roles_report.get("evidence") or "FAIL")
+    )
+    spinner_report = run_wait_spinner_scenario()
+    checks.append(
+        pass_step("wait_spinner")
+        if spinner_report.get("ok")
+        else fail_step("wait_spinner", spinner_report.get("evidence") or "FAIL")
+    )
 
     missing = Path(artifacts) / job_id / "missing-quote.pdf"
     try:

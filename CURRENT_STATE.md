@@ -151,7 +151,11 @@ artifact path). `artifact-path:concat-job-id-eb96f620` is the
 deterministic FAIL for Production job `eb96f620` (lookup was
 `{job_id[:-11]}{artifact_id}/`; required `{full_job_id}/`).
 `hitl-tone:dry-playwright-blocked` rewrites cowboy/slang HITL before
-send. GitHub CI asserts the punch list and that the artifact
+send. `ascend-roles:sender-not-robie-ai` overwrites Producer and
+Account Manager from `requested_by` (never Robie AI when Jake/Carlo
+sent the job). `ascend-new-program:wait-spinner` waits out the
+programs spinner and clicks only the unique primary + New program.
+GitHub CI asserts the punch list and that the artifact
 folder equals the job id. The live Ascend walk is `hermes-test-01` only.
 This tree does **not** flip that job type onto Production. Commercial
 auto already on Production is not a free pass. N=3 clean Test jobs still

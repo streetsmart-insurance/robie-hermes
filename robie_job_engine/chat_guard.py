@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
+from .ascend_sender_roles import ascend_new_program_contract_lines
 from .ezlynx_account_nav import account_nav_contract_lines
 from .context_policy import (
     CONTINUATION_PREFIXES,
@@ -536,7 +537,9 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "The Job Engine, not the Computer Worker, has final completion authority.",
     ])
     payload = dict(job.get("payload") or {})
+    payload.setdefault("action_type", job.get("action_type"))
     lines.extend(account_nav_contract_lines(text, payload))
+    lines.extend(ascend_new_program_contract_lines(text, payload))
     payload = dict(job.get("payload") or {})
     original = str(payload.get("text") or "").strip()
     if original and original != text:

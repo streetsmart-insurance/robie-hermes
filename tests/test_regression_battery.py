@@ -42,6 +42,8 @@ from robie_job_engine.regression_battery import (
     run_secret_health_scenario,
 )
 from robie_job_engine.regression_scenarios import (
+    ASCEND_ROLES_CHAT,
+    ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
     FALSE_SUCCESS_CHAT,
     HITL_RESUME_CHAT,
@@ -58,6 +60,8 @@ from robie_job_engine.regression_scenarios import (
     run_hitl_tone_scenario,
     run_named_scenarios,
     run_same_day_scenario_rule,
+    run_sender_not_robie_ai_scenario,
+    run_wait_spinner_scenario,
     run_ascend_locator_audit_scenario,
 )
 from robie_job_engine.worker_contract import claims_unverified_destination_progress
@@ -368,6 +372,8 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["ascend:locator-and-artifact-audit"]["outcome"], "PASS")
         self.assertEqual(ids["artifact-path:concat-job-id-eb96f620"]["outcome"], "PASS")
         self.assertEqual(ids["hitl-tone:dry-playwright-blocked"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-roles:sender-not-robie-ai"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-new-program:wait-spinner"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -565,6 +571,14 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["hitl-cowboy-tone"]["scenario"],
             "hitl-tone:dry-playwright-blocked",
         )
+        self.assertEqual(
+            incidents["ascend-roles-robie-ai"]["scenario"],
+            "ascend-roles:sender-not-robie-ai",
+        )
+        self.assertEqual(
+            incidents["eb96f620-vision-spinner"]["scenario"],
+            "ascend-new-program:wait-spinner",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -621,6 +635,32 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             trigger="post-deploy",
         )
         self.assertIn(HITL_TONE_CHAT, tone_text)
+        roles = run_sender_not_robie_ai_scenario()
+        self.assertTrue(roles["ok"], roles.get("evidence"))
+        spinner = run_wait_spinner_scenario()
+        self.assertTrue(spinner["ok"], spinner.get("evidence"))
+        roles_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-roles:sender-not-robie-ai",
+                    "outcome": "FAILED",
+                    "evidence": "Robie AI left on Producer",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_ROLES_CHAT, roles_text)
+        spinner_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-new-program:wait-spinner",
+                    "outcome": "FAILED",
+                    "evidence": "clicked caret",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_SPINNER_CHAT, spinner_text)
 
     def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
         with durable_temporary_directory() as tmp:

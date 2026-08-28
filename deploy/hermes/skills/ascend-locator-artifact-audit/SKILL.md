@@ -37,14 +37,27 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
 ## Expected flow
 
 1. Open `https://dashboard.useascend.com/programs`
-2. + New program (first HITL we hit live)
-3. Commercial customer radio
-4. Import document / upload (not Hawksoft / AMS360 / Epic)
-5. Insured fields, address autocomplete (must pick the exact row)
-6. Quote number, carrier, wholesaler, coverage type
-7. Dates, premium, taxes, Agency Fee field
-8. Stop before Save program
-9. Save and reopen the quote PDF under `{artifact_root}/{job_id}/`
+2. Wait out the programs spinner (~20s is normal). Do not click until the
+   unique primary `+ New program` is visible and enabled AND the programs
+   table or KPI cards are present. Never the split-menu caret. If the
+   spinner or button is not ready past timeout: `PLAYWRIGHT_BLOCKED` then
+   HITL. No Gemini.
+3. Click the unique primary `+ New program` only
+   (`get_by_role("button", name="+ New program", exact=True)`).
+4. Create a program (`/create/new`): **Import document** only (that panel
+   has no Hawksoft / AMS360 / Epic).
+5. Producer and Account Manager prefill `Robie AI`. Overwrite both with
+   the agent who SENT the job (`payload.requested_by` — Google Chat
+   `user_name` / `user_id`). Jake → Jake Ferrara. Carlo → Carlo Ferrara.
+   Leave them only if they already equal that name. Unknown sender → HITL
+   in dry English. Never leave Robie AI / SSRobie when requested_by is
+   known. Unique locators. No `.first` / `.nth` / `.last`.
+6. Commercial customer radio is already selected by default.
+7. Customer Name (Test account only), address autocomplete (exact row)
+8. Quote number, carrier, wholesaler, coverage type
+9. Dates, premium, taxes, Agency Fee field
+10. Stop before Save program / Send email / Copy checkout / payment / bind
+11. Save and reopen the quote PDF under `{artifact_root}/{job_id}/`
 
 ## Where it runs
 

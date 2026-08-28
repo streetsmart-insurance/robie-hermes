@@ -66,6 +66,22 @@
       "scenario": "hitl-tone:dry-playwright-blocked",
       "closed": true,
       "note": "Worker model ad-libbed Chat HITL after RETRY ('Listen up, Jake!', 'it ain't my fault'). Templates stay HITL Carlo in plain English. Outbound HITL must be dry/technical: PLAYWRIGHT_BLOCKED + path + ask."
+    },
+    {
+      "id": "ascend-roles-robie-ai",
+      "class": "ascend-roles",
+      "new_failure_mode": true,
+      "scenario": "ascend-roles:sender-not-robie-ai",
+      "closed": true,
+      "note": "Create a program prefills Producer and Account Manager as Robie AI. Carlo rule: overwrite both from requested_by (Jake Ferrara / Carlo Ferrara). Unknown sender HITL. Never leave Robie AI when the sender is known."
+    },
+    {
+      "id": "eb96f620-vision-spinner",
+      "class": "ascend-new-program",
+      "new_failure_mode": true,
+      "scenario": "ascend-new-program:wait-spinner",
+      "closed": true,
+      "note": "Programs page can hang on a spinner ~20s. Production eb96f620 first HITL was a vision miss after that wait, not a missing + New program. Wait until the unique primary button is visible and enabled and KPI/table are present. Never the caret. Timeout is PLAYWRIGHT_BLOCKED. No Gemini."
     }
   ]
 }
