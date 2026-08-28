@@ -116,6 +116,11 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
         "locator": 'get_by_role("button", name="Import document")',
     },
     {
+        "id": "unique_listbox_options",
+        "description": "Open each create-form combobox; unique locator for the intended option (38c0fa79)",
+        "locator": 'get_by_role("option", name=intended, exact=True)',
+    },
+    {
         "id": "producer_role",
         "description": "Log Producer prefill; overwrite from requested_by (never leave Robie AI)",
         "locator": 'get_by_label("Producer")',
@@ -1110,6 +1115,57 @@ def _fixture_walk(payload: dict[str, Any]) -> list[PunchStep]:
                 )
             )
             continue
+        if spec["id"] == "unique_listbox_options":
+            from .ascend_create_combobox import (
+                audit_fixture_comboboxes,
+            )
+
+            combobox_payload = {
+                **payload,
+                "producer": roles.get("producer") or payload.get("producer"),
+                "account_manager": roles.get("account_manager")
+                or payload.get("account_manager"),
+            }
+            if roles.get("resolved"):
+                combobox_payload.setdefault("producer", roles["resolved"])
+                combobox_payload.setdefault("account_manager", roles["resolved"])
+            else:
+                combobox_payload.setdefault("producer", "Carlo Ferrara")
+                combobox_payload.setdefault("account_manager", "Carlo Ferrara")
+            audit = audit_fixture_comboboxes(combobox_payload)
+            observed = {
+                "blocked_fields": audit.get("blocked_fields") or [],
+                "fields": [
+                    {
+                        "field": item.get("field"),
+                        "intended": item.get("intended"),
+                        "match_count": item.get("match_count"),
+                        "status": item.get("status"),
+                    }
+                    for item in audit.get("reports") or []
+                ],
+            }
+            if not audit.get("ok"):
+                blocked = ", ".join(audit.get("blocked_fields") or []) or "unknown"
+                steps.append(
+                    fail_step(
+                        spec["id"],
+                        f"PLAYWRIGHT_BLOCKED: create/new listbox not unique; "
+                        f"blocked field: {blocked}",
+                        locator=spec["locator"],
+                        observed=observed,
+                    )
+                )
+            else:
+                steps.append(
+                    pass_step(
+                        spec["id"],
+                        locator=spec["locator"],
+                        description=f"{spec['description']}: {len(observed['fields'])} comboboxes unique",
+                        observed=observed,
+                    )
+                )
+            continue
         if spec["id"] == "new_program":
             url_error = require_create_new_url(CREATE_URL)
             observed = {
@@ -1461,6 +1517,7 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         checks.append(fail_step("eb96f620_sliced_concat", exc))
 
+    from .ascend_create_combobox import run_unique_listbox_option_scenario
     from .ascend_create_defaults import (
         run_agency_fee_default_scenario,
         run_role_default_log_scenario,
@@ -1501,6 +1558,12 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         pass_step("agency_fee_default")
         if fee_report.get("ok")
         else fail_step("agency_fee_default", fee_report.get("evidence") or "FAIL")
+    )
+    listbox_report = run_unique_listbox_option_scenario()
+    checks.append(
+        pass_step("unique_listbox_option")
+        if listbox_report.get("ok")
+        else fail_step("unique_listbox_option", listbox_report.get("evidence") or "FAIL")
     )
     customer_report = run_customer_type_lob_scenario()
     checks.append(

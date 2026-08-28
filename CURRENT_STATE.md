@@ -156,6 +156,20 @@ battery again — pointer-only is not live; (5) ChatGPT / Claude /
 Jake-paste must follow this written gate. Do not skip the battery or
 the Dusty walk because a model is “just trying it.”
 
+**The Test gate is a clean Job Engine job on `hermes-test-01`.**
+Ascend / premium-finance / PAWIVA changes must get that clean pass
+(Test account, Robie login, never PAWIVA 221398001, never a live
+client) **before any Production Chat job on a real account.** Jobs
+`807f8920` and `38c0fa79` on 2026-08-28 were the first test of the
+Ascend change on a live client. The safety net (HITL / UNVERIFIED /
+no destination evidence) caught them. The Test gate was skipped. That
+is a process miss. **Production is not the first test.**
+
+A visual walk on Dusty's computer is **not** the Test gate. PR 35 CI
+is **not** the Test gate. Shipping a zip to `hermes-poc-01` is **not**
+the Test gate. The Test gate is a clean Job Engine job on
+`hermes-test-01`.
+
 **No new live Ascend / PAWIVA Production job until N=1 clean Test
 Ascend pass.** Carlo asked for at least one. That Test job is
 `ascend.locator_artifact_audit` on `hermes-test-01` with the Robie
@@ -179,6 +193,11 @@ spinner and clicks only the unique primary + New program.
 ready and `wait_for_url /create/new` (live PAWIVA was ~12s).
 `ascend-create:agency-fee-default` logs the Agency Fee default (expect
 $0.00 / empty), sets 500 if the field exists, then stops before Save.
+`ascend-create:unique-listbox-option` is job `38c0fa79`: open each
+create-form combobox (Producer, Account Manager, Carrier / Writing
+company, Coverage type, State, etc.) and require a unique locator for
+the intended option. Two matches is PLAYWRIGHT_BLOCKED; log the blocked
+field. Carlo will not RETRY `38c0fa79`.
 `ascend-customer-type:lob` sets Commercial vs Personal from line of
 business (not the form default, not LLC vs person-name).
 GitHub CI asserts the punch list and that the artifact

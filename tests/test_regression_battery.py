@@ -44,6 +44,7 @@ from robie_job_engine.regression_battery import (
 from robie_job_engine.regression_scenarios import (
     ASCEND_AGENCY_FEE_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
+    ASCEND_LISTBOX_CHAT,
     ASCEND_ROLES_CHAT,
     ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
@@ -67,6 +68,7 @@ from robie_job_engine.regression_scenarios import (
     run_same_day_scenario_rule,
     run_sender_not_robie_ai_scenario,
     run_spinner_timing_scenario,
+    run_unique_listbox_option_scenario,
     run_wait_spinner_scenario,
 )
 from robie_job_engine.worker_contract import claims_unverified_destination_progress
@@ -381,6 +383,7 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["ascend-new-program:wait-spinner"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-new-program:spinner-timing"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-create:agency-fee-default"]["outcome"], "PASS")
+        self.assertEqual(ids["ascend-create:unique-listbox-option"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-customer-type:lob"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
@@ -606,6 +609,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["pawiva-agency-fee-default"]["scenario"],
             "ascend-create:agency-fee-default",
         )
+        self.assertEqual(
+            incidents["38c0fa79"]["scenario"],
+            "ascend-create:unique-listbox-option",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -729,6 +736,21 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             trigger="post-deploy",
         )
         self.assertIn(ASCEND_AGENCY_FEE_CHAT, fee_text)
+        listbox = run_unique_listbox_option_scenario()
+        self.assertTrue(listbox["ok"], listbox.get("evidence"))
+        self.assertEqual(listbox["id"], "ascend-create:unique-listbox-option")
+        listbox_text = format_new_failure_chat(
+            [
+                {
+                    "id": "ascend-create:unique-listbox-option",
+                    "outcome": "FAILED",
+                    "evidence": "selector not unique",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(ASCEND_LISTBOX_CHAT, listbox_text)
+        self.assertIn("38c0fa79", listbox_text)
 
     def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
         with durable_temporary_directory() as tmp:

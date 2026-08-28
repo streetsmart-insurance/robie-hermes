@@ -89,6 +89,13 @@ ASCEND_AGENCY_FEE_CHAT = (
     "then STOP before Save program / Send email / checkout / payment / bind."
 )
 
+ASCEND_LISTBOX_CHAT = (
+    "ASCEND create/new listbox class returned (38c0fa79): open each "
+    "create-form combobox; the intended option needs a unique locator. "
+    "Two matches is PLAYWRIGHT_BLOCKED. Log the blocked field. No Save. "
+    "No PAWIVA. Carlo will not RETRY 38c0fa79."
+)
+
 ASCEND_CUSTOMER_TYPE_CHAT = (
     "ASCEND customer type class returned: Commercial vs Personal is from "
     "line of business, not the form default and not LLC vs person-name. "
@@ -118,6 +125,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "ascend-new-program:wait-spinner",
         "ascend-new-program:spinner-timing",
         "ascend-create:agency-fee-default",
+        "ascend-create:unique-listbox-option",
         "ascend-customer-type:lob",
     }
 )
@@ -597,6 +605,15 @@ def run_agency_fee_default_scenario() -> dict[str, Any]:
         return _fail("ascend-create:agency-fee-default", f"{type(exc).__name__}: {exc}")
 
 
+def run_unique_listbox_option_scenario() -> dict[str, Any]:
+    from .ascend_create_combobox import run_unique_listbox_option_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("ascend-create:unique-listbox-option", f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -613,5 +630,6 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_wait_spinner_scenario())
     results.append(run_spinner_timing_scenario())
     results.append(run_agency_fee_default_scenario())
+    results.append(run_unique_listbox_option_scenario())
     results.append(run_customer_type_lob_scenario())
     return results

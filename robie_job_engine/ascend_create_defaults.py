@@ -465,9 +465,12 @@ def run_role_default_log_scenario() -> dict[str, Any]:
 
 
 def create_program_contract_lines(resolved: str | None) -> list[str]:
+    from .ascend_create_combobox import combobox_instruction
+
     return [
         programs_spinner_timing_instruction(),
         role_default_instruction(resolved),
         document_label_instruction(),
+        combobox_instruction(),
         agency_fee_instruction(),
     ]

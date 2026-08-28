@@ -49,14 +49,17 @@ overlay. It does not modify a live Hermes installation in place.
   Playwright strict mode: unique locator or FAIL. No Gemini. No
   `.first` / `.nth` / `.last`. Artifact folder must equal the job id.
   The live walk logs programs-spinner seconds, Agency Fee default
-  (expect $0.00 / empty, set 500, stop before Save), and Producer /
+  (expect $0.00 / empty, set 500, stop before Save), Producer /
   Account Manager prefills (FAIL if they stay Robie AI when Carlo or
-  Jake sent the job). GitHub CI does not open Ascend. Live walk is
+  Jake sent the job), and unique create/new listbox options (job
+  `38c0fa79`: two matching options is PLAYWRIGHT_BLOCKED; log the
+  blocked field). GitHub CI does not open Ascend. Live walk is
   `hermes-test-01` only (Robie Test account + email 2SV; never PAWIVA).
-  No new live Ascend / PAWIVA Production job until N=1 clean Test pass.
-  Follow-tab is separately proven. This audit ends as a report, not
-  COMPLETE of a finance agreement. Loom `ascend-finance` is not this
-  skill and is never overwritten.
+  Production is not the first test. No new live Ascend / PAWIVA
+  Production job until N=1 clean Test pass. Follow-tab is separately
+  proven. This audit ends as a report, not COMPLETE of a finance
+  agreement. Loom `ascend-finance` is not this skill and is never
+  overwritten.
 - `deploy/hermes/config/playwright.yaml` is the minimal configuration fragment
   that exposes the tool to CLI and Google Chat profiles.
 - `deploy/hermes/SOUL.playwright.md` is the browser invariant to merge into the

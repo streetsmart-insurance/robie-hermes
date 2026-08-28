@@ -106,6 +106,14 @@
       "scenario": "ascend-create:agency-fee-default",
       "closed": true,
       "note": "Live PAWIVA job: Agency Fee defaulted to $0.00 on /create/new. Test audit must log that default, expect $0.00 / empty, set 500 if the field exists, then STOP before Save. Never bind. Never email. Never PAWIVA on the Test pass."
+    },
+    {
+      "id": "38c0fa79",
+      "class": "ascend-create",
+      "new_failure_mode": true,
+      "scenario": "ascend-create:unique-listbox-option",
+      "closed": true,
+      "note": "Live Production job 38c0fa79 HITL'd PLAYWRIGHT_BLOCKED at 12:18Z on hermes-poc-01: create/new dropdown options were not unique (multiple matching options / selector not unique for the active listbox). Still on /create/new. No Save. Carlo will not RETRY. Test pass must open each create-form combobox and require a unique exact option locator. Log the blocked field. Never PAWIVA."
     }
   ]
 }

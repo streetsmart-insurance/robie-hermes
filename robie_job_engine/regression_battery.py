@@ -38,6 +38,7 @@ from .regression_scenarios import (
     ASCEND_AGENCY_FEE_CHAT,
     ASCEND_AUDIT_CHAT,
     ASCEND_CUSTOMER_TYPE_CHAT,
+    ASCEND_LISTBOX_CHAT,
     ASCEND_ROLES_CHAT,
     ASCEND_SPINNER_CHAT,
     CONCAT_PATH_CHAT,
@@ -568,7 +569,10 @@ def format_new_failure_chat(
         if item_id.startswith("ascend-new-program:"):
             lines.append(ASCEND_SPINNER_CHAT)
         if item_id.startswith("ascend-create:"):
-            lines.append(ASCEND_AGENCY_FEE_CHAT)
+            if "listbox" in item_id or "unique-listbox" in item_id:
+                lines.append(ASCEND_LISTBOX_CHAT)
+            else:
+                lines.append(ASCEND_AGENCY_FEE_CHAT)
         if item_id.startswith("ascend-customer-type:"):
             lines.append(ASCEND_CUSTOMER_TYPE_CHAT)
     lines.append(HUMAN_GATE)

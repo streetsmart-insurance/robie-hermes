@@ -19,10 +19,15 @@ is “just trying it.”
    green before merge when it is a NEW failure mode or NEW site/workflow.
 2. **Dusty walks the live site himself** before a NEW website/portal is
    tried on a real account (same as the 2026-08-28 Ascend look).
-3. **This Test job on `hermes-test-01`.** No new live Ascend / PAWIVA
-   Production job until **N=1** clean Test pass (Carlo asked for at
-   least one). New job-type / `production_ready` flip still needs N=3.
-   Then Production zip. Follow-tab is separately proven.
+3. **This Test job on `hermes-test-01` is the Test gate.** A visual walk
+   on Dusty's computer is not the Test gate. PR 35 CI is not the Test
+   gate. Shipping a zip to `hermes-poc-01` is not the Test gate.
+   Production is not the first test. Jobs `807f8920` and `38c0fa79`
+   (2026-08-28) skipped this gate on a live client; the safety net
+   caught them. No new live Ascend / PAWIVA Production job until
+   **N=1** clean Test pass (Carlo asked for at least one). New
+   job-type / `production_ready` flip still needs N=3. Follow-tab is
+   separately proven.
 4. **After Production zip, run the PR 35 battery again.** Pointer-only
    is not live.
 5. Do not skip the battery or the Dusty walk because a model is “just
@@ -75,19 +80,27 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
    already equal that name. **FAIL** if they stay Robie AI when
    requested_by is Carlo Ferrara or Jake Ferrara. Unknown sender → HITL
    in dry English. Unique locators. No `.first` / `.nth` / `.last`.
-6. Commercial vs Personal radio from **line of business**, not the form
+6. Open each create-form combobox the job would use (Producer, Account
+   Manager, Carrier / Writing company, Coverage type, State, etc.).
+   The visible list must have a **unique** locator for the intended
+   option (`get_by_role("option", name=…, exact=True)`). Two options
+   matching the same selector is `PLAYWRIGHT_BLOCKED` (job `38c0fa79`).
+   Log the blocked field. Dry HITL if the intended option is missing.
+   Carlo will not RETRY `38c0fa79`. No `.first` / `.nth` / `.last`.
+7. Commercial vs Personal radio from **line of business**, not the form
    default and not LLC vs person-name. Commercial auto / commercial
    package / BOP / CGL / workers comp / trucking / garage → Commercial
    customer. Homeowners / personal auto / renters / personal umbrella /
    dwelling fire → Personal customer. Missing or unclear LOB → HITL in
    dry English. Unique radio locator. No `.first` / `.nth` / `.last`.
-7. Customer Name (Test account only), address autocomplete (exact row)
-8. Quote number, carrier, wholesaler, coverage type
-9. Dates, premium, taxes. **Log** the Agency Fee default (expect $0.00
+8. Customer Name (Test account only), address autocomplete (exact row)
+9. Quote number, carrier, wholesaler, coverage type (unique listbox
+   option — see step 6)
+10. Dates, premium, taxes. **Log** the Agency Fee default (expect $0.00
    / empty). If the fee field exists, **set 500** in this Test run.
-10. Stop before Save program / Send email / Copy checkout / payment / bind
+11. Stop before Save program / Send email / Copy checkout / payment / bind
     (same PR 37 stop; Loom `ascend-finance` is not overwritten).
-11. Save and reopen the quote PDF under `{artifact_root}/{job_id}/`
+12. Save and reopen the quote PDF under `{artifact_root}/{job_id}/`
 
 ## Where it runs
 
