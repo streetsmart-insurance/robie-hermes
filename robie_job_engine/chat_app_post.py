@@ -6,8 +6,8 @@ Never impersonate the person Robie AI. Never create a new space.
 
 There is no outbound email API on hermes-poc-01. Operator fail-notify uses
 this same Chat APP poster. ``find_direct_message_space`` only resolves an
-already-existing DM (``spaces.findDirectMessage``). It does not call
-``spaces.setup`` and does not @mention anyone.
+already-existing DM (``spaces.findDirectMessage``). It never creates a
+space and does not @mention anyone.
 """
 
 from __future__ import annotations

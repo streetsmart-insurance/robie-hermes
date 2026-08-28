@@ -186,8 +186,8 @@ class CheckContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("findDirectMessage", poster)
-        self.assertNotIn("spaces.setup", poster)
-        self.assertIn("no outbound email API", poster.casefold())
+        self.assertNotIn(".setup(", poster)
+        self.assertIn("no outbound email api", poster.casefold())
 
     def test_failure_message_names_check_and_does_not_mention_robie(self):
         text = format_failure("cdp", "http://127.0.0.1:9222/json/version HTTP 500")
