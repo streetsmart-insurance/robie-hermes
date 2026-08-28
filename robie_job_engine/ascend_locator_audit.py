@@ -943,7 +943,10 @@ def run_ci_assertion_battery(*, work_dir: Path) -> dict[str, Any]:
         step_id="unique_locator",
         description="unique-locator fail is FAIL",
     )
-    checks.append(unique if unique.status == "FAIL" else fail_step("unique_locator", "did not FAIL"))
+    if unique.status == "FAIL" and "strict mode violation" in str(unique.error or ""):
+        checks.append(pass_step("unique_locator", locator=unique.locator))
+    else:
+        checks.append(fail_step("unique_locator", "unique-locator fail was not classified as FAIL"))
 
     try:
         require_unique_locator(_CountTarget(2), locator='get_by_label("Insured")')
