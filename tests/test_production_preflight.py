@@ -136,7 +136,7 @@ class CheckContractTests(unittest.TestCase):
         self.assertIn("ROBIE_PREFLIGHT_CHAT_SPACE=spaces/AAQAZbLJO78", SERVICE)
         self.assertNotIn("robie-job-engine.service", SERVICE)
         self.assertNotIn("systemctl restart", SERVICE)
-        self.assertIn("OnCalendar=*-*-* 09..17:00:00 America/New_York", TIMER)
+        self.assertIn("OnCalendar=*-*-* 00,07..23:00:00 America/New_York", TIMER)
         self.assertIn("Unit=robie-production-preflight.service", TIMER)
         self.assertIn("WantedBy=timers.target", TIMER)
 
