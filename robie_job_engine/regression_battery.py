@@ -3,6 +3,8 @@
 This battery only guarantees previously seen failures have not come back.
 Simulator passed means nothing we have already seen is wrong, never that
 nothing is wrong. A Test all-clear is never a Production all-clear.
+Every Production NEW failure mode gets a named deterministic scenario
+before the incident is closed. That is how the simulator grows.
 
 Detection is automatic. Merge, Production flip, and hermes-gateway restart
 stay human-gated (Jake Approve / Carlo Confirm). GitHub-hosted runners never
@@ -32,6 +34,11 @@ from .quote_replay import (
     refuse_production_targets,
     run_quote_replay,
 )
+from .regression_scenarios import (
+    FALSE_SUCCESS_CHAT,
+    HITL_RESUME_CHAT,
+    run_named_scenarios,
+)
 from .runtime_env import PRODUCTION_ENV_NAMES, ProductionGuardError, current_robie_env
 
 
@@ -41,7 +48,7 @@ DEFAULT_CHAT_SPACE = "spaces/AAQAZbLJO78"
 SCOPE = (
     "This battery only guarantees previously seen failures have not come back. "
     "Simulator passed means nothing we have already seen is wrong, never that "
-    "nothing is wrong."
+    "nothing is wrong. Known scenarios did not regress."
 )
 SEEN_CLEAR_TEXT = (
     "previously seen failures have not come back on this runner "
@@ -468,6 +475,7 @@ def run_replay_scenarios(
     _guard("quote-replay:live-hermes-job-db", live_hermes_job_db)
     _guard("quote-replay:test-paths-require-test-env", test_paths_require_test_env)
     results.append(run_secret_health_scenario())
+    results.extend(run_named_scenarios(work_dir=root / "named"))
     return results
 
 
@@ -537,6 +545,11 @@ def format_new_failure_chat(
             f"- {item.get('id')}: {item.get('outcome')} ({snippet[:240]}) "
             f"{SIGNATURE_MARKER}{sig}"
         )
+        item_id = str(item.get("id") or "")
+        if item_id.startswith("false-success:"):
+            lines.append(FALSE_SUCCESS_CHAT)
+        if item_id.startswith("hitl-resume:"):
+            lines.append(HITL_RESUME_CHAT)
     lines.append(HUMAN_GATE)
     text = "\n".join(lines)
     if "@robie" in text.casefold():

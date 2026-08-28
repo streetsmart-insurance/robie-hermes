@@ -98,17 +98,26 @@ What runs automatically — do not reconstruct this from Chat.
 | `scripts/verify-release.sh` | Same `--ci` battery after digest + compile, before a host may consume the archive | Pre-deploy verify |
 
 This battery **only guarantees previously seen failures have not come
-back**. Simulator passed means nothing we have already seen is wrong,
-never that nothing is wrong. A Test all-clear is not a Production
-all-clear.
+back**. Simulator passed means nothing we have already seen is wrong —
+known scenarios did not regress — never that nothing is wrong. A Test
+all-clear is not a Production all-clear.
+
+**Same-day scenario rule:** every Production incident that was a NEW
+failure mode gets a named deterministic scenario in
+`deploy/regression_battery/scenarios.json` before we call the incident
+closed. That is how the simulator grows. Add the scenario the same day.
+Do not mark the incident closed until the id exists in the battery.
 
 A **NEW** fail (a logic failure, or a replay outcome that is not in the
 known-accepted catalog) posts to `spaces/AAQAZbLJO78` as the Robie Chat
 APP via `chat_app_post.post_as_chat_app`. Known-accepted Test failures
 stay quiet. DESTROYED Secret Manager latest with an older ENABLED
 version is HEALTHY and does not alert. INCONCLUSIVE parity gaps may be
-noted in Chat once and are never green. It does **not** `@robie` (that
-would start a live job). It does not bind, pay, or email the insured.
+noted in Chat once and are never green. HITL resume-orphan and
+false-success (COMPLETE-shaped prose, 0 destination evidence) are named
+scenarios; Chat names the class if either returns. It does **not**
+`@robie` (that would start a live job). It does not bind, pay, or email
+the insured. There is no duplicate draft PR for the same signature.
 
 A draft-PR hook may run (`gh pr create --draft`) only for a
 deterministic NEW fail with a stable scenario id + the same failure

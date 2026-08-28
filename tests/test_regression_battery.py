@@ -41,6 +41,21 @@ from robie_job_engine.regression_battery import (
     run_replay_scenarios,
     run_secret_health_scenario,
 )
+from robie_job_engine.regression_scenarios import (
+    FALSE_SUCCESS_CHAT,
+    HITL_RESUME_CHAT,
+    I_DID_IT_PROSE,
+    SAME_DAY_RULE,
+    SCENARIOS_PATH,
+    close_new_failure_incident,
+    IncidentCloseError,
+    load_scenario_catalog,
+    run_false_success_scenario,
+    run_hitl_resume_scenarios,
+    run_named_scenarios,
+    run_same_day_scenario_rule,
+)
+from robie_job_engine.worker_contract import claims_unverified_destination_progress
 from robie_job_engine.test_runtime import ProductionGuardError
 
 
@@ -141,6 +156,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn("nothing we have already seen is wrong", SOURCE)
         self.assertIn("INCONCLUSIVE", SOURCE)
         self.assertIn("not a Production all-clear", SOURCE)
+        self.assertIn("how the simulator grows", SOURCE)
         self.assertIn("Type=oneshot", SERVICE)
         self.assertIn("-m robie_job_engine.regression_battery --notify", SERVICE)
         self.assertIn("ROBIE_REGRESSION_CHAT_SPACE=spaces/AAQAZbLJO78", SERVICE)
@@ -334,6 +350,16 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(
             ids["login-secret:destroyed-latest-enabled-older"]["outcome"], "HEALTHY"
         )
+        self.assertEqual(ids["same-day:named-scenario-before-close"]["outcome"], "PASS")
+        self.assertEqual(
+            ids["hitl-resume:re-lease-after-gateway-restart"]["outcome"], "PASS"
+        )
+        self.assertEqual(ids["hitl-resume:no-second-job"]["outcome"], "PASS")
+        self.assertEqual(ids["hitl-resume:no-retry-leftover-failed"]["outcome"], "PASS")
+        self.assertIn(
+            ids["false-success:complete-prose-zero-evidence"]["outcome"],
+            {"UNVERIFIED", "FAILED"},
+        )
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -402,7 +428,10 @@ class ParityAndScopeTests(unittest.TestCase):
             self.assertIn("not a Production all-clear", flat)
             self.assertIn("previously seen failures have not come back", flat)
             self.assertIn("INCONCLUSIVE", flat)
+            self.assertIn("how the simulator grows", flat)
+            self.assertIn("named deterministic scenario", flat)
         self.assertTrue(PARITY_PATH.is_file())
+        self.assertTrue(SCENARIOS_PATH.is_file())
 
     def test_destroyed_latest_with_older_enabled_is_healthy_and_quiet(self):
         self.assertTrue(
@@ -497,6 +526,107 @@ class ParityAndScopeTests(unittest.TestCase):
         )
         self.assertIn("Not a Production all-clear", text)
         self.assertNotIn("@robie", text.casefold())
+
+
+class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
+    def test_cannot_close_new_failure_mode_without_named_scenario(self):
+        self.assertIn("before we call the incident closed", SAME_DAY_RULE)
+        self.assertIn("how the simulator grows", SAME_DAY_RULE)
+        catalog = load_scenario_catalog()
+        self.assertIn("how the simulator grows", catalog["rule"])
+        incidents = {row["id"]: row for row in catalog["incidents"]}
+        for job_id in ("09d69760", "da53765b", "6cf6f6ae"):
+            self.assertEqual(
+                incidents[job_id]["scenario"],
+                "hitl-resume:re-lease-after-gateway-restart",
+            )
+        for job_id in ("30777947", "c31f9c69"):
+            self.assertEqual(
+                incidents[job_id]["scenario"],
+                "false-success:complete-prose-zero-evidence",
+            )
+        with self.assertRaises(IncidentCloseError):
+            close_new_failure_incident(
+                {"id": "new-today", "new_failure_mode": True, "closed": False}
+            )
+        closed = close_new_failure_incident(
+            {
+                "id": "new-today",
+                "new_failure_mode": True,
+                "scenario": "false-success:complete-prose-zero-evidence",
+            }
+        )
+        self.assertTrue(closed["closed"])
+        self.assertEqual(run_same_day_scenario_rule()["outcome"], "PASS")
+
+    def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
+        with durable_temporary_directory() as tmp:
+            results = {
+                item["id"]: item
+                for item in run_hitl_resume_scenarios(work_dir=Path(tmp) / "hitl")
+            }
+        self.assertTrue(results["hitl-resume:re-lease-after-gateway-restart"]["ok"])
+        self.assertTrue(results["hitl-resume:no-second-job"]["ok"])
+        self.assertTrue(results["hitl-resume:no-retry-leftover-failed"]["ok"])
+        self.assertIn("09d69760", results["hitl-resume:re-lease-after-gateway-restart"]["evidence"])
+
+    def test_false_success_complete_prose_stays_unverified_and_names_class_in_chat(self):
+        self.assertTrue(claims_unverified_destination_progress(I_DID_IT_PROSE))
+        with durable_temporary_directory() as tmp:
+            result = run_false_success_scenario(work_dir=Path(tmp) / "false-success")
+        self.assertTrue(result["ok"])
+        self.assertIn(result["outcome"], {"UNVERIFIED", "FAILED"})
+        text = format_new_failure_chat(
+            [
+                {
+                    "id": "false-success:complete-prose-zero-evidence",
+                    "outcome": "COMPLETE",
+                    "evidence": "I did it with 0 destination evidence",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(FALSE_SUCCESS_CHAT, text)
+        self.assertIn("30777947", text)
+        self.assertIn("c31f9c69", text)
+        self.assertIn("UNVERIFIED or FAILED", text)
+        self.assertNotIn("@robie", text.casefold())
+        hitl_text = format_new_failure_chat(
+            [
+                {
+                    "id": "hitl-resume:re-lease-after-gateway-restart",
+                    "outcome": "FAILED",
+                    "evidence": "second job started",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(HITL_RESUME_CHAT, hitl_text)
+        self.assertIn("Do not RETRY leftover failed ids", hitl_text)
+        self.assertNotIn("@robie", hitl_text.casefold())
+
+    def test_named_scenarios_refuse_live_hermes_and_stay_quiet_when_passing(self):
+        with self.assertRaises(Exception):
+            run_named_scenarios(
+                work_dir=Path("/opt/streetsmart-hermes/robie-job-engine/data")
+            )
+        posted: list[str] = []
+        opened: list[dict] = []
+        with durable_temporary_directory() as tmp:
+            report = run_regression_battery(
+                trigger="post-deploy",
+                notify=True,
+                draft_pr=True,
+                logic_runner=_logic_pass,
+                replay_runner=lambda: run_named_scenarios(work_dir=Path(tmp) / "named"),
+                parity_runner=lambda: [],
+                poster=lambda space, text: posted.append(text),
+                pr_opener=lambda payload: opened.append(payload),
+            )
+        self.assertTrue(report["ok"])
+        self.assertEqual(posted, [])
+        self.assertEqual(opened, [])
+        self.assertNotIn("@robie", str(report).casefold())
 
 
 if __name__ == "__main__":
