@@ -202,6 +202,14 @@ class _FakeControl:
         self._page.open_label = self._label
         self._page.search_by_label[self._label] = value
 
+    def evaluate(self, _expression: str) -> str:
+        return "SELECT" if self._label == "State" else "INPUT"
+
+    def locator(self, selector: str) -> _FakeOptions:
+        if selector == "option" and self._label == "State":
+            return _FakeOptions(self._page.options_by_label.get(self._label, []))
+        return _FakeOptions([])
+
 
 class _FakeOptions:
     def __init__(self, names: list[str]) -> None:
@@ -499,10 +507,14 @@ class LiveComboboxAuditTests(unittest.TestCase):
             },
         )
         self.assertTrue(observed["ok"], observed)
-        for name in ("Carrier", "Coverage type", "State"):
+        for name in ("Carrier", "Coverage type"):
             field = next(item for item in observed["fields"] if item["field"] == name)
             self.assertTrue(field["searched"], field)
             self.assertEqual(field["match_count"], 1)
+        state = next(item for item in observed["fields"] if item["field"] == "State")
+        self.assertFalse(state["searched"], state)
+        self.assertEqual(state["control_type"], "select")
+        self.assertEqual(state["match_count"], 1)
 
     def test_import_uploads_test_quote_file(self):
         page = _FakePage({})
