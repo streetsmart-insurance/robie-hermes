@@ -1,27 +1,36 @@
-"""Production pre-flight: five yes/no checks. Chat on the first no only."""
+"""Production pre-flight: six yes/no checks. Chat on the first no only."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from durable_temp import durable_temporary_directory
 
+from robie_job_engine.chat_app_post import (
+    DEFAULT_FAIL_NOTIFY_EMAILS,
+    fail_notify_emails,
+    find_direct_message_space,
+)
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.models import JobStatus
 from robie_job_engine.production_preflight import (
     AUTHENTICATED_APP_PREFIX,
     CANONICAL_JOB_ENGINE_ROOT,
     CHECK_CDP,
+    CHECK_CHAT_INTAKE,
     CHECK_EZLYNX_TAB,
     CHECK_GATEWAY,
     CHECK_LINKS,
     CHECK_SECRETS,
     DEFAULT_CHAT_SPACE,
     check_cdp,
+    check_chat_intake,
     check_conversation_job_links,
     check_ezlynx_tab,
     check_hermes_gateway,
@@ -134,6 +143,11 @@ class CheckContractTests(unittest.TestCase):
             SERVICE,
         )
         self.assertIn("ROBIE_PREFLIGHT_CHAT_SPACE=spaces/AAQAZbLJO78", SERVICE)
+        self.assertIn(
+            "ROBIE_PREFLIGHT_FAIL_NOTIFY=carlo@streetsmart.insurance,"
+            "jake@streetsmart.insurance",
+            SERVICE,
+        )
         self.assertNotIn("robie-job-engine.service", SERVICE)
         self.assertNotIn("systemctl restart", SERVICE)
         self.assertIn("OnCalendar=*-*-* 00,07..23:00:00 America/New_York", TIMER)
@@ -147,8 +161,33 @@ class CheckContractTests(unittest.TestCase):
             DROP_IN,
         )
         self.assertIn("PYTHONPATH=/opt/streetsmart-hermes/releases/current:", DROP_IN)
+        self.assertIn(
+            "ROBIE_PREFLIGHT_FAIL_NOTIFY=carlo@streetsmart.insurance,"
+            "jake@streetsmart.insurance",
+            DROP_IN,
+        )
         self.assertNotIn("robie-job-engine.service", DROP_IN)
         self.assertNotIn("systemctl restart", DROP_IN)
+
+    def test_docs_keep_preflight_infra_only_and_test_n_gate(self):
+        release = (ROOT / "RELEASE_PROCESS.md").read_text(encoding="utf-8")
+        state = (ROOT / "CURRENT_STATE.md").read_text(encoding="utf-8")
+        for text in (release, state):
+            self.assertIn("infra only", text.casefold())
+            self.assertIn("hermes-test-01", text)
+            self.assertIn("New job types still need", text)
+        self.assertIn("3 clean jobs", release)
+        self.assertIn("N clean Test", state)
+        self.assertIn("N = 3", state)
+        self.assertIn("required Production gate", release)
+        self.assertNotIn("smtp", SOURCE.casefold())
+        self.assertNotIn("sendgrid", SOURCE.casefold())
+        poster = (ROOT / "robie_job_engine" / "chat_app_post.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("findDirectMessage", poster)
+        self.assertNotIn("spaces.setup", poster)
+        self.assertIn("no outbound email API", poster.casefold())
 
     def test_failure_message_names_check_and_does_not_mention_robie(self):
         text = format_failure("cdp", "http://127.0.0.1:9222/json/version HTTP 500")
@@ -345,8 +384,141 @@ class SecretAndLinkCheckTests(unittest.TestCase):
             self.assertTrue(result["ok"])
 
 
+def _empty_jobs_db(tmp: str) -> str:
+    db = str(Path(tmp) / "jobs-empty.db")
+    JobStore(db)
+    DurableChatEventQueue(db)
+    return db
+
+
+def _enqueue_chat_inbound(db: str, *, event_id: str = "spaces/s/messages/fresh") -> None:
+    DurableChatEventQueue(db).enqueue(
+        event_id=event_id,
+        conversation_id="spaces/AAQAZbLJO78",
+        message_id=event_id,
+        payload={"action_type": "hermes.google_chat_task"},
+    )
+
+
+def _age_chat_inbound(db: str, *, hours: int) -> None:
+    stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE chat_event_queue SET created_at=?, updated_at=?",
+            (stamp, stamp),
+        )
+
+
+WEDGED_JOURNAL = (
+    "[GoogleChat] Connected; project=streetsmart-hermes-poc, inbound=pubsub\n"
+    "RuntimeError: bound Job is not awaiting human input\n"
+)
+
+
+class ChatIntakeCheckTests(unittest.TestCase):
+    def test_wedged_listener_is_no(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            result = check_chat_intake(db, journal=WEDGED_JOURNAL)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["name"], CHECK_CHAT_INTAKE)
+            self.assertIn("wedged", result["evidence"])
+            self.assertIn("hermes-gateway active", result["evidence"])
+            self.assertIn("bound Job is not awaiting human input", result["evidence"])
+
+    def test_silent_listener_without_inbound_is_no(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            result = check_chat_intake(db, journal="")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["name"], CHECK_CHAT_INTAKE)
+            self.assertIn("silent", result["evidence"])
+            self.assertIn("hermes-gateway active", result["evidence"])
+
+    def test_recent_inbound_is_yes(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            _enqueue_chat_inbound(db)
+            result = check_chat_intake(db, journal="")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["name"], CHECK_CHAT_INTAKE)
+            self.assertIn("last Chat inbound", result["evidence"])
+
+    def test_recent_chat_job_without_queue_row_is_yes(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            JobStore(db).create_job("hermes.google_chat_task", {"text": "work"})
+            result = check_chat_intake(db, journal="")
+            self.assertTrue(result["ok"])
+            self.assertIn("last Chat inbound", result["evidence"])
+
+    def test_connected_idle_without_recent_inbound_is_yes(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            _enqueue_chat_inbound(db)
+            _age_chat_inbound(db, hours=20)
+            result = check_chat_intake(
+                db,
+                journal="[GoogleChat] Connected; inbound=pubsub\n",
+            )
+            self.assertTrue(result["ok"])
+            self.assertIn("connected", result["evidence"].casefold())
+
+    def test_stale_inbound_plus_stall_is_no(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            _enqueue_chat_inbound(db)
+            _age_chat_inbound(db, hours=1)
+            result = check_chat_intake(db, journal=WEDGED_JOURNAL)
+            self.assertFalse(result["ok"])
+            self.assertIn("wedged", result["evidence"])
+
+    def test_does_not_send_a_test_chat_job(self):
+        self.assertNotIn("open_chat_job", SOURCE)
+        self.assertNotIn("spaces.setup", SOURCE)
+        self.assertNotIn("messages().create", SOURCE)
+
+
+class FailNotifyTests(unittest.TestCase):
+    def test_fail_notify_emails_are_carlo_and_jake(self):
+        self.assertEqual(
+            fail_notify_emails(),
+            [
+                "carlo@streetsmart.insurance",
+                "jake@streetsmart.insurance",
+            ],
+        )
+        self.assertEqual(
+            DEFAULT_FAIL_NOTIFY_EMAILS,
+            (
+                "carlo@streetsmart.insurance",
+                "jake@streetsmart.insurance",
+            ),
+        )
+
+    def test_find_direct_message_uses_existing_poster_path(self):
+        chat = Mock()
+        chat.spaces.return_value.findDirectMessage.return_value.execute.return_value = {
+            "name": "spaces/dm-carlo"
+        }
+        space = find_direct_message_space(
+            "carlo@streetsmart.insurance", chat=chat
+        )
+        self.assertEqual(space, "spaces/dm-carlo")
+        chat.spaces.return_value.findDirectMessage.assert_called_once_with(
+            name="users/carlo@streetsmart.insurance"
+        )
+        chat.spaces.return_value.setup.assert_not_called()
+
+
 class FailClosedRunTests(unittest.TestCase):
-    def test_first_no_posts_one_message_and_stops(self):
+    def _dm_finder(self, email: str) -> str:
+        return {
+            "carlo@streetsmart.insurance": "spaces/dm-carlo",
+            "jake@streetsmart.insurance": "spaces/dm-jake",
+        }[email]
+
+    def test_first_no_posts_space_and_operator_dms_and_stops(self):
         posted: list[tuple[str, str]] = []
         secrets_called = {"n": 0}
 
@@ -361,16 +533,41 @@ class FailClosedRunTests(unittest.TestCase):
             ),
             secret_inspector=secrets,
             poster=lambda space, text: posted.append((space, text)),
+            dm_finder=self._dm_finder,
         )
         self.assertFalse(report["ok"])
         self.assertEqual(report["failed_check"], CHECK_GATEWAY)
         self.assertEqual(len(report["checks"]), 1)
         self.assertEqual(secrets_called["n"], 0)
-        self.assertEqual(len(posted), 1)
+        self.assertEqual(
+            [space for space, _text in posted],
+            [DEFAULT_CHAT_SPACE, "spaces/dm-carlo", "spaces/dm-jake"],
+        )
         self.assertEqual(posted[0][0], DEFAULT_CHAT_SPACE)
         self.assertIn("hermes-gateway", posted[0][1])
         self.assertNotIn("@robie", posted[0][1].casefold())
         self.assertTrue(report["chat_posted"])
+        self.assertEqual(
+            report["fail_notify_targets"],
+            [DEFAULT_CHAT_SPACE, "spaces/dm-carlo", "spaces/dm-jake"],
+        )
+        self.assertEqual(report["fail_notify_dm_errors"], [])
+
+    def test_space_post_survives_missing_dm(self):
+        posted: list[str] = []
+
+        def finder(email: str) -> str:
+            raise RuntimeError(f"no DM for {email}")
+
+        report = run_production_preflight(
+            gateway_probe=_gateway_ok(active=False, active_state="failed"),
+            poster=lambda space, text: posted.append(space),
+            dm_finder=finder,
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(posted, [DEFAULT_CHAT_SPACE])
+        self.assertTrue(report["chat_posted"])
+        self.assertEqual(len(report["fail_notify_dm_errors"]), 2)
 
     def test_all_yes_does_not_post(self):
         posted: list[str] = []
@@ -393,11 +590,24 @@ class FailClosedRunTests(unittest.TestCase):
                 ),
                 secret_inspector=_secret_ok,
                 db_path=db,
+                journal="[GoogleChat] Connected; inbound=pubsub\n",
                 poster=lambda space, text: posted.append(text),
+                dm_finder=self._dm_finder,
             )
         self.assertTrue(report["ok"])
         self.assertIsNone(report["failed_check"])
-        self.assertEqual(len(report["checks"]), 5)
+        self.assertEqual(len(report["checks"]), 6)
+        self.assertEqual(
+            [item["name"] for item in report["checks"]],
+            [
+                CHECK_GATEWAY,
+                CHECK_CDP,
+                CHECK_EZLYNX_TAB,
+                CHECK_SECRETS,
+                CHECK_LINKS,
+                CHECK_CHAT_INTAKE,
+            ],
+        )
         self.assertTrue(all(item["ok"] for item in report["checks"]))
         self.assertEqual(posted, [])
         self.assertFalse(report["chat_posted"])

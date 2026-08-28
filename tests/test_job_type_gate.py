@@ -117,6 +117,9 @@ class JobTypeGateTests(unittest.TestCase):
         self.assertIn("3 clean jobs", text)
         self.assertIn("scripts/check-job-type-gate.py", text)
         self.assertIn("production_ready", text)
+        self.assertIn("infra only", text.casefold())
+        self.assertIn("hermes-test-01", text)
+        self.assertIn("New job types still need", text)
 
     def test_audit_record_from_jobs_db_requires_pass_verdict(self):
         with durable_temporary_directory() as tmp:

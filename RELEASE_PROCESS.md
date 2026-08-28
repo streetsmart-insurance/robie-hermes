@@ -69,6 +69,16 @@ only COMPLETE authority.
 `ezlynx.commercial_auto`) and the already-live bounded Job Engine types. Those
 Production paths stay open. The gate applies to NEW types going forward.
 
+## Production pre-flight is infra only
+
+`robie_job_engine/production_preflight.py` watches Production host health
+(gateway, CDP, EZLynx tab, login-secret versions, conversation binds, Chat
+intake / Pub/Sub listener). It is **infra only**. A pre-flight yes is not a
+job-type gate and does not replace Test.
+
+New job types still need **N clean Test (`hermes-test-01`) jobs** before
+Production on a real account. N = **3**. See the required gate above.
+
 ## Automated post-job audit
 
 On every Chat/Job Engine terminal state (`COMPLETE`, `FAILED`, `UNVERIFIED`),
