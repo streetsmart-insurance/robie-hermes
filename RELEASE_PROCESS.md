@@ -39,6 +39,18 @@ Production must consume that exact archive and checksum. `scripts/verify-release
 revalidates the digest, compiles the extracted source, and runs the complete
 dependency-free acceptance suite before a deployment can proceed.
 
+Production zip install is `scripts/install-official-release.sh` — the only
+supported Production flip. Do not type a long SSH cookbook. The script
+flips both pointers and installs every Chat-critical file (adapter,
+Playwright tools, write-guard, gemini helper) from that zip, then refuses
+`done` until live proof holds: pointers match, Chat dests equal the zip,
+`hermes-gateway` `ActiveEnterTimestamp` is after the flip, and an
+`install_proof` row exists. Pointer-only is not live. Chat looking busy is
+not live. COMPLETE still requires destination-verified evidence > 0. The
+script does not `git pull`, bind, print secrets, restart Chrome, or
+overwrite user-owned Loom `ascend-finance`. Skills stay a separate Drive →
+`.hermes` install. See CURRENT_STATE.md.
+
 ## Required gate: new job types / LOB skills
 
 Carlo's standing rule: **before any new job type** (personal auto, homeowners,
@@ -81,7 +93,7 @@ Production paths stay open. The gate applies to NEW types going forward.
 
 `robie_job_engine/production_preflight.py` watches Production host health
 (gateway, CDP, EZLynx tab, login-secret versions, conversation binds, Chat
-intake / Pub/Sub listener). It is **infra only**. A pre-flight yes is not a
+intake / Pub/Sub listener, Chat-runtime dests equal the zip). It is **infra only**. A pre-flight yes is not a
 job-type gate and does not replace Test.
 
 New job types still need **N clean Test (`hermes-test-01`) jobs** before

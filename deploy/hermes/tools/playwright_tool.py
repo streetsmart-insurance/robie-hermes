@@ -1,11 +1,11 @@
 """Playwright-only browser tool for Robie's persistent Chrome session.
 
-Production Hermes loads this file from
+Production Hermes still discovers this filename at
 ``/opt/streetsmart-hermes/.hermes/hermes-agent/tools/playwright_tool.py``.
-The repo overlay is ``deploy/hermes/tools/playwright_tool.py``. A zip-only
-deploy does not install this tool; copy the overlay onto the .hermes path or
-the next install will keep relabeling empty-PDF / missing-artifact errors as
-retryable ``PLAYWRIGHT_BLOCKED``.
+The official install writes a zip-load shim there so the running tool is
+this zip file (``deploy/hermes/tools/playwright_tool.py``). Write-guard and
+Job Engine helpers prefer ``ROBIE_CANONICAL_JOB_ENGINE_ROOT`` / PYTHONPATH
+over a stale .hermes sibling. Pointer-only is not live.
 """
 
 import importlib.util
@@ -113,9 +113,18 @@ def relabel_user_exec_exception(exc: BaseException) -> None:
 
 def _job_engine_root() -> Path | None:
     here = Path(__file__).resolve()
+    try:
+        from robie_job_engine.deploy_truth import resolve_job_engine_root
+
+        found = resolve_job_engine_root(here=here)
+        if found is not None:
+            return found
+    except ImportError:
+        pass
     candidates = [
         here.parents[2],
         here.parents[3] if len(here.parents) >= 4 else None,
+        Path("/opt/streetsmart-hermes/releases/current"),
         Path("/opt/streetsmart-hermes/robie-job-engine"),
         Path("/opt/streetsmart-hermes-test/robie-job-engine"),
     ]
@@ -129,12 +138,27 @@ def _job_engine_root() -> Path | None:
 
 def _write_guard_path() -> Path:
     here = Path(__file__).resolve()
+    try:
+        from robie_job_engine.deploy_truth import resolve_write_guard_path
+
+        return resolve_write_guard_path(here=here)
+    except ImportError:
+        pass
+    except RuntimeError:
+        pass
     candidates = [
+        Path(os.environ["ROBIE_CANONICAL_JOB_ENGINE_ROOT"])
+        / "robie_job_engine"
+        / "playwright_write_guard.py"
+        if os.environ.get("ROBIE_CANONICAL_JOB_ENGINE_ROOT")
+        else None,
+        here.parents[2] / "robie_job_engine" / "playwright_write_guard.py"
+        if len(here.parents) >= 3
+        else None,
         here.with_name("playwright_write_guard.py"),
-        here.parents[2] / "robie_job_engine" / "playwright_write_guard.py",
     ]
     for path in candidates:
-        if path.is_file():
+        if path is not None and path.is_file():
             return path
     raise RuntimeError(
         "PLAYWRIGHT_BLOCKED: unique-write guard source is missing; "

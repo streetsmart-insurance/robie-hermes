@@ -71,6 +71,8 @@ HTTP_URL_RE = re.compile(r"https?://[^\s'\"\\<>]+", re.IGNORECASE)
 FLUSH_MODE = "flush"
 SWEEP_MODE = "sweep"
 TERMINAL_MODE = "terminal"
+SESSION_SEED_URL = "https://app.ezlynx.com/web/"
+EMPTY_TARGET_EVIDENCE = "empty CDP target list; session is not fine"
 
 
 @dataclass(frozen=True)
@@ -381,6 +383,95 @@ def list_cdp_tabs(
     raise RuntimeError(last_error)
 
 
+def ensure_one_browser_page(
+    *,
+    tabs: list[BrowserTab] | None = None,
+    cdp_url: str | None = None,
+    http_get: Callable[[str], tuple[int, bytes]] | None = None,
+    opener: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """Refuse 'session fine' when CDP has zero pages.
+
+    Attach-only bootstrap fails with ``Persistent EZLynx browser has no page``.
+    Open one seed page (CDP ``/json/new``) when possible. Never restart Chrome.
+    Never dump secrets. An opened seed page is not AUTHENTICATED.
+    """
+    listed = list(tabs) if tabs is not None else []
+    if tabs is None:
+        try:
+            listed = list_cdp_tabs(cdp_url=cdp_url, http_get=http_get)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "opened": False,
+                "count": 0,
+                "session_fine": False,
+                "status": "INCONCLUSIVE",
+                "evidence": f"{EMPTY_TARGET_EVIDENCE} ({type(exc).__name__})",
+            }
+    pages = [tab for tab in listed if tab.is_page]
+    if pages:
+        return {
+            "ok": True,
+            "opened": False,
+            "count": len(pages),
+            "session_fine": False,
+            "status": "HAS_PAGES",
+            "evidence": f"{len(pages)} CDP page(s); not session fine by count alone",
+        }
+    opened_url = ""
+    if opener is not None:
+        opened = opener()
+        if opened:
+            opened_url = str(getattr(opened, "url", "") or SESSION_SEED_URL)
+    else:
+        getter = http_get or _http_get
+        seed = f"{_cdp_url(cdp_url)}/json/new?{SESSION_SEED_URL}"
+        try:
+            status, body = getter(seed)
+        except (URLError, TimeoutError, OSError) as exc:
+            return {
+                "ok": False,
+                "opened": False,
+                "count": 0,
+                "session_fine": False,
+                "status": "INCONCLUSIVE",
+                "evidence": f"{EMPTY_TARGET_EVIDENCE} ({type(exc).__name__})",
+            }
+        if int(status) != 200:
+            return {
+                "ok": False,
+                "opened": False,
+                "count": 0,
+                "session_fine": False,
+                "status": "INCONCLUSIVE",
+                "evidence": f"{EMPTY_TARGET_EVIDENCE} (HTTP {status})",
+            }
+        opened_url = SESSION_SEED_URL
+        del body
+    if not opened_url:
+        return {
+            "ok": False,
+            "opened": False,
+            "count": 0,
+            "session_fine": False,
+            "status": "INCONCLUSIVE",
+            "evidence": EMPTY_TARGET_EVIDENCE,
+        }
+    return {
+        "ok": True,
+        "opened": True,
+        "count": 1,
+        "session_fine": False,
+        "status": "OPENED_SEED_PAGE",
+        "url": opened_url,
+        "evidence": (
+            f"opened seed page {opened_url}; not AUTHENTICATED; "
+            "session is not fine until /web/ is authenticated"
+        ),
+    }
+
+
 def choose_session_tab(tabs: Iterable[BrowserTab]) -> BrowserTab | None:
     pages = [tab for tab in tabs if tab.is_page and session_keep_rank(tab.url) >= 0]
     if not pages:
@@ -647,8 +738,26 @@ def sweep_orphaned_tabs(
             "live_account_ids": sorted(live.account_ids),
             "hint": hint,
             "selection_mode": "recent_navigation",
+            "session_fine": False,
         }
     )
+    if not remaining:
+        seed = ensure_one_browser_page(
+            tabs=remaining,
+            cdp_url=cdp_url,
+            http_get=http_get,
+        )
+        applied["seed_page"] = seed
+        applied["session_status"] = seed.get("status")
+        applied["session_fine"] = False
+        if not seed.get("ok"):
+            applied["ok"] = False
+            applied["evidence"] = seed.get("evidence") or EMPTY_TARGET_EVIDENCE
+        else:
+            applied["kept_urls"] = list(applied.get("kept_urls") or []) + [
+                str(seed.get("url") or SESSION_SEED_URL)
+            ]
+            applied["evidence"] = seed.get("evidence")
     return applied
 
 

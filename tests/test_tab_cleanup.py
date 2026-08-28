@@ -27,8 +27,10 @@ from robie_job_engine.recording_tab import (
 )
 from robie_job_engine.store import JobStore
 from robie_job_engine.tab_cleanup import (
+    EMPTY_TARGET_EVIDENCE,
     BrowserTab,
     cleanup_terminal_job_tabs,
+    ensure_one_browser_page,
     flush_orphaned_tabs,
     plan_tab_cleanup,
     retarget_recorder_hint,
@@ -271,6 +273,39 @@ class FlushCleanupTests(unittest.TestCase):
                 [SESSION, LIVE_DOCUMENTS],
             )
 
+    def test_flush_empty_targets_is_inconclusive_not_session_fine(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            JobStore(db)
+            result = flush_orphaned_tabs(
+                db,
+                tabs=[],
+                http_get=lambda url: (_ for _ in ()).throw(OSError("no cdp")),
+            )
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["session_fine"])
+            self.assertEqual(result.get("session_status"), "INCONCLUSIVE")
+            self.assertIn(EMPTY_TARGET_EVIDENCE, result.get("evidence") or "")
+            cleanup_source = (
+                Path(__file__).resolve().parents[1]
+                / "robie_job_engine"
+                / "tab_cleanup.py"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("systemctl restart", cleanup_source)
+
+        opened: list[str] = []
+
+        def opener() -> object:
+            opened.append(SESSION)
+            return type("Page", (), {"url": SESSION})()
+
+        seed = ensure_one_browser_page(tabs=[], opener=opener)
+        self.assertTrue(seed["ok"])
+        self.assertTrue(seed["opened"])
+        self.assertFalse(seed["session_fine"])
+        self.assertEqual(seed["status"], "OPENED_SEED_PAGE")
+        self.assertEqual(opened, [SESSION])
+
 
 class RecorderHintAfterCleanupTests(unittest.TestCase):
     def test_recorder_hint_is_not_first_ezlynx_wins_after_cleanup(self):
@@ -419,6 +454,11 @@ class PlanAndAuditHookTests(unittest.TestCase):
                 db_path=db,
                 journal="[GoogleChat] Connected; inbound=pubsub\n",
                 poster=lambda *_args, **_kwargs: None,
+                chat_runtime_probe={
+                    "name": "chat-runtime",
+                    "ok": True,
+                    "evidence": "Chat load path equals zip",
+                },
             )
         self.assertTrue(report["ok"])
         flush = report.get("tab_flush") or report.get("tab_sweep") or {}

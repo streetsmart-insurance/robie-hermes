@@ -1,10 +1,11 @@
 """SMALL Production pre-flight. Yes/no only. Chat on the first no.
 
-Complement to post-job audit. Not a dashboard. The six checks observe
+Complement to post-job audit. Not a dashboard. The seven checks observe
 only: no Chrome, hermes-gateway, or browser restart; no bind; no
 client-file navigation. After the checks, a leftover-tab flush may close
 any unclaimed page via CDP Target.closeTarget. A zip pointer match is
-not health.
+not health. Chat-runtime is the seventh check: adapter / Playwright
+tools loaded from .hermes must equal the zip (bytes or zip-load shim).
 
 Hooked after the zip pointer flip + hermes-gateway restart (ExecStartPost
 on the PYTHONPATH drop-in) and by an every-day 7am-midnight ET oneshot timer.
@@ -47,6 +48,7 @@ CHECK_EZLYNX_TAB = "ezlynx-tab"
 CHECK_SECRETS = "login-secrets"
 CHECK_LINKS = "conversation-job-links"
 CHECK_CHAT_INTAKE = "chat-intake"
+CHECK_CHAT_RUNTIME = "chat-runtime"
 CHAT_JOB_ACTION = "hermes.google_chat_task"
 DEFAULT_CHAT_INTAKE_FRESH_SECONDS = 6 * 60 * 60
 LISTENER_CONNECTED_MARKER = "[GoogleChat] Connected"
@@ -285,8 +287,24 @@ def check_ezlynx_tab(
             last_error = f"{url}{suffix} empty tab list"
             break
         tabs = listed
-        if not tabs and last_error:
-            return _result(CHECK_EZLYNX_TAB, False, last_error)
+        if not tabs:
+            if "empty tab list" in last_error:
+                return _result(
+                    CHECK_EZLYNX_TAB,
+                    False,
+                    "empty CDP target list; session is not fine",
+                )
+            return _result(
+                CHECK_EZLYNX_TAB,
+                False,
+                last_error or "empty CDP target list; session is not fine",
+            )
+    if not tabs:
+        return _result(
+            CHECK_EZLYNX_TAB,
+            False,
+            "empty CDP target list; session is not fine",
+        )
     matching = [item for item in tabs if ezlynx_web_tab_ok(item)]
     if matching:
         return _result(CHECK_EZLYNX_TAB, True, matching[0].split("?", 1)[0])
@@ -561,6 +579,47 @@ def check_chat_intake(
     )
 
 
+def check_chat_runtime(
+    *,
+    opt_root: str | Path | None = None,
+    release_root: str | Path | None = None,
+    hermes_home: str | Path | None = None,
+    prover: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Yes only when Chat-loaded dests equal the zip this pointer names.
+
+    Pointer-only is a no. Skills are not part of this check.
+    """
+    from .deploy_truth import (
+        DEFAULT_OPT_ROOT,
+        prove_chat_runtime_matches_zip,
+        pointer_targets,
+    )
+
+    root = Path(opt_root) if opt_root else DEFAULT_OPT_ROOT
+    dest = Path(hermes_home) if hermes_home else root / ".hermes"
+    zip_root = Path(release_root) if release_root else None
+    if zip_root is None:
+        pointers = pointer_targets(opt_root=root)
+        target = pointers.get("releases_current_target") or pointers.get(
+            "current_target"
+        )
+        if not target:
+            return _result(
+                CHECK_CHAT_RUNTIME,
+                False,
+                "zip pointer missing; Chat load path cannot equal the zip",
+            )
+        zip_root = Path(str(target))
+    prove = prover or prove_chat_runtime_matches_zip
+    report = prove(release_root=zip_root, hermes_home=dest)
+    return _result(
+        CHECK_CHAT_RUNTIME,
+        bool(report.get("ok")),
+        str(report.get("evidence") or "Chat load path does not equal the zip"),
+    )
+
+
 CHECKS: tuple[Callable[..., dict[str, Any]], ...] = (
     check_hermes_gateway,
     check_cdp,
@@ -568,6 +627,7 @@ CHECKS: tuple[Callable[..., dict[str, Any]], ...] = (
     check_login_secrets,
     check_conversation_job_links,
     check_chat_intake,
+    check_chat_runtime,
 )
 
 
@@ -667,6 +727,7 @@ def run_production_preflight(
     journal: str | None = None,
     journal_reader: Callable[[], str] | None = None,
     now: datetime | None = None,
+    chat_runtime_probe: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run checks in order. First no posts Chat (space + operator DMs) and stops."""
     runners: list[tuple[str, Callable[[], dict[str, Any]]]] = [
@@ -685,6 +746,16 @@ def run_production_preflight(
                 now=now,
                 journal=journal,
                 journal_reader=journal_reader,
+            ),
+        ),
+        (
+            CHECK_CHAT_RUNTIME,
+            lambda: (
+                chat_runtime_probe()
+                if callable(chat_runtime_probe)
+                else chat_runtime_probe
+                if chat_runtime_probe is not None
+                else check_chat_runtime()
             ),
         ),
     ]
