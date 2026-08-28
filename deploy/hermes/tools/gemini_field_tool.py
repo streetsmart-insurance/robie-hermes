@@ -11,6 +11,14 @@ from tools.registry import registry
 
 def _helper_path() -> Path:
     here = Path(__file__).resolve()
+    try:
+        from robie_job_engine.deploy_truth import resolve_gemini_helper_path
+
+        return resolve_gemini_helper_path(here=here)
+    except ImportError:
+        pass
+    except RuntimeError:
+        pass
     candidates = [
         here.parents[2] / "robie_job_engine" / "gemini_field_helper.py",
         here.parents[3] / "robie_job_engine" / "gemini_field_helper.py",

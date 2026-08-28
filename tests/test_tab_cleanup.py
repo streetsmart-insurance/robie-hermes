@@ -419,6 +419,11 @@ class PlanAndAuditHookTests(unittest.TestCase):
                 db_path=db,
                 journal="[GoogleChat] Connected; inbound=pubsub\n",
                 poster=lambda *_args, **_kwargs: None,
+                chat_runtime_probe={
+                    "name": "chat-runtime",
+                    "ok": True,
+                    "evidence": "Chat load path equals zip",
+                },
             )
         self.assertTrue(report["ok"])
         flush = report.get("tab_flush") or report.get("tab_sweep") or {}

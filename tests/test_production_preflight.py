@@ -1,4 +1,4 @@
-"""Production pre-flight: six yes/no checks. Chat on the first no only."""
+"""Production pre-flight: seven yes/no checks. Chat on the first no only."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from robie_job_engine.production_preflight import (
     CANONICAL_JOB_ENGINE_ROOT,
     CHECK_CDP,
     CHECK_CHAT_INTAKE,
+    CHECK_CHAT_RUNTIME,
     CHECK_EZLYNX_TAB,
     CHECK_GATEWAY,
     CHECK_LINKS,
@@ -593,10 +594,15 @@ class FailClosedRunTests(unittest.TestCase):
                 journal="[GoogleChat] Connected; inbound=pubsub\n",
                 poster=lambda space, text: posted.append(text),
                 dm_finder=self._dm_finder,
+                chat_runtime_probe={
+                    "name": CHECK_CHAT_RUNTIME,
+                    "ok": True,
+                    "evidence": "Chat load path equals zip",
+                },
             )
         self.assertTrue(report["ok"])
         self.assertIsNone(report["failed_check"])
-        self.assertEqual(len(report["checks"]), 6)
+        self.assertEqual(len(report["checks"]), 7)
         self.assertEqual(
             [item["name"] for item in report["checks"]],
             [
@@ -606,6 +612,7 @@ class FailClosedRunTests(unittest.TestCase):
                 CHECK_SECRETS,
                 CHECK_LINKS,
                 CHECK_CHAT_INTAKE,
+                CHECK_CHAT_RUNTIME,
             ],
         )
         self.assertTrue(all(item["ok"] for item in report["checks"]))

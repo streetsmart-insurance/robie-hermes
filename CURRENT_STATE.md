@@ -4,13 +4,31 @@ Verified 2026-08-27 on **hermes-poc-01**
 (`hermes-poc-01.c.streetsmart-hermes-poc.internal`, project
 `streetsmart-hermes-poc`). Documentation only.
 
-Production is **two code paths**. A zip pointer match is not enough for
-Chat / Playwright. A zip pointer is not “the whole process is that SHA.”
+Hermes still runs. Production used to have **two code paths** that could
+silently disagree after a zip pointer flip:
+
+1. Zip overlay (`/opt/streetsmart-hermes/releases/current` via PYTHONPATH)
+   — Job Engine, preflight, audit, tab cleanup, login bootstrap.
+2. `.hermes` tree — Google Chat adapter, Playwright tools, skills.
+
+A zip pointer match is not “Chat is that SHA.” Pointer-only is how PR 17
+looked live while the Chat adapter still ran stale `.hermes` code (no
+`gateway_progress`).
+
+**Official install is now one proof.** `scripts/install-official-release.sh`
+flips both pointers and installs every Chat-loaded overlay (adapter,
+oauth, Playwright tools) as a zip-load shim, then refuses `OFFICIAL
+INSTALL DONE` until dest inode/md5 or the shim equals that zip. Skills
+stay a separate Drive → `.hermes` install. User-owned Loom
+`ascend-finance` is never overwritten here.
 
 After a Chat job, prove a `checkpoints.kind=gateway_progress` row in
 `/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`.
 **Destination-verified evidence rows > 0 is success**, not Chat looking
 busy.
+
+This tree is **not** deployed to `hermes-poc-01`. Jake Approves, Carlo
+Confirms later.
 
 ## Live zip (PR 23 deploy, 2026-08-27)
 
@@ -91,11 +109,11 @@ pre-flight yes does not authorize a new job type on Production.
 New job types still need N clean Test (`hermes-test-01`) jobs before
 Production on a real account (N = 3; see RELEASE_PROCESS.md). It is not a
 dashboard and not a zip-pointer check. After every pointer flip +
-`hermes-gateway` restart, the PYTHONPATH drop-in `ExecStartPost` runs six
+`hermes-gateway` restart, the PYTHONPATH drop-in `ExecStartPost` runs seven
 yes/no checks (gateway+Job Engine PYTHONPATH, CDP `/json/version`, an
 EZLynx `/web/` tab that is not login, Secret Manager ENABLED versions, no
 `conversation_job_links.active=1` terminal bind, Chat intake / Pub/Sub
-listener). An every-day oneshot timer (`robie-production-preflight.timer`)
+listener, Chat-runtime dests equal that zip). An every-day oneshot timer (`robie-production-preflight.timer`)
 repeats that hourly from 7am through midnight `America/New_York`. The first
 no posts one Robie Chat APP message to `spaces/AAQAZbLJO78` and the same
 text to Carlo and Jake via the existing Chat APP poster
@@ -118,7 +136,7 @@ leftover pages of any host that finished job opened — not only EZLynx account
 / login / `about:blank` / Ascend — via CDP `Target.closeTarget`
 (`GET /json/close/{id}`). It does not restart Chrome, `hermes-gateway`, or
 `robie-ezlynx-browser`, does not wipe the EZLynx profile, and does not log
-out the shared session. A pre-flight flush (after the six yes/no checks,
+out the shared session. A pre-flight flush (after the seven yes/no checks,
 best-effort and never a pre-flight failure) closes every leftover page that
 no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job claims, and keeps exactly
 one authenticated `https://app.ezlynx.com/web/` session tab. Recorder and
@@ -152,16 +170,18 @@ directory.
 The PR 23 overlay copy targeted `/opt/streetsmart-hermes/.hermes` dests
 listed above. Inodes were not re-checked after that copy.
 
-## What ignores the zip pointer
+## What ignores a pointer-only zip flip
 
-Second, non-atomic deploy path. Zip flip does **not** update these (a
-later `deploy/hermes` copy is a second step):
+Official install now covers Chat adapter, oauth, and Playwright tools
+(zip-load shims under `.hermes`). A pointer-only flip without that
+script is still the PR 17 hole; `deploy_truth` will not call it done.
 
-- Chat adapter + oauth plugin under `.hermes/hermes-agent/plugins/platforms/google_chat/`
-- Hermes tools: `playwright_tool.py`, `playwright_write_guard.py`,
-  `gemini_field_tool.py` (must be installed into the Hermes tools dir)
+These still live in `.hermes` on purpose and are **not** part of the
+official zip proof:
+
 - Hermes skills under `.hermes/skills` (`robie-playwright-browser`,
-  `ezlynx-commercial-auto-from-quote`, `ezlynx-gemini-fallback`)
+  `ezlynx-commercial-auto-from-quote`, `ezlynx-gemini-fallback`, and
+  user-owned Loom `ascend-finance`)
 - `config.yaml` / SOUL / `playwright.yaml` merges
 - browser profile `.hermes/browser-profiles/ezlynx`
 - tokens and drive-skills snapshots
@@ -170,22 +190,48 @@ later `deploy/hermes` copy is a second step):
   references it)
 - Hermes-agent venv / `hermes_cli` / plugin loader (not in the zip)
 
-## Live definition (Carlo 2026-08-27)
+## Live definition (Carlo 2026-08-27, tightened)
 
 “Live” is **not** GitHub `main` alone, and **not** zip pointer alone.
+Pointer-only is not live.
 
-After every Production zip, all three must be true:
+After every official Production zip, all four must be true:
 
-1. Both pointers match the SHA.
+1. Both pointers match the SHA
+   (`/opt/streetsmart-hermes/current` and
+   `/opt/streetsmart-hermes/releases/current`).
 2. `hermes-gateway` `ActiveEnterTimestamp` is **after** the pointer flip.
-3. For a Chat job, a `checkpoints.kind=gateway_progress` row exists in
+3. Chat load path equals that zip: each Chat-loaded dest
+   (`adapter.py`, `oauth.py`, `playwright_tool.py`,
+   `playwright_write_guard.py`, `gemini_field_tool.py`) is a zip-load shim
+   or the same bytes/md5 as the zip file. Preflight check `chat-runtime`
+   and `python3 -m robie_job_engine.deploy_truth prove` are this proof.
+4. For a Chat job, a `checkpoints.kind=gateway_progress` row exists in
    `/opt/streetsmart-hermes/robie-job-engine/data/jobs.db`.
 
-A zip pointer match is **not** enough for Chat / Playwright. Pointer-only
-is how PR 17 looked deployed while Chat still ran stale plugin code.
+Skills stay in `.hermes` on purpose (Drive sync, including user-owned Loom
+`ascend-finance`). They are a separate install. Official zip install does
+not overwrite them.
 
 Job success is separate: **destination-verified evidence rows > 0**. Chat
 looking busy is not success.
+
+## Official install (one source of truth for adapter / tools / Job Engine)
+
+`scripts/install-official-release.sh` is the accepted zip path. It does
+not `git pull` on the VM. It does not bind. It does not print secrets.
+It does not restart `hermes-gateway` (operator does that after approval).
+
+What was two paths: pointer flip (Job Engine) plus a later hand copy into
+`.hermes` (Chat adapter / Playwright tools). What is now one proof: the
+same script flips both pointers, writes zip-load shims for every
+Chat-loaded Python file, and refuses `OFFICIAL INSTALL DONE` until dest
+equals that zip. A later zip flip then loads Chat from the new SHA
+without a file-by-file `.hermes` patch.
+
+What still lives in `.hermes` on purpose: Hermes-agent itself, plugin
+loader, `plugin.yaml`, tokens, browser profile, config/SOUL merges, and
+**skills** (Drive → `.hermes`, including Carlo’s Loom `ascend-finance`).
 
 ## Write-guard TimeoutError gap (c31f9c69 vs da53765b)
 

@@ -12,9 +12,10 @@ overlay. It does not modify a live Hermes installation in place.
   An empty PDF (`EmptyFileError` / pypdf empty file) or a missing
   `/tmp/playwright-artifacts-*` file is `PLAYWRIGHT_FAIL_CLOSED` once — not
   a retryable `PLAYWRIGHT_BLOCKED`. Production Hermes loads this file from
-  `/opt/streetsmart-hermes/.hermes/hermes-agent/tools/playwright_tool.py`;
-  a zip-only deploy does not install it. Copy the overlay onto that .hermes
-  path or the next install will not run this fail-closed remap.
+  `/opt/streetsmart-hermes/.hermes/hermes-agent/tools/playwright_tool.py`.
+  Official install writes a zip-load shim there so the running tool is this
+  zip file. Pointer-only is not live; `deploy_truth` must prove dest equals
+  the zip. Write-guard prefers `ROBIE_CANONICAL_JOB_ENGINE_ROOT`.
 - `deploy/hermes/tools/playwright_write_guard.py` is the unique-write guard
   installed into every `playwright_exec` run. A blocked write asks Gemini
   for one unique visible label and applies that locator only if unique-write
