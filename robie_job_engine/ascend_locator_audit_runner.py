@@ -704,12 +704,17 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
                 match_count=int(report.get("match_count") or 0),
             )
         )
-    if report.get("selection_strategy") == "first_active_identical_exact":
+    if searched or report.get("selection_strategy") == "first_active_identical_exact":
         press = getattr(target, "press", None)
         if not callable(press):
             raise RuntimeError(
-                "PLAYWRIGHT_BLOCKED: Coverage type cannot select the active "
-                "first identical exact option"
+                f"PLAYWRIGHT_BLOCKED: {field} cannot select the active "
+                "searched option"
+            )
+        if not report.get("selection_strategy"):
+            report["selection_strategy"] = "active_unique_search_result"
+            report["locator"] = (
+                f'get_by_label("{field}").press("Enter") after unique search'
             )
         press("Enter")
         _close_open_listbox(page)

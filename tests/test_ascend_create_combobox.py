@@ -370,6 +370,23 @@ class LiveComboboxAuditTests(unittest.TestCase):
         self.assertEqual(report["status"], "PASS")
         self.assertEqual(page.pressed_by_label["Coverage type"], "Enter")
 
+    def test_unique_searched_carrier_selects_active_result_with_enter(self):
+        carrier = "Drive New Jersey Insurance Company"
+        page = _FakePage(
+            {
+                "Carrier": [
+                    f"{carrier}\nOffice: P.O. Box 89490, Cleveland OH"
+                ]
+            }
+        )
+        target = page.get_by_label("Carrier")
+        report = _select_unique_option(page, target, carrier, field="Carrier")
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(
+            report["selection_strategy"], "active_unique_search_result"
+        )
+        self.assertEqual(page.pressed_by_label["Carrier"], "Enter")
+
     def test_role_selection_uses_visible_email_option_without_searching(self):
         page = _FakePage({"Producer": list(LIVE_ROLE_LISTBOX_OPTIONS)})
         target = page.get_by_label("Producer")
