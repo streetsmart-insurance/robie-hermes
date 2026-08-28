@@ -370,6 +370,18 @@ class LiveComboboxAuditTests(unittest.TestCase):
         self.assertEqual(report["status"], "PASS")
         self.assertEqual(page.pressed_by_label["Coverage type"], "Enter")
 
+    def test_role_selection_uses_visible_email_option_without_searching(self):
+        page = _FakePage({"Producer": list(LIVE_ROLE_LISTBOX_OPTIONS)})
+        target = page.get_by_label("Producer")
+        report = _select_unique_option(
+            page,
+            target,
+            CARLO_OPTION,
+            field="Producer",
+        )
+        self.assertEqual(report["status"], "PASS")
+        self.assertNotIn("Producer", page.search_by_label)
+
     def test_live_audit_allows_first_of_identical_exact_coverage_only(self):
         page = _FakePage(
             {
