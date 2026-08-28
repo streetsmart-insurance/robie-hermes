@@ -1,0 +1,87 @@
+{
+  "portal": "ascend",
+  "page_name": "create_new",
+  "version": "1.0",
+  "fields": {
+    "new_program_button": {
+      "name": "new_program_button",
+      "primary_strategy": "role",
+      "primary_selector": "button:New program",
+      "fallback_strategy": "text",
+      "fallback_selector": "New program",
+      "exact": true,
+      "description": "Primary button to start creating a new financing program",
+      "last_updated": "2026-08-28"
+    },
+    "import_document_button": {
+      "name": "import_document_button",
+      "primary_strategy": "role",
+      "primary_selector": "button:Import document",
+      "fallback_strategy": "text",
+      "fallback_selector": "Import document",
+      "exact": true,
+      "description": "Upload document button on new program creation form",
+      "last_updated": "2026-08-28"
+    },
+    "producer": {
+      "name": "producer",
+      "primary_strategy": "label",
+      "primary_selector": "Producer",
+      "fallback_strategy": "css",
+      "fallback_selector": "[aria-label='Producer']",
+      "exact": true,
+      "description": "Producer selection combobox",
+      "last_updated": "2026-08-28"
+    },
+    "account_manager": {
+      "name": "account_manager",
+      "primary_strategy": "label",
+      "primary_selector": "Account Manager",
+      "fallback_strategy": "css",
+      "fallback_selector": "[aria-label='Account Manager']",
+      "exact": true,
+      "description": "Account manager selection combobox",
+      "last_updated": "2026-08-28"
+    },
+    "carrier": {
+      "name": "carrier",
+      "primary_strategy": "label",
+      "primary_selector": "Carrier",
+      "fallback_strategy": "css",
+      "fallback_selector": "[aria-label='Carrier']",
+      "exact": true,
+      "description": "Carrier / writing company combobox",
+      "last_updated": "2026-08-28"
+    },
+    "coverage_type": {
+      "name": "coverage_type",
+      "primary_strategy": "label",
+      "primary_selector": "Coverage type",
+      "fallback_strategy": "css",
+      "fallback_selector": "[aria-label='Coverage type']",
+      "exact": true,
+      "description": "Coverage type / line of business combobox",
+      "last_updated": "2026-08-28"
+    },
+    "state": {
+      "name": "state",
+      "primary_strategy": "label",
+      "primary_selector": "State",
+      "fallback_strategy": "css",
+      "fallback_selector": "select[name='state']",
+      "exact": true,
+      "description": "State selection dropdown",
+      "last_updated": "2026-08-28"
+    },
+    "agency_fee": {
+      "name": "agency_fee",
+      "primary_strategy": "label",
+      "primary_selector": "Agency Fee",
+      "fallback_strategy": "css",
+      "fallback_selector": "input[name='agency_fee']",
+      "exact": true,
+      "description": "Agency fee numeric input field",
+      "last_updated": "2026-08-28"
+    }
+  }
+}

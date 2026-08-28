@@ -1,0 +1,37 @@
+{
+  "portal": "ezlynx",
+  "page_name": "document_library",
+  "version": "1.0",
+  "fields": {
+    "search_labels_input": {
+      "name": "search_labels_input",
+      "primary_strategy": "role",
+      "primary_selector": "textbox:Search Labels",
+      "fallback_strategy": "label",
+      "fallback_selector": "Search Labels",
+      "exact": true,
+      "description": "Label search input textbox in Document Library",
+      "last_updated": "2026-08-28"
+    },
+    "apply_button": {
+      "name": "apply_button",
+      "primary_strategy": "role",
+      "primary_selector": "button:Apply",
+      "fallback_strategy": "text",
+      "fallback_selector": "Apply",
+      "exact": true,
+      "description": "Apply label or tag button",
+      "last_updated": "2026-08-28"
+    },
+    "move_button": {
+      "name": "move_button",
+      "primary_strategy": "role",
+      "primary_selector": "button:Move",
+      "fallback_strategy": "text",
+      "fallback_selector": "Move",
+      "exact": true,
+      "description": "Move document confirmation button",
+      "last_updated": "2026-08-28"
+    }
+  }
+}
