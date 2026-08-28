@@ -99,6 +99,7 @@ UUID_SEARCH_RE = re.compile(
     re.IGNORECASE,
 )
 NEW_SITE_WORKFLOWS = frozenset({"ascend", "next-carrier-portal"})
+OPERATOR_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 FLOW_STEPS: tuple[dict[str, str], ...] = (
     {
@@ -699,6 +700,18 @@ def _step_spec(step_id: str) -> dict[str, str]:
 
 def empty_punch_list(job_id: str) -> PunchList:
     return PunchList(job_id=job_id)
+
+
+def live_operator_idempotency_key(run_id: str = "") -> str | None:
+    """Stable key for one explicit operator run; empty preserves legacy behavior."""
+    value = str(run_id or "").strip()
+    if not value:
+        return None
+    if not OPERATOR_RUN_ID_RE.fullmatch(value):
+        raise ValueError(
+            "operator run id must be 1-128 letters, digits, dot, colon, underscore, or dash"
+        )
+    return f"{JOB_TYPE}:operator:{value}"
 
 
 def site_workflow_hold_reason(
@@ -1739,6 +1752,7 @@ def run_live_test_job(
     artifact_root: str,
     requested_by: str = "",
     quote_path: str = "",
+    run_id: str = "",
 ) -> dict[str, Any]:
     """Full Job Engine job on hermes-test-01. Never Production. Never CI live."""
     refuse_production_env()
@@ -1747,16 +1761,20 @@ def run_live_test_job(
         raise ProductionGuardError("live walk requires ROBIE_ENV=TEST")
     refuse_production_targets(db_path, artifact_root)
     store = JobStore(db_path)
+    payload = {
+        **default_audit_payload(
+            live=True, requested_by=requested_by, quote_path=quote_path
+        ),
+        "worker": WORKER_NAME,
+        "db_path": db_path,
+        "artifact_root": artifact_root,
+    }
+    if str(run_id or "").strip():
+        payload["operator_run_id"] = str(run_id).strip()
     job = store.create_job(
         JOB_TYPE,
-        {
-            **default_audit_payload(
-                live=True, requested_by=requested_by, quote_path=quote_path
-            ),
-            "worker": WORKER_NAME,
-            "db_path": db_path,
-            "artifact_root": artifact_root,
-        },
+        payload,
+        idempotency_key=live_operator_idempotency_key(run_id),
     )
     job["db_path"] = db_path
     worker = AscendLocatorAuditWorker(artifact_root=artifact_root)
@@ -1815,6 +1833,14 @@ def main(argv: list[str] | None = None) -> int:
             "those fields HITL and continues to Agency Fee."
         ),
     )
+    parser.add_argument(
+        "--run-id",
+        default="",
+        help=(
+            "Explicit operator-run id. A new value creates a fresh Test job; "
+            "reusing the same value remains idempotent."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.live:
         refuse_production_env()
@@ -1837,6 +1863,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact_root=artifacts,
             requested_by=str(args.requested_by or ""),
             quote_path=str(args.quote or ""),
+            run_id=str(args.run_id or ""),
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if report.get("succeeded") else 2

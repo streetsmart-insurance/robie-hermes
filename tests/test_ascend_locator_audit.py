@@ -44,6 +44,7 @@ from robie_job_engine.ascend_locator_audit import (
     site_workflow_hold_reason,
     sliced_concat_job_folder,
     worker_lookup_artifact_dir,
+    live_operator_idempotency_key,
 )
 from robie_job_engine.job_type_gate import is_job_type_production_ready
 from robie_job_engine.models import JobStatus
@@ -252,6 +253,14 @@ class CompleteAndReportTests(unittest.TestCase):
 
 
 class WorkerAndGateTests(unittest.TestCase):
+    def test_explicit_operator_run_id_creates_stable_distinct_key(self):
+        first = live_operator_idempotency_key("20260828T1708Z-0a25586")
+        self.assertEqual(first, live_operator_idempotency_key("20260828T1708Z-0a25586"))
+        self.assertNotEqual(first, live_operator_idempotency_key("20260828T1709Z-0a25586"))
+        self.assertIsNone(live_operator_idempotency_key(""))
+        with self.assertRaises(ValueError):
+            live_operator_idempotency_key("bad run/id")
+
     def test_job_type_is_not_production_ready(self):
         self.assertFalse(is_job_type_production_ready(JOB_TYPE))
         self.assertTrue(is_job_type_production_ready("ezlynx.commercial_auto"))
