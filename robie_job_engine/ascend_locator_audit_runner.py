@@ -731,7 +731,7 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
         press("Enter")
         _close_open_listbox(page)
         return report
-    intended = str(report.get("intended") or intended)
+    intended = str(report.get("matched") or report.get("intended") or intended)
     option = page.get_by_role("option", name=intended, exact=True)
     require_unique_locator(option, locator=option_locator(intended, exact=True))
     option_click = getattr(option, "click", None)
