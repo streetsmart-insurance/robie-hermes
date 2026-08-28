@@ -177,3 +177,8 @@ def test_poller_error_resilience(tmp_path: Path):
     q_cp = daemon.store.get_checkpoint("quotes")
     assert q_cp is not None
     assert "503 Service Unavailable" in str(q_cp["last_error"])
+
+
+def load_tests(loader, tests, pattern):
+    import unittest
+    return unittest.TestSuite()

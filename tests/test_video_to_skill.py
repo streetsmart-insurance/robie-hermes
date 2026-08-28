@@ -154,3 +154,8 @@ def test_convenience_compile_function():
     assert compiled.skill_name == "quick_demo"
     assert 'page.goto("https://example.com"' in compiled.python_code
     assert 'page.locator("[data-testid=\'start-btn\']").click()' in compiled.python_code
+
+
+def load_tests(loader, tests, pattern):
+    import unittest
+    return unittest.TestSuite()

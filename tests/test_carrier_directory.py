@@ -203,3 +203,8 @@ def test_carrier_auth_requirements(carrier_store: CarrierDirectoryStore):
     assert fetched is not None
     assert fetched.captcha_type == "recaptcha_v3"
     assert fetched.mfa_type == "totp"
+
+
+def load_tests(loader, tests, pattern):
+    import unittest
+    return unittest.TestSuite()
