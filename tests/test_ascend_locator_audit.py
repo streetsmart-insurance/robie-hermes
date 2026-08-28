@@ -51,6 +51,7 @@ from robie_job_engine.models import JobStatus
 from robie_job_engine.request_routing import classify_request
 from robie_job_engine.runtime_env import ProductionGuardError
 from robie_job_engine.store import JobStore
+from robie_job_engine.ascend_locator_audit_runner import _resolve
 
 
 class _CountTarget:
@@ -63,6 +64,18 @@ class _CountTarget:
 
 
 class UniqueLocatorTests(unittest.TestCase):
+    def test_customer_name_uses_exact_required_label(self):
+        class LabelPage:
+            def get_by_label(self, text: str, exact: bool = False):
+                self.request = (text, exact)
+                return _CountTarget(1)
+
+        page = LabelPage()
+        target, locator = _resolve(page, "insured_fields", {})
+        self.assertEqual(target.count(), 1)
+        self.assertEqual(page.request, ("Name*", True))
+        self.assertEqual(locator, 'get_by_label("Name*", exact=True)')
+
     def test_strict_mode_violation_is_fail(self):
         step = classify_locator_failure(
             RuntimeError(
