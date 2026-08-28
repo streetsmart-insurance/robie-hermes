@@ -57,7 +57,7 @@ class GatewayJobEnginePathTests(unittest.TestCase):
             ROOT / "robie_job_engine/production_preflight.py"
         ).read_text(encoding="utf-8")
         self.assertIn("maybe_cleanup_terminal_job_tabs", post_job_audit)
-        self.assertIn("maybe_sweep_orphaned_tabs", production_preflight)
+        self.assertIn("maybe_flush_orphaned_tabs", production_preflight)
         self.assertIn("tab_cleanup", post_job_audit)
         self.assertNotIn(
             'JobContextManager(ROBIE_JOB_DB).get(event.source.chat_id)', adapter

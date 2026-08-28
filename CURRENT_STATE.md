@@ -113,17 +113,18 @@ orphan path persist the same checkpoint. A zip-only adapter change would miss
 Production Chat; this hook does not live only in `integrations/google_chat/`.
 
 Dead-tab cleanup (`robie_job_engine/tab_cleanup.py`) is on the zip path with
-the audit and pre-flight. COMPLETE / FAILED / UNVERIFIED close-out closes that
-job's leftover EZLynx account tabs, `/auth/account/login` leftovers, `about:blank`,
-and Ascend tabs via CDP `Target.closeTarget` (`GET /json/close/{id}`). It does
-not restart Chrome, `hermes-gateway`, or `robie-ezlynx-browser`, does not wipe
-the EZLynx profile, and does not log out the shared session. A periodic sweep
-(hooked from `production_preflight` after the six yes/no checks) closes
-orphaned EZLynx tabs that no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job
-claims, and keeps exactly one authenticated `https://app.ezlynx.com/web/`
-session tab. Recorder and Playwright select the current job tab with
-`select_recording_tab` / `select_playwright_page` after cleanup — not
-`pages[0]` / first-ezlynx-wins. The Playwright hint write still lives in
+the audit and pre-flight. COMPLETE / FAILED / UNVERIFIED close-out closes
+leftover pages of any host that finished job opened — not only EZLynx account
+/ login / `about:blank` / Ascend — via CDP `Target.closeTarget`
+(`GET /json/close/{id}`). It does not restart Chrome, `hermes-gateway`, or
+`robie-ezlynx-browser`, does not wipe the EZLynx profile, and does not log
+out the shared session. A pre-flight flush (after the six yes/no checks,
+best-effort and never a pre-flight failure) closes every leftover page that
+no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job claims, and keeps exactly
+one authenticated `https://app.ezlynx.com/web/` session tab. Recorder and
+Playwright select the current job tab with `select_recording_tab` /
+`select_playwright_page` after cleanup — not `pages[0]` / first-ezlynx-wins.
+The Playwright hint write still lives in
 `deploy/hermes/tools/playwright_tool.py` (a second `.hermes` install).
 
 PR 23 account-id nav (`robie_job_engine/ezlynx_account_nav.py`) is on the
