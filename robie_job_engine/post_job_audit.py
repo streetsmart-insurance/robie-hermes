@@ -614,6 +614,15 @@ def audit_terminal_job(
             audit["persist_error"] = "failed to persist post_job_audit checkpoint"
     message = format_audit_chat_message(audit)
     audit["chat_message"] = message
+    try:
+        from .tab_cleanup import maybe_cleanup_terminal_job_tabs
+
+        cleanup = maybe_cleanup_terminal_job_tabs(db_path, job_id)
+        if cleanup is not None:
+            audit["tab_cleanup"] = cleanup
+    except Exception as exc:
+        audit = dict(audit)
+        audit["tab_cleanup_error"] = f"{type(exc).__name__}: {exc}"
     if chat_poster is not None:
         try:
             posted = chat_poster(audit, message)

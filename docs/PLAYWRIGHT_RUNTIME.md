@@ -7,7 +7,8 @@ overlay. It does not modify a live Hermes installation in place.
 
 - `deploy/hermes/tools/playwright_tool.py` registers the `playwright_exec`
   toolset, connects only to the configured persistent Chrome CDP endpoint,
-  and refuses form writes unless the locator uniquely identifies one field.
+  selects the current job tab with `select_playwright_page` (never `pages[0]`
+  / first-ezlynx-wins), and refuses form writes unless the locator uniquely identifies one field.
   An empty PDF (`EmptyFileError` / pypdf empty file) or a missing
   `/tmp/playwright-artifacts-*` file is `PLAYWRIGHT_FAIL_CLOSED` once — not
   a retryable `PLAYWRIGHT_BLOCKED`. Production Hermes loads this file from
@@ -26,6 +27,10 @@ overlay. It does not modify a live Hermes installation in place.
   failure with a known id is one direct-URL fallback; with no id it is HITL /
   stuck. A zip flip loads this module. Skills and SOUL below are `.hermes`
   copies and are not updated by a zip flip.
+- `robie_job_engine/tab_cleanup.py` closes leftover EZLynx / login /
+  `about:blank` / Ascend tabs on COMPLETE / FAILED / UNVERIFIED and on the
+  production pre-flight sweep. It keeps one authenticated `/web/` session
+  tab and never restarts Chrome. A zip flip loads this module.
 - `deploy/hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md` requires
   Save and Continue Edit after a commercial auto SHELL, quote vehicles /
   drivers / garaging / symbols / limits / banks, titled-discussion notes

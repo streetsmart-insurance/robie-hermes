@@ -1,8 +1,10 @@
 """SMALL Production pre-flight. Yes/no only. Chat on the first no.
 
-Complement to post-job audit. Not a dashboard. Observes only: no Chrome,
-hermes-gateway, or browser restart; no bind; no client-file navigation.
-A zip pointer match is not health.
+Complement to post-job audit. Not a dashboard. The five checks observe
+only: no Chrome, hermes-gateway, or browser restart; no bind; no
+client-file navigation. After the checks, a leftover-tab sweep may close
+orphaned EZLynx pages via CDP Target.closeTarget. A zip pointer match is
+not health.
 
 Hooked after the zip pointer flip + hermes-gateway restart (ExecStartPost
 on the PYTHONPATH drop-in) and by a weekday oneshot timer.
@@ -402,6 +404,29 @@ def _post_failure(
     return True
 
 
+def _attach_tab_sweep(
+    payload: dict[str, Any],
+    *,
+    db_path: str | Path | None,
+    ezlynx_tabs: list[str] | None,
+    cdp_http_get: Callable[[str], tuple[int, bytes]] | None,
+) -> None:
+    """Best-effort orphan sweep. Never fails the yes/no pre-flight."""
+    try:
+        from .tab_cleanup import maybe_sweep_orphaned_tabs, tabs_from_cdp_payload
+
+        sweep_tabs = None
+        if ezlynx_tabs is not None:
+            sweep_tabs = tabs_from_cdp_payload(ezlynx_tabs)
+        payload["tab_sweep"] = maybe_sweep_orphaned_tabs(
+            db_path=db_path,
+            tabs=sweep_tabs,
+            http_get=cdp_http_get,
+        )
+    except Exception as exc:
+        payload["tab_sweep_error"] = f"{type(exc).__name__}: {exc}"
+
+
 def run_production_preflight(
     *,
     gateway_probe: dict[str, Any] | None = None,
@@ -444,14 +469,27 @@ def run_production_preflight(
         }
         if post_error:
             payload["chat_post_error"] = post_error
+        _attach_tab_sweep(
+            payload,
+            db_path=db_path,
+            ezlynx_tabs=ezlynx_tabs,
+            cdp_http_get=cdp_http_get,
+        )
         return payload
-    return {
+    report = {
         "ok": True,
         "failed_check": None,
         "checks": completed,
         "chat_posted": False,
         "message": None,
     }
+    _attach_tab_sweep(
+        report,
+        db_path=db_path,
+        ezlynx_tabs=ezlynx_tabs,
+        cdp_http_get=cdp_http_get,
+    )
+    return report
 
 
 def main() -> int:

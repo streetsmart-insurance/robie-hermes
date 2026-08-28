@@ -134,7 +134,27 @@ try:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: Chrome has no browser context")
     context = contexts[0]
     pages = [page for item in contexts for page in item.pages]
-    page = pages[0] if pages else context.new_page()
+    engine_root = os.environ.get("ROBIE_JOB_ENGINE_ROOT", "")
+    if engine_root and engine_root not in sys.path:
+        sys.path.insert(0, engine_root)
+    page = None
+    try:
+        from robie_job_engine.recording_tab import (
+            read_page_hint,
+            resolve_hint_file,
+            select_playwright_page,
+        )
+        hinted = read_page_hint(resolve_hint_file()) or {}
+        page = select_playwright_page(pages, hint_url=hinted.get("url") or None)
+    except Exception:
+        page = None
+    if page is None and not pages:
+        page = context.new_page()
+    if page is None:
+        raise RuntimeError(
+            "PLAYWRIGHT_BLOCKED: could not select the current job tab; "
+            "refusing pages[0] / first-ezlynx-wins"
+        )
     scope = {
         "playwright": pw,
         "browser": browser,
@@ -156,9 +176,6 @@ try:
         raise RuntimeError(
             "PLAYWRIGHT_BLOCKED: unique-write guard did not install"
         )
-    engine_root = os.environ.get("ROBIE_JOB_ENGINE_ROOT", "")
-    if engine_root and engine_root not in sys.path:
-        sys.path.insert(0, engine_root)
     try:
         from robie_job_engine.gemini_field_helper import ask_gemini_unique_field
         scope["ask_gemini_unique_field"] = ask_gemini_unique_field
@@ -258,8 +275,10 @@ PLAYWRIGHT_EXEC_SCHEMA = {
     "description": (
         "Control Robie's existing signed-in Chrome session using Python Playwright only. "
         "The code runs with sync Playwright bindings already available: browser, context, "
-        "pages, page, expect, and playwright. Reuse a matching page from pages before "
-        "opening or navigating another tab. Writes fail closed unless the locator uniquely "
+        "pages, page, expect, and playwright. Select the current job tab with "
+        "select_playwright_page / the recorder hint — never pages[0] or the first "
+        "EZLynx tab. Reuse a matching page from pages before opening or navigating "
+        "another tab. Writes fail closed unless the locator uniquely "
         "identifies exactly one field; .first/.nth/.last guesses are PLAYWRIGHT_BLOCKED. "
         "An empty PDF (EmptyFileError) or missing /tmp/playwright-artifacts file is "
         "PLAYWRIGHT_FAIL_CLOSED once: do not retry the same download/screenshot/PDF "
