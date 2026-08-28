@@ -1,14 +1,16 @@
-"""Close leftover EZLynx / Playwright tabs after a job ends.
+"""Close leftover Playwright tabs after a job ends.
 
 Carlo's 2026-08-27 hunch: frozen recording + busy Playwright + zero destination
-evidence is leftover dead tabs. Old EZLynx tabs stay open after
-COMPLETE / FAILED / UNVERIFIED. The recorder or Playwright attaches to a stale
-Policies / login / previous-account tab while the live job works in another.
+evidence is leftover dead tabs. Old pages stay open after COMPLETE / FAILED /
+UNVERIFIED. The recorder or Playwright attaches to a stale Policies / login /
+previous-account / carrier tab while the live job works in another.
 
-This module closes job-owned pages on terminal close-out and sweeps orphans
-that no RUNNING / AWAITING_HUMAN_INPUT job claims. It keeps exactly one
-authenticated ``https://app.ezlynx.com/web/`` session tab. It never restarts
-Chrome, never wipes the EZLynx profile, and never logs out.
+This module closes job-owned pages on terminal close-out (any host that job
+opened, not only EZLynx / Ascend), sweeps EZLynx-shaped orphans, and flushes
+every leftover page that no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job
+claims. It keeps exactly one authenticated ``https://app.ezlynx.com/web/``
+session tab. It never restarts Chrome, never wipes the EZLynx profile, and
+never logs out.
 
 Close mechanism is Chrome's HTTP CDP ``/json/close/{id}`` (Target.closeTarget).
 """
@@ -65,6 +67,10 @@ LIVE_TAB_STATUSES = frozenset(
 PAGE_TARGET_TYPES = frozenset({"", "page", "tab"})
 ASCEND_HOST_RE = re.compile(r"(^|\.)ascend\.", re.IGNORECASE)
 ASCEND_PATH_RE = re.compile(r"/ascend(?:/|$)", re.IGNORECASE)
+HTTP_URL_RE = re.compile(r"https?://[^\s'\"\\<>]+", re.IGNORECASE)
+FLUSH_MODE = "flush"
+SWEEP_MODE = "sweep"
+TERMINAL_MODE = "terminal"
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ class TabClaims:
     job_ids: set[str] = field(default_factory=set)
     account_ids: set[str] = field(default_factory=set)
     urls: set[str] = field(default_factory=set)
+    hosts: set[str] = field(default_factory=set)
 
     def claims(self, url: str) -> bool:
         raw = str(url or "").strip()
@@ -101,6 +108,13 @@ class TabClaims:
             if other == raw or other.casefold() in folded or folded in other.casefold():
                 return True
         return bool(account_ids_in_url(raw) & self.account_ids)
+
+    def opened_host(self, url: str) -> bool:
+        """True when this job opened a non-EZLynx page on the same host."""
+        host = url_host(url)
+        if not host or is_ezlynx_url(url) or is_blank_url(url):
+            return False
+        return host in self.hosts
 
 
 @dataclass
@@ -129,6 +143,18 @@ def _http_get(url: str, *, timeout: float = 2.0) -> tuple[int, bytes]:
     with urlopen(request, timeout=timeout) as response:
         status = int(getattr(response, "status", 200) or 200)
         return status, response.read()
+
+
+def url_host(url: str) -> str:
+    return (urlsplit(str(url or "").strip()).netloc or "").casefold()
+
+
+def extract_http_urls(text: str) -> set[str]:
+    found: list[str] = []
+    for match in HTTP_URL_RE.finditer(str(text or "")):
+        found.append(match.group(0).rstrip(").,;\"'"))
+    found.extend(extract_playwright_urls(text))
+    return {item for item in found if item}
 
 
 def is_login_url(url: str) -> bool:
@@ -217,9 +243,15 @@ def claims_from_text(*chunks: str) -> TabClaims:
         accounts.add(known)
     for match in WEB_ACCOUNT_RE.finditer(blob):
         accounts.add(match.group(1))
+    urls = extract_http_urls(blob)
     return TabClaims(
         account_ids={item for item in accounts if item.isdigit() and len(item) >= 6},
-        urls=set(extract_playwright_urls(blob)),
+        urls=urls,
+        hosts={
+            host
+            for host in (url_host(item) for item in urls)
+            if host and not is_ezlynx_url(f"https://{host}/")
+        },
     )
 
 
@@ -252,6 +284,9 @@ def claims_for_job(store: JobStore, job: dict[str, Any]) -> TabClaims:
         if url:
             claims.urls.add(url)
             claims.account_ids.update(account_ids_in_url(url))
+            host = url_host(url)
+            if host and not is_ezlynx_url(url):
+                claims.hosts.add(host)
     return claims
 
 
@@ -266,12 +301,16 @@ def live_tab_claims(db_path: str | Path | None = None) -> TabClaims:
         merged.job_ids.update(row.job_ids)
         merged.account_ids.update(row.account_ids)
         merged.urls.update(row.urls)
+        merged.hosts.update(row.hosts)
     hint = read_page_hint(resolve_hint_file())
     if hint and str(hint.get("job_id") or "") in merged.job_ids:
         url = str(hint.get("url") or "").strip()
         if url:
             merged.urls.add(url)
             merged.account_ids.update(account_ids_in_url(url))
+            host = url_host(url)
+            if host and not is_ezlynx_url(url):
+                merged.hosts.add(host)
     return merged
 
 
@@ -374,6 +413,7 @@ def plan_tab_cleanup(
     pages = [tab for tab in tabs if tab and tab.is_page]
     live = live or TabClaims()
     job = job or TabClaims()
+    mode = str(mode or SWEEP_MODE).strip().casefold()
     session = choose_session_tab(
         tab
         for tab in pages
@@ -390,10 +430,14 @@ def plan_tab_cleanup(
         if session is not None and tab.identity == session.identity:
             keep.append(tab)
             continue
-        job_owned = bool(job.account_ids or job.urls) and job.claims(tab.url)
+        job_owned = bool(job.account_ids or job.urls or job.hosts) and (
+            job.claims(tab.url) or job.opened_host(tab.url)
+        )
         leftover = is_orphan_leftover(tab.url)
-        if mode == "terminal":
+        if mode == TERMINAL_MODE:
             should_close = job_owned or leftover
+        elif mode == FLUSH_MODE:
+            should_close = True
         else:
             should_close = leftover
         if should_close:
@@ -539,7 +583,7 @@ def cleanup_terminal_job_tabs(
     listed = tabs_from_pages(pages) if pages is not None else list_cdp_tabs(
         cdp_url=cdp_url, http_get=http_get, tabs=tabs
     )
-    plan = plan_tab_cleanup(listed, live=live, job=job_claims, mode="terminal")
+    plan = plan_tab_cleanup(listed, live=live, job=job_claims, mode=TERMINAL_MODE)
     applied = apply_cleanup(
         plan, pages=pages, closer=closer, cdp_url=cdp_url, http_get=http_get
     )
@@ -553,7 +597,7 @@ def cleanup_terminal_job_tabs(
         {
             "ok": not applied["errors"],
             "job_id": job_id,
-            "mode": "terminal",
+            "mode": TERMINAL_MODE,
             "hint": hint,
             "selection_mode": "recent_navigation",
         }
@@ -569,14 +613,22 @@ def sweep_orphaned_tabs(
     closer: Callable[[BrowserTab], Any] | None = None,
     cdp_url: str | None = None,
     http_get: Callable[[str], tuple[int, bytes]] | None = None,
+    mode: str = SWEEP_MODE,
 ) -> dict[str, Any]:
-    """Close orphan EZLynx leftovers. Never close a live job's tab."""
+    """Close orphan leftovers. Never close a live job's tab.
+
+    ``sweep`` closes EZLynx-shaped leftovers. ``flush`` treats any unclaimed
+    page as leftover.
+    """
+    chosen = str(mode or SWEEP_MODE).strip().casefold()
+    if chosen not in {SWEEP_MODE, FLUSH_MODE}:
+        chosen = SWEEP_MODE
     path = _jobs_db(db_path)
     live = live_tab_claims(path)
     listed = tabs_from_pages(pages) if pages is not None else list_cdp_tabs(
         cdp_url=cdp_url, http_get=http_get, tabs=tabs
     )
-    plan = plan_tab_cleanup(listed, live=live, mode="sweep")
+    plan = plan_tab_cleanup(listed, live=live, mode=chosen)
     applied = apply_cleanup(
         plan, pages=pages, closer=closer, cdp_url=cdp_url, http_get=http_get
     )
@@ -590,7 +642,7 @@ def sweep_orphaned_tabs(
     applied.update(
         {
             "ok": not applied["errors"],
-            "mode": "sweep",
+            "mode": chosen,
             "live_job_ids": sorted(live.job_ids),
             "live_account_ids": sorted(live.account_ids),
             "hint": hint,
@@ -598,6 +650,15 @@ def sweep_orphaned_tabs(
         }
     )
     return applied
+
+
+def flush_orphaned_tabs(
+    db_path: str | Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Close every leftover page no live job claims. Keep one /web/ session."""
+    kwargs.pop("mode", None)
+    return sweep_orphaned_tabs(db_path, mode=FLUSH_MODE, **kwargs)
 
 
 def maybe_cleanup_terminal_job_tabs(
@@ -621,7 +682,14 @@ def maybe_sweep_orphaned_tabs(**kwargs: Any) -> dict[str, Any] | None:
     try:
         return sweep_orphaned_tabs(**kwargs)
     except Exception as exc:
-        return {"ok": False, "mode": "sweep", "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "mode": SWEEP_MODE, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def maybe_flush_orphaned_tabs(**kwargs: Any) -> dict[str, Any] | None:
+    try:
+        return flush_orphaned_tabs(**kwargs)
+    except Exception as exc:
+        return {"ok": False, "mode": FLUSH_MODE, "error": f"{type(exc).__name__}: {exc}"}
 
 
 # Re-export for Playwright attach after cleanup.

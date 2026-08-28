@@ -29,6 +29,7 @@ from robie_job_engine.store import JobStore
 from robie_job_engine.tab_cleanup import (
     BrowserTab,
     cleanup_terminal_job_tabs,
+    flush_orphaned_tabs,
     plan_tab_cleanup,
     retarget_recorder_hint,
     sweep_orphaned_tabs,
@@ -47,6 +48,8 @@ STALE_OVERVIEW = f"https://app.ezlynx.com/web/account/{STALE_ACCOUNT}/overview"
 STALE_DOCUMENTS = f"https://app.ezlynx.com/web/account/{STALE_ACCOUNT}/documents"
 BLANK = "about:blank"
 ASCEND = "https://app.ascend.com/workspace/file"
+GOOGLE = "https://www.google.com/"
+ASCEND_DASH = "https://dashboard.useascend.com/quotes"
 
 
 class FakePage:
@@ -115,6 +118,34 @@ class JobTerminalCleanupTests(unittest.TestCase):
             self.assertEqual(result["session_url"], SESSION)
             self.assertIn(SESSION, result["kept_urls"])
             self.assertNotIn(LIVE_OVERVIEW, result["kept_urls"])
+            self.assertEqual(
+                [page.url for page in pages if not page.closed],
+                [SESSION],
+            )
+
+    def test_terminal_closes_leftover_pages_of_any_host_the_job_opened(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = _complete_job(
+                db,
+                (
+                    f"open EZLynx account {LIVE_ACCOUNT} then "
+                    f"{GOOGLE} and {ASCEND_DASH}"
+                ),
+            )
+            pages = _pages(
+                ("session", SESSION),
+                ("overview", LIVE_OVERVIEW),
+                ("google", GOOGLE),
+                ("ascend-dash", ASCEND_DASH),
+            )
+            result = cleanup_terminal_job_tabs(db, job_id, pages=pages)
+            self.assertTrue(result["ok"])
+            self.assertFalse(pages[0].closed)
+            self.assertTrue(pages[1].closed)
+            self.assertTrue(pages[2].closed)
+            self.assertTrue(pages[3].closed)
+            self.assertEqual(result["session_url"], SESSION)
             self.assertEqual(
                 [page.url for page in pages if not page.closed],
                 [SESSION],
@@ -189,6 +220,55 @@ class SweepCleanupTests(unittest.TestCase):
             self.assertEqual(
                 [page.url for page in pages if not page.closed],
                 [SESSION],
+            )
+
+    def test_sweep_leaves_unclaimed_non_ezlynx_leftover(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            JobStore(db)
+            pages = _pages(
+                ("session", SESSION),
+                ("google", GOOGLE),
+                ("ascend-dash", ASCEND_DASH),
+            )
+            result = sweep_orphaned_tabs(db, pages=pages)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["mode"], "sweep")
+            self.assertFalse(pages[0].closed)
+            self.assertFalse(pages[1].closed)
+            self.assertFalse(pages[2].closed)
+            self.assertIn(GOOGLE, result["kept_urls"])
+            self.assertIn(ASCEND_DASH, result["kept_urls"])
+
+
+class FlushCleanupTests(unittest.TestCase):
+    def test_flush_closes_random_leftover_keeps_session_and_live_job(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            live_id = _running_job(
+                db, f"work EZLynx account {LIVE_ACCOUNT} documents"
+            )
+            pages = _pages(
+                ("session", SESSION),
+                ("live-docs", LIVE_DOCUMENTS),
+                ("google", GOOGLE),
+                ("ascend-dash", ASCEND_DASH),
+            )
+            result = flush_orphaned_tabs(db, pages=pages)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["mode"], "flush")
+            self.assertIn(live_id, result["live_job_ids"])
+            self.assertFalse(pages[0].closed)
+            self.assertFalse(pages[1].closed)
+            self.assertTrue(pages[2].closed)
+            self.assertTrue(pages[3].closed)
+            self.assertIn(SESSION, result["kept_urls"])
+            self.assertIn(LIVE_DOCUMENTS, result["kept_urls"])
+            self.assertIn(GOOGLE, result["closed_urls"])
+            self.assertIn(ASCEND_DASH, result["closed_urls"])
+            self.assertEqual(
+                [page.url for page in pages if not page.closed],
+                [SESSION, LIVE_DOCUMENTS],
             )
 
 
@@ -300,7 +380,7 @@ class PlanAndAuditHookTests(unittest.TestCase):
             / "robie_job_engine"
             / "production_preflight.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("maybe_sweep_orphaned_tabs", source)
+        self.assertIn("maybe_flush_orphaned_tabs", source)
         self.assertNotIn("page.goto", source)
         self.assertNotIn("systemctl restart", source)
         with durable_temporary_directory() as tmp:
@@ -320,7 +400,7 @@ class PlanAndAuditHookTests(unittest.TestCase):
                     if url.endswith("/json/version")
                     else (200, json.dumps([{"url": SESSION}]).encode())
                 ),
-                ezlynx_tabs=[SESSION, LOGIN, STALE_OVERVIEW],
+                ezlynx_tabs=[SESSION, LOGIN, STALE_OVERVIEW, GOOGLE, ASCEND_DASH],
                 secret_inspector=lambda: {
                     "result": "OK",
                     "secrets": [
@@ -341,11 +421,15 @@ class PlanAndAuditHookTests(unittest.TestCase):
                 poster=lambda *_args, **_kwargs: None,
             )
         self.assertTrue(report["ok"])
-        sweep = report.get("tab_sweep") or {}
-        self.assertIn("closed_urls", sweep)
-        self.assertIn(LOGIN, sweep["closed_urls"])
-        self.assertIn(STALE_OVERVIEW, sweep["closed_urls"])
-        self.assertEqual(sweep.get("session_url"), SESSION)
+        flush = report.get("tab_flush") or report.get("tab_sweep") or {}
+        self.assertEqual(flush.get("mode"), "flush")
+        self.assertIn("closed_urls", flush)
+        self.assertIn(LOGIN, flush["closed_urls"])
+        self.assertIn(STALE_OVERVIEW, flush["closed_urls"])
+        self.assertIn(GOOGLE, flush["closed_urls"])
+        self.assertIn(ASCEND_DASH, flush["closed_urls"])
+        self.assertEqual(flush.get("session_url"), SESSION)
+        self.assertNotIn(SESSION, flush.get("closed_urls") or [])
 
 
 class PlaywrightPageSelectionTests(unittest.TestCase):

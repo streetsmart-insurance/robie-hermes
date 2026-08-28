@@ -2,8 +2,8 @@
 
 Complement to post-job audit. Not a dashboard. The six checks observe
 only: no Chrome, hermes-gateway, or browser restart; no bind; no
-client-file navigation. After the checks, a leftover-tab sweep may close
-orphaned EZLynx pages via CDP Target.closeTarget. A zip pointer match is
+client-file navigation. After the checks, a leftover-tab flush may close
+any unclaimed page via CDP Target.closeTarget. A zip pointer match is
 not health.
 
 Hooked after the zip pointer flip + hermes-gateway restart (ExecStartPost
@@ -628,27 +628,31 @@ def _post_failure(
     }
 
 
-def _attach_tab_sweep(
+def _attach_tab_flush(
     payload: dict[str, Any],
     *,
     db_path: str | Path | None,
     ezlynx_tabs: list[str] | None,
     cdp_http_get: Callable[[str], tuple[int, bytes]] | None,
 ) -> None:
-    """Best-effort orphan sweep. Never fails the yes/no pre-flight."""
+    """Best-effort leftover flush. Never fails the yes/no pre-flight."""
     try:
-        from .tab_cleanup import maybe_sweep_orphaned_tabs, tabs_from_cdp_payload
+        from .tab_cleanup import maybe_flush_orphaned_tabs, tabs_from_cdp_payload
 
-        sweep_tabs = None
+        flush_tabs = None
         if ezlynx_tabs is not None:
-            sweep_tabs = tabs_from_cdp_payload(ezlynx_tabs)
-        payload["tab_sweep"] = maybe_sweep_orphaned_tabs(
+            flush_tabs = tabs_from_cdp_payload(ezlynx_tabs)
+        flushed = maybe_flush_orphaned_tabs(
             db_path=db_path,
-            tabs=sweep_tabs,
+            tabs=flush_tabs,
             http_get=cdp_http_get,
         )
+        payload["tab_flush"] = flushed
+        payload["tab_sweep"] = flushed
     except Exception as exc:
-        payload["tab_sweep_error"] = f"{type(exc).__name__}: {exc}"
+        error = f"{type(exc).__name__}: {exc}"
+        payload["tab_flush_error"] = error
+        payload["tab_sweep_error"] = error
 
 
 def run_production_preflight(
@@ -710,7 +714,7 @@ def run_production_preflight(
         }
         if post_error:
             payload["chat_post_error"] = post_error
-        _attach_tab_sweep(
+        _attach_tab_flush(
             payload,
             db_path=db_path,
             ezlynx_tabs=ezlynx_tabs,
@@ -726,7 +730,7 @@ def run_production_preflight(
         "fail_notify_dm_errors": [],
         "message": None,
     }
-    _attach_tab_sweep(
+    _attach_tab_flush(
         report,
         db_path=db_path,
         ezlynx_tabs=ezlynx_tabs,
