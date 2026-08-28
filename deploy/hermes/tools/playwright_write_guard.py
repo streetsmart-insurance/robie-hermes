@@ -9,6 +9,11 @@ When a write is PLAYWRIGHT_BLOCKED, the guard may ask Gemini for one unique
 visible label and apply that locator only after unique-write still passes.
 If Gemini is missing, unsure, or the locator is not unique, the write is
 refused and the Job HITLs Carlo. Unique-write is never disabled.
+
+A Playwright TimeoutError on fill / click / select_option / type, or a
+target that is hidden / aria-hidden / not visible / combobox-hidden, is
+the same PLAYWRIGHT_BLOCKED class. Do not invent the value or retry-loop;
+ask Gemini then HITL Carlo.
 """
 
 from __future__ import annotations
@@ -29,9 +34,14 @@ WRITE_METHODS = (
     "set_input_files",
     "clear",
 )
+# Unique-write still applies to WRITE_METHODS. These also HITL on timeout /
+# hidden / combobox-hidden instead of leaking a bare TimeoutError.
+CONTROL_ACTION_METHODS = ("fill", "click", "select_option", "type")
+WRAP_METHODS = tuple(dict.fromkeys((*WRITE_METHODS, *CONTROL_ACTION_METHODS)))
 POSITIONAL_MARKERS = ("nth=", " >> nth", ".first", ".last")
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 HITL_OPERATOR = "Carlo"
+HITL_NO_RETRY = "ask Gemini then HITL Carlo; do not retry-loop"
 _SECRET_LABEL = re.compile(
     r"\b(password|passwd|pwd|mfa|otp|totp|one[- ]time|secret|token|ssn|fein)\b",
     re.IGNORECASE,
@@ -117,6 +127,135 @@ def require_unique_write_target(
     reason = unique_write_block_reason(target, count=count, selector=selector)
     if reason:
         raise RuntimeError(reason)
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """True for builtin TimeoutError and playwright.sync_api.TimeoutError."""
+    if isinstance(exc, TimeoutError):
+        return True
+    cls = type(exc)
+    if cls.__name__ == "TimeoutError":
+        return True
+    module = getattr(cls, "__module__", "") or ""
+    return cls.__name__.endswith("TimeoutError") and "playwright" in module
+
+
+def _resolve_write_target(target: Any, selector: str | None) -> Any:
+    if selector:
+        locator_fn = getattr(target, "locator", None)
+        if callable(locator_fn):
+            return locator_fn(selector)
+    return target
+
+
+def _locator_attribute(target: Any, name: str) -> str | None:
+    getter = getattr(target, "get_attribute", None)
+    if callable(getter):
+        try:
+            value = getter(name)
+        except Exception as exc:
+            if _is_timeout_error(exc):
+                raise
+            return None
+        if value is None:
+            return None
+        return str(value)
+    raw = getattr(target, name, None)
+    if raw is None or callable(raw):
+        return None
+    return str(raw)
+
+
+def _locator_bool(target: Any, method_name: str) -> bool | None:
+    fn = getattr(target, method_name, None)
+    if callable(fn):
+        try:
+            return bool(fn())
+        except Exception as exc:
+            if _is_timeout_error(exc):
+                raise
+            return None
+    raw = getattr(target, method_name, None)
+    if isinstance(raw, bool):
+        return raw
+    return None
+
+
+def unwritable_control_block_reason(
+    target: Any,
+    *,
+    selector: str | None = None,
+) -> str | None:
+    """PLAYWRIGHT_BLOCKED if the unique target is hidden or not a writable control."""
+    resolved = _resolve_write_target(target, selector)
+    loc = locator_selector_text(resolved)
+    try:
+        is_hidden = _locator_bool(resolved, "is_hidden")
+        is_visible = _locator_bool(resolved, "is_visible")
+        aria_hidden = (_locator_attribute(resolved, "aria-hidden") or "").strip().casefold()
+        input_type = (_locator_attribute(resolved, "type") or "").strip().casefold()
+        role = (_locator_attribute(resolved, "role") or "").strip().casefold()
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            return (
+                f"{PLAYWRIGHT_BLOCKED}: visibility probe timed out on locator {loc}; "
+                f"{HITL_NO_RETRY}"
+            )
+        return None
+
+    loc_l = loc.casefold()
+    reasons: list[str] = []
+    if is_hidden is True:
+        reasons.append("hidden")
+    if is_visible is False:
+        reasons.append("not visible")
+    if aria_hidden in {"true", "1"}:
+        reasons.append("aria-hidden")
+    if input_type == "hidden":
+        reasons.append("hidden")
+
+    comboboxish = (
+        role == "combobox"
+        or "combobox" in loc_l
+        or "role=combobox" in loc_l
+    )
+    hiddenish = (
+        is_hidden is True
+        or is_visible is False
+        or aria_hidden in {"true", "1"}
+        or input_type == "hidden"
+        or "type=hidden" in loc_l
+        or "aria-hidden" in loc_l
+    )
+    if comboboxish and hiddenish:
+        reasons.append("combobox-hidden value")
+
+    if not reasons:
+        return None
+    seen: list[str] = []
+    for item in reasons:
+        if item not in seen:
+            seen.append(item)
+    return (
+        f"{PLAYWRIGHT_BLOCKED}: write target {loc} is {' / '.join(seen)}; "
+        f"{HITL_NO_RETRY}"
+    )
+
+
+def action_timeout_block_reason(
+    target: Any,
+    method_name: str,
+    *,
+    selector: str | None = None,
+    exc: BaseException | None = None,
+) -> str:
+    """PLAYWRIGHT_BLOCKED reason when a control action times out."""
+    loc = locator_selector_text(_resolve_write_target(target, selector))
+    extra = f" ({type(exc).__name__})" if exc is not None else ""
+    return (
+        f"{PLAYWRIGHT_BLOCKED}: {method_name} timed out on locator {loc}{extra}; "
+        f"{HITL_NO_RETRY}"
+    )
 
 
 def _safe_visible_label(value: str) -> str | None:
@@ -249,6 +388,51 @@ def _hitl_blocked(reason: str) -> RuntimeError:
     return RuntimeError(f"{detail}; HITL {HITL_OPERATOR}")
 
 
+def _gemini_then_write_or_hitl(
+    *,
+    reason: str,
+    owner: Any,
+    page_level: bool,
+    scope: dict[str, Any],
+    locator_originals: dict[str, Callable[..., Any]],
+    method: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Existing unique-write Gemini-then-HITL path. Do not invent a value."""
+    if scope.get("_robie_gemini_unique_write_attempted"):
+        raise _hitl_blocked(f"{reason}; Gemini already consulted")
+    scope["_robie_gemini_unique_write_attempted"] = True
+    page = _page_from_target(owner, page_level=page_level)
+    resolved = consult_gemini_for_blocked_write(
+        reason=reason,
+        page=page,
+        ask_gemini=scope.get("ask_gemini_unique_field"),
+    )
+    if resolved is None:
+        raise _hitl_blocked(f"{reason}; Gemini did not name one unique field")
+    require_unique_write_target(resolved)
+    hidden = unwritable_control_block_reason(resolved)
+    if hidden:
+        raise _hitl_blocked(f"{hidden}; Gemini already consulted")
+    original = locator_originals.get(getattr(method, "__name__", ""), method)
+    write_args = args[1:] if page_level else args
+    try:
+        result = original(resolved, *write_args, **kwargs)
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise _hitl_blocked(
+                action_timeout_block_reason(
+                    resolved,
+                    getattr(method, "__name__", "write"),
+                    exc=exc,
+                )
+            ) from exc
+        raise
+    _publish_page_hint_from_page(page)
+    return result
+
+
 def _wrap_write(
     method: Callable[..., Any],
     *,
@@ -256,35 +440,54 @@ def _wrap_write(
     scope: dict[str, Any],
     locator_originals: dict[str, Callable[..., Any]],
 ) -> Callable[..., Any]:
+    method_name = getattr(method, "__name__", "write")
+
     def wrapped(self, *args, **kwargs):
         selector = args[0] if page_level and args else None
-        reason = unique_write_block_reason(self, selector=selector)
-        if reason:
-            if scope.get("_robie_gemini_unique_write_attempted"):
-                raise _hitl_blocked(f"{reason}; Gemini already consulted")
-            scope["_robie_gemini_unique_write_attempted"] = True
-            page = _page_from_target(self, page_level=page_level)
-            resolved = consult_gemini_for_blocked_write(
-                reason=reason,
-                page=page,
-                ask_gemini=scope.get("ask_gemini_unique_field"),
-            )
-            if resolved is None:
-                raise _hitl_blocked(
-                    f"{reason}; Gemini did not name one unique field"
+        try:
+            reason = unique_write_block_reason(self, selector=selector)
+            if reason is None and method_name in CONTROL_ACTION_METHODS:
+                reason = unwritable_control_block_reason(self, selector=selector)
+        except Exception as exc:
+            if _is_timeout_error(exc) and method_name in CONTROL_ACTION_METHODS:
+                reason = action_timeout_block_reason(
+                    self, method_name, selector=selector, exc=exc
                 )
-            require_unique_write_target(resolved)
-            original = locator_originals.get(getattr(method, "__name__", ""), method)
-            write_args = args[1:] if page_level else args
-            result = original(resolved, *write_args, **kwargs)
-            _publish_page_hint_from_page(page)
-            return result
-        result = method(self, *args, **kwargs)
+            else:
+                raise
+        if reason:
+            return _gemini_then_write_or_hitl(
+                reason=reason,
+                owner=self,
+                page_level=page_level,
+                scope=scope,
+                locator_originals=locator_originals,
+                method=method,
+                args=args,
+                kwargs=kwargs,
+            )
+        try:
+            result = method(self, *args, **kwargs)
+        except Exception as exc:
+            if _is_timeout_error(exc) and method_name in CONTROL_ACTION_METHODS:
+                return _gemini_then_write_or_hitl(
+                    reason=action_timeout_block_reason(
+                        self, method_name, selector=selector, exc=exc
+                    ),
+                    owner=self,
+                    page_level=page_level,
+                    scope=scope,
+                    locator_originals=locator_originals,
+                    method=method,
+                    args=args,
+                    kwargs=kwargs,
+                )
+            raise
         _publish_page_hint_from_page(_page_from_target(self, page_level=page_level))
         return result
 
-    wrapped.__name__ = getattr(method, "__name__", "write")
-    wrapped.__qualname__ = getattr(method, "__qualname__", wrapped.__name__)
+    wrapped.__name__ = method_name
+    wrapped.__qualname__ = getattr(method, "__qualname__", method_name)
     return wrapped
 
 
@@ -294,7 +497,7 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
     locator_originals: dict[str, Callable[..., Any]] = {}
     locator_cls = scope.get("Locator")
     if locator_cls is not None:
-        for method_name in WRITE_METHODS:
+        for method_name in WRAP_METHODS:
             original = getattr(locator_cls, method_name, None)
             if callable(original):
                 locator_originals[method_name] = original
@@ -303,7 +506,7 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
         if cls is None:
             continue
         page_level = name == "Page"
-        for method_name in WRITE_METHODS:
+        for method_name in WRAP_METHODS:
             original = getattr(cls, method_name, None)
             if not callable(original):
                 continue

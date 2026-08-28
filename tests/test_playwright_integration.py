@@ -31,6 +31,7 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("ask_gemini_unique_field", source)
         self.assertIn("ROBIE_JOB_ENGINE_ROOT", source)
         self.assertIn("HITL Carlo", source)
+        self.assertIn("do not retry-loop", source)
         self.assertIn("PLAYWRIGHT_FAIL_CLOSED", source)
         self.assertIn("EmptyFileError", source)
         self.assertIn("playwright-artifacts", source)

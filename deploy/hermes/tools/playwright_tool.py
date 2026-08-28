@@ -59,13 +59,55 @@ def runner_failure_error(detail: str) -> str:
 
 
 def relabel_user_exec_exception(exc: BaseException) -> None:
-    """Re-raise empty/missing artifact errors as a non-retryable fail-closed stop."""
+    """Re-raise empty/missing artifact or leaked control-action timeouts.
+
+    Empty/missing artifacts stay PLAYWRIGHT_FAIL_CLOSED. A TimeoutError from
+    fill/click/select_option/type (or a hidden / combobox control) is the
+    same PLAYWRIGHT_BLOCKED class as unique-write: ask Gemini then HITL
+    Carlo; do not retry-loop. Unique-write PLAYWRIGHT_BLOCKED is left intact.
+    """
     name = type(exc).__name__
     text = f"{name}: {exc}"
     path = str(getattr(exc, "filename", "") or "")
     mapped = empty_or_missing_artifact_error(f"{path} {text}")
     if mapped:
         raise RuntimeError(mapped) from exc
+    if "PLAYWRIGHT_BLOCKED" in text or "PLAYWRIGHT_FAIL_CLOSED" in text:
+        raise exc
+    timeout = (
+        isinstance(exc, TimeoutError)
+        or name == "TimeoutError"
+        or (
+            "playwright" in (getattr(type(exc), "__module__", "") or "")
+            and "timeout" in name.casefold()
+        )
+    )
+    if timeout:
+        blob = text.casefold()
+        control = any(
+            token in blob
+            for token in (
+                "locator.fill",
+                "locator.click",
+                "locator.select_option",
+                "locator.type",
+                ".fill(",
+                ".click(",
+                ".select_option(",
+                ".type(",
+                "attempting fill",
+                "attempting click",
+                "element is not visible",
+                "element is hidden",
+                "aria-hidden",
+                "combobox",
+            )
+        )
+        if control:
+            raise RuntimeError(
+                f"PLAYWRIGHT_BLOCKED: {text}; "
+                "ask Gemini then HITL Carlo; do not retry-loop"
+            ) from exc
     raise exc
 
 
@@ -280,6 +322,9 @@ PLAYWRIGHT_EXEC_SCHEMA = {
         "EZLynx tab. Reuse a matching page from pages before opening or navigating "
         "another tab. Writes fail closed unless the locator uniquely "
         "identifies exactly one field; .first/.nth/.last guesses are PLAYWRIGHT_BLOCKED. "
+        "A TimeoutError on fill/click/select_option/type, or a hidden / aria-hidden / "
+        "not-visible / combobox-hidden control, is the same PLAYWRIGHT_BLOCKED: ask "
+        "Gemini then HITL Carlo; do not retry-loop or invent the value. "
         "An empty PDF (EmptyFileError) or missing /tmp/playwright-artifacts file is "
         "PLAYWRIGHT_FAIL_CLOSED once: do not retry the same download/screenshot/PDF "
         "parse; use the document already on the EZLynx file / HITL Carlo. "
