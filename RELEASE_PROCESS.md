@@ -55,8 +55,7 @@ overwrite user-owned Loom `ascend-finance`. Skills stay a separate Drive →
 
 The **automatic simulator is the PR 35 regression battery** (CI on every
 PR, and again after every Production zip). It is **not** Dusty personally
-opening a website. **PR 36 is one-load-path only — do not call 36 the
-simulator.**
+opening a website. **PR 36 is one-load-path only — do not call 36 the simulator.**
 
 ChatGPT / Claude / Jake-paste must follow this written gate. Do not skip
 the battery or the Dusty walk because a model is “just trying it.”
