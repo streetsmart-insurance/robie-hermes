@@ -10,16 +10,30 @@ from durable_temp import durable_temporary_directory
 from robie_job_engine.ascend_create_combobox import (
     COMBOBOX_FIELDS,
     COMBOBOX_SCENARIO_ID,
+    INVENTED_COMBOBOX_DEFAULTS,
+    LIVE_CARRIER_LISTBOX_TAILS,
+    LIVE_COVERAGE_LISTBOX_TAILS,
     LIVE_ROLE_LISTBOX_OPTIONS,
+    LIVE_STATE_LISTBOX_OPTIONS,
+    TEST_QUOTE_FIELDS,
+    TEST_QUOTE_TEXT,
     classify_listbox_options,
     default_test_combobox_payload,
+    invented_combobox_defaults,
+    listbox_audit_should_abort,
     matching_option_count,
     option_locator,
+    parse_quote_fields,
+    quote_fields_from_payload,
     refuse_non_unique_listbox,
     run_unique_listbox_option_scenario,
     unique_option_hitl,
 )
-from robie_job_engine.ascend_locator_audit_runner import audit_live_comboboxes
+from robie_job_engine.ascend_locator_audit_runner import (
+    _scoped_option_names,
+    _upload_test_quote,
+    audit_live_comboboxes,
+)
 from robie_job_engine.ascend_locator_audit import (
     JOB_TYPE,
     AscendLocatorAuditWorker,
@@ -134,6 +148,9 @@ class UniqueListboxOptionTests(unittest.TestCase):
         )
         self.assertEqual(payload["producer"], CARLO_OPTION)
         self.assertEqual(payload["account_manager"], CARLO_OPTION)
+        self.assertEqual(invented_combobox_defaults(payload), [])
+        for banned in INVENTED_COMBOBOX_DEFAULTS:
+            self.assertNotIn(banned, payload.values())
         report = classify_listbox_options(
             field="Producer",
             intended=payload["producer"],
@@ -186,20 +203,82 @@ class _FakeOptions:
     def __init__(self, names: list[str]) -> None:
         self._names = names
 
+    def count(self) -> int:
+        return len(self._names)
+
     def all_inner_texts(self) -> list[str]:
         return list(self._names)
 
+    def filter(self, visible: bool = True):
+        del visible
+        return self
+
+    def get_by_role(self, role: str, name: str | None = None, exact: bool = False):
+        del exact
+        if role != "option":
+            return _FakeOptions([])
+        if name is None:
+            return _FakeOptions(self._names)
+        matched = [item for item in self._names if item == name]
+        return _FakeOptions(matched)
+
+
+class _FakeListbox:
+    def __init__(self, names: list[str], *, present: bool) -> None:
+        self._names = names
+        self._present = present
+
+    def count(self) -> int:
+        return 1 if self._present else 0
+
+    def filter(self, visible: bool = True):
+        del visible
+        return self
+
+    def get_by_role(self, role: str, name: str | None = None, exact: bool = False):
+        del name, exact
+        if role != "option":
+            return _FakeOptions([])
+        return _FakeOptions(self._names)
+
+
+class _FakeFileInput:
+    def __init__(self) -> None:
+        self.files: str | None = None
+
+    def count(self) -> int:
+        return 1
+
+    def set_input_files(self, path: str) -> None:
+        self.files = path
+
 
 class _FakeKeyboard:
-    def press(self, _key: str) -> None:
-        return None
+    def __init__(self, page: "_FakePage") -> None:
+        self._page = page
+
+    def press(self, key: str) -> None:
+        if key == "Escape":
+            self._page.open_label = ""
 
 
 class _FakePage:
-    def __init__(self, options_by_label: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        options_by_label: dict[str, list[str]],
+        *,
+        leaked: list[str] | None = None,
+    ) -> None:
         self.options_by_label = options_by_label
+        self.leaked = list(leaked or [])
         self.open_label = ""
-        self.keyboard = _FakeKeyboard()
+        self.keyboard = _FakeKeyboard(self)
+        self.file_input = _FakeFileInput()
+
+    def locator(self, selector: str) -> _FakeFileInput | _FakeOptions:
+        if selector in {"#file_upload", "input#file_upload", "input[type='file']"}:
+            return self.file_input
+        return _FakeOptions([])
 
     def get_by_label(self, label: str) -> _FakeControl:
         if label in self.options_by_label:
@@ -207,9 +286,15 @@ class _FakePage:
         return _FakeControl(self, label, count=0)
 
     def get_by_role(self, role: str, name: str | None = None, exact: bool = False):
+        if role == "listbox":
+            present = bool(self.open_label)
+            names = self.options_by_label.get(self.open_label, []) if present else []
+            return _FakeListbox(names, present=present)
         if role != "option":
             return _FakeOptions([])
-        names = self.options_by_label.get(self.open_label, [])
+        scoped = self.options_by_label.get(self.open_label, [])
+        # Page-wide query includes leftover State names — the leak under test.
+        names = list(self.leaked) + scoped if self.open_label else []
         if name is None:
             return _FakeOptions(names)
         matched = [
@@ -226,20 +311,16 @@ class LiveComboboxAuditTests(unittest.TestCase):
             {
                 "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
                 "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
-                "Carrier": ["Progressive", "Progressive Specialty"],
-                "Coverage type": ["Commercial Auto"],
-                "State": ["Florida", "Florida"],
-                "Wholesaler": ["Test Wholesaler"],
+                "Carrier": list(LIVE_CARRIER_LISTBOX_TAILS),
+                "Coverage type": list(LIVE_COVERAGE_LISTBOX_TAILS),
+                "State": ["Georgia", "Georgia"],
             }
         )
         observed = audit_live_comboboxes(
             page,
             {
                 "requested_by": "carlo@streetsmart.insurance",
-                "test_carrier": "Progressive",
-                "test_coverage": "Commercial Auto",
-                "test_state": "Florida",
-                "test_wholesaler": "Test Wholesaler",
+                "quote_text": TEST_QUOTE_TEXT,
             },
         )
         self.assertFalse(observed["ok"])
@@ -248,30 +329,28 @@ class LiveComboboxAuditTests(unittest.TestCase):
         state = next(item for item in observed["fields"] if item["field"] == "State")
         self.assertEqual(state["match_count"], 2)
         self.assertIn("State", state["error"])
+        self.assertTrue(listbox_audit_should_abort(observed))
 
     def test_live_audit_opens_every_create_form_combobox(self):
         page = _FakePage(
             {
                 "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
                 "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
-                "Writing company": ["Test Carrier"],
-                "Coverage type": ["Commercial Auto"],
-                "State": ["Florida"],
-                "Wholesaler": ["Test Wholesaler"],
+                "Writing company": list(LIVE_CARRIER_LISTBOX_TAILS),
+                "Coverage type": list(LIVE_COVERAGE_LISTBOX_TAILS),
+                "State": ["Georgia", "New York"],
             }
         )
         observed = audit_live_comboboxes(
             page,
             {
                 "requested_by": "carlo@streetsmart.insurance",
-                "test_carrier": "Test Carrier",
-                "test_coverage": "Commercial Auto",
-                "test_state": "Florida",
-                "test_wholesaler": "Test Wholesaler",
+                "quote_text": TEST_QUOTE_TEXT,
             },
         )
         self.assertTrue(observed["ok"], observed)
         self.assertEqual(observed["blocked_fields"], [])
+        self.assertFalse(observed["abort_walk"])
         producer = next(item for item in observed["fields"] if item["field"] == "Producer")
         self.assertEqual(producer["intended"], CARLO_OPTION)
         self.assertEqual(producer["match_count"], 1)
@@ -279,6 +358,9 @@ class LiveComboboxAuditTests(unittest.TestCase):
             producer["locator"],
             f'get_by_role("option", name="{CARLO_OPTION}", exact=True)',
         )
+        coverage = next(item for item in observed["fields"] if item["field"] == "Coverage type")
+        self.assertEqual(coverage["intended"], "Commercial Package")
+        self.assertEqual(coverage["status"], "PASS")
         labels = {item["field"] for item in observed["fields"]}
         for required in (
             "Producer",
@@ -288,6 +370,88 @@ class LiveComboboxAuditTests(unittest.TestCase):
             "State",
         ):
             self.assertIn(required, labels)
+
+    def test_empty_intended_is_hitl_and_does_not_abort_walk(self):
+        page = _FakePage(
+            {
+                "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Carrier": list(LIVE_CARRIER_LISTBOX_TAILS),
+                "Coverage type": list(LIVE_COVERAGE_LISTBOX_TAILS),
+                "State": ["Georgia"],
+            }
+        )
+        observed = audit_live_comboboxes(
+            page,
+            {"requested_by": "carlo@streetsmart.insurance"},
+        )
+        self.assertFalse(observed["ok"])
+        self.assertFalse(observed["abort_walk"])
+        self.assertFalse(listbox_audit_should_abort(observed))
+        for name in ("Carrier", "Coverage type", "State"):
+            field = next(item for item in observed["fields"] if item["field"] == name)
+            self.assertEqual(field["status"], "HITL", name)
+            self.assertEqual(field["intended"], "")
+        wholesaler = next(item for item in observed["fields"] if item["field"] == "Wholesaler")
+        self.assertEqual(wholesaler["status"], "SKIP")
+
+    def test_leftover_state_options_are_not_counted_as_carrier(self):
+        page = _FakePage(
+            {
+                "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Carrier": list(LIVE_CARRIER_LISTBOX_TAILS),
+                "Coverage type": list(LIVE_COVERAGE_LISTBOX_TAILS),
+                "State": list(LIVE_STATE_LISTBOX_OPTIONS),
+            },
+            leaked=list(LIVE_STATE_LISTBOX_OPTIONS),
+        )
+        page.open_label = "Carrier"
+        page_wide = page.get_by_role("option").all_inner_texts()
+        self.assertIn("Florida", page_wide)
+        self.assertIn("New Jersey", page_wide)
+        scoped = _scoped_option_names(page)
+        self.assertNotIn("Florida", scoped)
+        self.assertNotIn("New Jersey", scoped)
+        self.assertEqual(scoped, list(LIVE_CARRIER_LISTBOX_TAILS))
+        page.open_label = ""
+        observed = audit_live_comboboxes(
+            page,
+            {
+                "requested_by": "carlo@streetsmart.insurance",
+                "quote_text": TEST_QUOTE_TEXT,
+            },
+        )
+        self.assertTrue(observed["ok"], observed)
+        carrier = next(item for item in observed["fields"] if item["field"] == "Carrier")
+        self.assertEqual(carrier["status"], "PASS")
+        self.assertEqual(carrier["intended"], TEST_QUOTE_FIELDS["carrier"])
+        self.assertNotIn("Florida", carrier["options"])
+        self.assertNotIn("New Jersey", carrier["options"])
+        coverage = next(item for item in observed["fields"] if item["field"] == "Coverage type")
+        self.assertNotIn("Florida", coverage["options"])
+        self.assertEqual(coverage["intended"], "Commercial Package")
+
+    def test_quote_parser_refuses_pawiva_and_does_not_guess(self):
+        self.assertEqual(parse_quote_fields(TEST_QUOTE_TEXT), TEST_QUOTE_FIELDS)
+        self.assertEqual(
+            quote_fields_from_payload({"quote_text": TEST_QUOTE_TEXT}),
+            TEST_QUOTE_FIELDS,
+        )
+        self.assertEqual(
+            quote_fields_from_payload({"requested_by": "carlo@streetsmart.insurance"}),
+            {"carrier": "", "coverage_type": "", "state": ""},
+        )
+        with self.assertRaises(ValueError):
+            parse_quote_fields("Carrier: PAWIVA\nCoverage type: Commercial Package")
+
+    def test_import_uploads_test_quote_file(self):
+        page = _FakePage({})
+        uploaded = _upload_test_quote(page, "/tmp/robie-test-quote.txt")
+        self.assertTrue(uploaded["uploaded"])
+        self.assertEqual(page.file_input.files, "/tmp/robie-test-quote.txt")
+        with self.assertRaises(RuntimeError):
+            _upload_test_quote(page, "/tmp/PAWIVA-quote.pdf")
 
 
 class FixtureAndDocsTests(unittest.TestCase):
@@ -300,7 +464,9 @@ class FixtureAndDocsTests(unittest.TestCase):
                 JOB_TYPE,
                 {
                     **default_audit_payload(
-                        live=False, requested_by="carlo@streetsmart.insurance"
+                        live=False,
+                        requested_by="carlo@streetsmart.insurance",
+                        quote_text=TEST_QUOTE_TEXT,
                     ),
                     "db_path": db,
                     "artifact_root": artifacts,
@@ -327,6 +493,17 @@ class FixtureAndDocsTests(unittest.TestCase):
             self.assertEqual(producer["intended"], CARLO_OPTION)
             self.assertEqual(producer["match_count"], 1)
             self.assertEqual(producer["status"], "PASS")
+            coverage = next(item for item in fields if item["field"] == "Coverage type")
+            self.assertEqual(coverage["intended"], "Commercial Package")
+            self.assertEqual(coverage["status"], "PASS")
+            self.assertEqual(
+                invented_combobox_defaults(
+                    default_audit_payload(
+                        live=True, requested_by="carlo@streetsmart.insurance"
+                    )
+                ),
+                [],
+            )
 
     def test_docs_lock_test_gate_and_live_jobs(self):
         lines = ascend_new_program_contract_lines(

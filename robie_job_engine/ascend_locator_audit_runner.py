@@ -15,8 +15,13 @@ from typing import Any, Callable
 from .ascend_create_combobox import (
     COMBOBOX_FIELDS,
     classify_listbox_options,
+    combobox_payload_from_audit,
     intended_option_for_field,
+    listbox_audit_should_abort,
     option_locator,
+    quote_fields_from_payload,
+    quote_mentions_forbidden_account,
+    quote_path_from_payload,
     unique_option_block_reason,
     unique_option_hitl,
 )
@@ -225,26 +230,95 @@ def _count(target: Any) -> int:
     return 0
 
 
-def _visible_option_names(page: Any) -> list[str]:
-    """Read every open listbox option. Do not use .first/.nth/.last."""
-    options = page.get_by_role("option")
-    reader = getattr(options, "all_inner_texts", None)
+LISTBOX_SETTLE_TIMEOUT_MS = 5_000
+LISTBOX_POLL_S = 0.05
+
+
+def _option_texts(locator: Any) -> list[str]:
+    reader = getattr(locator, "all_inner_texts", None)
     if callable(reader):
         try:
             return [str(item or "").strip() for item in reader() if str(item or "").strip()]
         except Exception:  # noqa: BLE001
-            pass
-    evaluate = getattr(page, "eval_on_selector_all", None)
+            return []
+    return []
+
+
+def _filter_visible(locator: Any) -> Any:
+    filtr = getattr(locator, "filter", None)
+    if callable(filtr):
+        try:
+            return filtr(visible=True)
+        except TypeError:
+            return locator
+    return locator
+
+
+def _scoped_option_names(page: Any) -> list[str]:
+    """Options from the unique visible listbox only. No page-wide leftover leak."""
+    listbox = _filter_visible(page.get_by_role("listbox"))
+    n = _count(listbox)
+    if n == 1:
+        names = _option_texts(_filter_visible(listbox.get_by_role("option")))
+        if names:
+            return names
+        return []
+    if n > 1:
+        # Leftover listbox is still open. Do not merge page-wide options.
+        return []
+    evaluate = getattr(page, "evaluate", None)
     if callable(evaluate):
         try:
             found = evaluate(
-                '[role="option"]',
-                "els => els.map(e => (e.innerText || e.textContent || '').trim())",
+                """() => {
+                    const visible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        if (!style || style.visibility === 'hidden' || style.display === 'none') {
+                            return false;
+                        }
+                        return el.getClientRects().length > 0;
+                    };
+                    const boxes = [...document.querySelectorAll('[role="listbox"]')].filter(visible);
+                    if (boxes.length !== 1) return [];
+                    return [...boxes[0].querySelectorAll('[role="option"]')]
+                        .filter(visible)
+                        .map(e => (e.innerText || e.textContent || '').trim())
+                        .filter(Boolean);
+                }"""
             )
-            return [str(item or "").strip() for item in found or [] if str(item or "").strip()]
+            names = [str(item or "").strip() for item in found or [] if str(item or "").strip()]
+            if names:
+                return names
         except Exception:  # noqa: BLE001
-            return []
-    return []
+            pass
+    return _option_texts(_filter_visible(page.get_by_role("option")))
+
+
+def _visible_option_names(page: Any) -> list[str]:
+    """Read the open listbox. Do not use .first/.nth/.last or leftover options."""
+    return _scoped_option_names(page)
+
+
+def _wait_options_gone(page: Any, *, timeout_ms: int = LISTBOX_SETTLE_TIMEOUT_MS) -> None:
+    started = time.monotonic()
+    while time.monotonic() - started < timeout_ms / 1000.0:
+        if _count(_filter_visible(page.get_by_role("listbox"))) == 0 and not _scoped_option_names(page):
+            return
+        time.sleep(LISTBOX_POLL_S)
+
+
+def _wait_open_listbox_options(
+    page: Any, *, timeout_ms: int = LISTBOX_SETTLE_TIMEOUT_MS
+) -> list[str]:
+    started = time.monotonic()
+    last: list[str] = []
+    while time.monotonic() - started < timeout_ms / 1000.0:
+        last = _scoped_option_names(page)
+        if last:
+            return last
+        time.sleep(LISTBOX_POLL_S)
+    return last
 
 
 def _close_open_listbox(page: Any) -> None:
@@ -255,6 +329,7 @@ def _close_open_listbox(page: Any) -> None:
             press("Escape")
         except Exception:  # noqa: BLE001
             return
+    _wait_options_gone(page)
 
 
 def _find_labeled_control(page: Any, aliases: tuple[str, ...]) -> tuple[Any | None, str]:
@@ -267,18 +342,10 @@ def _find_labeled_control(page: Any, aliases: tuple[str, ...]) -> tuple[Any | No
 
 def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Open each create-form combobox. Unique intended option or FAIL/HITL."""
-    from .ascend_sender_roles import requested_by_from_payload, roles_for_requested_by
-
-    roles = roles_for_requested_by(requested_by_from_payload(payload))
-    blob = dict(payload)
-    if roles.get("option"):
-        blob["producer"] = roles["option"]
-        blob["account_manager"] = roles["option"]
-    elif roles.get("resolved"):
-        blob.setdefault("producer", roles["resolved"])
-        blob.setdefault("account_manager", roles["resolved"])
+    blob = combobox_payload_from_audit(payload)
     reports: list[dict[str, Any]] = []
     blocked: list[str] = []
+    _close_open_listbox(page)
     for field in COMBOBOX_FIELDS:
         intended = intended_option_for_field(field, blob)
         target, locator = _find_labeled_control(page, tuple(field["aliases"]))
@@ -289,6 +356,7 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
                 options=[],
                 exact=True,
                 field_present=False,
+                optional=bool(field.get("optional")),
             )
             reports.append(report)
             continue
@@ -296,13 +364,14 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
         click = getattr(target, "click", None)
         if callable(click):
             click()
-        names = _visible_option_names(page)
+        names = _wait_open_listbox_options(page)
         report = classify_listbox_options(
             field=str(field["label"]),
             intended=intended,
             options=names,
             exact=True,
             field_present=True,
+            optional=bool(field.get("optional")),
         )
         chosen = str(report.get("intended") or intended)
         report["locator"] = option_locator(chosen, exact=True) if chosen else locator
@@ -315,6 +384,8 @@ def audit_live_comboboxes(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
         "blocked_fields": blocked,
         "fields": reports,
         "logged": True,
+        "abort_walk": listbox_audit_should_abort({"fields": reports}),
+        "quote_fields": blob.get("quote_fields") or {},
     }
 
 
@@ -412,12 +483,49 @@ def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str
     return builder(), text
 
 
+FILE_UPLOAD_LOCATOR = 'locator("#file_upload")'
+
+
+def _quote_file_input(page: Any) -> tuple[Any | None, str]:
+    for selector, text in (
+        ("#file_upload", FILE_UPLOAD_LOCATOR),
+        ("input#file_upload", 'locator("input#file_upload")'),
+        ("input[type='file']", 'locator("input[type=\'file\']")'),
+    ):
+        locator_fn = getattr(page, "locator", None)
+        if not callable(locator_fn):
+            continue
+        target = locator_fn(selector)
+        if _count(target) == 1:
+            return target, text
+    return None, FILE_UPLOAD_LOCATOR
+
+
+def _upload_test_quote(page: Any, quote_path: str) -> dict[str, Any]:
+    path = str(quote_path or "").strip()
+    if not path:
+        return {"uploaded": False, "reason": "no quote path"}
+    leak = quote_mentions_forbidden_account(path)
+    if leak:
+        raise RuntimeError(leak)
+    target, locator = _quote_file_input(page)
+    if target is None:
+        return {"uploaded": False, "reason": "unique file input not present", "locator": locator}
+    require_unique_locator(target, locator=locator)
+    setter = getattr(target, "set_input_files", None)
+    if not callable(setter):
+        return {"uploaded": False, "reason": "file input cannot set files", "locator": locator}
+    setter(path)
+    return {"uploaded": True, "path": path, "locator": locator}
+
+
 def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) -> dict[str, Any]:
     """Click the combobox, then the unique exact option. Log the field on block."""
+    _close_open_listbox(page)
     click = getattr(target, "click", None)
     if callable(click):
         click()
-    names = _visible_option_names(page)
+    names = _wait_open_listbox_options(page)
     report = classify_listbox_options(
         field=field,
         intended=intended,
@@ -444,6 +552,7 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
     option_click = getattr(option, "click", None)
     if callable(option_click):
         option_click()
+    _close_open_listbox(page)
     return report
 
 
@@ -461,9 +570,15 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
         url = wait_create_new_url(page)
         return {"url": url, "wait_for_url": WAIT_FOR_URL, "path": CREATE_PATH}
     if spec_id == "customer_type":
-        decision = resolve_customer_type(payload)
+        decision = resolve_customer_type(combobox_payload_from_audit(payload))
         if decision.get("hitl_required") or not decision.get("resolved"):
-            raise RuntimeError(unknown_lob_hitl(lob=str(decision.get("lob") or "")))
+            return {
+                "skipped": True,
+                "status": "HITL",
+                "hitl_required": True,
+                "hitl_text": unknown_lob_hitl(lob=str(decision.get("lob") or "")),
+                "radio": None,
+            }
         require_unique_locator(target, locator=str(decision.get("locator") or ""))
         checked = getattr(target, "is_checked", None)
         if callable(checked) and checked():
@@ -489,6 +604,12 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
         ]
         if not labels["import_document"] and not labels["upload_document"] and not labels["dropzone"]:
             raise RuntimeError(unclear_document_label_hitl(labels=labels["labels"]))
+        quote_path = quote_path_from_payload(payload)
+        if quote_path:
+            labels.update(_upload_test_quote(page, quote_path))
+        else:
+            labels["uploaded"] = False
+            labels["reason"] = "no quote path"
         return labels
     if spec_id in {"producer_role", "account_manager_role"}:
         roles = roles_for_requested_by(requested_by_from_payload(payload))
@@ -547,25 +668,33 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
             "field_present": present,
         }
     fill = getattr(target, "fill", None)
+    quote = quote_fields_from_payload(combobox_payload_from_audit(payload))
     value = {
         "insured_fields": str(payload.get("test_insured") or "ROBIE Test LLC"),
         "quote_number": str(payload.get("test_quote_number") or "TEST-ASCEND-AUDIT"),
-        "carrier": str(payload.get("test_carrier") or "Test Carrier"),
-        "wholesaler": str(payload.get("test_wholesaler") or "Test Wholesaler"),
-        "coverage_type": str(payload.get("test_coverage") or "Commercial Auto"),
+        "carrier": quote.get("carrier") or "",
+        "wholesaler": str(payload.get("test_wholesaler") or ""),
+        "coverage_type": quote.get("coverage_type") or "",
         "dates": str(payload.get("test_effective") or "01/01/2027"),
         "premium": str(payload.get("test_premium") or "1000"),
         "taxes": str(payload.get("test_taxes") or "50"),
         "agency_fee": str(payload.get("test_agency_fee") or TEST_AGENCY_FEE),
     }.get(spec_id)
-    if spec_id in {"carrier", "wholesaler", "coverage_type"} and value:
+    if spec_id in {"carrier", "wholesaler", "coverage_type"}:
         field = {
             "carrier": "Carrier",
             "wholesaler": "Wholesaler",
             "coverage_type": "Coverage type",
         }[spec_id]
+        if not value:
+            return {
+                "set_value": None,
+                "skipped": True,
+                "status": "HITL" if spec_id != "wholesaler" else "SKIP",
+                "reason": "no quote-sourced intended",
+            }
         report = _select_unique_option(page, target, value, field=field)
-        return {"set_value": value, "listbox": report}
+        return {"set_value": str(report.get("intended") or value), "listbox": report}
     if callable(fill) and value is not None:
         fill(value)
     return {"set_value": value} if value is not None else {}
@@ -582,6 +711,9 @@ def run_live_walk(payload: dict[str, Any]) -> list[PunchStep]:
         payload.get("insured"),
         payload.get("client"),
         payload.get("text"),
+        payload.get("quote_path"),
+        payload.get("quote_text"),
+        payload.get("test_quote_path"),
     )
     db_path = str(payload.get("db_path") or "")
     artifact_root = str(payload.get("artifact_root") or "")
@@ -692,7 +824,9 @@ def run_live_walk(payload: dict[str, Any]) -> list[PunchStep]:
                                     observed=observed,
                                 )
                             )
-                            return steps
+                            if observed.get("abort_walk"):
+                                return steps
+                            continue
                         steps.append(
                             pass_step(
                                 spec_id,
