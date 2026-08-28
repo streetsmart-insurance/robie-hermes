@@ -1,6 +1,6 @@
 """SMALL Production pre-flight. Yes/no only. Chat on the first no.
 
-Complement to post-job audit. Not a dashboard. The five checks observe
+Complement to post-job audit. Not a dashboard. The six checks observe
 only: no Chrome, hermes-gateway, or browser restart; no bind; no
 client-file navigation. After the checks, a leftover-tab sweep may close
 orphaned EZLynx pages via CDP Target.closeTarget. A zip pointer match is

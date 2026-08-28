@@ -118,7 +118,7 @@ job's leftover EZLynx account tabs, `/auth/account/login` leftovers, `about:blan
 and Ascend tabs via CDP `Target.closeTarget` (`GET /json/close/{id}`). It does
 not restart Chrome, `hermes-gateway`, or `robie-ezlynx-browser`, does not wipe
 the EZLynx profile, and does not log out the shared session. A periodic sweep
-(hooked from `production_preflight` after the five yes/no checks) closes
+(hooked from `production_preflight` after the six yes/no checks) closes
 orphaned EZLynx tabs that no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job
 claims, and keeps exactly one authenticated `https://app.ezlynx.com/web/`
 session tab. Recorder and Playwright select the current job tab with
