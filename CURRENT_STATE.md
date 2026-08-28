@@ -145,6 +145,14 @@ Every Production incident that was a NEW failure mode gets a named
 deterministic scenario in `deploy/regression_battery/scenarios.json`
 before we call the incident closed. That is how the simulator grows.
 
+`ascend:locator-and-artifact-audit` is the named Test-only Job Engine
+scenario for a NEW site/workflow (Ascend locator walk + quote-PDF
+artifact path). GitHub CI asserts the punch list and that the artifact
+folder equals the job id. The live Ascend walk is `hermes-test-01` only.
+This tree does **not** flip that job type onto Production. Commercial
+auto already on Production is not a free pass. N=3 clean Test jobs still
+applies. Loom `ascend-finance` is never overwritten.
+
 `hermes-test-01` is **not** a clone of Production: different service-account
 permissions, isolated Job DB / browser / ingress, and Test must not read
 Production secrets. A Test all-clear is **not** a Production all-clear.

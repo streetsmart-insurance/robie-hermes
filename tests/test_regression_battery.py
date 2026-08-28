@@ -54,6 +54,7 @@ from robie_job_engine.regression_scenarios import (
     run_hitl_resume_scenarios,
     run_named_scenarios,
     run_same_day_scenario_rule,
+    run_ascend_locator_audit_scenario,
 )
 from robie_job_engine.worker_contract import claims_unverified_destination_progress
 from robie_job_engine.test_runtime import ProductionGuardError
@@ -360,6 +361,7 @@ class ReplayGuardTests(unittest.TestCase):
             ids["false-success:complete-prose-zero-evidence"]["outcome"],
             {"UNVERIFIED", "FAILED"},
         )
+        self.assertEqual(ids["ascend:locator-and-artifact-audit"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -545,6 +547,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
                 incidents[job_id]["scenario"],
                 "false-success:complete-prose-zero-evidence",
             )
+        self.assertEqual(
+            incidents["artifact-concat-job-id"]["scenario"],
+            "ascend:locator-and-artifact-audit",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -558,6 +564,15 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         )
         self.assertTrue(closed["closed"])
         self.assertEqual(run_same_day_scenario_rule()["outcome"], "PASS")
+
+    def test_ascend_locator_audit_scenario_is_ci_only_and_passes(self):
+        with durable_temporary_directory() as tmp:
+            result = run_ascend_locator_audit_scenario(
+                work_dir=Path(tmp) / "ascend-named"
+            )
+        self.assertTrue(result["ok"], result.get("evidence"))
+        self.assertEqual(result["id"], "ascend:locator-and-artifact-audit")
+        self.assertFalse(result.get("finance_agreement"))
 
     def test_hitl_resume_re_leases_same_job_and_does_not_retry_leftover(self):
         with durable_temporary_directory() as tmp:

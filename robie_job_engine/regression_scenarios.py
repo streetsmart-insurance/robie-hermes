@@ -51,6 +51,13 @@ FALSE_SUCCESS_CHAT = (
     "Must stay UNVERIFIED or FAILED."
 )
 
+ASCEND_AUDIT_CHAT = (
+    "ASCEND locator + artifact audit class returned: unique-locator fail is "
+    "FAIL (no Gemini, no .first/.nth/.last). Artifact folder must equal the "
+    "job id. Missing PDF after save is FAIL. This job ends as a report, not "
+    "COMPLETE of a finance agreement."
+)
+
 I_DID_IT_PROSE = (
     "I did it. The job is complete. Completed successfully — COMPLETE."
 )
@@ -67,6 +74,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "hitl-resume:no-second-job",
         "hitl-resume:no-retry-leftover-failed",
         "false-success:complete-prose-zero-evidence",
+        "ascend:locator-and-artifact-audit",
     }
 )
 
@@ -434,8 +442,22 @@ def run_false_success_scenario(*, work_dir: Path) -> dict[str, Any]:
             stop_generic_chat_job_heartbeat(db, job_id)
 
 
+def run_ascend_locator_audit_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """CI fixture battery for ascend:locator-and-artifact-audit. No live Ascend."""
+    from .ascend_locator_audit import run_ci_assertion_battery
+
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing ascend locator audit on live Hermes path: {work_dir}"
+        )
+    try:
+        return run_ci_assertion_battery(work_dir=work_dir)
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash the battery
+        return _fail("ascend:locator-and-artifact-audit", f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
-    """Same-day catalog + HITL resume + false-success. Isolated workdir only."""
+    """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
         raise ProductionGuardError(
             f"refusing named scenarios on live Hermes path: {work_dir}"
@@ -443,4 +465,5 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results = [run_same_day_scenario_rule()]
     results.extend(run_hitl_resume_scenarios(work_dir=work_dir / "hitl"))
     results.append(run_false_success_scenario(work_dir=work_dir / "false-success"))
+    results.append(run_ascend_locator_audit_scenario(work_dir=work_dir / "ascend-audit"))
     return results

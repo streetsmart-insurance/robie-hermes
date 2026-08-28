@@ -37,6 +37,7 @@ class JobTypeGateTests(unittest.TestCase):
 
     def test_new_type_is_not_production_ready_without_test_audits(self):
         self.assertFalse(is_job_type_production_ready("ezlynx.personal_auto"))
+        self.assertFalse(is_job_type_production_ready("ascend.locator_artifact_audit"))
         reason = production_hold_reason("ezlynx.personal_auto", env="PRODUCTION")
         self.assertIsNotNone(reason)
         self.assertIn("3", reason)
@@ -120,6 +121,9 @@ class JobTypeGateTests(unittest.TestCase):
         self.assertIn("infra only", text.casefold())
         self.assertIn("hermes-test-01", text)
         self.assertIn("New job types still need", text)
+        self.assertIn("NEW site / workflow", text)
+        self.assertIn("ascend:locator-and-artifact-audit", text)
+        self.assertIn("Commercial auto already on Production is **not** a free pass", text)
 
     def test_audit_record_from_jobs_db_requires_pass_verdict(self):
         with durable_temporary_directory() as tmp:

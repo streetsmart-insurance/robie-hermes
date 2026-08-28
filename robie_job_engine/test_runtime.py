@@ -111,6 +111,7 @@ def build_runtime_engine(
         "hermes-cua": ezlynx_worker,
         "submission-audit": EzlynxSubmissionAuditWorker(),
         "session-refresh": EzlynxSessionRefreshWorker(),
+        "ascend-locator-audit": _UnavailableWorker(),
     }
     verifiers: dict[str, Any] = {}
     if destination is not None:
@@ -127,11 +128,14 @@ def build_runtime_engine(
         from .chat_verifiers import FilesystemSkillUpdateVerifier
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
+    from .ascend_locator_audit import AscendLocatorAuditVerifier, AscendLocatorAuditWorker
     from .chat_verifiers import EzlynxSubmissionAuditVerifier
     from .skill_sync import DriveSkillSyncVerifier, DriveSkillSyncWorker
 
     workers["drive-skill-sync"] = DriveSkillSyncWorker()
+    workers["ascend-locator-audit"] = AscendLocatorAuditWorker()
     verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
+    verifiers["ascend.locator_artifact_audit"] = AscendLocatorAuditVerifier()
 
     verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
         submission_readback or SubprocessSubmissionReadback()

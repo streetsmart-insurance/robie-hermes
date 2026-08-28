@@ -650,6 +650,10 @@ def open_chat_job(
         )
     if classification.action_type == "ezlynx.submission_audit":
         server_payload.update(_submission_audit_payload())
+    if classification.action_type == "ascend.locator_artifact_audit":
+        from .ascend_locator_audit import default_audit_payload
+
+        server_payload.update(default_audit_payload(live=False))
     server_payload.update(dict(action_payload or {}))
     if continued_job is not None:
         job = continued_job

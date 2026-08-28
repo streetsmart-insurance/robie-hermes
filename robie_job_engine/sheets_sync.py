@@ -96,6 +96,7 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
         "browser.read": "Read a page without changing it",
         "hermes.plain_english": "Plain-English request",
         "deployment.smoke": "Deployment safety check",
+        "ascend.locator_artifact_audit": "Ascend locator and artifact audit",
     }
     status_names = {
         "PENDING": "Queued",

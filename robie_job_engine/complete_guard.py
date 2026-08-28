@@ -40,6 +40,7 @@ IDENTITY_KEYS = (
     "record_id",
     "resource_id",
     "proposal_id",
+    "report_id",
     "locator",
     "id",
 )

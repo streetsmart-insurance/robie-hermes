@@ -89,6 +89,41 @@ only COMPLETE authority.
 `ezlynx.commercial_auto`) and the already-live bounded Job Engine types. Those
 Production paths stay open. The gate applies to NEW types going forward.
 
+## Required gate: NEW site / workflow (Ascend, next carrier portal)
+
+Commercial auto already on Production is **not** a free pass for a NEW site
+or workflow. Before Ascend, the next carrier portal, or any other new
+browser workflow may run on a real Production account, it must pass this
+Test-only Job Engine job on `hermes-test-01`:
+
+- Job type: `ascend.locator_artifact_audit`
+- Battery scenario: `ascend:locator-and-artifact-audit`
+- Skill: `ascend-locator-artifact-audit` (`production_ready: false`)
+- N = **3** clean Test jobs still applies
+
+The job is a **full Job Engine job**, not a UI click-through script. It
+walks the Ascend new-program flow with Playwright strict mode (unique
+locator required; non-unique is FAIL; no Gemini; no `.first` / `.nth` /
+`.last`) and saves / looks up a quote PDF the same way a live Chat job
+does (artifacts under the real job id). It fails if the worker cannot
+open the PDF it just saved (mangled / concatenated job-id folder). It
+stops before Save program, Send email, Copy checkout, payment, or bind.
+Test account only. Never PAWIVA / 221398001 / a real client.
+
+GitHub-hosted CI must not talk to live Ascend or EZLynx. CI unit-tests
+the punch-list reporter and the artifact-path assertion. The live walk
+is Test-VM only:
+
+```sh
+ROBIE_ENV=TEST python3 -m robie_job_engine.ascend_locator_audit --live \
+  --db /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db \
+  --artifact-root /opt/streetsmart-hermes-test/robie-job-engine/data/artifacts
+```
+
+This job ends as a punch-list report, not COMPLETE of a finance
+agreement. COMPLETE is never allowed without destination evidence. This
+tree must not flip Production. Loom `ascend-finance` is never overwritten.
+
 ## Production pre-flight is infra only
 
 `robie_job_engine/production_preflight.py` watches Production host health

@@ -35,6 +35,7 @@ from .quote_replay import (
     run_quote_replay,
 )
 from .regression_scenarios import (
+    ASCEND_AUDIT_CHAT,
     FALSE_SUCCESS_CHAT,
     HITL_RESUME_CHAT,
     run_named_scenarios,
@@ -550,6 +551,8 @@ def format_new_failure_chat(
             lines.append(FALSE_SUCCESS_CHAT)
         if item_id.startswith("hitl-resume:"):
             lines.append(HITL_RESUME_CHAT)
+        if item_id.startswith("ascend:"):
+            lines.append(ASCEND_AUDIT_CHAT)
     lines.append(HUMAN_GATE)
     text = "\n".join(lines)
     if "@robie" in text.casefold():

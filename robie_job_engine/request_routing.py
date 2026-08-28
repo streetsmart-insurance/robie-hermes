@@ -17,6 +17,7 @@ WORKER_FOR_ACTION = {
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
+    "ascend.locator_artifact_audit": "ascend-locator-audit",
 }
 
 BOUNDED_ENGINE_ACTIONS = frozenset(
@@ -29,6 +30,7 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.apply_label",
         "ezlynx.submission_audit",
         "ezlynx.session_refresh",
+        "ascend.locator_artifact_audit",
     }
 )
 
@@ -105,6 +107,11 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification("ezlynx.move_document", WORKER_FOR_ACTION["ezlynx.move_document"])
     if "ezlynx" in normalized and "label" in normalized:
         return RequestClassification("ezlynx.apply_label", WORKER_FOR_ACTION["ezlynx.apply_label"])
+    if _is_ascend_locator_audit(normalized):
+        return RequestClassification(
+            "ascend.locator_artifact_audit",
+            WORKER_FOR_ACTION["ascend.locator_artifact_audit"],
+        )
     if _is_submission_audit(normalized):
         return RequestClassification(
             "ezlynx.submission_audit", WORKER_FOR_ACTION["ezlynx.submission_audit"]
@@ -151,6 +158,18 @@ def _is_browser_read(text: str) -> bool:
     if any(word in text for word in _MUTATION_WORDS):
         return False
     return any(phrase in text for phrase in _BROWSER_READ_PHRASES)
+
+
+def _is_ascend_locator_audit(text: str) -> bool:
+    markers = (
+        "ascend locator",
+        "locator-and-artifact-audit",
+        "locator and artifact audit",
+        "ascend punch list",
+        "ascend locator-artifact",
+        "ascend locator audit",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _is_submission_audit(text: str) -> bool:
