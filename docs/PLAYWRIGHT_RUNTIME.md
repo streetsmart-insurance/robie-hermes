@@ -51,10 +51,12 @@ overlay. It does not modify a live Hermes installation in place.
   `.first` / `.nth` / `.last`. The programs-page primary is
   `get_by_role("button", name="New program", exact=True)` — the plus is
   an icon, not text; never the caret. Artifact folder must equal the job id.
-  The live walk logs programs-spinner seconds, Agency Fee default
-  (expect $0.00 / empty, set 500, stop before Save), Producer /
-  Account Manager prefills (FAIL if they stay Robie AI when Carlo or
-  Jake sent the job), and unique create/new listbox options (job
+  The live walk logs programs-spinner seconds, then after
+  `wait_for_url /create/new` waits until unique exact `Import document`
+  is visible (log those seconds; a too-soon 0-element lookup is FAIL),
+  Agency Fee default (expect $0.00 / empty, set 500, stop before Save),
+  Producer / Account Manager prefills (FAIL if they stay Robie AI when
+  Carlo or Jake sent the job), and unique create/new listbox options (job
   `38c0fa79`: two matching options is PLAYWRIGHT_BLOCKED; log the
   blocked field). GitHub CI does not open Ascend. Live walk is
   `hermes-test-01` only (Robie Test account + email 2SV; never PAWIVA).

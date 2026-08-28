@@ -14,23 +14,29 @@ from robie_job_engine.ascend_create_defaults import (
     PAWIVA_SPINNER_SECONDS,
     SPINNER_TIMING_SCENARIO_ID,
     TEST_AGENCY_FEE,
+    TOO_SOON_ZERO_ELEMENT_SCENARIO_ID,
     WAIT_FOR_URL,
     agency_fee_default_is_empty_or_zero,
     classify_document_labels,
+    classify_too_soon_zero_element,
     create_url_is_new_program,
     log_role_defaults,
     new_program_click_is_primary,
     refuse_unexpected_agency_fee_default,
     refuse_unlogged_agency_fee_default,
+    require_create_form_seconds_logged,
     require_create_new_url,
     require_spinner_seconds_logged,
     run_agency_fee_default_scenario,
     run_role_default_log_scenario,
     run_spinner_timing_scenario,
+    run_too_soon_zero_element_scenario,
     should_set_test_agency_fee,
     spinner_seconds,
     test_agency_fee_set_value,
+    too_soon_zero_element_lookup_is_fail,
 )
+from robie_job_engine.ascend_locator_audit_runner import wait_create_form_ready
 from robie_job_engine.ascend_locator_audit import (
     JOB_TYPE,
     AscendLocatorAuditWorker,
@@ -40,10 +46,15 @@ from robie_job_engine.ascend_locator_audit import (
 from robie_job_engine.store import JobStore
 from robie_job_engine.ascend_sender_roles import (
     CARLO_FERRARA,
+    DUMPED_CREATE_FORM_IMPORT_BUTTON,
+    IMPORT_DOCUMENT_ACCESSIBLE_NAME,
+    IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES,
+    IMPORT_DOCUMENT_LOCATOR,
     JAKE_FERRARA,
     NEW_PROGRAM_LOCATOR,
     ROBIE_AI,
     ascend_new_program_contract_lines,
+    create_form_timeout_error,
 )
 from robie_job_engine.job_type_gate import is_job_type_production_ready
 
@@ -71,6 +82,69 @@ class SpinnerTimingTests(unittest.TestCase):
         self.assertEqual(report["id"], SPINNER_TIMING_SCENARIO_ID)
         self.assertTrue(report["ok"], report.get("evidence"))
         self.assertEqual(report["observed"]["seconds"], 12.0)
+
+
+class CreateFormTooSoonZeroElementTests(unittest.TestCase):
+    def test_zero_element_lookup_is_fail_and_seconds_required(self):
+        self.assertTrue(too_soon_zero_element_lookup_is_fail(0))
+        self.assertFalse(too_soon_zero_element_lookup_is_fail(1))
+        error = classify_too_soon_zero_element(0)
+        self.assertIn("strict mode", error.casefold())
+        self.assertIn("resolved to 0 elements", error)
+        self.assertIn(IMPORT_DOCUMENT_LOCATOR, error)
+        self.assertIsNotNone(require_create_form_seconds_logged(None))
+        self.assertIsNone(require_create_form_seconds_logged(2.837))
+        timeout = create_form_timeout_error("TimeoutError")
+        self.assertTrue(timeout.startswith("PLAYWRIGHT_BLOCKED"))
+        self.assertIn("Gemini", timeout)
+
+    def test_dumped_import_document_is_exact_ascii_space_32(self):
+        dumped = str(DUMPED_CREATE_FORM_IMPORT_BUTTON["accessible_name"])
+        self.assertEqual(dumped, "Import document")
+        self.assertEqual(
+            tuple(ord(char) for char in dumped),
+            IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES,
+        )
+        self.assertIn(32, IMPORT_DOCUMENT_ACCESSIBLE_NAME_CHAR_CODES)
+        self.assertEqual(IMPORT_DOCUMENT_ACCESSIBLE_NAME, dumped)
+        self.assertIn("exact=True", IMPORT_DOCUMENT_LOCATOR)
+
+    def test_named_too_soon_scenario_proves_zero_element_is_fail(self):
+        report = run_too_soon_zero_element_scenario()
+        self.assertEqual(report["id"], TOO_SOON_ZERO_ELEMENT_SCENARIO_ID)
+        self.assertTrue(report["ok"], report.get("evidence"))
+        self.assertTrue(report["observed"]["too_soon_zero_element_is_fail"])
+
+    def test_wait_create_form_ready_waits_then_logs_seconds(self):
+        page = _FakeCreateFormPage(visible_after_wait=True)
+        observed = wait_create_form_ready(page)
+        self.assertTrue(page.import_button.waited)
+        self.assertIn("seconds", observed)
+        self.assertGreaterEqual(observed["seconds"], 0)
+        self.assertEqual(observed["primary"], IMPORT_DOCUMENT_ACCESSIBLE_NAME)
+        self.assertEqual(page.import_button.count(), 1)
+
+    def test_immediate_zero_count_is_fail_before_wait(self):
+        page = _FakeCreateFormPage(visible_after_wait=True)
+        self.assertEqual(page.import_button.count(), 0)
+        from robie_job_engine.ascend_locator_audit import (
+            UniqueLocatorError,
+            require_unique_locator,
+        )
+
+        with self.assertRaises(UniqueLocatorError) as raised:
+            require_unique_locator(
+                page.import_button, locator=IMPORT_DOCUMENT_LOCATOR
+            )
+        self.assertIn("resolved to 0 elements", str(raised.exception))
+
+    def test_create_form_wait_timeout_is_playwright_blocked(self):
+        page = _FakeCreateFormPage(visible_after_wait=False)
+        with self.assertRaises(RuntimeError) as raised:
+            wait_create_form_ready(page, timeout_ms=50)
+        self.assertIn("PLAYWRIGHT_BLOCKED", str(raised.exception))
+        self.assertIn("logged", str(raised.exception))
+        self.assertTrue(page.import_button.waited)
 
 
 class AgencyFeeDefaultTests(unittest.TestCase):
@@ -155,6 +229,8 @@ class FixtureAndDocsTests(unittest.TestCase):
         }
         self.assertIn("spinner_timing", steps)
         self.assertEqual(steps["spinner_timing"]["status"], "PASS")
+        self.assertIn("too_soon_zero_element", steps)
+        self.assertEqual(steps["too_soon_zero_element"]["status"], "PASS")
         self.assertIn("agency_fee_default", steps)
         self.assertEqual(steps["agency_fee_default"]["status"], "PASS")
         payload = default_audit_payload(requested_by="Carlo Ferrara")
@@ -189,6 +265,8 @@ class FixtureAndDocsTests(unittest.TestCase):
             self.assertEqual(walked["producer_role"]["observed"]["producer_default"], ROBIE_AI)
             self.assertEqual(walked["producer_role"]["observed"]["set_value"], CARLO_FERRARA)
             self.assertIn("Import document", walked["import_document"]["observed"]["labels"])
+            self.assertIn("seconds", walked["import_document"]["observed"])
+            self.assertEqual(walked["import_document"]["observed"]["seconds"], 2.0)
             self.assertIn("Save program", walked["stop_before_save"]["observed"]["stop_before"])
 
     def test_contract_and_docs_name_n1_and_follow_tab(self):
@@ -199,12 +277,15 @@ class FixtureAndDocsTests(unittest.TestCase):
         blob = "\n".join(lines)
         self.assertIn("seconds", blob.casefold())
         self.assertIn("/create/new", blob)
+        self.assertIn("not instant", blob.casefold())
+        self.assertIn("0-element", blob.casefold())
         self.assertIn("500", blob)
         self.assertIn("$0.00", blob)
         self.assertIn("Import document", blob)
         self.assertIn("Upload document", blob)
         self.assertIn("dropzone", blob.casefold())
         self.assertIn(CARLO_FERRARA, blob)
+        self.assertIn(IMPORT_DOCUMENT_LOCATOR, blob)
         state = Path("CURRENT_STATE.md").read_text(encoding="utf-8")
         release = Path("RELEASE_PROCESS.md").read_text(encoding="utf-8")
         skill = Path("skills/ascend-locator-artifact-audit/SKILL.md").read_text(
@@ -220,6 +301,39 @@ class FixtureAndDocsTests(unittest.TestCase):
         self.assertIn("production_ready: false", skill)
         self.assertIn("Do not overwrite", skill)
         self.assertNotIn("production_ready: true", skill)
+        self.assertIn("not instant", skill.casefold())
+        self.assertIn("0-element", skill.casefold())
+        self.assertIn('name="Import document", exact=True', skill)
+
+
+class _FakeImportButton:
+    def __init__(self, *, visible_after_wait: bool) -> None:
+        self._visible = False
+        self._visible_after_wait = visible_after_wait
+        self.waited = False
+
+    def count(self) -> int:
+        return 1 if self._visible else 0
+
+    def wait_for(self, state: str = "visible", timeout: int | None = None) -> None:
+        self.waited = True
+        if not self._visible_after_wait:
+            raise TimeoutError("Timeout 30000ms exceeded")
+        if state == "visible":
+            self._visible = True
+
+    def is_enabled(self) -> bool:
+        return self._visible
+
+
+class _FakeCreateFormPage:
+    def __init__(self, *, visible_after_wait: bool) -> None:
+        self.import_button = _FakeImportButton(visible_after_wait=visible_after_wait)
+
+    def get_by_role(self, role: str, name: str | None = None, exact: bool = False):
+        if role == "button" and name == IMPORT_DOCUMENT_ACCESSIBLE_NAME and exact:
+            return self.import_button
+        return _FakeImportButton(visible_after_wait=False)
 
 
 if __name__ == "__main__":

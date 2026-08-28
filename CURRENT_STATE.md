@@ -205,7 +205,11 @@ spinner and clicks only the unique primary New program
 text). `ascend-new-program:accessible-name` is live job `f7653a85`:
 `get_by_role("button", name="+ New program", exact=True)` never matches.
 `ascend-new-program:spinner-timing` logs seconds until that primary is
-ready and `wait_for_url /create/new` (live PAWIVA was ~12s).
+ready and `wait_for_url /create/new` (live PAWIVA was ~12s). The create
+form is not instant after that URL.
+`ascend-create:too-soon-zero-element` waits until the unique exact
+`Import document` primary is visible (log seconds). A too-soon
+0-element lookup after `/create/new` is FAIL.
 `ascend-create:agency-fee-default` logs the Agency Fee default (expect
 $0.00 / empty), sets 500 if the field exists, then stops before Save.
 `ascend-create:unique-listbox-option` is job `38c0fa79`: open each

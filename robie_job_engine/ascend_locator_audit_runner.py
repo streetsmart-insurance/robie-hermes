@@ -28,6 +28,7 @@ from .ascend_create_defaults import (
     classify_document_labels,
     log_role_defaults,
     refuse_unexpected_agency_fee_default,
+    require_create_form_seconds_logged,
     require_create_new_url,
     require_spinner_seconds_logged,
     should_set_test_agency_fee,
@@ -56,6 +57,8 @@ from .ascend_customer_type import (
 )
 from .ascend_sender_roles import (
     ACCOUNT_MANAGER_LOCATOR,
+    CREATE_FORM_READY_TIMEOUT_MS,
+    IMPORT_DOCUMENT_ACCESSIBLE_NAME,
     IMPORT_DOCUMENT_LOCATOR,
     NEW_PROGRAM_ACCESSIBLE_NAME,
     NEW_PROGRAM_LOCATOR,
@@ -63,6 +66,8 @@ from .ascend_sender_roles import (
     PROGRAMS_KPI_LOCATOR,
     PROGRAMS_READY_TIMEOUT_MS,
     PROGRAMS_TABLE_LOCATOR,
+    UPLOAD_DOCUMENT_ACCESSIBLE_NAME,
+    create_form_timeout_error,
     locator_is_new_program_caret,
     programs_spinner_timeout_error,
     requested_by_from_payload,
@@ -90,6 +95,12 @@ def _label_text(label: str) -> str:
 
 def _new_program_target(page: Any) -> Any:
     return page.get_by_role("button", name=NEW_PROGRAM_ACCESSIBLE_NAME, exact=True)
+
+
+def _import_document_target(page: Any) -> Any:
+    return page.get_by_role(
+        "button", name=IMPORT_DOCUMENT_ACCESSIBLE_NAME, exact=True
+    )
 
 
 def wait_programs_ready(
@@ -151,6 +162,40 @@ def wait_create_new_url(
     if leak:
         raise RuntimeError(leak)
     return url
+
+
+def wait_create_form_ready(
+    page: Any, *, timeout_ms: int = CREATE_FORM_READY_TIMEOUT_MS
+) -> dict[str, Any]:
+    """After /create/new, wait until unique Import document is visible. Log seconds."""
+    started = time.monotonic()
+    button = _import_document_target(page)
+    try:
+        button.wait_for(state="visible", timeout=timeout_ms)
+    except Exception as exc:  # noqa: BLE001
+        seconds = spinner_seconds(started, time.monotonic())
+        raise RuntimeError(
+            create_form_timeout_error(f"{exc}; logged {seconds}s")
+        ) from exc
+    require_unique_locator(button, locator=IMPORT_DOCUMENT_LOCATOR)
+    enabled = getattr(button, "is_enabled", None)
+    if callable(enabled) and not enabled():
+        seconds = spinner_seconds(started, time.monotonic())
+        raise RuntimeError(
+            create_form_timeout_error(
+                f"Import document is not enabled; logged {seconds}s"
+            )
+        )
+    seconds = spinner_seconds(started, time.monotonic())
+    leak = require_create_form_seconds_logged(seconds)
+    if leak:
+        raise RuntimeError(leak)
+    return {
+        "seconds": seconds,
+        "locator": IMPORT_DOCUMENT_LOCATOR,
+        "primary": IMPORT_DOCUMENT_ACCESSIBLE_NAME,
+        "primary_enabled": True,
+    }
 
 
 def _field_value(target: Any) -> str:
@@ -297,7 +342,7 @@ def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str
             NEW_PROGRAM_LOCATOR,
         ),
         "import_document": (
-            lambda: page.get_by_role("button", name="Import document"),
+            lambda: _import_document_target(page),
             IMPORT_DOCUMENT_LOCATOR,
         ),
         "producer_role": (
@@ -422,8 +467,10 @@ def _act(page: Any, spec_id: str, target: Any, payload: dict[str, Any]) -> dict[
         return {"radio": decision.get("radio")}
     if spec_id == "import_document":
         labels = classify_document_labels(_visible_text(page))
-        import_count = _count(page.get_by_role("button", name="Import document"))
-        upload_count = _count(page.get_by_role("button", name="Upload document"))
+        import_count = _count(_import_document_target(page))
+        upload_count = _count(
+            page.get_by_role("button", name=UPLOAD_DOCUMENT_ACCESSIBLE_NAME, exact=True)
+        )
         labels["import_document"] = labels["import_document"] or import_count >= 1
         labels["upload_document"] = labels["upload_document"] or upload_count >= 1
         labels["labels"] = [
@@ -584,6 +631,22 @@ def run_live_walk(payload: dict[str, Any]) -> list[PunchStep]:
                                 spec_id,
                                 locator=PROGRAMS_KPI_LOCATOR + "|" + PROGRAMS_TABLE_LOCATOR,
                                 description=f"programs spinner {observed.get('seconds')}s",
+                                observed=observed,
+                            )
+                        )
+                        continue
+                    if spec_id == "import_document":
+                        observed = wait_create_form_ready(page)
+                        labels = _act(page, spec_id, _import_document_target(page), payload)
+                        observed = {**observed, **(labels or {})}
+                        steps.append(
+                            pass_step(
+                                spec_id,
+                                locator=IMPORT_DOCUMENT_LOCATOR,
+                                description=(
+                                    f"create form ready {observed.get('seconds')}s; "
+                                    f"labels {observed.get('labels')}"
+                                ),
                                 observed=observed,
                             )
                         )

@@ -103,6 +103,14 @@ ASCEND_LISTBOX_CHAT = (
     "No PAWIVA. Carlo will not RETRY 38c0fa79."
 )
 
+ASCEND_TOO_SOON_CHAT = (
+    "ASCEND create/new too-soon 0-element class returned: after "
+    "wait_for_url /create/new the form is not ready. Wait until the unique "
+    "exact Import document primary is visible; log seconds. Immediate "
+    "get_by_role(button, name='Import document') resolving to 0 elements "
+    "is FAIL. No Gemini. No .first/.nth/.last."
+)
+
 ASCEND_CUSTOMER_TYPE_CHAT = (
     "ASCEND customer type class returned: Commercial vs Personal is from "
     "line of business, not the form default and not LLC vs person-name. "
@@ -140,6 +148,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "ascend-new-program:accessible-name",
         "ascend-new-program:spinner-timing",
         "ascend-create:agency-fee-default",
+        "ascend-create:too-soon-zero-element",
         "ascend-create:unique-listbox-option",
         "ascend-customer-type:lob",
         "recording:follow-live-playwright-tab",
@@ -630,6 +639,17 @@ def run_agency_fee_default_scenario() -> dict[str, Any]:
         return _fail("ascend-create:agency-fee-default", f"{type(exc).__name__}: {exc}")
 
 
+def run_too_soon_zero_element_scenario() -> dict[str, Any]:
+    from .ascend_create_defaults import run_too_soon_zero_element_scenario as _run
+
+    try:
+        return _run()
+    except Exception as exc:  # noqa: BLE001
+        return _fail(
+            "ascend-create:too-soon-zero-element", f"{type(exc).__name__}: {exc}"
+        )
+
+
 def run_unique_listbox_option_scenario() -> dict[str, Any]:
     from .ascend_create_combobox import run_unique_listbox_option_scenario as _run
 
@@ -863,6 +883,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results.append(run_accessible_name_scenario())
     results.append(run_spinner_timing_scenario())
     results.append(run_agency_fee_default_scenario())
+    results.append(run_too_soon_zero_element_scenario())
     results.append(run_unique_listbox_option_scenario())
     results.append(run_customer_type_lob_scenario())
     results.append(

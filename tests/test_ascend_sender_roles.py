@@ -169,6 +169,7 @@ class ProgramsSpinnerWaitTests(unittest.TestCase):
         self.assertNotIn(PLUS_PREFIXED_NEW_PROGRAM_NAME, blob)
         self.assertIn("Jake Ferrara", blob)
         self.assertIn("Import document", blob)
+        self.assertIn("0-element", blob.casefold())
         self.assertIn("line of business", blob.casefold())
         self.assertIn("seconds", blob.casefold())
         self.assertIn("/create/new", blob)
