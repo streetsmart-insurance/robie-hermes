@@ -9,6 +9,14 @@ Status: required Production gate. This is the accepted path, not a suggestion.
 
 Both profiles may be managed from one restricted Antigravity workspace, but they must never share writable state or deployment credentials.
 
+**Test is not a Production clone.** `hermes-test-01` has different
+service-account permissions and must not read Production secrets. A Test
+all-clear is never a Production all-clear. Known diffs live in
+`deploy/regression_battery/parity.json`. Update that list when a deploy
+or HITL shows drift (new permission, secret, browser, or ingress gap).
+A check that cannot be proven on Test because of a documented gap is
+**INCONCLUSIVE**, never green.
+
 ## Release contract
 
 `feature branch -> tests and security checks -> immutable artifact -> Test deploy -> end-to-end verification -> stored evidence -> approval -> promote same digest -> Production verification`
@@ -89,14 +97,26 @@ What runs automatically — do not reconstruct this from Chat.
 | `hermes-poc-01` after zip pointer flip + `hermes-gateway` restart | Same battery (`python -m robie_job_engine.regression_battery --notify --detach`) from `deploy/systemd/zz-hermes-gateway-job-engine-path.conf` `ExecStartPost`. Leading `-` so a NEW fail does not take the gateway down. `--detach` so the suite does not block ready. Isolated workdir `/var/lib/robie-regression-battery` — never Production `jobs.db`. | Every Production deploy (gateway restart after pointer flip) |
 | `scripts/verify-release.sh` | Same `--ci` battery after digest + compile, before a host may consume the archive | Pre-deploy verify |
 
+This battery **only guarantees previously seen failures have not come
+back**. Simulator passed means nothing we have already seen is wrong,
+never that nothing is wrong. A Test all-clear is not a Production
+all-clear.
+
 A **NEW** fail (a logic failure, or a replay outcome that is not in the
 known-accepted catalog) posts to `spaces/AAQAZbLJO78` as the Robie Chat
-APP via `chat_app_post.post_as_chat_app`. It does **not** `@robie` (that
+APP via `chat_app_post.post_as_chat_app`. Known-accepted Test failures
+stay quiet. DESTROYED Secret Manager latest with an older ENABLED
+version is HEALTHY and does not alert. INCONCLUSIVE parity gaps may be
+noted in Chat once and are never green. It does **not** `@robie` (that
 would start a live job). It does not bind, pay, or email the insured.
 
-A draft-PR hook may run (`gh pr create --draft`, contents:write +
-pull-requests:write, never merge). That PR is detection / a proposed
-starting point only.
+A draft-PR hook may run (`gh pr create --draft`) only for a
+deterministic NEW fail with a stable scenario id + the same failure
+signature. Flaky / timeout / network blips do not open a PR. If an
+unmerged auto-draft for that signature already exists, comment on it
+instead of opening another. Each auto-draft names owners Carlo Ferrara
+(StreetSmart) and Jake (StreetSmartJake) and says: Jake Approves, Carlo
+Confirms, Dusty pings if it sits.
 
 **Human gate (no self-ship):** Jake Approve (`StreetSmartJake`) and Carlo
 Confirm, same as other changes. The battery must not merge, must not flip

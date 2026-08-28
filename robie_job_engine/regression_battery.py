@@ -1,4 +1,8 @@
-"""PR + post-deploy regression battery. Logic tests + known Test replay.
+"""PR + post-deploy regression battery. Previously seen failures only.
+
+This battery only guarantees previously seen failures have not come back.
+Simulator passed means nothing we have already seen is wrong, never that
+nothing is wrong. A Test all-clear is never a Production all-clear.
 
 Detection is automatic. Merge, Production flip, and hermes-gateway restart
 stay human-gated (Jake Approve / Carlo Confirm). GitHub-hosted runners never
@@ -6,14 +10,16 @@ drive live EZLynx. Replay refuses Production env and live Hermes job-db paths.
 
 A NEW fail (not a known-accepted Test replay outcome) posts to the Robie
 Chat space as the Chat APP and may open a draft PR. It does not @robie,
-bind, email the insured, merge, or deploy.
+bind, email the insured, merge, or deploy. INCONCLUSIVE gaps are never green.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,11 +36,33 @@ from .runtime_env import PRODUCTION_ENV_NAMES, ProductionGuardError, current_rob
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PARITY_PATH = REPO_ROOT / "deploy" / "regression_battery" / "parity.json"
 DEFAULT_CHAT_SPACE = "spaces/AAQAZbLJO78"
+SCOPE = (
+    "This battery only guarantees previously seen failures have not come back. "
+    "Simulator passed means nothing we have already seen is wrong, never that "
+    "nothing is wrong."
+)
+SEEN_CLEAR_TEXT = (
+    "previously seen failures have not come back on this runner "
+    "(not a Production all-clear)"
+)
 HUMAN_GATE = (
-    "Human gate: Jake Approve (StreetSmartJake) and Carlo Confirm. "
+    "Owners: Carlo Ferrara (StreetSmart) and Jake (StreetSmartJake). "
+    "Jake Approves, Carlo Confirms, Dusty pings if it sits. "
     "Do not merge from this hook. Do not flip Production. "
     "Do not restart hermes-gateway."
+)
+SIGNATURE_MARKER = "regression-signature:"
+FLAKY_EVIDENCE = (
+    "timeout",
+    "timed out",
+    "network",
+    "connection reset",
+    "connection refused",
+    "temporary failure",
+    "eagain",
+    "unavailable",
 )
 ISOLATED_UNSET = (
     "ROBIE_ENV",
@@ -70,6 +98,8 @@ KNOWN_ACCEPTED_REPLAY = {
     "quote-replay:live-hermes-job-db": frozenset({"REFUSED"}),
     "quote-replay:test-paths-require-test-env": frozenset({"REFUSED"}),
 }
+HEALTHY_OUTCOMES = frozenset({"HEALTHY"})
+INCONCLUSIVE_OUTCOME = "INCONCLUSIVE"
 
 
 def _chat_space() -> str:
@@ -83,6 +113,103 @@ def _chat_space() -> str:
         if value.startswith("spaces/"):
             return value
     return DEFAULT_CHAT_SPACE
+
+
+def load_parity_catalog(path: Path | None = None) -> dict[str, Any]:
+    """Living Test/Production diff list. Update when deploy or HITL shows drift."""
+    target = Path(path or PARITY_PATH)
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+def parity_gap_results(
+    catalog: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Known permission/secret/browser gaps. INCONCLUSIVE, never green."""
+    data = catalog if catalog is not None else load_parity_catalog()
+    results: list[dict[str, Any]] = []
+    for row in data.get("diffs") or []:
+        gap_id = str(row.get("id") or "").strip()
+        if not gap_id:
+            continue
+        evidence = str(row.get("cannot_prove_on_test") or row.get("test") or "")
+        results.append(
+            {
+                "id": gap_id,
+                "kind": "parity",
+                "ok": False,
+                "outcome": INCONCLUSIVE_OUTCOME,
+                "evidence": evidence,
+                "gap": row.get("gap"),
+            }
+        )
+    return results
+
+
+def destroyed_latest_with_older_enabled_is_healthy(
+    *,
+    newest_state: str,
+    newest_enabled_version: str | None,
+    alert: bool,
+) -> bool:
+    """DESTROYED Secret Manager latest + older ENABLED is HEALTHY. Do not alert."""
+    return (
+        str(newest_state or "").upper() == "DESTROYED"
+        and bool(str(newest_enabled_version or "").strip())
+        and not alert
+    )
+
+
+def run_secret_health_scenario() -> dict[str, Any]:
+    """Deterministic leftover-DESTROYED case. Never reads Secret Manager payloads."""
+    from types import SimpleNamespace
+
+    from .login_secret_health import summarize_secret_versions
+
+    versions = [
+        SimpleNamespace(name="secrets/ezlynx-password/versions/1", state="ENABLED", create_time=1.0),
+        SimpleNamespace(name="secrets/ezlynx-password/versions/2", state="DESTROYED", create_time=2.0),
+    ]
+    summary = summarize_secret_versions(versions, secret_id="ezlynx-password")
+    healthy = destroyed_latest_with_older_enabled_is_healthy(
+        newest_state=str(summary.get("newest_state") or ""),
+        newest_enabled_version=summary.get("newest_enabled_version"),
+        alert=bool(summary.get("alert")),
+    )
+    return {
+        "id": "login-secret:destroyed-latest-enabled-older",
+        "kind": "replay",
+        "ok": healthy,
+        "outcome": "HEALTHY" if healthy else "ALERT",
+        "evidence": (
+            f"ENABLED {summary.get('newest_enabled_version')}; "
+            f"{summary.get('newest_version')} is DESTROYED leftover"
+        ),
+    }
+
+
+def normalize_evidence(evidence: str) -> str:
+    text = str(evidence or "").strip().splitlines()[0] if evidence else ""
+    text = re.sub(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\S*", "<ts>", text)
+    text = re.sub(r"\b[0-9a-f]{8,}\b", "<hex>", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d{3,}\b", "<n>", text)
+    return " ".join(text.casefold().split())
+
+
+def evidence_is_flaky(evidence: str) -> bool:
+    folded = str(evidence or "").casefold()
+    return any(token in folded for token in FLAKY_EVIDENCE)
+
+
+def failure_signature(item: dict[str, Any]) -> str:
+    """Stable scenario id + outcome + normalized evidence. Required before draft."""
+    payload = "|".join(
+        (
+            str(item.get("id") or "").strip(),
+            str(item.get("outcome") or "").strip(),
+            normalize_evidence(str(item.get("evidence") or "")),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def default_work_dir() -> Path:
@@ -340,6 +467,7 @@ def run_replay_scenarios(
     _guard("quote-replay:production-env", production_env)
     _guard("quote-replay:live-hermes-job-db", live_hermes_job_db)
     _guard("quote-replay:test-paths-require-test-env", test_paths_require_test_env)
+    results.append(run_secret_health_scenario())
     return results
 
 
@@ -352,9 +480,21 @@ def classify_results(
     new_failures: list[dict[str, Any]] = []
     known: list[dict[str, Any]] = []
     passed: list[dict[str, Any]] = []
+    inconclusive: list[dict[str, Any]] = []
+    healthy: list[dict[str, Any]] = []
     for item in results:
         outcome = str(item.get("outcome") or "")
         allowed = accepted.get(str(item.get("id") or ""), frozenset())
+        if outcome == INCONCLUSIVE_OUTCOME:
+            inconclusive.append(item)
+            continue
+        if outcome in HEALTHY_OUTCOMES or (
+            str(item.get("id") or "").startswith("login-secret:")
+            and item.get("ok")
+        ):
+            healthy.append(item)
+            passed.append(item)
+            continue
         if item.get("ok") and (not allowed or outcome in allowed):
             passed.append(item)
             continue
@@ -362,10 +502,19 @@ def classify_results(
             known.append(item)
             continue
         new_failures.append(item)
+    if new_failures:
+        verdict = "NEW_FAIL"
+    elif inconclusive:
+        verdict = "INCONCLUSIVE"
+    else:
+        verdict = "SEEN_CLEAR"
     return {
         "new_failures": new_failures,
         "known_accepted": known,
         "passed": passed,
+        "inconclusive": inconclusive,
+        "healthy": healthy,
+        "verdict": verdict,
     }
 
 
@@ -374,18 +523,45 @@ def format_new_failure_chat(
     *,
     trigger: str,
 ) -> str:
-    """Short Chat APP post. Never @robie."""
+    """Short Chat APP post. Never @robie. Never a Production all-clear."""
     lines = [
         "ROBIE regression battery — NEW fail",
         f"trigger: {trigger}",
+        SCOPE,
     ]
     for item in new_failures:
         evidence = str(item.get("evidence") or "no evidence").strip().splitlines()
         snippet = evidence[0] if evidence else "no evidence"
+        sig = failure_signature(item)
         lines.append(
-            f"- {item.get('id')}: {item.get('outcome')} ({snippet[:240]})"
+            f"- {item.get('id')}: {item.get('outcome')} ({snippet[:240]}) "
+            f"{SIGNATURE_MARKER}{sig}"
         )
     lines.append(HUMAN_GATE)
+    text = "\n".join(lines)
+    if "@robie" in text.casefold():
+        raise ValueError("regression Chat must not @robie")
+    if "production all-clear" in text.casefold() and "not a production all-clear" not in text.casefold():
+        raise ValueError("regression Chat must not claim a Production all-clear")
+    return text
+
+
+def format_inconclusive_chat(
+    gaps: list[dict[str, Any]],
+    *,
+    trigger: str,
+) -> str:
+    """One note that a gap is INCONCLUSIVE. Never green. Never @robie."""
+    lines = [
+        "ROBIE regression battery — INCONCLUSIVE",
+        f"trigger: {trigger}",
+        "Not a Production all-clear. Not green.",
+        SCOPE,
+    ]
+    for item in gaps:
+        lines.append(
+            f"- {item.get('id')}: cannot prove {item.get('evidence')}"
+        )
     text = "\n".join(lines)
     if "@robie" in text.casefold():
         raise ValueError("regression Chat must not @robie")
@@ -456,20 +632,105 @@ def assert_draft_argv_safe(argv: list[str]) -> list[str]:
     return argv
 
 
+def draftable_failures(new_failures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only deterministic NEW fails with a stable scenario id + signature."""
+    ready: list[dict[str, Any]] = []
+    for item in new_failures:
+        if not str(item.get("id") or "").strip():
+            continue
+        if evidence_is_flaky(str(item.get("evidence") or "")):
+            continue
+        if not failure_signature(item):
+            continue
+        ready.append(item)
+    return ready
+
+
 def draft_pr_payload(
     new_failures: list[dict[str, Any]],
     *,
     trigger: str,
 ) -> dict[str, str]:
+    signatures = [failure_signature(item) for item in new_failures]
     title = "ROBIE regression: NEW fail (do not merge)"
     body = (
         format_new_failure_chat(new_failures, trigger=trigger)
         + "\n\nThis draft is detection only. "
         + HUMAN_GATE
+        + "\n"
+        + SCOPE
+        + "\n"
+        + " ".join(f"{SIGNATURE_MARKER}{sig}" for sig in signatures)
     )
     if "@robie" in body.casefold():
         raise ValueError("draft PR body must not @robie")
-    return {"title": title, "body": body, "draft": "true"}
+    return {
+        "title": title,
+        "body": body,
+        "draft": "true",
+        "signature": signatures[0] if signatures else "",
+        "signatures": ",".join(signatures),
+    }
+
+
+def find_open_draft_for_signature(
+    signature: str,
+    *,
+    finder: Callable[[str], dict[str, Any] | None] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> dict[str, Any] | None:
+    if not signature:
+        return None
+    if finder is not None:
+        return finder(signature)
+    if shutil.which("gh") is None:
+        return None
+    run = runner or subprocess.run
+    query = f"{SIGNATURE_MARKER}{signature} draft:true state:open"
+    proc = run(
+        ["gh", "pr", "list", "--search", query, "--json", "number,title,url"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if int(proc.returncode) != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not rows:
+        return None
+    return dict(rows[0])
+
+
+def comment_on_existing_draft(
+    existing: dict[str, Any],
+    *,
+    body: str,
+    commenter: Callable[[dict[str, Any], str], Any] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> dict[str, Any]:
+    if commenter is not None:
+        result = commenter(existing, body)
+        return {"commented": True, "opened": False, "draft": True, "result": result}
+    number = str(existing.get("number") or "").strip()
+    if not number:
+        return {"commented": False, "opened": False, "draft": True, "skipped": "no PR number"}
+    argv = ["gh", "pr", "comment", number, "--body", body]
+    if "merge" in argv[:4]:
+        raise ValueError("comment hook cannot merge")
+    if shutil.which("gh") is None:
+        return {"commented": False, "opened": False, "draft": True, "skipped": "gh not available", "argv": argv}
+    run = runner or subprocess.run
+    proc = run(argv, check=False, capture_output=True, text=True)
+    return {
+        "commented": int(proc.returncode) == 0,
+        "opened": False,
+        "draft": True,
+        "argv": argv,
+        "returncode": int(proc.returncode),
+    }
 
 
 def open_draft_fix_pr(
@@ -477,9 +738,28 @@ def open_draft_fix_pr(
     *,
     trigger: str,
     opener: Callable[[dict[str, str]], Any] | None = None,
+    finder: Callable[[str], dict[str, Any] | None] | None = None,
+    commenter: Callable[[dict[str, Any], str], Any] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> dict[str, Any]:
-    payload = draft_pr_payload(new_failures, trigger=trigger)
+    ready = draftable_failures(new_failures)
+    if not ready:
+        return {
+            "opened": False,
+            "draft": True,
+            "skipped": "no deterministic signature (flaky or missing scenario id)",
+        }
+    payload = draft_pr_payload(ready, trigger=trigger)
+    existing = find_open_draft_for_signature(
+        payload.get("signature") or "", finder=finder, runner=runner
+    )
+    if existing:
+        comment = comment_on_existing_draft(
+            existing, body=payload["body"], commenter=commenter, runner=runner
+        )
+        comment["payload"] = payload
+        comment["existing"] = existing
+        return comment
     if opener is not None:
         result = opener(payload)
         return {"opened": True, "draft": True, "payload": payload, "result": result}
@@ -507,6 +787,30 @@ def open_draft_fix_pr(
     }
 
 
+def _note_once(
+    key: str,
+    *,
+    store: dict[str, bool] | None,
+    persist_path: Path | None = None,
+) -> bool:
+    """Return True if this key has not been noted yet. Used for one Chat."""
+    seen = store if store is not None else {}
+    if persist_path is not None and persist_path.is_file() and not seen:
+        try:
+            loaded = json.loads(persist_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                seen.update({str(k): bool(v) for k, v in loaded.items()})
+        except (OSError, json.JSONDecodeError):
+            pass
+    if seen.get(key):
+        return False
+    seen[key] = True
+    if persist_path is not None:
+        persist_path.parent.mkdir(parents=True, exist_ok=True)
+        persist_path.write_text(json.dumps(seen, sort_keys=True), encoding="utf-8")
+    return True
+
+
 def run_regression_battery(
     *,
     trigger: str = "ci",
@@ -514,10 +818,15 @@ def run_regression_battery(
     draft_pr: bool = False,
     logic_runner: Callable[[], list[dict[str, Any]]] | None = None,
     replay_runner: Callable[[], list[dict[str, Any]]] | None = None,
+    parity_runner: Callable[[], list[dict[str, Any]]] | None = None,
     poster: Callable[..., Any] | None = None,
     pr_opener: Callable[[dict[str, str]], Any] | None = None,
+    pr_finder: Callable[[str], dict[str, Any] | None] | None = None,
+    pr_commenter: Callable[[dict[str, Any], str], Any] | None = None,
     known_accepted: dict[str, frozenset[str]] | None = None,
     include_pytest: bool | None = None,
+    chat_once: dict[str, bool] | None = None,
+    chat_once_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run logic suite + replay catalog. Chat/draft only on NEW fails."""
     if current_robie_env() in PRODUCTION_ENV_NAMES and trigger == "replay-live":
@@ -528,10 +837,14 @@ def run_regression_battery(
     replay = list(
         replay_runner() if replay_runner is not None else run_replay_scenarios()
     )
+    parity = list(
+        parity_runner() if parity_runner is not None else parity_gap_results()
+    )
     classified = classify_results(
-        logic + replay, known_accepted=known_accepted
+        logic + replay + parity, known_accepted=known_accepted
     )
     new_failures = classified["new_failures"]
+    inconclusive = classified["inconclusive"]
     message = (
         format_new_failure_chat(new_failures, trigger=trigger)
         if new_failures
@@ -548,7 +861,11 @@ def run_regression_battery(
         if draft_pr:
             try:
                 draft = open_draft_fix_pr(
-                    new_failures, trigger=trigger, opener=pr_opener
+                    new_failures,
+                    trigger=trigger,
+                    opener=pr_opener,
+                    finder=pr_finder,
+                    commenter=pr_commenter,
                 )
             except Exception as exc:
                 draft = {
@@ -556,18 +873,40 @@ def run_regression_battery(
                     "draft": True,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
+    elif inconclusive and notify:
+        note_key = "inconclusive:" + ",".join(
+            str(item.get("id") or "") for item in inconclusive
+        )
+        persist = chat_once_path
+        if persist is None and chat_once is None:
+            persist = default_work_dir() / "inconclusive-noted.json"
+        if _note_once(note_key, store=chat_once, persist_path=persist):
+            try:
+                posted = _post_new_failure(
+                    format_inconclusive_chat(inconclusive, trigger=trigger),
+                    poster=poster,
+                )
+            except Exception as exc:
+                post_error = f"{type(exc).__name__}: {exc}"
+    verdict = classified["verdict"]
     return {
         "ok": not new_failures,
+        "green": verdict == "SEEN_CLEAR",
+        "verdict": verdict,
         "trigger": trigger,
-        "results": logic + replay,
+        "results": logic + replay + parity,
         "new_failures": new_failures,
         "known_accepted": classified["known_accepted"],
         "passed": classified["passed"],
+        "inconclusive": inconclusive,
+        "healthy": classified["healthy"],
         "chat_posted": posted,
         "message": message,
         "chat_post_error": post_error,
         "draft_pr": draft,
         "human_gate": HUMAN_GATE,
+        "scope": SCOPE,
+        "seen_clear_text": SEEN_CLEAR_TEXT,
     }
 
 
@@ -587,7 +926,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=(
             "ROBIE regression battery. Logic tests + Test replay catalog. "
             "NEW fails post to Chat without @robie and may open a draft PR. "
-            "Does not merge or deploy."
+            "Previously seen failures only. Does not merge or deploy."
         )
     )
     parser.add_argument(
@@ -622,7 +961,11 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(
         {
             "ok": report["ok"],
+            "green": report.get("green"),
+            "verdict": report.get("verdict"),
             "trigger": report["trigger"],
+            "scope": report.get("scope"),
+            "seen_clear_text": report.get("seen_clear_text"),
             "new_failures": [
                 {"id": item.get("id"), "outcome": item.get("outcome")}
                 for item in report["new_failures"]
@@ -631,8 +974,13 @@ def main(argv: list[str] | None = None) -> int:
                 {"id": item.get("id"), "outcome": item.get("outcome")}
                 for item in report["known_accepted"]
             ],
+            "inconclusive": [
+                {"id": item.get("id"), "outcome": item.get("outcome")}
+                for item in report.get("inconclusive") or []
+            ],
             "chat_posted": report["chat_posted"],
             "draft_pr_opened": bool((report.get("draft_pr") or {}).get("opened")),
+            "draft_pr_commented": bool((report.get("draft_pr") or {}).get("commented")),
         },
         sort_keys=True,
     ))

@@ -1,0 +1,34 @@
+{
+  "updated": "2026-08-28",
+  "maintain": "This is a living list, not a one-time snapshot. Update a row when a deploy or HITL shows drift (new permission, secret, browser, or ingress gap). A Test all-clear is never a Production all-clear. A gap that cannot be proven on Test is INCONCLUSIVE, never green.",
+  "diffs": [
+    {
+      "id": "parity:service-account",
+      "test": "hermes-test-01 uses an isolated service account. It is not a clone of Production IAM.",
+      "production": "hermes-poc-01 / project streetsmart-hermes-poc uses the Production identity.",
+      "cannot_prove_on_test": "Production IAM and Secret Manager access",
+      "gap": "permission"
+    },
+    {
+      "id": "parity:secrets",
+      "test": "Test must not read Production Secret Manager payloads or assume secretAccessor on Production secrets.",
+      "production": "Production reads ezlynx-username / ezlynx-password (newest ENABLED by create_time). DESTROYED latest + older ENABLED is HEALTHY.",
+      "cannot_prove_on_test": "Production login-secret ENABLED versions",
+      "gap": "secret"
+    },
+    {
+      "id": "parity:browser",
+      "test": "Test browser profile, CDP, and EZLynx session are isolated. GitHub runners have no EZLynx.",
+      "production": "Production shared Chrome on 127.0.0.1:9222 with the live EZLynx profile.",
+      "cannot_prove_on_test": "Production EZLynx tab / Chrome session",
+      "gap": "browser"
+    },
+    {
+      "id": "parity:job-db",
+      "test": "Test jobs.db lives under /opt/streetsmart-hermes-test/. Replay refuses Production job-db paths.",
+      "production": "Production jobs.db is /opt/streetsmart-hermes/robie-job-engine/data/jobs.db.",
+      "cannot_prove_on_test": "Production conversation binds and Chat intake timestamps",
+      "gap": "permission"
+    }
+  ]
+}

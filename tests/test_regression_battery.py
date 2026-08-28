@@ -16,19 +16,30 @@ from robie_job_engine.regression_battery import (
     KNOWN_ACCEPTED_REPLAY,
     LIVE_PRODUCTION_JOB_DB,
     LOGIC_PYTEST_MODULES,
+    PARITY_PATH,
     PYTEST_ONLY_MODULES,
+    SCOPE,
+    SEEN_CLEAR_TEXT,
+    SIGNATURE_MARKER,
     assert_draft_argv_safe,
     discover_unittest_suite,
     build_draft_pr_argv,
     classify_results,
+    destroyed_latest_with_older_enabled_is_healthy,
+    evidence_is_flaky,
+    failure_signature,
+    format_inconclusive_chat,
     format_new_failure_chat,
     isolated_env,
+    load_parity_catalog,
     logic_job_type_argv,
     logic_pytest_argv,
     logic_unittest_argv,
     open_draft_fix_pr,
+    parity_gap_results,
     run_regression_battery,
     run_replay_scenarios,
+    run_secret_health_scenario,
 )
 from robie_job_engine.test_runtime import ProductionGuardError
 
@@ -125,6 +136,11 @@ class ContractTests(unittest.TestCase):
         self.assertIn("--draft", SOURCE)
         self.assertIn("StreetSmartJake", SOURCE)
         self.assertIn("Carlo Confirm", SOURCE)
+        self.assertIn("Dusty pings if it sits", SOURCE)
+        self.assertIn("previously seen failures have not come back", SOURCE)
+        self.assertIn("nothing we have already seen is wrong", SOURCE)
+        self.assertIn("INCONCLUSIVE", SOURCE)
+        self.assertIn("not a Production all-clear", SOURCE)
         self.assertIn("Type=oneshot", SERVICE)
         self.assertIn("-m robie_job_engine.regression_battery --notify", SERVICE)
         self.assertIn("ROBIE_REGRESSION_CHAT_SPACE=spaces/AAQAZbLJO78", SERVICE)
@@ -209,6 +225,7 @@ class ClassifierAndNotifyTests(unittest.TestCase):
             ],
             poster=lambda space, text: posted.append((space, text)),
             pr_opener=lambda payload: opened.append(payload) or {"url": "unused"},
+            parity_runner=lambda: [],
         )
         self.assertTrue(report["ok"])
         self.assertEqual(report["new_failures"], [])
@@ -229,6 +246,7 @@ class ClassifierAndNotifyTests(unittest.TestCase):
             poster=lambda space, text: posted.append((space, text)),
             pr_opener=lambda payload: opened.append(payload)
             or {"url": "https://github.com/streetsmart-insurance/robie-hermes/pull/999"},
+            parity_runner=lambda: [],
         )
         self.assertFalse(report["ok"])
         self.assertEqual(len(posted), 1)
@@ -239,6 +257,11 @@ class ClassifierAndNotifyTests(unittest.TestCase):
         self.assertNotIn("@robie", posted[0][1].casefold())
         self.assertIn("StreetSmartJake", posted[0][1])
         self.assertIn("Carlo Confirm", posted[0][1])
+        self.assertIn("previously seen failures have not come back", posted[0][1])
+        self.assertNotIn("nothing is wrong", posted[0][1].replace(SCOPE, ""))
+        self.assertIn("Dusty pings if it sits", opened[0]["body"])
+        self.assertIn("Carlo Ferrara", opened[0]["body"])
+        self.assertIn(SIGNATURE_MARKER, opened[0]["body"])
         self.assertTrue(report["chat_posted"])
         self.assertEqual(len(opened), 1)
         self.assertIn("do not merge", opened[0]["title"].casefold())
@@ -308,6 +331,9 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(
             ids["quote-replay:test-paths-require-test-env"]["outcome"], "REFUSED"
         )
+        self.assertEqual(
+            ids["login-secret:destroyed-latest-enabled-older"]["outcome"], "HEALTHY"
+        )
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -321,6 +347,156 @@ class ReplayGuardTests(unittest.TestCase):
             run_replay_scenarios(
                 work_dir=Path("/opt/streetsmart-hermes/robie-job-engine/data")
             )
+
+
+class ParityAndScopeTests(unittest.TestCase):
+    def test_parity_catalog_is_maintained_and_never_green(self):
+        catalog = load_parity_catalog()
+        self.assertIn("when a deploy or HITL shows drift", catalog["maintain"])
+        self.assertGreaterEqual(len(catalog["diffs"]), 3)
+        gaps = {item["id"]: item for item in parity_gap_results(catalog)}
+        self.assertIn("parity:secrets", gaps)
+        self.assertEqual(gaps["parity:secrets"]["outcome"], "INCONCLUSIVE")
+        self.assertFalse(gaps["parity:secrets"]["ok"])
+        posted: list[str] = []
+        once: dict[str, bool] = {}
+        report = run_regression_battery(
+            trigger="test-vm",
+            notify=True,
+            draft_pr=True,
+            logic_runner=_logic_pass,
+            replay_runner=lambda: [],
+            poster=lambda space, text: posted.append(text),
+            pr_opener=lambda payload: (_ for _ in ()).throw(
+                AssertionError("INCONCLUSIVE must not open a draft PR")
+            ),
+            chat_once=once,
+        )
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["green"])
+        self.assertEqual(report["verdict"], "INCONCLUSIVE")
+        self.assertEqual(len(posted), 1)
+        self.assertIn("INCONCLUSIVE", posted[0])
+        self.assertIn("Not a Production all-clear", posted[0])
+        self.assertIn(SCOPE, posted[0])
+        self.assertNotIn("@robie", posted[0].casefold())
+        again = run_regression_battery(
+            trigger="test-vm",
+            notify=True,
+            draft_pr=True,
+            logic_runner=_logic_pass,
+            replay_runner=lambda: [],
+            poster=lambda space, text: posted.append(text),
+            pr_opener=lambda payload: (_ for _ in ()).throw(
+                AssertionError("second INCONCLUSIVE must stay quiet")
+            ),
+            chat_once=once,
+        )
+        self.assertEqual(len(posted), 1)
+        self.assertFalse(again["green"])
+        state = (ROOT / "CURRENT_STATE.md").read_text(encoding="utf-8")
+        release = (ROOT / "RELEASE_PROCESS.md").read_text(encoding="utf-8")
+        for text in (state, release):
+            flat = " ".join(text.replace("**", "").split())
+            self.assertIn("HITL shows drift", flat)
+            self.assertIn("not a Production all-clear", flat)
+            self.assertIn("previously seen failures have not come back", flat)
+            self.assertIn("INCONCLUSIVE", flat)
+        self.assertTrue(PARITY_PATH.is_file())
+
+    def test_destroyed_latest_with_older_enabled_is_healthy_and_quiet(self):
+        self.assertTrue(
+            destroyed_latest_with_older_enabled_is_healthy(
+                newest_state="DESTROYED",
+                newest_enabled_version="versions/1",
+                alert=False,
+            )
+        )
+        self.assertFalse(
+            destroyed_latest_with_older_enabled_is_healthy(
+                newest_state="DESTROYED",
+                newest_enabled_version=None,
+                alert=True,
+            )
+        )
+        posted: list[str] = []
+        opened: list[dict] = []
+        report = run_regression_battery(
+            trigger="post-deploy",
+            notify=True,
+            draft_pr=True,
+            logic_runner=_logic_pass,
+            replay_runner=lambda: [run_secret_health_scenario()],
+            parity_runner=lambda: [],
+            poster=lambda space, text: posted.append(text),
+            pr_opener=lambda payload: opened.append(payload),
+        )
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["green"])
+        self.assertEqual(report["verdict"], "SEEN_CLEAR")
+        self.assertEqual(report["seen_clear_text"], SEEN_CLEAR_TEXT)
+        self.assertIn("not a Production all-clear", report["seen_clear_text"])
+        self.assertEqual(posted, [])
+        self.assertEqual(opened, [])
+        self.assertEqual(report["healthy"][0]["outcome"], "HEALTHY")
+
+    def test_flaky_evidence_does_not_open_a_draft_pr(self):
+        self.assertTrue(evidence_is_flaky("connection reset while waiting"))
+        posted: list[str] = []
+        opened: list[dict] = []
+        report = run_regression_battery(
+            trigger="post-deploy",
+            notify=True,
+            draft_pr=True,
+            logic_runner=_logic_pass,
+            replay_runner=lambda: [
+                {
+                    "id": "quote-replay:simulated-new",
+                    "ok": False,
+                    "outcome": "FAILED",
+                    "evidence": "TimeoutError: page.goto timed out after 30000",
+                }
+            ],
+            parity_runner=lambda: [],
+            poster=lambda space, text: posted.append(text),
+            pr_opener=lambda payload: opened.append(payload),
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(opened, [])
+        self.assertEqual((report.get("draft_pr") or {}).get("opened"), False)
+        self.assertIn("flaky", str((report.get("draft_pr") or {}).get("skipped") or "").casefold())
+
+    def test_same_signature_comments_on_existing_draft_instead_of_opening_another(self):
+        first = _new_replay_fail()[0]
+        second = dict(first)
+        self.assertEqual(failure_signature(first), failure_signature(second))
+        comments: list[tuple[dict, str]] = []
+        opened: list[dict] = []
+        result = open_draft_fix_pr(
+            [first],
+            trigger="post-deploy",
+            opener=lambda payload: opened.append(payload) or {"url": "new"},
+            finder=lambda signature: {
+                "number": 99,
+                "title": "ROBIE regression: NEW fail (do not merge)",
+                "url": "https://github.com/streetsmart-insurance/robie-hermes/pull/99",
+            },
+            commenter=lambda existing, body: comments.append((existing, body)),
+        )
+        self.assertFalse(result["opened"])
+        self.assertTrue(result["commented"])
+        self.assertEqual(opened, [])
+        self.assertEqual(comments[0][0]["number"], 99)
+        self.assertIn("Dusty pings if it sits", comments[0][1])
+        self.assertIn("Carlo Ferrara", comments[0][1])
+        self.assertIn(SIGNATURE_MARKER, comments[0][1])
+        text = format_inconclusive_chat(
+            [{"id": "parity:secrets", "evidence": "Production login-secret ENABLED versions"}],
+            trigger="test-vm",
+        )
+        self.assertIn("Not a Production all-clear", text)
+        self.assertNotIn("@robie", text.casefold())
 
 
 if __name__ == "__main__":
