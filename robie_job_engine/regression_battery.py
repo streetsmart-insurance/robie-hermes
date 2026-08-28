@@ -437,6 +437,10 @@ def run_replay_scenarios(
     with patch.dict(os.environ, {}, clear=False):
         for key in ISOLATED_UNSET:
             os.environ.pop(key, None)
+        # This is a synthetic Test-only replay.  The durable verifier root may
+        # itself live under /opt/streetsmart-hermes-test, whose path guard
+        # correctly requires an explicit TEST environment.
+        os.environ["ROBIE_ENV"] = "TEST"
         missing = run_quote_replay(
             quote_pdf=None, db_path=db, artifact_root=artifacts
         )

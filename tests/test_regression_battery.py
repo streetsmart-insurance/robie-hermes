@@ -361,6 +361,24 @@ class ClassifierAndNotifyTests(unittest.TestCase):
 
 
 class ReplayGuardTests(unittest.TestCase):
+    def test_missing_pdf_replay_is_explicitly_test_scoped(self):
+        observed_env: list[str] = []
+
+        def missing_pdf(**kwargs):
+            del kwargs
+            observed_env.append(os.environ.get("ROBIE_ENV", ""))
+            return {"outcome": "BLOCKED", "reason": "no pdf"}
+
+        with durable_temporary_directory() as tmp, patch(
+            "robie_job_engine.regression_battery.run_quote_replay",
+            side_effect=missing_pdf,
+        ), patch(
+            "robie_job_engine.regression_battery.run_named_scenarios",
+            return_value=[],
+        ):
+            run_replay_scenarios(work_dir=Path(tmp) / "replay")
+        self.assertEqual(observed_env, ["TEST"])
+
     def test_replay_catalog_accepts_known_outcomes_and_refuses_production(self):
         with durable_temporary_directory() as tmp:
             results = run_replay_scenarios(work_dir=Path(tmp) / "replay")
