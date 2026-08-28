@@ -48,6 +48,7 @@ def gemini_unique_field(
     dialog_title: str = "",
     visible_labels: list[str] | str | None = None,
     block_reason: str = "PLAYWRIGHT_BLOCKED",
+    page_url: str = "",
     **_kwargs,
 ):
     from tools.registry import tool_error, tool_result
@@ -62,6 +63,7 @@ def gemini_unique_field(
             block_reason=block_reason or "PLAYWRIGHT_BLOCKED",
             dialog_title=dialog_title or "",
             visible_labels=labels,
+            page_url=page_url or "",
         )
     except Exception as exc:
         return tool_error(
@@ -77,10 +79,11 @@ def gemini_unique_field(
 GEMINI_UNIQUE_FIELD_SCHEMA = {
     "name": "gemini_unique_field",
     "description": (
-        "After PLAYWRIGHT_BLOCKED or an unnamed EZLynx modal, send the dialog "
-        "title and visible labels only (no passwords). Gemini may return one "
-        "unique field to apply through unique-write, or the tool HITLs Carlo. "
-        "Never guess. Never use .first/.nth/.last."
+        "After a stuck Playwright write on any site (PLAYWRIGHT_BLOCKED "
+        "unique-write, hidden/combobox, or fill/click timeout), send the "
+        "dialog title and visible labels only (no passwords). Gemini may "
+        "return one unique field to apply through unique-write, or the tool "
+        "HITLs Carlo. Never guess. Never use .first/.nth/.last."
     ),
     "parameters": {
         "type": "object",
@@ -96,6 +99,10 @@ GEMINI_UNIQUE_FIELD_SCHEMA = {
                 "type": "string",
                 "description": "Exact PLAYWRIGHT_BLOCKED reason.",
             },
+            "page_url": {
+                "type": "string",
+                "description": "Current page URL if known. Only the host is sent.",
+            },
         },
         "required": ["dialog_title", "visible_labels"],
     },
@@ -110,6 +117,7 @@ registry.register(
         dialog_title=args.get("dialog_title", ""),
         visible_labels=args.get("visible_labels"),
         block_reason=args.get("block_reason", "PLAYWRIGHT_BLOCKED"),
+        page_url=args.get("page_url", ""),
         **kwargs,
     ),
     check_fn=lambda: True,

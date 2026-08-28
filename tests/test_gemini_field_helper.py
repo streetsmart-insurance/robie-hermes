@@ -11,6 +11,7 @@ from io import BytesIO
 from robie_job_engine.gemini_field_helper import (
     VertexGeminiFieldClient,
     ask_gemini_unique_field,
+    build_gemini_unique_field_prompt,
     describe_blocked_dialog,
     resolve_blocked_unique_write,
 )
@@ -98,6 +99,8 @@ class GeminiFieldHelperTests(unittest.TestCase):
         self.assertIn("every EZLynx note write", fallback)
         self.assertIn("Robie was here", fallback)
         self.assertIn("Never write a note on Untitled", fallback)
+        self.assertNotIn("EZLynx Gemini fallback", fallback)
+        self.assertIn("stuck Playwright write on any site", fallback)
 
     def test_password_labels_are_stripped_before_gemini(self):
         description = describe_blocked_dialog(
@@ -217,6 +220,77 @@ class GeminiFieldHelperTests(unittest.TestCase):
     def test_unconfigured_vertex_client_is_not_used(self):
         client = VertexGeminiFieldClient(project="", location="us-central1", model="gemini-2.5-flash")
         self.assertFalse(client.configured())
+
+    def test_prompt_names_current_page_not_ezlynx_write(self):
+        with_host = build_gemini_unique_field_prompt(
+            dialog_title="Quote Details",
+            visible_labels=["Carrier"],
+            block_reason=(
+                "PLAYWRIGHT_BLOCKED: write target input[name='quotes.0.carrier_id'] "
+                "is hidden / combobox-hidden value; ask Gemini then HITL Carlo; "
+                "do not retry-loop"
+            ),
+            page_url="https://app.ascend.com/quotes/123?token=should-not-appear",
+        )
+        self.assertNotIn("EZLynx write", with_host)
+        self.assertIn("app.ascend.com", with_host)
+        self.assertIn("Quote Details", with_host)
+        self.assertIn("Carrier", with_host)
+        self.assertIn("hidden / combobox-hidden", with_host)
+        self.assertNotIn("should-not-appear", with_host)
+        self.assertNotIn("token=", with_host)
+
+        untitled = build_gemini_unique_field_prompt(
+            dialog_title="Add Vehicle",
+            visible_labels=["VIN"],
+            block_reason="PLAYWRIGHT_BLOCKED: matched 2 fields",
+        )
+        self.assertNotIn("EZLynx write", untitled)
+        self.assertIn("Add Vehicle", untitled)
+        self.assertIn("VIN", untitled)
+
+    def test_ascend_hidden_field_still_apply_or_hitl(self):
+        apply_client = FakeGeminiClient(
+            json.dumps(
+                {
+                    "decision": "unique",
+                    "field_label": "Carrier",
+                    "locator": "get_by_label('Carrier')",
+                }
+            )
+        )
+        applied = resolve_blocked_unique_write(
+            block_reason=(
+                "PLAYWRIGHT_BLOCKED: write target input[name='quotes.0.carrier_id'] "
+                "is hidden / combobox-hidden value; ask Gemini then HITL Carlo"
+            ),
+            dialog_title="Quote Details",
+            visible_labels=["Carrier"],
+            page_url="https://app.ascend.com/quotes/123",
+            client=apply_client,
+        )
+        self.assertEqual(applied.action, "APPLY")
+        self.assertEqual(applied.field_label, "Carrier")
+        self.assertEqual(applied.locator, "get_by_label('Carrier')")
+        self.assertTrue(applied.gemini_asked)
+        self.assertEqual(len(apply_client.prompts), 1)
+        self.assertNotIn("EZLynx write", apply_client.prompts[0])
+        self.assertIn("app.ascend.com", apply_client.prompts[0])
+
+        hitl = resolve_blocked_unique_write(
+            block_reason=(
+                "PLAYWRIGHT_BLOCKED: write target is hidden / combobox-hidden value; "
+                "ask Gemini then HITL Carlo"
+            ),
+            dialog_title="Quote Details",
+            visible_labels=["Carrier"],
+            page_url="https://app.ascend.com/quotes/123",
+            client=FakeGeminiClient('{"decision":"unsure","reason":"hidden combobox"}'),
+        )
+        self.assertEqual(hitl.action, "HITL")
+        self.assertEqual(hitl.hitl_operator, "Carlo")
+        self.assertIn("Carlo", hitl.reason)
+        self.assertTrue(hitl.gemini_asked)
 
 
 if __name__ == "__main__":

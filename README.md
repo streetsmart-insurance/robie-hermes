@@ -89,6 +89,7 @@ Backend EZLynx workflow Skills live in `deploy/hermes/skills/` (installed to
 `.hermes/skills`) and are mirrored under `skills/` for the EZLynx skill-folder
 layout. `ezlynx-commercial-auto-from-quote` requires Save and Continue Edit
 after a policy SHELL and titled-discussion notes that include `Robie was here`.
-`ezlynx-gemini-fallback` is the fail-closed stuck-field hook: ask Gemini for
-one unique field, then HITL Carlo if Gemini is unsure. Unique-write stays on.
+`ezlynx-gemini-fallback` is the fail-closed stuck-field hook for a stuck
+Playwright write on any site: ask Gemini for one unique field, then HITL
+Carlo if Gemini is unsure. Unique-write stays on.
 These Skills do not bind and do not take payment.

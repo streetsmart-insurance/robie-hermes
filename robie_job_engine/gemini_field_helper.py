@@ -1,11 +1,11 @@
-"""Fail-closed Gemini helper for a blocked unique-write.
+"""Fail-closed Gemini helper for a blocked unique-write on any Playwright site.
 
 Vertex/Gemini is already used in this repo as a Hermes fallback provider and
 for model-attempt / thought-signature audit. There is no existing job-callable
 stuck-field client. This module is the smallest safe hook:
 
-1. A blocked unique-write or unnamed modal stops.
-2. Only the dialog title and visible labels are sent (secrets redacted).
+1. A blocked unique-write or unnamed modal on any site Robie drives stops.
+2. Only the page host/title and visible labels are sent (secrets redacted).
 3. Gemini may return exactly one unique field, or the helper HITLs.
 4. Positional ``.first`` / ``.nth()`` / ``.last`` answers are refused.
 
@@ -19,6 +19,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
@@ -82,6 +83,24 @@ def _safe_label(value: str) -> str | None:
     if text == "[REDACTED]":
         return None
     return text[:160]
+
+
+def _safe_page_host(page_url: str = "") -> str:
+    """Host only. Drop userinfo, path, and query so tokens never leave the page."""
+    text = redact_text(str(page_url or "")).strip()
+    if not text or text == "[REDACTED]":
+        return ""
+    parsed = urllib.parse.urlparse(text if "://" in text else f"https://{text}")
+    host = (parsed.hostname or "").strip()
+    return _safe_label(host) or ""
+
+
+def _current_page_name(*, dialog_title: str, page_url: str = "") -> str:
+    host = _safe_page_host(page_url)
+    title = str(dialog_title or "").strip()
+    if host and title:
+        return f"{host} ({title})"
+    return host or title or "the current page"
 
 
 def describe_blocked_dialog(
@@ -154,16 +173,21 @@ def build_gemini_unique_field_prompt(
     dialog_title: str,
     visible_labels: Iterable[str],
     block_reason: str = "",
+    page_url: str = "",
 ) -> str:
     description = describe_blocked_dialog(
         dialog_title=dialog_title,
         visible_labels=visible_labels,
         block_reason=block_reason,
     )
+    page_name = _current_page_name(
+        dialog_title=description["dialog_title"],
+        page_url=page_url,
+    )
     return (
-        "An EZLynx write was PLAYWRIGHT_BLOCKED because the field could not "
-        "be uniquely named. Unique-write stays fail-closed. Do not guess. "
-        "Do not use .first, .nth(), or .last.\n\n"
+        f"A Playwright write on {page_name} was PLAYWRIGHT_BLOCKED because "
+        "the field could not be uniquely named. Unique-write stays fail-closed. "
+        "Do not guess. Do not use .first, .nth(), or .last.\n\n"
         f"Dialog title: {description['dialog_title'] or '(none)'}\n"
         "Visible labels:\n"
         + ("\n".join(f"- {label}" for label in description["visible_labels"]) or "- (none)")
@@ -302,6 +326,7 @@ def ask_gemini_unique_field(
     dialog_title: str,
     visible_labels: Iterable[str],
     block_reason: str = "",
+    page_url: str = "",
     client: GeminiFieldClient | None = None,
 ) -> UniqueFieldDecision:
     """Ask Gemini for one unique field, then APPLY or HITL. Fail closed."""
@@ -325,6 +350,7 @@ def ask_gemini_unique_field(
         dialog_title=description["dialog_title"],
         visible_labels=description["visible_labels"],
         block_reason=description["block_reason"],
+        page_url=page_url,
     )
     try:
         raw = active.generate_unique_field(prompt)
@@ -371,6 +397,7 @@ def resolve_blocked_unique_write(
     block_reason: str,
     dialog_title: str,
     visible_labels: Iterable[str],
+    page_url: str = "",
     client: GeminiFieldClient | None = None,
 ) -> UniqueFieldDecision:
     """Hook for a PLAYWRIGHT_BLOCKED write: Gemini once, then APPLY or HITL."""
@@ -381,5 +408,6 @@ def resolve_blocked_unique_write(
         dialog_title=dialog_title,
         visible_labels=visible_labels,
         block_reason=safe_reason,
+        page_url=page_url,
         client=client,
     )
