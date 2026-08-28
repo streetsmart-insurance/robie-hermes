@@ -5,7 +5,7 @@ hermes-gateway, or browser restart; no bind; no client-file navigation.
 A zip pointer match is not health.
 
 Hooked after the zip pointer flip + hermes-gateway restart (ExecStartPost
-on the PYTHONPATH drop-in) and by a weekday oneshot timer.
+on the PYTHONPATH drop-in) and by an every-day 7am-midnight ET oneshot timer.
 """
 
 from __future__ import annotations
