@@ -104,6 +104,22 @@ already-existing DM). There is no outbound email API on `hermes-poc-01`.
 It does not `@robie`, bind, or restart Chrome / `hermes-gateway` / the
 browser.
 
+The regression battery (`robie_job_engine/regression_battery.py`) is the
+job-type / logic / Test-replay detector. It is not pre-flight and not
+post-job audit. GitHub Actions job `test` (same ROBIE verification gate
+family as `canonical-paths`) runs it on every PR via `--ci`: job-type
+gate, `unittest discover -s tests`, Phase 3 pytest modules, and the
+in-process quote-replay known-failure catalog. That runner never talks
+to EZLynx or `hermes-test-01`. After every Production zip pointer flip +
+`hermes-gateway` restart, the same drop-in starts
+`--notify --detach` so the battery runs again without blocking gateway
+ready and without a human typing `@robie`. A NEW fail (not a
+known-accepted Test replay outcome such as missing-PDF `BLOCKED`) posts
+one Robie Chat APP message to `spaces/AAQAZbLJO78` and may open a
+**draft** GitHub PR. It does not `@robie`, bind, email the insured,
+merge, flip Production, or restart `hermes-gateway`. Merge still needs
+Jake Approve (`StreetSmartJake`) and Carlo Confirm.
+
 Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
 `guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
 four-answer audit to the existing Robie Chat APP reply. Production Chat already

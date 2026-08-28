@@ -79,6 +79,35 @@ job-type gate and does not replace Test.
 New job types still need **N clean Test (`hermes-test-01`) jobs** before
 Production on a real account. N = **3**. See the required gate above.
 
+## Automated regression battery
+
+What runs automatically — do not reconstruct this from Chat.
+
+| Where | What | Trigger |
+| --- | --- | --- |
+| GitHub Actions job `test` (ROBIE verification gate, with `canonical-paths`) | Logic suite: job-type gate, `unittest discover -s tests`, Phase 3 pytest modules, plus the in-process Test replay / known-failure catalog (`quote_replay` missing-PDF + Production-path refuses). No EZLynx. No `hermes-test-01`. | Every `pull_request` and every push to `main` |
+| `hermes-poc-01` after zip pointer flip + `hermes-gateway` restart | Same battery (`python -m robie_job_engine.regression_battery --notify --detach`) from `deploy/systemd/zz-hermes-gateway-job-engine-path.conf` `ExecStartPost`. Leading `-` so a NEW fail does not take the gateway down. `--detach` so the suite does not block ready. Isolated workdir `/var/lib/robie-regression-battery` — never Production `jobs.db`. | Every Production deploy (gateway restart after pointer flip) |
+| `scripts/verify-release.sh` | Same `--ci` battery after digest + compile, before a host may consume the archive | Pre-deploy verify |
+
+A **NEW** fail (a logic failure, or a replay outcome that is not in the
+known-accepted catalog) posts to `spaces/AAQAZbLJO78` as the Robie Chat
+APP via `chat_app_post.post_as_chat_app`. It does **not** `@robie` (that
+would start a live job). It does not bind, pay, or email the insured.
+
+A draft-PR hook may run (`gh pr create --draft`, contents:write +
+pull-requests:write, never merge). That PR is detection / a proposed
+starting point only.
+
+**Human gate (no self-ship):** Jake Approve (`StreetSmartJake`) and Carlo
+Confirm, same as other changes. The battery must not merge, must not flip
+Production, and must not restart `hermes-gateway`.
+
+Live Test replay of a real quote PDF stays on `hermes-test-01` with
+`ROBIE_ENV=TEST` and `/opt/streetsmart-hermes-test/...` paths. GitHub
+runners and the Production oneshot refuse Production env and live Hermes
+job-db paths. New job types still need N=3 clean Test jobs before
+Production on a real account.
+
 ## Automated post-job audit
 
 On every Chat/Job Engine terminal state (`COMPLETE`, `FAILED`, `UNVERIFIED`),
