@@ -30,8 +30,10 @@ from robie_job_engine.ascend_create_combobox import (
     unique_option_hitl,
 )
 from robie_job_engine.ascend_locator_audit_runner import (
+    _allow_first_identical_coverage_option,
     _field_value,
     _scoped_option_names,
+    _select_unique_option,
     _upload_test_quote,
     _verified_role_value,
     _wait_open_listbox_options,
@@ -205,6 +207,11 @@ class _FakeControl:
         self._page.open_label = self._label
         self._page.search_by_label[self._label] = value
 
+    def press(self, key: str) -> None:
+        self._page.pressed_by_label[self._label] = key
+        if key == "Enter":
+            self._page.open_label = ""
+
     def evaluate(self, _expression: str) -> str:
         return "SELECT" if self._label == "State" else "INPUT"
 
@@ -288,6 +295,7 @@ class _FakePage:
         self.leaked = list(leaked or [])
         self.open_label = ""
         self.search_by_label: dict[str, str] = {}
+        self.pressed_by_label: dict[str, str] = {}
         self.keyboard = _FakeKeyboard(self)
         self.file_input = _FakeFileInput()
 
@@ -329,6 +337,64 @@ class _FakePage:
 
 
 class LiveComboboxAuditTests(unittest.TestCase):
+    def test_only_identical_exact_coverage_duplicates_use_first_active(self):
+        duplicate = classify_listbox_options(
+            field="Coverage type",
+            intended="Commercial Auto",
+            options=["Commercial Auto", "Commercial Auto"],
+            exact=True,
+        )
+        allowed = _allow_first_identical_coverage_option(
+            duplicate, field="Coverage type"
+        )
+        self.assertEqual(allowed["status"], "PASS")
+        self.assertEqual(
+            allowed["selection_strategy"], "first_active_identical_exact"
+        )
+        still_blocked = _allow_first_identical_coverage_option(
+            duplicate, field="Carrier"
+        )
+        self.assertEqual(still_blocked["status"], "FAIL")
+
+    def test_coverage_selection_presses_enter_on_first_identical_exact_result(self):
+        page = _FakePage(
+            {"Coverage type": ["Commercial Auto", "Commercial Auto"]}
+        )
+        target = page.get_by_label("Coverage type")
+        report = _select_unique_option(
+            page,
+            target,
+            "Commercial Auto",
+            field="Coverage type",
+        )
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(page.pressed_by_label["Coverage type"], "Enter")
+
+    def test_live_audit_allows_first_of_identical_exact_coverage_only(self):
+        page = _FakePage(
+            {
+                "Producer": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Account Manager": list(LIVE_ROLE_LISTBOX_OPTIONS),
+                "Carrier": list(LIVE_CARRIER_LISTBOX_TAILS),
+                "Coverage type": ["Commercial Package", "Commercial Package"],
+                "State": ["Georgia"],
+            }
+        )
+        observed = audit_live_comboboxes(
+            page,
+            {
+                "requested_by": "carlo@streetsmart.insurance",
+                "quote_text": TEST_QUOTE_TEXT,
+            },
+        )
+        self.assertTrue(observed["ok"], observed)
+        coverage = next(
+            item for item in observed["fields"] if item["field"] == "Coverage type"
+        )
+        self.assertEqual(
+            coverage["selection_strategy"], "first_active_identical_exact"
+        )
+
     def test_wait_for_searched_options_does_not_return_initial_list(self):
         class DelayedSearchPage:
             def __init__(self) -> None:
