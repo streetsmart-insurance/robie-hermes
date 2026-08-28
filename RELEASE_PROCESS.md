@@ -144,8 +144,10 @@ Job Engine job must pass on `hermes-test-01`:
 - Agency Fee: `ascend-create:agency-fee-default` (log the default, expect
   $0.00 / empty; set 500 if the field exists; then STOP before Save)
 - Unique listbox: `ascend-create:unique-listbox-option` (job `38c0fa79`:
-  open each create-form combobox; unique exact option locator; log the
-  blocked field; Carlo will not RETRY that live job)
+  open each create-form combobox; unique exact option locator; Producer /
+  Account Manager option is the concatenated Name+email label, not
+  name-only `Carlo Ferrara`; log the blocked field; Carlo will not RETRY
+  that live job)
 - Customer type: `ascend-customer-type:lob` (Commercial vs Personal from
   line of business, not the form default and not LLC vs person-name)
 - Skill: `ascend-locator-artifact-audit` (`production_ready: false`)

@@ -7,9 +7,11 @@ import unittest
 from robie_job_engine.ascend_sender_roles import (
     ACCESSIBLE_NAME_SCENARIO_ID,
     CARLO_FERRARA,
+    CARLO_OPTION,
     CARET_ACCESSIBLE_NAME,
     DUMPED_PROGRAMS_PRIMARY_BUTTON,
     JAKE_FERRARA,
+    JAKE_OPTION,
     NEW_PROGRAM_ACCESSIBLE_NAME,
     NEW_PROGRAM_ACCESSIBLE_NAME_CHAR_CODES,
     NEW_PROGRAM_LOCATOR,
@@ -28,6 +30,7 @@ from robie_job_engine.ascend_sender_roles import (
     requested_by_from_job,
     requested_by_from_payload,
     resolve_sender_agent,
+    role_option_label,
     roles_for_requested_by,
     run_accessible_name_scenario,
     run_sender_not_robie_ai_scenario,
@@ -55,10 +58,13 @@ class SenderAgentResolverTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(resolve_sender_agent(raw), JAKE_FERRARA)
                 roles = roles_for_requested_by(raw)
-                self.assertEqual(roles["producer"], JAKE_FERRARA)
-                self.assertEqual(roles["account_manager"], JAKE_FERRARA)
+                self.assertEqual(roles["resolved"], JAKE_FERRARA)
+                self.assertEqual(roles["option"], JAKE_OPTION)
+                self.assertEqual(roles["producer"], JAKE_OPTION)
+                self.assertEqual(roles["account_manager"], JAKE_OPTION)
                 self.assertFalse(roles["hitl_required"])
                 self.assertNotEqual(roles["producer"], ROBIE_AI)
+                self.assertNotIn("Robie AI", roles["producer"])
                 leak = refuse_robie_ai_when_sender_known(
                     requested_by=raw,
                     producer=ROBIE_AI,
@@ -76,8 +82,41 @@ class SenderAgentResolverTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(resolve_sender_agent(raw), CARLO_FERRARA)
                 roles = roles_for_requested_by(raw)
-                self.assertEqual(roles["producer"], CARLO_FERRARA)
-                self.assertEqual(roles["account_manager"], CARLO_FERRARA)
+                self.assertEqual(roles["resolved"], CARLO_FERRARA)
+                self.assertEqual(roles["option"], CARLO_OPTION)
+                self.assertEqual(roles["producer"], CARLO_OPTION)
+                self.assertEqual(roles["account_manager"], CARLO_OPTION)
+                self.assertNotEqual(roles["producer"], CARLO_FERRARA)
+                self.assertNotIn("ssinj", roles["producer"])
+                self.assertNotIn("Robie AI", roles["producer"])
+                leak = refuse_robie_ai_when_sender_known(
+                    requested_by=raw,
+                    producer=CARLO_FERRARA,
+                    account_manager=CARLO_FERRARA,
+                )
+                self.assertIsNotNone(leak)
+
+    def test_unique_option_is_name_plus_email_not_display_name(self):
+        self.assertEqual(
+            role_option_label(requested_by="Carlo Ferrara"),
+            CARLO_OPTION,
+        )
+        self.assertEqual(
+            role_option_label(requested_by="carlo@streetsmart.insurance"),
+            CARLO_OPTION,
+        )
+        self.assertEqual(
+            role_option_label(requested_by="carlo@ssinj.com"),
+            "Carlo Ferrara carlo@ssinj.com",
+        )
+        self.assertEqual(
+            role_option_label(requested_by="jake@streetsmart.insurance"),
+            JAKE_OPTION,
+        )
+        self.assertEqual(role_option_label(requested_by="Robie AI"), "")
+        self.assertNotEqual(CARLO_OPTION, CARLO_FERRARA)
+        self.assertIn("carlo@streetsmart.insurance", CARLO_OPTION)
+        self.assertNotIn("ssinj", CARLO_OPTION)
 
     def test_unknown_requested_by_does_not_write_robie_ai(self):
         for raw in (
@@ -168,6 +207,8 @@ class ProgramsSpinnerWaitTests(unittest.TestCase):
         self.assertIn(NEW_PROGRAM_LOCATOR, blob)
         self.assertNotIn(PLUS_PREFIXED_NEW_PROGRAM_NAME, blob)
         self.assertIn("Jake Ferrara", blob)
+        self.assertIn(JAKE_OPTION, blob)
+        self.assertIn("Name+email", blob)
         self.assertIn("Import document", blob)
         self.assertIn("0-element", blob.casefold())
         self.assertIn("line of business", blob.casefold())

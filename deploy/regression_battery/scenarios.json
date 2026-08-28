@@ -73,7 +73,7 @@
       "new_failure_mode": true,
       "scenario": "ascend-roles:sender-not-robie-ai",
       "closed": true,
-      "note": "Create a program prefills Producer and Account Manager as Robie AI. The Test audit must log those prefills. Carlo rule: overwrite both from requested_by (Jake Ferrara / Carlo Ferrara). FAIL if they stay Robie AI when Carlo or Jake sent the job. Unknown sender HITL."
+      "note": "Create a program prefills Producer and Account Manager as Robie AI. The Test audit must log those prefills. LOGIN is Robie only. Carlo rule: overwrite both from requested_by with the unique Name+email option (Jake Ferrara jake@streetsmart.insurance / Carlo Ferrara carlo@streetsmart.insurance). Name-only Carlo Ferrara is FAIL (two Carlo rows). FAIL if they stay Robie AI when Carlo or Jake sent the job. Unknown sender HITL."
     },
     {
       "id": "eb96f620-vision-spinner",
@@ -129,7 +129,7 @@
       "new_failure_mode": true,
       "scenario": "ascend-create:unique-listbox-option",
       "closed": true,
-      "note": "Live Production job 38c0fa79 HITL'd PLAYWRIGHT_BLOCKED at 12:18Z on hermes-poc-01: create/new dropdown options were not unique (multiple matching options / selector not unique for the active listbox). Still on /create/new. No Save. Carlo will not RETRY. Test pass must open each create-form combobox and require a unique exact option locator. Log the blocked field. Never PAWIVA."
+      "note": "Live Production job 38c0fa79 HITL'd PLAYWRIGHT_BLOCKED at 12:18Z on hermes-poc-01: create/new dropdown options were not unique (multiple matching options / selector not unique for the active listbox). Still on /create/new. No Save. Carlo will not RETRY. Test pass must open each create-form combobox and require a unique exact option locator. Producer / Account Manager unique option is the concatenated Name+email label (Carlo Ferrara carlo@streetsmart.insurance), not name-only Carlo Ferrara. Log the blocked field. Never PAWIVA."
     },
     {
       "id": "807f8920",

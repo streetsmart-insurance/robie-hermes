@@ -82,19 +82,29 @@ This skill is **not** Loom `ascend-finance`. Do not overwrite that skill.
    Unclear → dry HITL. If the button is not ready past timeout:
    `PLAYWRIGHT_BLOCKED` then HITL. No Gemini.
 5. **Log** the Producer and Account Manager prefills (live default is
-   `Robie AI`). Overwrite both with the agent who SENT the job
-   (`payload.requested_by` — Google Chat `user_name` / `user_id`).
-   Jake → Jake Ferrara. Carlo → Carlo Ferrara. Leave them only if they
-   already equal that name. **FAIL** if they stay Robie AI when
-   requested_by is Carlo Ferrara or Jake Ferrara. Unknown sender → HITL
-   in dry English. Unique locators. No `.first` / `.nth` / `.last`.
+   `Robie AI`). LOGIN is Robie (browser session only) — do **not** put
+   Robie AI on Producer or Account Manager. Overwrite both with the
+   agent who SENT the job (`payload.requested_by` — Google Chat
+   `user_name` / `user_id`). The unique option is the concatenated
+   Name+email label, **not** the display name alone. Jake →
+   `Jake Ferrara jake@streetsmart.insurance`. Carlo →
+   `Carlo Ferrara carlo@streetsmart.insurance` (not `carlo@ssinj.com`,
+   not Robie AI). Name-only `Carlo Ferrara` is **FAIL** — two Carlo
+   rows exist. If the sender email is missing from the list, HITL/FAIL
+   that field; do not fall back to Robie AI or the other Carlo. Leave
+   them only if they already equal that unique option. **FAIL** if they
+   stay Robie AI when requested_by is Carlo or Jake. Unknown sender →
+   HITL in dry English. Unique locators. No `.first` / `.nth` / `.last`.
 6. Open each create-form combobox the job would use (Producer, Account
    Manager, Carrier / Writing company, Coverage type, State, etc.).
    The visible list must have a **unique** locator for the intended
-   option (`get_by_role("option", name=…, exact=True)`). Two options
-   matching the same selector is `PLAYWRIGHT_BLOCKED` (job `38c0fa79`).
-   Log the blocked field. Dry HITL if the intended option is missing.
-   Carlo will not RETRY `38c0fa79`. No `.first` / `.nth` / `.last`.
+   option (`get_by_role("option", name=…, exact=True)`). For Producer
+   and Account Manager that name is the concatenated Name+email label
+   (`Carlo Ferrara carlo@streetsmart.insurance`), not `Carlo Ferrara`.
+   Two options matching the same selector is `PLAYWRIGHT_BLOCKED` (job
+   `38c0fa79`). Log the blocked field. Dry HITL if the intended option
+   is missing. Carlo will not RETRY `38c0fa79`. No `.first` / `.nth` /
+   `.last`.
 7. Commercial vs Personal radio from **line of business**, not the form
    default and not LLC vs person-name. Commercial auto / commercial
    package / BOP / CGL / workers comp / trucking / garage → Commercial

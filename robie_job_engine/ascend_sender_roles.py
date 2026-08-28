@@ -2,12 +2,16 @@
 
 Production-useful. Jobs already store the Google Chat sender as
 ``payload.requested_by`` (adapter: ``event.source.user_name`` or
-``user_id``). This module maps that field to the Ascend display name.
-It does not invent a second identity system.
+``user_id``). This module maps that field to the unique Ascend
+listbox option. It does not invent a second identity system.
 
-Carlo rule: default Producer AND Account Manager to the agent who SENT
-the job. Never leave Robie AI / SSRobie when requested_by is known.
-Unknown sender → dry HITL. Do not guess.
+Carlo rule (2026-08-28): LOGIN is Robie (browser session only). Do not
+put Robie AI on Producer or Account Manager. Those fields are whoever
+sent the PFA (requested_by / Chat sender). The unique option is the
+concatenated Name+email label, not the display name alone — two
+``Carlo Ferrara`` rows exist (streetsmart vs ssinj). Name-only is FAIL.
+If the sender email is missing from the list, HITL/FAIL that field.
+Do not fall back to Robie AI or the other Carlo.
 """
 
 from __future__ import annotations
@@ -24,6 +28,16 @@ CARLO_FERRARA = "Carlo Ferrara"
 JAKE_FERRARA = "Jake Ferrara"
 ROBIE_AI = "Robie AI"
 SSROBIE = "SSRobie"
+# Proven 2026-08-28 on hermes-test-01 /create/new (Robie logged in).
+# react-select options render as Name + email concatenated. Two Carlo rows.
+CARLO_EMAIL = "carlo@streetsmart.insurance"
+JAKE_EMAIL = "jake@streetsmart.insurance"
+CARLO_SSINJ_EMAIL = "carlo@ssinj.com"
+ROBIE_EMAIL = "robie@streetsmart.insurance"
+CARLO_OPTION = f"{CARLO_FERRARA} {CARLO_EMAIL}"
+JAKE_OPTION = f"{JAKE_FERRARA} {JAKE_EMAIL}"
+CARLO_SSINJ_OPTION = f"{CARLO_FERRARA} {CARLO_SSINJ_EMAIL}"
+ROBIE_OPTION = f"{ROBIE_AI} {ROBIE_EMAIL}"
 
 ROLES_SCENARIO_ID = "ascend-roles:sender-not-robie-ai"
 SPINNER_SCENARIO_ID = "ascend-new-program:wait-spinner"
@@ -166,6 +180,9 @@ _JAKE_EXACT = frozenset(
     }
 )
 _EMAIL_LOCAL = re.compile(r"^([^@]+)@")
+_EMAIL_IN_TEXT = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+)
 _WORD = re.compile(r"[a-z0-9]+")
 
 
@@ -220,12 +237,60 @@ def is_robie_ai_role(value: str) -> bool:
     return any(marker in folded for marker in ROBIE_ROLE_MARKERS)
 
 
+def extract_email(value: str) -> str:
+    match = _EMAIL_IN_TEXT.search(str(value or "").strip())
+    return match.group(0) if match else ""
+
+
+def canonical_email_for_agent(resolved: str | None) -> str:
+    folded = _normalized(str(resolved or ""))
+    if folded == _normalized(CARLO_FERRARA):
+        return CARLO_EMAIL
+    if folded == _normalized(JAKE_FERRARA):
+        return JAKE_EMAIL
+    return ""
+
+
+def role_option_label(*, resolved: str | None = None, requested_by: str = "") -> str:
+    """Exact visible Producer / AM option: ``Name email``, never name-only.
+
+    Name-only Carlo / Jake map to the streetsmart address. If requested_by
+    already carries an email, use that email so a missing streetsmart row
+    does not silently select carlo@ssinj.com or Robie AI.
+    """
+    agent = resolved if resolved is not None else resolve_sender_agent(requested_by)
+    if not agent:
+        return ""
+    email = extract_email(requested_by) or canonical_email_for_agent(agent)
+    if not email:
+        return ""
+    return f"{agent} {email}"
+
+
+def role_value_matches_unique_option(
+    value: str,
+    *,
+    option: str,
+    email: str = "",
+) -> bool:
+    folded = _normalized(value)
+    if not folded:
+        return False
+    if option and folded == _normalized(option):
+        return True
+    if email and email.casefold() in folded:
+        return True
+    return False
+
+
 def resolve_sender_agent(*values: Any) -> str | None:
     """Map requested_by to an Ascend display name, or None if unknown.
 
     Carlo / carlo@ / Carlo Ferrara → Carlo Ferrara
     Jake / jake@ / StreetSmartJake → Jake Ferrara
     Robie AI / SSRobie / empty / Google Chat user → None (HITL, do not write Robie AI)
+
+    The unique listbox option is ``role_option_label``, not this display name.
     """
     for raw in values:
         text = str(raw or "").strip()
@@ -252,7 +317,8 @@ def unknown_sender_hitl(*, requested_by: str = "") -> str:
         reason=(
             "Producer and Account Manager cannot be set. "
             f"requested_by {who!r} did not resolve to Carlo Ferrara or Jake Ferrara. "
-            "Do not write Robie AI. Reply with the agent display name."
+            "Do not write Robie AI. Reply with the unique Name+email option "
+            f"({CARLO_OPTION} or {JAKE_OPTION})."
         )
     )
 
@@ -269,17 +335,22 @@ def roles_for_requested_by(*values: Any) -> dict[str, Any]:
         return {
             "requested_by": requested,
             "resolved": None,
+            "email": None,
+            "option": None,
             "producer": None,
             "account_manager": None,
             "hitl_required": True,
             "hitl_text": unknown_sender_hitl(requested_by=requested),
             "write_robie_ai": False,
         }
+    option = role_option_label(resolved=resolved, requested_by=requested)
     return {
         "requested_by": requested,
         "resolved": resolved,
-        "producer": resolved,
-        "account_manager": resolved,
+        "email": extract_email(option) or None,
+        "option": option,
+        "producer": option,
+        "account_manager": option,
         "hitl_required": False,
         "hitl_text": "",
         "write_robie_ai": False,
@@ -306,15 +377,19 @@ def refuse_robie_ai_when_sender_known(
                 "Producer or Account Manager"
             )
         return None
+    option = role_option_label(resolved=resolved, requested_by=requested_by)
+    email = extract_email(option)
     if is_robie_ai_role(producer) or is_robie_ai_role(account_manager):
         return (
-            f"roles stayed {ROBIE_AI} when requested_by resolved to {resolved}; "
+            f"roles stayed {ROBIE_AI} when requested_by resolved to {option}; "
             f"scenario {ROLES_SCENARIO_ID} FAIL"
         )
-    if _normalized(producer) != _normalized(resolved):
-        return f"Producer {producer!r} is not {resolved}"
-    if _normalized(account_manager) != _normalized(resolved):
-        return f"Account Manager {account_manager!r} is not {resolved}"
+    if not role_value_matches_unique_option(producer, option=option, email=email):
+        return f"Producer {producer!r} is not {option}"
+    if not role_value_matches_unique_option(
+        account_manager, option=option, email=email
+    ):
+        return f"Account Manager {account_manager!r} is not {option}"
     return None
 
 
@@ -399,18 +474,26 @@ def programs_page_ready_instruction() -> str:
     )
 
 
-def ascend_role_overwrite_instruction(resolved: str | None) -> str:
-    if not resolved:
+def ascend_role_overwrite_instruction(
+    resolved: str | None,
+    option: str | None = None,
+) -> str:
+    target = str(option or "").strip() or (
+        role_option_label(resolved=resolved) if resolved else ""
+    )
+    if not target:
         return (
             "After Create a program loads, do not leave Producer or Account "
             "Manager as Robie AI / SSRobie. requested_by did not resolve. "
-            "HITL in dry English. Do not guess."
+            "HITL in dry English. Do not guess. Do not write Robie AI."
         )
     return (
         f"After Create a program loads, overwrite Producer and Account Manager "
-        f"with {resolved} (unique locators {PRODUCER_LOCATOR} and "
-        f"{ACCOUNT_MANAGER_LOCATOR}; no .first/.nth/.last). Leave them only if "
-        f"they already equal {resolved}."
+        f"with {target} (unique locators {PRODUCER_LOCATOR} and "
+        f"{ACCOUNT_MANAGER_LOCATOR}; no .first/.nth/.last). The unique option "
+        "is the concatenated Name+email label, not the display name alone "
+        f"(two {CARLO_FERRARA} rows exist). Leave them only if they already "
+        f"equal {target}."
     )
 
 
@@ -443,7 +526,9 @@ def ascend_new_program_contract_lines(
 
     lines = [
         programs_page_ready_instruction(),
-        ascend_role_overwrite_instruction(roles.get("resolved")),
+        ascend_role_overwrite_instruction(
+            roles.get("resolved"), option=roles.get("option")
+        ),
         customer_type_instruction(payload),
         (
             "Ascend Import document only (that panel has no Hawksoft/AMS360/Epic). "
@@ -454,7 +539,9 @@ def ascend_new_program_contract_lines(
             "Stop before Save program, Send email, Copy checkout, payment, or bind."
         ),
     ]
-    lines.extend(create_program_contract_lines(roles.get("resolved")))
+    lines.extend(
+        create_program_contract_lines(roles.get("option") or roles.get("resolved"))
+    )
     if roles.get("hitl_required"):
         lines.append(roles["hitl_text"])
     return lines
@@ -463,19 +550,24 @@ def ascend_new_program_contract_lines(
 def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
     """Named scenario: roles stay Robie AI when requested_by is Jake/Carlo → FAIL."""
     cases = (
-        ("Jake", JAKE_FERRARA),
-        ("jake@streetsmart.insurance", JAKE_FERRARA),
-        ("StreetSmartJake", JAKE_FERRARA),
-        ("Jake Ferrara", JAKE_FERRARA),
-        ("Carlo", CARLO_FERRARA),
-        ("carlo@streetsmart.insurance", CARLO_FERRARA),
-        ("Carlo Ferrara", CARLO_FERRARA),
+        ("Jake", JAKE_FERRARA, JAKE_OPTION),
+        ("jake@streetsmart.insurance", JAKE_FERRARA, JAKE_OPTION),
+        ("StreetSmartJake", JAKE_FERRARA, JAKE_OPTION),
+        ("Jake Ferrara", JAKE_FERRARA, JAKE_OPTION),
+        ("Carlo", CARLO_FERRARA, CARLO_OPTION),
+        ("carlo@streetsmart.insurance", CARLO_FERRARA, CARLO_OPTION),
+        ("Carlo Ferrara", CARLO_FERRARA, CARLO_OPTION),
     )
     errors: list[str] = []
-    for requested, expected in cases:
+    for requested, expected, option in cases:
         roles = roles_for_requested_by(requested)
         if roles.get("resolved") != expected:
             errors.append(f"{requested!r} resolved to {roles.get('resolved')!r}")
+            continue
+        if roles.get("option") != option or roles.get("producer") != option:
+            errors.append(
+                f"{requested!r} option {roles.get('option')!r} is not {option!r}"
+            )
             continue
         leak = refuse_robie_ai_when_sender_known(
             requested_by=requested,
@@ -484,13 +576,20 @@ def run_sender_not_robie_ai_scenario() -> dict[str, Any]:
         )
         if leak is None:
             errors.append(f"{requested!r} allowed Robie AI roles")
-        ok = refuse_robie_ai_when_sender_known(
+        name_only = refuse_robie_ai_when_sender_known(
             requested_by=requested,
             producer=expected,
             account_manager=expected,
         )
+        if name_only is None:
+            errors.append(f"{requested!r} accepted name-only {expected}")
+        ok = refuse_robie_ai_when_sender_known(
+            requested_by=requested,
+            producer=option,
+            account_manager=option,
+        )
         if ok is not None:
-            errors.append(f"{requested!r} rejected correct {expected}: {ok}")
+            errors.append(f"{requested!r} rejected correct {option}: {ok}")
         from .ascend_create_defaults import log_role_defaults
 
         logged = log_role_defaults(
