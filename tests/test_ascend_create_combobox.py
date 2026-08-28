@@ -281,7 +281,11 @@ class _FakePage:
         self.file_input = _FakeFileInput()
 
     def locator(self, selector: str) -> _FakeFileInput | _FakeOptions:
-        if selector in {"#file_upload", "input#file_upload", "input[type='file']"}:
+        if selector in {
+            "input[aria-label='file_upload'][type='file']",
+            "input#file_upload[type='file']",
+            "input[type='file']",
+        }:
             return self.file_input
         return _FakeOptions([])
 
