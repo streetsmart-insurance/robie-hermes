@@ -152,7 +152,7 @@ FLOW_STEPS: tuple[dict[str, str], ...] = (
     {
         "id": "insured_fields",
         "description": "Customer Name (Test account only)",
-        "locator": 'get_by_label("Name")',
+        "locator": 'get_by_label("Name*", exact=True)',
     },
     {
         "id": "address_autocomplete",

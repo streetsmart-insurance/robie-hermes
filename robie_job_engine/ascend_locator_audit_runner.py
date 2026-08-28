@@ -587,8 +587,8 @@ def _resolve(page: Any, spec_id: str, payload: dict[str, Any]) -> tuple[Any, str
             resolve_customer_type(payload).get("locator") or COMMERCIAL_LOCATOR,
         ),
         "insured_fields": (
-            lambda: page.get_by_label("Name"),
-            _label_text("Name"),
+            lambda: page.get_by_label("Name*", exact=True),
+            'get_by_label("Name*", exact=True)',
         ),
         "address_autocomplete": (
             lambda: page.get_by_role("option", name=exact_address, exact=True)
