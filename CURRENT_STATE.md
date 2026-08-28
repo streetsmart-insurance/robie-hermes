@@ -86,15 +86,23 @@ stops first-ezlynx-wins. The optional Playwright hint write lives in
 the hint.
 
 Production pre-flight (`robie_job_engine/production_preflight.py`) is on the
-zip path. It is not a dashboard and not a zip-pointer check. After every
-pointer flip + `hermes-gateway` restart, the PYTHONPATH drop-in
-`ExecStartPost` runs five yes/no checks (gateway+Job Engine PYTHONPATH,
-CDP `/json/version`, an EZLynx `/web/` tab that is not login, Secret
-Manager ENABLED versions, no `conversation_job_links.active=1` terminal
-bind). An every-day oneshot timer (`robie-production-preflight.timer`) repeats
-that hourly from 7am through midnight `America/New_York`. The first no posts
-one Robie Chat APP message and stops. It does not `@robie`, bind, or restart
-Chrome / `hermes-gateway` / the browser.
+zip path. It is infra only: host/intake health, not a job-type gate. A
+pre-flight yes does not authorize a new job type on Production.
+New job types still need N clean Test (`hermes-test-01`) jobs before
+Production on a real account (N = 3; see RELEASE_PROCESS.md). It is not a
+dashboard and not a zip-pointer check. After every pointer flip +
+`hermes-gateway` restart, the PYTHONPATH drop-in `ExecStartPost` runs six
+yes/no checks (gateway+Job Engine PYTHONPATH, CDP `/json/version`, an
+EZLynx `/web/` tab that is not login, Secret Manager ENABLED versions, no
+`conversation_job_links.active=1` terminal bind, Chat intake / Pub/Sub
+listener). An every-day oneshot timer (`robie-production-preflight.timer`)
+repeats that hourly from 7am through midnight `America/New_York`. The first
+no posts one Robie Chat APP message to `spaces/AAQAZbLJO78` and the same
+text to Carlo and Jake via the existing Chat APP poster
+(`chat_app_post.post_as_chat_app` + `spaces.findDirectMessage` on an
+already-existing DM). There is no outbound email API on `hermes-poc-01`.
+It does not `@robie`, bind, or restart Chrome / `hermes-gateway` / the
+browser.
 
 Post-job audit (`robie_job_engine/post_job_audit.py`) is also on the zip path.
 `guard_chat_response` / `_render_chat_terminal` in `chat_guard.py` appends the
@@ -110,7 +118,7 @@ job's leftover EZLynx account tabs, `/auth/account/login` leftovers, `about:blan
 and Ascend tabs via CDP `Target.closeTarget` (`GET /json/close/{id}`). It does
 not restart Chrome, `hermes-gateway`, or `robie-ezlynx-browser`, does not wipe
 the EZLynx profile, and does not log out the shared session. A periodic sweep
-(hooked from `production_preflight` after the five yes/no checks) closes
+(hooked from `production_preflight` after the six yes/no checks) closes
 orphaned EZLynx tabs that no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job
 claims, and keeps exactly one authenticated `https://app.ezlynx.com/web/`
 session tab. Recorder and Playwright select the current job tab with

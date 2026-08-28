@@ -1,6 +1,6 @@
 """SMALL Production pre-flight. Yes/no only. Chat on the first no.
 
-Complement to post-job audit. Not a dashboard. The five checks observe
+Complement to post-job audit. Not a dashboard. The six checks observe
 only: no Chrome, hermes-gateway, or browser restart; no bind; no
 client-file navigation. After the checks, a leftover-tab sweep may close
 orphaned EZLynx pages via CDP Target.closeTarget. A zip pointer match is
@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -45,6 +46,21 @@ CHECK_CDP = "cdp"
 CHECK_EZLYNX_TAB = "ezlynx-tab"
 CHECK_SECRETS = "login-secrets"
 CHECK_LINKS = "conversation-job-links"
+CHECK_CHAT_INTAKE = "chat-intake"
+CHAT_JOB_ACTION = "hermes.google_chat_task"
+DEFAULT_CHAT_INTAKE_FRESH_SECONDS = 6 * 60 * 60
+LISTENER_CONNECTED_MARKER = "[GoogleChat] Connected"
+LISTENER_HANDOFF_MARKER = "durable executable handoff"
+LISTENER_FATAL_MARKERS = (
+    "pubsub_reconnect_exhausted",
+    "Pub/Sub reconnect failed",
+    "subscription_not_found",
+)
+LISTENER_STALL_MARKERS = (
+    "bound Job is not awaiting human input",
+    "active human-input correlation is missing",
+    "conversation is not awaiting human input",
+)
 
 
 def _chat_space() -> str:
@@ -368,12 +384,190 @@ def check_conversation_job_links(
     )
 
 
+def _parse_utc(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _fresh_seconds() -> int:
+    raw = os.environ.get("ROBIE_PREFLIGHT_CHAT_INTAKE_MAX_AGE_SECONDS", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = DEFAULT_CHAT_INTAKE_FRESH_SECONDS
+        if value > 0:
+            return value
+    return DEFAULT_CHAT_INTAKE_FRESH_SECONDS
+
+
+def last_chat_inbound_at(db_path: str | Path | None = None) -> datetime | None:
+    """Latest DurableChatEventQueue or Chat-job timestamp. Read-only."""
+    path = Path(db_path or _jobs_db())
+    if not path.is_file():
+        return None
+    stamps: list[datetime] = []
+    try:
+        uri = f"file:{path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "chat_event_queue" in tables:
+                row = conn.execute(
+                    """
+                    SELECT MAX(created_at), MAX(updated_at)
+                    FROM chat_event_queue
+                    """
+                ).fetchone()
+                for value in row or ():
+                    parsed = _parse_utc(value)
+                    if parsed is not None:
+                        stamps.append(parsed)
+            if "jobs" in tables:
+                row = conn.execute(
+                    """
+                    SELECT MAX(created_at)
+                    FROM jobs
+                    WHERE action_type=?
+                    """,
+                    (CHAT_JOB_ACTION,),
+                ).fetchone()
+                parsed = _parse_utc(row[0] if row else None)
+                if parsed is not None:
+                    stamps.append(parsed)
+        finally:
+            conn.close()
+    except Exception:
+        return max(stamps) if stamps else None
+    return max(stamps) if stamps else None
+
+
+def classify_listener_journal(text: str) -> dict[str, Any]:
+    """Observe gateway logs only. Does not send a Chat job."""
+    blob = str(text or "")
+    folded = blob.casefold()
+    fatal = next((item for item in LISTENER_FATAL_MARKERS if item.casefold() in folded), None)
+    stall = next((item for item in LISTENER_STALL_MARKERS if item.casefold() in folded), None)
+    return {
+        "connected": LISTENER_CONNECTED_MARKER in blob,
+        "handoff": LISTENER_HANDOFF_MARKER in blob,
+        "fatal": fatal,
+        "stall": stall,
+        "wedged": bool(fatal or stall),
+    }
+
+
+def _read_gateway_journal(
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> str:
+    run = runner or _run
+    proc = run(
+        [
+            "journalctl",
+            "-u",
+            GATEWAY_UNIT,
+            "-n",
+            "400",
+            "--no-pager",
+            "-o",
+            "cat",
+            "--since",
+            "24 hours ago",
+        ]
+    )
+    return (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+
+def check_chat_intake(
+    db_path: str | Path | None = None,
+    *,
+    now: datetime | None = None,
+    journal: str | None = None,
+    journal_reader: Callable[[], str] | None = None,
+    fresh_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Yes if Chat intake is live. Silent/wedged listener + active gateway is no.
+
+    Recent DurableChatEventQueue / Chat-job activity is yes. Recency alone is
+    not the wedge signal (#26 can leave a still-fresh prior job). A stall or
+    fatal marker in hermes-gateway logs is no. Idle Connected without a stall
+    is yes so a quiet morning does not page. No inbound and no Connected is
+    no: a silent listener while hermes-gateway is active.
+    Does not @robie. Does not send a test Chat job.
+    """
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    window = fresh_seconds if fresh_seconds is not None else _fresh_seconds()
+    inbound_at = last_chat_inbound_at(db_path)
+    age = (clock - inbound_at).total_seconds() if inbound_at is not None else None
+    recent = age is not None and age >= 0 and age <= window
+    if journal is None:
+        reader = journal_reader or _read_gateway_journal
+        try:
+            journal = reader()
+        except Exception:
+            journal = ""
+    state = classify_listener_journal(journal or "")
+    if state["wedged"]:
+        reason = state["fatal"] or state["stall"] or "Pub/Sub stall"
+        return _result(
+            CHECK_CHAT_INTAKE,
+            False,
+            f"{GATEWAY_UNIT} active; Chat listener wedged ({reason})",
+        )
+    if recent:
+        stamp = inbound_at.isoformat() if inbound_at else "recent"
+        return _result(
+            CHECK_CHAT_INTAKE,
+            True,
+            f"last Chat inbound {stamp} ({int(age)}s ago)",
+        )
+    if state["connected"]:
+        return _result(
+            CHECK_CHAT_INTAKE,
+            True,
+            f"{GATEWAY_UNIT} active; Chat Pub/Sub listener connected (idle)",
+        )
+    if inbound_at is not None:
+        return _result(
+            CHECK_CHAT_INTAKE,
+            False,
+            f"{GATEWAY_UNIT} active; Chat listener silent "
+            f"(last inbound {inbound_at.isoformat()})",
+        )
+    path = Path(db_path or _jobs_db())
+    return _result(
+        CHECK_CHAT_INTAKE,
+        False,
+        f"{GATEWAY_UNIT} active; Chat listener silent "
+        f"(no Chat inbound in {path})",
+    )
+
+
 CHECKS: tuple[Callable[..., dict[str, Any]], ...] = (
     check_hermes_gateway,
     check_cdp,
     check_ezlynx_tab,
     check_login_secrets,
     check_conversation_job_links,
+    check_chat_intake,
 )
 
 
@@ -389,19 +583,49 @@ def _post_failure(
     text: str,
     *,
     poster: Callable[..., Any] | None,
-) -> bool:
+    dm_finder: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    """Post the Robie space message, then the same text to Carlo/Jake DMs.
+
+    Keeps the existing space post. There is no outbound email API on
+    hermes-poc-01; operator notify reuses ``post_as_chat_app`` against an
+    existing DM space from ``find_direct_message_space``. Never @robie.
+    """
     if "@robie" in text.casefold():
         raise ValueError("pre-flight Chat must not @robie")
-    space = _chat_space()
-    if not space.startswith("spaces/"):
-        return False
-    send = poster
-    if send is None:
-        from .chat_app_post import post_as_chat_app
+    from .chat_app_post import fail_notify_emails, find_direct_message_space, post_as_chat_app
 
-        send = post_as_chat_app
-    send(space, text)
-    return True
+    send = poster if poster is not None else post_as_chat_app
+    finder = dm_finder if dm_finder is not None else find_direct_message_space
+    targets: list[str] = []
+    dm_errors: list[str] = []
+    space = _chat_space()
+    space_posted = False
+    if space.startswith("spaces/"):
+        send(space, text)
+        targets.append(space)
+        space_posted = True
+    for email in fail_notify_emails():
+        try:
+            dm_space = finder(email)
+        except Exception as exc:
+            dm_errors.append(f"{email}: {type(exc).__name__}")
+            continue
+        if not str(dm_space or "").startswith("spaces/"):
+            dm_errors.append(f"{email}: no existing DM space")
+            continue
+        if dm_space in targets:
+            continue
+        try:
+            send(dm_space, text)
+            targets.append(dm_space)
+        except Exception as exc:
+            dm_errors.append(f"{email}: {type(exc).__name__}")
+    return {
+        "space_posted": space_posted,
+        "targets": targets,
+        "dm_errors": dm_errors,
+    }
 
 
 def _attach_tab_sweep(
@@ -435,8 +659,12 @@ def run_production_preflight(
     secret_inspector: Callable[..., dict[str, Any]] | None = None,
     db_path: str | Path | None = None,
     poster: Callable[..., Any] | None = None,
+    dm_finder: Callable[[str], str] | None = None,
+    journal: str | None = None,
+    journal_reader: Callable[[], str] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Run checks in order. First no posts one Chat message and stops."""
+    """Run checks in order. First no posts Chat (space + operator DMs) and stops."""
     runners: list[tuple[str, Callable[[], dict[str, Any]]]] = [
         (CHECK_GATEWAY, lambda: check_hermes_gateway(gateway_probe)),
         (CHECK_CDP, lambda: check_cdp(http_get=cdp_http_get)),
@@ -446,6 +674,15 @@ def run_production_preflight(
         ),
         (CHECK_SECRETS, lambda: check_login_secrets(inspector=secret_inspector)),
         (CHECK_LINKS, lambda: check_conversation_job_links(db_path)),
+        (
+            CHECK_CHAT_INTAKE,
+            lambda: check_chat_intake(
+                db_path,
+                now=now,
+                journal=journal,
+                journal_reader=journal_reader,
+            ),
+        ),
     ]
     completed: list[dict[str, Any]] = []
     for _name, runner in runners:
@@ -456,8 +693,10 @@ def run_production_preflight(
         message = format_failure(result["name"], result["evidence"])
         posted = False
         post_error = None
+        notify: dict[str, Any] = {}
         try:
-            posted = _post_failure(message, poster=poster)
+            notify = _post_failure(message, poster=poster, dm_finder=dm_finder)
+            posted = bool(notify.get("space_posted"))
         except Exception as exc:
             post_error = f"{type(exc).__name__}: {exc}"
         payload = {
@@ -465,6 +704,8 @@ def run_production_preflight(
             "failed_check": result["name"],
             "checks": completed,
             "chat_posted": posted,
+            "fail_notify_targets": list(notify.get("targets") or []),
+            "fail_notify_dm_errors": list(notify.get("dm_errors") or []),
             "message": message,
         }
         if post_error:
@@ -481,6 +722,8 @@ def run_production_preflight(
         "failed_check": None,
         "checks": completed,
         "chat_posted": False,
+        "fail_notify_targets": [],
+        "fail_notify_dm_errors": [],
         "message": None,
     }
     _attach_tab_sweep(
@@ -496,7 +739,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Production pre-flight. Yes/no only. Posts to the Robie Chat "
-            "space on the first no. Does not @robie."
+            "space and Carlo/Jake Chat APP DMs on the first no. "
+            "Does not @robie. Infra only: not a job-type gate."
         )
     )
     parser.add_argument("--db", default="")
