@@ -391,7 +391,7 @@ class JobEngine:
                 release_lease=True,
             )
         if not result.succeeded:
-            from .retry_policy import classify_failure
+            from .retry_policy import FailureClass, classify_failure
 
             classification = classify_failure(result.error)
             hold = classification.suggested_hold_status or result.hold_status
@@ -404,11 +404,16 @@ class JobEngine:
                     resume_status=JobStatus.PENDING,
                     release_lease=True,
                 )
-            retryable = (
-                classification.is_retryable
-                if result.error and not result.retryable
-                else (result.retryable and classification.is_retryable)
-            )
+            if classification.failure_class in (
+                FailureClass.LOCATOR_AMBIGUITY,
+                FailureClass.EMPTY_OR_CORRUPT_ARTIFACT,
+                FailureClass.AUTH_CHALLENGE,
+            ):
+                retryable = False
+            elif classification.failure_class == FailureClass.TRANSIENT_NETWORK:
+                retryable = True
+            else:
+                retryable = result.retryable
             return self._retry_or_fail(
                 job,
                 number,
