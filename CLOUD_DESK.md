@@ -34,6 +34,11 @@ Pawel owns durable IAP / OS Login. Do not open a public SSH port.
 
 1. Read [HANDOFF.md](HANDOFF.md) and this file.
 2. Do not `@robie` a live PAWIVA job.
-3. Finish the Test zip of current `main` on `hermes-test-01` if pointers are not that SHA.
-4. Re-run the live Test audit with a Test quote (`--quote`). Carrier / State / Coverage come from that doc.
-5. Production zip only after a recorded clean Test punch-list PASS.
+3. Confirm Test still points to `4df60a0955f3` and that
+   `robie-gateway.service` entered active after the pointer flip.
+4. Do not enable the Ascend API worker until a sandbox key is stored in an
+   isolated Test Secret Manager secret. Never paste the key.
+5. Run one non-PAWIVA sandbox API create/read-back Job and record its clean
+   Test pass before considering Production.
+6. Keep the Playwright locator audit separate for Import document UI testing;
+   it stops before Save and does not prove the API creation path.
