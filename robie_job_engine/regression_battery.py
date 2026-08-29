@@ -104,6 +104,7 @@ LOGIC_UNITTEST = ("-m", "unittest", "discover", "-s", "tests", "-v")
 LOGIC_PYTEST_MODULES = (
     "tests/test_carrier_directory.py",
     "tests/test_ezlynx_poller.py",
+    "tests/test_playwright_route_fixtures.py",
     "tests/test_video_to_skill.py",
 )
 PYTEST_ONLY_MODULES = frozenset(

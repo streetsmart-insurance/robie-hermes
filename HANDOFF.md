@@ -42,6 +42,13 @@ The API worker creates a program and one or more billables, then performs
 fresh GET requests for the program and every returned billable ID. The Job
 Engine cannot mark COMPLETE without authoritative matching read-back.
 
+In-flight PRs:
+
+- **PR 57 (`feat/playwright-hardening-punchlist`)**: Playwright hardening
+  suite (tracing, locator registry, route-interception fixtures, split retry
+  policy, visual snapshot diffing, idle-gated Chrome refresh). Not merged.
+  Not deployed. No live job.
+
 ## Proven Test deployment
 
 Host: `hermes-test-01.c.streetsmart-hermes-poc.internal`
@@ -99,6 +106,24 @@ customer type, customer name, address handling, and quote number. It then
 failed because Ascend's carrier option accessibility name differed from the
 visible carrier text. PR 58 attempted a searched-option Enter fix but was not
 merged. Do not treat that UI audit as an API create/read-back pass.
+
+## Playwright hardening status (PR 57, not live)
+
+Fail-closed rules stay in force: no positional locator guesses; locator
+ambiguity is HITL, not retry; no Production deploy; no live job.
+
+- **PW-01 Tracing**: `PlaywrightTraceManager` wraps CDP execution with
+  `ROBIE_JOB_ID` and writes `playwright-trace.zip` to the job artifact folder.
+- **PW-02 Locator Registry**: declarative JSON (`locators/ascend.json`,
+  `locators/ezlynx.json`); positional selectors are rejected.
+- **PW-03 Retry Policy**: `LOCATOR_AMBIGUITY`, `EMPTY_OR_CORRUPT_ARTIFACT`,
+  and `AUTH_CHALLENGE` are non-retryable; `TRANSIENT_NETWORK` is retryable;
+  other errors keep the worker flag.
+- **PW-04 Route fixtures**: offline Playwright tests in
+  `tests/test_playwright_route_fixtures.py`.
+- **PW-05 Snapshot diffing**: `SnapshotDiffManager` / `scripts/run-snapshot-diff.py`.
+- **PW-06 Idle Chrome refresh**: `scripts/chrome_refresh_if_idle.py` refuses
+  to restart while jobs are `RUNNING` or `VERIFYING`.
 
 ## What “live” means
 

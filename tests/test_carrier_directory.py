@@ -33,19 +33,16 @@ def test_carrier_crud(carrier_store: CarrierDirectoryStore):
     assert carrier.naic_code == "25658"
     assert carrier.status == "ACTIVE"
 
-    # Query by ID and by slug
     fetched_by_id = carrier_store.get_carrier(carrier.id)
     fetched_by_slug = carrier_store.get_carrier("travelers")
     assert fetched_by_id is not None
     assert fetched_by_slug is not None
     assert fetched_by_id.id == fetched_by_slug.id == carrier.id
 
-    # List carriers
     carriers = carrier_store.list_carriers()
     assert len(carriers) == 1
     assert carriers[0].name == "Travelers Insurance"
 
-    # Update carrier
     updated = carrier_store.update_carrier(carrier.id, status="MAINTENANCE", am_best_rating="A+")
     assert updated.status == "MAINTENANCE"
     assert updated.am_best_rating == "A+"
@@ -69,7 +66,7 @@ def test_carrier_endpoints(carrier_store: CarrierDirectoryStore):
     assert login_ep.endpoint_type == "login"
 
     quote_ep = carrier_store.set_endpoint(
-        carrier.slug,  # Test resolving by slug
+        carrier.slug,
         endpoint_type="quote",
         url="https://foragentsonly.com/api/quote",
         environment="production",
@@ -78,7 +75,6 @@ def test_carrier_endpoints(carrier_store: CarrierDirectoryStore):
     )
     assert quote_ep.timeout_seconds == 90
 
-    # Retrieve endpoints
     ep = carrier_store.get_endpoint("progressive", "login", environment="production")
     assert ep is not None
     assert ep.url == "https://foragentsonly.com/login"
@@ -106,7 +102,6 @@ def test_carrier_credentials_and_rotation(carrier_store: CarrierDirectoryStore):
     assert active_cred is not None
     assert active_cred.username == "agent_streetsmart_01"
 
-    # Credential rotation
     rotated = carrier_store.rotate_credential(
         "hartford",
         username="agent_streetsmart_01",
@@ -136,7 +131,6 @@ def test_carrier_lob_rules_and_appetite_validation(carrier_store: CarrierDirecto
     assert "CA" in rule.state_eligibility
     assert rule.quote_auto_approval is True
 
-    # 1. Valid submission payload
     valid_payload = {
         "vin": "1HGCR2F83HA000000",
         "radius_of_operation": 50,
@@ -150,14 +144,12 @@ def test_carrier_lob_rules_and_appetite_validation(carrier_store: CarrierDirecto
     assert res["eligible"] is True
     assert len(res["reasons"]) == 0
 
-    # 2. Ineligible state
     res_state = carrier_store.validate_submission_appetite(
         "liberty", "commercial_auto", state="NY", payload=valid_payload
     )
     assert res_state["eligible"] is False
     assert any("State 'NY' not eligible" in r for r in res_state["reasons"])
 
-    # 3. Missing required field
     bad_payload = dict(valid_payload)
     del bad_payload["vin"]
     res_missing = carrier_store.validate_submission_appetite(
@@ -166,7 +158,6 @@ def test_carrier_lob_rules_and_appetite_validation(carrier_store: CarrierDirecto
     assert res_missing["eligible"] is False
     assert any("Missing required field: 'vin'" in r for r in res_missing["reasons"])
 
-    # 4. Exceeds limit
     over_limit = dict(valid_payload, requested_limit=5_000_000)
     res_limit = carrier_store.validate_submission_appetite(
         "liberty", "commercial_auto", state="TX", payload=over_limit
@@ -174,7 +165,6 @@ def test_carrier_lob_rules_and_appetite_validation(carrier_store: CarrierDirecto
     assert res_limit["eligible"] is False
     assert any("exceeds carrier max" in r for r in res_limit["reasons"])
 
-    # 5. Prohibited class code
     prohibited = dict(valid_payload, class_code="91580")
     res_class = carrier_store.validate_submission_appetite(
         "liberty", "commercial_auto", state="TX", payload=prohibited

@@ -461,6 +461,23 @@ def _close_open_listbox(page: Any) -> None:
 
 
 def _find_labeled_control(page: Any, aliases: tuple[str, ...]) -> tuple[Any | None, str]:
+    # Check LocatorRegistry first before dynamic generation
+    try:
+        from .locator_registry import LocatorRegistry
+
+        reg = LocatorRegistry()
+        for label in aliases:
+            key = label.lower().replace(" ", "_")
+            loc = reg.get_locator("ascend", "create_new", key)
+            if loc:
+                target = reg._build_locator(
+                    page, loc.primary_strategy, loc.primary_selector, loc.exact
+                )
+                if _count(target) == 1:
+                    return target, _label_text(loc.primary_selector)
+    except Exception:
+        pass
+
     for label in aliases:
         target = page.get_by_label(label)
         if _count(target) == 1:
@@ -714,7 +731,7 @@ def _select_unique_option(page: Any, target: Any, intended: str, *, field: str) 
         press("Enter")
         _close_open_listbox(page)
         return report
-    intended = str(report.get("intended") or intended)
+    intended = str(report.get("matched") or report.get("intended") or intended)
     option = page.get_by_role("option", name=intended, exact=True)
     require_unique_locator(option, locator=option_locator(intended, exact=True))
     option_click = getattr(option, "click", None)
