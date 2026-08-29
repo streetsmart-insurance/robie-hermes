@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .chat_policy import forbidden_tool_request
-from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
+from .models import (
+    JobStatus,
+    ReconciliationOutcome,
+    ReconciliationResult,
+    VerificationEvidence,
+    VerificationResult,
+    WorkerResult,
+)
 
 
 EZLYNX_REQUIRED_FIELDS = {
@@ -152,6 +159,61 @@ class EzlynxDestinationVerifier:
 
     def __init__(self, readback: EzlynxReadback):
         self.readback = readback
+
+    def reconcile(
+        self,
+        job: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> ReconciliationResult:
+        """Authoritatively read destination state before an interrupted retry."""
+        expected = _ezlynx_destination(job["action_type"], dict(job["payload"]))
+        if not expected:
+            return ReconciliationResult(
+                ReconciliationOutcome.UNKNOWN,
+                job["action_type"],
+                error="EZLynx reconciliation destination is missing",
+                hold_status=JobStatus.NEEDS_CLARIFICATION,
+            )
+        method = "EZLYNX_API_READBACK"
+        try:
+            observed = self.readback.api_state(job["action_type"], expected)
+            if observed is None:
+                observed = self.readback.fresh_page_state(job["action_type"], expected)
+                method = "FRESH_PAGE_READBACK"
+        except Exception as exc:
+            return ReconciliationResult(
+                ReconciliationOutcome.UNKNOWN,
+                job["action_type"],
+                destination=expected,
+                detail={"method": method},
+                error=f"EZLynx reconciliation is unavailable: {type(exc).__name__}: {exc}",
+            )
+        if not observed:
+            return ReconciliationResult(
+                ReconciliationOutcome.NOT_APPLIED,
+                job["action_type"],
+                destination=expected,
+                detail={"method": method, "observed": {}},
+                authoritative=True,
+            )
+        if _matches(expected, observed):
+            return ReconciliationResult(
+                ReconciliationOutcome.APPLIED,
+                job["action_type"],
+                destination=expected,
+                detail={"method": method, "observed": observed},
+                authoritative=True,
+            )
+        return ReconciliationResult(
+            ReconciliationOutcome.UNKNOWN,
+            job["action_type"],
+            destination=expected,
+            detail={"method": method, "observed": observed},
+            authoritative=True,
+            error="EZLynx destination exists but does not match the intended consequence",
+            hold_status=JobStatus.NEEDS_CLARIFICATION,
+        )
 
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> VerificationResult:
         expected = dict(action.get("destination") or {})
