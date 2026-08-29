@@ -1028,6 +1028,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def failure_log_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Bounded diagnostic detail for private CI logs; never hide the cause."""
+    return {
+        "id": item.get("id"),
+        "outcome": item.get("outcome"),
+        "returncode": item.get("returncode"),
+        "evidence": str(item.get("evidence") or "")[-4000:],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     raw = list(argv if argv is not None else sys.argv[1:])
@@ -1047,7 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
             "scope": report.get("scope"),
             "seen_clear_text": report.get("seen_clear_text"),
             "new_failures": [
-                {"id": item.get("id"), "outcome": item.get("outcome")}
+                failure_log_item(item)
                 for item in report["new_failures"]
             ],
             "known_accepted": [

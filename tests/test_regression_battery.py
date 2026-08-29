@@ -28,6 +28,7 @@ from robie_job_engine.regression_battery import (
     destroyed_latest_with_older_enabled_is_healthy,
     evidence_is_flaky,
     failure_signature,
+    failure_log_item,
     format_inconclusive_chat,
     format_new_failure_chat,
     isolated_env,
@@ -295,6 +296,21 @@ class ContractTests(unittest.TestCase):
 
 
 class ClassifierAndNotifyTests(unittest.TestCase):
+    def test_new_failure_log_keeps_bounded_root_cause_evidence(self):
+        item = failure_log_item(
+            {
+                "id": "unittest-discover",
+                "outcome": "FAILED",
+                "returncode": 1,
+                "evidence": "prefix-that-must-be-trimmed" + ("x" * 3990) + "ROOT_CAUSE",
+            }
+        )
+        self.assertEqual(item["id"], "unittest-discover")
+        self.assertEqual(item["returncode"], 1)
+        self.assertLessEqual(len(item["evidence"]), 4000)
+        self.assertNotIn("prefix-that-must-be-trimmed", item["evidence"])
+        self.assertTrue(item["evidence"].endswith("ROOT_CAUSE"))
+
     def test_known_accepted_replay_does_not_post_or_draft(self):
         posted: list[tuple[str, str]] = []
         opened: list[dict] = []
