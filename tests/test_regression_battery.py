@@ -258,6 +258,7 @@ class ContractTests(unittest.TestCase):
                 "test_carrier_directory",
                 "test_ezlynx_poller",
                 "test_playwright_route_fixtures",
+                "test_productivity_engine",
                 "test_video_to_skill",
             },
         )
@@ -440,6 +441,24 @@ class ReplayGuardTests(unittest.TestCase):
         ), patch(
             "robie_job_engine.regression_battery.run_named_scenarios",
             return_value=[],
+        ):
+            run_replay_scenarios(work_dir=Path(tmp) / "replay")
+        self.assertEqual(observed_env, ["TEST"])
+
+    def test_named_replays_are_explicitly_test_scoped(self):
+        observed_env: list[str] = []
+
+        def named(**kwargs):
+            del kwargs
+            observed_env.append(os.environ.get("ROBIE_ENV", ""))
+            return []
+
+        with durable_temporary_directory() as tmp, patch(
+            "robie_job_engine.regression_battery.run_quote_replay",
+            return_value={"outcome": "BLOCKED", "reason": "no pdf"},
+        ), patch(
+            "robie_job_engine.regression_battery.run_named_scenarios",
+            side_effect=named,
         ):
             run_replay_scenarios(work_dir=Path(tmp) / "replay")
         self.assertEqual(observed_env, ["TEST"])
