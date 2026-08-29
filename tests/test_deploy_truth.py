@@ -6,6 +6,7 @@ stay stale while both zip pointers name the new SHA.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -461,6 +462,43 @@ class OfficialInstallProofTests(unittest.TestCase):
                 later["install_proof_row"]["status"], JobStatus.COMPLETE.value
             )
 
+            proved = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "robie_job_engine.deploy_truth",
+                    "prove",
+                    "--opt-root",
+                    str(paths["opt"]),
+                    "--release-root",
+                    str(paths["release"]),
+                    "--hermes-home",
+                    str(paths["hermes"]),
+                    "--sha",
+                    SHA_NEW,
+                    "--db",
+                    db,
+                    "--gateway-active-enter",
+                    (flipped + timedelta(seconds=8)).isoformat(),
+                ],
+                cwd=str(ROOT),
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proved.returncode, 0, proved.stderr)
+            refreshed = json.loads(
+                (paths["release"] / PROOF_FILENAME).read_text(encoding="utf-8")
+            )
+            self.assertTrue(refreshed["done"])
+            self.assertTrue(refreshed["live"])
+            self.assertTrue(refreshed["proof"]["live"])
+            self.assertEqual(refreshed["sha"], SHA_NEW)
+            self.assertIn("verified_at", refreshed)
+            self.assertFalse(refreshed["authorizes_complete"])
+            self.assertIn("overlays", refreshed)
+
     def test_cli_install_is_not_done_until_proof(self):
         with durable_temporary_directory() as tmp:
             paths = _layout(tmp)
@@ -613,4 +651,3 @@ class CompleteLawAndBootstrapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
