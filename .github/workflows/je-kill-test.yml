@@ -1,0 +1,101 @@
+name: Test-only JE-KILL-01 live proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN_JE_KILL_01_ON_HERMES_TEST_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  je-kill-test:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'RUN_JE_KILL_01_ON_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      TEST_ROOT: /opt/streetsmart-hermes-test
+      FIXTURE: /opt/streetsmart-hermes-test/je-kill/fixture.json
+      RUN_ROOT: /opt/streetsmart-hermes-test/je-kill/runs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except the protected Test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
+          test "${TEST_VM}" = hermes-test-01
+          test "${TEST_ROOT}" = /opt/streetsmart-hermes-test
+          test "${FIXTURE}" = /opt/streetsmart-hermes-test/je-kill/fixture.json
+          test "${RUN_ROOT}" = /opt/streetsmart-hermes-test/je-kill/runs
+          gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
+      - name: Run guarded process-death proof on Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA:0:12}"
+          gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo env EXPECTED_SHA='${short}' TEST_ROOT='${TEST_ROOT}' FIXTURE='${FIXTURE}' RUN_ROOT='${RUN_ROOT}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          test "$(hostname -s)" = hermes-test-01
+          current="$(readlink -f "${TEST_ROOT}/current")"
+          releases_current="$(readlink -f "${TEST_ROOT}/releases/current")"
+          test -n "${current}"
+          test "${current}" = "${releases_current}"
+          case "${current}" in
+            "${TEST_ROOT}/releases/${EXPECTED_SHA}/"*) ;;
+            *) echo "Test release does not match workflow commit" >&2; exit 2 ;;
+          esac
+          test -f "${FIXTURE}" || {
+            echo "JE-KILL FIXTURE MISSING: an approved disposable Test fixture is required" >&2
+            exit 2
+          }
+          job_db="${TEST_ROOT}/robie-job-engine/data/jobs.db"
+          test -f "${job_db}"
+          python3 - "${job_db}" <<'PY'
+          import sqlite3
+          import sys
+
+          con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+          blocking = con.execute(
+              """SELECT COUNT(*) FROM jobs
+                 WHERE status IN ('RUNNING','VERIFYING') OR lease_owner IS NOT NULL"""
+          ).fetchone()[0]
+          con.close()
+          if blocking:
+              raise SystemExit(
+                  f"JE-KILL REFUSED: {blocking} active Test Job(s) or lease(s)"
+              )
+          print("JE-KILL Test inventory: 0 blocking Jobs/leases")
+          PY
+          install -d -o streetsmart-hermes -g streetsmart-hermes "${RUN_ROOT}"
+          python_bin=/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
+          test -x "${python_bin}"
+          sudo -u streetsmart-hermes env \
+            ROBIE_ENV=TEST \
+            PYTHONPATH="${current}" \
+            ROBIE_PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222 \
+            "${python_bin}" "${current}/scripts/run-je-kill-live-test.py" \
+              --fixture "${FIXTURE}" \
+              --run-root "${RUN_ROOT}"
+          REMOTE

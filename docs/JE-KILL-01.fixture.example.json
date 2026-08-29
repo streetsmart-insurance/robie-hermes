@@ -1,0 +1,51 @@
+{
+  "test_only": true,
+  "disposable": true,
+  "approved_by": "Carlo Ferrara",
+  "approval_scope": "JE-KILL-01",
+  "approved_at": "YYYY-MM-DDTHH:MM:SSZ",
+  "scenarios": {
+    "before_action": {
+      "account_id": "DISPOSABLE_TEST_ACCOUNT_ID",
+      "resource_id": "DISTINCT_TEST_DOCUMENT_ID_1",
+      "document_name": "je-kill-before.pdf",
+      "label_id": "TEST_LABEL_ID",
+      "label": "JE-KILL-01",
+      "action_url": "https://TEST_HOST.ezlynx.com/web/TEST_ACTION_PATH",
+      "readback_url": "https://TEST_HOST.ezlynx.com/web/TEST_READBACK_PATH",
+      "label_control": {"kind": "role", "value": "button", "name": "Labels"},
+      "search_input": {"kind": "role", "value": "textbox", "name": "Search Labels"},
+      "label_option": {"kind": "text", "value": "JE-KILL-01"},
+      "apply_button": {"kind": "role", "value": "button", "name": "Apply"},
+      "applied_label": {"kind": "text", "value": "JE-KILL-01"}
+    },
+    "after_action": {
+      "account_id": "DISPOSABLE_TEST_ACCOUNT_ID",
+      "resource_id": "DISTINCT_TEST_DOCUMENT_ID_2",
+      "document_name": "je-kill-after.pdf",
+      "label_id": "TEST_LABEL_ID",
+      "label": "JE-KILL-01",
+      "action_url": "https://TEST_HOST.ezlynx.com/web/TEST_ACTION_PATH",
+      "readback_url": "https://TEST_HOST.ezlynx.com/web/TEST_READBACK_PATH",
+      "label_control": {"kind": "role", "value": "button", "name": "Labels"},
+      "search_input": {"kind": "role", "value": "textbox", "name": "Search Labels"},
+      "label_option": {"kind": "text", "value": "JE-KILL-01"},
+      "apply_button": {"kind": "role", "value": "button", "name": "Apply"},
+      "applied_label": {"kind": "text", "value": "JE-KILL-01"}
+    },
+    "during_verification": {
+      "account_id": "DISPOSABLE_TEST_ACCOUNT_ID",
+      "resource_id": "DISTINCT_TEST_DOCUMENT_ID_3",
+      "document_name": "je-kill-verify.pdf",
+      "label_id": "TEST_LABEL_ID",
+      "label": "JE-KILL-01",
+      "action_url": "https://TEST_HOST.ezlynx.com/web/TEST_ACTION_PATH",
+      "readback_url": "https://TEST_HOST.ezlynx.com/web/TEST_READBACK_PATH",
+      "label_control": {"kind": "role", "value": "button", "name": "Labels"},
+      "search_input": {"kind": "role", "value": "textbox", "name": "Search Labels"},
+      "label_option": {"kind": "text", "value": "JE-KILL-01"},
+      "apply_button": {"kind": "role", "value": "button", "name": "Apply"},
+      "applied_label": {"kind": "text", "value": "JE-KILL-01"}
+    }
+  }
+}

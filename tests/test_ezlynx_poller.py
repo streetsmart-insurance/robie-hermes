@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-import pytest
+try:
+    import pytest
+    fixture = pytest.fixture
+except ImportError:
+    def fixture(fn):
+        return fn
 
 from robie_job_engine.ezlynx_poller import (
     EzlynxCustomerRecord,
@@ -13,7 +18,7 @@ from robie_job_engine.ezlynx_poller import (
 )
 
 
-@pytest.fixture
+@fixture
 def sync_store(tmp_path: Path) -> EzlynxSyncStore:
     db = tmp_path / "jobs.db"
     return EzlynxSyncStore(db)
