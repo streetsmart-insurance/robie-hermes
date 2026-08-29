@@ -153,7 +153,7 @@
       "new_failure_mode": true,
       "scenario": "action-gate:test-pass-required-before-production",
       "closed": true,
-      "note": "Jobs 807f8920 and 38c0fa79 were live PAWIVA / Ascend Chat jobs on hermes-poc-01. They were the first test of an Ascend change. The written Test gate was skipped. HITL / UNVERIFIED caught them after a miss. Production Chat jobs that would perform ascend.create_program must now be REFUSED by the Job Engine before Playwright / CDP / any Ascend click unless a recorded clean Test punch-list PASS exists for that exact action. Generic hermes.google_chat_task must not hide the action. Leftover Production ids must not RETRY around the gate."
+      "note": "Jobs 807f8920 and 38c0fa79 were live PAWIVA / Ascend Chat jobs on hermes-poc-01. They were the first test of an Ascend change. The written Test gate was skipped. HITL / UNVERIFIED caught them after a miss. Production Chat jobs that would perform ascend.create_program must now be REFUSED by the Job Engine before any Ascend API request unless a recorded clean Test API creation and fresh-readback PASS exists for that exact action. Generic hermes.google_chat_task must not hide the action. Leftover Production ids must not RETRY around the gate."
     },
     {
       "id": "1df9740b",

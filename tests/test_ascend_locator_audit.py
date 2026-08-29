@@ -304,8 +304,8 @@ class WorkerAndGateTests(unittest.TestCase):
 
     def test_classify_request_and_stop_before(self):
         self.assertEqual(
-            classify_request("Run the Ascend locator-and-artifact-audit").action_type,
-            JOB_TYPE,
+            classify_request("Create a program in Ascend").action_type,
+            "ascend.create_program",
         )
         self.assertNotEqual(
             classify_request("finish the Ascend finance agreement and bind").action_type,

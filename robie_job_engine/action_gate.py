@@ -12,7 +12,7 @@ applies to flipping ``production_ready`` on a brand-new job type
 is the only grandfathered action. Ascend is not grandfathered.
 
 This module never authorizes COMPLETE, never binds, never emails, and
-never starts Playwright / CDP / Ascend.
+never sends an Ascend API request.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ CREATE_PROGRAM_MARKERS = (
     "agency fee",
 )
 SKILL_MARKERS = (
+    "ascend-api-create-program",
     "ascend-locator-artifact-audit",
     "ascend.create_program",
     "ascend.locator_artifact_audit",
@@ -74,8 +75,8 @@ DEFAULT_NO_RETRY_PREFIXES = ("807f8920", "38c0fa79")
 CHAT_REFUSE_NOTE = (
     "The system refused because Test has no clean pass for this action. "
     "Production is not the first test. HITL after a miss is not the gate. "
-    "Do not start Ascend, Playwright, or CDP until a recorded clean Test "
-    "punch-list PASS exists for this exact action."
+    "Do not send an Ascend API create request until a recorded clean Test "
+    "API creation and fresh-readback PASS exists for this exact action."
 )
 LEFTOVER_RETRY_NOTE = (
     "Leftover Production job ids must not RETRY around the action gate. "
@@ -327,7 +328,7 @@ def apply_action_gate(
     text: str = "",
     env: str | None = None,
 ) -> dict[str, Any] | None:
-    """Refuse a gated Production job before recorder / Playwright / CDP.
+    """Refuse a gated Production job before any Ascend API request.
 
     Returns the updated job when it refused, otherwise None so the caller
     may continue. Dry Chat note is the FAILED reason. Not HITL. Not
@@ -426,8 +427,8 @@ def format_action_gate_chat_note(job: dict[str, Any] | None) -> str:
     return (
         f"ROBIE Job {job_id} — FAILED\n\n"
         f"{error}\n\n"
-        "No Ascend click, no Playwright, no CDP. "
-        "A recorded clean Test punch-list PASS for this exact action is required."
+        "No Ascend API request was sent. "
+        "A recorded clean Test API creation and fresh-readback PASS for this exact action is required."
     )
 
 

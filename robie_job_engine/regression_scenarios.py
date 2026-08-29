@@ -133,7 +133,7 @@ ACTION_GATE_CHAT = (
     "ACTION GATE class returned (807f8920, 38c0fa79): Production Chat jobs "
     "that target Ascend / premium finance / PAWIVA / create-program must be "
     "REFUSED before Playwright, CDP, or any Ascend click unless a recorded "
-    "clean Test punch-list PASS exists for that exact action. HITL after a "
+    "clean Test API creation and fresh-readback PASS exists for that exact action. HITL after a "
     "miss is not the gate. The Job Engine refuses; this is not a memory item."
 )
 
@@ -907,7 +907,7 @@ def run_action_gate_scenario(*, work_dir: Path) -> dict[str, Any]:
     """Production Chat Ascend/create-program without a Test pass must REFUSE.
 
     Named class: 807f8920 / 38c0fa79 skipped the written Test gate. The
-    Job Engine must refuse before Playwright / CDP / Ascend. Test env may
+    Job Engine must refuse before any Ascend API request. Test env may
     run. A recorded clean Test pass unblocks N=1. Leftover Production ids
     must not RETRY around the gate.
     """
@@ -934,7 +934,7 @@ def run_action_gate_scenario(*, work_dir: Path) -> dict[str, Any]:
     try:
         classified = classify_action(
             CHAT_SHAPED_ASCEND,
-            payload={"text": CHAT_SHAPED_ASCEND, "skill": "ascend-locator-artifact-audit"},
+            payload={"text": CHAT_SHAPED_ASCEND, "skill": "ascend-api-create-program"},
             action_type="hermes.google_chat_task",
         )
         if classified != CREATE_PROGRAM_ACTION:
@@ -983,8 +983,11 @@ def run_action_gate_scenario(*, work_dir: Path) -> dict[str, Any]:
                     errors.append(f"missing refuse token: {refused.get('last_error')}")
                 if RecordingStore(db).latest(refused_id):
                     errors.append("Production refuse started a recorder")
-                if refused["action_type"] != "hermes.google_chat_task":
-                    errors.append("Chat job type changed; gate must see through it")
+                if refused["action_type"] != "ascend.create_program":
+                    errors.append(
+                        "Ascend create request did not route to the bounded API job: "
+                        f"{refused['action_type']}"
+                    )
 
             leftover_reason = hold_reason_for_job(
                 {
