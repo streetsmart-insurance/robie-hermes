@@ -1,0 +1,53 @@
+name: GCP keyless readiness audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/gcp-readiness-audit.yml"
+      - "scripts/gcp-readiness-audit.sh"
+      - "docs/GCP_ACCESS_RUNBOOK.md"
+      - "AGENTS.md"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  resource-plane-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out audited commit
+        uses: actions/checkout@v4
+
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Generate bounded readiness evidence
+        env:
+          AUDIT_REPORT: ${{ runner.temp }}/gcp-readiness.md
+          CONTROL_PROJECT: streetsmart-robie-test
+          RUNTIME_PROJECT: streetsmart-hermes-poc
+          GCP_ZONE: us-east1-b
+        run: bash scripts/gcp-readiness-audit.sh
+
+      - name: Publish job summary
+        if: always()
+        shell: bash
+        run: |
+          report="${RUNNER_TEMP}/gcp-readiness.md"
+          if [[ -f "$report" ]]; then
+            cat "$report" >>"$GITHUB_STEP_SUMMARY"
+          else
+            printf '## GCP readiness audit\n\nAuthentication or setup failed before evidence was generated.\n' >>"$GITHUB_STEP_SUMMARY"
+          fi
