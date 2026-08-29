@@ -22,6 +22,8 @@ from .models import (
     VERIFIER_AUTHORITY,
     WAITING_STATUSES,
     JobStatus,
+    ReconciliationOutcome,
+    ReconciliationResult,
     VerificationResult,
     WorkerResult,
 )
@@ -33,6 +35,9 @@ from .store import JobStore
 
 LEFTOVER_RETRY_REFUSED = "LEFTOVER_RETRY_REFUSED"
 _RETRY_TEXTS = frozenset({"retry", "/retry"})
+RECONCILIATION_REQUIRED_ACTIONS = frozenset(
+    {"ezlynx.reassign", "ezlynx.move_document", "ezlynx.apply_label"}
+)
 
 
 def is_retry_text(text: str) -> bool:
@@ -86,6 +91,15 @@ class Verifier(Protocol):
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> VerificationResult: ...
 
 
+class DestinationReconciler(Protocol):
+    def reconcile(
+        self,
+        job: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> ReconciliationResult: ...
+
+
 class JobEngine:
     """The only component authorized to set COMPLETE."""
 
@@ -95,6 +109,7 @@ class JobEngine:
         workers: dict[str, ComputerWorker],
         verifiers: dict[str, Verifier],
         *,
+        reconcilers: dict[str, DestinationReconciler] | None = None,
         owner: str = "robie-job-engine",
         recordings: RecordingManager | None = None,
         perform_timeout_seconds: float = 120,
@@ -104,11 +119,17 @@ class JobEngine:
         self.store = store
         self.workers = workers
         self.verifiers = verifiers
+        self.reconcilers = dict(reconcilers or {})
+        for action_type, verifier in verifiers.items():
+            if action_type not in self.reconcilers and callable(
+                getattr(verifier, "reconcile", None)
+            ):
+                self.reconcilers[action_type] = verifier  # type: ignore[assignment]
         self.owner = owner
         self.recordings = recordings or RecordingManager(store.path)
         self.perform_timeout_seconds = perform_timeout_seconds
         self.enforce_recording_policy = enforce_recording_policy
-        self.lease_seconds = max(15, int(lease_seconds))
+        self.lease_seconds = max(1, int(lease_seconds))
 
     def request_retry(
         self,
@@ -136,7 +157,11 @@ class JobEngine:
         runs = IsolatedRunStore(self.store.path)
         ledger = DurableWorkLedger(self.store.path)
         try:
-            run = runs.start(owner=lease_owner, job_id=job_id)
+            run = runs.start(
+                owner=lease_owner,
+                job_id=job_id,
+                lease_seconds=self.lease_seconds,
+            )
         except RunIsolationError:
             return self.store.get_job(job_id)
         job = self.store.claim(
@@ -147,15 +172,18 @@ class JobEngine:
             return self.store.get_job(job_id)
         runs.bind(run["id"], "lease", {"owner": lease_owner, "job_id": job_id})
         verify_only = False
+        existing_action = self.store.get_checkpoint(job_id, "action")
+        existing_intent = self.store.get_checkpoint(job_id, "action_intent")
         try:
             ledger.acquire(
                 job["action_type"],
                 job["idempotency_key"],
                 owner=lease_owner,
                 timeout_seconds=self.lease_seconds,
+                allow_unverified_existing=bool(existing_intent and existing_action is None),
             )
         except IdempotencyError:
-            if self.store.get_checkpoint(job_id, "action") is None:
+            if existing_action is None:
                 self.store.release_lease(job_id)
                 runs.terminate(run["id"], "BLOCKED")
                 return self.store.get_job(job_id)
@@ -214,9 +242,14 @@ class JobEngine:
         heartbeat_errors: list[Exception] = []
 
         def maintain_leases() -> None:
-            interval = max(5.0, min(float(self.lease_seconds) / 3.0, 30.0))
+            interval = max(0.1, min(float(self.lease_seconds) / 3.0, 30.0))
             while not heartbeat_stop.wait(interval):
                 try:
+                    runs.renew_lease(
+                        run["id"],
+                        owner=lease_owner,
+                        lease_seconds=self.lease_seconds,
+                    )
                     self.store.renew_lease(
                         job_id,
                         lease_owner,
@@ -400,11 +433,36 @@ class JobEngine:
                 release_lease=True,
             )
         self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING, JobStatus.RUNNING})
-        number = self.store.increment(job["id"], "attempt_count")
         worker_name = job["payload"].get("worker", "hermes-cua")
         worker = self.workers.get(worker_name)
         if not worker:
             return self.store.transition(job["id"], JobStatus.FAILED, error=f"unknown worker: {worker_name}", release_lease=True)
+        reconciliation_required = (
+            job["action_type"] in RECONCILIATION_REQUIRED_ACTIONS
+            or bool(job["payload"].get("require_destination_reconciliation"))
+        )
+        prior_intent = self.store.get_checkpoint(job["id"], "action_intent")
+        if reconciliation_required and prior_intent is not None:
+            reconciled = self._reconcile_before_repeat(
+                job,
+                ledger=ledger,
+                run_id=run_id,
+                intent=prior_intent,
+            )
+            if reconciled is not None:
+                return reconciled
+        number = self.store.increment(job["id"], "attempt_count")
+        if reconciliation_required:
+            intent = {
+                "action": job["action_type"],
+                "idempotency_key": job["idempotency_key"],
+                "attempt_number": number,
+                "run_id": run_id,
+                "state": "PREPARED",
+                "prepared_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.store.checkpoint(job["id"], "action_intent", intent)
+            IsolatedRunStore(self.store.path).bind(run_id, "action_intent", intent)
         try:
             result = self._call_worker(worker, job)
         except Exception as exc:
@@ -505,7 +563,130 @@ class JobEngine:
             )
         action = {"action": result.action, "destination": result.destination, "detail": result.detail}
         self.store.checkpoint(job["id"], "action", action)
+        if reconciliation_required:
+            self.store.checkpoint(
+                job["id"],
+                "action_intent",
+                {
+                    "action": job["action_type"],
+                    "idempotency_key": job["idempotency_key"],
+                    "attempt_number": number,
+                    "run_id": run_id,
+                    "state": "ACTION_RECORDED",
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
         return self.store.transition(job["id"], JobStatus.VERIFYING, expected={JobStatus.RUNNING})
+
+    def _reconcile_before_repeat(
+        self,
+        job: dict[str, Any],
+        *,
+        ledger: DurableWorkLedger,
+        run_id: str,
+        intent: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Read destination state before an interrupted intent can write again.
+
+        ``None`` means an authoritative read proved the consequence did not
+        occur, so a new perform attempt may proceed. Every other return value
+        is a Job state and the worker is not called.
+        """
+        reconciler = self.reconcilers.get(job["action_type"])
+        if reconciler is None:
+            result = ReconciliationResult(
+                ReconciliationOutcome.UNKNOWN,
+                job["action_type"],
+                detail={"intent": intent},
+                error="destination reconciliation is required before retry but no reconciler is registered",
+                hold_status=JobStatus.NEEDS_CLARIFICATION,
+            )
+        else:
+            try:
+                result = reconciler.reconcile(
+                    job,
+                    idempotency_key=job["idempotency_key"],
+                )
+            except Exception as exc:
+                result = ReconciliationResult(
+                    ReconciliationOutcome.UNKNOWN,
+                    job["action_type"],
+                    detail={"intent": intent},
+                    error=f"destination reconciliation failed: {redact_exception(exc)}",
+                )
+        outcome = result.outcome
+        if not isinstance(outcome, ReconciliationOutcome):
+            try:
+                outcome = ReconciliationOutcome(str(outcome))
+            except ValueError:
+                outcome = ReconciliationOutcome.UNKNOWN
+        if not result.authoritative and outcome != ReconciliationOutcome.UNKNOWN:
+            outcome = ReconciliationOutcome.UNKNOWN
+        if outcome == ReconciliationOutcome.APPLIED and not result.destination:
+            outcome = ReconciliationOutcome.UNKNOWN
+        evidence = {
+            "outcome": outcome.value,
+            "authoritative": bool(result.authoritative),
+            "action": result.action,
+            "destination": redact_mapping(result.destination),
+            "detail": redact_mapping(result.detail),
+            "error": result.error,
+            "intent": intent,
+            "reconciled_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.store.checkpoint(job["id"], "action_reconciliation", evidence)
+        IsolatedRunStore(self.store.path).bind(run_id, "action_reconciliation", evidence)
+        if outcome == ReconciliationOutcome.NOT_APPLIED:
+            self.store.checkpoint(
+                job["id"],
+                "action_intent",
+                {
+                    **intent,
+                    "state": "RECONCILED_NOT_APPLIED",
+                    "reconciled_at": evidence["reconciled_at"],
+                },
+            )
+            return None
+        if outcome == ReconciliationOutcome.APPLIED:
+            try:
+                ledger.record_external_action(job["action_type"], job["idempotency_key"])
+            except IdempotencyError:
+                pass
+            action = {
+                "action": result.action or job["action_type"],
+                "destination": result.destination,
+                "detail": {
+                    **result.detail,
+                    "reconciled_after_interruption": True,
+                    "idempotency_key": job["idempotency_key"],
+                },
+            }
+            self.store.checkpoint(job["id"], "action", action)
+            self.store.checkpoint(
+                job["id"],
+                "action_intent",
+                {
+                    **intent,
+                    "state": "RECONCILED_APPLIED",
+                    "reconciled_at": evidence["reconciled_at"],
+                },
+            )
+            return self.store.transition(
+                job["id"],
+                JobStatus.VERIFYING,
+                expected={JobStatus.RUNNING},
+            )
+        hold = result.hold_status
+        if hold not in WAITING_STATUSES:
+            hold = JobStatus.WAITING
+        return self.store.transition(
+            job["id"],
+            hold,
+            expected={JobStatus.RUNNING},
+            error=result.error or "destination reconciliation was inconclusive; action not repeated",
+            resume_status=JobStatus.PENDING,
+            release_lease=True,
+        )
 
     def _call_worker(self, worker: ComputerWorker, job: dict[str, Any]) -> WorkerResult:
         timeout = float(job["payload"].get("perform_timeout_seconds", self.perform_timeout_seconds))

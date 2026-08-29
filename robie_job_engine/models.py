@@ -36,6 +36,14 @@ VERIFIER_AUTHORITY = "independent-verifier"
 ACTION_OUTCOME_UNKNOWN = "ACTION_OUTCOME_UNKNOWN"
 
 
+class ReconciliationOutcome(str, Enum):
+    """Authoritative read-before-write result after an interrupted action intent."""
+
+    APPLIED = "APPLIED"
+    NOT_APPLIED = "NOT_APPLIED"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True)
 class WorkerResult:
     """A worker may report only what it attempted, never job completion."""
@@ -47,6 +55,24 @@ class WorkerResult:
     retryable: bool = True
     error: str | None = None
     hold_status: JobStatus | None = None
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """Result of reconciling destination state before a possible repeat write.
+
+    ``APPLIED`` and ``NOT_APPLIED`` are actionable only when ``authoritative``
+    is true. Any missing, stale, ambiguous, or unavailable read-back is
+    ``UNKNOWN`` and must not allow the worker to repeat the consequence.
+    """
+
+    outcome: ReconciliationOutcome
+    action: str
+    destination: dict[str, Any] = field(default_factory=dict)
+    detail: dict[str, Any] = field(default_factory=dict)
+    authoritative: bool = False
+    error: str | None = None
+    hold_status: JobStatus = JobStatus.WAITING
 
 
 @dataclass(frozen=True)
