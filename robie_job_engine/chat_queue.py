@@ -830,12 +830,26 @@ class DurableChatEventQueue:
                 (conversation_id, job_id),
             ).fetchone()
             job = conn.execute(
-                "SELECT payload_json,status,resume_status FROM jobs WHERE id=?",
+                "SELECT payload_json,status,resume_status,created_at,updated_at FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
             if job is None or job["status"] != "AWAITING_HUMAN_INPUT":
                 conn.rollback()
                 raise RuntimeError("bound Job is not awaiting human input")
+            from .engine import is_retry_text, leftover_retry_hold_reason
+
+            if is_retry_text(clean_value):
+                leftover = leftover_retry_hold_reason(
+                    {
+                        "id": job_id,
+                        "status": job["status"],
+                        "created_at": job["created_at"],
+                        "updated_at": job["updated_at"],
+                    }
+                )
+                if leftover:
+                    conn.rollback()
+                    raise RuntimeError(leftover)
             payload = json.loads(job["payload_json"] or "{}")
             values = dict(payload.get("human_input_values") or {})
             values[clean_field] = clean_value

@@ -31,6 +31,7 @@ from robie_job_engine.store import JobStore
 from robie_job_engine.tab_cleanup import (
     EMPTY_TARGET_EVIDENCE,
     LIVE_TAB_CLAIM_MAX_AGE,
+    WRONG_HOST_REFUSED,
     BrowserTab,
     cleanup_terminal_job_tabs,
     ensure_one_browser_page,
@@ -38,9 +39,11 @@ from robie_job_engine.tab_cleanup import (
     flush_tabs_at_job_start,
     live_tab_claims,
     plan_tab_cleanup,
+    refuse_wrong_host_at_job_start,
     retarget_recorder_hint,
     sweep_orphaned_tabs,
     tabs_from_pages,
+    wrong_host_refuse_reason,
 )
 
 
@@ -653,6 +656,91 @@ class StaleLiveTabClaimTests(unittest.TestCase):
                     sys.modules.pop(name, None)
                 else:
                     sys.modules[name] = item
+
+
+class WrongHostRefuseTests(unittest.TestCase):
+    def test_ezlynx_job_plus_ascend_tab_is_refused(self):
+        job = {
+            "action_type": "hermes.google_chat_task",
+            "payload": {"text": f"open EZLynx account {LIVE_ACCOUNT} documents"},
+        }
+        tabs = _cdp(
+            ("session", SESSION),
+            ("ascend-create", ASCEND_CREATE_NEW),
+        )
+        reason = wrong_host_refuse_reason(job=job, tabs=tabs)
+        self.assertIsNotNone(reason)
+        self.assertIn(WRONG_HOST_REFUSED, reason or "")
+        self.assertIn("ezlynx", (reason or "").casefold())
+        self.assertIn("do not attach", (reason or "").casefold())
+        self.assertIn("playwright_exec", (reason or "").casefold())
+        verdict = refuse_wrong_host_at_job_start(job=job, tabs=tabs)
+        self.assertTrue(verdict["refused"])
+        self.assertFalse(verdict["ok"])
+        self.assertEqual(verdict["job_host"], "ezlynx")
+        self.assertTrue(verdict["kept_session"])
+
+    def test_ezlynx_job_plus_ezlynx_account_tab_is_allowed(self):
+        job = {
+            "action_type": "hermes.google_chat_task",
+            "payload": {"text": f"open EZLynx account {LIVE_ACCOUNT} documents"},
+        }
+        tabs = _cdp(
+            ("session", SESSION),
+            ("account", LIVE_OVERVIEW),
+        )
+        reason = wrong_host_refuse_reason(job=job, tabs=tabs)
+        self.assertIsNone(reason)
+        verdict = refuse_wrong_host_at_job_start(job=job, tabs=tabs)
+        self.assertFalse(verdict["refused"])
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["job_host"], "ezlynx")
+
+    def test_chat_and_playwright_invoke_wrong_host_refuse(self):
+        job = {
+            "action_type": "hermes.google_chat_task",
+            "payload": {"text": f"open EZLynx account {LIVE_ACCOUNT}"},
+        }
+        tabs = _cdp(("session", SESSION), ("ascend-create", ASCEND_CREATE_NEW))
+        refused = {
+            "ok": False,
+            "refused": True,
+            "reason": f"{WRONG_HOST_REFUSED}: fixture",
+            "job_host": "ezlynx",
+            "kept_session": True,
+        }
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            JobStore(db)
+            with patch(
+                "robie_job_engine.tab_cleanup.refuse_wrong_host_at_job_start",
+                return_value=refused,
+            ):
+                job_id = open_chat_job(
+                    db,
+                    "message-wrong-host",
+                    f"open EZLynx account {LIVE_ACCOUNT} documents",
+                    conversation_id="spaces/wrong-host",
+                )
+            opened = JobStore(db).get_job(job_id)
+            self.assertEqual(opened["status"], JobStatus.FAILED.value)
+            self.assertIn(WRONG_HOST_REFUSED, opened["last_error"])
+            stop_generic_chat_job_heartbeat(db, job_id)
+        self.assertIsNotNone(wrong_host_refuse_reason(job=job, tabs=tabs))
+        chat_guard = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "chat_guard.py"
+        ).read_text(encoding="utf-8")
+        tool = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "hermes"
+            / "tools"
+            / "playwright_tool.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("refuse_wrong_host_at_job_start", chat_guard)
+        self.assertIn("refuse_wrong_host_at_job_start", tool)
 
 
 class PlaywrightPageSelectionTests(unittest.TestCase):

@@ -46,6 +46,7 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertNotIn("page = pages[0] if pages else context.new_page()", source)
         self.assertIn("refusing pages[0] / first-ezlynx-wins", source)
         self.assertIn("flush_tabs_at_job_start", source)
+        self.assertIn("refuse_wrong_host_at_job_start", source)
 
     def test_playwright_policy_forbids_silent_engine_fallback(self):
         source = SKILL.read_text()

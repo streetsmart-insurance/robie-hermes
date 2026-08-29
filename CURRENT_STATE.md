@@ -321,7 +321,15 @@ live tab claim, so a parked HITL or stuck job no longer protects leftover
 tabs (for example Ascend `/create/new`). The job itself is not FAILED,
 RETRYed, or deleted — tabs only. A new Google Chat or Playwright job runs
 the same flush at start (`flush_tabs_at_job_start`); do not wait for
-terminal close-out or pre-flight. Recorder and
+terminal close-out or pre-flight. If that new job is EZLynx (or another
+named host) and Chrome/CDP/recorder is still on a different named host —
+tonight: leftover `dashboard.useascend.com/create/new` vs an EZLynx
+account — refuse attach and `playwright_exec` (`WRONG_HOST_REFUSED`). Do
+not wait for the 1-hour claim expiry. Leftover RETRY is refused by the
+Job Engine (`leftover_retry_hold_reason` / `JobEngine.request_retry`):
+RETRY is allowed only for a fresh `AWAITING_HUMAN_INPUT` HITL younger
+than the same 1-hour constant. Terminal FAILED / UNVERIFIED / leftover
+ids must not resume via RETRY. New `@robie` is the path. No auto-retry. Recorder and
 Playwright select the current job tab with `select_recording_tab` /
 `select_playwright_page` after cleanup — not `pages[0]` / first-ezlynx-wins.
 Capture also reads Chrome `/json/list` so a second Playwright tab is
