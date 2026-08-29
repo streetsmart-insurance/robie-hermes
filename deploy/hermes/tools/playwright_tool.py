@@ -336,20 +336,20 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         from robie_job_engine.tab_cleanup import refuse_wrong_host_at_job_start
 
         job = None
-        job_id = os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID")
-        db_path = os.environ.get("ROBIE_JOB_DB")
-        if job_id and db_path:
+        bound_job_id = job_id or os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID")
+        bound_db = db_path or os.environ.get("ROBIE_JOB_DB")
+        if bound_job_id and bound_db:
             try:
                 from robie_job_engine.store import JobStore
 
-                job = JobStore(db_path).get_job(job_id)
+                job = JobStore(bound_db).get_job(bound_job_id)
             except Exception:
                 job = None
         verdict = refuse_wrong_host_at_job_start(
-            db_path=db_path, job=job, code=code
+            db_path=bound_db, job=job, code=code
         )
         if verdict.get("refused") and verdict.get("reason"):
-            return tool_error(verdict["reason"])
+            return _finish(tool_error(verdict["reason"]))
     except Exception:
         pass
     if not code or not code.strip():

@@ -329,7 +329,8 @@ not wait for the 1-hour claim expiry. Leftover RETRY is refused by the
 Job Engine (`leftover_retry_hold_reason` / `JobEngine.request_retry`):
 RETRY is allowed only for a fresh `AWAITING_HUMAN_INPUT` HITL younger
 than the same 1-hour constant. Terminal FAILED / UNVERIFIED / leftover
-ids must not resume via RETRY. New `@robie` is the path. No auto-retry. Recorder and
+ids must not resume via RETRY. New `@robie` is the path. No auto-retry.
+Recorder and
 Playwright select the current job tab with `select_recording_tab` /
 `select_playwright_page` after cleanup — not `pages[0]` / first-ezlynx-wins.
 Capture also reads Chrome `/json/list` so a second Playwright tab is
