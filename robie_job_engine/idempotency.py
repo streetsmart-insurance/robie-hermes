@@ -127,6 +127,7 @@ class DurableWorkLedger:
         *,
         owner: str,
         timeout_seconds: int = 60,
+        allow_unverified_existing: bool = False,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=timeout_seconds)).isoformat()
@@ -159,10 +160,19 @@ class DurableWorkLedger:
                 )
                 item["outcome"] = ACTION_OUTCOME_UNKNOWN
             if item["external_actions"] >= 1 and not item["verified"]:
-                conn.commit()
-                raise IdempotencyError(
-                    "verify before any retry; an external action already ran"
+                if not allow_unverified_existing:
+                    conn.commit()
+                    raise IdempotencyError(
+                        "verify before any retry; an external action already ran"
+                    )
+                conn.execute(
+                    """UPDATE durable_work_items
+                       SET lease_owner=?, lease_expires_at=?, updated_at=?
+                       WHERE namespace=? AND work_item_key=?""",
+                    (owner, expiry, stamp, namespace, work_item_key),
                 )
+                conn.commit()
+                return self.get(namespace, work_item_key)
             if item["external_actions"] >= 1 and item["verified"]:
                 conn.commit()
                 return self.get(namespace, work_item_key)

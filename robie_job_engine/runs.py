@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,15 @@ from .store import utc_now
 
 ACTIVE_STATUSES = frozenset({"ACTIVE"})
 TERMINAL_EVENTS = frozenset(
-    {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "UNVERIFIED", "INTAKE"}
+    {
+        "COMPLETE",
+        "FAILED",
+        "CANCELLED",
+        "BLOCKED",
+        "UNVERIFIED",
+        "INTAKE",
+        "ABANDONED",
+    }
 )
 
 
@@ -46,6 +55,8 @@ class IsolatedRunStore:
                     status TEXT NOT NULL,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
                     terminal_event TEXT,
+                    heartbeat_at TEXT,
+                    lease_expires_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -62,6 +73,14 @@ class IsolatedRunStore:
                     ON isolated_runs(status) WHERE status='ACTIVE';
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(isolated_runs)").fetchall()
+            }
+            if "heartbeat_at" not in columns:
+                conn.execute("ALTER TABLE isolated_runs ADD COLUMN heartbeat_at TEXT")
+            if "lease_expires_at" not in columns:
+                conn.execute("ALTER TABLE isolated_runs ADD COLUMN lease_expires_at TEXT")
 
     def _decode(self, row: sqlite3.Row) -> dict[str, Any]:
         return dict(row)
@@ -108,18 +127,81 @@ class IsolatedRunStore:
                 self.terminate(run["id"], "BLOCKED")
             raise
 
-    def start(self, *, owner: str, job_id: str) -> dict[str, Any]:
+    @staticmethod
+    def _reconcile_stale_in_transaction(
+        conn: sqlite3.Connection,
+        *,
+        now: datetime,
+    ) -> list[str]:
+        stamp = now.isoformat()
+        rows = conn.execute(
+            """SELECT id, owner, job_id, lease_expires_at
+               FROM isolated_runs
+               WHERE status='ACTIVE'
+                 AND (lease_expires_at IS NULL OR lease_expires_at<=?)
+               ORDER BY created_at, id""",
+            (stamp,),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                """UPDATE isolated_runs
+                   SET status='ABANDONED', terminal_event='ABANDONED',
+                       lease_expires_at=NULL, updated_at=?
+                   WHERE id=? AND status='ACTIVE'""",
+                (stamp, row["id"]),
+            )
+            conn.execute(
+                """INSERT INTO isolated_run_bindings
+                   (run_id,kind,payload_json,created_at)
+                   VALUES (?,?,?,?)""",
+                (
+                    row["id"],
+                    "startup-reconciliation",
+                    json.dumps(
+                        {
+                            "reason": "run lease expired before a terminal event",
+                            "previous_owner": row["owner"],
+                            "job_id": row["job_id"],
+                            "lease_expires_at": row["lease_expires_at"],
+                            "reconciled_at": stamp,
+                        },
+                        sort_keys=True,
+                    ),
+                    stamp,
+                ),
+            )
+        return [str(row["id"]) for row in rows]
+
+    def reconcile_stale(self, *, now: datetime | None = None) -> list[str]:
+        """Expire dead ACTIVE runs while preserving an auditable terminal row."""
+        at = now or datetime.now(timezone.utc)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            reconciled = self._reconcile_stale_in_transaction(conn, now=at)
+            conn.commit()
+        return reconciled
+
+    def start(
+        self,
+        *,
+        owner: str,
+        job_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
         run_id = str(uuid.uuid4())
-        now = utc_now()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expiry = (now_dt + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                self._reconcile_stale_in_transaction(conn, now=now_dt)
                 conn.execute(
                     """INSERT INTO isolated_runs
-                       (id,owner,job_id,status,created_at,updated_at)
-                       VALUES (?,?,?,?,?,?)""",
-                    (run_id, owner, job_id, "ACTIVE", now, now),
+                       (id,owner,job_id,status,heartbeat_at,lease_expires_at,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (run_id, owner, job_id, "ACTIVE", now, expiry, now, now),
                 )
                 conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -136,13 +218,39 @@ class IsolatedRunStore:
             conn.close()
         return self.get(run_id)
 
+    def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Heartbeat only a live, unexpired run owned by this worker."""
+        now = datetime.now(timezone.utc)
+        stamp = now.isoformat()
+        expiry = (now + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
+        with self._connect() as conn:
+            changed = conn.execute(
+                """UPDATE isolated_runs
+                   SET heartbeat_at=?, lease_expires_at=?, updated_at=?
+                   WHERE id=? AND owner=? AND status='ACTIVE'
+                     AND terminal_event IS NULL
+                     AND lease_expires_at>?""",
+                (stamp, expiry, stamp, run_id, owner, stamp),
+            ).rowcount
+        if changed != 1:
+            raise RunIsolationError(
+                f"run lease is expired, terminal, missing, or owned by another worker: {run_id}"
+            )
+        return self.get(run_id)
+
     def cancel(self, run_id: str) -> dict[str, Any]:
         run = self.assert_can_work(run_id)
         now = utc_now()
         with self._connect() as conn:
             conn.execute(
                 """UPDATE isolated_runs SET cancel_requested=1, status='CANCELLED',
-                   terminal_event='CANCELLED', updated_at=? WHERE id=?""",
+                   terminal_event='CANCELLED', lease_expires_at=NULL, updated_at=? WHERE id=?""",
                 (now, run_id),
             )
         self.bind(run_id, "cleanup", {"cancelled": True, "owner": run["owner"]})
@@ -161,7 +269,8 @@ class IsolatedRunStore:
         now = utc_now()
         with self._connect() as conn:
             conn.execute(
-                """UPDATE isolated_runs SET status=?, terminal_event=?, updated_at=?
+                """UPDATE isolated_runs SET status=?, terminal_event=?,
+                   lease_expires_at=NULL, updated_at=?
                    WHERE id=? AND terminal_event IS NULL""",
                 (event, event, now, run_id),
             )
@@ -173,6 +282,8 @@ class IsolatedRunStore:
             raise RunIsolationError(f"no work after terminal event on run {run_id}")
         if run["cancel_requested"]:
             raise RunIsolationError(f"run {run_id} is cancelled")
+        if run.get("lease_expires_at") and run["lease_expires_at"] <= utc_now():
+            raise RunIsolationError(f"run lease expired: {run_id}")
         return run
 
     def bind(self, run_id: str, kind: str, payload: dict[str, Any]) -> None:
