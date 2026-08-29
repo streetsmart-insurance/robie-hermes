@@ -3,7 +3,12 @@ name: ROBIE verification gate
 on:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      # This zip-base branch is intentionally not mergeable into later main
+      # (PR 65 onto 8734440 only). pull_request CI cannot create a merge
+      # ref; run the same gate on the head SHA via push.
+      - cursor/cherry-pick-pr65-observability-8734440-a1b2
   workflow_dispatch:
 
 permissions:
