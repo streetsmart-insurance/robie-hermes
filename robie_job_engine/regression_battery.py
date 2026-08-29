@@ -49,6 +49,8 @@ from .regression_scenarios import (
     FOLLOW_TAB_CHAT,
     HITL_RESUME_CHAT,
     HITL_TONE_CHAT,
+    PLAYWRIGHT_CDP_CHAT,
+    PLAYWRIGHT_SILENT_CHAT,
     run_named_scenarios,
 )
 from .runtime_env import PRODUCTION_ENV_NAMES, ProductionGuardError, current_robie_env
@@ -602,6 +604,10 @@ def format_new_failure_chat(
             lines.append(ASCEND_CUSTOMER_TYPE_CHAT)
         if item_id.startswith("action-gate:"):
             lines.append(ACTION_GATE_CHAT)
+        if item_id.startswith("playwright-silent:"):
+            lines.append(PLAYWRIGHT_SILENT_CHAT)
+        if item_id.startswith("playwright-cdp:"):
+            lines.append(PLAYWRIGHT_CDP_CHAT)
     lines.append(HUMAN_GATE)
     text = "\n".join(lines)
     if "@robie" in text.casefold():

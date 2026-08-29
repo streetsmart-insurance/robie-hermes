@@ -28,6 +28,11 @@ from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
 from .secrets import redact_mapping, redact_text
 from .sheets_sync import publish_job_to_control_center
 from .submission_routing import resolve_submission_route, submission_verification_requirements
+from .playwright_observability import (
+    bind_current_playwright_job,
+    fail_closed_zero_playwright_rows,
+    maybe_snapshot_and_bind,
+)
 from .post_job_audit import format_audit_chat_message, maybe_audit_terminal_job
 from .store import JobStore
 
@@ -86,6 +91,7 @@ def start_generic_chat_job_heartbeat(
     ):
         return job
     written = store.heartbeat_generic_chat_job(job_id, now=now, source=source)
+    bind_current_playwright_job(db_path, job_id)
     key = _generic_chat_heartbeat_key(db_path, job_id)
     with _GENERIC_CHAT_HEARTBEAT_LOCK:
         existing = _GENERIC_CHAT_HEARTBEATS.get(key)
@@ -906,6 +912,7 @@ def open_chat_job(
         and current["status"] == JobStatus.RUNNING.value
     ):
         start_generic_chat_job_heartbeat(db_path, current["id"])
+        maybe_snapshot_and_bind(db_path, current["id"], phase="start")
     return job["id"]
 
 
@@ -926,6 +933,7 @@ def _post_job_audit_note(
             f"2. Destination evidence: UNKNOWN\n"
             f"3. Recording motion: FAIL (audit crashed; fail-closed)\n"
             f"4. Tool vs recording: UNKNOWN\n"
+            f"5. Playwright tool rows: UNKNOWN\n"
             "Audit verdict: FAIL (does not authorize COMPLETE)"
         )
     if not audit:
@@ -1234,7 +1242,14 @@ def guard_chat_response(
         if JobStatus(current["status"]) == JobStatus.RUNNING:
             store.transition(job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING})
         current = store.get_job(job_id)
-        if JobStatus(current["status"]) == JobStatus.VERIFYING:
+        closed = fail_closed_zero_playwright_rows(
+            store,
+            current,
+            expected={JobStatus.VERIFYING, JobStatus.RUNNING, JobStatus.UNVERIFIED},
+        )
+        if JobStatus(closed["status"]) == JobStatus.FAILED:
+            recordings.safe_stop(job_id, JobStatus.FAILED.value)
+        elif JobStatus(current["status"]) == JobStatus.VERIFYING:
             store.transition(
                 job_id,
                 JobStatus.UNVERIFIED,
@@ -1248,6 +1263,13 @@ def guard_chat_response(
             )
             recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
     final = store.get_job(job_id)
+    if JobStatus(final["status"]) == JobStatus.UNVERIFIED:
+        final = fail_closed_zero_playwright_rows(
+            store,
+            final,
+            expected={JobStatus.UNVERIFIED},
+        )
     if JobStatus(final["status"]) in TERMINAL_STATUSES:
+        maybe_snapshot_and_bind(db_path, job_id, phase="end")
         final = _publish_terminal_job(db_path, store, final)
     return _render_chat_terminal(store, final, content, recordings)

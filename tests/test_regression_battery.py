@@ -57,6 +57,8 @@ from robie_job_engine.regression_scenarios import (
     HITL_RESUME_CHAT,
     HITL_TONE_CHAT,
     I_DID_IT_PROSE,
+    PLAYWRIGHT_CDP_CHAT,
+    PLAYWRIGHT_SILENT_CHAT,
     SAME_DAY_RULE,
     SCENARIOS_PATH,
     close_new_failure_incident,
@@ -79,6 +81,8 @@ from robie_job_engine.regression_scenarios import (
     run_too_soon_zero_element_scenario,
     run_unique_listbox_option_scenario,
     run_wait_spinner_scenario,
+    run_zero_playwright_tool_row_scenario,
+    run_cdp_json_list_fixture_scenario,
 )
 from robie_job_engine.worker_contract import claims_unverified_destination_progress
 from robie_job_engine.test_runtime import ProductionGuardError
@@ -448,6 +452,10 @@ class ReplayGuardTests(unittest.TestCase):
         self.assertEqual(ids["ascend-create:unique-listbox-option"]["outcome"], "PASS")
         self.assertEqual(ids["ascend-customer-type:lob"]["outcome"], "PASS")
         self.assertEqual(ids["recording:follow-live-playwright-tab"]["outcome"], "PASS")
+        self.assertEqual(
+            ids["playwright-silent:zero-tool-rows-1df9740b"]["outcome"], "PASS"
+        )
+        self.assertEqual(ids["playwright-cdp:json-list-fixture"]["outcome"], "PASS")
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -693,6 +701,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["test-gate-skipped-807f8920-38c0fa79"]["scenario"],
             "action-gate:test-pass-required-before-production",
         )
+        self.assertEqual(
+            incidents["1df9740b"]["scenario"],
+            "playwright-silent:zero-tool-rows-1df9740b",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -749,6 +761,43 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
         self.assertIn("807f8920", text)
         self.assertIn("38c0fa79", text)
         self.assertNotIn("@robie", text.casefold())
+
+    def test_zero_playwright_tool_row_and_cdp_fixture_scenarios_pass(self):
+        with durable_temporary_directory() as tmp:
+            silent = run_zero_playwright_tool_row_scenario(
+                work_dir=Path(tmp) / "playwright-silent"
+            )
+            cdp = run_cdp_json_list_fixture_scenario(
+                work_dir=Path(tmp) / "playwright-cdp"
+            )
+        self.assertTrue(silent["ok"], silent.get("evidence"))
+        self.assertEqual(silent["id"], "playwright-silent:zero-tool-rows-1df9740b")
+        self.assertTrue(cdp["ok"], cdp.get("evidence"))
+        self.assertEqual(cdp["id"], "playwright-cdp:json-list-fixture")
+        silent_text = format_new_failure_chat(
+            [
+                {
+                    "id": "playwright-silent:zero-tool-rows-1df9740b",
+                    "outcome": "FAILED",
+                    "evidence": "UNVERIFIED hide",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(PLAYWRIGHT_SILENT_CHAT, silent_text)
+        self.assertIn("1df9740b", silent_text)
+        self.assertNotIn("@robie", silent_text.casefold())
+        cdp_text = format_new_failure_chat(
+            [
+                {
+                    "id": "playwright-cdp:json-list-fixture",
+                    "outcome": "FAILED",
+                    "evidence": "no checkpoint",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(PLAYWRIGHT_CDP_CHAT, cdp_text)
 
     def test_ascend_locator_audit_scenario_is_ci_only_and_passes(self):
         with durable_temporary_directory() as tmp:
