@@ -522,11 +522,11 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
             job_id,
             "I set up the policy. The work is done.",
         )
-        self.assertIn("UNVERIFIED", response)
+        self.assertIn("FAILED", response)
         self.assertNotIn("— COMPLETE", response)
         self.assertNotIn("I set up the policy", response)
-        self.assertIn("suppressed", response)
-        self.assertEqual(self.store.get_job(job_id)["status"], JobStatus.UNVERIFIED)
+        self.assertIn("PLAYWRIGHT_SILENT", self.store.get_job(job_id)["last_error"])
+        self.assertEqual(self.store.get_job(job_id)["status"], JobStatus.FAILED)
 
     def test_unbound_policy_success_claim_is_not_reported(self):
         response = guard_chat_response(

@@ -134,7 +134,23 @@ ACTION_GATE_CHAT = (
     "miss is not the gate. The Job Engine refuses; this is not a memory item."
 )
 
+PLAYWRIGHT_SILENT_CHAT = (
+    "PLAYWRIGHT SILENT-GAP class returned (1df9740b): a Chat/EZLynx "
+    "job closed UNVERIFIED from heartbeat + leftover recorder tab with "
+    "zero playwright_exec rows. Persist every tool call. Snapshot CDP "
+    "tabs. Zero tool rows is FAILED, not UNVERIFIED."
+)
+
+PLAYWRIGHT_CDP_CHAT = (
+    "PLAYWRIGHT CDP-SNAPSHOT class returned: job start/end must write "
+    "Chrome /json/list url+title checkpoints from a fixture payload. "
+    "No cookies. No websocket debugger URLs. Leftover Ascend vs EZLynx "
+    "must be visible without a live browser."
+)
+
 ACTION_GATE_SCENARIO_ID = "action-gate:test-pass-required-before-production"
+PLAYWRIGHT_SILENT_SCENARIO_ID = "playwright-silent:zero-tool-rows-1df9740b"
+PLAYWRIGHT_CDP_SCENARIO_ID = "playwright-cdp:json-list-fixture"
 CHAT_SHAPED_ASCEND = (
     "@robie create a program in Ascend for PAWIVA premium finance"
 )
@@ -168,6 +184,8 @@ NAMED_SCENARIO_IDS = frozenset(
         "ascend-customer-type:lob",
         "recording:follow-live-playwright-tab",
         "action-gate:test-pass-required-before-production",
+        "playwright-silent:zero-tool-rows-1df9740b",
+        "playwright-cdp:json-list-fixture",
     }
 )
 
@@ -1027,6 +1045,136 @@ def run_action_gate_scenario(*, work_dir: Path) -> dict[str, Any]:
     )
 
 
+def run_zero_playwright_tool_row_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """1df9740b: EZLynx Chat job with zero playwright_exec rows is FAILED."""
+    from .playwright_observability import ZERO_PLAYWRIGHT_TOOL_ROWS
+
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing playwright-silent scenario on live Hermes path: {work_dir}"
+        )
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    db = str(work_dir / "silent-gap.db")
+    job_id = None
+    try:
+        job_id = open_chat_job(
+            db,
+            "spaces/1df9740b/messages/open",
+            "Finish ROBIE Test LLC 220250093 commercial auto in EZLynx",
+            requested_by="Carlo",
+            conversation_id="spaces/1df9740b",
+        )
+        if job_id is None:
+            return _fail(PLAYWRIGHT_SILENT_SCENARIO_ID, "silent-gap job did not open")
+        response = guard_chat_response(
+            db,
+            job_id,
+            "I entered the vehicles and drivers. The commercial auto is done.",
+        )
+        store = JobStore(db)
+        job = store.get_job(job_id)
+        rows = store.list_playwright_exec(job_id)
+        ok = (
+            job["status"] == JobStatus.FAILED.value
+            and job["status"] != JobStatus.UNVERIFIED.value
+            and job["status"] != JobStatus.COMPLETE.value
+            and rows == []
+            and store.list_attempts(job_id) == []
+            and "PLAYWRIGHT_SILENT" in str(job.get("last_error") or "")
+            and "FAILED" in response
+            and "— UNVERIFIED" not in response
+            and ZERO_PLAYWRIGHT_TOOL_ROWS[:20] in str(job.get("last_error") or "")
+        )
+        return _result(
+            PLAYWRIGHT_SILENT_SCENARIO_ID,
+            ok=ok,
+            outcome="PASS" if ok else "FAILED",
+            evidence=(
+                PLAYWRIGHT_SILENT_CHAT
+                if ok
+                else (
+                    f"silent-gap leaked: status={job['status']} "
+                    f"rows={len(rows)} response={response[:240]!r}"
+                )
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash
+        return _fail(PLAYWRIGHT_SILENT_SCENARIO_ID, f"{type(exc).__name__}: {exc}")
+    finally:
+        if job_id:
+            stop_generic_chat_job_heartbeat(db, job_id)
+
+
+def run_cdp_json_list_fixture_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """Write CDP url+title checkpoints from fixture /json/list. No live browser."""
+    from .playwright_observability import (
+        CDP_END_CHECKPOINT,
+        CDP_START_CHECKPOINT,
+        persist_cdp_snapshot,
+    )
+
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing cdp-snapshot scenario on live Hermes path: {work_dir}"
+        )
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    db = str(work_dir / "cdp-fixture.db")
+    job_id = None
+    fixture = [
+        {
+            "id": "leftover",
+            "type": "page",
+            "title": "New program",
+            "url": "https://dashboard.useascend.com/create/new",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/secret",
+            "cookies": [{"name": "sid", "value": "cookie-secret"}],
+        },
+        {
+            "id": "ezlynx",
+            "type": "page",
+            "title": "EZLynx",
+            "url": "https://app.ezlynx.com/web/",
+        },
+    ]
+    try:
+        job_id = open_chat_job(
+            db,
+            "spaces/cdp-fixture/messages/open",
+            "open EZLynx for the commercial auto",
+            requested_by="Carlo",
+            conversation_id="spaces/cdp-fixture",
+        )
+        if job_id is None:
+            return _fail(PLAYWRIGHT_CDP_SCENARIO_ID, "cdp fixture job did not open")
+        store = JobStore(db)
+        persist_cdp_snapshot(store, job_id, "start", payload=fixture)
+        persist_cdp_snapshot(store, job_id, "end", payload=fixture)
+        start = store.get_checkpoint(job_id, CDP_START_CHECKPOINT) or {}
+        end = store.get_checkpoint(job_id, CDP_END_CHECKPOINT) or {}
+        blob = json.dumps(start) + json.dumps(end)
+        urls = [tab.get("url") for tab in (start.get("tabs") or [])]
+        ok = (
+            start.get("phase") == "start"
+            and end.get("phase") == "end"
+            and any("useascend.com/create/new" in str(url) for url in urls)
+            and any("app.ezlynx.com/web" in str(url) for url in urls)
+            and "cookie-secret" not in blob
+            and "webSocketDebuggerUrl" not in blob
+            and "ws://127.0.0.1:9222/devtools/page/secret" not in blob
+        )
+        return _result(
+            PLAYWRIGHT_CDP_SCENARIO_ID,
+            ok=ok,
+            outcome="PASS" if ok else "FAILED",
+            evidence=PLAYWRIGHT_CDP_CHAT if ok else f"cdp snapshot missing: {blob[:240]}",
+        )
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash
+        return _fail(PLAYWRIGHT_CDP_SCENARIO_ID, f"{type(exc).__name__}: {exc}")
+    finally:
+        if job_id:
+            stop_generic_chat_job_heartbeat(db, job_id)
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -1051,4 +1199,10 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
         run_follow_live_playwright_tab_scenario(work_dir=work_dir / "follow-tab")
     )
     results.append(run_action_gate_scenario(work_dir=work_dir / "action-gate"))
+    results.append(
+        run_zero_playwright_tool_row_scenario(work_dir=work_dir / "playwright-silent")
+    )
+    results.append(
+        run_cdp_json_list_fixture_scenario(work_dir=work_dir / "playwright-cdp")
+    )
     return results

@@ -112,6 +112,18 @@ class JobStore:
                     ON jobs(status, next_wakeup_at);
                 CREATE INDEX IF NOT EXISTS idx_evidence_job
                     ON verification_evidence(job_id, id);
+                CREATE TABLE IF NOT EXISTS playwright_exec (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    tool TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    code_preview TEXT,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_playwright_exec_job
+                    ON playwright_exec(job_id, id);
                 """
             )
 
@@ -595,6 +607,80 @@ class JobStore:
                 "INSERT INTO attempts(job_id,phase,attempt_number,outcome,detail_json,created_at) VALUES(?,?,?,?,?,?)",
                 (job_id, phase, number, outcome, canonical_json(redact_mapping(detail)), utc_now()),
             )
+
+    def latest_running_chat_job_id(self) -> str | None:
+        """Newest RUNNING generic Chat job. Used when playwright_exec has no env id."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status=? AND action_type IN (
+                       'hermes.google_chat_task', 'hermes.plain_english'
+                   )
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (JobStatus.RUNNING.value,),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def add_playwright_exec(
+        self,
+        job_id: str,
+        tool: str,
+        status: str,
+        *,
+        code_preview: str = "",
+        result: dict[str, Any] | None = None,
+    ) -> int:
+        """Append one playwright_exec row and commit immediately."""
+        now = utc_now()
+        payload = canonical_json(redact_mapping(result or {}))
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """INSERT INTO playwright_exec
+                   (job_id,tool,status,code_preview,result_json,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    tool,
+                    status,
+                    redact_text(code_preview),
+                    payload,
+                    now,
+                    now,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def update_playwright_exec(
+        self,
+        row_id: int,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        now = utc_now()
+        payload = canonical_json(redact_mapping(result or {}))
+        with self.transaction() as conn:
+            conn.execute(
+                """UPDATE playwright_exec
+                   SET status=?, result_json=?, updated_at=?
+                   WHERE id=?""",
+                (status, payload, now, row_id),
+            )
+
+    def list_playwright_exec(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id, job_id, tool, status, code_preview, result_json,
+                          created_at, updated_at
+                   FROM playwright_exec WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["result"] = json.loads(item.pop("result_json") or "{}")
+            result.append(item)
+        return result
 
     def add_evidence(self, job_id: str, verified: bool, evidence: VerificationEvidence) -> None:
         expected = redact_mapping(evidence.expected)
