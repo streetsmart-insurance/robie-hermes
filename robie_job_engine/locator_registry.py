@@ -100,6 +100,10 @@ class LocatorRegistry:
         key = f"{page_locators.portal}:{page_locators.page_name}"
         self._pages[key] = page_locators
 
+    def get_page(self, portal: str, page_name: str) -> PageLocators | None:
+        key = f"{portal}:{page_name}"
+        return self._pages.get(key)
+
     def get_locator(self, portal: str, page_name: str, field_name: str) -> FieldLocator | None:
         key = f"{portal}:{page_name}"
         page = self._pages.get(key)

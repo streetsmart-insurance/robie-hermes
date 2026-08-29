@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -114,6 +115,31 @@ class EZLynxActivityMetric:
     notes_count: int = 0
     quotes_created: int = 0
     policy_changes: int = 0
+
+
+@dataclass
+class CallerProfile:
+    """Classifies a caller as Active Client, Prospect / Non-Client, or Vendor/Underwriter."""
+    phone_number: str
+    caller_name: str = ""
+    client_type: str = "UNKNOWN"  # "ACTIVE_CLIENT", "PROSPECT_NON_CLIENT", "VENDOR_UNDERWRITER"
+    ezlynx_applicant_id: Optional[str] = None
+    assigned_producer: Optional[str] = None
+    assigned_csr: Optional[str] = None
+    sentiment_flag: Optional[str] = None  # "POSITIVE", "NEUTRAL", "NEGATIVE", "FRUSTRATED"
+
+
+@dataclass
+class NonClientLeadAudit:
+    """Tracks whether new prospects and non-clients are being called back."""
+    phone_number: str
+    caller_name: str
+    first_call_time: datetime
+    calls_count: int
+    was_returned: bool
+    returned_by: Optional[str] = None
+    response_time_minutes: Optional[float] = None
+    magellan_sentiment: Optional[str] = None
 
 
 @dataclass
@@ -373,12 +399,97 @@ class ProductivityAuditor:
                 alerts=alerts,
             )
 
+        # Capture unassigned or general queue orphaned calls to prevent lost accounts
+        unassigned_orphaned = [i for i in incidents if i.employee_name == "Unassigned" and i.status == "ORPHANED_ALERT"]
+        for inc in unassigned_orphaned:
+            critical_alerts.append(
+                f"• Unassigned / General Queue: Unreturned call from {format_phone(inc.caller_phone)} at {inc.missed_at.strftime('%I:%M %p')}"
+            )
+
         return {
             "timestamp": ref_time.isoformat(),
             "critical_alerts": critical_alerts,
             "incidents": [asdict(i) for i in incidents],
             "employee_reports": {k: asdict(v) for k, v in employee_reports.items()},
         }
+
+    def audit_non_clients(
+        self,
+        calls: List[RingCentralCall],
+        known_client_phones: Optional[set] = None,
+    ) -> List[NonClientLeadAudit]:
+        """Audits inbound calls from prospects / non-clients to verify callback SLA on new leads."""
+        client_set = known_client_phones or set()
+        sorted_calls = sorted(calls, key=lambda c: c.start_time)
+        outbound_calls = [c for c in sorted_calls if c.direction == "Outbound" and c.to_number]
+        
+        inbound_non_clients: Dict[str, List[RingCentralCall]] = defaultdict(list)
+        for c in sorted_calls:
+            if c.direction == "Inbound" and c.from_number:
+                if c.from_number not in client_set:
+                    inbound_non_clients[c.from_number].append(c)
+
+        audits: List[NonClientLeadAudit] = []
+        for phone, call_list in inbound_non_clients.items():
+            first_call = call_list[0]
+            name = first_call.employee_name if first_call.employee_name != "Unassigned" else "Prospect / Unknown"
+            
+            # Check if any outbound call went to this lead
+            matching_outbound = [
+                c for c in outbound_calls
+                if c.to_number == phone and c.start_time >= first_call.start_time
+            ]
+            
+            if matching_outbound:
+                first_cb = matching_outbound[0]
+                diff_mins = (first_cb.start_time - first_call.start_time).total_seconds() / 60.0
+                audits.append(
+                    NonClientLeadAudit(
+                        phone_number=phone,
+                        caller_name=name,
+                        first_call_time=first_call.start_time,
+                        calls_count=len(call_list),
+                        was_returned=True,
+                        returned_by=first_cb.employee_name,
+                        response_time_minutes=round(diff_mins, 1),
+                    )
+                )
+            else:
+                audits.append(
+                    NonClientLeadAudit(
+                        phone_number=phone,
+                        caller_name=name,
+                        first_call_time=first_call.start_time,
+                        calls_count=len(call_list),
+                        was_returned=False,
+                        returned_by=None,
+                        response_time_minutes=None,
+                    )
+                )
+
+        return audits
+
+    def analyze_magellan_sentiment(
+        self,
+        calls: List[RingCentralCall],
+        hold_time_threshold_seconds: int = 180,
+    ) -> List[Dict[str, Any]]:
+        """Identifies calls with negative or frustrated sentiment and long wait/hold times in Magellan/AI Receptionist."""
+        flagged = []
+        for c in calls:
+            # Detect long hold times or repetitive voicemails indicative of customer frustration
+            is_long_hold = c.duration_seconds >= hold_time_threshold_seconds and c.result in ("Voicemail", "Missed")
+            if is_long_hold:
+                flagged.append({
+                    "call_id": c.call_id,
+                    "phone": c.from_number,
+                    "caller_name": c.employee_name,
+                    "duration_seconds": c.duration_seconds,
+                    "timestamp": c.start_time.isoformat(),
+                    "sentiment": "FRUSTRATED_HIGH_RISK",
+                    "reason": f"Client abandoned after {round(c.duration_seconds / 60.0, 1)}m wait/voicemail",
+                })
+        return flagged
 
     def format_google_chat_card(self, audit: Dict[str, Any], title: str = "Daily Agency Productivity & Account Risk Report") -> str:
         """Formats the audit into an executive-ready Google Chat message."""
