@@ -46,6 +46,8 @@ Compute read.
 `.github/workflows/gcp-readiness-audit.yml` performs selected, non-secret
 resource-plane reads. It deliberately does not SSH, read VM metadata values,
 read Secret Manager payloads, restart services, or deploy.
+It runs only from protected `main` (scheduled, after a relevant push, or manual
+dispatch). It must not execute credential-bearing code from a pull request.
 
 The report distinguishes:
 
@@ -65,8 +67,10 @@ An authenticated GCP administrator must complete this once:
 
 1. Inspect the existing WIF provider's issuer, attribute mapping, and attribute
    condition. Confirm it restricts trust by immutable organization and
-   repository IDs, including repository ID `1343750842`; names alone are not
-   sufficient.
+   repository IDs, including organization ID `320189022` and repository ID
+   `1343750842`, and to `refs/heads/main`; names alone are not sufficient. The
+   existing successful pull-request run proves the current condition is not yet
+   main-only. Do not add runtime-project permissions until this is corrected.
 2. Create a dedicated build-auditor service account or formally document why
    the existing read-only identity is retained.
 3. Grant only the resource-read permissions required by the readiness workflow
@@ -74,7 +78,8 @@ An authenticated GCP administrator must complete this once:
    Admin, Secret Manager Secret Accessor, OS Login, IAP tunnel, or deployment
    roles to the auditor.
 4. Bind WIF principal access to that service account for this repository and
-   approved workflow/ref conditions only.
+   approved protected-main workflow/ref conditions only. Never expose the
+   runtime-project identity to `pull_request` or `pull_request_target` code.
 5. Run the readiness workflow and record the run ID. Any denied read remains
    `UNVERIFIED`; do not widen permissions without reviewing the exact denied
    permission.
@@ -85,6 +90,24 @@ An authenticated GCP administrator must complete this once:
 The bootstrap operator must save the redacted provider description, IAM policy
 diff, workflow run ID, and rollback commands. Never save tokens or credential
 payloads.
+
+### Read-only inspection command
+
+Run this once in an authenticated Cloud Shell. It does not change GCP:
+
+```bash
+gcloud iam workload-identity-pools providers describe github \
+  --project=streetsmart-robie-test \
+  --location=global \
+  --workload-identity-pool=github-actions \
+  --format='json(name,attributeMapping,attributeCondition,oidc.issuerUri)'
+```
+
+Review the redacted output before changing the provider. After the condition is
+verified as protected-main-only, the minimum currently observed runtime grant is
+`roles/compute.viewer` on `streetsmart-hermes-poc` for the chosen audit service
+account. The exact IAM mutation and rollback command must be reviewed against
+the live provider output before execution.
 
 ## Handoff to another LLM
 

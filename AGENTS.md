@@ -29,6 +29,8 @@ independently and record immutable identifiers.
 
 - Use GitHub Actions Workload Identity Federation. Do not ask Carlo to preserve
   a browser login and do not create service-account JSON keys.
+- Credential-bearing workflows must run from protected `main` only. Never
+  grant `id-token: write` to pull-request code that can be changed by the PR.
 - Use the audit identity for reads and the Test deployment identity only for an
   approved Test release workflow. Never give either identity Production write,
   Secret Manager payload, billing, or IAM-administration permissions.

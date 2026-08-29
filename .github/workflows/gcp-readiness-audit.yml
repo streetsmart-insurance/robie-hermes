@@ -2,7 +2,10 @@ name: GCP keyless readiness audit
 
 on:
   workflow_dispatch:
-  pull_request:
+  schedule:
+    - cron: "17 * * * *"
+  push:
+    branches: [main]
     paths:
       - ".github/workflows/gcp-readiness-audit.yml"
       - "scripts/gcp-readiness-audit.sh"
