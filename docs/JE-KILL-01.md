@@ -1,8 +1,8 @@
 # JE-KILL-01 — restart safety at the consequential-action boundary
 
-Status: **candidate implementation; not reviewed, merged, deployed, or trusted**  
-Environment exercised: local synthetic fixtures only  
-Required reviewers: Dusty and Jake
+Status: **engine logic merged and deployed to Test; live browser proof remains unverified**
+Environment exercised: local/CI synthetic fixtures and the Test release verifier
+Production: **not deployed; do not promote without the live proof**
 
 ## Safety invariants
 
@@ -52,6 +52,38 @@ Covered boundaries:
 
 Every success case asserts exactly one fake destination consequence, one ledger external action, authoritative verification, an `ABANDONED` killed run where applicable, and a terminal `COMPLETE` recovery run.
 
+## Guarded Test-only live browser harness
+
+`python -m robie_job_engine.je_kill_live` is a separate, guarded proof for
+`hermes-test-01`. It is not invoked by Chat intake and it never discovers or
+guesses a customer record. The protected-main workflow
+`.github/workflows/je-kill-test.yml` will run only when all of these hold:
+
+- `ROBIE_ENV=TEST` and the exact hostname is `hermes-test-01`;
+- both Test release pointers match the workflow commit;
+- `/opt/streetsmart-hermes-test/je-kill/fixture.json` exists;
+- the fixture declares `test_only=true`, `disposable=true`, Carlo's
+  `JE-KILL-01`-scoped approval from the last seven days, and three distinct
+  disposable document IDs;
+- every URL is an authenticated HTTPS `ezlynx.com/web/` URL;
+- every locator is explicit and non-positional;
+- none of the configured accounts is the known forbidden PAWIVA account.
+
+The three scenarios use isolated Job databases under
+`/opt/streetsmart-hermes-test/je-kill/runs`. The parent process kills a real
+child before the action, after the browser consequence but before Job Engine
+recording, and after authoritative verification but before evidence is
+persisted. Each restart must end with one browser-action attempt, one durable
+external action, one authoritative verified evidence row, an `ABANDONED`
+killed run, and `COMPLETE`. Zero browser tabs, multiple EZLynx tabs, an
+expired session, locator ambiguity, unavailable readback, or a missing fixture
+fails closed before a repeat action.
+
+The fixture example is `docs/JE-KILL-01.fixture.example.json`. Placeholder
+values are not executable evidence. A real disposable Test fixture must be
+created out of band without putting client identifiers or credentials in Git,
+GitHub logs, or chat.
+
 ## Local verification record
 
 - `PYTHONPATH=tests:. python3 -m unittest -v tests.test_je_kill_01` — 7 passed.
@@ -71,7 +103,8 @@ The repository's complete regression battery cannot be certified on this host: i
 
 ## Explicit non-claims
 
-- No Test or Production deployment was performed.
-- No live EZLynx account or browser session was accessed.
+- The engine release was deployed only to Test; no live browser consequence
+  has been exercised until the guarded workflow records `TEST VERIFIED`.
 - No Production Job or database was read or modified.
-- This candidate is not done until Dusty/Jake review, green GitHub CI, approved Test-only execution, and stored evidence.
+- A green synthetic suite or Test deployment is not the live Manual Renewals
+  proof. Missing live evidence remains `UNVERIFIED`.
