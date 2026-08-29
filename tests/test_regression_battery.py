@@ -251,6 +251,7 @@ class ContractTests(unittest.TestCase):
             {
                 "test_carrier_directory",
                 "test_ezlynx_poller",
+                "test_playwright_route_fixtures",
                 "test_video_to_skill",
             },
         )
@@ -265,10 +266,11 @@ class ContractTests(unittest.TestCase):
                 "        self.assertTrue(True)\n",
                 encoding="utf-8",
             )
-            (tests_dir / "test_carrier_directory.py").write_text(
-                "raise AssertionError('pytest-only module must not be imported')\n",
-                encoding="utf-8",
+            skip_body = (
+                "raise AssertionError('pytest-only module must not be imported')\n"
             )
+            for name in PYTEST_ONLY_MODULES:
+                (tests_dir / f"{name}.py").write_text(skip_body, encoding="utf-8")
             suite = discover_unittest_suite(
                 tests_dir,
                 include_pytest_modules=False,
