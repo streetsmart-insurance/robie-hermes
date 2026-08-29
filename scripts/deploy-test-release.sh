@@ -80,7 +80,9 @@ if int(data.get("blocking", 0)):
     raise SystemExit("active Test jobs or leases exist; refuse deploy")
 PY
 
-"${old_current}/scripts/verify-release.sh" "${archive}" "${checksum}"
+# Historical releases do not consistently preserve executable mode bits.
+# Invoke the trusted verifier through Bash so the gate is independent of mode.
+bash "${old_current}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
 release_parent="${OPT_ROOT}/releases/${short}"
 release_root="${release_parent}/robie-hermes-${short}"

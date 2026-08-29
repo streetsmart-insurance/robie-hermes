@@ -31,6 +31,10 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("active Test jobs or leases exist; refuse deploy", text)
         self.assertIn("rollback_test", text)
         self.assertIn("atomic_pointer", text)
+        self.assertIn(
+            'bash "${old_current}/scripts/verify-release.sh" "${archive}" "${checksum}"',
+            text,
+        )
         self.assertIn('"production_touched": False', text)
         self.assertNotIn("/opt/streetsmart-hermes/", text)
         self.assertNotIn("hermes-poc-01", text)
