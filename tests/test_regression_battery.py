@@ -257,6 +257,7 @@ class ContractTests(unittest.TestCase):
             {
                 "test_carrier_directory",
                 "test_ezlynx_poller",
+                "test_magellan_client",
                 "test_playwright_route_fixtures",
                 "test_productivity_engine",
                 "test_video_to_skill",
