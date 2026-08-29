@@ -131,17 +131,54 @@ database and confirm a `verification_evidence` row for that Job with:
 Until that row exists and is checked, the status is not a valid `COMPLETE`.
 If evidence is missing, leave the Job `UNVERIFIED`, `WAITING`, or `FAILED`.
 
-## Test deploy and rollback (do not run from this Cloud Agent VM)
+## Durable Test deploy and rollback
 
-There is no Test SSH from this VM. Do **not** deploy or roll back from here.
-On the isolated Test host only, follow:
+The supported remote path is the GitHub Actions workflow
+`.github/workflows/deploy-test.yml`. It uses GitHub OIDC workload identity to
+impersonate
+`robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com`; it does
+not use a downloaded service-account key and does not require a recurring
+browser login. The provider admits only repository ID `1343750842`, owner ID
+`320189022`, and `refs/heads/main`. Repository names alone are not the trust
+boundary.
 
-- `.agents/workflows/deploy-to-test.md` — build an immutable digest, inventory
-  Test, deploy only the Test profile, store evidence, report `TEST VERIFIED`
-  only when authoritative evidence passed. Otherwise `TEST UNVERIFIED` / `TEST FAILED`.
-- `.agents/workflows/rollback.md` — restore the previous verified digest, preserve
-  durable Job data, do not delete Job state, report success only after
-  authoritative verification.
+The workflow is manual and accepts only the exact confirmation
+`DEPLOY_TO_HERMES_TEST_01`. Run it from protected `main`. It builds the exact
+`github.sha`, verifies the release archive and checksum, and targets only:
+
+- project `streetsmart-hermes-poc`
+- zone `us-east1-b`
+- VM `hermes-test-01`
+- root `/opt/streetsmart-hermes-test`
+- service `robie-gateway`
+
+The remote installer independently refuses a different hostname, a missing or
+divergent rollback pointer, an archive/commit mismatch, a missing Test
+`jobs.db`, or any `RUNNING`/`VERIFYING` job or live lease. It flips both Test
+pointers atomically, restarts only `robie-gateway`, refreshes the official
+proof, and requires `done=true`, `live=true`, and
+`authorizes_complete=false`. On failed post-flip proof, it restores both old
+pointers and restarts the prior Test release.
+
+Durable deployment evidence is written to
+`/opt/streetsmart-hermes-test/deployments/<12-char-sha>/test-deploy-evidence.json`.
+It includes the full commit, archive SHA-256, previous release, gateway start
+timestamp, proof path, inactive-job inventory, and `production_touched=false`.
+The previous release path in that file is the exact rollback target.
+
+### One-time GCP bootstrap
+
+An owner must grant the deployer only the access needed to reach and administer
+`hermes-test-01`: IAP tunnel access for that specific VM, OS Login admin on
+that instance, Compute read access, and service-account `actAs` only if the VM
+uses an attached service account and Google Cloud requires it for SSH. Do not
+grant access on `hermes-poc-01`, do not create a service-account key, and do not
+weaken the workload-identity provider condition. After this one-time bootstrap,
+normal Test deployments do not require Carlo to authenticate in a browser.
+
+Follow `.agents/workflows/deploy-to-test.md` for the release gate and
+`.agents/workflows/rollback.md` for manual rollback. Preserve durable Job data;
+never delete Job state during deploy or rollback.
 
 `live_test_complete` stays `false` until an independent reviewer has stored live
 Test evidence on the Test host.
@@ -152,4 +189,4 @@ Test evidence on the Test host.
 - It does not claim live Test `COMPLETE` from a Cloud Agent VM that cannot see
   the Razza PDF.
 - It does not create or download a fake quote.
-- It does not deploy or roll back Test from a Cloud Agent VM.
+- It does not deploy or roll back Test outside the protected GitHub workflow.
