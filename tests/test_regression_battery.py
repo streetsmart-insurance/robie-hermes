@@ -37,6 +37,7 @@ from robie_job_engine.regression_battery import (
     logic_unittest_argv,
     open_draft_fix_pr,
     parity_gap_results,
+    pytest_available,
     run_regression_battery,
     run_logic_suite,
     run_replay_scenarios,
@@ -282,6 +283,16 @@ class ContractTests(unittest.TestCase):
             )
             self.assertEqual(suite.countTestCases(), 1)
 
+    def test_pytest_console_script_from_another_interpreter_is_not_available(self):
+        with patch(
+            "robie_job_engine.regression_battery._can_import_pytest",
+            return_value=False,
+        ), patch(
+            "robie_job_engine.regression_battery.shutil.which",
+            return_value="/usr/local/bin/pytest",
+        ):
+            self.assertFalse(pytest_available())
+
 
 class ClassifierAndNotifyTests(unittest.TestCase):
     def test_known_accepted_replay_does_not_post_or_draft(self):
@@ -463,6 +474,18 @@ class ReplayGuardTests(unittest.TestCase):
         with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
             with self.assertRaises(ProductionGuardError):
                 refuse_production_targets(LIVE_PRODUCTION_JOB_DB, "artifacts")
+
+    def test_replay_catalog_is_repeatable_in_the_same_durable_base(self):
+        with durable_temporary_directory() as tmp:
+            base = Path(tmp) / "replay"
+            first = run_replay_scenarios(work_dir=base)
+            second = run_replay_scenarios(work_dir=base)
+        self.assertTrue(all(item["ok"] for item in first))
+        self.assertTrue(all(item["ok"] for item in second))
+        self.assertEqual(
+            [item["id"] for item in first],
+            [item["id"] for item in second],
+        )
 
     def test_replay_refuses_live_hermes_work_dir(self):
         with self.assertRaises(ProductionGuardError):

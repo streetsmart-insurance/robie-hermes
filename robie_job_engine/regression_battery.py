@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import patch
@@ -272,7 +273,10 @@ def logic_pytest_argv(python: str | None = None) -> list[str]:
 
 
 def pytest_available() -> bool:
-    return shutil.which("pytest") is not None or _can_import_pytest()
+    # The suite invokes ``sys.executable -m pytest``.  A pytest console script
+    # on PATH may belong to a different interpreter (as it does on the Test
+    # VM), so PATH presence alone cannot make the module runnable.
+    return _can_import_pytest()
 
 
 def _can_import_pytest() -> bool:
@@ -436,12 +440,17 @@ def run_replay_scenarios(
     work_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """In-process Test replay / known-failure scenarios. No live EZLynx."""
-    root = Path(work_dir or default_work_dir())
-    if is_live_hermes_path(root):
+    base = Path(work_dir or default_work_dir())
+    if is_live_hermes_path(base):
         raise ProductionGuardError(
-            f"refusing regression replay work dir on live Hermes path: {root}"
+            f"refusing regression replay work dir on live Hermes path: {base}"
         )
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Scenario databases contain deterministic identifiers. Reusing them makes
+    # a second verifier run collide with the first run's conversation links,
+    # recording states, and artifact paths. Keep the durable base (including
+    # notification history) but isolate every replay execution beneath it.
+    root = Path(tempfile.mkdtemp(prefix="run-", dir=str(base)))
     db = str(root / "jobs.db")
     artifacts = str(root / "artifacts")
     results: list[dict[str, Any]] = []
