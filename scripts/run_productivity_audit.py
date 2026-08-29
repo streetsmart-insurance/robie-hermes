@@ -21,6 +21,39 @@ from robie_job_engine.productivity import (
 )
 
 
+def parse_duration(raw: str) -> int:
+    """Parses 'H:MM:SS' or seconds string into integer seconds."""
+    if not raw:
+        return 0
+    raw = str(raw).strip()
+    if ":" in raw:
+        parts = raw.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+    try:
+        return int(float(raw))
+    except ValueError:
+        return 0
+
+
+def parse_rc_csv_time(raw: str) -> datetime:
+    """Parses 'Sat 08/29/2026 10:26 AM' or similar format."""
+    clean = " ".join(str(raw).split())
+    # Strip day of week if present e.g. 'Sat '
+    for day in ("Mon ", "Tue ", "Wed ", "Thu ", "Fri ", "Sat ", "Sun "):
+        if clean.startswith(day):
+            clean = clean[len(day):].strip()
+    try:
+        return datetime.strptime(clean, "%m/%d/%Y %I:%M %p").replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            return datetime.strptime(clean, "%m/%d/%Y %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return datetime.now(timezone.utc)
+
+
 def generate_sample_data():
     """Generates realistic test data demonstrating both compliant and at-risk employee workflows."""
     now = datetime.now(timezone.utc)
@@ -138,9 +171,32 @@ def main():
     else:
         calls = []
         if args.calls and Path(args.calls).exists():
-            with open(args.calls, "r") as f:
-                raw_calls = json.load(f)
-                calls = [RingCentralCall.from_dict(c) for c in raw_calls]
+            path_str = str(args.calls)
+            if path_str.endswith(".csv"):
+                import csv
+                with open(path_str, "r", encoding="utf-8-sig", errors="replace") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        # Map RingCentral CSV export format to RingCentralCall
+                        ext_val = row.get("Extension", "")
+                        emp = ext_val.split(" - ")[-1] if " - " in ext_val else ext_val
+                        calls.append(
+                            RingCentralCall.from_dict({
+                                "call_id": row.get("From", "") + "_" + row.get("Date", "") + "_" + row.get("Time", ""),
+                                "direction": row.get("Direction", ""),
+                                "from_number": row.get("From", ""),
+                                "to_number": row.get("To", ""),
+                                "result": row.get("Action Result", row.get("Result", "")),
+                                "duration_seconds": parse_duration(row.get("Duration", row.get("Length", "0"))),
+                                "start_time": parse_rc_csv_time(row.get("Date", "") + " " + row.get("Time", "")),
+                                "extension": ext_val.split(" - ")[0] if " - " in ext_val else "",
+                                "employee_name": emp or "Unassigned",
+                            })
+                        )
+            else:
+                with open(args.calls, "r") as f:
+                    raw_calls = json.load(f)
+                    calls = [RingCentralCall.from_dict(c) for c in raw_calls]
         
         tasks = []
         if args.tasks and Path(args.tasks).exists():
