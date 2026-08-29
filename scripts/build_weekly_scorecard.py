@@ -106,10 +106,19 @@ def generate_weekly_report():
         "| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
     ]
 
+    # Exclude BDRs, specific non-service reps, and system queues
+    EXCLUDED_REPS = {
+        "AI Receptionist Sonant", "Commercial Queue", "RingCentral App",
+        "Fax", "Direct Inward Dialing", "Main Line",
+        "Nelson Maldonado",  # BDR
+        "Alexis Martinez",   # BDR
+        "Sandy Santana",     # Excluded per management request
+    }
+
     # Calculate scores and sort
     rows = []
     for rep, data in calls_by_rep.items():
-        if rep in ("AI Receptionist Sonant", "Commercial Queue", "RingCentral App", "Fax", "Direct Inward Dialing", "Main Line"):
+        if rep in EXCLUDED_REPS:
             continue
         in_total = data["inbound_total"]
         if in_total == 0 and data["outbound_total"] == 0:
