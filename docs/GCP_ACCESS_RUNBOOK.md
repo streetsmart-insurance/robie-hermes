@@ -41,6 +41,22 @@ Do not reuse the name `robie-test-deployer` as proof that it has deploy rights;
 IAM policy is authoritative. The current verified workflow uses it only for a
 Compute read.
 
+## Ownership boundary with Pawel's infrastructure Task 1
+
+This keyless GitHub path does not replace Pawel's durable SSH/OS Login work.
+
+- Pawel Task 1 owns the human/bootstrap route: Cloud Shell, IAP, OS Login,
+  durable local SSH material, restart survival, and a no-manual-passphrase Test
+  deployment proof.
+- This runbook owns machine/LLM resource-plane audit access through GitHub WIF.
+- A future protected Test deployment workflow is separate again and is not
+  ready until least-privilege permissions, immutable artifact installation,
+  verification, and rollback are proven in Test.
+
+Keep Pawel Task 1 open until a full Cloud Shell restart and safe Test deploy
+satisfy its documented done condition. PR completion here is not evidence that
+his task passed.
+
 ## Readiness workflow
 
 `.github/workflows/gcp-readiness-audit.yml` performs selected, non-secret
