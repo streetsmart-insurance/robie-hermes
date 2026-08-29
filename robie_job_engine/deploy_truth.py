@@ -456,9 +456,10 @@ def parse_timestamp(value: str | datetime | None) -> datetime | None:
 
 def probe_gateway_active_enter(
     *,
+    gateway_unit: str = GATEWAY_UNIT,
     runner: Callable[[list[str]], Any] | None = None,
 ) -> datetime | None:
-    """Read hermes-gateway ActiveEnterTimestamp. Never restarts the unit."""
+    """Read a gateway ActiveEnterTimestamp. Never restarts the unit."""
     if runner is None:
         import subprocess
 
@@ -471,7 +472,7 @@ def probe_gateway_active_enter(
         [
             "systemctl",
             "show",
-            GATEWAY_UNIT,
+            gateway_unit,
             "-p",
             "ActiveEnterTimestamp",
             "--value",
@@ -487,13 +488,14 @@ def prove_gateway_after_flip(
     flip_at: str | datetime | None,
     active_enter: str | datetime | None = None,
     gateway_probe: Callable[[], datetime | None] | None = None,
+    gateway_unit: str = GATEWAY_UNIT,
 ) -> dict[str, Any]:
     flipped = parse_timestamp(flip_at)
     entered = parse_timestamp(active_enter)
     if entered is None and gateway_probe is not None:
         entered = parse_timestamp(gateway_probe())
     if entered is None and active_enter is None and gateway_probe is None:
-        entered = probe_gateway_active_enter()
+        entered = probe_gateway_active_enter(gateway_unit=gateway_unit)
     if flipped is None:
         return {
             "ok": False,
@@ -509,7 +511,7 @@ def prove_gateway_after_flip(
             "flip_at": flipped.isoformat(),
             "active_enter": None,
             "evidence": (
-                f"{GATEWAY_UNIT} ActiveEnterTimestamp missing; "
+                f"{gateway_unit} ActiveEnterTimestamp missing; "
                 "restart after the flip is required; pointer-only is not live"
             ),
         }
@@ -520,11 +522,11 @@ def prove_gateway_after_flip(
         "flip_at": flipped.isoformat(),
         "active_enter": entered.isoformat(),
         "evidence": (
-            f"{GATEWAY_UNIT} ActiveEnterTimestamp {entered.isoformat()} "
+            f"{gateway_unit} ActiveEnterTimestamp {entered.isoformat()} "
             f"after flip {flipped.isoformat()}"
             if ok
             else (
-                f"{GATEWAY_UNIT} ActiveEnterTimestamp {entered.isoformat()} "
+                f"{gateway_unit} ActiveEnterTimestamp {entered.isoformat()} "
                 f"is not after flip {flipped.isoformat()}; pointer-only is not live"
             )
         ),
@@ -648,6 +650,7 @@ def prove_official_install(
     flip_at: str | datetime | None = None,
     gateway_active_enter: str | datetime | None = None,
     gateway_probe: Callable[[], datetime | None] | None = None,
+    gateway_unit: str = GATEWAY_UNIT,
     db_path: str | Path | None = None,
     persist_row: bool = False,
 ) -> dict[str, Any]:
@@ -670,6 +673,7 @@ def prove_official_install(
         flip_at=flip_at,
         active_enter=gateway_active_enter,
         gateway_probe=gateway_probe,
+        gateway_unit=gateway_unit,
     )
     files_ok = bool(pointers["ok"] and chat["ok"])
     live = bool(files_ok and gateway["ok"])
@@ -870,6 +874,7 @@ def official_install(
     flip_at: str | datetime | None = None,
     gateway_active_enter: str | datetime | None = None,
     gateway_probe: Callable[[], datetime | None] | None = None,
+    gateway_unit: str = GATEWAY_UNIT,
     db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Flip pointers, install Chat-loaded overlays, refuse done without live proof.
@@ -911,6 +916,7 @@ def official_install(
         flip_at=flipped,
         gateway_active_enter=gateway_active_enter,
         gateway_probe=gateway_probe,
+        gateway_unit=gateway_unit,
         db_path=db_path,
         persist_row=True,
     )
@@ -975,6 +981,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         item.add_argument("--db", default="")
         item.add_argument("--flip-at", default="")
         item.add_argument("--gateway-active-enter", default="")
+        item.add_argument("--gateway-unit", default=GATEWAY_UNIT)
     return parser.parse_args(argv)
 
 
@@ -986,6 +993,7 @@ def main(argv: list[str] | None = None) -> int:
     db_path = args.db or None
     flip_at = args.flip_at or None
     gateway_active_enter = args.gateway_active_enter or None
+    gateway_unit = args.gateway_unit
     if args.command == "prove":
         proof = prove_official_install(
             opt_root=opt_root,
@@ -994,6 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
             sha=sha,
             flip_at=flip_at,
             gateway_active_enter=gateway_active_enter,
+            gateway_unit=gateway_unit,
             db_path=db_path,
             persist_row=True,
         )
@@ -1011,6 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
             sha=sha,
             flip_at=flip_at,
             gateway_active_enter=gateway_active_enter,
+            gateway_unit=gateway_unit,
             db_path=db_path,
         )
     except DeployTruthError as exc:

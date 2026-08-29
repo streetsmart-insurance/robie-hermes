@@ -36,6 +36,7 @@ from robie_job_engine.deploy_truth import (
     official_install,
     parse_timestamp,
     prove_chat_runtime_matches_zip,
+    prove_gateway_after_flip,
     prove_official_install,
     resolve_job_engine_root,
     resolve_write_guard_path,
@@ -258,6 +259,16 @@ class StaleChatFileFailsTests(unittest.TestCase):
 
 
 class OfficialInstallProofTests(unittest.TestCase):
+    def test_test_gateway_name_is_used_in_proof(self):
+        flipped = datetime.now(timezone.utc)
+        proof = prove_gateway_after_flip(
+            flip_at=flipped,
+            active_enter=flipped + timedelta(seconds=1),
+            gateway_unit="robie-gateway",
+        )
+        self.assertTrue(proof["ok"])
+        self.assertIn("robie-gateway ActiveEnterTimestamp", proof["evidence"])
+
     def test_official_install_writes_shims_flips_pointers_and_prints_done(self):
         with durable_temporary_directory() as tmp:
             paths = _layout(tmp)
