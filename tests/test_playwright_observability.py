@@ -22,7 +22,9 @@ from robie_job_engine.playwright_observability import (
     CDP_END_CHECKPOINT,
     CDP_START_CHECKPOINT,
     ZERO_PLAYWRIGHT_TOOL_ROWS,
+    format_playwright_job_lookup,
     job_requires_playwright,
+    lookup_playwright_job,
     persist_cdp_snapshot,
     persist_playwright_exec_finish,
     persist_playwright_exec_start,
@@ -224,3 +226,87 @@ class PlaywrightToolPersistTests(unittest.TestCase):
                 self.assertEqual(rows[0]["tool"], "playwright_exec")
         finally:
             _restore_modules(previous)
+
+
+class OperatorLookupTests(unittest.TestCase):
+    def test_lookup_prints_exec_rows_cdp_tabs_and_trace_path(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            artifacts = Path(tmp) / "artifacts"
+            job_id = open_chat_job(
+                db,
+                "spaces/lookup/messages/open",
+                EZLYNX_COMMERCIAL_AUTO,
+                conversation_id="spaces/lookup",
+            )
+            persist_playwright_exec_start(
+                db, job_id, "page.goto('https://app.ezlynx.com/web/')"
+            )
+            persist_cdp_snapshot(db, job_id, "start", payload=ASCEND_LEFTOVER_LIST)
+            persist_cdp_snapshot(db, job_id, "end", payload=ASCEND_LEFTOVER_LIST)
+            zip_path = artifacts / job_id / "playwright-trace.zip"
+            zip_path.parent.mkdir(parents=True, exist_ok=True)
+            zip_path.write_bytes(b"PK\x03\x04trace")
+            report = lookup_playwright_job(
+                job_id, db_path=db, artifact_root=artifacts
+            )
+            text = format_playwright_job_lookup(report)
+            stop_generic_chat_job_heartbeat(db, job_id)
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["playwright_exec_count"], 1)
+            self.assertEqual(report["playwright_exec"][0]["status"], "started")
+            self.assertTrue(
+                any("useascend.com/create/new" in tab["url"] for tab in report["cdp_tabs_start"])
+            )
+            self.assertTrue(
+                any("app.ezlynx.com/web" in tab["url"] for tab in report["cdp_tabs_end"])
+            )
+            self.assertTrue(report["trace"]["present"])
+            self.assertEqual(report["trace"]["path"], str(zip_path))
+            self.assertIn("playwright_exec rows: 1", text)
+            self.assertIn("CDP tabs start:", text)
+            self.assertIn("CDP tabs end:", text)
+            self.assertIn("trace zip:", text)
+            self.assertIn(str(zip_path), text)
+            self.assertNotIn("super-secret", text)
+            self.assertNotIn("cookie-secret", text)
+            self.assertNotIn("webSocketDebuggerUrl", text)
+            self.assertNotIn("password", text.casefold())
+
+    def test_lookup_zero_rows_still_shows_fail_closed_reason(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "spaces/lookup/messages/silent",
+                EZLYNX_COMMERCIAL_AUTO,
+                conversation_id="spaces/lookup-silent",
+            )
+            report = lookup_playwright_job(job_id, db_path=db, artifact_root=tmp)
+            text = format_playwright_job_lookup(report)
+            stop_generic_chat_job_heartbeat(db, job_id)
+            self.assertTrue(report["ok"])
+            self.assertTrue(report["zero_tool_rows"])
+            self.assertEqual(report["playwright_exec"], [])
+            self.assertFalse(report["trace"]["present"])
+            self.assertIn("PLAYWRIGHT_SILENT", text)
+            self.assertIn("1df9740b", text)
+
+    def test_handoff_must_call_lookup_is_at_the_top(self):
+        root = Path(__file__).resolve().parents[1]
+        handoff = (root / "HANDOFF.md").read_text(encoding="utf-8")
+        state = (root / "CURRENT_STATE.md").read_text(encoding="utf-8")
+        head = " ".join(
+            handoff.split("## Non-negotiable safety boundary", 1)[0].split()
+        )
+        self.assertIn("MUST-CALL", head)
+        self.assertIn("playwright_observability", head)
+        self.assertIn("lookup-playwright-job.py", head)
+        self.assertIn("Do not invent leftover RETRY", head)
+        self.assertIn("Production is not the first test", head)
+        self.assertLess(
+            handoff.find("MUST-CALL"),
+            handoff.find("Ascend API implementation"),
+        )
+        self.assertIn("playwright_observability", state)
+        self.assertIn("Do not invent leftover RETRY", state)

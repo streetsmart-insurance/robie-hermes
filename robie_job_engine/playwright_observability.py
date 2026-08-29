@@ -18,9 +18,11 @@ ledger operators query after the job.
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -38,6 +40,7 @@ from .store import JobStore, utc_now
 logger = logging.getLogger(__name__)
 
 DEFAULT_JOBS_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
+DEFAULT_ARTIFACT_ROOT = "/opt/streetsmart-hermes/robie-job-engine/data/artifacts"
 CDP_START_CHECKPOINT = "cdp_tabs_start"
 CDP_END_CHECKPOINT = "cdp_tabs_end"
 PLAYWRIGHT_TOOL = "playwright_exec"
@@ -481,3 +484,177 @@ def audit_playwright_tool_log(store: JobStore, job: dict[str, Any]) -> dict[str,
 def encode_json_list_fixture(tabs: list[dict[str, Any]]) -> bytes:
     """Test helper: Chrome-shaped ``/json/list`` bytes."""
     return json.dumps(tabs).encode("utf-8")
+
+
+def operator_tab_views(snapshot: dict[str, Any] | None) -> list[dict[str, str]]:
+    """url + title only from a stored CDP checkpoint. Drops cookies/secrets."""
+    tabs: list[dict[str, str]] = []
+    for item in list((snapshot or {}).get("tabs") or []):
+        if not isinstance(item, dict):
+            continue
+        tabs.append(
+            {
+                "url": sanitize_tab_url(str(item.get("url") or "")),
+                "title": redact_text(str(item.get("title") or "")),
+            }
+        )
+    return tabs
+
+
+def operator_exec_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Structured playwright_exec rows for operators. Already redacted at write."""
+    views: list[dict[str, Any]] = []
+    for row in rows:
+        result = dict(row.get("result") or {})
+        views.append(
+            {
+                "id": row.get("id"),
+                "tool": redact_text(str(row.get("tool") or PLAYWRIGHT_TOOL)),
+                "status": str(row.get("status") or ""),
+                "code_preview": redact_text(str(row.get("code_preview") or "")),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+                "error": redact_text(str(result.get("error") or "")),
+                "success": bool(result.get("success") or result.get("ok") is True),
+            }
+        )
+    return views
+
+
+def trace_zip_for_job(
+    job_id: str,
+    *,
+    artifact_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Report the PR 57 trace zip path without creating folders."""
+    root = Path(
+        artifact_root
+        or os.environ.get("ROBIE_ARTIFACT_ROOT")
+        or DEFAULT_ARTIFACT_ROOT
+    )
+    path = root / job_id / "playwright-trace.zip"
+    return {
+        "path": str(path),
+        "present": path.is_file() and path.stat().st_size > 0,
+    }
+
+
+def lookup_playwright_job(
+    job_id: str,
+    *,
+    db_path: str | Path | None = None,
+    artifact_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read-only operator view of what Playwright actually did.
+
+    Standing diagnosis path. Chat prose and a frozen recording are not
+    substitutes. Does not bind a port, write rows, or authorize COMPLETE.
+    """
+    resolved_db = str(db_path or os.environ.get("ROBIE_JOB_DB") or DEFAULT_JOBS_DB)
+    if not Path(resolved_db).is_file():
+        return {
+            "ok": False,
+            "job_id": job_id,
+            "error": f"jobs.db is missing: {resolved_db}",
+            "playwright_exec": [],
+            "cdp_tabs_start": [],
+            "cdp_tabs_end": [],
+            "trace": {"path": None, "present": False},
+        }
+    store = JobStore(resolved_db)
+    try:
+        job = store.get_job(job_id)
+    except KeyError:
+        return {
+            "ok": False,
+            "job_id": job_id,
+            "error": f"job not found: {job_id}",
+            "playwright_exec": [],
+            "cdp_tabs_start": [],
+            "cdp_tabs_end": [],
+            "trace": trace_zip_for_job(job_id, artifact_root=artifact_root),
+        }
+    start = store.get_checkpoint(job_id, CDP_START_CHECKPOINT) or {}
+    end = store.get_checkpoint(job_id, CDP_END_CHECKPOINT) or {}
+    rows = operator_exec_views(list_playwright_exec(store, job_id))
+    return {
+        "ok": True,
+        "job_id": job["id"],
+        "status": job["status"],
+        "action_type": job.get("action_type"),
+        "requires_playwright": job_requires_playwright(job),
+        "playwright_exec": rows,
+        "playwright_exec_count": len(rows),
+        "cdp_tabs_start": operator_tab_views(start),
+        "cdp_tabs_end": operator_tab_views(end),
+        "trace": trace_zip_for_job(job_id, artifact_root=artifact_root),
+        "zero_tool_rows": job_requires_playwright(job) and not rows,
+    }
+
+
+def format_playwright_job_lookup(report: dict[str, Any]) -> str:
+    """Plain-text operator card. No cookies, secrets, or passwords."""
+    lines = [
+        f"ROBIE Playwright lookup — {report.get('job_id')} — "
+        f"{report.get('status') or report.get('error') or 'UNKNOWN'}"
+    ]
+    if not report.get("ok"):
+        lines.append(str(report.get("error") or "lookup failed"))
+        return "\n".join(lines)
+    rows = list(report.get("playwright_exec") or [])
+    lines.append(f"playwright_exec rows: {len(rows)}")
+    if not rows:
+        if report.get("zero_tool_rows"):
+            lines.append(f"  {ZERO_PLAYWRIGHT_TOOL_ROWS}")
+        else:
+            lines.append("  (none)")
+    for index, row in enumerate(rows, start=1):
+        preview = str(row.get("code_preview") or "").replace("\n", " ")
+        if len(preview) > 120:
+            preview = preview[:120] + "…"
+        extra = f" error={row['error']}" if row.get("error") else ""
+        lines.append(f"  {index}. {row.get('status')} {preview}{extra}")
+    for phase, key in (("start", "cdp_tabs_start"), ("end", "cdp_tabs_end")):
+        tabs = list(report.get(key) or [])
+        lines.append(f"CDP tabs {phase}: {len(tabs)}")
+        if not tabs:
+            lines.append("  (none)")
+        for tab in tabs:
+            title = tab.get("title") or "(no title)"
+            lines.append(f"  - {title} | {tab.get('url')}")
+    trace = dict(report.get("trace") or {})
+    present = "present" if trace.get("present") else "missing"
+    lines.append(f"trace zip: {trace.get('path') or '(none)'} ({present})")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: ``python -m robie_job_engine.playwright_observability <job-id>``."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Read-only Playwright/EZLynx job lookup. Prints playwright_exec "
+            "rows, CDP url+title snapshots, and the trace zip path. "
+            "Does not bind a port, deploy, or authorize COMPLETE."
+        )
+    )
+    parser.add_argument("job_id", help="Job id to inspect")
+    parser.add_argument(
+        "--db",
+        default=os.environ.get("ROBIE_JOB_DB") or DEFAULT_JOBS_DB,
+        help="jobs.db path (default ROBIE_JOB_DB or Production ledger path)",
+    )
+    parser.add_argument(
+        "--artifact-root",
+        default=os.environ.get("ROBIE_ARTIFACT_ROOT") or DEFAULT_ARTIFACT_ROOT,
+        help="Artifact root used by PR 57 playwright-trace.zip",
+    )
+    args = parser.parse_args(argv)
+    report = lookup_playwright_job(
+        args.job_id, db_path=args.db, artifact_root=args.artifact_root
+    )
+    print(format_playwright_job_lookup(report))
+    return 0 if report.get("ok") else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
