@@ -1,0 +1,102 @@
+name: Deploy immutable release to Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DEPLOY_TO_HERMES_TEST_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: robie-hermes-test-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-test:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY_TO_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      STAGING_DIR: /var/tmp/robie-test-deploy/${{ github.sha }}
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@v4
+
+      - name: Re-run verification gate
+        run: |
+          python -m pip install "pytest>=8.3,<9"
+          PYTHONPATH=. python -m robie_job_engine.regression_battery --ci
+
+      - name: Build immutable artifact
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-release.sh "${RUNNER_TEMP}/releases" | tee "${RUNNER_TEMP}/release.env"
+          source "${RUNNER_TEMP}/release.env"
+          test "${release_commit}" = "${GITHUB_SHA}"
+          echo "archive=${release_archive}" >>"${GITHUB_OUTPUT}"
+          echo "checksum=${release_archive}.sha256" >>"${GITHUB_OUTPUT}"
+          echo "sha256=${release_sha256}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = "hermes-test-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
+
+      - name: Create bounded Test staging directory
+        run: |
+          gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}'"
+
+      - name: Transfer exact artifact and installer
+        run: |
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${{ steps.release.outputs.archive }}" \
+            "${{ steps.release.outputs.checksum }}" \
+            scripts/deploy-test-release.sh \
+            "${TEST_VM}:${STAGING_DIR}/"
+
+      - name: Install and independently verify Test
+        run: |
+          archive="${STAGING_DIR}/$(basename '${{ steps.release.outputs.archive }}')"
+          checksum="${archive}.sha256"
+          gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}'"
+
+      - name: Publish immutable Test evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## ROBIE Test deployment"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Artifact SHA-256: \`${{ steps.release.outputs.sha256 }}\`"
+            echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
+            echo "- Production deployment: \`false\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
