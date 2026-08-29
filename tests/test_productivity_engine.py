@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
-import pytest
 
 from robie_job_engine.ezlynx_productivity_sync import EZLynxProductivityParser
 from robie_job_engine.productivity import (
