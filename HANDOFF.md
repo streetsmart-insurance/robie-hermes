@@ -145,6 +145,15 @@ ambiguity is HITL, not retry; no Production deploy; no live job.
 - **PW-06 Idle Chrome refresh**: `scripts/chrome_refresh_if_idle.py` refuses
   to restart while jobs are `RUNNING` or `VERIFYING`.
 
+## Stale tab claims (tabs only)
+
+A RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job older than one hour
+(`LIVE_TAB_CLAIM_MAX_AGE` in `robie_job_engine/tab_cleanup.py`) does not
+count as a live tab_cleanup claim. Flush can then close leftover tabs such
+as a parked Ascend `/create/new`. The job row is unchanged — not FAILED,
+not RETRY, not deleted. New Google Chat and Playwright jobs run the same
+flush at start. Do not invent leftover RETRY.
+
 ## What “live” means
 
 1. GitHub `main` SHA matches the release archive.

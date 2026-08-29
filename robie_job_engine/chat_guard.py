@@ -590,6 +590,12 @@ def open_chat_job(
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
     store.fail_orphaned_chat_jobs()
+    try:
+        from .tab_cleanup import flush_tabs_at_job_start
+
+        flush_tabs_at_job_start(db_path=db_path)
+    except Exception:
+        logger.exception("start-of-job tab flush failed; continuing")
     queue = DurableChatEventQueue(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
     files = list(attachments or [])

@@ -7,10 +7,12 @@ previous-account / carrier tab while the live job works in another.
 
 This module closes job-owned pages on terminal close-out (any host that job
 opened, not only EZLynx / Ascend), sweeps EZLynx-shaped orphans, and flushes
-every leftover page that no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job
-claims. It keeps exactly one authenticated ``https://app.ezlynx.com/web/``
-session tab. It never restarts Chrome, never wipes the EZLynx profile, and
-never logs out.
+every leftover page that no fresh RUNNING / AWAITING_HUMAN_INPUT / VERIFYING
+job claims. A job in those statuses older than ``LIVE_TAB_CLAIM_MAX_AGE``
+(default one hour) does not count as a live tab claim. The job itself is
+not FAILED, RETRYed, or deleted — tabs only. It keeps exactly one
+authenticated ``https://app.ezlynx.com/web/`` session tab. It never restarts
+Chrome, never wipes the EZLynx profile, and never logs out.
 
 Close mechanism is Chrome's HTTP CDP ``/json/close/{id}`` (Target.closeTarget).
 """
@@ -21,6 +23,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.error import URLError
@@ -64,6 +67,7 @@ LIVE_TAB_STATUSES = frozenset(
         JobStatus.VERIFYING,
     }
 )
+LIVE_TAB_CLAIM_MAX_AGE = timedelta(hours=1)
 PAGE_TARGET_TYPES = frozenset({"", "page", "tab"})
 ASCEND_HOST_RE = re.compile(r"(^|\.)ascend\.", re.IGNORECASE)
 ASCEND_PATH_RE = re.compile(r"/ascend(?:/|$)", re.IGNORECASE)
@@ -292,13 +296,68 @@ def claims_for_job(store: JobStore, job: dict[str, Any]) -> TabClaims:
     return claims
 
 
-def live_tab_claims(db_path: str | Path | None = None) -> TabClaims:
+def parse_job_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def job_claim_stamp(job: dict[str, Any]) -> datetime | None:
+    """Last ledger write. Parked HITL / stuck VERIFYING age from ``updated_at``."""
+    for key in ("updated_at", "created_at"):
+        parsed = parse_job_timestamp(job.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def job_holds_live_tab_claim(
+    job: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    max_age: timedelta | None = None,
+) -> bool:
+    """True when this live-status job is still fresh enough to keep tabs.
+
+    Age is tabs-only. A stale HITL or stuck RUNNING / VERIFYING job is not
+    FAILED, RETRYed, or deleted here.
+    """
+    try:
+        status = JobStatus(job.get("status"))
+    except (TypeError, ValueError):
+        return False
+    if status not in LIVE_TAB_STATUSES:
+        return False
+    stamp = job_claim_stamp(job)
+    if stamp is None:
+        return True
+    age = (now or datetime.now(timezone.utc)) - stamp
+    return age <= (max_age or LIVE_TAB_CLAIM_MAX_AGE)
+
+
+def live_tab_claims(
+    db_path: str | Path | None = None,
+    *,
+    now: datetime | None = None,
+) -> TabClaims:
     path = _jobs_db(db_path)
     merged = TabClaims()
     if not path.is_file():
         return merged
     store = JobStore(path)
+    at = now or datetime.now(timezone.utc)
     for job in store.list_jobs_by_status(LIVE_TAB_STATUSES):
+        if not job_holds_live_tab_claim(job, now=at):
+            continue
         row = claims_for_job(store, job)
         merged.job_ids.update(row.job_ids)
         merged.account_ids.update(row.account_ids)
@@ -797,6 +856,22 @@ def maybe_sweep_orphaned_tabs(**kwargs: Any) -> dict[str, Any] | None:
 def maybe_flush_orphaned_tabs(**kwargs: Any) -> dict[str, Any] | None:
     try:
         return flush_orphaned_tabs(**kwargs)
+    except Exception as exc:
+        return {"ok": False, "mode": FLUSH_MODE, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def flush_tabs_at_job_start(
+    db_path: str | Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """Run the existing leftover flush when a new Chat / Playwright job starts.
+
+    Does not wait for terminal close-out or pre-flight. Unclaimed leftovers
+    close; one EZLynx ``/web/`` session stays. Stale live-status jobs do not
+    keep tabs.
+    """
+    try:
+        return maybe_flush_orphaned_tabs(db_path=db_path, **kwargs)
     except Exception as exc:
         return {"ok": False, "mode": FLUSH_MODE, "error": f"{type(exc).__name__}: {exc}"}
 

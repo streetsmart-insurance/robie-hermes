@@ -326,6 +326,12 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         _persist_playwright_exec_finish(db_path, row_id, result)
         return result
 
+    try:
+        from robie_job_engine.tab_cleanup import flush_tabs_at_job_start
+
+        flush_tabs_at_job_start()
+    except Exception:
+        pass
     if not code or not code.strip():
         return _finish(tool_error("No Playwright code provided."))
     try:

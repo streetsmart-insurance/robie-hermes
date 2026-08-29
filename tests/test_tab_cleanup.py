@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from durable_temp import durable_temporary_directory
 
-from robie_job_engine.chat_guard import open_chat_job
+from robie_job_engine.chat_guard import open_chat_job, stop_generic_chat_job_heartbeat
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.models import JobStatus
 from robie_job_engine.post_job_audit import audit_terminal_job
@@ -28,10 +30,13 @@ from robie_job_engine.recording_tab import (
 from robie_job_engine.store import JobStore
 from robie_job_engine.tab_cleanup import (
     EMPTY_TARGET_EVIDENCE,
+    LIVE_TAB_CLAIM_MAX_AGE,
     BrowserTab,
     cleanup_terminal_job_tabs,
     ensure_one_browser_page,
     flush_orphaned_tabs,
+    flush_tabs_at_job_start,
+    live_tab_claims,
     plan_tab_cleanup,
     retarget_recorder_hint,
     sweep_orphaned_tabs,
@@ -52,6 +57,7 @@ BLANK = "about:blank"
 ASCEND = "https://app.ascend.com/workspace/file"
 GOOGLE = "https://www.google.com/"
 ASCEND_DASH = "https://dashboard.useascend.com/quotes"
+ASCEND_CREATE_NEW = "https://dashboard.useascend.com/create/new"
 
 
 class FakePage:
@@ -92,6 +98,18 @@ def _complete_job(db: str, text: str, *, status: JobStatus = JobStatus.FAILED) -
 
 def _running_job(db: str, text: str) -> str:
     return open_chat_job(db, f"message-live-{id(text)}-{text[:12]}", text)
+
+
+def _park_hitl_job(db: str, text: str, *, age: timedelta) -> str:
+    job_id = open_chat_job(db, f"message-hitl-{id(text)}-{age.total_seconds()}", text)
+    stop_generic_chat_job_heartbeat(db, job_id)
+    stamp = (datetime.now(timezone.utc) - age).isoformat()
+    with JobStore(db).connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status=?, created_at=?, updated_at=? WHERE id=?",
+            (JobStatus.AWAITING_HUMAN_INPUT.value, stamp, stamp, job_id),
+        )
+    return job_id
 
 
 class JobTerminalCleanupTests(unittest.TestCase):
@@ -470,6 +488,171 @@ class PlanAndAuditHookTests(unittest.TestCase):
         self.assertIn(ASCEND_DASH, flush["closed_urls"])
         self.assertEqual(flush.get("session_url"), SESSION)
         self.assertNotIn(SESSION, flush.get("closed_urls") or [])
+
+
+class StaleLiveTabClaimTests(unittest.TestCase):
+    """Parked HITL / stuck jobs older than one hour do not keep leftover tabs."""
+
+    def test_sixty_one_minute_hitl_job_does_not_claim_ascend_create_new_so_flush_closes_it(
+        self,
+    ):
+        self.assertEqual(LIVE_TAB_CLAIM_MAX_AGE, timedelta(hours=1))
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = _park_hitl_job(
+                db,
+                f"create Ascend program at {ASCEND_CREATE_NEW}",
+                age=timedelta(minutes=61),
+            )
+            store = JobStore(db)
+            before = store.get_job(job_id)
+            self.assertEqual(before["status"], JobStatus.AWAITING_HUMAN_INPUT.value)
+            claims = live_tab_claims(db)
+            self.assertNotIn(job_id, claims.job_ids)
+            self.assertFalse(claims.claims(ASCEND_CREATE_NEW))
+            pages = _pages(
+                ("session", SESSION),
+                ("ascend-create", ASCEND_CREATE_NEW),
+            )
+            result = flush_orphaned_tabs(db, pages=pages)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["mode"], "flush")
+            self.assertNotIn(job_id, result["live_job_ids"])
+            self.assertFalse(pages[0].closed)
+            self.assertTrue(pages[1].closed)
+            self.assertIn(ASCEND_CREATE_NEW, result["closed_urls"])
+            self.assertNotIn(ASCEND_CREATE_NEW, result["kept_urls"])
+            after = store.get_job(job_id)
+            self.assertEqual(after["status"], JobStatus.AWAITING_HUMAN_INPUT.value)
+            self.assertEqual(after["id"], job_id)
+            self.assertIsNone(after.get("completed_at"))
+            self.assertNotEqual(after["status"], JobStatus.FAILED.value)
+
+    def test_thirty_minute_hitl_job_still_claims_ascend_create_new_so_flush_keeps_it(
+        self,
+    ):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = _park_hitl_job(
+                db,
+                f"create Ascend program at {ASCEND_CREATE_NEW}",
+                age=timedelta(minutes=30),
+            )
+            store = JobStore(db)
+            claims = live_tab_claims(db)
+            self.assertIn(job_id, claims.job_ids)
+            self.assertTrue(claims.claims(ASCEND_CREATE_NEW))
+            pages = _pages(
+                ("session", SESSION),
+                ("ascend-create", ASCEND_CREATE_NEW),
+            )
+            result = flush_orphaned_tabs(db, pages=pages)
+            self.assertTrue(result["ok"])
+            self.assertIn(job_id, result["live_job_ids"])
+            self.assertFalse(pages[0].closed)
+            self.assertFalse(pages[1].closed)
+            self.assertIn(ASCEND_CREATE_NEW, result["kept_urls"])
+            self.assertNotIn(ASCEND_CREATE_NEW, result["closed_urls"])
+            after = store.get_job(job_id)
+            self.assertEqual(after["status"], JobStatus.AWAITING_HUMAN_INPUT.value)
+
+    def test_start_of_job_flush_hook_is_invoked_for_chat_and_playwright(self):
+        chat_calls: list[dict] = []
+        playwright_calls: list[dict] = []
+
+        def _record(bucket: list[dict], **kwargs):
+            bucket.append(dict(kwargs))
+            return {"ok": True, "mode": "flush", "closed_urls": [], "kept_urls": [SESSION]}
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            JobStore(db)
+            with patch(
+                "robie_job_engine.tab_cleanup.flush_tabs_at_job_start",
+                side_effect=lambda **kwargs: _record(chat_calls, **kwargs),
+            ):
+                job_id = open_chat_job(
+                    db,
+                    "message-start-flush",
+                    "open EZLynx documents",
+                    conversation_id="spaces/start-flush",
+                )
+            self.assertTrue(job_id)
+            self.assertGreaterEqual(len(chat_calls), 1)
+            self.assertEqual(chat_calls[0].get("db_path"), db)
+            stop_generic_chat_job_heartbeat(db, job_id)
+
+        import importlib.util
+        import sys
+        from types import ModuleType
+
+        tools_pkg = ModuleType("tools")
+        tools_pkg.__path__ = []
+        registry_mod = ModuleType("tools.registry")
+
+        class DummyRegistry:
+            def register(self, **_kwargs):
+                return None
+
+        def tool_error(message):
+            return {"ok": False, "error": message}
+
+        def tool_result(payload):
+            return payload
+
+        registry_mod.registry = DummyRegistry()
+        registry_mod.tool_error = tool_error
+        registry_mod.tool_result = tool_result
+        previous = {name: sys.modules.get(name) for name in ("tools", "tools.registry")}
+        sys.modules["tools"] = tools_pkg
+        sys.modules["tools.registry"] = registry_mod
+        tool_path = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "hermes"
+            / "tools"
+            / "playwright_tool.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "robie_playwright_tool_start_flush", tool_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        try:
+            assert spec is not None and spec.loader is not None
+            spec.loader.exec_module(module)
+            with patch(
+                "robie_job_engine.tab_cleanup.flush_tabs_at_job_start",
+                side_effect=lambda **kwargs: _record(playwright_calls, **kwargs),
+            ):
+                result = module.playwright_exec("")
+            self.assertGreaterEqual(len(playwright_calls), 1)
+            self.assertEqual(result.get("ok"), False)
+            self.assertIn("No Playwright code provided", result.get("error") or "")
+            source = tool_path.read_text(encoding="utf-8")
+            self.assertIn("flush_tabs_at_job_start", source)
+            self.assertIn(
+                "flush_tabs_at_job_start",
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "robie_job_engine"
+                    / "chat_guard.py"
+                ).read_text(encoding="utf-8"),
+            )
+            with durable_temporary_directory() as hook_tmp:
+                hook_db = str(Path(hook_tmp) / "jobs.db")
+                JobStore(hook_db)
+                pages = _pages(("session", SESSION), ("leftover", GOOGLE))
+                flushed = flush_tabs_at_job_start(db_path=hook_db, pages=pages)
+            self.assertIsNotNone(flushed)
+            self.assertEqual(flushed.get("mode"), "flush")
+            self.assertTrue(pages[1].closed)
+            self.assertFalse(pages[0].closed)
+        finally:
+            for name, item in previous.items():
+                if item is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = item
 
 
 class PlaywrightPageSelectionTests(unittest.TestCase):
