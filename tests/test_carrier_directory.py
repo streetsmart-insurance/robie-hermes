@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pytest
+try:
+    import pytest
+    fixture = pytest.fixture
+except ImportError:
+    def fixture(fn):
+        return fn
 
 from robie_job_engine.carrier_directory import (
     Carrier,
@@ -13,7 +18,7 @@ from robie_job_engine.carrier_directory import (
 )
 
 
-@pytest.fixture
+@fixture
 def carrier_store(tmp_path: Path) -> CarrierDirectoryStore:
     db = tmp_path / "jobs.db"
     return CarrierDirectoryStore(db)
