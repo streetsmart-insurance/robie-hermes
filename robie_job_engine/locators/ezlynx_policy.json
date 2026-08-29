@@ -1,0 +1,987 @@
+{
+  "portal": "ezlynx",
+  "page_name": "policy_setup",
+  "version": "2.0",
+  "fields": {
+    "add_policy_button": {
+      "name": "add_policy_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-policy",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add policy",
+      "exact": true,
+      "description": "Add policy button on applicant policies overview page",
+      "last_updated": "2026-08-29"
+    },
+    "lob_select": {
+      "name": "lob_select",
+      "primary_strategy": "css",
+      "primary_selector": "#mergeSplitLOB",
+      "fallback_strategy": "label",
+      "fallback_selector": "Line of Business",
+      "exact": true,
+      "description": "Line of business dropdown select",
+      "last_updated": "2026-08-29"
+    },
+    "transaction_type_select": {
+      "name": "transaction_type_select",
+      "primary_strategy": "css",
+      "primary_selector": "#TransactionType",
+      "fallback_strategy": "label",
+      "fallback_selector": "Transaction Type",
+      "exact": true,
+      "description": "Transaction type dropdown (NBS, RWL, PCH, REW, REI, XLC)",
+      "last_updated": "2026-08-29"
+    },
+    "master_company_select": {
+      "name": "master_company_select",
+      "primary_strategy": "css",
+      "primary_selector": "#MasterCompany",
+      "fallback_strategy": "label",
+      "fallback_selector": "Master Company",
+      "exact": true,
+      "description": "Master carrier dropdown (e.g. Progressive, Travelers, AmTrust)",
+      "last_updated": "2026-08-29"
+    },
+    "writing_company_select": {
+      "name": "writing_company_select",
+      "primary_strategy": "css",
+      "primary_selector": "#WritingCompany",
+      "fallback_strategy": "label",
+      "fallback_selector": "Writing Company",
+      "exact": true,
+      "description": "Writing carrier dropdown",
+      "last_updated": "2026-08-29"
+    },
+    "policy_number_input": {
+      "name": "policy_number_input",
+      "primary_strategy": "css",
+      "primary_selector": "#PolicyNumber",
+      "fallback_strategy": "label",
+      "fallback_selector": "Policy Number",
+      "exact": true,
+      "description": "Policy number text input field",
+      "last_updated": "2026-08-29"
+    },
+    "effective_date_input": {
+      "name": "effective_date_input",
+      "primary_strategy": "css",
+      "primary_selector": "#EffectiveDate",
+      "fallback_strategy": "label",
+      "fallback_selector": "Effective Date",
+      "exact": true,
+      "description": "Policy effective date (MM/DD/YYYY)",
+      "last_updated": "2026-08-29"
+    },
+    "expiration_date_input": {
+      "name": "expiration_date_input",
+      "primary_strategy": "css",
+      "primary_selector": "#ExpirationDate",
+      "fallback_strategy": "label",
+      "fallback_selector": "Expiration Date",
+      "exact": true,
+      "description": "Policy expiration date (MM/DD/YYYY)",
+      "last_updated": "2026-08-29"
+    },
+    "lob_origination_date_input": {
+      "name": "lob_origination_date_input",
+      "primary_strategy": "css",
+      "primary_selector": "#LOBOriginationDate",
+      "fallback_strategy": "label",
+      "fallback_selector": "LOB Origination Date",
+      "exact": true,
+      "description": "Mandatory Line of Business Origination Date (MM/DD/YYYY)",
+      "last_updated": "2026-08-29"
+    },
+    "billing_type_select": {
+      "name": "billing_type_select",
+      "primary_strategy": "css",
+      "primary_selector": "#BillingType",
+      "fallback_strategy": "label",
+      "fallback_selector": "Billing Type",
+      "exact": true,
+      "description": "Billing type dropdown (Direct vs Agency)",
+      "last_updated": "2026-08-29"
+    },
+    "billing_company_select": {
+      "name": "billing_company_select",
+      "primary_strategy": "css",
+      "primary_selector": "#BillingCompany",
+      "fallback_strategy": "label",
+      "fallback_selector": "Billing Company",
+      "exact": true,
+      "description": "Billing company select for Agency billing or finance",
+      "last_updated": "2026-08-29"
+    },
+    "rating_state_select": {
+      "name": "rating_state_select",
+      "primary_strategy": "css",
+      "primary_selector": "#RatingState",
+      "fallback_strategy": "label",
+      "fallback_selector": "Rating State",
+      "exact": true,
+      "description": "Rating state dropdown",
+      "last_updated": "2026-08-29"
+    },
+    "department_select": {
+      "name": "department_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Department .select2-choice",
+      "fallback_strategy": "css",
+      "fallback_selector": "#Department a.ui-select-match",
+      "exact": true,
+      "description": "Department ui-select trigger",
+      "last_updated": "2026-08-29"
+    },
+    "department_option": {
+      "name": "department_option",
+      "primary_strategy": "css",
+      "primary_selector": "#Department .ui-select-choices-row",
+      "fallback_strategy": "css",
+      "fallback_selector": ".select2-results li",
+      "exact": false,
+      "description": "Department choice option",
+      "last_updated": "2026-08-29"
+    },
+    "premium_input": {
+      "name": "premium_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Premium",
+      "fallback_strategy": "label",
+      "fallback_selector": "Premium",
+      "exact": true,
+      "description": "Policy written premium input (clean unmasked number)",
+      "last_updated": "2026-08-29"
+    },
+    "full_term_premium_input": {
+      "name": "full_term_premium_input",
+      "primary_strategy": "css",
+      "primary_selector": "#FullTermPremium",
+      "fallback_strategy": "label",
+      "fallback_selector": "Full Term Premium",
+      "exact": true,
+      "description": "Full term written premium input",
+      "last_updated": "2026-08-29"
+    },
+    "annual_premium_input": {
+      "name": "annual_premium_input",
+      "primary_strategy": "css",
+      "primary_selector": "#AnnualPremium",
+      "fallback_strategy": "label",
+      "fallback_selector": "Annual Premium",
+      "exact": true,
+      "description": "Annualized premium input",
+      "last_updated": "2026-08-29"
+    },
+    "description_input": {
+      "name": "description_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Description",
+      "fallback_strategy": "label",
+      "fallback_selector": "Description",
+      "exact": true,
+      "description": "Policy shell description or notes",
+      "last_updated": "2026-08-29"
+    },
+    "add_and_edit_policy_button": {
+      "name": "add_and_edit_policy_button",
+      "primary_strategy": "css",
+      "primary_selector": "#AddAndEditPolicyBtn",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add & Edit Policy",
+      "exact": true,
+      "description": "Save policy shell and advance into detailed Form Entry wizard",
+      "last_updated": "2026-08-29"
+    },
+    "add_policy_button_shell": {
+      "name": "add_policy_button_shell",
+      "primary_strategy": "css",
+      "primary_selector": "#AddPolicyBtn",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Policy",
+      "exact": true,
+      "description": "Save policy shell without entering detailed Form Entry",
+      "last_updated": "2026-08-29"
+    },
+    "cancel_shell_button": {
+      "name": "cancel_shell_button",
+      "primary_strategy": "css",
+      "primary_selector": "#CloseBtn",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Cancel",
+      "exact": true,
+      "description": "Cancel policy creation and return to account overview",
+      "last_updated": "2026-08-29"
+    },
+    "form_entry_next": {
+      "name": "form_entry_next",
+      "primary_strategy": "css",
+      "primary_selector": "#next-header",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Next",
+      "exact": true,
+      "description": "Next step in Form Entry wizard",
+      "last_updated": "2026-08-29"
+    },
+    "form_entry_save_close": {
+      "name": "form_entry_save_close",
+      "primary_strategy": "css",
+      "primary_selector": "#finishButton-header",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Save & Close",
+      "exact": true,
+      "description": "Save and finish policy form entry",
+      "last_updated": "2026-08-29"
+    },
+    "form_entry_cancel": {
+      "name": "form_entry_cancel",
+      "primary_strategy": "css",
+      "primary_selector": "#cancelButton-header",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Cancel",
+      "exact": true,
+      "description": "Cancel form entry wizard",
+      "last_updated": "2026-08-29"
+    },
+    "tab_vehicles": {
+      "name": "tab_vehicles",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#vehicles-tab'], #tab-vehicles",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Vehicles",
+      "exact": true,
+      "description": "Vehicles tab in auto policy detail",
+      "last_updated": "2026-08-29"
+    },
+    "add_vehicle_button": {
+      "name": "add_vehicle_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-vehicle-btn, button[data-action='add-vehicle']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Vehicle",
+      "exact": true,
+      "description": "Button to add a vehicle to schedule",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_vin_input": {
+      "name": "vehicle_vin_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_VIN, input[name='VIN']",
+      "fallback_strategy": "label",
+      "fallback_selector": "VIN",
+      "exact": true,
+      "description": "17-digit VIN input",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_year_input": {
+      "name": "vehicle_year_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_Year, input[name='Year']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Year",
+      "exact": true,
+      "description": "Vehicle model year",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_make_input": {
+      "name": "vehicle_make_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_Make, input[name='Make']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Make",
+      "exact": true,
+      "description": "Vehicle make",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_model_input": {
+      "name": "vehicle_model_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_Model, input[name='Model']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Model",
+      "exact": true,
+      "description": "Vehicle model",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_body_type_select": {
+      "name": "vehicle_body_type_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_BodyType, select[name='BodyType']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Body Type",
+      "exact": true,
+      "description": "Vehicle body style dropdown",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_garaging_address_select": {
+      "name": "vehicle_garaging_address_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_GaragingAddressId, select[name='GaragingAddress']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Garaging Address",
+      "exact": true,
+      "description": "Vehicle garaging address link",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_comp_deductible_select": {
+      "name": "vehicle_comp_deductible_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_CompDeductible, select[name='CompDeductible']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Comprehensive Deductible",
+      "exact": true,
+      "description": "Comprehensive deductible selector",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_coll_deductible_select": {
+      "name": "vehicle_coll_deductible_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_CollDeductible, select[name='CollDeductible']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Collision Deductible",
+      "exact": true,
+      "description": "Collision deductible selector",
+      "last_updated": "2026-08-29"
+    },
+    "vehicle_towing_checkbox": {
+      "name": "vehicle_towing_checkbox",
+      "primary_strategy": "css",
+      "primary_selector": "#Vehicle_Towing, input[name='TowingCoverage']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Towing & Labor",
+      "exact": true,
+      "description": "Towing coverage endorsement",
+      "last_updated": "2026-08-29"
+    },
+    "tab_drivers": {
+      "name": "tab_drivers",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#drivers-tab'], #tab-drivers",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Drivers",
+      "exact": true,
+      "description": "Drivers tab in auto policy detail",
+      "last_updated": "2026-08-29"
+    },
+    "add_driver_button": {
+      "name": "add_driver_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-driver-btn, button[data-action='add-driver']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Driver",
+      "exact": true,
+      "description": "Button to add a driver to schedule",
+      "last_updated": "2026-08-29"
+    },
+    "driver_first_name_input": {
+      "name": "driver_first_name_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Driver_FirstName, input[name='FirstName']",
+      "fallback_strategy": "label",
+      "fallback_selector": "First Name",
+      "exact": true,
+      "description": "Driver first name",
+      "last_updated": "2026-08-29"
+    },
+    "driver_last_name_input": {
+      "name": "driver_last_name_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Driver_LastName, input[name='LastName']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Last Name",
+      "exact": true,
+      "description": "Driver last name",
+      "last_updated": "2026-08-29"
+    },
+    "driver_dob_input": {
+      "name": "driver_dob_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Driver_DOB, input[name='DOB']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Date of Birth",
+      "exact": true,
+      "description": "Driver date of birth (MM/DD/YYYY)",
+      "last_updated": "2026-08-29"
+    },
+    "driver_license_number_input": {
+      "name": "driver_license_number_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Driver_LicenseNumber, input[name='LicenseNumber']",
+      "fallback_strategy": "label",
+      "fallback_selector": "License Number",
+      "exact": true,
+      "description": "Driver license number",
+      "last_updated": "2026-08-29"
+    },
+    "driver_license_state_select": {
+      "name": "driver_license_state_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Driver_LicenseState, select[name='LicenseState']",
+      "fallback_strategy": "label",
+      "fallback_selector": "License State",
+      "exact": true,
+      "description": "Driver license state dropdown",
+      "last_updated": "2026-08-29"
+    },
+    "driver_excluded_checkbox": {
+      "name": "driver_excluded_checkbox",
+      "primary_strategy": "css",
+      "primary_selector": "#Driver_Excluded, input[name='Excluded']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Excluded Driver",
+      "exact": true,
+      "description": "Checkbox for excluded driver endorsement",
+      "last_updated": "2026-08-29"
+    },
+    "tab_locations": {
+      "name": "tab_locations",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#locations-tab'], #tab-locations",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Locations & Buildings",
+      "exact": true,
+      "description": "Locations & Buildings tab for BOP/GL/Property/WC",
+      "last_updated": "2026-08-29"
+    },
+    "add_location_button": {
+      "name": "add_location_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-location-btn, button[data-action='add-location']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Location",
+      "exact": true,
+      "description": "Button to add a premise location",
+      "last_updated": "2026-08-29"
+    },
+    "location_address_input": {
+      "name": "location_address_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Location_Address1, input[name='Address1']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Street Address",
+      "exact": true,
+      "description": "Location street address",
+      "last_updated": "2026-08-29"
+    },
+    "location_city_input": {
+      "name": "location_city_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Location_City, input[name='City']",
+      "fallback_strategy": "label",
+      "fallback_selector": "City",
+      "exact": true,
+      "description": "Location city",
+      "last_updated": "2026-08-29"
+    },
+    "location_state_select": {
+      "name": "location_state_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Location_State, select[name='State']",
+      "fallback_strategy": "label",
+      "fallback_selector": "State",
+      "exact": true,
+      "description": "Location state",
+      "last_updated": "2026-08-29"
+    },
+    "location_zip_input": {
+      "name": "location_zip_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Location_Zip, input[name='Zip']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Zip",
+      "exact": true,
+      "description": "Location ZIP code",
+      "last_updated": "2026-08-29"
+    },
+    "add_building_button": {
+      "name": "add_building_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-building-btn, button[data-action='add-building']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Building",
+      "exact": true,
+      "description": "Button to add a building to a location",
+      "last_updated": "2026-08-29"
+    },
+    "building_construction_type_select": {
+      "name": "building_construction_type_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_ConstructionType, select[name='ConstructionType']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Construction Type",
+      "exact": true,
+      "description": "Building construction code (Frame, Joisted Masonry, Non-Combustible, etc.)",
+      "last_updated": "2026-08-29"
+    },
+    "building_protection_class_input": {
+      "name": "building_protection_class_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_ProtectionClass, input[name='ProtectionClass']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Protection Class",
+      "exact": true,
+      "description": "ISO Protection Class (1-10)",
+      "last_updated": "2026-08-29"
+    },
+    "building_year_built_input": {
+      "name": "building_year_built_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_YearBuilt, input[name='YearBuilt']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Year Built",
+      "exact": true,
+      "description": "Year building was built",
+      "last_updated": "2026-08-29"
+    },
+    "building_sq_ft_input": {
+      "name": "building_sq_ft_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_SquareFootage, input[name='SquareFootage']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Square Footage",
+      "exact": true,
+      "description": "Building total area in square feet",
+      "last_updated": "2026-08-29"
+    },
+    "building_sprinklered_pct_input": {
+      "name": "building_sprinklered_pct_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_SprinkleredPct, input[name='SprinkleredPct']",
+      "fallback_strategy": "label",
+      "fallback_selector": "% Sprinklered",
+      "exact": true,
+      "description": "Percentage of building sprinklered",
+      "last_updated": "2026-08-29"
+    },
+    "building_limit_input": {
+      "name": "building_limit_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_CoverageLimit, input[name='BuildingLimit']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Building Limit",
+      "exact": true,
+      "description": "Building coverage limit",
+      "last_updated": "2026-08-29"
+    },
+    "bpp_limit_input": {
+      "name": "bpp_limit_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Building_BPPLimit, input[name='BPPLimit']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Business Personal Property (BPP) Limit",
+      "exact": true,
+      "description": "Business Personal Property limit",
+      "last_updated": "2026-08-29"
+    },
+    "tab_coverages": {
+      "name": "tab_coverages",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#coverages-tab'], #tab-coverages",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Coverages",
+      "exact": true,
+      "description": "Coverages & Limits tab",
+      "last_updated": "2026-08-29"
+    },
+    "gl_occurrence_limit_select": {
+      "name": "gl_occurrence_limit_select",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_EachOccurrence, select[name='EachOccurrence']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Each Occurrence Limit",
+      "exact": true,
+      "description": "General Liability each occurrence limit",
+      "last_updated": "2026-08-29"
+    },
+    "gl_general_aggregate_select": {
+      "name": "gl_general_aggregate_select",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_GeneralAggregate, select[name='GeneralAggregate']",
+      "fallback_strategy": "label",
+      "fallback_selector": "General Aggregate Limit",
+      "exact": true,
+      "description": "General Liability general aggregate limit",
+      "last_updated": "2026-08-29"
+    },
+    "gl_products_aggregate_select": {
+      "name": "gl_products_aggregate_select",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_ProductsAggregate, select[name='ProductsAggregate']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Products/Completed Operations Aggregate",
+      "exact": true,
+      "description": "GL products/completed operations aggregate",
+      "last_updated": "2026-08-29"
+    },
+    "gl_pers_adv_injury_select": {
+      "name": "gl_pers_adv_injury_select",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_PersonalAdvInjury, select[name='PersonalAdvInjury']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Personal & Advertising Injury Limit",
+      "exact": true,
+      "description": "GL personal and advertising injury limit",
+      "last_updated": "2026-08-29"
+    },
+    "gl_premises_rented_select": {
+      "name": "gl_premises_rented_select",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_DamageToRentedPremises, select[name='DamageToRentedPremises']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Damage to Rented Premises Limit",
+      "exact": true,
+      "description": "GL fire legal / damage to rented premises",
+      "last_updated": "2026-08-29"
+    },
+    "gl_med_expense_select": {
+      "name": "gl_med_expense_select",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_MedicalExpense, select[name='MedicalExpense']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Medical Expense Limit",
+      "exact": true,
+      "description": "GL medical expense per person limit",
+      "last_updated": "2026-08-29"
+    },
+    "add_gl_classification_button": {
+      "name": "add_gl_classification_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-gl-class-btn, button[data-action='add-gl-class']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Classification",
+      "exact": true,
+      "description": "Button to add GL class code / exposure",
+      "last_updated": "2026-08-29"
+    },
+    "gl_class_code_input": {
+      "name": "gl_class_code_input",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_ClassCode, input[name='ClassCode']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Class Code",
+      "exact": true,
+      "description": "GL 5-digit classification code",
+      "last_updated": "2026-08-29"
+    },
+    "gl_exposure_input": {
+      "name": "gl_exposure_input",
+      "primary_strategy": "css",
+      "primary_selector": "#GL_Exposure, input[name='Exposure']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Gross Sales / Payroll Exposure",
+      "exact": true,
+      "description": "GL rating basis exposure amount",
+      "last_updated": "2026-08-29"
+    },
+    "tab_workers_comp": {
+      "name": "tab_workers_comp",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#workers-comp-tab'], #tab-wc",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Workers Comp",
+      "exact": true,
+      "description": "Workers Comp classifications and payroll tab",
+      "last_updated": "2026-08-29"
+    },
+    "add_wc_class_code_button": {
+      "name": "add_wc_class_code_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-wc-class-btn, button[data-action='add-wc-class']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add WC Class Code",
+      "exact": true,
+      "description": "Add WC class code and payroll rating",
+      "last_updated": "2026-08-29"
+    },
+    "wc_class_code_input": {
+      "name": "wc_class_code_input",
+      "primary_strategy": "css",
+      "primary_selector": "#WC_ClassCode, input[name='WCClassCode']",
+      "fallback_strategy": "label",
+      "fallback_selector": "WC Class Code",
+      "exact": true,
+      "description": "WC 4-digit classification code (e.g. 8810)",
+      "last_updated": "2026-08-29"
+    },
+    "wc_payroll_input": {
+      "name": "wc_payroll_input",
+      "primary_strategy": "css",
+      "primary_selector": "#WC_Payroll, input[name='WCPayroll']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Estimated Annual Payroll",
+      "exact": true,
+      "description": "Estimated annual payroll for class code",
+      "last_updated": "2026-08-29"
+    },
+    "wc_ft_employees_input": {
+      "name": "wc_ft_employees_input",
+      "primary_strategy": "css",
+      "primary_selector": "#WC_FullTimeEmployees, input[name='FTEmployees']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Full Time Employees",
+      "exact": true,
+      "description": "Count of full time employees",
+      "last_updated": "2026-08-29"
+    },
+    "wc_el_each_accident_select": {
+      "name": "wc_el_each_accident_select",
+      "primary_strategy": "css",
+      "primary_selector": "#WC_ELEachAccident, select[name='ELEachAccident']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Employers Liability - Each Accident",
+      "exact": true,
+      "description": "EL each accident limit (e.g. 1M)",
+      "last_updated": "2026-08-29"
+    },
+    "wc_el_disease_policy_select": {
+      "name": "wc_el_disease_policy_select",
+      "primary_strategy": "css",
+      "primary_selector": "#WC_ELDiseasePolicy, select[name='ELDiseasePolicy']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Employers Liability - Disease Policy Limit",
+      "exact": true,
+      "description": "EL disease policy limit",
+      "last_updated": "2026-08-29"
+    },
+    "wc_el_disease_employee_select": {
+      "name": "wc_el_disease_employee_select",
+      "primary_strategy": "css",
+      "primary_selector": "#WC_ELDiseaseEmployee, select[name='ELDiseaseEmployee']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Employers Liability - Disease Each Employee",
+      "exact": true,
+      "description": "EL disease each employee limit",
+      "last_updated": "2026-08-29"
+    },
+    "tab_umbrella_underlying": {
+      "name": "tab_umbrella_underlying",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#umbrella-underlying-tab'], #tab-umbrella-underlying",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Underlying Policies",
+      "exact": true,
+      "description": "Umbrella underlying policy schedule tab",
+      "last_updated": "2026-08-29"
+    },
+    "add_underlying_policy_button": {
+      "name": "add_underlying_policy_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-underlying-policy-btn, button[data-action='add-underlying']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Underlying Policy",
+      "exact": true,
+      "description": "Add underlying scheduled auto, GL, or EL policy",
+      "last_updated": "2026-08-29"
+    },
+    "underlying_lob_select": {
+      "name": "underlying_lob_select",
+      "primary_strategy": "css",
+      "primary_selector": "#Underlying_LOB, select[name='UnderlyingLOB']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Underlying LOB",
+      "exact": true,
+      "description": "Underlying line of business (Auto, GL, Employers Liability)",
+      "last_updated": "2026-08-29"
+    },
+    "underlying_carrier_input": {
+      "name": "underlying_carrier_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Underlying_Carrier, input[name='UnderlyingCarrier']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Underlying Carrier",
+      "exact": true,
+      "description": "Underlying insurance carrier name",
+      "last_updated": "2026-08-29"
+    },
+    "underlying_policy_number_input": {
+      "name": "underlying_policy_number_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Underlying_PolicyNumber, input[name='UnderlyingPolicyNumber']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Underlying Policy #",
+      "exact": true,
+      "description": "Underlying policy number",
+      "last_updated": "2026-08-29"
+    },
+    "underlying_limits_input": {
+      "name": "underlying_limits_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Underlying_Limits, input[name='UnderlyingLimits']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Underlying Limits",
+      "exact": true,
+      "description": "Underlying limits of liability",
+      "last_updated": "2026-08-29"
+    },
+    "tab_property_homeowners": {
+      "name": "tab_property_homeowners",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#homeowners-tab'], #tab-homeowners",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Homeowners Property",
+      "exact": true,
+      "description": "Homeowners / Dwelling Fire property limits tab",
+      "last_updated": "2026-08-29"
+    },
+    "ho_dwelling_limit_a_input": {
+      "name": "ho_dwelling_limit_a_input",
+      "primary_strategy": "css",
+      "primary_selector": "#HO_CoverageA, input[name='CoverageA']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Coverage A - Dwelling Limit",
+      "exact": true,
+      "description": "Homeowners Coverage A Dwelling limit",
+      "last_updated": "2026-08-29"
+    },
+    "ho_other_structures_limit_b_input": {
+      "name": "ho_other_structures_limit_b_input",
+      "primary_strategy": "css",
+      "primary_selector": "#HO_CoverageB, input[name='CoverageB']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Coverage B - Other Structures",
+      "exact": true,
+      "description": "Homeowners Coverage B Other Structures limit",
+      "last_updated": "2026-08-29"
+    },
+    "ho_personal_property_limit_c_input": {
+      "name": "ho_personal_property_limit_c_input",
+      "primary_strategy": "css",
+      "primary_selector": "#HO_CoverageC, input[name='CoverageC']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Coverage C - Personal Property",
+      "exact": true,
+      "description": "Homeowners Coverage C Personal Property limit",
+      "last_updated": "2026-08-29"
+    },
+    "ho_loss_of_use_limit_d_input": {
+      "name": "ho_loss_of_use_limit_d_input",
+      "primary_strategy": "css",
+      "primary_selector": "#HO_CoverageD, input[name='CoverageD']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Coverage D - Loss of Use",
+      "exact": true,
+      "description": "Homeowners Coverage D Loss of Use limit",
+      "last_updated": "2026-08-29"
+    },
+    "ho_liability_limit_e_input": {
+      "name": "ho_liability_limit_e_input",
+      "primary_strategy": "css",
+      "primary_selector": "#HO_CoverageE, input[name='CoverageE']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Coverage E - Personal Liability",
+      "exact": true,
+      "description": "Homeowners Coverage E Personal Liability limit",
+      "last_updated": "2026-08-29"
+    },
+    "ho_med_pay_limit_f_input": {
+      "name": "ho_med_pay_limit_f_input",
+      "primary_strategy": "css",
+      "primary_selector": "#HO_CoverageF, input[name='CoverageF']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Coverage F - Medical Payments",
+      "exact": true,
+      "description": "Homeowners Coverage F Medical Payments to Others limit",
+      "last_updated": "2026-08-29"
+    },
+    "tab_inland_marine": {
+      "name": "tab_inland_marine",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#inland-marine-tab'], #tab-im",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Inland Marine",
+      "exact": true,
+      "description": "Inland Marine equipment floater tab",
+      "last_updated": "2026-08-29"
+    },
+    "add_im_item_button": {
+      "name": "add_im_item_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-im-item-btn, button[data-action='add-im-item']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Equipment Item",
+      "exact": true,
+      "description": "Button to add scheduled equipment item",
+      "last_updated": "2026-08-29"
+    },
+    "im_item_description_input": {
+      "name": "im_item_description_input",
+      "primary_strategy": "css",
+      "primary_selector": "#IM_ItemDescription, input[name='ItemDescription']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Item Description",
+      "exact": true,
+      "description": "Equipment description / Make / Model",
+      "last_updated": "2026-08-29"
+    },
+    "im_item_serial_input": {
+      "name": "im_item_serial_input",
+      "primary_strategy": "css",
+      "primary_selector": "#IM_SerialNumber, input[name='SerialNumber']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Serial Number",
+      "exact": true,
+      "description": "Equipment serial number",
+      "last_updated": "2026-08-29"
+    },
+    "im_item_limit_input": {
+      "name": "im_item_limit_input",
+      "primary_strategy": "css",
+      "primary_selector": "#IM_ItemLimit, input[name='ItemLimit']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Scheduled Limit",
+      "exact": true,
+      "description": "Scheduled value / limit for equipment item",
+      "last_updated": "2026-08-29"
+    },
+    "tab_discussion_notes": {
+      "name": "tab_discussion_notes",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-target='#discussions-tab'], #tab-discussions",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Discussions",
+      "exact": true,
+      "description": "Discussions / Notes tab on policy",
+      "last_updated": "2026-08-29"
+    },
+    "add_discussion_note_button": {
+      "name": "add_discussion_note_button",
+      "primary_strategy": "css",
+      "primary_selector": "#add-note-btn, button[data-action='add-note']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Add Note",
+      "exact": true,
+      "description": "Button to add a discussion note",
+      "last_updated": "2026-08-29"
+    },
+    "discussion_note_title_input": {
+      "name": "discussion_note_title_input",
+      "primary_strategy": "css",
+      "primary_selector": "#Discussion_Title, input[name='DiscussionTitle']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Title",
+      "exact": true,
+      "description": "Discussion note subject / title",
+      "last_updated": "2026-08-29"
+    },
+    "discussion_note_body_textarea": {
+      "name": "discussion_note_body_textarea",
+      "primary_strategy": "css",
+      "primary_selector": "#Discussion_Body, textarea[name='DiscussionBody']",
+      "fallback_strategy": "label",
+      "fallback_selector": "Note Content",
+      "exact": true,
+      "description": "Discussion note body (must end in 'ROBIE was here')",
+      "last_updated": "2026-08-29"
+    },
+    "save_discussion_note_button": {
+      "name": "save_discussion_note_button",
+      "primary_strategy": "css",
+      "primary_selector": "#save-note-btn, button[data-action='save-note']",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Save Note",
+      "exact": true,
+      "description": "Save discussion note button",
+      "last_updated": "2026-08-29"
+    }
+  }
+}

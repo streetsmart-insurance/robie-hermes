@@ -197,7 +197,51 @@ Sarah,Discussion Note,08/29/2026 14:00
     assert act_by_user["Sarah"].quotes_created == 1
 
 
-def test_pipeline_execution():
+def test_non_client_lead_audit_and_magellan_sentiment():
+    auditor = ProductivityAuditor(sla_warning_minutes=30)
+    base_time = datetime(2026, 8, 29, 10, 0, 0, tzinfo=timezone.utc)
+
+    calls = [
+        # Call 1: New Prospect / Non-client calls in, leaves 200s hold/voicemail (frustrated)
+        RingCentralCall(
+            call_id="call-prospect-1",
+            direction="Inbound",
+            from_number="7325550199",
+            to_number="7324628343",
+            result="Voicemail",
+            duration_seconds=210,
+            start_time=base_time,
+            extension="9006",
+            employee_name="Commercial Queue",
+        ),
+        # Call 2: Existing client calls in
+        RingCentralCall(
+            call_id="call-client-1",
+            direction="Inbound",
+            from_number="7329007987",
+            to_number="7324628343",
+            result="Voicemail",
+            duration_seconds=90,
+            start_time=base_time + timedelta(minutes=5),
+            extension="9042",
+            employee_name="Jackie",
+        ),
+    ]
+
+    known_clients = {"7329007987"}  # Costa 1 Cleaning is known client
+
+    # Audit non-clients
+    non_client_audits = auditor.audit_non_clients(calls, known_client_phones=known_clients)
+    assert len(non_client_audits) == 1
+    assert non_client_audits[0].phone_number == "7325550199"
+    assert non_client_audits[0].was_returned is False
+
+    # Audit Magellan sentiment
+    sentiment_flags = auditor.analyze_magellan_sentiment(calls, hold_time_threshold_seconds=180)
+    assert len(sentiment_flags) == 1
+    assert sentiment_flags[0]["phone"] == "7325550199"
+    assert sentiment_flags[0]["sentiment"] == "FRUSTRATED_HIGH_RISK"
+
     pipeline = ProductivityPipeline(chat_space=None)
     calls = [
         RingCentralCall(
@@ -215,3 +259,30 @@ def test_pipeline_execution():
     audit = pipeline.run(calls=calls, post_to_chat=False)
     assert "employee_reports" in audit
     assert "Sarah" in audit["employee_reports"]
+
+
+def test_unassigned_orphaned_call_reconciliation():
+    auditor = ProductivityAuditor(sla_warning_minutes=30)
+    base_time = datetime(2026, 8, 29, 14, 0, 0, tzinfo=timezone.utc)
+
+    calls = [
+        # Inbound call on main line with no direct employee / Unassigned
+        RingCentralCall(
+            call_id="call-unassigned",
+            direction="Inbound",
+            from_number="5557776666",
+            to_number="5559990000",
+            result="Voicemail",
+            duration_seconds=45,
+            start_time=base_time,
+            extension="",
+            employee_name="Unassigned",
+        )
+    ]
+
+    audit = auditor.generate_audit(calls, reference_time=base_time + timedelta(hours=1))
+    
+    # Verify unassigned orphaned call is successfully captured in critical alerts
+    assert len(audit["critical_alerts"]) == 1
+    assert "Unassigned / General Queue" in audit["critical_alerts"][0]
+    assert "(555) 777-6666" in audit["critical_alerts"][0]

@@ -542,6 +542,7 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             )
         )
     lines.extend([
+        "When the request requires browser interaction on any website or web application (EZLynx, Ascend, carrier portals, or external sites), execute it strictly via the 'playwright_exec' tool directly. Do not use generic terminal/bash commands for browser automation.",
         "When the request requires an upload, set the browser file chooser to the exact staged_path before clicking Upload.",
         "Complete every requested mutation (including status, premium, document attachment, and note when requested).",
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
