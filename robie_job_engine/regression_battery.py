@@ -108,6 +108,7 @@ LOGIC_PYTEST_MODULES = (
     "tests/test_carrier_directory.py",
     "tests/test_ezlynx_poller.py",
     "tests/test_playwright_route_fixtures.py",
+    "tests/test_productivity_engine.py",
     "tests/test_video_to_skill.py",
 )
 PYTEST_ONLY_MODULES = frozenset(
@@ -512,7 +513,11 @@ def run_replay_scenarios(
     _guard("quote-replay:live-hermes-job-db", live_hermes_job_db)
     _guard("quote-replay:test-paths-require-test-env", test_paths_require_test_env)
     results.append(run_secret_health_scenario())
-    results.extend(run_named_scenarios(work_dir=root / "named"))
+    # Every named scenario is part of the same synthetic Test replay. Keep the
+    # explicit environment through those scenarios as well; otherwise bounded
+    # Test wiring correctly fails closed after the quote-only context exits.
+    with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+        results.extend(run_named_scenarios(work_dir=root / "named"))
     return results
 
 
