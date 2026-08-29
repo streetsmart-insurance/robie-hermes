@@ -80,10 +80,6 @@ if int(data.get("blocking", 0)):
     raise SystemExit("active Test jobs or leases exist; refuse deploy")
 PY
 
-# Historical releases do not consistently preserve executable mode bits.
-# Invoke the trusted verifier through Bash so the gate is independent of mode.
-bash "${old_current}/scripts/verify-release.sh" "${archive}" "${checksum}"
-
 release_parent="${OPT_ROOT}/releases/${short}"
 release_root="${release_parent}/robie-hermes-${short}"
 manifest="${release_root}/.release-sha256"
@@ -106,6 +102,13 @@ else
   rm -rf "${staging}"
   trap - EXIT
 fi
+
+# Verify the immutable candidate with the candidate's own tests. Using the
+# previous release's verifier prevents a regression-battery fix from ever
+# bootstrapping into Test. This still occurs before either pointer is changed
+# or the gateway is restarted, and Bash keeps the gate independent of mode
+# bits in historical archives.
+bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
 atomic_pointer() {
   python3 - "$1" "$2" <<'PY'
