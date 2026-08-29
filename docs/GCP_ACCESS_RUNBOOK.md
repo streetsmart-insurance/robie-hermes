@@ -55,6 +55,9 @@ The report distinguishes:
 Authentication alone is never reported as a verified runtime version. Exact
 Test/Production versions require an independently verifiable host status
 contract. Until that exists, those version facts stay `UNVERIFIED`.
+The workflow exits non-zero when either required Hermes instance cannot be
+read, so successful identity exchange cannot create a false-green readiness
+gate.
 
 ## One-time bootstrap still required
 

@@ -10,6 +10,7 @@ umask 077
 
 verified=0
 unverified=0
+required_unverified=0
 
 record_verified() {
   verified=$((verified + 1))
@@ -25,22 +26,10 @@ sanitize_error() {
   tr '\n' ' ' <"$1" | sed -E 's/[[:space:]]+/ /g; s/`/'"'"'/g' | cut -c1-240
 }
 
-probe_project() {
-  local project="$1"
-  local output error_file
-  error_file="$(mktemp)"
-  if output="$(gcloud projects describe "$project" \
-      --format='value(projectId,lifecycleState,projectNumber)' 2>"$error_file")"; then
-    record_verified "project:${project}" "$output"
-  else
-    record_unverified "project:${project}" "$(sanitize_error "$error_file")"
-  fi
-  rm -f "$error_file"
-}
-
 probe_instance() {
   local project="$1"
   local instance="$2"
+  local required="$3"
   local output error_file
   error_file="$(mktemp)"
   if output="$(gcloud compute instances describe "$instance" \
@@ -51,6 +40,9 @@ probe_instance() {
     record_verified "instance:${project}/${instance}" "$output"
   else
     record_unverified "instance:${project}/${instance}" "$(sanitize_error "$error_file")"
+    if [[ "$required" == 'required' ]]; then
+      required_unverified=$((required_unverified + 1))
+    fi
   fi
   rm -f "$error_file"
 }
@@ -74,21 +66,22 @@ fi
   echo '| --- | --- | --- |'
 } >"$AUDIT_REPORT"
 
-probe_project "$CONTROL_PROJECT"
-probe_instance "$CONTROL_PROJECT" 'antigravity-test-01'
-probe_project "$RUNTIME_PROJECT"
-probe_instance "$RUNTIME_PROJECT" 'hermes-test-01'
-probe_instance "$RUNTIME_PROJECT" 'hermes-poc-01'
+probe_instance "$CONTROL_PROJECT" 'antigravity-test-01' 'informational'
+probe_instance "$RUNTIME_PROJECT" 'hermes-test-01' 'required'
+probe_instance "$RUNTIME_PROJECT" 'hermes-poc-01' 'required'
 
 {
   echo
   printf -- '- Verified checks: `%s`\n' "$verified"
   printf -- '- Unverified checks: `%s`\n' "$unverified"
+  printf -- '- Required runtime checks unverified: `%s`\n' "$required_unverified"
   echo '- Runtime application versions: `UNVERIFIED` (resource-plane status is not loaded-code proof).'
 } >>"$AUDIT_REPORT"
 
 cat "$AUDIT_REPORT"
 
-# Permission gaps are reported as UNVERIFIED rather than hidden by a green
-# authentication smoke test. Authentication failure itself exits non-zero.
-exit 0
+# Required permission gaps are reported as UNVERIFIED and fail the readiness
+# check. Authentication success alone must never produce a green readiness gate.
+if (( required_unverified > 0 )); then
+  exit 2
+fi
