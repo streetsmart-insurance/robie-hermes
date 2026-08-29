@@ -145,6 +145,21 @@ ambiguity is HITL, not retry; no Production deploy; no live job.
 - **PW-06 Idle Chrome refresh**: `scripts/chrome_refresh_if_idle.py` refuses
   to restart while jobs are `RUNNING` or `VERIFYING`.
 
+## Tab leftovers, wrong host, leftover RETRY (must-call)
+
+A RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job older than one hour
+(`LIVE_TAB_CLAIM_MAX_AGE`) does not count as a live tab claim — tabs only;
+the job is not FAILED, RETRYed, or deleted. New Chat/Playwright jobs flush
+unclaimed leftovers at start and keep one EZLynx `/web/` session. If a new
+named-host job (EZLynx or Ascend) finds Chrome/CDP/recorder on a different
+named host, refuse attach and `playwright_exec` immediately
+(`WRONG_HOST_REFUSED`); do not wait for the 1-hour claim expiry. Leftover
+RETRY is refused by the Job Engine (`leftover_retry_hold_reason` /
+`JobEngine.request_retry`), not a handoff policy: RETRY is allowed only
+for a fresh `AWAITING_HUMAN_INPUT` HITL younger than the same 1-hour
+constant. Terminal FAILED / UNVERIFIED / leftover ids must not resume via
+RETRY. New `@robie` is the path. No auto-retry.
+
 ## What “live” means
 
 1. GitHub `main` SHA matches the release archive.

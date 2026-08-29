@@ -326,6 +326,32 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         _persist_playwright_exec_finish(db_path, row_id, result)
         return result
 
+    try:
+        from robie_job_engine.tab_cleanup import flush_tabs_at_job_start
+
+        flush_tabs_at_job_start()
+    except Exception:
+        pass
+    try:
+        from robie_job_engine.tab_cleanup import refuse_wrong_host_at_job_start
+
+        job = None
+        bound_job_id = job_id or os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID")
+        bound_db = db_path or os.environ.get("ROBIE_JOB_DB")
+        if bound_job_id and bound_db:
+            try:
+                from robie_job_engine.store import JobStore
+
+                job = JobStore(bound_db).get_job(bound_job_id)
+            except Exception:
+                job = None
+        verdict = refuse_wrong_host_at_job_start(
+            db_path=bound_db, job=job, code=code
+        )
+        if verdict.get("refused") and verdict.get("reason"):
+            return _finish(tool_error(verdict["reason"]))
+    except Exception:
+        pass
     if not code or not code.strip():
         return _finish(tool_error("No Playwright code provided."))
     try:

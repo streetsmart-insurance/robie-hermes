@@ -31,6 +31,53 @@ from .secrets import redact_exception, redact_mapping
 from .store import JobStore
 
 
+LEFTOVER_RETRY_REFUSED = "LEFTOVER_RETRY_REFUSED"
+_RETRY_TEXTS = frozenset({"retry", "/retry"})
+
+
+def is_retry_text(text: str) -> bool:
+    return " ".join(str(text or "").casefold().split()) in _RETRY_TEXTS
+
+
+def leftover_retry_hold_reason(
+    job: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Refuse leftover RETRY. Job Engine rule, not a handoff policy.
+
+    RETRY is allowed only when the job is currently AWAITING_HUMAN_INPUT
+    and younger than ``LIVE_TAB_CLAIM_MAX_AGE``. Terminal FAILED /
+    UNVERIFIED / leftover ids must not resume via RETRY. New @robie is
+    the path. No auto-retry.
+    """
+    from .tab_cleanup import LIVE_TAB_CLAIM_MAX_AGE, job_holds_live_tab_claim
+
+    job = dict(job or {})
+    job_id = str(job.get("id") or "").strip() or "unknown"
+    try:
+        status = JobStatus(job.get("status"))
+    except (TypeError, ValueError):
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: leftover job {job_id} has no usable "
+            "status. RETRY is refused. Start a new @robie. No auto-retry."
+        )
+    if status != JobStatus.AWAITING_HUMAN_INPUT:
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: leftover RETRY is refused for "
+            f"{status.value} job {job_id}. RETRY is allowed only for a fresh "
+            "AWAITING_HUMAN_INPUT HITL younger than one hour. Start a new "
+            "@robie. No auto-retry."
+        )
+    if not job_holds_live_tab_claim(job, now=now):
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: HITL job {job_id} is older than "
+            f"{LIVE_TAB_CLAIM_MAX_AGE}. Leftover RETRY is refused. Start a "
+            "new @robie. No auto-retry."
+        )
+    return None
+
+
 class ComputerWorker(Protocol):
     def perform(self, job: dict[str, Any], *, idempotency_key: str) -> WorkerResult: ...
 
@@ -62,6 +109,27 @@ class JobEngine:
         self.perform_timeout_seconds = perform_timeout_seconds
         self.enforce_recording_policy = enforce_recording_policy
         self.lease_seconds = max(15, int(lease_seconds))
+
+    def request_retry(
+        self,
+        job_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Resume via RETRY only for a fresh HITL. Leftover ids stay put."""
+        job = self.store.get_job(job_id)
+        reason = leftover_retry_hold_reason(job, now=now)
+        self.store.checkpoint(
+            job_id,
+            "leftover_retry",
+            {"refused": bool(reason), "reason": reason, "auto_retry": False},
+        )
+        if reason:
+            current = self.store.get_job(job_id)
+            current["leftover_retry_refused"] = True
+            current["leftover_retry_reason"] = reason
+            return current
+        return self.store.resume(job_id)
 
     def run(self, job_id: str) -> dict[str, Any]:
         lease_owner = f"{self.owner}:{uuid.uuid4()}"

@@ -590,6 +590,12 @@ def open_chat_job(
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
     store.fail_orphaned_chat_jobs()
+    try:
+        from .tab_cleanup import flush_tabs_at_job_start
+
+        flush_tabs_at_job_start(db_path=db_path)
+    except Exception:
+        logger.exception("start-of-job tab flush failed; continuing")
     queue = DurableChatEventQueue(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
     files = list(attachments or [])
@@ -628,6 +634,18 @@ def open_chat_job(
             refused = apply_action_gate(store, active_job, text=text)
             if refused is not None:
                 return refused["id"]
+        if would_resume:
+            from .engine import is_retry_text, leftover_retry_hold_reason
+
+            if is_retry_text(text):
+                leftover = leftover_retry_hold_reason(active_job)
+                store.checkpoint(
+                    active_job_id,
+                    "leftover_retry",
+                    {"refused": bool(leftover), "reason": leftover, "auto_retry": False},
+                )
+                if leftover:
+                    return active_job_id
         if JobStatus(active_job["status"]) in WAITING_STATUSES:
             store.resume(active_job_id)
         elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
@@ -685,6 +703,25 @@ def open_chat_job(
 
         server_payload.update(default_audit_payload(live=False))
     server_payload.update(dict(action_payload or {}))
+    if continued_job is None:
+        from .engine import is_retry_text, leftover_retry_hold_reason
+
+        if is_retry_text(text):
+            parked = resume_context or queue.active_conversation_job(context_key)
+            parked_id = (parked or {}).get("job_id")
+            if parked_id:
+                existing = store.get_job(parked_id)
+                leftover = leftover_retry_hold_reason(existing)
+                store.checkpoint(
+                    parked_id,
+                    "leftover_retry",
+                    {"refused": bool(leftover), "reason": leftover, "auto_retry": False},
+                )
+                if leftover:
+                    return parked_id
+                if JobStatus(existing["status"]) == JobStatus.AWAITING_HUMAN_INPUT:
+                    store.resume(parked_id)
+                    continued_job = store.get_job(parked_id)
     if continued_job is not None:
         job = continued_job
     else:
@@ -906,6 +943,29 @@ def open_chat_job(
             store.checkpoint(job["id"], "recording_exemption", {"reason": reason})
         else:
             RecordingManager(db_path).safe_start(job["id"])
+    current = store.get_job(job["id"])
+    if current["status"] not in {JobStatus.COMPLETE.value, JobStatus.FAILED.value}:
+        try:
+            from .tab_cleanup import refuse_wrong_host_at_job_start
+
+            verdict = refuse_wrong_host_at_job_start(db_path=db_path, job=current, text=text)
+            if verdict.get("refused") and verdict.get("reason"):
+                store.transition(
+                    current["id"],
+                    JobStatus.FAILED,
+                    expected={
+                        JobStatus.PENDING,
+                        JobStatus.RUNNING,
+                        JobStatus.VERIFYING,
+                        JobStatus.NEEDS_CLARIFICATION,
+                        JobStatus.WAITING,
+                    },
+                    error=verdict["reason"],
+                    release_lease=True,
+                )
+                return current["id"]
+        except Exception:
+            logger.exception("wrong-host refuse check failed; continuing without attach")
     current = store.get_job(job["id"])
     if (
         current["action_type"] == "hermes.google_chat_task"

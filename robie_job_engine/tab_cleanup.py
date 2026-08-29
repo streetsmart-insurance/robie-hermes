@@ -7,10 +7,12 @@ previous-account / carrier tab while the live job works in another.
 
 This module closes job-owned pages on terminal close-out (any host that job
 opened, not only EZLynx / Ascend), sweeps EZLynx-shaped orphans, and flushes
-every leftover page that no RUNNING / AWAITING_HUMAN_INPUT / VERIFYING job
-claims. It keeps exactly one authenticated ``https://app.ezlynx.com/web/``
-session tab. It never restarts Chrome, never wipes the EZLynx profile, and
-never logs out.
+every leftover page that no fresh RUNNING / AWAITING_HUMAN_INPUT / VERIFYING
+job claims. A job in those statuses older than ``LIVE_TAB_CLAIM_MAX_AGE``
+(default one hour) does not count as a live tab claim. The job itself is
+not FAILED, RETRYed, or deleted — tabs only. It keeps exactly one
+authenticated ``https://app.ezlynx.com/web/`` session tab. It never restarts
+Chrome, never wipes the EZLynx profile, and never logs out.
 
 Close mechanism is Chrome's HTTP CDP ``/json/close/{id}`` (Target.closeTarget).
 """
@@ -21,6 +23,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.error import URLError
@@ -64,6 +67,7 @@ LIVE_TAB_STATUSES = frozenset(
         JobStatus.VERIFYING,
     }
 )
+LIVE_TAB_CLAIM_MAX_AGE = timedelta(hours=1)
 PAGE_TARGET_TYPES = frozenset({"", "page", "tab"})
 ASCEND_HOST_RE = re.compile(r"(^|\.)ascend\.", re.IGNORECASE)
 ASCEND_PATH_RE = re.compile(r"/ascend(?:/|$)", re.IGNORECASE)
@@ -73,6 +77,9 @@ SWEEP_MODE = "sweep"
 TERMINAL_MODE = "terminal"
 SESSION_SEED_URL = "https://app.ezlynx.com/web/"
 EMPTY_TARGET_EVIDENCE = "empty CDP target list; session is not fine"
+WRONG_HOST_REFUSED = "WRONG_HOST_REFUSED"
+NAMED_HOSTS = ("ezlynx", "ascend")
+_USEASCEND_HOST_RE = re.compile(r"(^|\.)useascend\.com$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -176,6 +183,179 @@ def is_ascend_url(url: str) -> bool:
     if "ascending" in host or "ascending" in path:
         return False
     return bool(ASCEND_HOST_RE.search(host) or ASCEND_PATH_RE.search(path))
+
+
+def named_host_for_url(url: str) -> str | None:
+    """Named browser host for wrong-host refuse. ``useascend`` is Ascend."""
+    raw = str(url or "").strip()
+    if not raw or is_blank_url(raw):
+        return None
+    if is_ezlynx_url(raw):
+        return "ezlynx"
+    host = url_host(raw)
+    if "ascending" in host:
+        return None
+    if _USEASCEND_HOST_RE.search(host) or is_ascend_url(raw):
+        return "ascend"
+    return None
+
+
+def named_host_for_job(
+    job: dict[str, Any] | None = None,
+    *,
+    text: str = "",
+    code: str = "",
+) -> str | None:
+    """Named host this job must run on, or None when the job is unscoped."""
+    job = dict(job or {})
+    payload = dict(job.get("payload") or {})
+    action_type = str(job.get("action_type") or "").strip()
+    folded_type = action_type.casefold()
+    if folded_type.startswith("ezlynx.") or folded_type == "ezlynx.commercial_auto":
+        return "ezlynx"
+    if folded_type.startswith("ascend."):
+        return "ascend"
+    blob = "\n".join(
+        part
+        for part in (
+            text,
+            code,
+            action_type,
+            str(payload.get("text") or ""),
+            str(payload.get("url") or ""),
+            str(payload.get("gated_action") or ""),
+        )
+        if part
+    )
+    hosts = {named_host_for_url(item) for item in extract_http_urls(blob)}
+    hosts.discard(None)
+    if len(hosts) == 1:
+        return next(iter(hosts))
+    lowered = blob.casefold()
+    ascend_shaped = any(
+        marker in lowered
+        for marker in (
+            "useascend",
+            "dashboard.useascend",
+            "app.ascend.com",
+            "/create/new",
+        )
+    )
+    ezlynx_shaped = any(
+        marker in lowered
+        for marker in (
+            "ezlynx",
+            "commercial auto",
+            "/web/account/",
+            "applicantportal",
+        )
+    )
+    if ezlynx_shaped and not ascend_shaped:
+        return "ezlynx"
+    if ascend_shaped and not ezlynx_shaped:
+        return "ascend"
+    if ezlynx_shaped:
+        return "ezlynx"
+    return None
+
+
+def is_idle_session_tab(url: str) -> bool:
+    """True for the kept /web/ session, login, or blank — not a work tab."""
+    return is_blank_url(url) or is_login_url(url) or is_generic_web_session(url)
+
+
+def wrong_host_refuse_reason(
+    *,
+    job: dict[str, Any] | None = None,
+    text: str = "",
+    code: str = "",
+    tabs: Iterable[BrowserTab] | None = None,
+    hint_url: str | None = None,
+) -> str | None:
+    """Refuse when Chrome/recorder is on a different named host than the job.
+
+    Does not wait for ``LIVE_TAB_CLAIM_MAX_AGE``. Session /web/ tabs are not
+    a matching work tab.
+    """
+    job_host = named_host_for_job(job, text=text, code=code)
+    if not job_host:
+        return None
+    hint_host = named_host_for_url(hint_url or "")
+    if hint_host and hint_host != job_host:
+        return (
+            f"{WRONG_HOST_REFUSED}: this job is {job_host} but the recorder/"
+            f"Chrome hint is still on {hint_url}. Do not attach, do not "
+            "playwright_exec. Keep one EZLynx /web/ session. Start again "
+            "after Chrome is on the job host — do not wait for the 1-hour "
+            "tab-claim expiry."
+        )
+    work: list[BrowserTab] = []
+    for tab in tabs or []:
+        if tab is None or not tab.is_page:
+            continue
+        if is_idle_session_tab(tab.url):
+            continue
+        work.append(tab)
+    matching = [tab for tab in work if named_host_for_url(tab.url) == job_host]
+    if matching:
+        return None
+    foreign = [
+        tab
+        for tab in work
+        if named_host_for_url(tab.url) and named_host_for_url(tab.url) != job_host
+    ]
+    if not foreign:
+        return None
+    return (
+        f"{WRONG_HOST_REFUSED}: this job is {job_host} but Chrome/CDP is "
+        f"still on {foreign[0].url}. Do not attach, do not playwright_exec. "
+        "Keep one EZLynx /web/ session. Do not wait for the 1-hour "
+        "tab-claim expiry."
+    )
+
+
+def refuse_wrong_host_at_job_start(
+    db_path: str | Path | None = None,
+    *,
+    job: dict[str, Any] | None = None,
+    text: str = "",
+    code: str = "",
+    tabs: list[BrowserTab] | None = None,
+    hint_url: str | None = None,
+    cdp_url: str | None = None,
+    http_get: Callable[[str], tuple[int, bytes]] | None = None,
+) -> dict[str, Any]:
+    """Job-start wrong-host check. Fake CDP tabs are allowed. Never attach."""
+    listed = list(tabs) if tabs is not None else []
+    if tabs is None:
+        try:
+            listed = list_cdp_tabs(cdp_url=cdp_url, http_get=http_get)
+        except Exception:
+            listed = []
+    hint = hint_url
+    if hint is None:
+        try:
+            hint = str((read_page_hint(resolve_hint_file()) or {}).get("url") or "") or None
+        except Exception:
+            hint = None
+    if job is None and db_path:
+        job_id = str(os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or "")
+        path = _jobs_db(db_path)
+        if job_id and path.is_file():
+            try:
+                job = JobStore(path).get_job(job_id)
+            except KeyError:
+                job = None
+    reason = wrong_host_refuse_reason(
+        job=job, text=text, code=code, tabs=listed, hint_url=hint
+    )
+    return {
+        "ok": not bool(reason),
+        "refused": bool(reason),
+        "reason": reason,
+        "job_host": named_host_for_job(job, text=text, code=code),
+        "kept_session": True,
+    }
 
 
 def is_generic_web_session(url: str) -> bool:
@@ -292,13 +472,68 @@ def claims_for_job(store: JobStore, job: dict[str, Any]) -> TabClaims:
     return claims
 
 
-def live_tab_claims(db_path: str | Path | None = None) -> TabClaims:
+def parse_job_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def job_claim_stamp(job: dict[str, Any]) -> datetime | None:
+    """Last ledger write. Parked HITL / stuck VERIFYING age from ``updated_at``."""
+    for key in ("updated_at", "created_at"):
+        parsed = parse_job_timestamp(job.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def job_holds_live_tab_claim(
+    job: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    max_age: timedelta | None = None,
+) -> bool:
+    """True when this live-status job is still fresh enough to keep tabs.
+
+    Age is tabs-only. A stale HITL or stuck RUNNING / VERIFYING job is not
+    FAILED, RETRYed, or deleted here.
+    """
+    try:
+        status = JobStatus(job.get("status"))
+    except (TypeError, ValueError):
+        return False
+    if status not in LIVE_TAB_STATUSES:
+        return False
+    stamp = job_claim_stamp(job)
+    if stamp is None:
+        return True
+    age = (now or datetime.now(timezone.utc)) - stamp
+    return age <= (max_age or LIVE_TAB_CLAIM_MAX_AGE)
+
+
+def live_tab_claims(
+    db_path: str | Path | None = None,
+    *,
+    now: datetime | None = None,
+) -> TabClaims:
     path = _jobs_db(db_path)
     merged = TabClaims()
     if not path.is_file():
         return merged
     store = JobStore(path)
+    at = now or datetime.now(timezone.utc)
     for job in store.list_jobs_by_status(LIVE_TAB_STATUSES):
+        if not job_holds_live_tab_claim(job, now=at):
+            continue
         row = claims_for_job(store, job)
         merged.job_ids.update(row.job_ids)
         merged.account_ids.update(row.account_ids)
@@ -797,6 +1032,22 @@ def maybe_sweep_orphaned_tabs(**kwargs: Any) -> dict[str, Any] | None:
 def maybe_flush_orphaned_tabs(**kwargs: Any) -> dict[str, Any] | None:
     try:
         return flush_orphaned_tabs(**kwargs)
+    except Exception as exc:
+        return {"ok": False, "mode": FLUSH_MODE, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def flush_tabs_at_job_start(
+    db_path: str | Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """Run the existing leftover flush when a new Chat / Playwright job starts.
+
+    Does not wait for terminal close-out or pre-flight. Unclaimed leftovers
+    close; one EZLynx ``/web/`` session stays. Stale live-status jobs do not
+    keep tabs.
+    """
+    try:
+        return maybe_flush_orphaned_tabs(db_path=db_path, **kwargs)
     except Exception as exc:
         return {"ok": False, "mode": FLUSH_MODE, "error": f"{type(exc).__name__}: {exc}"}
 
