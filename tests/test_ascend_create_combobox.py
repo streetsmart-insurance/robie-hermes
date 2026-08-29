@@ -42,6 +42,7 @@ from robie_job_engine.ascend_locator_audit_runner import (
 from robie_job_engine.ascend_locator_audit import (
     JOB_TYPE,
     AscendLocatorAuditWorker,
+    UniqueLocatorError,
     default_audit_payload,
 )
 from robie_job_engine.ascend_sender_roles import (
@@ -386,6 +387,36 @@ class LiveComboboxAuditTests(unittest.TestCase):
             report["selection_strategy"], "active_unique_search_result"
         )
         self.assertEqual(page.pressed_by_label["Carrier"], "Enter")
+
+    def test_non_unique_searched_carrier_does_not_press_enter(self):
+        carrier = "Drive New Jersey Insurance Company"
+        page = _FakePage(
+            {
+                "Carrier": [
+                    f"{carrier}\nOffice: One",
+                    f"{carrier} Excess\nOffice: Two",
+                ]
+            }
+        )
+        target = page.get_by_label("Carrier")
+        with self.assertRaises(UniqueLocatorError) as raised:
+            _select_unique_option(page, target, carrier, field="Carrier")
+        self.assertIn("Carrier", str(raised.exception))
+        self.assertIn("PLAYWRIGHT_BLOCKED", str(raised.exception))
+        self.assertNotIn("Carrier", page.pressed_by_label)
+
+    def test_missing_searched_carrier_does_not_press_enter(self):
+        page = _FakePage({"Carrier": ["CNA"]})
+        target = page.get_by_label("Carrier")
+        with self.assertRaises(RuntimeError) as raised:
+            _select_unique_option(
+                page,
+                target,
+                "Drive New Jersey Insurance Company",
+                field="Carrier",
+            )
+        self.assertIn("Carrier", str(raised.exception))
+        self.assertNotIn("Carrier", page.pressed_by_label)
 
     def test_role_selection_uses_visible_email_option_without_searching(self):
         page = _FakePage({"Producer": list(LIVE_ROLE_LISTBOX_OPTIONS)})
