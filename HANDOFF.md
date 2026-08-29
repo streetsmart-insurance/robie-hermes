@@ -27,7 +27,10 @@ Detailed Ascend handoff: [docs/ascend-api-handoff-2026-08-28.md](docs/ascend-api
 
 ## Current GitHub state
 
-GitHub `main`: `4df60a0955f3500bdf51de2e81526dbe15a5a802`.
+Deployed application baseline:
+`4df60a0955f3500bdf51de2e81526dbe15a5a802`. Test matches this application
+commit. Documentation-only handoff commits may advance GitHub `main` without
+requiring a VM redeploy; compare application files before reporting drift.
 
 Merged work:
 - PR 59 — guarded `ascend.create_program` API worker, verifier, planning CLI, and documentation.
