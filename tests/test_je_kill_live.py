@@ -148,6 +148,19 @@ class JeKillLiveGuardTests(unittest.TestCase):
         self.assertNotIn("cat \"${FIXTURE}\"", workflow)
         self.assertNotIn("hermes-poc-01", workflow)
 
+    def test_workflow_transfers_runner_and_fails_closed_without_remote_sentinel(self):
+        workflow = Path(".github/workflows/je-kill-test.yml").read_text(encoding="utf-8")
+        self.assertIn("gcloud compute scp", workflow)
+        self.assertIn("scripts/run-je-kill-test-remote.sh", workflow)
+        self.assertIn("JE-KILL REMOTE VERIFIED", workflow)
+        self.assertNotIn("bash -s", workflow)
+
+        remote = Path("scripts/run-je-kill-test-remote.sh").read_text(encoding="utf-8")
+        self.assertIn("JE-KILL Test inventory: 0 blocking Jobs/leases", remote)
+        self.assertIn("run-je-kill-live-test.py", remote)
+        self.assertIn("grep -Fq '\"result\": \"TEST VERIFIED\"'", remote)
+        self.assertIn("JE-KILL REMOTE VERIFIED", remote)
+
 
 if __name__ == "__main__":
     unittest.main()
