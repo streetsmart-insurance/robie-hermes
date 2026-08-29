@@ -824,6 +824,42 @@ def write_install_proof(path: Path, payload: Mapping[str, Any]) -> Path:
     return path
 
 
+def refresh_install_proof_file(
+    path: Path,
+    proof: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Atomically replace stale pre-restart proof with the latest verdict.
+
+    ``official_install`` intentionally writes a failed proof before the
+    operator restarts the gateway.  A later ``prove`` must update that same
+    durable artifact; otherwise operators and audits see ``live: false`` even
+    after the database checkpoint and gateway timestamp prove the release is
+    live.
+    """
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict):
+            payload.update(existing)
+    payload.update(
+        {
+            "sha": proof.get("sha") or payload.get("sha"),
+            "proof": dict(proof),
+            "done": bool(proof.get("ok")),
+            "live": bool(proof.get("live")),
+            "banner": DONE_BANNER if proof.get("ok") else NOT_DONE_BANNER,
+            "verified_at": _utc_now(),
+            "authorizes_complete": False,
+        }
+    )
+    write_install_proof(path, payload)
+    payload["proof_path"] = str(path)
+    return payload
+
+
 def official_install(
     *,
     opt_root: str | Path,
@@ -961,6 +997,9 @@ def main(argv: list[str] | None = None) -> int:
             db_path=db_path,
             persist_row=True,
         )
+        proof_path = Path(args.release_root) / PROOF_FILENAME
+        refresh_install_proof_file(proof_path, proof)
+        proof["proof_path"] = str(proof_path)
         print(json.dumps(_public_payload(proof), indent=2, sort_keys=True))
         print(format_proof_report(proof), flush=True)
         return 0 if proof["ok"] else 2
