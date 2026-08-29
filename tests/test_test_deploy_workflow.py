@@ -39,6 +39,14 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertLess(text.index('release_root="'), text.index(candidate_verify))
         self.assertLess(text.index(candidate_verify), text.index("atomic_pointer()"))
         self.assertLess(text.index(candidate_verify), text.index('systemctl restart'))
+        precision_gate = 'official-install-flip.json'
+        self.assertIn(precision_gate, text)
+        self.assertIn("whole-second precision", text)
+        precision_position = text.index(precision_gate)
+        restart_after_gate = text.index(
+            'systemctl restart "${GATEWAY_UNIT}"', precision_position
+        )
+        self.assertLess(precision_position, restart_after_gate)
         self.assertIn('"production_touched": False', text)
         self.assertNotIn("/opt/streetsmart-hermes/", text)
         self.assertNotIn("hermes-poc-01", text)

@@ -165,6 +165,30 @@ set -e
   exit 2
 }
 
+# systemd's human-readable ActiveEnterTimestamp has whole-second precision,
+# while the persisted pointer flip includes microseconds. A restart in the
+# same UTC second is therefore impossible to order authoritatively and must
+# wait for the next representable systemd timestamp instead of producing a
+# false pointer-only failure.
+python3 - "${release_root}/official-install-flip.json" <<'PY'
+import json
+import pathlib
+import sys
+import time
+from datetime import datetime, timezone
+
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+flipped = datetime.fromisoformat(str(data["flip_at"]).replace("Z", "+00:00"))
+if flipped.tzinfo is None:
+    flipped = flipped.replace(tzinfo=timezone.utc)
+deadline = time.monotonic() + 3.0
+while datetime.now(timezone.utc).replace(microsecond=0) <= flipped:
+    if time.monotonic() >= deadline:
+        raise SystemExit("could not establish a gateway timestamp after the pointer flip")
+    time.sleep(0.05)
+PY
+
 systemctl restart "${GATEWAY_UNIT}"
 systemctl is-active --quiet "${GATEWAY_UNIT}"
 after="$(systemctl show "${GATEWAY_UNIT}" -p ActiveEnterTimestamp --value --no-pager)"
