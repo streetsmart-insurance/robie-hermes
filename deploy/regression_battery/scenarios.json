@@ -154,6 +154,14 @@
       "scenario": "action-gate:test-pass-required-before-production",
       "closed": true,
       "note": "Jobs 807f8920 and 38c0fa79 were live PAWIVA / Ascend Chat jobs on hermes-poc-01. They were the first test of an Ascend change. The written Test gate was skipped. HITL / UNVERIFIED caught them after a miss. Production Chat jobs that would perform ascend.create_program must now be REFUSED by the Job Engine before Playwright / CDP / any Ascend click unless a recorded clean Test punch-list PASS exists for that exact action. Generic hermes.google_chat_task must not hide the action. Leftover Production ids must not RETRY around the gate."
+    },
+    {
+      "id": "1df9740b",
+      "class": "playwright-silent",
+      "new_failure_mode": true,
+      "scenario": "playwright-silent:zero-tool-rows-1df9740b",
+      "closed": true,
+      "note": "Production Chat job 1df9740b-7389-4021-918a-8e65a04d61da (ROBIE Test LLC 220250093 commercial auto) went UNVERIFIED in ~90s. gateway_progress existed. attempts 0. verification_evidence 0. artifacts 0. No playwright checkpoint. post_job_audit FAIL. Recorder frozen on leftover dashboard.useascend.com/create/new. Zero playwright_exec rows. The job asked for EZLynx and never recorded a Playwright call. Fail closed; persist every playwright_exec row; snapshot CDP /json/list at start and end."
     }
   ]
 }

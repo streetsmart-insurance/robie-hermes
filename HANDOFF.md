@@ -1,5 +1,25 @@
 # Hermes handoff — Friday 28 Aug 2026 after 2:32pm ET
 
+## MUST-CALL — diagnose any Hermes job
+
+Do **not** diagnose from Google Chat text, the published recording, or by
+clicking Production/Test Chrome from a laptop. Do not invent leftover
+RETRY. Production is not the first test. Do not deploy to
+`hermes-poc-01` / `hermes-test-01` from this lookup.
+
+Copy-paste on the VM (or with `ROBIE_JOB_DB` pointed at an isolated copy):
+
+```bash
+PYTHONPATH=. python3 -m robie_job_engine.playwright_observability <job-id>
+# or
+PYTHONPATH=. python3 scripts/lookup-playwright-job.py <job-id>
+```
+
+That prints `playwright_exec` rows, CDP `/json/list` url+title snapshots,
+and the `playwright-trace.zip` path if present. Zero tool rows on an
+EZLynx/Playwright Chat job is FAILED (1df9740b silent-gap), not
+UNVERIFIED. No cookies, secrets, or passwords.
+
 Start here if you are ChatGPT, Claude, Cursor, Grok, Jake, or another
 operator continuing StreetSmart Hermes. The Ascend API implementation is
 merged and live on Test, but API execution is intentionally disabled until a
@@ -153,4 +173,4 @@ First command after login: `hostname`.
 
 Do not RETRY: `09d69760` `40ccc0d6` `da53765b` `6cf6f6ae` `468d1575`
 `de9c530a` `7f297e56` `66266d62` `c31f9c69` `8a11d28c` `6662f894`
-`eb96f620` `ffbfa109` `640834a4` `807f8920` `38c0fa79`.
+`eb96f620` `ffbfa109` `640834a4` `807f8920` `38c0fa79` `1df9740b`.

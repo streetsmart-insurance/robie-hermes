@@ -1319,6 +1319,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if not job_id:
             await self.handle_message(event)
             return
+        try:
+            from robie_job_engine.playwright_observability import bind_current_playwright_job
+
+            bind_current_playwright_job(ROBIE_JOB_DB, job_id)
+        except Exception:
+            pass
         await self._maintain_generic_chat_job_heartbeat(job_id)
         await self.handle_message(event)
 

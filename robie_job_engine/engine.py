@@ -171,6 +171,9 @@ class JobEngine:
         )
         heartbeat.start()
         try:
+            from .playwright_observability import maybe_snapshot_and_bind
+
+            maybe_snapshot_and_bind(self.store.path, job_id, phase="start")
             action = self.store.get_checkpoint(job_id, "action")
             if action is None and not verify_only:
                 job = self._perform(job, ledger=ledger, run_id=run["id"])
@@ -283,8 +286,19 @@ class JobEngine:
                     pass
             if status_name in {"COMPLETE", "FAILED", "UNVERIFIED"}:
                 try:
+                    from .playwright_observability import (
+                        fail_closed_zero_playwright_rows,
+                        maybe_snapshot_and_bind,
+                    )
                     from .post_job_audit import maybe_audit_terminal_job
 
+                    if status_name == "UNVERIFIED":
+                        fail_closed_zero_playwright_rows(
+                            self.store,
+                            self.store.get_job(job_id),
+                            expected={JobStatus.UNVERIFIED},
+                        )
+                    maybe_snapshot_and_bind(self.store.path, job_id, phase="end")
                     maybe_audit_terminal_job(self.store.path, job_id)
                     if self.recordings is not None:
                         self.recordings.release_local_after_audit(job_id)

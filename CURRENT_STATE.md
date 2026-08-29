@@ -35,6 +35,17 @@ After a Chat job, prove a `checkpoints.kind=gateway_progress` row in
 busy. COMPLETE still requires that evidence. Success prose without it
 stays UNVERIFIED/FAILED.
 
+To see what Playwright actually did, use the operator lookup — not Chat
+text, not the published recording, not clicking Chrome from a laptop:
+
+```bash
+PYTHONPATH=. python3 -m robie_job_engine.playwright_observability <job-id>
+```
+
+It prints `playwright_exec` rows, CDP url+title snapshots, and the
+`playwright-trace.zip` path if present. Do not invent leftover RETRY.
+Production is not the first test.
+
 The install/preflight path must not leave Production at 0 CDP tabs.
 Attach-only bootstrap fails with `Persistent EZLynx browser has no page`.
 Empty CDP target list is INCONCLUSIVE / fail — never “session fine”. Open one

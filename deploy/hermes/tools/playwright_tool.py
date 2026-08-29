@@ -286,17 +286,54 @@ finally:
 '''
 
 
-def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
+def _persist_playwright_exec_start(code: str, **kwargs):
+    """Commit a started jobs.db row before the runner. Worker death still leaves it."""
+    try:
+        from robie_job_engine.playwright_observability import (
+            persist_playwright_exec_start,
+            resolve_playwright_job_binding,
+        )
+
+        job_id, db_path = resolve_playwright_job_binding(
+            job_id=kwargs.get("job_id"),
+            db_path=kwargs.get("db_path"),
+        )
+        if not job_id:
+            return None, None, None
+        row_id = persist_playwright_exec_start(db_path, job_id, code)
+        return row_id, job_id, db_path
+    except Exception:
+        return None, None, None
+
+
+def _persist_playwright_exec_finish(db_path, row_id, result) -> None:
+    if row_id is None or not db_path:
+        return
+    try:
+        from robie_job_engine.playwright_observability import persist_playwright_exec_finish
+
+        persist_playwright_exec_finish(db_path, row_id, result)
+    except Exception:
+        pass
+
+
+def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
     from tools.registry import tool_error, tool_result
 
+    row_id, job_id, db_path = _persist_playwright_exec_start(code, **kwargs)
+
+    def _finish(result):
+        _persist_playwright_exec_finish(db_path, row_id, result)
+        return result
+
     if not code or not code.strip():
-        return tool_error("No Playwright code provided.")
+        return _finish(tool_error("No Playwright code provided."))
     try:
         from robie_job_engine.action_gate import refuse_playwright_start
 
         refused = refuse_playwright_start(code)
         if refused:
-            return tool_error(refused)
+            return _finish(tool_error(refused))
     except ImportError:
         pass
     try:
@@ -307,6 +344,9 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
     wrapper = _playwright_exec_wrapper()
     env = os.environ.copy()
     env["ROBIE_PLAYWRIGHT_CDP_URL"] = _CDP_URL
+    if job_id:
+        env["ROBIE_JOB_ID"] = job_id
+        env["ROBIE_CURRENT_JOB_ID"] = job_id
     engine_root = _job_engine_root()
     if engine_root is not None:
         env["ROBIE_JOB_ENGINE_ROOT"] = str(engine_root)
@@ -317,7 +357,7 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
     try:
         payload = _write_guard_path().read_text() + _USER_CODE_SEPARATOR + code
     except Exception as exc:
-        return tool_error(f"PLAYWRIGHT_BLOCKED: {exc}")
+        return _finish(tool_error(f"PLAYWRIGHT_BLOCKED: {exc}"))
     try:
         proc = subprocess.Popen(
             [sys.executable, "-u", "-c", wrapper],
@@ -342,26 +382,30 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **_kwargs):
             except ProcessLookupError:
                 pass
             proc.communicate()
-        return tool_error(
-            f"PLAYWRIGHT_BLOCKED: execution exceeded {timeout} seconds; "
-            "the runner was cancelled and the persistent browser was preserved; "
-            "the browser state was not verified"
+        return _finish(
+            tool_error(
+                f"PLAYWRIGHT_BLOCKED: execution exceeded {timeout} seconds; "
+                "the runner was cancelled and the persistent browser was preserved; "
+                "the browser state was not verified"
+            )
         )
     except OSError as exc:
-        return tool_error(f"PLAYWRIGHT_BLOCKED: runner failed to start: {exc}")
+        return _finish(tool_error(f"PLAYWRIGHT_BLOCKED: runner failed to start: {exc}"))
 
     if proc.returncode != 0:
         detail = (stderr or stdout or "runner exited without details")[-12000:]
-        return tool_error(runner_failure_error(detail))
-    return tool_result(
-        {
-            "success": True,
-            "exit_code": 0,
-            "output": stdout,
-            "engine": "playwright",
-            "destination_verified": False,
-            "authorizes_complete": False,
-        }
+        return _finish(tool_error(runner_failure_error(detail)))
+    return _finish(
+        tool_result(
+            {
+                "success": True,
+                "exit_code": 0,
+                "output": stdout,
+                "engine": "playwright",
+                "destination_verified": False,
+                "authorizes_complete": False,
+            }
+        )
     )
 
 

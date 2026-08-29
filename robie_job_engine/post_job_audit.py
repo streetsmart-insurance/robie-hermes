@@ -280,6 +280,11 @@ def _tool_text_from_job(store: JobStore, job_id: str) -> str:
     for attempt in store.list_attempts(job_id):
         chunks.append(json.dumps(attempt.get("detail") or {}, default=str))
         chunks.append(str(attempt.get("outcome") or ""))
+    try:
+        for row in store.list_playwright_exec(job_id):
+            chunks.append(json.dumps(row, default=str))
+    except Exception:
+        pass
     return "\n".join(chunks)
 
 
@@ -486,6 +491,7 @@ def run_post_job_audit(
             "destination_evidence": _unknown("missing jobs.db"),
             "recording_motion": _fail("missing jobs.db"),
             "tool_vs_recording": _unknown("missing jobs.db"),
+            "playwright_exec": _unknown("missing jobs.db"),
             "authorizes_complete": False,
         }
         return audit
@@ -501,6 +507,7 @@ def run_post_job_audit(
             "destination_evidence": _unknown(f"jobs.db unreadable: {type(exc).__name__}"),
             "recording_motion": _fail(f"jobs.db unreadable: {type(exc).__name__}"),
             "tool_vs_recording": _unknown(f"jobs.db unreadable: {type(exc).__name__}"),
+            "playwright_exec": _unknown(f"jobs.db unreadable: {type(exc).__name__}"),
             "authorizes_complete": False,
         }
     hermes_home = session_root
@@ -510,6 +517,13 @@ def run_post_job_audit(
         )
     heartbeat = audit_heartbeat(store, job_id)
     evidence = audit_destination_evidence(store, job_id)
+    from .playwright_observability import (
+        audit_playwright_tool_log,
+        persist_cdp_snapshot,
+    )
+
+    persist_cdp_snapshot(store, job_id, "end")
+    playwright_log = audit_playwright_tool_log(store, job)
     motion = audit_recording_motion(str(path), job_id, extract_frames=extract_frames)
     session_text, _session = _session_text(hermes_home, job_id)
     tool_text = f"{_tool_text_from_job(store, job_id)}\n{session_text}"
@@ -528,6 +542,7 @@ def run_post_job_audit(
         str(evidence.get("result") or "UNKNOWN"),
         str(motion.get("result") or "UNKNOWN"),
         "FAIL" if mismatch_result == "MISMATCH" else mismatch_result,
+        str(playwright_log.get("result") or "UNKNOWN"),
     )
     return {
         "job_id": job["id"],
@@ -538,6 +553,7 @@ def run_post_job_audit(
         "destination_evidence": evidence,
         "recording_motion": motion,
         "tool_vs_recording": mismatch,
+        "playwright_exec": playwright_log,
         "authorizes_complete": False,
         "audited_at": utc_now(),
     }
@@ -571,12 +587,22 @@ def format_audit_chat_message(audit: dict[str, Any]) -> str:
     motion_line = f"{motion.get('result')} ({motion.get('reason')})"
     tools = dict(audit.get("tool_vs_recording") or {})
     tool_line = f"{tools.get('result')} ({tools.get('reason')})"
+    playwright = dict(audit.get("playwright_exec") or {})
+    if playwright:
+        pw_line = (
+            f"{playwright.get('result')} "
+            f"(rows={playwright.get('row_count', 0)}; "
+            f"{playwright.get('reason') or 'structured playwright_exec rows'})"
+        )
+    else:
+        pw_line = "UNKNOWN (playwright_exec not audited)"
     return (
         f"ROBIE post-job audit — {audit.get('job_id')} — {audit.get('job_status')}\n"
         f"1. Heartbeat gateway_progress: {hb}\n"
         f"2. Destination evidence: {ev}\n"
         f"3. Recording motion: {motion_line}\n"
         f"4. Tool vs recording: {tool_line}\n"
+        f"5. Playwright tool rows: {pw_line}\n"
         f"Audit verdict: {audit.get('verdict')} (does not authorize COMPLETE)"
     )
 
