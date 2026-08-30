@@ -46,13 +46,25 @@ if blocking:
 print("JE-KILL Test inventory: 0 blocking Jobs/leases")
 PY
 
-install -d -o streetsmart-hermes -g streetsmart-hermes "${RUN_ROOT}"
-python_bin=/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
+# Test Chrome / Job Engine run as streetsmart-hermes-test (uid 999).
+# Production user paths do not exist on hermes-test-01.
+test_user=streetsmart-hermes-test
+id -u "${test_user}" >/dev/null
+python_bin="${TEST_ROOT}/venv/bin/python"
 test -x "${python_bin}"
+test "${python_bin}" = /opt/streetsmart-hermes-test/venv/bin/python
+
+# Python chdir's into the invoking cwd. Operator homes such as
+# /home/carlo_streetsmart_insurance are not readable by the Test user.
+cd "${TEST_ROOT}"
+export HOME="${TEST_ROOT}"
+
+install -d -o "${test_user}" -g "${test_user}" "${RUN_ROOT}"
 
 runner_log="$(mktemp)"
 trap 'rm -f -- "${runner_log}"' EXIT
-if ! sudo -u streetsmart-hermes env \
+if ! sudo -u "${test_user}" -H env \
+    HOME="${TEST_ROOT}" \
     ROBIE_ENV=TEST \
     PYTHONPATH="${current}" \
     ROBIE_PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222 \

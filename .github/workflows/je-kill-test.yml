@@ -72,7 +72,7 @@ jobs:
           remote_log="${RUNNER_TEMP}/je-kill-remote.log"
           if ! gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo env ROBIE_ENV=TEST EXPECTED_SHA='${short}' TEST_ROOT='${TEST_ROOT}' FIXTURE='${FIXTURE}' RUN_ROOT='${RUN_ROOT}' bash '${staging}/run-je-kill-test-remote.sh'" \
+            --command="sudo env ROBIE_ENV=TEST EXPECTED_SHA='${short}' TEST_ROOT='${TEST_ROOT}' FIXTURE='${FIXTURE}' RUN_ROOT='${RUN_ROOT}' bash -c 'cd \"${TEST_ROOT}\" && bash \"${staging}/run-je-kill-test-remote.sh\"'" \
             2>&1 | tee "${remote_log}"; then
             echo "JE-KILL FAILED: remote runner exited nonzero" >&2
             exit 3
