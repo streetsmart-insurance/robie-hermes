@@ -46,6 +46,7 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
         in text
     )
     assert "python_bin=/home/streetsmart-hermes/" not in text
+    assert "sudo -u streetsmart-hermes" not in text
     assert "systemctl restart" not in text
 
 
