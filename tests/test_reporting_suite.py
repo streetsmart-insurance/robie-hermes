@@ -117,3 +117,12 @@ def test_weekly_report_includes_retention_and_submission_ledgers():
     assert "Costa 1 Cleaning Services" in weekly
     assert "SUBMISSION CENTER EXCEPTIONS" in weekly
     assert "Old Open Risk" in weekly
+
+def test_daily_report_never_marks_missing_call_source_resolved():
+    suite = ReportingSuite()
+    daily = suite.build_daily_report(
+        {"source_status": "not supplied"},
+        {"source_status": "not supplied"},
+    )
+    assert "UNVERIFIED — RingCentral evidence is unavailable." in daily
+    assert "All client voicemails and missed calls resolved!" not in daily

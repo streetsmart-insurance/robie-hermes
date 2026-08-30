@@ -105,7 +105,10 @@ class ReportingSuite:
             "🚨 *CRITICAL UNRETURNED CALLS (>30m SLA)*",
         ]
         unreturned = call_data.get("unreturned_calls", [])
-        if not unreturned:
+        call_source_warning = _source_warning("RingCentral", call_data)
+        if call_source_warning:
+            lines.append("   ⚠️ UNVERIFIED — RingCentral evidence is unavailable.")
+        elif not unreturned:
             lines.append("   🟢 All client voicemails and missed calls resolved!")
         else:
             for i, u in enumerate(unreturned[:10], 1):
