@@ -2576,15 +2576,22 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     if related_only and correction.action_type in BOUNDED_ENGINE_ACTIONS
                     else "CONTINUATION" if related_only else "CREATED"
                 )
-                await asyncio.to_thread(
-                    queue.link_conversation_job,
-                    conversation_id=getattr(event.source, "chat_id", None)
-                    or "google-chat:unknown",
-                    job_id=job_id,
-                    message_id=message_id,
-                    event_id=message_id,
-                    relation=relation,
-                )
+                try:
+                    await asyncio.to_thread(
+                        queue.link_conversation_job,
+                        conversation_id=getattr(event.source, "chat_id", None)
+                        or "google-chat:unknown",
+                        job_id=job_id,
+                        message_id=message_id,
+                        event_id=message_id,
+                        relation=relation,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[GoogleChat] Could not link conversation job for %s: %s",
+                        message_id,
+                        exc,
+                    )
             if job_id and await self._halt_failed_drive_ingestion(
                 event, job_id, attachment_kwargs["attachment_refs"]
             ):
