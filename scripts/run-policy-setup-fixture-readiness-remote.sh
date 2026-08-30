@@ -23,17 +23,26 @@ if blocking:
 print("fixture_job_inventory=0")
 PY
 
-systemctl is-active --quiet robie-gateway
+if ! systemctl is-active --quiet robie-gateway; then
+  echo 'fixture readiness refused: Test gateway is not active' >&2
+  exit 1
+fi
 gateway_environment="$(systemctl show robie-gateway -p Environment --value --no-pager)"
-grep -Fq 'ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes-test/releases/current' \
-  <<<"${gateway_environment}"
+if ! grep -Fq 'ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes-test/releases/current' \
+    <<<"${gateway_environment}"; then
+  echo 'fixture readiness refused: Test gateway canonical root is missing' >&2
+  exit 1
+fi
 if grep -Fq '/opt/streetsmart-hermes/releases/current' <<<"${gateway_environment}"; then
   echo 'fixture readiness refused: Test gateway references the Production release root' >&2
   exit 1
 fi
 
 python_bin=/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
-test -x "${python_bin}"
+if ! test -x "${python_bin}"; then
+  echo 'fixture readiness refused: Test browser Python runtime is missing' >&2
+  exit 1
+fi
 sudo -u streetsmart-hermes env ROBIE_ENV=TEST \
   "${python_bin}" "${AUDIT_SCRIPT}" \
   --expected-sha "${EXPECTED_TEST_SHA}" \
