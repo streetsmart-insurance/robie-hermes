@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-test "$(hostname -s)" = hermes-test-01
-[[ "${EXPECTED_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
-test "${TEST_ROOT:-}" = /opt/streetsmart-hermes-test
+fail() {
+  echo "ASCEND DISABLED TEST REFUSED: $1" >&2
+  exit 2
+}
+
+test "$(hostname -s)" = hermes-test-01 || fail "wrong host"
+[[ "${EXPECTED_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || fail "invalid expected SHA"
+test "${TEST_ROOT:-}" = /opt/streetsmart-hermes-test || fail "wrong Test root"
+echo "ASCEND DISABLED CHECK: protected Test target"
 
 short="${EXPECTED_SHA:0:12}"
 current="$(readlink -f "${TEST_ROOT}/current")"
 releases_current="$(readlink -f "${TEST_ROOT}/releases/current")"
-test -n "${current}"
-test "${current}" = "${releases_current}"
+test -n "${current}" || fail "Test current pointer missing"
+test "${current}" = "${releases_current}" || fail "Test pointers disagree"
 case "${current}" in
   "${TEST_ROOT}/releases/${short}/"*) ;;
   *) echo "Ascend disabled proof refuses a different Test release" >&2; exit 2 ;;
 esac
+echo "ASCEND DISABLED CHECK: exact deployed release"
 
-systemctl is-active --quiet robie-gateway
+systemctl is-active --quiet robie-gateway || fail "robie-gateway is not active"
 gateway_pid="$(systemctl show robie-gateway --property=MainPID --value)"
-test "${gateway_pid}" -gt 1
+test "${gateway_pid}" -gt 1 || fail "robie-gateway has no live process"
 process_env="/proc/${gateway_pid}/environ"
-test -r "${process_env}"
+test -r "${process_env}" || fail "gateway process environment is unreadable"
+echo "ASCEND DISABLED CHECK: Test gateway active"
 
 # Inspect names and enablement only. Never print environment contents.
 if tr '\0' '\n' <"${process_env}" | grep -Eq '^ROBIE_ASCEND_API_ENABLED=(1|true|yes|on)$'; then
@@ -34,9 +42,10 @@ if tr '\0' '\n' <"${process_env}" | grep -Eq '^ROBIE_ASCEND_API_PRODUCTION_ENABL
   echo "Ascend disabled proof refused: Production execution flag is enabled" >&2
   exit 2
 fi
+echo "ASCEND DISABLED CHECK: execution disabled and credential absent"
 
 python_bin=/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
-test -x "${python_bin}"
+test -x "${python_bin}" || fail "Test Python runtime missing"
 sudo -u streetsmart-hermes env \
   -u ROBIE_ASCEND_API_ENABLED \
   -u ROBIE_ASCEND_API_KEY_SECRET \
