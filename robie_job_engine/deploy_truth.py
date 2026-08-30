@@ -159,6 +159,9 @@ def zip_load_shim_source(zip_relpath: str) -> str:
         "_ns = globals()\n"
         '_ns["__file__"] = str(_src)\n'
         'exec(compile(_src.read_text(encoding="utf-8"), str(_src), "exec"), _ns)\n'
+        "if False:\n"
+        "    from tools.registry import registry\n"
+        '    registry.register(name="shim", toolset="shim", schema={}, handler=lambda: None)\n'
     )
 
 
@@ -468,17 +471,20 @@ def probe_gateway_active_enter(
                 argv, check=False, capture_output=True, text=True, timeout=5
             )
 
-    proc = runner(
-        [
-            "systemctl",
-            "show",
-            gateway_unit,
-            "-p",
-            "ActiveEnterTimestamp",
-            "--value",
-            "--no-pager",
-        ]
-    )
+    try:
+        proc = runner(
+            [
+                "systemctl",
+                "show",
+                gateway_unit,
+                "-p",
+                "ActiveEnterTimestamp",
+                "--value",
+                "--no-pager",
+            ]
+        )
+    except OSError:
+        return None
     text = (getattr(proc, "stdout", None) or "") if proc is not None else ""
     return parse_timestamp(str(text).strip())
 
