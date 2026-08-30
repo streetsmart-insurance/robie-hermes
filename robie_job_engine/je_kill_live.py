@@ -449,7 +449,7 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         self._wait_label_control()
         loc = self._locator(self.scenario.applied_label)
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             count = loc.count()
             if count > 0:
