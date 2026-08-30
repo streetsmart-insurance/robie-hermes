@@ -1,0 +1,112 @@
+{
+  "version": "0.1.0-draft",
+  "state": "Testing",
+  "production_ready": false,
+  "source": {
+    "policy_entry_sheet_id": "1OTrvGJR9GlzH9b_JBkvpIVT-XZ_UQuUcIwYWtc3Bs-A",
+    "actual_policy_authority": [
+      "issued policy",
+      "declarations",
+      "forms",
+      "schedules",
+      "applications",
+      "bind request"
+    ],
+    "loom_status": "Business-workflow owner must approve recording-derived rules before selector certification"
+  },
+  "required_checkpoints": [
+    "duplicate_check",
+    "pre_save_snapshot",
+    "post_save_readback",
+    "reopen_verification"
+  ],
+  "evidence": ["screenshot", "playwright_trace", "checkpoint_log", "structured_verification"],
+  "profiles": [
+    {
+      "id": "homeowners", "name": "Homeowners", "aliases": ["homeowner", "ho"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["property_location", "coverages", "deductibles", "replacement_cost_basis"],
+      "verification_fields": ["named_insured", "property_location", "coverages", "deductibles", "mortgagees"],
+      "guards": ["Full Value treatment remains unresolved"]
+    },
+    {
+      "id": "dwelling_fire", "name": "Dwelling Fire", "aliases": ["df"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["mailing_address", "property_location", "coverages", "deductibles"],
+      "verification_fields": ["named_insured", "mailing_address", "property_location", "coverages", "deductibles", "lienholders"],
+      "guards": ["mailing-versus-location absolute rule is not approved"]
+    },
+    {
+      "id": "general_liability", "name": "General Liability", "aliases": ["gl"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["coverage_basis", "limits", "classifications", "exposures"],
+      "verification_fields": ["coverage_basis", "aggregate_basis", "limits", "deductibles", "classifications", "exposures", "additional_interests"],
+      "guards": ["silent aggregate basis", "exposure described as if any"]
+    },
+    {
+      "id": "businessowners_policy", "name": "Businessowners Policy", "aliases": ["business owners", "bop"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["locations", "buildings", "coverages", "classifications"],
+      "verification_fields": ["locations", "buildings", "coverages", "deductibles", "classifications", "additional_interests"],
+      "guards": ["policy-level versus location-level placement must be confirmed"]
+    },
+    {
+      "id": "commercial_package", "name": "Commercial Package", "aliases": ["package", "cmp"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["package_parts", "locations", "coverages", "classifications"],
+      "verification_fields": ["package_parts", "locations", "coverages", "deductibles", "classifications", "additional_interests"],
+      "guards": ["do not default GL aggregate basis when source is silent"]
+    },
+    {
+      "id": "commercial_auto_contractors", "name": "Commercial Auto — Contractors", "aliases": ["commercial auto contractors", "contractors auto"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["business_use", "vehicles", "drivers", "garaging", "symbols", "limits"],
+      "verification_fields": ["business_use", "vehicles", "drivers", "garaging", "symbols", "limits", "deductibles", "loss_payees"],
+      "guards": ["must not be reused for trucking"]
+    },
+    {
+      "id": "commercial_property", "name": "Commercial Property", "aliases": ["property commercial"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["locations", "buildings", "subjects_of_insurance"],
+      "verification_fields": ["locations", "buildings", "subjects_of_insurance", "coinsurance", "deductibles", "additional_interests"],
+      "guards": ["each location must map to an explicit building or approved exception"]
+    },
+    {
+      "id": "commercial_umbrella", "name": "Commercial Umbrella", "aliases": ["umbrella commercial"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["limits", "underlying_policies", "coverage_basis"],
+      "verification_fields": ["limits", "underlying_policies", "coverage_basis", "retained_limit", "retroactive_date", "defense_basis"],
+      "guards": ["retained limit must be explicit"]
+    },
+    {
+      "id": "crime", "name": "Crime", "aliases": ["commercial crime"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["locations", "coverage_basis", "crime_coverages"],
+      "verification_fields": ["locations", "coverage_basis", "crime_coverages", "limits", "deductibles", "additional_interests"],
+      "guards": ["coverage basis must be checked against the actual policy"]
+    },
+    {
+      "id": "errors_omissions", "name": "Errors & Omissions", "aliases": ["errors and omissions", "e&o", "eo"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["limits", "retention", "services", "revenue"],
+      "verification_fields": ["limits", "retention", "defense_cost_basis", "services", "revenue", "largest_jobs", "claims_information"],
+      "guards": ["select Errors & Omissions rather than a generic professional-liability profile"]
+    },
+    {
+      "id": "garage_dealers", "name": "Garage & Dealers", "aliases": ["garage", "dealers"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "required_fields": ["operation_type", "coverage_basis", "vehicles", "drivers", "limits"],
+      "verification_fields": ["operation_type", "coverage_basis", "symbols", "vehicles", "drivers", "limits", "deductibles", "additional_interests"],
+      "guards": ["operation and coverage-basis mappings must be explicit"]
+    },
+    {
+      "id": "bonds", "name": "Bonds — limited supported variants", "aliases": ["bond", "surety"],
+      "state": "Testing", "consequential_writes_enabled": false,
+      "supported_variants": ["Employee Dishonesty", "Home Improvement Bond"],
+      "disabled_variants": ["Bid Bond", "Performance Bond"],
+      "required_fields": ["bond_type", "bond_amount", "obligee"],
+      "verification_fields": ["bond_type", "bond_amount", "obligee", "effective_date", "expiration_date"],
+      "guards": ["all unlisted bond types return NEEDS_SKILL"]
+    }
+  ]
+}

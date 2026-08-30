@@ -24,5 +24,6 @@ tar -xzf "${archive_name}" -C "${work_dir}"
 release_root="$(find "${work_dir}" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 test -n "${release_root}"
 cd "${release_root}"
-PYTHONPYCACHEPREFIX="${work_dir}/pycache" python3 -m compileall -q robie_job_engine tests
-PYTHONPATH=. python3 -m robie_job_engine.regression_battery --ci
+PYTHONPYCACHEPREFIX="${work_dir}/pycache" python3 -m compileall -q robie_job_engine
+PYTHONPATH=. python3 -m robie_job_engine.release_profile
+ROBIE_RUNTIME_ONLY_RELEASE=1 PYTHONPATH=. python3 -m robie_job_engine.regression_battery --ci

@@ -43,6 +43,15 @@ archive_digest="$(sha256sum "${archive}" | awk '{print $1}')"
 
 old_current="$(readlink -f "${OPT_ROOT}/current")"
 old_releases_current="$(readlink -f "${OPT_ROOT}/releases/current")"
+policy_skill_link="${OPT_ROOT}/.hermes/skills/ezlynx-policy-setup"
+old_policy_skill_target=""
+if [[ -e "${policy_skill_link}" || -L "${policy_skill_link}" ]]; then
+  [[ -L "${policy_skill_link}" ]] || {
+    echo "existing Test Policy Setup skill is not an atomic symlink; refuse deploy" >&2
+    exit 2
+  }
+  old_policy_skill_target="$(readlink -f "${policy_skill_link}")"
+fi
 [[ -n "${old_current}" && "${old_current}" == "${old_releases_current}" ]] || {
   echo "Test rollback pointers are missing or disagree" >&2
   exit 2
@@ -110,29 +119,18 @@ fi
 # bits in historical archives.
 bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
-atomic_pointer() {
-  python3 - "$1" "$2" <<'PY'
-import os
-import pathlib
-import sys
-target = pathlib.Path(sys.argv[1]).resolve()
-link = pathlib.Path(sys.argv[2])
-tmp = link.with_name(link.name + ".rollback-new")
-try:
-    tmp.unlink()
-except FileNotFoundError:
-    pass
-tmp.symlink_to(target)
-os.replace(tmp, link)
-PY
-}
+source "${release_root}/scripts/lib/test-release-rollback.sh"
 
 rollback_test() {
   echo "Test verification failed; restoring ${old_current}" >&2
-  atomic_pointer "${old_current}" "${OPT_ROOT}/current"
-  atomic_pointer "${old_releases_current}" "${OPT_ROOT}/releases/current"
-  systemctl restart "${GATEWAY_UNIT}"
-  systemctl is-active --quiet "${GATEWAY_UNIT}"
+  rollback_test_release \
+    "${old_current}" \
+    "${old_releases_current}" \
+    "${old_policy_skill_target}" \
+    "${OPT_ROOT}/current" \
+    "${OPT_ROOT}/releases/current" \
+    "${policy_skill_link}" \
+    "${GATEWAY_UNIT}"
 }
 
 before="$(systemctl show "${GATEWAY_UNIT}" -p ActiveEnterTimestamp --value --no-pager)"
@@ -189,8 +187,48 @@ while datetime.now(timezone.utc).replace(microsecond=0) <= flipped:
     time.sleep(0.05)
 PY
 
-systemctl restart "${GATEWAY_UNIT}"
-systemctl is-active --quiet "${GATEWAY_UNIT}"
+# Install only the explicitly Test-only draft skill. The destination is an
+# atomic symlink into this immutable release, so rollback restores the exact
+# previous skill bytes. Production uses a different root and is never touched.
+policy_skill_source="${release_root}/deploy/hermes/skills/ezlynx-policy-setup"
+[[ -f "${policy_skill_source}/SKILL.md" ]] || {
+  echo "Policy Setup SKILL.md missing from Test candidate" >&2
+  rollback_test
+  exit 2
+}
+if ! python3 - "${policy_skill_source}/SKILL.md" \
+  "${policy_skill_source}/references/profiles.json" <<'PY'
+import json
+import pathlib
+import sys
+
+skill = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+profiles = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+assert 'version: "0.1.0-draft"' in skill
+assert 'status: "Testing"' in skill
+assert "production_ready: false" in skill
+assert profiles.get("production_ready") is False
+assert len(profiles.get("profiles") or []) == 12
+assert all(item.get("state") == "Testing" for item in profiles["profiles"])
+assert all(item.get("consequential_writes_enabled") is False for item in profiles["profiles"])
+PY
+then
+  echo "Policy Setup Test-only package validation failed" >&2
+  rollback_test
+  exit 2
+fi
+mkdir -p "$(dirname "${policy_skill_link}")"
+if ! atomic_pointer "${policy_skill_source}" "${policy_skill_link}"; then
+  rollback_test
+  exit 2
+fi
+policy_skill_digest="$(sha256sum "${policy_skill_source}/SKILL.md" "${policy_skill_source}/references/profiles.json" | sha256sum | awk '{print $1}')"
+
+if ! systemctl restart "${GATEWAY_UNIT}" || \
+  ! systemctl is-active --quiet "${GATEWAY_UNIT}"; then
+  rollback_test
+  exit 2
+fi
 after="$(systemctl show "${GATEWAY_UNIT}" -p ActiveEnterTimestamp --value --no-pager)"
 if ! bash "${release_root}/scripts/install-official-release.sh" prove \
   --opt-root "${OPT_ROOT}" \
@@ -221,7 +259,8 @@ evidence_dir="${OPT_ROOT}/deployments/${short}"
 mkdir -p "${evidence_dir}"
 python3 - "${evidence_dir}/test-deploy-evidence.json" "${inventory}" \
   "${commit}" "${archive_digest}" "${release_root}" "${old_current}" \
-  "${GATEWAY_UNIT}" "${after}" "${proof}" <<'PY'
+  "${GATEWAY_UNIT}" "${after}" "${proof}" "${policy_skill_link}" \
+  "${policy_skill_source}" "${policy_skill_digest}" "${old_policy_skill_target}" <<'PY'
 import json
 import pathlib
 import sys
@@ -236,6 +275,18 @@ payload = {
     "gateway_unit": sys.argv[7],
     "gateway_active_enter": sys.argv[8],
     "proof_path": sys.argv[9],
+    "test_skill": {
+        "name": "ezlynx-policy-setup",
+        "version": "0.1.0-draft",
+        "state": "Testing",
+        "destination": sys.argv[10],
+        "source": sys.argv[11],
+        "profile_manifest": sys.argv[11] + "/references/profiles.json",
+        "selector_inventory": sys.argv[11] + "/references/selector-inventory.md",
+        "content_digest": sys.argv[12],
+        "previous_target": sys.argv[13] or None,
+        "consequential_writes_enabled": False,
+    },
     "test_job_inventory": json.loads(sys.argv[2]),
     "verified_at": datetime.now(timezone.utc).isoformat(),
     "production_touched": False,

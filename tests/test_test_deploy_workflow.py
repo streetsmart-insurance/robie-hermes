@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-test.yml"
 INSTALLER = ROOT / "scripts" / "deploy-test-release.sh"
+ROLLBACK_LIBRARY = ROOT / "scripts" / "lib" / "test-release-rollback.sh"
 
 
 class TestDeployWorkflowContractTests(unittest.TestCase):
@@ -37,7 +41,7 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn(candidate_verify, text)
         self.assertNotIn('${old_current}/scripts/verify-release.sh', text)
         self.assertLess(text.index('release_root="'), text.index(candidate_verify))
-        self.assertLess(text.index(candidate_verify), text.index("atomic_pointer()"))
+        self.assertLess(text.index(candidate_verify), text.index('source "${release_root}/scripts/lib/test-release-rollback.sh"'))
         self.assertLess(text.index(candidate_verify), text.index('systemctl restart'))
         precision_gate = 'official-install-flip.json'
         self.assertIn(precision_gate, text)
@@ -57,6 +61,114 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn('--gateway-unit "${GATEWAY_UNIT}"', text)
         self.assertIn('data.get("authorizes_complete") is False', text)
         self.assertIn("TEST VERIFIED", text)
+
+    def test_installs_only_guarded_policy_setup_skill_with_rollback_evidence(self):
+        text = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('policy_skill_link="${OPT_ROOT}/.hermes/skills/ezlynx-policy-setup"', text)
+        self.assertIn(
+            'policy_skill_source="${release_root}/deploy/hermes/skills/ezlynx-policy-setup"',
+            text,
+        )
+        self.assertIn("existing Test Policy Setup skill is not an atomic symlink", text)
+        self.assertIn('atomic_pointer "${policy_skill_source}" "${policy_skill_link}"', text)
+        self.assertIn('"${old_policy_skill_target}"', text)
+        self.assertIn("rollback_test_release", text)
+        self.assertIn("Policy Setup Test-only package validation failed", text)
+        skill_install = text.index(
+            'atomic_pointer "${policy_skill_source}" "${policy_skill_link}"'
+        )
+        restart_after_skill = text.index('systemctl restart "${GATEWAY_UNIT}"', skill_install)
+        self.assertLess(skill_install, restart_after_skill)
+        self.assertIn("rollback_test", text[skill_install:restart_after_skill + 200])
+        self.assertIn('"consequential_writes_enabled": False', text)
+        self.assertIn('"profile_manifest": sys.argv[11]', text)
+        self.assertIn('"selector_inventory": sys.argv[11]', text)
+        self.assertIn('"production_touched": False', text)
+        self.assertNotIn('/opt/streetsmart-hermes/.hermes/skills/ezlynx-policy-setup', text)
+
+    def test_post_flip_failure_restores_all_targets_and_gateway_recovers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_release = root / "releases" / "old" / "robie-hermes-old"
+            new_release = root / "releases" / "new" / "robie-hermes-new"
+            old_skill = old_release / "deploy" / "hermes" / "skills" / "ezlynx-policy-setup"
+            new_skill = new_release / "deploy" / "hermes" / "skills" / "ezlynx-policy-setup"
+            for path in (old_skill, new_skill):
+                path.mkdir(parents=True)
+
+            current = root / "current"
+            releases_current = root / "releases" / "current"
+            skill_link = root / ".hermes" / "skills" / "ezlynx-policy-setup"
+            skill_link.parent.mkdir(parents=True)
+            current.symlink_to(old_release)
+            releases_current.symlink_to(old_release)
+            skill_link.symlink_to(old_skill)
+
+            gateway_state = root / "gateway.state"
+            gateway_log = root / "gateway.log"
+            gateway_state.write_text("failed\n", encoding="utf-8")
+            systemctl_stub = root / "systemctl-stub"
+            systemctl_stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >>\"${GATEWAY_LOG}\"\n"
+                "case \"$1\" in\n"
+                "  restart) printf 'active\\n' >\"${GATEWAY_STATE}\" ;;\n"
+                "  is-active) test \"$(cat \"${GATEWAY_STATE}\")\" = active ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            systemctl_stub.chmod(0o755)
+
+            harness = root / "exercise-rollback.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "source \"$1\"\n"
+                "atomic_pointer \"$3\" \"$5\"\n"
+                "atomic_pointer \"$3\" \"$6\"\n"
+                "atomic_pointer \"$4\" \"$7\"\n"
+                "# Fault injection occurs only after both release pointers and the skill flip.\n"
+                "if ! false; then\n"
+                "  rollback_test_release \"$2\" \"$2\" \"$8\" \"$5\" \"$6\" \"$7\" robie-gateway\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "ROBIE_SYSTEMCTL": str(systemctl_stub),
+                "GATEWAY_STATE": str(gateway_state),
+                "GATEWAY_LOG": str(gateway_log),
+            }
+            subprocess.run(
+                [
+                    str(harness),
+                    str(ROLLBACK_LIBRARY),
+                    str(old_release),
+                    str(new_release),
+                    str(new_skill),
+                    str(current),
+                    str(releases_current),
+                    str(skill_link),
+                    str(old_skill),
+                ],
+                check=True,
+                env=env,
+            )
+
+            self.assertEqual(current.resolve(strict=True), old_release.resolve(strict=True))
+            self.assertEqual(
+                releases_current.resolve(strict=True), old_release.resolve(strict=True)
+            )
+            self.assertEqual(skill_link.resolve(strict=True), old_skill.resolve(strict=True))
+            self.assertEqual(gateway_state.read_text(encoding="utf-8"), "active\n")
+            self.assertEqual(
+                gateway_log.read_text(encoding="utf-8").splitlines(),
+                ["restart robie-gateway", "is-active --quiet robie-gateway"],
+            )
 
 
 if __name__ == "__main__":

@@ -221,6 +221,7 @@ class PolicyShellInput:
     premium: str = ""
     full_term_premium: str = ""
     annual_premium: str = ""
+    total_commission: str = "12.00"
     department: str = ""  # "Commercial Lines (CL)" or "Personal Lines (P/L)"
     # LOB Specific Components
     vehicles: Sequence[VehicleItem] = field(default_factory=tuple)
@@ -372,6 +373,10 @@ class EzlynxPolicySetupPage:
         if shell_input.annual_premium:
             ann_prem = self.page.locator("#AnnualPremium")
             await ann_prem.fill(clean_currency(shell_input.annual_premium))
+        comm_val = shell_input.total_commission or "12.00"
+        comm_input = self.page.locator("#TotalCommission")
+        if await comm_input.count() > 0:
+            await comm_input.fill(clean_currency(comm_val))
 
         # 8b. Department selection (Commercial Lines (CL) for commercial, Personal Lines (P/L) for personal)
         dept_val = shell_input.department or (
@@ -408,6 +413,58 @@ class EzlynxPolicySetupPage:
             return True
 
     # Detailed Sub-Tab / Schedule Handlers
+    async def select_vehicle_garaging_address(self, vehicle: VehicleItem) -> None:
+        """Choose garaging from EZLynx's active UI mode, failing closed.
+
+        EZLynx normally renders a location dropdown and leaves the legacy raw
+        address input hidden/disabled.  Never force-fill that legacy input
+        while dropdown mode is present.
+        """
+        dropdown = self.page.locator("#Vehicle_GaragingAddressId")
+        if await dropdown.count() > 0:
+            if not await dropdown.is_visible() or not await dropdown.is_enabled():
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: garaging-address dropdown is present but unavailable"
+                )
+            requested = vehicle.garaging_address.strip()
+            if requested:
+                await dropdown.select_option(label=requested)
+                await dropdown.dispatch_event("change")
+                return
+            current = str(await dropdown.input_value() or "").strip()
+            if current:
+                return
+            options = await dropdown.locator("option:not([disabled])").all()
+            eligible: list[Any] = []
+            for option in options:
+                value = str(await option.get_attribute("value") or "").strip()
+                label = str(await option.text_content() or "").strip()
+                if value and label and "select" not in label.casefold():
+                    eligible.append(option)
+            if len(eligible) != 1:
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: garaging address is missing or ambiguous"
+                )
+            value = str(await eligible[0].get_attribute("value") or "").strip()
+            await dropdown.select_option(value=value)
+            await dropdown.dispatch_event("change")
+            return
+
+        raw = self.page.locator("#Vehicle_PhysicalAddress_LineOne_A")
+        if await raw.count() != 1:
+            raise RuntimeError(
+                "PLAYWRIGHT_BLOCKED: no unique garaging-address control is available"
+            )
+        if not await raw.is_visible() or not await raw.is_enabled():
+            raise RuntimeError(
+                "PLAYWRIGHT_BLOCKED: raw garaging-address input is hidden or disabled"
+            )
+        requested = vehicle.garaging_address.strip()
+        if not requested:
+            raise RuntimeError("MISSING_REQUIRED_FIELD: garaging_address")
+        await raw.fill(requested)
+        await raw.dispatch_event("change")
+
     async def add_vehicle(self, vehicle: VehicleItem) -> None:
         add_btn = self.page.locator("input[value='Add Vehicle'], button:has-text('Add Vehicle'), #add-vehicle-btn")
         await add_btn.click()
@@ -448,6 +505,8 @@ class EzlynxPolicySetupPage:
             coll = self.page.locator("#Vehicle_Collision_DeductibleAmount_A, #Vehicle_CollDeductible")
             if await coll.count() > 0:
                 await coll.fill(clean_currency(vehicle.coll_deductible))
+
+        await self.select_vehicle_garaging_address(vehicle)
 
         # Save modal
         save_btn = self.page.locator(".modal button:has-text('Save'), .modal input[value='Save'], button.btn-primary:has-text('Save')")
@@ -647,67 +706,27 @@ class EzlynxPolicySetupPage:
 
     # Unified LOB Orchestrator
     async def setup_policy_by_lob(self, shell_input: PolicyShellInput) -> PolicySetupResult:
-        """Executes full policy setup for any Line of Business from start to finish."""
-        lob_key = shell_input.lob.lower().replace(" ", "_")
+        """Refuse the legacy write path while Policy Setup remains a Test draft.
+
+        The original implementation created a shell and performed multiple
+        saves without an authoritative duplicate check, durable checkpoints,
+        or reopen verification.  Keep the page-object helpers available for
+        selector-level Test work, but never enter the consequential
+        orchestrator until a later, reviewed implementation supplies those
+        controls.
+        """
         normalized = normalize_lob(shell_input.lob)
 
-        # 1. Fill Shell and Advance to Form Entry
-        shell_ok = await self.fill_policy_shell(shell_input, save_and_edit=True)
-        if not shell_ok:
-            return PolicySetupResult(
-                success=False,
-                applicant_id=shell_input.applicant_id,
-                policy_number=shell_input.policy_number,
-                lob=normalized,
-                phase_reached="policy_shell_failed",
-                error="Failed to create policy shell and advance to form entry",
-            )
-
-        # 2. Populate LOB Specific Detail Components
-        if "auto" in lob_key:
-            for veh in shell_input.vehicles:
-                await self.add_vehicle(veh)
-            for drv in shell_input.drivers:
-                await self.add_driver(drv)
-        elif "bop" in lob_key or "business_owners" in lob_key or "property" in lob_key:
-            for loc in shell_input.locations:
-                await self.add_location(loc)
-            for bldg in shell_input.buildings:
-                await self.add_building(bldg)
-            if shell_input.gl_coverage:
-                await self.fill_gl_coverages(shell_input.gl_coverage)
-        elif "general_liability" in lob_key or lob_key == "gl":
-            if shell_input.gl_coverage:
-                await self.fill_gl_coverages(shell_input.gl_coverage)
-        elif "workers_comp" in lob_key or lob_key == "wc":
-            if shell_input.wc_coverage:
-                await self.fill_wc_coverages(shell_input.wc_coverage)
-        elif "umbrella" in lob_key:
-            if shell_input.umbrella_coverage:
-                await self.fill_umbrella_coverages(shell_input.umbrella_coverage)
-        elif "homeowners" in lob_key or "dwelling" in lob_key:
-            if shell_input.homeowners_coverage:
-                await self.fill_homeowners_coverages(shell_input.homeowners_coverage)
-        elif "inland_marine" in lob_key:
-            for im in shell_input.inland_marine_items:
-                await self.add_inland_marine_item(im)
-
-        # 3. Add Discussion Note
-        note_title = shell_input.discussion_note_title or f"{normalized} Policy Setup"
-        note_body = shell_input.discussion_note_body or build_discussion_note(
-            normalized, shell_input.policy_number, shell_input.writing_company_text or "Carrier"
-        )
-        await self.add_discussion_note(note_title, note_body)
-
-        # 4. Save and Close Form Entry
-        await self.save_and_close_form_entry()
-
         return PolicySetupResult(
-            success=True,
+            success=False,
             applicant_id=shell_input.applicant_id,
             policy_number=shell_input.policy_number,
             lob=normalized,
-            phase_reached="completed_form_entry",
-            note_added=True,
+            phase_reached="draft_write_gate",
+            error=(
+                "NEEDS_CLARIFICATION: EZLynx Policy Setup v0.1.0-draft "
+                "does not authorize consequential writes"
+            ),
+            note_added=False,
             stopped_before_bind=True,
         )

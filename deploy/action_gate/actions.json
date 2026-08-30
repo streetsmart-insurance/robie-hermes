@@ -1,5 +1,5 @@
 {
-  "notes": "An action is more specific than a job type. Chat @robie + skill uses hermes.google_chat_task, which is grandfathered at the job-type layer and cannot hide these. On ROBIE_ENV=PRODUCTION the Job Engine REFUSES to start a gated action unless a recorded clean Test pass exists for that exact action id. N=1 unblocks an action. N=3 still applies to flipping production_ready on a brand-new job type. HITL after a miss is not the gate. Commercial auto is the only grandfathered action. Ascend is not grandfathered.",
+  "notes": "An action is more specific than a job type. Chat @robie + skill uses hermes.google_chat_task, which is grandfathered at the job-type layer and cannot hide these. On ROBIE_ENV=PRODUCTION the Job Engine REFUSES to start a gated action unless a recorded clean Test pass exists for that exact action id. N=1 unblocks an action. N=3 still applies to flipping production_ready on a brand-new job type. HITL after a miss is not the gate. Commercial auto is the only grandfathered action. Ascend and Policy Setup are not grandfathered.",
   "required_clean_test_passes": 1,
   "grandfathered_actions": [
     "ezlynx.commercial_auto"
@@ -22,6 +22,20 @@
         "jobs.db post_job_audit verdict=PASS tagged with this action"
       ],
       "notes": "Jobs 807f8920 and 38c0fa79 (2026-08-28) were the first test of this action on a live Production client. The written Test gate was skipped. Production is not the first test."
+    },
+    {
+      "id": "ezlynx.policy_setup",
+      "kind": "browser-policy-setup",
+      "site": "ezlynx",
+      "version": "0.1.0-draft",
+      "profile_state": "Testing",
+      "consequential_writes_enabled": false,
+      "records_from": [
+        "sanitized hermes-test-01 fixture only",
+        "fresh reopen verification evidence",
+        "jobs.db post_job_audit verdict=PASS tagged with this action"
+      ],
+      "notes": "This draft action remains refused on Production even when invoked through the grandfathered generic Chat job type."
     }
   ],
   "no_retry_job_prefixes": [

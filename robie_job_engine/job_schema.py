@@ -148,44 +148,6 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
         "the allowlisted SKILL.md path contains the exact requested bytes and hash",
         "FilesystemSkillUpdateVerifier",
     ),
-    "ascend.locator_artifact_audit": ExecutableSkillContract(
-        expected_destination_result=(
-            "an audit punch-list report is persisted under the real job id; "
-            "no finance agreement is saved"
-        ),
-        recording_policy="REQUIRED",
-        independent_verifier="AscendLocatorAuditVerifier",
-        maximum_attempts=1,
-        success_conditions=(
-            "the punch-list report is reread from the job artifact folder",
-            "the report kind is locator_artifact_audit_report",
-            "finance_agreement is false",
-        ),
-        failure_conditions=(
-            "a locator is not unique (Playwright strict mode)",
-            "the quote PDF folder is not exactly the job id",
-            "the worker cannot open the PDF it just saved",
-        ),
-    ),
-    "ascend.create_program": ExecutableSkillContract(
-        expected_destination_result=(
-            "the Ascend API returns a program id and every requested billable is "
-            "independently read back under that program"
-        ),
-        recording_policy="EXEMPT",
-        independent_verifier="AscendCreateProgramVerifier",
-        maximum_attempts=1,
-        success_conditions=(
-            "a fresh authoritative GET matches the requested insured and assigned users",
-            "every created billable is freshly read back under the created program id",
-            "verification evidence is persisted",
-        ),
-        failure_conditions=(
-            "the API integration or matching environment host is not explicitly enabled",
-            "the bounded payload is incomplete or contains a forbidden account",
-            "the program or any requested billable cannot be independently read back",
-        ),
-    ),
 }
 
 
@@ -242,16 +204,6 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": True,
         "required": ("target_path", "expected_content", "expected_sha256"),
         "identity": ("target_path",),
-    },
-    "ascend.locator_artifact_audit": {
-        "schema_verified": True,
-        "required": ("scenario", "report_only", "test_account_only"),
-        "identity": ("report_id", "scenario"),
-    },
-    "ascend.create_program": {
-        "schema_verified": True,
-        "required": ("program", "billables", "execute"),
-        "identity": ("insured_id",),
     },
 }
 

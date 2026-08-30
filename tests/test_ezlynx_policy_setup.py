@@ -111,29 +111,29 @@ def test_locator_registry_loads_all_lob_locators():
 
 def test_commercial_auto_spec():
     vehicle = VehicleItem(
-        vin="1FT7W2BT9NED12345",
+        vin="TEST-VIN-001",
         year="2022",
         make="Ford",
         model="F-250",
-        garaging_address="123 Industrial Pkwy",
+        garaging_address="SANITIZED GARAGING ADDRESS",
         comp_deductible="1000",
         coll_deductible="1000",
         towing=True,
     )
     driver = DriverItem(
-        first_name="Carlos",
-        last_name="Rodriguez",
-        dob="05/12/1985",
-        license_number="R1234567890",
+        first_name="SYNTHETIC-FIRST",
+        last_name="SYNTHETIC-LAST",
+        dob="SYNTHETIC-DOB",
+        license_number="TEST-LICENSE-001",
         license_state="NJ",
     )
     shell_input = PolicyShellInput(
-        applicant_id="220250093",
+        applicant_id="SANITIZED-APPLICANT-001",
         lob="commercial_auto",
         transaction_type="new_business",
         master_company_value="155",
-        writing_company_text="PROGRESSIVE GARDEN STATE INS CO",
-        policy_number="CA-ANC-2026-01",
+        writing_company_text="TEST CARRIER",
+        policy_number="TEST-POLICY-CA-001",
         effective_date="09/01/2026",
         expiration_date="09/01/2027",
         lob_origination_date="09/01/2026",
@@ -143,17 +143,17 @@ def test_commercial_auto_spec():
     )
     assert shell_input.lob == "commercial_auto"
     assert len(shell_input.vehicles) == 1
-    assert shell_input.vehicles[0].vin == "1FT7W2BT9NED12345"
+    assert shell_input.vehicles[0].vin == "TEST-VIN-001"
     assert len(shell_input.drivers) == 1
 
 
 def test_bop_and_commercial_property_spec():
     loc = LocationItem(
         location_number="1",
-        address="450 Main St",
-        city="Hackensack",
+        address="SANITIZED PROPERTY ADDRESS",
+        city="SANITIZED CITY",
         state="NJ",
-        zip_code="07601",
+        zip_code="00000",
     )
     bldg = BuildingItem(
         location_number="1",
@@ -176,11 +176,11 @@ def test_bop_and_commercial_property_spec():
         blanket_ai=True,
     )
     shell_input = PolicyShellInput(
-        applicant_id="220250093",
+        applicant_id="SANITIZED-APPLICANT-001",
         lob="bop",
         transaction_type="new_business",
         master_company_value="10",
-        policy_number="BOP-77281-01",
+        policy_number="TEST-POLICY-BOP-001",
         effective_date="10/01/2026",
         expiration_date="10/01/2027",
         premium="4500.00",
@@ -206,11 +206,11 @@ def test_workers_comp_spec():
         el_each_accident="1000000",
     )
     shell_input = PolicyShellInput(
-        applicant_id="220250093",
+        applicant_id="SANITIZED-APPLICANT-001",
         lob="workers_comp",
         transaction_type="new_business",
         master_company_value="55",
-        policy_number="WC-99182-01",
+        policy_number="TEST-POLICY-WC-001",
         effective_date="10/01/2026",
         expiration_date="10/01/2027",
         premium="1850.00",
@@ -225,13 +225,13 @@ def test_umbrella_spec():
     auto_under = UnderlyingPolicyItem(
         lob="Auto",
         carrier="Progressive",
-        policy_number="CA-ANC-2026-01",
+        policy_number="TEST-POLICY-CA-001",
         limits="1,000,000 CSL",
     )
     gl_under = UnderlyingPolicyItem(
         lob="General Liability",
         carrier="Travelers",
-        policy_number="BOP-77281-01",
+        policy_number="TEST-POLICY-BOP-001",
         limits="1,000,000 / 2,000,000",
     )
     umb = UmbrellaCoverageItem(
@@ -241,9 +241,9 @@ def test_umbrella_spec():
         underlying_policies=(auto_under, gl_under),
     )
     shell_input = PolicyShellInput(
-        applicant_id="220250093",
+        applicant_id="SANITIZED-APPLICANT-001",
         lob="commercial_umbrella",
-        policy_number="UMB-00192-01",
+        policy_number="TEST-POLICY-UMB-001",
         effective_date="10/01/2026",
         expiration_date="10/01/2027",
         premium="3200.00",
@@ -264,9 +264,9 @@ def test_homeowners_spec():
         all_peril_deductible="1000",
     )
     shell_input = PolicyShellInput(
-        applicant_id="220250093",
+        applicant_id="SANITIZED-APPLICANT-001",
         lob="homeowners",
-        policy_number="HO-12847-01",
+        policy_number="TEST-POLICY-HO-001",
         effective_date="11/01/2026",
         expiration_date="11/01/2027",
         premium="1950.00",
@@ -279,14 +279,14 @@ def test_homeowners_spec():
 def test_inland_marine_spec():
     im = InlandMarineItem(
         item_description="2023 Caterpillar 308 CR Mini Excavator",
-        serial_number="CAT0308CR99812",
+        serial_number="TEST-SERIAL-001",
         limit="95000",
         deductible="1000",
     )
     shell_input = PolicyShellInput(
-        applicant_id="220250093",
+        applicant_id="SANITIZED-APPLICANT-001",
         lob="inland_marine",
-        policy_number="IM-55192-01",
+        policy_number="TEST-POLICY-IM-001",
         effective_date="09/01/2026",
         expiration_date="09/01/2027",
         premium="1200.00",
@@ -294,11 +294,11 @@ def test_inland_marine_spec():
     )
     assert shell_input.lob == "inland_marine"
     assert len(shell_input.inland_marine_items) == 1
-    assert shell_input.inland_marine_items[0].serial_number == "CAT0308CR99812"
+    assert shell_input.inland_marine_items[0].serial_number == "TEST-SERIAL-001"
 
 
 def test_playwright_page_object_mock_orchestrator():
-    """Verify that EzlynxPolicySetupPage orchestrates full setup across any LOB."""
+    """The legacy multi-save orchestrator must fail before its first write."""
     async def _run():
         mock_page = MagicMock()
         mock_locator = MagicMock()
@@ -308,6 +308,9 @@ def test_playwright_page_object_mock_orchestrator():
         mock_locator.select_option = AsyncMock()
         mock_locator.dispatch_event = AsyncMock()
         mock_locator.count = AsyncMock(return_value=1)
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.is_enabled = AsyncMock(return_value=True)
+        mock_locator.input_value = AsyncMock(return_value="existing-location")
 
         mock_page.locator = MagicMock(return_value=mock_locator)
         mock_page.wait_for_load_state = AsyncMock()
@@ -317,12 +320,12 @@ def test_playwright_page_object_mock_orchestrator():
         page_obj = EzlynxPolicySetupPage(mock_page)
 
         # Test Commercial Auto Run
-        vehicle = VehicleItem(vin="1FT7W2BT9NED12345")
-        driver = DriverItem(first_name="Carlos", last_name="Rodriguez")
+        vehicle = VehicleItem(vin="TEST-VIN-001")
+        driver = DriverItem(first_name="SYNTHETIC-FIRST", last_name="SYNTHETIC-LAST")
         shell_input = PolicyShellInput(
-            applicant_id="220250093",
+            applicant_id="SANITIZED-APPLICANT-001",
             lob="commercial_auto",
-            policy_number="CA-ANC-2026-01",
+            policy_number="TEST-POLICY-CA-001",
             effective_date="09/01/2026",
             expiration_date="09/01/2027",
             premium="22080.00",
@@ -330,10 +333,61 @@ def test_playwright_page_object_mock_orchestrator():
             drivers=(driver,),
         )
         result = await page_obj.setup_policy_by_lob(shell_input)
-        assert result.success is True
+        assert result.success is False
         assert result.lob == "Auto (Commercial)"
-        assert result.phase_reached == "completed_form_entry"
+        assert result.phase_reached == "draft_write_gate"
         assert result.stopped_before_bind is True
-        assert result.note_added is True
+        assert result.note_added is False
+        assert result.error.startswith("NEEDS_CLARIFICATION:")
+        mock_page.locator.assert_not_called()
+
+    asyncio.run(_run())
+
+
+def test_vehicle_garaging_uses_location_dropdown_not_hidden_raw_input():
+    async def _run():
+        dropdown = MagicMock()
+        dropdown.count = AsyncMock(return_value=1)
+        dropdown.is_visible = AsyncMock(return_value=True)
+        dropdown.is_enabled = AsyncMock(return_value=True)
+        dropdown.select_option = AsyncMock()
+        dropdown.dispatch_event = AsyncMock()
+        raw = MagicMock()
+        raw.fill = AsyncMock()
+        page = MagicMock()
+        page.locator = MagicMock(
+            side_effect=lambda selector: dropdown
+            if selector == "#Vehicle_GaragingAddressId"
+            else raw
+        )
+
+        await EzlynxPolicySetupPage(page).select_vehicle_garaging_address(
+            VehicleItem(vin="TESTVIN", garaging_address="123 Industrial Pkwy")
+        )
+
+        dropdown.select_option.assert_awaited_once_with(label="123 Industrial Pkwy")
+        dropdown.dispatch_event.assert_awaited_once_with("change")
+        raw.fill.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+def test_vehicle_garaging_fails_closed_when_dropdown_mode_is_disabled():
+    async def _run():
+        dropdown = MagicMock()
+        dropdown.count = AsyncMock(return_value=1)
+        dropdown.is_visible = AsyncMock(return_value=False)
+        dropdown.is_enabled = AsyncMock(return_value=False)
+        page = MagicMock()
+        page.locator = MagicMock(return_value=dropdown)
+
+        try:
+            await EzlynxPolicySetupPage(page).select_vehicle_garaging_address(
+                VehicleItem(vin="TESTVIN", garaging_address="123 Industrial Pkwy")
+            )
+        except RuntimeError as exc:
+            assert str(exc).startswith("PLAYWRIGHT_BLOCKED:")
+        else:
+            raise AssertionError("disabled dropdown mode must fail closed")
 
     asyncio.run(_run())
