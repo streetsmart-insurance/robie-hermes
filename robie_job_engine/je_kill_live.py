@@ -551,7 +551,7 @@ def _engine(db: Path, scenario: ScenarioFixture, *, phase: str, marker: Path, at
         {"hermes-cua": worker},
         {ACTION: verifier},
         reconcilers={ACTION: verifier},
-        lease_seconds=30,
+        lease_seconds=2 if kill else 30,
         enforce_recording_policy=False,
         call_worker_on_calling_thread=True,
     )
