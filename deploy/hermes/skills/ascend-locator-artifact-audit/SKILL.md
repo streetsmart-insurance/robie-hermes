@@ -3,9 +3,15 @@ name: "ascend-locator-artifact-audit"
 description: "Test-only Job Engine audit: walk the Ascend new-program flow with Playwright strict mode and save/look up a quote PDF under the real job id. Stop before Save program. Never bind, email, or use a real client."
 job_type: "ascend.locator_artifact_audit"
 production_ready: false
+status: retired
 ---
 
 # Ascend locator + artifact audit (Test only)
+
+> **RETIRED:** Do not route or launch new work through this browser audit.
+> Ascend program creation now uses `ascend.create_program` and the
+> `ascend-api-create-program` skill exclusively. This file remains only for
+> historical incident regression coverage.
 
 This is a **full Job Engine job**, not a UI click-through script. It is the
 `hermes-test-01` Test job (step 3) in the written NEW-site gate. It is

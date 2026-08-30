@@ -1,9 +1,8 @@
 # Ascend API program creation
 
-`ascend.create_program` is the operational path for creating an Ascend
-program and its quote billables. It does not use Playwright and it does not
-replace `ascend.locator_artifact_audit`, which remains the non-saving test for
-Ascend's Import document UI.
+`ascend.create_program` is the only operational path for creating an Ascend
+program and its quote billables. It uses the Ascend API and never uses
+Playwright, CDP, browser selectors, or the Ascend dashboard UI.
 
 ## Safety boundary
 
@@ -18,6 +17,8 @@ Ascend's Import document UI.
 - PAWIVA and account `221398001` are rejected recursively before a credential
   is loaded.
 - The worker performs no email, checkout, payment, or bind operation.
+- The retired `ascend.locator_artifact_audit` browser path is not an acceptance
+  gate for API program creation and must not be selected for new work.
 
 Do not configure the Test secret reference until Test/Production Secret
 Manager isolation is confirmed. Use a sandbox credential for TEST.

@@ -109,10 +109,10 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification("ezlynx.move_document", WORKER_FOR_ACTION["ezlynx.move_document"])
     if "ezlynx" in normalized and "label" in normalized:
         return RequestClassification("ezlynx.apply_label", WORKER_FOR_ACTION["ezlynx.apply_label"])
-    if _is_ascend_locator_audit(normalized):
+    if _is_ascend_create_program(normalized):
         return RequestClassification(
-            "ascend.locator_artifact_audit",
-            WORKER_FOR_ACTION["ascend.locator_artifact_audit"],
+            "ascend.create_program",
+            WORKER_FOR_ACTION["ascend.create_program"],
         )
     if _is_submission_audit(normalized):
         return RequestClassification(
@@ -170,6 +170,21 @@ def _is_ascend_locator_audit(text: str) -> bool:
         "ascend punch list",
         "ascend locator-artifact",
         "ascend locator audit",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_ascend_create_program(text: str) -> bool:
+    """Route operational Ascend creation to the API, never the browser audit."""
+    if "ascend" not in text and "useascend" not in text:
+        return False
+    markers = (
+        "create a program",
+        "create program",
+        "new program",
+        "create-program",
+        "set up a program",
+        "setup a program",
     )
     return any(marker in text for marker in markers)
 
