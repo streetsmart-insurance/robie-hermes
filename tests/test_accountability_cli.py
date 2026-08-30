@@ -83,3 +83,9 @@ def test_daily_cli_reports_unique_queue_offers_and_member_pickups(tmp_path: Path
     assert "| Commercial | 2 | 1 | 1 | 50.0% | 190s |" in output
     assert "Commercial pickups — Erika: 1" in output
     assert "Commercial missed/refused member legs — Jackie: 2" in output
+
+def test_daily_cli_without_ringcentral_fails_closed(capsys):
+    assert main(["daily", "--as-of", "2026-08-30T17:00:00+00:00"]) == 0
+    output = capsys.readouterr().out
+    assert "UNVERIFIED — RingCentral evidence is unavailable." in output
+    assert "All client voicemails and missed calls resolved!" not in output
