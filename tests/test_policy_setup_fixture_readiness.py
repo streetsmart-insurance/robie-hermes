@@ -41,6 +41,9 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
     assert "Test gateway is not active" in text
     assert "Test gateway canonical root is missing" in text
     assert "systemctl show robie-gateway -p ExecStart" in text
+    assert "systemctl show robie-gateway -p MainPID" in text
+    assert 'pathlib.Path(f"/proc/{sys.argv[1]}/environ")' in text
+    assert 'PYTHONPATH="${gateway_pythonpath}"' in text
     assert "active Test gateway Playwright runtime is unavailable" in text
     assert "-c 'import playwright'" in text
     assert "sudo -u streetsmart-hermes" not in text

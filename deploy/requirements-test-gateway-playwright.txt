@@ -1,0 +1,3 @@
+# Test-only gateway browser runtime. Installed into the release-local
+# .gateway-runtime directory on hermes-test-01; never into Production.
+playwright==1.52.0

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-test.yml"
 INSTALLER = ROOT / "scripts" / "deploy-test-release.sh"
 ROLLBACK_LIBRARY = ROOT / "scripts" / "lib" / "test-release-rollback.sh"
+RUNTIME_REQUIREMENTS = ROOT / "deploy" / "requirements-test-gateway-playwright.txt"
 
 
 class TestDeployWorkflowContractTests(unittest.TestCase):
@@ -34,6 +35,7 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("mode=ro", text)
         self.assertIn("active Test jobs or leases exist; refuse deploy", text)
         self.assertIn("rollback_test", text)
+        self.assertIn("continuing pointer rollback", text)
         self.assertIn("atomic_pointer", text)
         candidate_verify = (
             'bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"'
@@ -61,6 +63,65 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn('--gateway-unit "${GATEWAY_UNIT}"', text)
         self.assertIn('data.get("authorizes_complete") is False', text)
         self.assertIn("TEST VERIFIED", text)
+
+    def test_playwright_runtime_is_release_local_test_only_and_evidenced(self):
+        text = INSTALLER.read_text(encoding="utf-8")
+        requirements = RUNTIME_REQUIREMENTS.read_text(encoding="utf-8")
+        self.assertIn("playwright==1.52.0", requirements)
+        self.assertIn('GATEWAY_RUNTIME_DIRNAME=".gateway-runtime"', text)
+        self.assertIn("requirements-test-gateway-playwright.txt", text)
+        self.assertIn('--target "${runtime_staging}"', text)
+        self.assertIn('--only-binary=:all:', text)
+        self.assertIn('PYTHONPATH="${runtime_root}"', text)
+        self.assertIn("from playwright.sync_api import sync_playwright", text)
+        self.assertIn("releases/current/${GATEWAY_RUNTIME_DIRNAME}", text)
+        self.assertIn("if ! install_gateway_runtime_config; then", text)
+        self.assertIn("rollback_test", text[text.index("if ! install_gateway_runtime_config; then"):])
+        self.assertIn('"content_digest": sys.argv[15]', text)
+        self.assertIn('"playwright_version": "1.52.0"', text)
+        self.assertIn('"browser_binaries_installed": False', text)
+        self.assertNotIn("playwright install", text)
+        self.assertNotIn("hermes-poc-01", text)
+
+    def test_runtime_dropin_snapshot_restore_is_behavioral(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "systemd" / "runtime.conf"
+            snapshot = root / "snapshot.conf"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("old-runtime\n", encoding="utf-8")
+            snapshot.write_text("old-runtime\n", encoding="utf-8")
+            destination.write_text("new-runtime\n", encoding="utf-8")
+
+            harness = root / "restore.sh"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "source \"$1\"\n"
+                "restore_file_snapshot present \"$2\" \"$3\"\n",
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+            subprocess.run(
+                [str(harness), str(ROLLBACK_LIBRARY), str(snapshot), str(destination)],
+                check=True,
+            )
+            self.assertEqual(destination.read_text(encoding="utf-8"), "old-runtime\n")
+
+            destination.write_text("new-runtime\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; restore_file_snapshot absent "$2" "$3"',
+                    "restore",
+                    str(ROLLBACK_LIBRARY),
+                    str(snapshot),
+                    str(destination),
+                ],
+                check=True,
+            )
+            self.assertFalse(destination.exists())
 
     def test_installs_only_guarded_policy_setup_skill_with_rollback_evidence(self):
         text = INSTALLER.read_text(encoding="utf-8")
@@ -106,6 +167,11 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
 
             gateway_state = root / "gateway.state"
             gateway_log = root / "gateway.log"
+            runtime_dropin = root / "systemd" / "runtime.conf"
+            runtime_snapshot = root / "runtime.conf.pre-deploy"
+            runtime_dropin.parent.mkdir(parents=True)
+            runtime_dropin.write_text("old-runtime\n", encoding="utf-8")
+            runtime_snapshot.write_text("old-runtime\n", encoding="utf-8")
             gateway_state.write_text("failed\n", encoding="utf-8")
             systemctl_stub = root / "systemctl-stub"
             systemctl_stub.write_text(
@@ -113,6 +179,7 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
                 "set -euo pipefail\n"
                 "printf '%s\\n' \"$*\" >>\"${GATEWAY_LOG}\"\n"
                 "case \"$1\" in\n"
+                "  daemon-reload) : ;;\n"
                 "  restart) printf 'active\\n' >\"${GATEWAY_STATE}\" ;;\n"
                 "  is-active) test \"$(cat \"${GATEWAY_STATE}\")\" = active ;;\n"
                 "  *) exit 2 ;;\n"
@@ -129,8 +196,11 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
                 "atomic_pointer \"$3\" \"$5\"\n"
                 "atomic_pointer \"$3\" \"$6\"\n"
                 "atomic_pointer \"$4\" \"$7\"\n"
+                "printf 'new-runtime\\n' >\"${10}\"\n"
                 "# Fault injection occurs only after both release pointers and the skill flip.\n"
                 "if ! false; then\n"
+                "  restore_file_snapshot present \"$9\" \"${10}\"\n"
+                "  \"${ROBIE_SYSTEMCTL}\" daemon-reload\n"
                 "  rollback_test_release \"$2\" \"$2\" \"$8\" \"$5\" \"$6\" \"$7\" robie-gateway\n"
                 "fi\n",
                 encoding="utf-8",
@@ -154,6 +224,8 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
                     str(releases_current),
                     str(skill_link),
                     str(old_skill),
+                    str(runtime_snapshot),
+                    str(runtime_dropin),
                 ],
                 check=True,
                 env=env,
@@ -164,10 +236,15 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
                 releases_current.resolve(strict=True), old_release.resolve(strict=True)
             )
             self.assertEqual(skill_link.resolve(strict=True), old_skill.resolve(strict=True))
+            self.assertEqual(runtime_dropin.read_text(encoding="utf-8"), "old-runtime\n")
             self.assertEqual(gateway_state.read_text(encoding="utf-8"), "active\n")
             self.assertEqual(
                 gateway_log.read_text(encoding="utf-8").splitlines(),
-                ["restart robie-gateway", "is-active --quiet robie-gateway"],
+                [
+                    "daemon-reload",
+                    "restart robie-gateway",
+                    "is-active --quiet robie-gateway",
+                ],
             )
 
 

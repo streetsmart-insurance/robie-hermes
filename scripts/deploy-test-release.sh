@@ -6,6 +6,9 @@ OPT_ROOT="/opt/streetsmart-hermes-test"
 JOB_DB="${OPT_ROOT}/robie-job-engine/data/jobs.db"
 GATEWAY_UNIT="robie-gateway"
 EXPECTED_HOST="hermes-test-01"
+GATEWAY_RUNTIME_DIRNAME=".gateway-runtime"
+GATEWAY_RUNTIME_REQUIREMENTS="deploy/requirements-test-gateway-playwright.txt"
+GATEWAY_RUNTIME_DROPIN="/etc/systemd/system/robie-gateway.service.d/zz-robie-test-release-runtime.conf"
 
 archive=""
 checksum=""
@@ -121,8 +124,28 @@ bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
 source "${release_root}/scripts/lib/test-release-rollback.sh"
 
+runtime_dropin_snapshot="${release_parent}/.pre-${short}-gateway-runtime.conf"
+runtime_dropin_state=absent
+if [[ -f "${GATEWAY_RUNTIME_DROPIN}" ]]; then
+  install -D -m 0600 "${GATEWAY_RUNTIME_DROPIN}" "${runtime_dropin_snapshot}"
+  runtime_dropin_state=present
+fi
+
+restore_gateway_runtime_config() {
+  restore_file_snapshot \
+    "${runtime_dropin_state}" \
+    "${runtime_dropin_snapshot}" \
+    "${GATEWAY_RUNTIME_DROPIN}"
+  systemctl daemon-reload
+}
+
 rollback_test() {
   echo "Test verification failed; restoring ${old_current}" >&2
+  local runtime_config_restored=true
+  if ! restore_gateway_runtime_config; then
+    runtime_config_restored=false
+    echo "Test runtime configuration restore failed; continuing pointer rollback" >&2
+  fi
   rollback_test_release \
     "${old_current}" \
     "${old_releases_current}" \
@@ -131,7 +154,38 @@ rollback_test() {
     "${OPT_ROOT}/releases/current" \
     "${policy_skill_link}" \
     "${GATEWAY_UNIT}"
+  [[ "${runtime_config_restored}" == true ]]
 }
+
+gateway_exec="$(systemctl show "${GATEWAY_UNIT}" -p ExecStart --value --no-pager)"
+gateway_python="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
+[[ -x "${gateway_python}" ]] || {
+  echo "active Test gateway Python interpreter is unavailable" >&2
+  exit 2
+}
+runtime_requirements="${release_root}/${GATEWAY_RUNTIME_REQUIREMENTS}"
+runtime_root="${release_root}/${GATEWAY_RUNTIME_DIRNAME}"
+[[ -f "${runtime_requirements}" ]] || {
+  echo "Test gateway Playwright requirements are missing" >&2
+  exit 2
+}
+if [[ ! -d "${runtime_root}" ]]; then
+  runtime_staging="${release_root}/${GATEWAY_RUNTIME_DIRNAME}.staging-$$"
+  trap 'rm -rf -- "${runtime_staging:-}"' EXIT
+  "${gateway_python}" -m pip install \
+    --disable-pip-version-check \
+    --no-input \
+    --only-binary=:all: \
+    --target "${runtime_staging}" \
+    --requirement "${runtime_requirements}"
+  mv "${runtime_staging}" "${runtime_root}"
+  trap - EXIT
+fi
+PYTHONPATH="${runtime_root}" "${gateway_python}" - <<'PY'
+from playwright.sync_api import sync_playwright
+assert callable(sync_playwright)
+PY
+runtime_digest="$(find "${runtime_root}" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 
 before="$(systemctl show "${GATEWAY_UNIT}" -p ActiveEnterTimestamp --value --no-pager)"
 set +e
@@ -224,6 +278,22 @@ if ! atomic_pointer "${policy_skill_source}" "${policy_skill_link}"; then
 fi
 policy_skill_digest="$(sha256sum "${policy_skill_source}/SKILL.md" "${policy_skill_source}/references/profiles.json" | sha256sum | awk '{print $1}')"
 
+install_gateway_runtime_config() {
+  install -d -m 0755 "$(dirname "${GATEWAY_RUNTIME_DROPIN}")" || return
+  runtime_dropin_tmp="${GATEWAY_RUNTIME_DROPIN}.new-$$"
+  cat >"${runtime_dropin_tmp}" <<EOF
+[Service]
+Environment="PYTHONPATH=${OPT_ROOT}/releases/current/${GATEWAY_RUNTIME_DIRNAME}:${OPT_ROOT}/releases/current:${OPT_ROOT}/.hermes/hermes-agent"
+EOF
+  chmod 0644 "${runtime_dropin_tmp}" || return
+  mv "${runtime_dropin_tmp}" "${GATEWAY_RUNTIME_DROPIN}" || return
+  systemctl daemon-reload
+}
+if ! install_gateway_runtime_config; then
+  rollback_test
+  exit 2
+fi
+
 if ! systemctl restart "${GATEWAY_UNIT}" || \
   ! systemctl is-active --quiet "${GATEWAY_UNIT}"; then
   rollback_test
@@ -260,7 +330,8 @@ mkdir -p "${evidence_dir}"
 python3 - "${evidence_dir}/test-deploy-evidence.json" "${inventory}" \
   "${commit}" "${archive_digest}" "${release_root}" "${old_current}" \
   "${GATEWAY_UNIT}" "${after}" "${proof}" "${policy_skill_link}" \
-  "${policy_skill_source}" "${policy_skill_digest}" "${old_policy_skill_target}" <<'PY'
+  "${policy_skill_source}" "${policy_skill_digest}" "${old_policy_skill_target}" \
+  "${runtime_root}" "${runtime_digest}" "${GATEWAY_RUNTIME_DROPIN}" <<'PY'
 import json
 import pathlib
 import sys
@@ -286,6 +357,13 @@ payload = {
         "content_digest": sys.argv[12],
         "previous_target": sys.argv[13] or None,
         "consequential_writes_enabled": False,
+    },
+    "gateway_playwright_runtime": {
+        "root": sys.argv[14],
+        "content_digest": sys.argv[15],
+        "systemd_dropin": sys.argv[16],
+        "playwright_version": "1.52.0",
+        "browser_binaries_installed": False,
     },
     "test_job_inventory": json.loads(sys.argv[2]),
     "verified_at": datetime.now(timezone.utc).isoformat(),

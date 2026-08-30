@@ -40,10 +40,23 @@ fi
 
 gateway_exec="$(systemctl show robie-gateway -p ExecStart --value --no-pager)"
 python_bin="$(sed -n 's/.*path=\([^ ;}]*\).*/\1/p' <<<"${gateway_exec}")"
-if ! test -x "${python_bin}" || ! "${python_bin}" -c 'import playwright' >/dev/null 2>&1; then
+gateway_pid="$(systemctl show robie-gateway -p MainPID --value --no-pager)"
+gateway_pythonpath="$(python3 - "${gateway_pid}" <<'PY'
+import pathlib
+import sys
+
+raw = pathlib.Path(f"/proc/{sys.argv[1]}/environ").read_bytes()
+for item in raw.split(b"\0"):
+    if item.startswith(b"PYTHONPATH="):
+        print(item.split(b"=", 1)[1].decode("utf-8"))
+        break
+PY
+)"
+if ! test -x "${python_bin}" || ! test -n "${gateway_pythonpath}" || \
+    ! env PYTHONPATH="${gateway_pythonpath}" "${python_bin}" -c 'import playwright' >/dev/null 2>&1; then
   echo 'fixture readiness refused: active Test gateway Playwright runtime is unavailable' >&2
   exit 1
 fi
-env ROBIE_ENV=TEST "${python_bin}" "${AUDIT_SCRIPT}" \
+env ROBIE_ENV=TEST PYTHONPATH="${gateway_pythonpath}" "${python_bin}" "${AUDIT_SCRIPT}" \
   --expected-sha "${EXPECTED_TEST_SHA}" \
   --cdp-url http://127.0.0.1:9222
