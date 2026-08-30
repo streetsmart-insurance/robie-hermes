@@ -491,17 +491,35 @@ class ProductivityAuditor:
                 })
         return flagged
 
-    def format_google_chat_card(self, audit: Dict[str, Any], title: str = "Daily Agency Productivity & Account Risk Report") -> str:
+    def format_critical_alerts_card(self, audit: Dict[str, Any], title: str = "🚨 CRITICAL ACCOUNT RISK: Unreturned Missed Calls (>30m SLA)") -> Optional[str]:
+        """Formats only the critical unreturned call alerts as a focused action message."""
+        critical_alerts = audit.get("critical_alerts", [])
+        if not critical_alerts:
+            return None
+        lines = [
+            f"🚨 **{title}**\n",
+            "⚠️ *Immediate Action Required:* The following client calls/voicemails have breached the 30-minute SLA without any outbound callback or contact:\n",
+        ]
+        lines.extend(critical_alerts)
+        return "\n".join(lines)
+
+    def format_google_chat_card(
+        self,
+        audit: Dict[str, Any],
+        title: str = "Daily Agency Productivity & Account Risk Report",
+        include_critical_section: bool = True,
+    ) -> str:
         """Formats the audit into an executive-ready Google Chat message."""
         lines = [f"📊 **{title}**\n"]
 
         critical_alerts = audit.get("critical_alerts", [])
-        if critical_alerts:
-            lines.append("🚨 **CRITICAL ACCOUNT RISK (Unreturned Missed Calls):**")
-            lines.extend(critical_alerts)
-            lines.append("")
-        else:
-            lines.append("✅ **No orphaned missed calls. All client contacts handled.**\n")
+        if include_critical_section:
+            if critical_alerts:
+                lines.append("🚨 **CRITICAL ACCOUNT RISK (Unreturned Missed Calls):**")
+                lines.extend(critical_alerts)
+                lines.append("")
+            else:
+                lines.append("✅ **No orphaned missed calls. All client contacts handled.**\n")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
