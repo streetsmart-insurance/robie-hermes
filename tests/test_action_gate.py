@@ -137,15 +137,15 @@ class ActionGateTests(unittest.TestCase):
             store = JobStore(db)
             job = store.get_job(job_id)
             self.assertEqual(job["status"], JobStatus.FAILED.value)
-            self.assertIn(REFUSAL_TOKEN, job["last_error"])
+            self.assertIn("ASCEND_UNAVAILABLE", job["last_error"])
             self.assertNotIn("PLAYWRIGHT_BLOCKED", job["last_error"])
-            self.assertTrue(is_action_gate_refusal(job))
+            self.assertFalse(is_action_gate_refusal(job))
             self.assertTrue(consumed)
             self.assertEqual(hermes, [])
             self.assertIsNone(RecordingStore(db).latest(job_id))
             self.assertFalse(has_clean_test_pass(CREATE_PROGRAM_ACTION))
 
-    def test_test_env_routes_api_and_holds_missing_structured_payload(self):
+    def test_test_env_fails_closed_when_ascend_is_excluded(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
@@ -157,9 +157,9 @@ class ActionGateTests(unittest.TestCase):
                     conversation_id="spaces/action-gate-test",
                 )
             job = JobStore(db).get_job(job_id)
-            self.assertEqual(job["action_type"], "ascend.create_program")
-            self.assertEqual(job["status"], JobStatus.NEEDS_CLARIFICATION.value)
-            self.assertIn("missing required schema field", job["last_error"])
+            self.assertEqual(job["action_type"], "hermes.unavailable")
+            self.assertEqual(job["status"], JobStatus.FAILED.value)
+            self.assertIn("ASCEND_UNAVAILABLE", job["last_error"])
             self.assertFalse(is_action_gate_refusal(job))
 
     def test_recorded_clean_test_pass_unblocks_production_n1(self):

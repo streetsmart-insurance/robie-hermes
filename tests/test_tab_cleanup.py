@@ -41,6 +41,7 @@ from robie_job_engine.tab_cleanup import (
     plan_tab_cleanup,
     refuse_wrong_host_at_job_start,
     retarget_recorder_hint,
+    reset_ezlynx_workspace,
     sweep_orphaned_tabs,
     tabs_from_pages,
     wrong_host_refuse_reason,
@@ -68,9 +69,86 @@ class FakePage:
         self.url = url
         self._guid = identity
         self.closed = False
+        self.navigations: list[str] = []
 
     def close(self) -> None:
         self.closed = True
+
+    def locator(self, _selector: str):
+        return FakeLocator()
+
+    def goto(self, url: str, *, wait_until: str) -> None:
+        self.url = url
+        self.navigations.append(f"{wait_until}:{url}")
+
+
+class FakeLocator:
+    def all(self):
+        return []
+
+
+class FakeElement:
+    def __init__(self, *, visible: bool = True, enabled: bool = True, controls=None) -> None:
+        self.visible = visible
+        self.enabled = enabled
+        self.clicked = False
+        self.controls = list(controls or [])
+
+    def is_visible(self) -> bool:
+        return self.visible and not self.clicked
+
+    def is_enabled(self) -> bool:
+        return self.enabled
+
+    def click(self) -> None:
+        self.clicked = True
+
+    def locator(self, _selector: str):
+        controls = self.controls
+
+        class _Result:
+            def all(self):
+                return controls
+
+        return _Result()
+
+
+class WorkspacePage(FakePage):
+    def __init__(self, *, closable: bool) -> None:
+        super().__init__(SESSION, "workspace")
+        self.control = FakeElement() if closable else None
+        self.panel = FakeElement(controls=[self.control] if self.control else [])
+
+    def locator(self, selector: str):
+        page = self
+
+        class _Result:
+            def all(self):
+                return [page.panel]
+
+        return _Result()
+
+
+class WorkspaceResetTests(unittest.TestCase):
+    def test_closes_visible_panel_then_navigates_neutral(self):
+        page = WorkspacePage(closable=True)
+        original_click = page.control.click
+
+        def close_panel():
+            original_click()
+            page.panel.visible = False
+
+        page.control.click = close_panel
+        result = reset_ezlynx_workspace(page)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["controls_clicked"], 1)
+        self.assertEqual(page.navigations, [f"domcontentloaded:{SESSION}"])
+
+    def test_refuses_release_when_visible_panel_cannot_be_closed(self):
+        page = WorkspacePage(closable=False)
+        result = reset_ezlynx_workspace(page)
+        self.assertFalse(result["ok"])
+        self.assertEqual(page.navigations, [])
 
 
 def _pages(*pairs: tuple[str, str]) -> list[FakePage]:
@@ -139,6 +217,8 @@ class JobTerminalCleanupTests(unittest.TestCase):
             self.assertTrue(pages[4].closed)
             self.assertTrue(pages[5].closed)
             self.assertEqual(result["session_url"], SESSION)
+            self.assertTrue(result["workspace_reset"]["ok"])
+            self.assertEqual(pages[0].navigations, [f"domcontentloaded:{SESSION}"])
             self.assertIn(SESSION, result["kept_urls"])
             self.assertNotIn(LIVE_OVERVIEW, result["kept_urls"])
             self.assertEqual(

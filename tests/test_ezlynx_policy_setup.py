@@ -308,6 +308,9 @@ def test_playwright_page_object_mock_orchestrator():
         mock_locator.select_option = AsyncMock()
         mock_locator.dispatch_event = AsyncMock()
         mock_locator.count = AsyncMock(return_value=1)
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.is_enabled = AsyncMock(return_value=True)
+        mock_locator.input_value = AsyncMock(return_value="existing-location")
 
         mock_page.locator = MagicMock(return_value=mock_locator)
         mock_page.wait_for_load_state = AsyncMock()
@@ -337,5 +340,54 @@ def test_playwright_page_object_mock_orchestrator():
         assert result.note_added is False
         assert result.error.startswith("NEEDS_CLARIFICATION:")
         mock_page.locator.assert_not_called()
+
+    asyncio.run(_run())
+
+
+def test_vehicle_garaging_uses_location_dropdown_not_hidden_raw_input():
+    async def _run():
+        dropdown = MagicMock()
+        dropdown.count = AsyncMock(return_value=1)
+        dropdown.is_visible = AsyncMock(return_value=True)
+        dropdown.is_enabled = AsyncMock(return_value=True)
+        dropdown.select_option = AsyncMock()
+        dropdown.dispatch_event = AsyncMock()
+        raw = MagicMock()
+        raw.fill = AsyncMock()
+        page = MagicMock()
+        page.locator = MagicMock(
+            side_effect=lambda selector: dropdown
+            if selector == "#Vehicle_GaragingAddressId"
+            else raw
+        )
+
+        await EzlynxPolicySetupPage(page).select_vehicle_garaging_address(
+            VehicleItem(vin="TESTVIN", garaging_address="123 Industrial Pkwy")
+        )
+
+        dropdown.select_option.assert_awaited_once_with(label="123 Industrial Pkwy")
+        dropdown.dispatch_event.assert_awaited_once_with("change")
+        raw.fill.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
+def test_vehicle_garaging_fails_closed_when_dropdown_mode_is_disabled():
+    async def _run():
+        dropdown = MagicMock()
+        dropdown.count = AsyncMock(return_value=1)
+        dropdown.is_visible = AsyncMock(return_value=False)
+        dropdown.is_enabled = AsyncMock(return_value=False)
+        page = MagicMock()
+        page.locator = MagicMock(return_value=dropdown)
+
+        try:
+            await EzlynxPolicySetupPage(page).select_vehicle_garaging_address(
+                VehicleItem(vin="TESTVIN", garaging_address="123 Industrial Pkwy")
+            )
+        except RuntimeError as exc:
+            assert str(exc).startswith("PLAYWRIGHT_BLOCKED:")
+        else:
+            raise AssertionError("disabled dropdown mode must fail closed")
 
     asyncio.run(_run())
