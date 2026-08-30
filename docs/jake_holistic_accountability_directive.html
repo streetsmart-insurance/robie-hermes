@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1e293b; line-height: 1.5; margin: 0; padding: 20px; background-color: #f8fafc; }
+  .container { max-width: 950px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+  h1 { color: #0f172a; font-size: 24px; border-bottom: 2px solid #3b82f6; padding-bottom: 12px; margin-top: 0; }
+  h2 { color: #1e293b; font-size: 18px; margin-top: 28px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+  h3 { color: #334155; font-size: 15px; margin-top: 20px; }
+  p, li { font-size: 14px; color: #334155; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+  th, td { border: 1px solid #cbd5e1; padding: 9px 12px; text-align: left; }
+  th { background-color: #1e293b; color: #ffffff; font-weight: 600; }
+  tr:nth-child(even) { background-color: #f8fafc; }
+  .badge-danger { background-color: #fee2e2; color: #991b1b; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; display: inline-block; }
+  .badge-warning { background-color: #fef3c7; color: #92400e; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; display: inline-block; }
+  .badge-success { background-color: #dcfce7; color: #166534; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; display: inline-block; }
+  .callout { background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 0 6px 6px 0; margin: 16px 0; }
+  .callout-danger { background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 0 6px 6px 0; margin: 16px 0; }
+  .code-block { background: #0f172a; color: #f8fafc; padding: 14px; border-radius: 6px; font-family: monospace; font-size: 12px; overflow-x: auto; margin: 14px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>🏛️ StreetSmart Holistic Productivity, Accountability & Queue Engine</h1>
+  <p><strong>To:</strong> Jake Ferrara (<code>jake@streetsmart.insurance</code>)<br>
+  <strong>From:</strong> Carlo Ferrara & ROBIE Engineering Engine<br>
+  <strong>Subject:</strong> Holistic Accountability Architecture, Role-Based Super-Prompts, Repeat Abandoned Client Audit & Queue Alignment</p>
+
+  <div class="callout">
+    <strong>Executive Purpose:</strong> This directive provides Jake with the complete operational blueprint to build, verify, and enforce the StreetSmart Automated Productivity & Accountability System. It covers active pipeline filters, queue membership policies, employee email inbox level auditing, and the forensic repeat-caller data.
+  </div>
+
+  <h2>📅 1. Holistic Operating Cadence: Daily, Weekly & Monthly</h2>
+  <table>
+    <tr>
+      <th>Cadence</th>
+      <th>Engine & Focus</th>
+      <th>Key Deliverables</th>
+      <th>Execution Trigger</th>
+    </tr>
+    <tr>
+      <td><strong>Daily (Real-Time)</strong></td>
+      <td><strong>Orphaned Call Watchdog</strong></td>
+      <td>Flags unreturned client voicemails (>30m SLA), lead callback response time (<15m), and queue abandonment spikes.</td>
+      <td>Runs every 30 mins during business hours + 5:00 PM EOD summary.</td>
+    </tr>
+    <tr>
+      <td><strong>Weekly</strong></td>
+      <td><strong>3-Way Productivity Scorecard</strong></td>
+      <td>Cross-references RingCentral calls + EZLynx Tasks/Notes (Looker #25979) + Magellan AI Sentiment. Scores reps 0–100.</td>
+      <td>Every Friday @ 5:00 PM (Cron <code>a3c0fe92d10a</code>).</td>
+    </tr>
+    <tr>
+      <td><strong>Monthly</strong></td>
+      <td><strong>Lost Customer Root Cause Autopsy</strong></td>
+      <td>Autonomously audits all cancelled/lost accounts over the past 30 days to diagnose why they left (phone tag, handoff confusion, rate shock).</td>
+      <td>1st of every month @ 8:00 AM.</td>
+    </tr>
+  </table>
+
+  <h2>🎧 2. Call Queue Membership Alignment (Policy Rule)</h2>
+  <div class="callout-danger">
+    <strong>Critical Policy Decision:</strong><br>
+    <strong>Account Managers (e.g. Jazmin Molina, Sandy Santana) DO NOT belong in general incoming call queues.</strong><br>
+    • <strong>The Problem:</strong> When Account Managers are dumped into the general ring group, they ignore the queue (e.g., Jazmin's 88.9% missed rate), while their focused renewal and servicing work is continuously disrupted.<br>
+    • <strong>The Standard:</strong> General Queues (<code>Commercial 9006</code>, <code>Trucking 105</code>, <code>Personal Lines 104</code>) must be staffed exclusively by <strong>Account Technicians & Queue Rescuers</strong>. Account Managers handle direct client appointments, scheduled renewal reviews, and assigned client escalations.
+  </div>
+
+  <h2>📬 3. Employee Email Inbox Level Auditing (Solving "Unanswered Emails")</h2>
+  <p>To eliminate client complaints regarding unanswered emails, ROBIE will ingest inbox backlog levels through a 2-pillar audit:</p>
+  <ol>
+    <li><strong>Google Workspace Gmail API (Service Account):</strong>
+      <ul>
+        <li>Scans employee work inboxes (<code>user@streetsmart.insurance</code>) for:
+          <br>— <strong>Total Unread Count:</strong> Backlog volume per employee.
+          <br>— <strong>Oldest Unread Email:</strong> Flags any client email sitting unanswered for <strong>> 24 hours</strong>.
+          <br>— <strong>Average Response Time:</strong> Measures hours between inbound client email and outbound rep reply.
+        </li>
+      </ul>
+    </li>
+    <li><strong>EZLynx Communication Center Inbox:</strong>
+      <ul>
+        <li>Audits <code>Unresolved</code> SMS and email communication threads across all employee inboxes to prevent reps from leaving client conversations open indefinitely.
+        </li>
+      </ul>
+    </li>
+  </ol>
+
+  <h2>🚨 4. Forensic Case Study & The 167 Repeat Abandoned Callers</h2>
+  <p>Our 7-day reconciliation caught <strong>167 callers who dialed 3+ times with ZERO return callbacks</strong> across the agency.</p>
+
+  <h3>Case 1: The Costa 1 Cleaning Churn Breakdown (Account #132780296)</h3>
+  <ul>
+    <li><strong>3.5-Year Loyal Account:</strong> Renewed Utica First BOP ($952.85) on Sat 08/22.</li>
+    <li><strong>The Breakdown:</strong> Called in Tue 08/25 @ 2:35 PM. Transferred to Jackie Arriola (Ext 9042) who was offline. Costa sat on hold for <strong>16 minutes 55 seconds</strong>.</li>
+    <li><strong>The Churn:</strong> Costa called back Wed 08/26, bounced between 4 different reps in 24 hours, and Sandy sent her the cancellation form immediately following a 17-minute call.</li>
+  </ul>
+
+  <h3>Top Repeat Accounts Currently in Distress (Zero Callbacks):</h3>
+  <table>
+    <tr>
+      <th>Client / Account</th>
+      <th>Phone Number</th>
+      <th>Inbound Dials</th>
+      <th>Voicemails</th>
+      <th>Reps / Queues Hit</th>
+      <th>Status & Risk</th>
+    </tr>
+    <tr>
+      <td><strong>Kyoungnam Moon</strong></td>
+      <td><code>(551) 200-2984</code></td>
+      <td><strong>50x 🚨</strong></td>
+      <td>6 VMs</td>
+      <td>Mike Sosa, Ricardo Aguilar, Trucking</td>
+      <td><span class="badge-danger">Severe Trucking Risk</span></td>
+    </tr>
+    <tr>
+      <td><strong>Live Oak FL</strong></td>
+      <td><code>(386) 249-8449</code></td>
+      <td><strong>47x 🚨</strong></td>
+      <td>2 VMs</td>
+      <td>Andrea Illanes, Ricardo, Commercial</td>
+      <td><span class="badge-danger">Commercial Account Risk</span></td>
+    </tr>
+    <tr>
+      <td><strong>Sandra Wheeler</strong></td>
+      <td><code>(267) 304-4776</code></td>
+      <td><strong>26x 🚨</strong></td>
+      <td>0 VMs</td>
+      <td>Trucking Queue, Main Line</td>
+      <td><span class="badge-danger">26 Dials with Zero Callback</span></td>
+    </tr>
+    <tr>
+      <td><strong>Pierre Kaldas</strong></td>
+      <td><code>(407) 334-0410</code></td>
+      <td><strong>25x 🚨</strong></td>
+      <td>0 VMs</td>
+      <td>Maria Bara, Mike Sosa, Diana, Ricardo</td>
+      <td><span class="badge-warning">Bounced Across 4 Reps</span></td>
+    </tr>
+    <tr>
+      <td><strong>Parul Patel</strong></td>
+      <td><code>(551) 358-3911</code></td>
+      <td><strong>21x 🚨</strong></td>
+      <td>6 VMs</td>
+      <td>Jackie Arriola, Commercial Queue</td>
+      <td><span class="badge-danger">6 Voicemails Ignored</span></td>
+    </tr>
+    <tr>
+      <td><strong>Rony Dupoux</strong></td>
+      <td><code>(908) 265-5665</code></td>
+      <td><strong>17x 🚨</strong></td>
+      <td>6 VMs</td>
+      <td>Diana Cabrera, Trucking Queue</td>
+      <td><span class="badge-danger">Trucking Client Left 6 VMs</span></td>
+    </tr>
+    <tr>
+      <td><strong>Juan Oviedo Munoz</strong></td>
+      <td><code>(732) 351-6405</code></td>
+      <td><strong>16x 🚨</strong></td>
+      <td>6 VMs</td>
+      <td>Jazmin Molina</td>
+      <td><span class="badge-danger">Jazmin Ignored 6 Voicemails</span></td>
+    </tr>
+    <tr>
+      <td><strong>Utica First Ins</strong></td>
+      <td><code>(315) 736-8211</code></td>
+      <td><strong>12x 🚨</strong></td>
+      <td>4 VMs</td>
+      <td>Lenin Perdomo, Commercial Queue</td>
+      <td><span class="badge-danger">Carrier Notice Left Unreturned</span></td>
+    </tr>
+    <tr>
+      <td><strong>Piotr Gusciora</strong></td>
+      <td><code>(973) 652-8939</code></td>
+      <td><strong>6x 🚨</strong></td>
+      <td>3 VMs</td>
+      <td>Jackie Arriola</td>
+      <td><span class="badge-danger">4m Voicemail Ignored</span></td>
+    </tr>
+    <tr>
+      <td><strong>Tuscano Agency</strong></td>
+      <td><code>(724) 836-1510</code></td>
+      <td><strong>4x 🚨</strong></td>
+      <td>2 VMs</td>
+      <td>Jackie Arriola</td>
+      <td><span class="badge-danger">Wholesale Underwriter Ignored</span></td>
+    </tr>
+  </table>
+
+  <h2>🎯 5. Jake's Super-Prompt Specifications by Role</h2>
+  <p>The prompt specifications in <code>docs/STREETSMART_ROLE_BASED_ACCOUNTABILITY_SUPER_PROMPT.md</code> are ready for Jake to review and test:</p>
+  <ul>
+    <li><strong>Super-Prompt 1 (Sales Producers):</strong> Tracks Outbound Dials (>40/day) + Sales Center Pipeline Velocity + Submission Center Underwriter turnarounds (<48h).</li>
+    <li><strong>Super-Prompt 2 (Account Managers):</strong> Direct Inbound Pickup (>80%) + 0 Overdue Tasks in EZLynx + Retention Center (contacting renewals 30/60/90 days out) + Magellan AI Sad Sentiment.</li>
+    <li><strong>Super-Prompt 3 (Queue & Operations):</strong> Inbound Queue Pickup Rate (>90%), Abandonment (<5%), Hold Time Violations (>180s), and Department Voicemail SLA.</li>
+    <li><strong>Super-Prompt 4 (Monthly Churn Autopsy):</strong> Automated root-cause autopsy on every cancelled account.</li>
+  </ul>
+
+  <h2>🛠️ 6. Immediate Action Items for Jake</h2>
+  <ol>
+    <li><strong>Queue Configuration in RingCentral:</strong> Remove Account Managers (Jazmin) from general queues; restrict queue ring-groups to Account Technicians & Dedicated Queue Rescuers.</li>
+    <li><strong>Active Pipeline Verification:</strong> Verify EZLynx Sales Center deal stages and Looker Report #25979 filters for Producers.</li>
+    <li><strong>Review Repository PR #89:</strong> Check the automated scripts and test suite in <code>feature/productivity-audit-v2</code>.</li>
+  </ol>
+
+</div>
+</body>
+</html>
