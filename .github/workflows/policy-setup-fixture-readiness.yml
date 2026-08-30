@@ -59,7 +59,7 @@ jobs:
             --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${staging}'"
           gcloud compute scp \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            scripts/audit-policy-setup-fixture-readiness.js \
+            scripts/audit-policy-setup-fixture-readiness.py \
             scripts/run-policy-setup-fixture-readiness-remote.sh \
             "${TEST_VM}:${staging}/"
       - name: Audit Test browser without writes
@@ -69,7 +69,7 @@ jobs:
           staging="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo env ROBIE_ENV=TEST TEST_ROOT='${TEST_ROOT}' EXPECTED_TEST_SHA='${EXPECTED_TEST_SHA}' AUDIT_SCRIPT='${staging}/audit-policy-setup-fixture-readiness.js' bash '${staging}/run-policy-setup-fixture-readiness-remote.sh'" \
+            --command="sudo env ROBIE_ENV=TEST TEST_ROOT='${TEST_ROOT}' EXPECTED_TEST_SHA='${EXPECTED_TEST_SHA}' AUDIT_SCRIPT='${staging}/audit-policy-setup-fixture-readiness.py' bash '${staging}/run-policy-setup-fixture-readiness-remote.sh'" \
             | tee "${RUNNER_TEMP}/fixture-readiness.log"
           grep -Fq '"result": "TEST READINESS VERIFIED"' "${RUNNER_TEMP}/fixture-readiness.log"
           grep -Fq '"consequential_writes": 0' "${RUNNER_TEMP}/fixture-readiness.log"
