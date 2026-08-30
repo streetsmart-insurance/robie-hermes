@@ -634,7 +634,14 @@ def audit_terminal_job(
             cached_audit = store.get_checkpoint(job_id, AUDIT_CHECKPOINT)
             if isinstance(cached_audit, dict) and cached_audit.get("job_id"):
                 cached_audit = dict(cached_audit)
-                cached_audit.setdefault("chat_message", format_audit_chat_message(cached_audit))
+                message = cached_audit.setdefault("chat_message", format_audit_chat_message(cached_audit))
+                if chat_poster is not None:
+                    try:
+                        posted = chat_poster(cached_audit, message)
+                        cached_audit["chat_posted"] = posted is not False
+                    except Exception as exc:
+                        cached_audit["chat_posted"] = False
+                        cached_audit["chat_post_error"] = f"{type(exc).__name__}: {exc}"
                 return cached_audit
         except Exception:
             pass
