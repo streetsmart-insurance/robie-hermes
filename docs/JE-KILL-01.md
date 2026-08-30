@@ -70,7 +70,19 @@ guesses a customer record. The protected-main workflow
 - none of the configured accounts is the known forbidden PAWIVA account.
 
 The three scenarios use isolated Job databases under
-`/opt/streetsmart-hermes-test/je-kill/runs`. The parent process kills a real
+`/opt/streetsmart-hermes-test/je-kill/runs`. The official remote script
+(`scripts/run-je-kill-test-remote.sh`) runs on `hermes-test-01` as
+`streetsmart-hermes-test` with `/opt/streetsmart-hermes-test/venv/bin/python`
+from a cwd that user can `chdir` into. It does not use Production
+`streetsmart-hermes` home or venv paths.
+
+Playwright sync stays on one owner thread for the CDP connection. The Job
+Engine timeout pool must not call `page.goto` / locators after reconcile
+opened CDP on another greenlet. `port.close()` disconnects that CDP client
+only; it must not close the operator-owned Test Chrome the parent still
+needs after a killed child.
+
+The parent process kills a real
 child before the action, after the browser consequence but before Job Engine
 recording, and after authoritative verification but before evidence is
 persisted. Each restart must end with one browser-action attempt, one durable

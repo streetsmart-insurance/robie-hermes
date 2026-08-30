@@ -10,16 +10,20 @@ readback before any interrupted action may be repeated.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import multiprocessing
 import os
+import queue
 import socket
+import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 from .engine import JobEngine
@@ -29,6 +33,8 @@ from .models import JobStatus, VerificationResult, WorkerResult
 from .runs import IsolatedRunStore
 from .store import JobStore
 
+T = TypeVar("T")
+
 
 EXPECTED_HOST = "hermes-test-01"
 EXPECTED_ENV = "TEST"
@@ -36,6 +42,67 @@ ACTION = "ezlynx.apply_label"
 PHASES = ("before_action", "after_action", "during_verification")
 FORBIDDEN_ACCOUNT_IDS = frozenset({"221398001"})
 POSITIONAL_MARKERS = (".first", ".last", ".nth", ":nth", "nth=")
+GREENLET_THREAD_SWITCH = (
+    "Cannot switch to a different thread — Current: <greenlet"
+)
+
+
+class PlaywrightThread:
+    """Own every Playwright sync call on one greenlet-bound thread.
+
+    ``JobEngine._call_worker`` uses a ``ThreadPoolExecutor``. Playwright's
+    sync API is bound to the thread that opened the CDP connection. The
+    JE-KILL live path therefore cannot call ``page.goto`` / locators from
+    the Job Engine pool after reconcile opened CDP on the main thread.
+    """
+
+    def __init__(self) -> None:
+        self._jobs: queue.Queue[
+            tuple[Callable[[], Any], concurrent.futures.Future[Any]] | None
+        ] = queue.Queue()
+        self._ready = threading.Event()
+        self.thread_id = 0
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="je-kill-playwright",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("JE-KILL Playwright thread failed to start")
+
+    def _loop(self) -> None:
+        self.thread_id = threading.get_ident()
+        self._ready.set()
+        while True:
+            item = self._jobs.get()
+            if item is None:
+                return
+            fn, done = item
+            try:
+                done.set_result(fn())
+            except BaseException as exc:
+                done.set_exception(exc)
+
+    def call(self, fn: Callable[[], T]) -> T:
+        if threading.get_ident() == self.thread_id:
+            return fn()
+        done: concurrent.futures.Future[T] = concurrent.futures.Future()
+        self._jobs.put((fn, done))
+        return done.result()
+
+    def shutdown(self) -> None:
+        if not self._thread.is_alive():
+            return
+        self._jobs.put(None)
+        self._thread.join(timeout=5)
+
+
+def _on_playwright_thread(method: Callable[..., T]) -> Callable[..., T]:
+    def wrapper(self: PersistentChromeEzlynxPort, *args: Any, **kwargs: Any) -> T:
+        return self._pw_thread.call(lambda: method(self, *args, **kwargs))
+
+    return wrapper
 
 
 def _utc_now() -> str:
@@ -190,18 +257,36 @@ class PersistentChromeEzlynxPort:
         self._pw: Any | None = None
         self._browser: Any | None = None
         self._page: Any | None = None
+        self._pw_thread = PlaywrightThread()
 
     def close(self) -> None:
-        if self._pw is not None:
-            self._pw.stop()
-        self._pw = self._browser = self._page = None
+        """Disconnect this CDP client only. Never close operator-owned Chrome."""
 
+        def _disconnect() -> None:
+            pw = self._pw
+            self._pw = self._browser = self._page = None
+            if pw is not None:
+                # playwright.stop() drops the CDP websocket. Do not call
+                # browser.close() / page.close() — a killed JE-KILL child
+                # plus those APIs can take down the Test Chrome the parent
+                # still needs for resume.
+                pw.stop()
+
+        try:
+            self._pw_thread.call(_disconnect)
+        finally:
+            self._pw_thread.shutdown()
+
+    def _start_playwright(self) -> Any:
+        from playwright.sync_api import sync_playwright
+
+        return sync_playwright().start()
+
+    @_on_playwright_thread
     def _connect(self) -> Any:
         if self._page is not None:
             return self._page
-        from playwright.sync_api import sync_playwright
-
-        self._pw = sync_playwright().start()
+        self._pw = self._start_playwright()
         self._browser = self._pw.chromium.connect_over_cdp(self.cdp_url, timeout=15_000)
         pages = [page for context in self._browser.contexts for page in context.pages]
         if not pages:
@@ -215,6 +300,7 @@ class PersistentChromeEzlynxPort:
         self._page = eligible[0]
         return self._page
 
+    @_on_playwright_thread
     def _assert_authenticated(self) -> None:
         page = self._connect()
         url = str(page.url or "").casefold()
@@ -222,6 +308,7 @@ class PersistentChromeEzlynxPort:
         if "login" in url or "signin" in url or password_count:
             raise RuntimeError("AUTH_CHALLENGE: EZLynx Test session is expired")
 
+    @_on_playwright_thread
     def _locator(self, spec: dict[str, Any], *, scope: Any | None = None) -> Any:
         target = scope or self._connect()
         kind = spec["kind"]
@@ -245,20 +332,29 @@ class PersistentChromeEzlynxPort:
             )
         return locator
 
+    def preflight(self) -> None:
+        """Fail closed on tab/auth before a kill cycle. Disconnect after."""
+        self._connect()
+        self._assert_authenticated()
+
+    @_on_playwright_thread
     def begin_action(self) -> None:
         page = self._connect()
         page.goto(self.scenario.action_url, wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
 
+    @_on_playwright_thread
     def exact_option(self, *, stable_id: str, exact_text: str, scope: Any | None = None) -> Any:
         if stable_id != self.scenario.label_id or exact_text != self.scenario.label:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: option is outside approved Test fixture")
         return self._require_one(self._locator(self.scenario.label_option, scope=scope), "label option")
 
+    @_on_playwright_thread
     def click(self, target: Any) -> None:
         locator = self._locator(target) if isinstance(target, dict) else target
         self._require_one(locator, "click target").click()
 
+    @_on_playwright_thread
     def wait_interactable(
         self, *, role: str, name: str, timeout_ms: int, scope: Any | None = None
     ) -> Any:
@@ -277,11 +373,13 @@ class PersistentChromeEzlynxPort:
     def wait_frame_interactable(self, **_: Any) -> Any:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: frame actions are outside this apply-label prototype")
 
+    @_on_playwright_thread
     def fill_like_user(self, target: Any, value: str) -> None:
         if value != self.scenario.label:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: label differs from approved Test fixture")
         self._require_one(target, "label search").fill(value)
 
+    @_on_playwright_thread
     def submit(self, *, idempotency_key: str) -> dict[str, Any]:
         page = self._connect()
         try:
@@ -297,6 +395,7 @@ class PersistentChromeEzlynxPort:
     def api_state(self, action_type: str, expected: dict[str, Any]) -> None:
         return None
 
+    @_on_playwright_thread
     def fresh_page_state(self, action_type: str, expected: dict[str, Any]) -> dict[str, Any]:
         if action_type != ACTION or expected.get("resource_id") != self.scenario.resource_id:
             raise RuntimeError("readback destination is outside approved Test fixture")
@@ -401,6 +500,7 @@ def _engine(db: Path, scenario: ScenarioFixture, *, phase: str, marker: Path, at
         reconcilers={ACTION: verifier},
         lease_seconds=2,
         enforce_recording_policy=False,
+        call_worker_on_calling_thread=True,
     )
     return engine, port
 
@@ -411,6 +511,8 @@ def _child(db: str, job_id: str, fixture_path: str, phase: str, marker: str, att
     try:
         engine.run(job_id)
     finally:
+        # Disconnect CDP only. SIGKILL of this child skips finally; the
+        # parent must still be able to attach to the same Test Chrome.
         port.close()
 
 
@@ -434,6 +536,11 @@ def run_phase(fixture_path: Path, fixture: LiveFixture, phase: str, run_root: Pa
         idempotency_key=f"je-kill-live:{run_root.name}:{phase}",
         max_attempts=3,
     )
+    preflight = PersistentChromeEzlynxPort(scenario, cdp_url=cdp_url)
+    try:
+        preflight.preflight()
+    finally:
+        preflight.close()
     context = multiprocessing.get_context("spawn")
     process = context.Process(
         target=_child,

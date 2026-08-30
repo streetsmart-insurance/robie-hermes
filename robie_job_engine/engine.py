@@ -115,6 +115,7 @@ class JobEngine:
         perform_timeout_seconds: float = 120,
         enforce_recording_policy: bool = False,
         lease_seconds: int = 120,
+        call_worker_on_calling_thread: bool = False,
     ):
         self.store = store
         self.workers = workers
@@ -130,6 +131,10 @@ class JobEngine:
         self.perform_timeout_seconds = perform_timeout_seconds
         self.enforce_recording_policy = enforce_recording_policy
         self.lease_seconds = max(1, int(lease_seconds))
+        # Playwright sync is greenlet-bound. JE-KILL live sets this so
+        # perform stays on the thread that already opened CDP in
+        # reconcile / verify. Production default keeps the timeout pool.
+        self.call_worker_on_calling_thread = bool(call_worker_on_calling_thread)
 
     def request_retry(
         self,
@@ -230,6 +235,13 @@ class JobEngine:
                 reason = (
                     "registered Skill recording policy is EXEMPT because authentication "
                     "may display credentials or MFA data"
+                )
+            elif contract:
+                reason = (
+                    "recording not enforced: registered Skill "
+                    f"{job['action_type']} has recording_policy="
+                    f"{contract.recording_policy} but this engine run has "
+                    "enforce_recording_policy=False"
                 )
             else:
                 reason = "action is not registered as an executable Skill"
@@ -690,6 +702,8 @@ class JobEngine:
 
     def _call_worker(self, worker: ComputerWorker, job: dict[str, Any]) -> WorkerResult:
         timeout = float(job["payload"].get("perform_timeout_seconds", self.perform_timeout_seconds))
+        if self.call_worker_on_calling_thread:
+            return worker.perform(job, idempotency_key=job["idempotency_key"])
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             future = pool.submit(worker.perform, job, idempotency_key=job["idempotency_key"])
