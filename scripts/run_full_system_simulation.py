@@ -84,19 +84,32 @@ def simulate_full_agency_ecosystem():
     suite = ReportingSuite()
 
     # -------------------------------------------------------------
-    # SIMULATION 1: 15-MINUTE INTRA-DAY WATCHDOG ALERT
+    # SIMULATION 1: 15-MINUTE INTRA-DAY WATCHDOG ALERT (WITH MAGELLAN SENTIMENT)
     # -------------------------------------------------------------
     print("\n" + "─" * 70)
-    print("📍 [CRON 1: 15-MINUTE SLA WATCHDOG] (Triggered intra-day)")
+    print("📍 [CRON 1: 15-MINUTE SLA WATCHDOG + MAGELLAN CHURN TAGS]")
     print("─" * 70)
     orphaned_incidents = [inc for inc in audit.get("incidents", []) if inc.get("status") == "ORPHANED_ALERT"]
-    if orphaned_incidents:
-        print(f"🚨 **CRITICAL ACCOUNT RISK: {len(orphaned_incidents)} UNRETURNED CALLS (>30m SLA)**")
-        for idx, inc in enumerate(orphaned_incidents, 1):
-            caller = inc.get("caller_phone")
+    
+    from robie_job_engine.magellan_client import MagellanAuditor, MagellanCallRecord
+    magellan_records = [
+        MagellanCallRecord(now - timedelta(hours=5), "5552000001", "5559999042", 45, "Sad", ["At-Risk Customer", "Cancellation"], False, "Costa Morales", "Client frustrated over hold time"),
+        MagellanCallRecord(now - timedelta(hours=3), "5552000002", "5559999042", 0, "Neutral", ["Billing"], False, "John Smith", "Billing inquiry"),
+    ]
+    
+    enriched_alerts = MagellanAuditor.correlate_with_ringcentral(
+        magellan_records,
+        [{"from": inc.get("caller_phone"), "rep": inc.get("employee_name", "Queue"), "time": inc.get("missed_at")} for inc in orphaned_incidents]
+    )
+
+    if enriched_alerts:
+        print(f"🚨 **CRITICAL ACCOUNT RISK: {len(enriched_alerts)} UNRETURNED CALLS (>30m SLA)**")
+        for idx, inc in enumerate(enriched_alerts, 1):
+            caller = str(inc.get("from", ""))
             formatted = f"({caller[:3]}) {caller[3:6]}-{caller[6:]}" if len(caller) == 10 else caller
-            rep = inc.get("employee_name", "Queue")
-            print(f"  {idx}. 🔴 {formatted} — Assigned/Left on: *{rep}* | Status: Unreturned SLA Breach")
+            rep = inc.get("rep", "Queue")
+            sent_badge = f"🔥 [MAGELLAN CHURN ALERT: {inc.get('magellan_sentiment')} | Tags: {', '.join(inc.get('magellan_tags', []))}]" if inc.get("magellan_at_risk") else f"[{inc.get('magellan_sentiment', 'UNRECORDED')}]"
+            print(f"  {idx}. 🔴 {formatted} — Left on *{rep}* | {sent_badge}")
     else:
         print("🟢 WATCHDOG: All client voicemails and missed calls are resolved.")
 
