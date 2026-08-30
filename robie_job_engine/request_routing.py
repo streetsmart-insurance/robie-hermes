@@ -5,6 +5,9 @@ from dataclasses import dataclass
 
 
 WORKER_FOR_ACTION = {
+    "accountability.daily": "accountability-report",
+    "accountability.weekly": "accountability-report",
+    "accountability.monthly": "accountability-report",
     "drive.skill_sync": "drive-skill-sync",
     "carrier.proposal": "carrier-proposal",
     "browser.read": "browser-read",
@@ -23,6 +26,9 @@ WORKER_FOR_ACTION = {
 
 BOUNDED_ENGINE_ACTIONS = frozenset(
     {
+        "accountability.daily",
+        "accountability.weekly",
+        "accountability.monthly",
         "drive.skill_sync",
         "carrier.proposal",
         "browser.read",

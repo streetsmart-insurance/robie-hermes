@@ -147,3 +147,58 @@ Executive Churn Autopsy Report:
 - Responsible Parties & Process Breakdown
 - Recommended Agency SOP Preventive Fix
 ```
+
+---
+
+## Evidence-Backed Daily, Weekly, and Monthly Reporting Contract
+
+The report engine must fail closed: if an export is missing, empty, stale, or
+cannot be parsed, the affected metric is **UNVERIFIED**. It must never substitute
+sample counts, a default score, or an assumed customer root cause.
+
+### Department tracker register
+
+| Tracker | Department | Cadence | Exception question | Verified source/schema |
+|---|---|---|---|---|
+| BOR Tracker | Commercial / Trucking | Weekly | Which BORs remain pending or blocked? | Sheet `17mlkNkDlP51TjNPUVIe0f8-hhDJ6-mF6cRQFWyaAbzs`; client, carrier, submitted/effective dates, status, notes, department |
+| Pending Payouts | Accounting | Weekly | Which payments are blocked by missing policy number, invoice, or release data? | Accounting Payable Worklist; applicant, policy number, invoice number, due date, amount, received/paid/net due |
+| Policy Change Request Tracker | Service | Daily | Which changes exceeded turnaround or lack an owner/next step? | Export required; column aliases are normalized and source row preserved |
+| Referrals Report - Last Week | Sales | Weekly | Which referrals need follow-up and which became wins? | Sheet `1dbhkyWw5krL_ujbOBfrh1_s3LlTcWBPutCZw4y9m3Hc`; account, referrer, assigned agent, source/status, producer, estimated value |
+| Missed Calls Report 2026 | All departments | Daily | Was each missed call returned within SLA, and by whom? | Reconciled with RingCentral inbound/outbound evidence; tracker export supplements manual disposition |
+| 2026 Pending COIs/Endorsements | Service | Daily | Which requests are late, blocked, or missing a next step? | Export required; account, owner, request/due dates, status and notes expected |
+| Expiration Report | Retention | Weekly | Which upcoming renewals lack a documented renewal plan? | Renewal tracker `1AnnKl85a8QzFUGabpy_UduhZBdjlCFfcOl35cqcykLs`; account, renewal date, status, remarks, premium, agent |
+| Voicemail/Email Tracker | All departments | Weekly | Who has unresolved workload, and is the weekly tracker complete? | Sheet `1wB1ZBJDDkR6WjWLFw19DWTt1eowEb8nTG_aKl-s`; employee/email weekly count matrix |
+| Case Studies | All departments | Monthly | Which saved renewal or new-business win has evidence suitable for team sharing? | Evidence bundle must identify the account, result, owner, and supporting source IDs |
+| Submission Center Status | Sales | Weekly | Which open submission is older than 30 days or has no actionable note? | EZLynx Submission Center export; submission/account/owner/carrier/created/last activity/status |
+| Policy Transaction - Audit & Cancellation | Accounting / Service | Weekly | Which audits/cancellations remain incomplete or need escalation? | Export required; transaction/account/owner/due date/status/notes expected |
+
+Each exception carries the original tracker name and source row. A vague note is
+a coaching signal, not proof that work did not occur. Employee discipline or a
+churn verdict requires corroborating RingCentral, EZLynx, Magellan, email, and/or
+document evidence.
+
+### Gmail accountability boundary
+
+For a backend report, use a Google Workspace service account with administrator-
+approved domain-wide delegation and the narrowest Gmail read-only metadata
+scope. Impersonate each approved employee only for the reporting job. Report
+thread-level workflow signals such as unread age, last external message, last
+employee response, and whether the thread appears to await the employee. Do not
+publish message bodies in leadership reports by default.
+
+Unread is not the same as unreplied. A reliable email metric must reconstruct the
+thread and determine whose message was last. Auto-replies, internal-only threads,
+spam, bulk mail, and delegated/shared inbox behavior must be excluded by written
+rules. Until Workspace authorization and those rules are approved, Gmail metrics
+remain **UNVERIFIED** and the browser-export/manual tracker path is used.
+
+### Reporting cadence
+
+- Daily: direct and queue calls, voicemail/callback reconciliation, overdue tasks,
+  policy changes, missed calls, and pending COIs/endorsements.
+- Weekly: per-employee rollup, Sales/Retention/Submission Centers, Gmail workflow
+  signals, BORs, payouts, referrals, expirations, audits/cancellations, and tracker
+  completion.
+- Monthly: trends and recurring exceptions plus evidence-backed case studies and
+  churn autopsies. An agency grade is shown only when the approved weighting
+  formula version and all required evidence are supplied.

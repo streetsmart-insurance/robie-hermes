@@ -7,6 +7,7 @@ from robie_job_engine.ezlynx_productivity_sync import EZLynxProductivityParser
 from robie_job_engine.productivity import (
     EZLynxActivityMetric,
     EZLynxTaskMetric,
+    EmployeeProductivityReport,
     ProductivityAuditor,
     RingCentralCall,
     format_phone,
@@ -21,6 +22,29 @@ def test_normalize_phone():
     assert normalize_phone("15551234567") == "5551234567"
     assert normalize_phone("5551234567") == "5551234567"
     assert format_phone("5551234567") == "(555) 123-4567"
+
+
+def test_no_inbound_calls_is_not_a_perfect_answer_rate():
+    report = EmployeeProductivityReport(employee_name="No Volume")
+    assert report.answer_rate_percent is None
+    assert report.callback_resolution_rate_percent is None
+
+
+def test_failed_outbound_dial_does_not_resolve_voicemail():
+    auditor = ProductivityAuditor(sla_warning_minutes=30)
+    base_time = datetime(2026, 8, 29, 14, 0, 0, tzinfo=timezone.utc)
+    calls = [
+        RingCentralCall(
+            "in-1", "Inbound", "5551234567", "5559990001", "Voicemail", 30,
+            base_time, "101", "Sarah"
+        ),
+        RingCentralCall(
+            "out-1", "Outbound", "5559990001", "5551234567", "No Answer", 0,
+            base_time + timedelta(minutes=10), "101", "Sarah"
+        ),
+    ]
+    incidents = auditor.reconcile_missed_calls(calls, reference_time=base_time + timedelta(hours=1))
+    assert incidents[0].status == "ORPHANED_ALERT"
 
 
 def test_missed_call_reconciliation_resolved():
@@ -397,5 +421,3 @@ def test_ringcentral_client_from_env_and_polling():
             assert len(orphaned) == 1
             assert orphaned[0]["caller_phone"] == "5559876543"
             assert orphaned[0]["status"] == "ORPHANED_ALERT"
-
-

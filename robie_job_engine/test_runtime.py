@@ -131,14 +131,20 @@ def build_runtime_engine(
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
     from .ascend_locator_audit import AscendLocatorAuditVerifier, AscendLocatorAuditWorker
+    from .accountability_jobs import AccountabilityReportVerifier, AccountabilityReportWorker
     from .ascend_api import AscendCreateProgramVerifier, AscendCreateProgramWorker
     from .chat_verifiers import EzlynxSubmissionAuditVerifier
     from .skill_sync import DriveSkillSyncVerifier, DriveSkillSyncWorker
 
     workers["drive-skill-sync"] = DriveSkillSyncWorker()
+    workers["accountability-report"] = AccountabilityReportWorker()
     workers["ascend-locator-audit"] = AscendLocatorAuditWorker()
     workers["ascend-api"] = AscendCreateProgramWorker()
     verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
+    accountability_verifier = AccountabilityReportVerifier()
+    verifiers["accountability.daily"] = accountability_verifier
+    verifiers["accountability.weekly"] = accountability_verifier
+    verifiers["accountability.monthly"] = accountability_verifier
     verifiers["ascend.locator_artifact_audit"] = AscendLocatorAuditVerifier()
     verifiers["ascend.create_program"] = AscendCreateProgramVerifier()
 

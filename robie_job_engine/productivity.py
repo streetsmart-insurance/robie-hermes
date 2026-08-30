@@ -172,10 +172,12 @@ class EmployeeProductivityReport:
     missed_calls_orphaned: int = 0
     missed_calls_pending: int = 0
     avg_callback_time_minutes: Optional[float] = None
-    ezlynx_tasks_completed: int = 0
-    ezlynx_tasks_overdue: int = 0
-    ezlynx_activities_logged: int = 0
-    productivity_score: float = 0.0  # 0 to 100
+    ezlynx_tasks_completed: Optional[int] = None
+    ezlynx_tasks_overdue: Optional[int] = None
+    ezlynx_activities_logged: Optional[int] = None
+    productivity_score: Optional[float] = None  # None when required evidence is absent
+    score_status: str = "UNVERIFIED"
+    data_limitations: List[str] = field(default_factory=list)
     alerts: List[str] = field(default_factory=list)
 
     @property
@@ -183,16 +185,16 @@ class EmployeeProductivityReport:
         return round(self.total_talk_time_seconds / 60.0, 1)
 
     @property
-    def answer_rate_percent(self) -> float:
+    def answer_rate_percent(self) -> Optional[float]:
         if self.inbound_total == 0:
-            return 100.0
+            return None
         return round((self.inbound_answered / self.inbound_total) * 100.0, 1)
 
     @property
-    def callback_resolution_rate_percent(self) -> float:
+    def callback_resolution_rate_percent(self) -> Optional[float]:
         total_missed = self.inbound_missed + self.inbound_voicemails
         if total_missed == 0:
-            return 100.0
+            return None
         return round((self.missed_calls_resolved / total_missed) * 100.0, 1)
 
 
@@ -204,10 +206,12 @@ class ProductivityAuditor:
         sla_warning_minutes: int = 30,
         sla_critical_minutes: int = 120,
         employee_mapping: Optional[Dict[str, str]] = None,
+        qualifying_callback_results: Optional[set[str]] = None,
     ):
         self.sla_warning_minutes = sla_warning_minutes
         self.sla_critical_minutes = sla_critical_minutes
         self.employee_mapping = employee_mapping or {}
+        self.qualifying_callback_results = qualifying_callback_results or {"Call connected"}
 
     def reconcile_missed_calls(
         self, calls: List[RingCentralCall], reference_time: Optional[datetime] = None
@@ -217,7 +221,13 @@ class ProductivityAuditor:
         sorted_calls = sorted(calls, key=lambda c: c.start_time)
         
         incidents: List[MissedCallIncident] = []
-        outbound_calls = [c for c in sorted_calls if c.direction == "Outbound" and c.to_number]
+        outbound_calls = [
+            c
+            for c in sorted_calls
+            if c.direction == "Outbound"
+            and c.to_number
+            and c.result in self.qualifying_callback_results
+        ]
 
         for call in sorted_calls:
             if call.direction == "Inbound" and call.result in ("Missed", "Voicemail"):
@@ -320,6 +330,9 @@ class ProductivityAuditor:
         ref_time = reference_time or datetime.now(timezone.utc)
         incidents = self.reconcile_missed_calls(calls, reference_time=ref_time)
 
+        tasks_provided = tasks is not None
+        activities_provided = activities is not None
+
         task_map: Dict[str, EZLynxTaskMetric] = {t.employee_name: t for t in (tasks or [])}
         activity_map: Dict[str, EZLynxActivityMetric] = {a.employee_name: a for a in (activities or [])}
 
@@ -354,21 +367,32 @@ class ProductivityAuditor:
             resp_times = [i.response_time_minutes for i in resolved_inc if i.response_time_minutes is not None]
             avg_resp = round(sum(resp_times) / len(resp_times), 1) if resp_times else None
 
-            emp_tasks = task_map.get(emp, EZLynxTaskMetric(employee_name=emp))
-            emp_act = activity_map.get(emp, EZLynxActivityMetric(employee_name=emp))
+            emp_tasks = task_map.get(emp)
+            emp_act = activity_map.get(emp)
+            limitations: List[str] = []
+            if not tasks_provided:
+                limitations.append("EZLynx task source not supplied")
+            if not activities_provided:
+                limitations.append("EZLynx activity source not supplied")
 
-            score = self.calculate_score(
-                inbound_total=len(inbound),
-                inbound_answered=len(inbound_answered),
-                missed_total=len(inbound_missed) + len(inbound_vms),
-                missed_resolved=len(resolved_inc),
-                orphaned_count=len(orphaned_inc),
-                outbound_total=len(outbound),
-                talk_time_secs=total_talk,
-                tasks_completed=emp_tasks.completed_today,
-                tasks_overdue=emp_tasks.overdue,
-                activities_count=emp_act.notes_count,
-            )
+            score: Optional[float] = None
+            score_status = "UNVERIFIED"
+            if not limitations:
+                safe_tasks = emp_tasks or EZLynxTaskMetric(employee_name=emp)
+                safe_act = emp_act or EZLynxActivityMetric(employee_name=emp)
+                score = self.calculate_score(
+                    inbound_total=len(inbound),
+                    inbound_answered=len(inbound_answered),
+                    missed_total=len(inbound_missed) + len(inbound_vms),
+                    missed_resolved=len(resolved_inc),
+                    orphaned_count=len(orphaned_inc),
+                    outbound_total=len(outbound),
+                    talk_time_secs=total_talk,
+                    tasks_completed=safe_tasks.completed_today,
+                    tasks_overdue=safe_tasks.overdue,
+                    activities_count=safe_act.notes_count,
+                )
+                score_status = "NOT_EVALUABLE" if not inbound and not outbound and not emp_tasks and not emp_act else "EVALUATED"
 
             alerts: List[str] = []
             if orphaned_inc:
@@ -377,7 +401,7 @@ class ProductivityAuditor:
                     critical_alerts.append(
                         f"• {emp}: Unreturned call from {format_phone(inc.caller_phone)} at {inc.missed_at.strftime('%I:%M %p')}"
                     )
-            if emp_tasks.overdue > 0:
+            if emp_tasks and emp_tasks.overdue > 0:
                 alerts.append(f"⚠️ {emp_tasks.overdue} overdue EZLynx task(s)")
 
             employee_reports[emp] = EmployeeProductivityReport(
@@ -392,10 +416,12 @@ class ProductivityAuditor:
                 missed_calls_orphaned=len(orphaned_inc),
                 missed_calls_pending=len(pending_inc),
                 avg_callback_time_minutes=avg_resp,
-                ezlynx_tasks_completed=emp_tasks.completed_today,
-                ezlynx_tasks_overdue=emp_tasks.overdue,
-                ezlynx_activities_logged=emp_act.notes_count,
+                ezlynx_tasks_completed=emp_tasks.completed_today if emp_tasks else (0 if tasks_provided else None),
+                ezlynx_tasks_overdue=emp_tasks.overdue if emp_tasks else (0 if tasks_provided else None),
+                ezlynx_activities_logged=emp_act.notes_count if emp_act else (0 if activities_provided else None),
                 productivity_score=score,
+                score_status=score_status,
+                data_limitations=limitations,
                 alerts=alerts,
             )
 
@@ -524,10 +550,13 @@ class ProductivityAuditor:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         for emp, data in audit.get("employee_reports", {}).items():
-            score = data.get("productivity_score", 0.0)
-            score_emoji = "🟢" if score >= 85 else ("🟡" if score >= 70 else "🔴")
-
-            lines.append(f"👤 **{emp}** — {score_emoji} **Score: {score}/100**")
+            score = data.get("productivity_score")
+            if score is None:
+                score_label = data.get("score_status", "UNVERIFIED")
+                lines.append(f"👤 **{emp}** — ⚪ **Score: {score_label}**")
+            else:
+                score_emoji = "🟢" if score >= 85 else ("🟡" if score >= 70 else "🔴")
+                lines.append(f"👤 **{emp}** — {score_emoji} **Score: {score}/100**")
             
             # Call metrics
             in_tot = data.get("inbound_total", 0)
@@ -549,10 +578,16 @@ class ProductivityAuditor:
             lines.append(f"  • **Missed Call Resolution:** {resolved} Returned ({avg_resp_str}) | {orphaned} Unreturned 🚨" if orphaned else f"  • **Missed Call Resolution:** {resolved} Returned ({avg_resp_str}) ✅")
 
             # EZLynx metrics
-            tasks_comp = data.get("ezlynx_tasks_completed", 0)
-            tasks_od = data.get("ezlynx_tasks_overdue", 0)
-            act_notes = data.get("ezlynx_activities_logged", 0)
+            tasks_comp = data.get("ezlynx_tasks_completed")
+            tasks_od = data.get("ezlynx_tasks_overdue")
+            act_notes = data.get("ezlynx_activities_logged")
+            tasks_comp = "UNVERIFIED" if tasks_comp is None else tasks_comp
+            tasks_od = "UNVERIFIED" if tasks_od is None else tasks_od
+            act_notes = "UNVERIFIED" if act_notes is None else act_notes
             lines.append(f"  • **EZLynx:** {tasks_comp} Tasks Completed | {tasks_od} Overdue | {act_notes} Activity Notes Logged")
+
+            for limitation in data.get("data_limitations", []):
+                lines.append(f"  • ⚠️ **Data limitation:** {limitation}")
 
             lines.append("")
 
