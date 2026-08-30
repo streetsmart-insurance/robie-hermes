@@ -624,8 +624,27 @@ def audit_terminal_job(
     session_root: str | Path | None = None,
     extract_frames: Callable[[str | Path], list[bytes]] | None = None,
     chat_poster: Callable[[dict[str, Any], str], Any] | None = None,
+    force_recompute: bool = False,
 ) -> dict[str, Any]:
     """Run, persist, and optionally post. Never marks the Job COMPLETE."""
+    path = Path(db_path)
+    if not force_recompute and path.is_file():
+        try:
+            store = JobStore(path)
+            cached_audit = store.get_checkpoint(job_id, AUDIT_CHECKPOINT)
+            if isinstance(cached_audit, dict) and cached_audit.get("job_id"):
+                cached_audit = dict(cached_audit)
+                message = cached_audit.setdefault("chat_message", format_audit_chat_message(cached_audit))
+                if chat_poster is not None:
+                    try:
+                        posted = chat_poster(cached_audit, message)
+                        cached_audit["chat_posted"] = posted is not False
+                    except Exception as exc:
+                        cached_audit["chat_posted"] = False
+                        cached_audit["chat_post_error"] = f"{type(exc).__name__}: {exc}"
+                return cached_audit
+        except Exception:
+            pass
     audit = run_post_job_audit(
         db_path,
         job_id,
