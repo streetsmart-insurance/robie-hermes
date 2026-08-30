@@ -32,8 +32,25 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
     assert "mode=ro" in text
     assert "active Test jobs/leases" in text
     assert "systemctl is-active --quiet robie-gateway" in text
-    assert "ROBIE_ENV=TEST" in text
+    assert (
+        "ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes-test/releases/current"
+        in text
+    )
+    assert "/opt/streetsmart-hermes/releases/current" in text
+    assert "Test gateway references the Production release root" in text
     assert "systemctl restart" not in text
+
+
+def test_remote_audit_does_not_require_unconfigured_service_environment_marker():
+    """The live Test unit identifies itself by its canonical Test release root.
+
+    ROBIE_ENV is injected into the one-shot audit process; it is not currently
+    configured on robie-gateway itself. Requiring it in systemd caused the
+    initial read-only audit to stop before the browser checks.
+    """
+    text = REMOTE.read_text(encoding="utf-8")
+    assert "systemctl show robie-gateway" in text
+    assert "grep -q 'ROBIE_ENV=TEST'" not in text
 
 
 def test_browser_audit_has_no_fill_click_or_sensitive_dom_dump():
