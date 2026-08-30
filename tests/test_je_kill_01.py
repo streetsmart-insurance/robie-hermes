@@ -382,6 +382,103 @@ class JeKill01Tests(unittest.TestCase):
         self.assertEqual(unknown.outcome, ReconciliationOutcome.UNKNOWN)
         self.assertFalse(unknown.authoritative)
 
+    def test_click_target_zero_readback_is_not_applied_with_fresh_page_method(self) -> None:
+        job = self._new_job("je-kill-click-target-zero-readback")
+
+        class ClickTargetZero:
+            def api_state(self, action_type, expected):
+                return None
+
+            def fresh_page_state(self, action_type, expected):
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: click target matched 0 elements; refuse to guess"
+                )
+
+        result = EzlynxDestinationVerifier(ClickTargetZero()).reconcile(
+            job, idempotency_key=job["idempotency_key"]
+        )
+        self.assertEqual(result.outcome, ReconciliationOutcome.NOT_APPLIED)
+        self.assertTrue(result.authoritative)
+        self.assertEqual(result.detail["method"], "FRESH_PAGE_READBACK")
+        self.assertEqual(result.detail["observed"], {})
+
+    def test_click_target_ambiguous_and_auth_and_row_zero_stay_unknown(self) -> None:
+        job = self._new_job("je-kill-unknown-readbacks")
+
+        class Raises:
+            def __init__(self, error: str) -> None:
+                self.error = error
+
+            def api_state(self, action_type, expected):
+                return None
+
+            def fresh_page_state(self, action_type, expected):
+                raise RuntimeError(self.error)
+
+        ambiguous = EzlynxDestinationVerifier(
+            Raises("PLAYWRIGHT_BLOCKED: click target matched 8 elements; refuse to guess")
+        ).reconcile(job, idempotency_key=job["idempotency_key"])
+        self.assertEqual(ambiguous.outcome, ReconciliationOutcome.UNKNOWN)
+        self.assertFalse(ambiguous.authoritative)
+        self.assertEqual(ambiguous.detail["method"], "FRESH_PAGE_READBACK")
+
+        auth = EzlynxDestinationVerifier(
+            Raises("AUTH_CHALLENGE: EZLynx Test session is expired")
+        ).reconcile(job, idempotency_key=job["idempotency_key"])
+        self.assertEqual(auth.outcome, ReconciliationOutcome.UNKNOWN)
+        self.assertIn("AUTH_CHALLENGE", auth.error or "")
+        self.assertEqual(auth.detail["method"], "FRESH_PAGE_READBACK")
+
+        missing_row = EzlynxDestinationVerifier(
+            Raises("PLAYWRIGHT_BLOCKED: documents row matched 0 elements; refuse to guess")
+        ).reconcile(job, idempotency_key=job["idempotency_key"])
+        self.assertEqual(missing_row.outcome, ReconciliationOutcome.UNKNOWN)
+        self.assertFalse(missing_row.authoritative)
+
+    def test_prepared_intent_resumes_after_click_target_zero_then_writes_once(self) -> None:
+        job = self._new_job("je-kill-prepared-click-target-zero")
+        self.store.checkpoint(
+            job["id"],
+            "action_intent",
+            {"action": ACTION, "state": "PREPARED", "run_id": "dead-child"},
+        )
+        destination = MemoryEzlynxDestination()
+
+        class RaiseZeroUntilWritten(MemoryEzlynxDestination):
+            def __init__(self, inner: MemoryEzlynxDestination) -> None:
+                self._inner = inner
+                self.unavailable = False
+
+            def api_state(self, action_type, expected):
+                return None
+
+            def fresh_page_state(self, action_type, expected):
+                observed = self._inner.fresh_page_state(action_type, expected)
+                if not observed:
+                    raise RuntimeError(
+                        "PLAYWRIGHT_BLOCKED: click target matched 0 elements; refuse to guess"
+                    )
+                return observed
+
+            def write(self, action_type, destination_state):
+                self._inner.write(action_type, destination_state)
+
+        readback = RaiseZeroUntilWritten(destination)
+        worker = BoundedEzlynxWorker(destination)
+        final = JobEngine(
+            self.store,
+            {"kill-worker": worker},
+            {ACTION: EzlynxDestinationVerifier(readback)},
+            reconcilers={ACTION: EzlynxDestinationVerifier(readback)},
+            lease_seconds=1,
+        ).run(job["id"])
+        self.assertEqual(final["status"], JobStatus.COMPLETE)
+        reconciliation = self.store.get_checkpoint(job["id"], "action_reconciliation")
+        self.assertEqual(reconciliation["outcome"], ReconciliationOutcome.NOT_APPLIED.value)
+        self.assertTrue(reconciliation["authoritative"])
+        self.assertEqual(reconciliation["detail"]["method"], "FRESH_PAGE_READBACK")
+        self.assertEqual(destination.writes, 1)
+
     def test_kill_before_action_reconciles_not_applied_then_writes_once(self) -> None:
         job = self._new_job("je-kill-before")
         self._kill_at(job, "before_action")

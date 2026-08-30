@@ -63,6 +63,17 @@ def _missing_ezlynx_fields(action: str, payload: dict[str, Any]) -> list[str]:
     return [key for key in required if not payload.get(key)]
 
 
+def _is_click_target_zero_block(exc: BaseException) -> bool:
+    """Readback waited on the opening click control and found 0 matches.
+
+    That is not evidence the label was applied. Reconcile must treat it as
+    NOT_APPLIED so a PREPARED interrupt can still perform the click.
+    count>1 stays a refuse-to-guess block (not this helper).
+    """
+    text = str(exc)
+    return "PLAYWRIGHT_BLOCKED: click target matched 0 elements" in text
+
+
 def _ezlynx_destination(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     if action == "ezlynx.reassign":
         return {
@@ -186,9 +197,21 @@ class EzlynxDestinationVerifier:
         try:
             observed = self.readback.api_state(job["action_type"], expected)
             if observed is None:
-                observed = self.readback.fresh_page_state(job["action_type"], expected)
                 method = "FRESH_PAGE_READBACK"
+                observed = self.readback.fresh_page_state(job["action_type"], expected)
         except Exception as exc:
+            if _is_click_target_zero_block(exc):
+                return ReconciliationResult(
+                    ReconciliationOutcome.NOT_APPLIED,
+                    job["action_type"],
+                    destination=expected,
+                    detail={
+                        "method": method,
+                        "observed": {},
+                        "readback_error": f"{type(exc).__name__}: {exc}",
+                    },
+                    authoritative=True,
+                )
             return ReconciliationResult(
                 ReconciliationOutcome.UNKNOWN,
                 job["action_type"],
@@ -247,9 +270,9 @@ class EzlynxDestinationVerifier:
         try:
             observed = self.readback.api_state(job["action_type"], expected)
             if observed is None:
-                observed = self.readback.fresh_page_state(job["action_type"], expected)
                 method = "FRESH_PAGE_READBACK"
                 source = "ezlynx-reloaded-page"
+                observed = self.readback.fresh_page_state(job["action_type"], expected)
         except Exception as exc:
             evidence = VerificationEvidence(
                 method="FRESH_PAGE_READBACK",
