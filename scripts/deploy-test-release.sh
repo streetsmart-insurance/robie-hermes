@@ -119,34 +119,18 @@ fi
 # bits in historical archives.
 bash "${release_root}/scripts/verify-release.sh" "${archive}" "${checksum}"
 
-atomic_pointer() {
-  python3 - "$1" "$2" <<'PY'
-import os
-import pathlib
-import sys
-target = pathlib.Path(sys.argv[1]).resolve()
-link = pathlib.Path(sys.argv[2])
-tmp = link.with_name(link.name + ".rollback-new")
-try:
-    tmp.unlink()
-except FileNotFoundError:
-    pass
-tmp.symlink_to(target)
-os.replace(tmp, link)
-PY
-}
+source "${release_root}/scripts/lib/test-release-rollback.sh"
 
 rollback_test() {
   echo "Test verification failed; restoring ${old_current}" >&2
-  atomic_pointer "${old_current}" "${OPT_ROOT}/current"
-  atomic_pointer "${old_releases_current}" "${OPT_ROOT}/releases/current"
-  if [[ -n "${old_policy_skill_target}" ]]; then
-    atomic_pointer "${old_policy_skill_target}" "${policy_skill_link}"
-  else
-    rm -f "${policy_skill_link}"
-  fi
-  systemctl restart "${GATEWAY_UNIT}"
-  systemctl is-active --quiet "${GATEWAY_UNIT}"
+  rollback_test_release \
+    "${old_current}" \
+    "${old_releases_current}" \
+    "${old_policy_skill_target}" \
+    "${OPT_ROOT}/current" \
+    "${OPT_ROOT}/releases/current" \
+    "${policy_skill_link}" \
+    "${GATEWAY_UNIT}"
 }
 
 before="$(systemctl show "${GATEWAY_UNIT}" -p ActiveEnterTimestamp --value --no-pager)"

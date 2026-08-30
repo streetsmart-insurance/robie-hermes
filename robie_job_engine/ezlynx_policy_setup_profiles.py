@@ -37,22 +37,30 @@ REQUIRED_CHECKPOINTS = (
     "post_save_readback",
     "reopen_verification",
 )
-SENSITIVE_KEYS = frozenset(
+SENSITIVE_KEY_TOKENS = frozenset(
     {
         "address",
-        "applicant_id",
-        "date_of_birth",
+        "applicantid",
+        "dateofbirth",
         "dob",
+        "driverlicense",
+        "driverlicensenumber",
         "email",
-        "first_name",
-        "last_name",
-        "license_number",
-        "mailing_address",
-        "named_insured",
+        "emailaddress",
+        "firstname",
+        "fullname",
+        "lastname",
+        "license",
+        "licensenumber",
+        "mailingaddress",
+        "name",
+        "namedinsured",
         "phone",
-        "policy_number",
-        "property_location",
+        "phonenumber",
+        "policynumber",
+        "propertylocation",
         "ssn",
+        "socialsecuritynumber",
         "vin",
     }
 )
@@ -97,6 +105,12 @@ def _normalized(value: Any) -> str:
 
 def _slug(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", _normalized(value)).strip("_")
+
+
+def _sensitive_key_token(value: Any) -> str:
+    """Normalize only field names, including case and common separators."""
+
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
 
 def resolve_profile(lob: Any, catalog: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -232,7 +246,11 @@ def verify_reopened_policy(
 def redact_evidence(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
-            str(key): "[REDACTED]" if _slug(key) in SENSITIVE_KEYS else redact_evidence(item)
+            str(key): (
+                "[REDACTED]"
+                if _sensitive_key_token(key) in SENSITIVE_KEY_TOKENS
+                else redact_evidence(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
