@@ -92,9 +92,58 @@ def load_ringcentral_csv(path: Path) -> tuple[list[RingCentralCall], list[str]]:
                 "start_time": timestamp,
                 "extension": _first(row, "Extension", "Extension ID"),
                 "employee_name": _first(row, "Employee", "User", "Name", "Extension Name", "Answered By"),
+                "queue_name": _first(row, "Queue", "Queue Name", "Call Queue", "Called Queue"),
+                "answered_by": _first(row, "Answered By", "Connected To", "Forwarded To"),
+                "queue_wait_seconds": _duration_seconds(_first(row, "Queue Wait Time", "Wait Time", "Hold Time")),
             }
             calls.append(RingCentralCall.from_dict(data))
     return calls, errors
+
+
+def _queue_rows(calls: list[RingCentralCall]) -> list[dict[str, Any]]:
+    """Aggregate queue sessions and member call legs without double-counting offers."""
+    sessions: dict[tuple[str, str], list[RingCentralCall]] = {}
+    labels: dict[str, str] = {}
+    for index, call in enumerate(calls):
+        queue = call.queue_name.strip()
+        if call.direction != "Inbound" or not queue:
+            continue
+        folded = queue.casefold()
+        labels.setdefault(folded, queue)
+        sessions.setdefault((folded, call.call_id or f"row-{index}"), []).append(call)
+
+    output = []
+    for folded, label in sorted(labels.items(), key=lambda item: item[1].casefold()):
+        queue_sessions = [legs for (queue, _), legs in sessions.items() if queue == folded]
+        answered_by: dict[str, int] = {}
+        missed_by: dict[str, int] = {}
+        answered = 0
+        waits = []
+        for legs in queue_sessions:
+            connected = [leg for leg in legs if leg.result == "Call connected"]
+            if connected:
+                answered += 1
+                winner = connected[0].answered_by or connected[0].employee_name
+                if winner and winner not in {"Unassigned", "Queue"}:
+                    answered_by[winner] = answered_by.get(winner, 0) + 1
+            waits.extend(leg.queue_wait_seconds for leg in legs if leg.queue_wait_seconds > 0)
+            for leg in legs:
+                if any(term in leg.result.casefold() for term in ("miss", "reject", "refus", "no answer")):
+                    member = leg.employee_name
+                    if member and member not in {"Unassigned", "Queue"}:
+                        missed_by[member] = missed_by.get(member, 0) + 1
+        offered = len(queue_sessions)
+        output.append({
+            "queue": label,
+            "offered": offered,
+            "answered": answered,
+            "abandoned_or_voicemail": offered - answered,
+            "answer_rate": "NOT EVALUABLE" if not offered else f"{round(answered / offered * 100, 1)}%",
+            "max_wait_seconds": max(waits) if waits else None,
+            "answered_by": answered_by,
+            "missed_by": missed_by,
+        })
+    return output
 
 
 def _json(path: Optional[Path]) -> dict[str, Any]:
@@ -156,6 +205,7 @@ def _call_report(
         "answer_rate": "NOT EVALUABLE" if not total_inbound else f"{round(total_answered / total_inbound * 100, 1)}%",
         "unreturned_total": sum(item["unreturned"] for item in employee_rows),
         "employee_rows": employee_rows,
+        "queue_rows": _queue_rows(calls),
         "rep_stats": rep_stats,
         "unreturned_calls": [
             {

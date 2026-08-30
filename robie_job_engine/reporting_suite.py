@@ -128,6 +128,25 @@ class ReportingSuite:
             badge = "🔴" if unret > 0 else "🟢"
             lines.append(f"| {rep} | {stats.get('inbound', 0)} | {ans_rate} | {badge} {unret} | {overdue_display} |")
 
+        queue_rows = call_data.get("queue_rows", [])
+        if queue_rows:
+            lines.extend([
+                "",
+                "☎️ *CALL QUEUE PICKUP & MEMBER LEGS*",
+                "| Queue | Offered | Answered | Abandoned/VM | Answer Rate | Max Wait |",
+                "| :--- | ---: | ---: | ---: | ---: | ---: |",
+            ])
+            for row in queue_rows:
+                wait = "UNVERIFIED" if row.get("max_wait_seconds") is None else f"{row['max_wait_seconds']}s"
+                lines.append(
+                    f"| {row['queue']} | {row['offered']} | {row['answered']} | "
+                    f"{row['abandoned_or_voicemail']} | {row['answer_rate']} | {wait} |"
+                )
+                pickups = ", ".join(f"{name}: {count}" for name, count in sorted(row.get("answered_by", {}).items())) or "none evidenced"
+                missed = ", ".join(f"{name}: {count}" for name, count in sorted(row.get("missed_by", {}).items())) or "none evidenced"
+                lines.append(f"• {row['queue']} pickups — {pickups}")
+                lines.append(f"• {row['queue']} missed/refused member legs — {missed}")
+
         magellan_data = magellan_data or {"source_status": "not supplied"}
         sales_data = sales_data or {"source_status": "not supplied"}
         role_rows = role_rows or []
@@ -217,6 +236,18 @@ class ReportingSuite:
                 )
         else:
             lines.append("• Employee comparison: UNVERIFIED — no normalized employee rows supplied")
+
+        queue_rows = call_data.get("queue_rows", [])
+        if queue_rows:
+            lines.extend(["", "☎️ *WEEKLY QUEUE ACCOUNTABILITY*"])
+            for row in queue_rows:
+                pickups = ", ".join(f"{name}: {count}" for name, count in sorted(row.get("answered_by", {}).items())) or "none evidenced"
+                missed = ", ".join(f"{name}: {count}" for name, count in sorted(row.get("missed_by", {}).items())) or "none evidenced"
+                lines.append(
+                    f"• *{row['queue']}* — {row['answered']}/{row['offered']} answered "
+                    f"({row['answer_rate']}); abandoned/VM {row['abandoned_or_voicemail']}; pickups: {pickups}; "
+                    f"missed/refused member legs: {missed}"
+                )
 
         if role_rows:
             lines.extend(["", "🧩 *RESPONSIBILITIES ↔ OBSERVED WORK*"])
