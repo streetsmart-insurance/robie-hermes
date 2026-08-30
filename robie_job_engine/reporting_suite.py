@@ -95,6 +95,7 @@ class ReportingSuite:
         task_data: Dict[str, Any],
         magellan_data: Optional[Dict[str, Any]] = None,
         sales_data: Optional[Dict[str, Any]] = None,
+        role_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Daily: Phones + Overdue Tasks + Unreturned Calls SLA."""
         lines = [
@@ -129,6 +130,7 @@ class ReportingSuite:
 
         magellan_data = magellan_data or {"source_status": "not supplied"}
         sales_data = sales_data or {"source_status": "not supplied"}
+        role_rows = role_rows or []
         sales_exceptions = sales_data.get("exceptions", [])
         if sales_exceptions:
             lines.extend(["", "📈 *SALES CENTER INACTIVE OPPORTUNITIES*"])
@@ -138,6 +140,11 @@ class ReportingSuite:
                     f"{item.get('stage', 'Unknown')} | last touch {item.get('days_since_touch', 'unknown')}d ago | "
                     f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
                 )
+        if role_rows:
+            lines.extend(["", "🧩 *TODAY'S WORK ↔ ROLE RESPONSIBILITIES*"])
+            for row in role_rows:
+                lines.append(f"*{row['employee']} — {row['role']}*")
+                lines.extend(f"• {fact}" for fact in row.get("facts", []))
         warnings = [
             warning
             for warning in (
@@ -164,12 +171,14 @@ class ReportingSuite:
         tracker_data: Optional[Dict[str, Any]] = None,
         appsheet_data: Optional[Dict[str, Any]] = None,
         magellan_data: Optional[Dict[str, Any]] = None,
+        role_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Weekly: Phones + Tasks + Sales Center + Submission Center + Retention Center + Email."""
         submission_data = submission_data or {"source_status": "not supplied"}
         tracker_data = tracker_data or {"source_status": "not supplied"}
         appsheet_data = appsheet_data or {"source_status": "not supplied"}
         magellan_data = magellan_data or {"source_status": "not supplied"}
+        role_rows = role_rows or []
         lines = [
             "🏆 *STREETSMART WEEKLY EXECUTIVE PERFORMANCE SCORECARD*",
             f"📅 Period: Past 7 Days ({datetime.now(timezone.utc).strftime('%B %d, %Y')})",
@@ -208,6 +217,12 @@ class ReportingSuite:
                 )
         else:
             lines.append("• Employee comparison: UNVERIFIED — no normalized employee rows supplied")
+
+        if role_rows:
+            lines.extend(["", "🧩 *RESPONSIBILITIES ↔ OBSERVED WORK*"])
+            for row in role_rows:
+                lines.append(f"*{row['employee']} — {row['role']}*")
+                lines.extend(f"• {fact}" for fact in row.get("facts", []))
 
         retention_exceptions = retention_data.get("exceptions", [])
 
@@ -300,6 +315,7 @@ class ReportingSuite:
         monthly_kpis: Dict[str, Any],
         churn_autopsies: List[Dict[str, Any]],
         sales_data: Optional[Dict[str, Any]] = None,
+        role_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Monthly: Holistic 30-Day Agency Score + Lost Customer Churn Root Cause Autopsies."""
         grade = monthly_kpis.get("grade")
@@ -310,6 +326,7 @@ class ReportingSuite:
         else:
             grade_line = f"📊 *30-DAY HOLISTIC AGENCY GRADE: {grade} ({score}/100)* — formula {approved_formula}"
         sales_data = sales_data or {"source_status": "not supplied"}
+        role_rows = role_rows or []
         lines = [
             "🏛️ *STREETSMART MONTHLY EXECUTIVE AUDIT & CHURN AUTOPSY*",
             f"📅 Month: {datetime.now(timezone.utc).strftime('%B %Y')}",
@@ -333,4 +350,9 @@ class ReportingSuite:
             else:
                 verdict = f"{root_cause} | confidence: {confidence} | evidence: {', '.join(map(str, evidence_ids))}"
             lines.append(f"• *{c.get('client_name', 'Unknown client')}* ({c.get('policy_type', 'Unknown policy')}) — {verdict}")
+        if role_rows:
+            lines.extend(["", "🧩 *30-DAY EMPLOYEE ROLE ACCOUNTABILITY*"])
+            for row in role_rows:
+                lines.append(f"*{row['employee']} — {row['role']}*")
+                lines.extend(f"• {fact}" for fact in row.get("facts", []))
         return "\n".join(lines)

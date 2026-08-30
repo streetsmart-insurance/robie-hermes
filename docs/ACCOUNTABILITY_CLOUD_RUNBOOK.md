@@ -96,6 +96,38 @@ The AppSheet API requires an Enterprise plan, an enabled inbound API, an App
 ID, and an unexpired Application Access Key. Store the key in Secret Manager.
 The implementation exposes no Add, Edit, or Delete method.
 
+For the supplied backing spreadsheet
+`1dFmE_J-YM9ua7v_B2UDgHHFr6BofIpIuU9qEXXtoZnA`, configure explicit tab,
+range, and column allowlists under `google_sheets`. The collector persists only
+those columns. SSNs, compensation, home addresses, personal email, and other HR
+fields must never be included. The Employees allowlist can generate the approved
+employee-to-role registry used by every reporting tier.
+
+### Report delivery
+
+Delivery is disabled until destinations are explicit. Configure existing Google
+Chat space names under `delivery.chat_spaces`; the job posts as the Robie Chat
+app, splits long reports safely, and independently reads every created message
+back before the job can become COMPLETE. It never creates a new space.
+
+Email uses `robie@streetsmart.insurance` through keyless Workspace delegation.
+Configure recipients separately for daily, weekly, and monthly reports. The
+required scopes are `gmail.send` and `gmail.metadata`; the latter supports fresh
+sent-mail read-back. Department-lead addresses must be supplied explicitly and
+are never inferred from names. A delivery failure fails the job even when the
+local report artifact was generated.
+
+### Role/accountability boundary
+
+The employee registry maps each person to an approved role. Producers receive
+outbound, Sales Center, Submission Center, and follow-up facts—not an inbound
+queue penalty unless the registry explicitly assigns that queue duty. Account
+managers/CSRs receive direct/assigned queue calls, callback, EZLynx task,
+renewal, change/COI, and email facts. Managers receive queue and backlog
+oversight facts. Magellan quality is labeled `INSUFFICIENT_SAMPLE` below the
+configured minimum call count, so a high sentiment score on two calls cannot be
+presented as top performance.
+
 ### Google Sheets trackers
 
 Share only the required spreadsheets with the cloud service identity. The
