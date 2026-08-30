@@ -33,6 +33,9 @@ class RingCentralCall:
     start_time: datetime
     extension: str
     employee_name: str
+    queue_name: str = ""
+    answered_by: str = ""
+    queue_wait_seconds: int = 0
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], employee_mapping: Optional[Dict[str, str]] = None) -> RingCentralCall:
@@ -41,7 +44,13 @@ class RingCentralCall:
         
         # Determine extension / rep
         ext = str(data.get("extension", data.get("extensionId", ""))).strip()
-        emp_name = data.get("employee_name") or mapping.get(ext) or mapping.get(data.get("to_number", "")) or mapping.get(data.get("from_number", "")) or f"Ext {ext}" if ext else "Unassigned"
+        emp_name = (
+            data.get("employee_name")
+            or mapping.get(ext)
+            or mapping.get(data.get("to_number", ""))
+            or mapping.get(data.get("from_number", ""))
+            or (f"Ext {ext}" if ext else "Unassigned")
+        )
 
         start_raw = data.get("start_time") or data.get("startTime")
         if isinstance(start_raw, str):
@@ -87,6 +96,9 @@ class RingCentralCall:
             start_time=start_dt,
             extension=ext,
             employee_name=emp_name,
+            queue_name=str(data.get("queue_name") or "").strip(),
+            answered_by=str(data.get("answered_by") or "").strip(),
+            queue_wait_seconds=int(data.get("queue_wait_seconds") or 0),
         )
 
 

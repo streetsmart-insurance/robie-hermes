@@ -66,3 +66,20 @@ def test_weekly_cli_flags_zero_workload_attestation_that_conflicts_with_gmail(tm
     assert "ATTESTATION MISMATCHES" in output
     assert "reported 0 unresolved" in output
     assert "evidence shows 8" in output
+
+
+def test_daily_cli_reports_unique_queue_offers_and_member_pickups(tmp_path: Path, capsys):
+    calls = tmp_path / "calls.csv"
+    calls.write_text(
+        "Call ID,Direction,From,To,Result,Date/Time,Queue Name,Employee,Answered By,Queue Wait Time\n"
+        "q-1,Inbound,5551110001,9006,Missed,08/30/2026 10:00 AM,Commercial,Jackie,,00:00:20\n"
+        "q-1,Inbound,5551110001,9006,Call connected,08/30/2026 10:00 AM,Commercial,Erika,Erika,00:00:25\n"
+        "q-2,Inbound,5551110002,9006,Refused,08/30/2026 11:00 AM,Commercial,Jackie,,00:03:10\n",
+        encoding="utf-8",
+    )
+    assert main(["daily", "--as-of", "2026-08-30T17:00:00+00:00", "--ringcentral", str(calls)]) == 0
+    output = capsys.readouterr().out
+    assert "CALL QUEUE PICKUP & MEMBER LEGS" in output
+    assert "| Commercial | 2 | 1 | 1 | 50.0% | 190s |" in output
+    assert "Commercial pickups — Erika: 1" in output
+    assert "Commercial missed/refused member legs — Jackie: 2" in output
