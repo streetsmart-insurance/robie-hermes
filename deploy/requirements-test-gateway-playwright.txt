@@ -1,3 +1,9 @@
-# Test-only gateway browser runtime. Installed into the release-local
+# Test-only gateway and Job Engine runtime. Installed into the release-local
 # .gateway-runtime directory on hermes-test-01; never into Production.
+#
+# Keep direct runtime dependencies pinned because this directory is built
+# after release extraction and its digest is recorded as deployment evidence.
+google-api-python-client==2.170.0
+google-auth==2.40.3
+google-cloud-secret-manager==2.24.0
 playwright==1.52.0
