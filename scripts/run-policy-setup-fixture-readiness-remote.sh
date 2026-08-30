@@ -38,7 +38,7 @@ if grep -Fq '/opt/streetsmart-hermes/releases/current' <<<"${gateway_environment
   exit 1
 fi
 
-python_bin=/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
+python_bin=/opt/streetsmart-hermes-test/.hermes/hermes-agent/venv/bin/python
 if ! test -x "${python_bin}"; then
   echo 'fixture readiness refused: Test browser Python runtime is missing' >&2
   exit 1

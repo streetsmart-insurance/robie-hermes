@@ -41,6 +41,11 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
     assert "Test gateway is not active" in text
     assert "Test gateway canonical root is missing" in text
     assert "Test browser Python runtime is missing" in text
+    assert (
+        "python_bin=/opt/streetsmart-hermes-test/.hermes/hermes-agent/venv/bin/python"
+        in text
+    )
+    assert "python_bin=/home/streetsmart-hermes/" not in text
     assert "systemctl restart" not in text
 
 
