@@ -293,13 +293,13 @@ class EzlynxPolicySetupPage:
 
     async def navigate_to_policies(self, applicant_id: str) -> None:
         url = f"{EZLYNX_BASE_URL}/web/account/{applicant_id}/policies"
-        await self.page.goto(url, wait_until="networkidle")
+        await self.page.goto(url, wait_until="domcontentloaded")
 
     async def open_policy_add(self) -> None:
         add_btn = self.page.locator("#add-policy")
         await add_btn.wait_for(state="visible", timeout=10000)
         await add_btn.click()
-        await self.page.wait_for_load_state("networkidle")
+        await self.page.wait_for_load_state("domcontentloaded")
 
     async def fill_policy_shell(self, shell_input: PolicyShellInput, save_and_edit: bool = True) -> bool:
         lob_val = normalize_lob(shell_input.lob)
@@ -398,13 +398,13 @@ class EzlynxPolicySetupPage:
             add_edit_btn = self.page.locator("#AddAndEditPolicyBtn")
             await add_edit_btn.wait_for(state="visible", timeout=5000)
             await add_edit_btn.click()
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded")
             return True
         else:
             add_btn = self.page.locator("#AddPolicyBtn")
             await add_btn.wait_for(state="visible", timeout=5000)
             await add_btn.click()
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded")
             return True
 
     # Detailed Sub-Tab / Schedule Handlers
@@ -643,7 +643,7 @@ class EzlynxPolicySetupPage:
         save_close_btn = self.page.locator("#finishButton-header")
         await save_close_btn.wait_for(state="visible", timeout=10000)
         await save_close_btn.click()
-        await self.page.wait_for_load_state("networkidle")
+        await self.page.wait_for_load_state("domcontentloaded")
 
     # Unified LOB Orchestrator
     async def setup_policy_by_lob(self, shell_input: PolicyShellInput) -> PolicySetupResult:
