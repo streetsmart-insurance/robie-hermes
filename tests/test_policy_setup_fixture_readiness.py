@@ -16,8 +16,8 @@ def test_workflow_is_protected_main_test_only_and_read_only():
     assert "github.ref == 'refs/heads/main'" in text
     assert "TEST_VM: hermes-test-01" in text
     assert "TEST_ROOT: /opt/streetsmart-hermes-test" in text
-    assert "EXPECTED_TEST_SHA: e18fcfa2ed13" in text
-    assert "AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13" in text
+    assert "EXPECTED_TEST_SHA: ae2c54701461" in text
+    assert "AUDIT_POLICY_SETUP_FIXTURES_ON_AE2C54701461" in text
     assert "id-token: write" in text
     assert "hermes-poc-01" not in text
     assert "systemctl restart" not in text
@@ -29,6 +29,7 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
     assert "test \"$(hostname -s)\" = hermes-test-01" in text
     assert 'test "${ROBIE_ENV:-}" = TEST' in text
     assert 'test "${TEST_ROOT:-}" = /opt/streetsmart-hermes-test' in text
+    assert 'test "${EXPECTED_TEST_SHA:-}" = ae2c54701461' in text
     assert "mode=ro" in text
     assert "active Test jobs/leases" in text
     assert "systemctl is-active --quiet robie-gateway" in text
