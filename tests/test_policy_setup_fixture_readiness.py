@@ -38,6 +38,9 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
     )
     assert "/opt/streetsmart-hermes/releases/current" in text
     assert "Test gateway references the Production release root" in text
+    assert "Test gateway is not active" in text
+    assert "Test gateway canonical root is missing" in text
+    assert "Test browser Python runtime is missing" in text
     assert "systemctl restart" not in text
 
 
