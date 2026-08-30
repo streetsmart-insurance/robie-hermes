@@ -404,7 +404,14 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         page.reload(wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
-        count = self._locator(self.scenario.applied_label).count()
+        loc = self._locator(self.scenario.applied_label)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            count = loc.count()
+            if count > 0:
+                break
+            time.sleep(0.2)
+        count = loc.count()
         if count == 0:
             return {}
         if count != 1:
