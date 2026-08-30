@@ -163,3 +163,35 @@ def test_reusable_evidence_redacts_customer_fields():
     assert redacted["property_location"] == "[REDACTED]"
     assert redacted["nested"]["vin"] == "[REDACTED]"
     assert redacted["nested"]["coverage"] == "500000"
+
+
+def test_reusable_evidence_redacts_generic_name_license_and_common_variants():
+    redacted = redact_evidence(
+        {
+            "name": "Synthetic Person",
+            "LICENSE": "QA-LICENSE",
+            "Nested": {
+                "Full Name": "Synthetic Nested Person",
+                "driverLicenseNumber": "QA-DRIVER-LICENSE",
+                "Email-Address": "synthetic@example.invalid",
+                "coverage_name": "General Liability",
+                "license_status": "Active",
+                "coverage": {"name_of_coverage": "Occurrence", "limit": "500000"},
+            },
+            "Rows": [{"NamedInsured": "Synthetic Insured", "PhoneNumber": "5550100"}],
+        }
+    )
+
+    assert redacted["name"] == "[REDACTED]"
+    assert redacted["LICENSE"] == "[REDACTED]"
+    assert redacted["Nested"]["Full Name"] == "[REDACTED]"
+    assert redacted["Nested"]["driverLicenseNumber"] == "[REDACTED]"
+    assert redacted["Nested"]["Email-Address"] == "[REDACTED]"
+    assert redacted["Rows"][0]["NamedInsured"] == "[REDACTED]"
+    assert redacted["Rows"][0]["PhoneNumber"] == "[REDACTED]"
+    assert redacted["Nested"]["coverage_name"] == "General Liability"
+    assert redacted["Nested"]["license_status"] == "Active"
+    assert redacted["Nested"]["coverage"] == {
+        "name_of_coverage": "Occurrence",
+        "limit": "500000",
+    }
