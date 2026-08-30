@@ -76,7 +76,11 @@ class FakeTransport:
                 "account_manager_id": MANAGER_ID,
             }
         if method == "GET" and path == f"/billables/{BILLABLE_ID}":
-            return {"id": BILLABLE_ID, "program_id": PROGRAM_ID}
+            return {
+                "id": BILLABLE_ID,
+                "program_id": PROGRAM_ID,
+                **payload()["billables"][0],
+            }
         raise AssertionError((method, path))
 
 
@@ -181,6 +185,34 @@ class AscendApiTests(unittest.TestCase):
         self.assertTrue(result.verified)
         self.assertTrue(result.evidence.authoritative)
         self.assertEqual(result.evidence.locator, PROGRAM_ID)
+        self.assertEqual(
+            result.evidence.observed["billables"][0]["agency_fees_cents"],
+            50000,
+        )
+
+    def test_verifier_rejects_wrong_billable_business_values(self):
+        class WrongPremium(FakeTransport):
+            def request(self, method, path, *, query=None, json_body=None):
+                result = super().request(
+                    method, path, query=query, json_body=json_body
+                )
+                if method == "GET" and path == f"/billables/{BILLABLE_ID}":
+                    result["premium_cents"] = 1
+                return result
+
+        client = AscendApiClient(WrongPremium())
+        result = AscendCreateProgramVerifier(lambda: client).verify(
+            {"payload": payload()},
+            {
+                "destination": {
+                    "resource_id": PROGRAM_ID,
+                    "program_id": PROGRAM_ID,
+                },
+                "detail": {"billable_ids": [BILLABLE_ID]},
+            },
+        )
+        self.assertFalse(result.verified)
+        self.assertIn("did not match", result.error or "")
 
     def test_execute_false_holds_without_loading_client(self):
         calls = []

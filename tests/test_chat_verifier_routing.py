@@ -370,8 +370,8 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             "ezlynx.submission_audit",
         )
         self.assertEqual(
-            classify_request("Run the Ascend locator-and-artifact-audit").action_type,
-            "ascend.locator_artifact_audit",
+            classify_request("Create a program in Ascend").action_type,
+            "ascend.create_program",
         )
         self.assertEqual(
             classify_request(
@@ -386,6 +386,38 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             ).action_type,
             "ezlynx.submission_audit",
         )
+
+    def test_ascend_create_program_chat_is_api_only(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "ascend-api-routing",
+                "Create a program in Ascend",
+                action_payload={
+                    "program": {
+                        "insured_id": "00000000-0000-0000-0000-000000000001",
+                        "producer_id": "00000000-0000-0000-0000-000000000002",
+                        "account_manager_id": "00000000-0000-0000-0000-000000000003",
+                    },
+                    "billables": [
+                        {
+                            "billable_identifier": "TEST-API-1",
+                            "carrier_identifier": "progressive",
+                            "coverage_identifier": "commercial_auto",
+                            "effective_date": "2026-09-01",
+                            "expiration_date": "2027-09-01",
+                            "premium_cents": 100000,
+                        }
+                    ],
+                },
+            )
+            job = JobStore(db).get_job(job_id)
+            self.assertEqual(job["action_type"], "ascend.create_program")
+            self.assertEqual(job["payload"]["worker"], "ascend-api")
+            self.assertTrue(job["payload"]["execute"])
+            self.assertTrue(job["payload"]["api_only"])
+            self.assertNotIn("programs_url", job["payload"])
 
 
 if __name__ == "__main__":

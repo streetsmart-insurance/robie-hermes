@@ -7,17 +7,18 @@
   "gated_actions": [
     {
       "id": "ascend.create_program",
-      "kind": "new-site-form-field-mapping",
+      "kind": "api-program-creation",
       "site": "ascend",
-      "form": "create/new",
+      "api": "/v1/programs + /v1/billables",
       "mappings": [
-        "Import document",
-        "Agency Fee",
-        "Producer",
-        "Account Manager"
+        "insured_id",
+        "producer_id",
+        "account_manager_id",
+        "billables"
       ],
       "records_from": [
-        "ascend.locator_artifact_audit punch-list PASS on hermes-test-01",
+        "ascend.create_program COMPLETE on hermes-test-01",
+        "ASCEND_API_FRESH_GET authoritative verification evidence",
         "jobs.db post_job_audit verdict=PASS tagged with this action"
       ],
       "notes": "Jobs 807f8920 and 38c0fa79 (2026-08-28) were the first test of this action on a live Production client. The written Test gate was skipped. Production is not the first test."

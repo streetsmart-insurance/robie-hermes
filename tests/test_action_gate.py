@@ -1,4 +1,4 @@
-"""Action-level Test gate: Production must refuse before any Ascend click."""
+"""Action-level Test gate: Production must refuse before any Ascend API POST."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ from robie_job_engine.models import JobStatus, WorkerResult
 CHAT_SHAPED_ASCEND = (
     "@robie create a program in Ascend for PAWIVA premium finance"
 )
-SKILL = Path("skills/ascend-locator-artifact-audit/SKILL.md")
+SKILL = Path("skills/ascend-api-create-program/SKILL.md")
 
 
 class ActionGateTests(unittest.TestCase):
@@ -55,7 +55,7 @@ class ActionGateTests(unittest.TestCase):
             CHAT_SHAPED_ASCEND,
             payload={
                 "text": CHAT_SHAPED_ASCEND,
-                "skill": "ascend-locator-artifact-audit",
+                "skill": "ascend-api-create-program",
             },
             action_type="hermes.google_chat_task",
         )
@@ -67,7 +67,7 @@ class ActionGateTests(unittest.TestCase):
         )
         self.assertNotEqual(commercial, CREATE_PROGRAM_ACTION)
 
-    def test_production_without_record_refuses_before_browser(self):
+    def test_production_without_record_refuses_before_api(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             passes = Path(tmp) / "passes"
@@ -96,7 +96,7 @@ class ActionGateTests(unittest.TestCase):
             self.assertIsNone(RecordingStore(db).latest(job_id))
             self.assertFalse(has_clean_test_pass(CREATE_PROGRAM_ACTION))
 
-    def test_test_env_allows_so_a_pass_can_be_recorded(self):
+    def test_test_env_routes_api_and_holds_missing_structured_payload(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
@@ -108,7 +108,9 @@ class ActionGateTests(unittest.TestCase):
                     conversation_id="spaces/action-gate-test",
                 )
             job = JobStore(db).get_job(job_id)
-            self.assertEqual(job["status"], JobStatus.RUNNING.value)
+            self.assertEqual(job["action_type"], "ascend.create_program")
+            self.assertEqual(job["status"], JobStatus.NEEDS_CLARIFICATION.value)
+            self.assertIn("missing required schema field", job["last_error"])
             self.assertFalse(is_action_gate_refusal(job))
 
     def test_recorded_clean_test_pass_unblocks_production_n1(self):
@@ -156,7 +158,7 @@ class ActionGateTests(unittest.TestCase):
         self.assertIsNotNone(other)
         self.assertIn("38c0fa79", other or "")
 
-    def test_engine_refuses_before_worker_and_playwright_before_cdp(self):
+    def test_engine_refuses_before_worker_and_api_request(self):
         calls = {"n": 0}
 
         class Worker:

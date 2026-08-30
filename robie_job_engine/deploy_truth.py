@@ -155,6 +155,12 @@ def zip_load_shim_source(zip_relpath: str) -> str:
         '"; refuse to run a stale .hermes copy"\n'
         "    )\n"
         "\n"
+        "class _DummyRegistry:\n"
+        "    def register(self, *args, **kwargs):\n"
+        "        pass\n"
+        'registry = globals().get("registry", _DummyRegistry())\n'
+        'registry.register(name="robie_shim", toolset="robie", schema={}, handler=lambda *a, **k: None)\n'
+        "\n"
         "_src = _zip_source()\n"
         "_ns = globals()\n"
         '_ns["__file__"] = str(_src)\n'
@@ -468,17 +474,20 @@ def probe_gateway_active_enter(
                 argv, check=False, capture_output=True, text=True, timeout=5
             )
 
-    proc = runner(
-        [
-            "systemctl",
-            "show",
-            gateway_unit,
-            "-p",
-            "ActiveEnterTimestamp",
-            "--value",
-            "--no-pager",
-        ]
-    )
+    try:
+        proc = runner(
+            [
+                "systemctl",
+                "show",
+                gateway_unit,
+                "-p",
+                "ActiveEnterTimestamp",
+                "--value",
+                "--no-pager",
+            ]
+        )
+    except OSError:
+        return None
     text = (getattr(proc, "stdout", None) or "") if proc is not None else ""
     return parse_timestamp(str(text).strip())
 

@@ -623,6 +623,8 @@ def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
             decorated["topLabel"] = str(widget["top_label"])
         if widget.get("bottom_label"):
             decorated["bottomLabel"] = str(widget["bottom_label"])
+        if widget.get("button"):
+            decorated["button"] = _button_to_chat(widget["button"])
         return {"decoratedText": decorated}
     if widget_type == "divider":
         return {"divider": {}}
@@ -2203,7 +2205,20 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if not space and isinstance(event_message, dict):
                 space = event_message.get("space") or {}
             chat_id = str(space.get("name") or "") if isinstance(space, dict) else ""
-            if chat_id:
+            message_name = str(event_message.get("name") or "") if isinstance(event_message, dict) else ""
+
+            patched = False
+            if message_name and hasattr(self, "_patch_message"):
+                try:
+                    await self._patch_message(
+                        message_name,
+                        {"text": f"✓ {response}", "cardsV2": []},
+                    )
+                    patched = True
+                except Exception:
+                    logger.debug("[GoogleChat] Could not patch card message in-place", exc_info=True)
+
+            if not patched and chat_id:
                 body: Dict[str, Any] = {"text": response}
                 thread = event_message.get("thread") or {} if isinstance(event_message, dict) else {}
                 if isinstance(thread, dict) and thread.get("name"):
@@ -2217,7 +2232,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
     async def dispatch_http_event(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         if _card_event_payload(envelope) is not None:
             response = await self._handle_card_event(envelope, notify=False)
-            return {"text": response}
+            return {
+                "actionResponse": {
+                    "type": "UPDATE_MESSAGE",
+                },
+                "text": f"✓ {response}",
+                "cardsV2": [],
+            }
 
         extracted = self._extract_message_payload(envelope)
         if extracted is None:
@@ -2555,15 +2576,22 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     if related_only and correction.action_type in BOUNDED_ENGINE_ACTIONS
                     else "CONTINUATION" if related_only else "CREATED"
                 )
-                await asyncio.to_thread(
-                    queue.link_conversation_job,
-                    conversation_id=getattr(event.source, "chat_id", None)
-                    or "google-chat:unknown",
-                    job_id=job_id,
-                    message_id=message_id,
-                    event_id=message_id,
-                    relation=relation,
-                )
+                try:
+                    await asyncio.to_thread(
+                        queue.link_conversation_job,
+                        conversation_id=getattr(event.source, "chat_id", None)
+                        or "google-chat:unknown",
+                        job_id=job_id,
+                        message_id=message_id,
+                        event_id=message_id,
+                        relation=relation,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[GoogleChat] Could not link conversation job for %s: %s",
+                        message_id,
+                        exc,
+                    )
             if job_id and await self._halt_failed_drive_ingestion(
                 event, job_id, attachment_kwargs["attachment_refs"]
             ):
@@ -3477,7 +3505,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 chat_id, question, choices, clarify_id, session_key, metadata
             )
 
-        buttons: List[Dict[str, Any]] = []
+        choice_widgets: List[Dict[str, Any]] = []
+        short_buttons: List[Dict[str, Any]] = []
+        has_long_choice = any(len(str(c).strip()) > 24 for c in choices)
+
         for choice in choices:
             choice_text = str(choice).strip()
             if not choice_text:
@@ -3491,31 +3522,67 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 "something else (type it out)",
             }:
                 continue
-            label = choice_text if len(choice_text) <= 80 else choice_text[:77] + "..."
-            buttons.append(
-                {
-                    "text": label,
-                    "action": "hermes_clarify",
-                    "parameters": {
-                        "clarify_id": clarify_id,
-                        "choice": choice_text,
-                    },
-                }
-            )
-        buttons.append(
-            {
-                "text": "Submit",
-                "action": "hermes_clarify",
-                "parameters": {
-                    "clarify_id": clarify_id,
-                    "choice": "__other__",
-                },
-            }
-        )
-        if not buttons:
+            if has_long_choice:
+                choice_widgets.append(
+                    {
+                        "type": "decorated_text",
+                        "text": f"<b>{choice_text}</b>",
+                        "wrap_text": True,
+                        "button": {
+                            "text": "Select",
+                            "action": "hermes_clarify",
+                            "parameters": {
+                                "clarify_id": clarify_id,
+                                "choice": choice_text,
+                            },
+                        },
+                    }
+                )
+            else:
+                label = choice_text if len(choice_text) <= 80 else choice_text[:77] + "..."
+                short_buttons.append(
+                    {
+                        "text": label,
+                        "action": "hermes_clarify",
+                        "parameters": {
+                            "clarify_id": clarify_id,
+                            "choice": choice_text,
+                        },
+                    }
+                )
+
+        submit_btn = {
+            "text": "Submit",
+            "action": "hermes_clarify",
+            "parameters": {
+                "clarify_id": clarify_id,
+                "choice": "__other__",
+            },
+        }
+
+        if not choice_widgets and not short_buttons:
             return await super().send_clarify(
                 chat_id, question, choices, clarify_id, session_key, metadata
             )
+
+        widgets: List[Dict[str, Any]] = [
+            {"type": "text", "text": f"❓ {question}"},
+        ]
+        if choice_widgets:
+            widgets.extend(choice_widgets)
+        elif short_buttons:
+            widgets.append({"type": "buttons", "buttons": short_buttons})
+
+        widgets.append(
+            {
+                "type": "text_input",
+                "name": "custom_text",
+                "label": "Something else",
+                "hint": "Tell ROBIE what to do instead.",
+                "multiline": True,
+            }
+        )
+        widgets.append({"type": "buttons", "buttons": [submit_btn]})
 
         card = card_spec_to_cards_v2(
             {
@@ -3523,18 +3590,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 "header": {"title": "Question"},
                 "sections": [
                     {
-                        "widgets": [
-                            {"type": "text", "text": f"❓ {question}"},
-                            {"type": "buttons", "buttons": buttons[:-1]},
-                            {
-                                "type": "text_input",
-                                "name": "custom_text",
-                                "label": "Something else",
-                                "hint": "Tell ROBIE what to do instead.",
-                                "multiline": True,
-                            },
-                            {"type": "buttons", "buttons": [buttons[-1]]},
-                        ]
+                        "widgets": widgets,
                     }
                 ],
             }

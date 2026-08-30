@@ -1,10 +1,14 @@
-name: Test-only JE-KILL-01 live proof
+name: Verify disabled Ascend API on Test
 
 on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type RUN_JE_KILL_01_ON_HERMES_TEST_01
+        description: Type VERIFY_ASCEND_DISABLED_ON_HERMES_TEST_01
+        required: true
+        type: string
+      expected_sha:
+        description: Exact deployed Test commit SHA
         required: true
         type: string
 
@@ -13,24 +17,28 @@ permissions:
   id-token: write
 
 jobs:
-  je-kill-test:
+  verify-disabled:
     if: >-
       github.ref == 'refs/heads/main' &&
-      inputs.confirmation == 'RUN_JE_KILL_01_ON_HERMES_TEST_01'
+      inputs.confirmation == 'VERIFY_ASCEND_DISABLED_ON_HERMES_TEST_01'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     environment: Test
     env:
       PROJECT_ID: streetsmart-hermes-poc
       ZONE: us-east1-b
       TEST_VM: hermes-test-01
       TEST_ROOT: /opt/streetsmart-hermes-test
-      FIXTURE: /opt/streetsmart-hermes-test/je-kill/fixture.json
-      RUN_ROOT: /opt/streetsmart-hermes-test/je-kill/runs
-      STAGING_ROOT: /var/tmp/robie-je-kill
-      ROBIE_ENV: TEST
+      STAGING_ROOT: /var/tmp/robie-ascend-disabled-proof
     steps:
       - uses: actions/checkout@v4
+      - name: Refuse unsafe inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+          test "${TEST_ROOT}" = /opt/streetsmart-hermes-test
+          [[ "${{ inputs.expected_sha }}" =~ ^[0-9a-f]{40}$ ]]
       - name: Authenticate with short-lived Test identity
         uses: google-github-actions/auth@v3
         with:
@@ -38,20 +46,7 @@ jobs:
           service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
       - name: Install Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v3
-      - name: Refuse every target except the protected Test runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "${GITHUB_REF}" = refs/heads/main
-          test "${TEST_VM}" = hermes-test-01
-          test "${TEST_ROOT}" = /opt/streetsmart-hermes-test
-          test "${FIXTURE}" = /opt/streetsmart-hermes-test/je-kill/fixture.json
-          test "${RUN_ROOT}" = /opt/streetsmart-hermes-test/je-kill/runs
-          test "${ROBIE_ENV}" = TEST
-          gcloud compute instances describe "${TEST_VM}" \
-            --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
-      - name: Transfer exact remote runner to Test
+      - name: Transfer exact verification script
         shell: bash
         run: |
           set -euo pipefail
@@ -61,23 +56,22 @@ jobs:
             --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${staging}'"
           gcloud compute scp \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            scripts/run-je-kill-test-remote.sh \
+            scripts/verify-ascend-disabled-test.sh \
             "${TEST_VM}:${staging}/"
-      - name: Run guarded process-death proof on Test
+      - name: Verify deployed Test service fails closed without Ascend access
         shell: bash
         run: |
           set -euo pipefail
-          short="${GITHUB_SHA:0:12}"
           staging="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          remote_log="${RUNNER_TEMP}/je-kill-remote.log"
+          remote_log="${RUNNER_TEMP}/ascend-disabled-proof.log"
           if ! gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo env ROBIE_ENV=TEST EXPECTED_SHA='${short}' TEST_ROOT='${TEST_ROOT}' FIXTURE='${FIXTURE}' RUN_ROOT='${RUN_ROOT}' bash '${staging}/run-je-kill-test-remote.sh'" \
+            --command="sudo env EXPECTED_SHA='${{ inputs.expected_sha }}' TEST_ROOT='${TEST_ROOT}' bash '${staging}/verify-ascend-disabled-test.sh'" \
             2>&1 | tee "${remote_log}"; then
-            echo "JE-KILL FAILED: remote runner exited nonzero" >&2
+            echo "ASCEND DISABLED TEST FAILED" >&2
             exit 3
           fi
-          grep -Fq 'JE-KILL REMOTE VERIFIED' "${remote_log}" || {
-            echo "JE-KILL UNVERIFIED: remote proof sentinel missing" >&2
+          grep -Fq 'ASCEND DISABLED TEST VERIFIED' "${remote_log}" || {
+            echo "ASCEND DISABLED TEST UNVERIFIED: proof sentinel missing" >&2
             exit 3
           }

@@ -10,8 +10,8 @@ billables. The code is merged to GitHub and officially installed on
 credential configured, so no external Ascend record was created during this
 work.
 
-The Playwright locator audit remains available solely for testing the Import
-document UI. It is not the operational program-creation implementation.
+The Playwright locator audit is retired from the operational and release gate.
+New Ascend program work uses only the bounded API path.
 
 ## Implementation
 

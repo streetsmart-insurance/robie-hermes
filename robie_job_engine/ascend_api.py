@@ -1,8 +1,7 @@
 """Bounded Ascend API program creation and independent read-back.
 
-The browser locator audit remains a separate job because it tests Ascend's
-Import document UI.  This module is the deterministic operational path for
-creating a program and its billables with stable API identifiers.
+This is the only operational path for creating an Ascend program and its
+billables. It does not use Playwright, CDP, browser selectors, or the Ascend UI.
 
 No API call is made by validation or planning.  Execution is opt-in and the
 configured API host must match ROBIE_ENV.  Credentials are loaded only from a
@@ -471,6 +470,36 @@ def _billable_program_id(record: dict[str, Any]) -> str:
     return ""
 
 
+def _expected_billable(record: dict[str, Any], program_id: str) -> dict[str, Any]:
+    """Business postcondition for one requested billable.
+
+    Attachments and metadata have separate storage/shape contracts. Every
+    scalar billable value supplied to the create API is consequential and is
+    therefore included in fresh readback comparison.
+    """
+    return {
+        "program_id": program_id,
+        **{
+            field: record[field]
+            for field in sorted(BILLABLE_FIELDS - {"attachments", "metadata"})
+            if field in record
+        },
+    }
+
+
+def _observed_billable(
+    record: dict[str, Any], expected: dict[str, Any], program_id: str
+) -> dict[str, Any]:
+    return {
+        "program_id": _billable_program_id(record),
+        **{
+            field: record.get(field)
+            for field in expected
+            if field != "program_id"
+        },
+    }
+
+
 class AscendCreateProgramVerifier:
     """Fresh authoritative GET of the program and every created billable."""
 
@@ -498,18 +527,48 @@ class AscendCreateProgramVerifier:
             "producer_id": str(expected_program.get("producer_id") or ""),
             "account_manager_id": str(expected_program.get("account_manager_id") or ""),
             "billable_count": expected_billable_count,
+            "billables": sorted(
+                (
+                    _expected_billable(item, program_id)
+                    for item in plan["billables"]
+                ),
+                key=lambda item: str(item.get("billable_identifier") or ""),
+            ),
         }
-        observed: dict[str, Any] = {"resource_id": program_id, "billable_count": 0}
+        observed: dict[str, Any] = {
+            "resource_id": program_id,
+            "billable_count": 0,
+            "billables": [],
+        }
         try:
             if validation_error:
                 raise AscendPayloadError(validation_error)
             client = self.client_factory()
             observed.update(_normalized_program(client.get_program(program_id), program_id))
+            expected_by_identifier = {
+                str(item.get("billable_identifier") or ""): item
+                for item in expected["billables"]
+            }
+            observed_billables: list[dict[str, Any]] = []
             for billable_id in billable_ids:
                 record = client.get_billable(billable_id)
                 if _billable_program_id(record) != program_id:
                     raise AscendApiError(None, "Ascend billable is not bound to the created program")
+                identifier = str(record.get("billable_identifier") or "")
+                expected_item = expected_by_identifier.get(identifier)
+                if expected_item is None:
+                    raise AscendApiError(
+                        None,
+                        "Ascend returned an unexpected billable identifier",
+                    )
+                observed_billables.append(
+                    _observed_billable(record, expected_item, program_id)
+                )
             observed["billable_count"] = len(billable_ids)
+            observed["billables"] = sorted(
+                observed_billables,
+                key=lambda item: str(item.get("billable_identifier") or ""),
+            )
         except (AscendApiError, AscendConfigurationError, AscendPayloadError) as exc:
             observed["readback_error"] = str(exc)
             evidence = VerificationEvidence(
