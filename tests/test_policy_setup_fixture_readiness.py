@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AUDIT = ROOT / "scripts" / "audit-policy-setup-fixture-readiness.py"
+AUDIT = ROOT / "scripts" / "audit-policy-setup-fixture-readiness.js"
 REMOTE = ROOT / "scripts" / "run-policy-setup-fixture-readiness-remote.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "policy-setup-fixture-readiness.yml"
 
@@ -40,12 +40,9 @@ def test_remote_audit_requires_test_runtime_and_zero_active_jobs():
     assert "Test gateway references the Production release root" in text
     assert "Test gateway is not active" in text
     assert "Test gateway canonical root is missing" in text
-    assert "Test browser Python runtime is missing" in text
-    assert (
-        "python_bin=/opt/streetsmart-hermes-test/.hermes/hermes-agent/venv/bin/python"
-        in text
-    )
-    assert "python_bin=/home/streetsmart-hermes/" not in text
+    assert "Test browser Playwright runtime is missing" in text
+    assert "node_modules=/opt/streetsmart-hermes-test/.hermes/hermes-agent/node_modules" in text
+    assert 'NODE_PATH="${node_modules}"' in text
     assert "sudo -u streetsmart-hermes" not in text
     assert "systemctl restart" not in text
 
@@ -64,12 +61,12 @@ def test_remote_audit_does_not_require_unconfigured_service_environment_marker()
 
 def test_browser_audit_has_no_fill_click_or_sensitive_dom_dump():
     text = AUDIT.read_text(encoding="utf-8")
-    assert "context.new_page()" in text
-    assert "page.close()" in text
-    assert '"consequential_writes": 0' in text
-    assert '"production_touched": False' in text
+    assert "seed.context().newPage()" in text
+    assert "await page.close()" in text
+    assert "consequential_writes: 0" in text
+    assert "production_touched: false" in text
     assert ".fill(" not in text
     assert ".click(" not in text
     assert "page.content(" not in text
-    assert "inner_html(" not in text
+    assert "innerHTML(" not in text
     assert "<id>" in text
