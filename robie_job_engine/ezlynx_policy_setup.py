@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
+
 
 EZLYNX_BASE_URL = "https://app.ezlynx.com"
 
@@ -291,8 +293,11 @@ class EzlynxPolicySetupPage:
 
     def __init__(self, page: Any) -> None:
         self.page = page
+        self.applicant_id: str | None = None
 
     async def navigate_to_policies(self, applicant_id: str) -> None:
+        applicant_id = require_allowed_ezlynx_write_applicant(applicant_id)
+        self.applicant_id = applicant_id
         url = f"{EZLYNX_BASE_URL}/web/account/{applicant_id}/policies"
         await self.page.goto(url, wait_until="domcontentloaded")
 
@@ -716,6 +721,19 @@ class EzlynxPolicySetupPage:
         controls.
         """
         normalized = normalize_lob(shell_input.lob)
+        try:
+            require_allowed_ezlynx_write_applicant(shell_input.applicant_id)
+        except RuntimeError as exc:
+            return PolicySetupResult(
+                success=False,
+                applicant_id=shell_input.applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="applicant_write_scope",
+                error=str(exc),
+                note_added=False,
+                stopped_before_bind=True,
+            )
 
         return PolicySetupResult(
             success=False,

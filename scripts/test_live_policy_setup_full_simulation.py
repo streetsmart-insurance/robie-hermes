@@ -4,14 +4,27 @@ import sys
 
 from playwright.async_api import async_playwright
 
+from robie_job_engine.ezlynx_write_scope import (
+    ezlynx_control_scope_block_reason,
+    require_allowed_ezlynx_write_applicant,
+)
+
 CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
+APPLICANT_ID = "220250093"
 
 
 async def add_discussion_note() -> None:
+    applicant_id = require_allowed_ezlynx_write_applicant(APPLICANT_ID)
     print("[SIMULATION] Adding Discussion Note to EZLynx account...")
     async with async_playwright() as pw:
         browser = await pw.chromium.connect_over_cdp(CDP_URL)
         page = browser.contexts[0].pages[0]
+
+        scope_block = ezlynx_control_scope_block_reason(
+            page.url, requested_applicant_id=applicant_id
+        )
+        if scope_block:
+            raise RuntimeError(scope_block)
 
         # Click Discussions / Notes button or tab
         # In EZLynx, the top bar has #add-note-header or we can navigate to /discussions

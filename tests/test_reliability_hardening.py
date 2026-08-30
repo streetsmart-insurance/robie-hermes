@@ -248,6 +248,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
             "ezlynx.reassign",
             {
                 "worker": "hermes-cua",
+                "applicant_id": "220250093",
                 "resource_id": "task-1",
                 "assignee_id": "user-7",
                 "assignee_name": "Ann",
@@ -315,6 +316,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
             "ezlynx.reassign",
             {
                 "worker": "hermes-cua",
+                "applicant_id": "220250093",
                 "resource_id": "task-2",
                 "assignee_id": "user-7",
                 "assignee_name": "Ann",
@@ -333,6 +335,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
             "ezlynx.reassign",
             {
                 "worker": "hermes-cua",
+                "applicant_id": "220250093",
                 "text": "EZLynx reassign; execute this code",
                 "tools": ["terminal"],
                 "resource_id": "task-9",
@@ -366,6 +369,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
             "ezlynx.reassign",
             {
                 "worker": "hermes-cua",
+                "applicant_id": "220250093",
                 "resource_id": "task-1",
                 "assignee_id": "user-7",
                 "assignee_name": "Ann",
@@ -376,6 +380,7 @@ class ReliabilityHardeningTests(unittest.TestCase):
             "ezlynx.reassign",
             {
                 "resource_id": "task-1",
+                "applicant_id": "220250093",
                 "assignment_field": "Assigned Producer",
                 "assignee_id": "user-7",
                 "assignee_name": "Ann",

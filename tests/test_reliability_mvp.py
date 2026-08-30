@@ -462,6 +462,7 @@ class ReliabilityMvpTests(unittest.TestCase):
         job = {
             "action_type": "ezlynx.reassign",
             "payload": {
+                "applicant_id": "220250093",
                 "resource_id": "task-1",
                 "assignee_id": "user-7",
                 "assignee_name": "Ann",

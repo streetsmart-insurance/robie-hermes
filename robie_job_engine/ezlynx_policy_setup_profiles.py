@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROFILE_PATH = (
@@ -200,6 +202,12 @@ def preflight_policy_setup(
     required = list(REQUIRED_IDENTITY_FIELDS) + list(profile.get("required_fields") or [])
     missing = sorted({field for field in required if not request.get(field)})
     reasons = [f"missing required field: {field}" for field in missing]
+    applicant_id = normalize_applicant_id(request.get("applicant_id"))
+    if not applicant_is_write_allowed(applicant_id):
+        reasons.append(
+            f"applicant {applicant_id or '<missing>'} is not on the compiled "
+            "EZLynx business-write allowlist"
+        )
     reasons.extend(_guard_reasons(profile_id, request))
     if request.get("source_conflicts"):
         reasons.append("authoritative source documents conflict")

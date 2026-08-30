@@ -431,6 +431,7 @@ class CaptureCommandAndHintPublishTests(unittest.TestCase):
         with durable_temporary_directory() as tmp:
             hint = Path(tmp) / "job.hint.json"
             os.environ["ROBIE_RECORDING_HINT_FILE"] = str(hint)
+            os.environ["ROBIE_EZLYNX_WRITE_APPLICANT_ID"] = "220250093"
 
             class _Page:
                 url = POLICIES
@@ -451,6 +452,7 @@ class CaptureCommandAndHintPublishTests(unittest.TestCase):
                 self.assertEqual(read_page_hint(hint)["url"], EDIT)
             finally:
                 os.environ.pop("ROBIE_RECORDING_HINT_FILE", None)
+                os.environ.pop("ROBIE_EZLYNX_WRITE_APPLICANT_ID", None)
 
 
 if __name__ == "__main__":

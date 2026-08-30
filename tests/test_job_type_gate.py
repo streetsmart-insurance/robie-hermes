@@ -104,7 +104,10 @@ class JobTypeGateTests(unittest.TestCase):
 
     def test_production_runtime_holds_new_bounded_type(self):
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
-            reason = bounded_schema_hold_reason("ezlynx.reassign", {"resource_id": "r1"})
+            reason = bounded_schema_hold_reason(
+                "ezlynx.reassign",
+                {"applicant_id": "220250093", "resource_id": "r1"},
+            )
             self.assertIsNone(reason)
             # New types are not in BOUNDED_ENGINE_ACTIONS yet; the hold applies
             # once they are registered. Exercise the gate function directly.

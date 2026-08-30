@@ -24,6 +24,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("os.killpg", source)
         self.assertIn("persistent browser was preserved", source)
         self.assertIn("install_playwright_write_guards", source)
+        self.assertIn("ROBIE_EZLYNX_WRITE_APPLICANT_ID", source)
+        self.assertIn('payload.get("applicant_id")', source)
         self.assertIn("destination_verified", source)
         self.assertIn("authorizes_complete", source)
         self.assertIn("identifies exactly one field", source)

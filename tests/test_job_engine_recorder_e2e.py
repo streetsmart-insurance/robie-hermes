@@ -331,6 +331,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                 "ezlynx.reassign",
                 {
                     "worker": "hermes-cua",
+                    "applicant_id": "220250093",
                     "resource_id": "task-e2e",
                     "assignee_id": "user-7",
                     "assignee_name": "Ann",
@@ -342,7 +343,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                 {
                     "worker": "hermes-cua",
                     "document_id": "doc-e2e",
-                    "account_id": "account-4",
+                    "account_id": "220250093",
                     "destination_id": "acct-9",
                     "destination_name": "Acme Test",
                 },
@@ -353,7 +354,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                 {
                     "worker": "hermes-cua",
                     "resource_id": "doc-label",
-                    "account_id": "account-4",
+                    "account_id": "220250093",
                     "label_id": "label-2",
                     "label": "Renewal",
                 },

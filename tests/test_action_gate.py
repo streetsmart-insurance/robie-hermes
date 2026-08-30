@@ -81,7 +81,7 @@ class ActionGateTests(unittest.TestCase):
                 POLICY_SETUP_ACTION,
             )
 
-    def test_policy_setup_is_refused_in_production_even_through_chat(self):
+    def test_policy_setup_is_refused_without_allowlisted_applicant_even_through_chat(self):
         reason = hold_reason_for_job(
             {
                 "id": "policy-setup-prod",
@@ -92,9 +92,23 @@ class ActionGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(reason)
         self.assertIn(REFUSAL_TOKEN, reason or "")
-        self.assertIn("consequential writes disabled", reason or "")
+        self.assertIn("compiled-allowlisted applicant", reason or "")
 
-    def test_policy_setup_draft_stays_refused_even_with_a_test_pass_record(self):
+    def test_policy_setup_allowlisted_applicant_is_not_held_by_environment_gate(self):
+        reason = hold_reason_for_job(
+            {
+                "id": "policy-setup-allowed",
+                "action_type": "hermes.google_chat_task",
+                "payload": {
+                    "skill": "ezlynx-policy-setup",
+                    "applicant_id": "220250093",
+                },
+            },
+            env="PRODUCTION",
+        )
+        self.assertIsNone(reason)
+
+    def test_policy_setup_wrong_applicant_stays_refused_even_with_a_test_pass_record(self):
         with durable_temporary_directory() as tmp:
             passes = Path(tmp) / "passes"
             passes.mkdir()
@@ -109,12 +123,15 @@ class ActionGateTests(unittest.TestCase):
                     {
                         "id": "policy-setup-prod-after-pass",
                         "action_type": "hermes.google_chat_task",
-                        "payload": {"skill": "ezlynx-policy-setup"},
+                        "payload": {
+                            "skill": "ezlynx-policy-setup",
+                            "applicant_id": "220250094",
+                        },
                     },
                     env="PRODUCTION",
                 )
         self.assertIsNotNone(reason)
-        self.assertIn("Test-only", reason or "")
+        self.assertIn("compiled-allowlisted applicant", reason or "")
 
     def test_production_without_record_refuses_before_api(self):
         with durable_temporary_directory() as tmp:

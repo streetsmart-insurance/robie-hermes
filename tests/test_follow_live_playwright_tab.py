@@ -266,6 +266,7 @@ class FollowLivePlaywrightTabTests(unittest.TestCase):
         with durable_temporary_directory() as tmp:
             hint = Path(tmp) / "job.hint.json"
             os.environ["ROBIE_RECORDING_HINT_FILE"] = str(hint)
+            os.environ["ROBIE_EZLYNX_WRITE_APPLICANT_ID"] = "220250093"
 
             class _Page:
                 url = POLICIES
@@ -290,6 +291,7 @@ class FollowLivePlaywrightTabTests(unittest.TestCase):
                 )
             finally:
                 os.environ.pop("ROBIE_RECORDING_HINT_FILE", None)
+                os.environ.pop("ROBIE_EZLYNX_WRITE_APPLICANT_ID", None)
 
     def test_capture_source_uses_cdp_list_not_first_ezlynx(self):
         source = Path(capture.__code__.co_filename).read_text(encoding="utf-8")
