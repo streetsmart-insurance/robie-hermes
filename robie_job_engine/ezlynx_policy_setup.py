@@ -221,6 +221,7 @@ class PolicyShellInput:
     premium: str = ""
     full_term_premium: str = ""
     annual_premium: str = ""
+    total_commission: str = "12.00"
     department: str = ""  # "Commercial Lines (CL)" or "Personal Lines (P/L)"
     # LOB Specific Components
     vehicles: Sequence[VehicleItem] = field(default_factory=tuple)
@@ -372,6 +373,10 @@ class EzlynxPolicySetupPage:
         if shell_input.annual_premium:
             ann_prem = self.page.locator("#AnnualPremium")
             await ann_prem.fill(clean_currency(shell_input.annual_premium))
+        comm_val = shell_input.total_commission or "12.00"
+        comm_input = self.page.locator("#TotalCommission")
+        if await comm_input.count() > 0:
+            await comm_input.fill(clean_currency(comm_val))
 
         # 8b. Department selection (Commercial Lines (CL) for commercial, Personal Lines (P/L) for personal)
         dept_val = shell_input.department or (
