@@ -20,6 +20,26 @@ os.replace(tmp, link)
 PY
 }
 
+restore_file_snapshot() {
+  local state="$1"
+  local snapshot="$2"
+  local destination="$3"
+
+  case "${state}" in
+    present)
+      test -f "${snapshot}"
+      install -D -m 0644 "${snapshot}" "${destination}"
+      ;;
+    absent)
+      rm -f -- "${destination}"
+      ;;
+    *)
+      echo "unknown file snapshot state: ${state}" >&2
+      return 2
+      ;;
+  esac
+}
+
 rollback_test_release() {
   local old_current="$1"
   local old_releases_current="$2"
