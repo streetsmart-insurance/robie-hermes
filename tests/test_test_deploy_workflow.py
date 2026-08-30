@@ -58,6 +58,29 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn('data.get("authorizes_complete") is False', text)
         self.assertIn("TEST VERIFIED", text)
 
+    def test_installs_only_guarded_policy_setup_skill_with_rollback_evidence(self):
+        text = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('policy_skill_link="${OPT_ROOT}/.hermes/skills/ezlynx-policy-setup"', text)
+        self.assertIn(
+            'policy_skill_source="${release_root}/deploy/hermes/skills/ezlynx-policy-setup"',
+            text,
+        )
+        self.assertIn("existing Test Policy Setup skill is not an atomic symlink", text)
+        self.assertIn('atomic_pointer "${policy_skill_source}" "${policy_skill_link}"', text)
+        self.assertIn('atomic_pointer "${old_policy_skill_target}" "${policy_skill_link}"', text)
+        self.assertIn("Policy Setup Test-only package validation failed", text)
+        skill_install = text.index(
+            'atomic_pointer "${policy_skill_source}" "${policy_skill_link}"'
+        )
+        restart_after_skill = text.index('systemctl restart "${GATEWAY_UNIT}"', skill_install)
+        self.assertLess(skill_install, restart_after_skill)
+        self.assertIn("rollback_test", text[skill_install:restart_after_skill + 200])
+        self.assertIn('"consequential_writes_enabled": False', text)
+        self.assertIn('"profile_manifest": sys.argv[11]', text)
+        self.assertIn('"selector_inventory": sys.argv[11]', text)
+        self.assertIn('"production_touched": False', text)
+        self.assertNotIn('/opt/streetsmart-hermes/.hermes/skills/ezlynx-policy-setup', text)
+
 
 if __name__ == "__main__":
     unittest.main()
