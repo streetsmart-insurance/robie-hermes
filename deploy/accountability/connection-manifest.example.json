@@ -4,6 +4,7 @@
     "ringcentral": "/opt/streetsmart-hermes/accountability/inbox/ringcentral.csv",
     "tasks": "/opt/streetsmart-hermes/accountability/inbox/ezlynx_tasks.csv",
     "activities": "/opt/streetsmart-hermes/accountability/inbox/ezlynx_activities.csv",
+    "sales": "/opt/streetsmart-hermes/accountability/inbox/ezlynx_sales_center.csv",
     "sales_json": "/opt/streetsmart-hermes/accountability/inbox/sales_summary.json",
     "retention": "/opt/streetsmart-hermes/accountability/inbox/retention.csv",
     "retention_summary_json": "/opt/streetsmart-hermes/accountability/inbox/retention_summary.json",
@@ -15,7 +16,6 @@
     "churn_json": "/opt/streetsmart-hermes/accountability/inbox/churn_cases.json",
     "trackers": {
       "bor": "/opt/streetsmart-hermes/accountability/inbox/bor.csv",
-      "pending_payouts": "/opt/streetsmart-hermes/accountability/inbox/pending_payouts.csv",
       "policy_changes": "/opt/streetsmart-hermes/accountability/inbox/policy_changes.csv",
       "referrals": "/opt/streetsmart-hermes/accountability/inbox/referrals.csv",
       "missed_calls": "/opt/streetsmart-hermes/accountability/inbox/missed_calls.csv",
@@ -25,6 +25,10 @@
       "case_studies": "/opt/streetsmart-hermes/accountability/inbox/case_studies.csv",
       "policy_transactions": "/opt/streetsmart-hermes/accountability/inbox/policy_transactions.csv"
     }
+  },
+  "rules": {
+    "sales_untouched_days": 5,
+    "submission_open_days": 30
   },
   "appsheet": {
     "enabled": false,

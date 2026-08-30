@@ -11,14 +11,21 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .center_audits import (
+    audit_sales_records,
     audit_retention_records,
     audit_submission_records,
     finding_dicts,
     parse_retention_csv,
+    parse_sales_csv,
     parse_submission_csv,
 )
 from .ezlynx_productivity_sync import EZLynxProductivityParser
-from .operational_trackers import TRACKER_DEFINITIONS, audit_tracker_csv, findings_as_dicts as tracker_dicts
+from .operational_trackers import (
+    TRACKER_DEFINITIONS,
+    audit_tracker_csv,
+    findings_as_dicts as tracker_dicts,
+    voicemail_email_attestations,
+)
 from .productivity import ProductivityAuditor, RingCentralCall, normalize_phone
 from .reporting_suite import ReportingSuite
 
@@ -180,6 +187,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", type=Path)
     parser.add_argument("--activities", type=Path)
     parser.add_argument("--sales-json", type=Path)
+    parser.add_argument("--sales", type=Path, help="EZLynx Sales Center CSV export")
+    parser.add_argument("--sales-untouched-days", type=int, default=5)
     parser.add_argument("--retention", type=Path)
     parser.add_argument("--retention-summary-json", type=Path)
     parser.add_argument("--submissions", type=Path)
@@ -200,9 +209,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         raise SystemExit("--as-of must be a valid ISO timestamp")
     suite = ReportingSuite()
     magellan_data = _json(args.magellan_json)
+    sales_data = _json(args.sales_json)
+    if args.sales and args.sales.exists():
+        sales_findings = audit_sales_records(
+            parse_sales_csv(args.sales),
+            as_of=as_of,
+            untouched_days=max(1, args.sales_untouched_days),
+        )
+        sales_data.update(
+            {
+                "source_status": "available",
+                "inactive_opportunity_count": len(sales_findings),
+                "exceptions": finding_dicts(sales_findings),
+                "untouched_days_threshold": max(1, args.sales_untouched_days),
+            }
+        )
     call_data, task_data = _call_report(args.ringcentral, as_of, args.tasks, args.activities, magellan_data)
     if args.mode == "daily":
-        report = suite.build_daily_report(call_data, task_data, magellan_data)
+        report = suite.build_daily_report(call_data, task_data, magellan_data, sales_data)
     elif args.mode == "weekly":
         retention = _json(args.retention_summary_json)
         if args.retention and args.retention.exists():
@@ -213,6 +237,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             findings = audit_submission_records(parse_submission_csv(args.submissions), as_of=as_of)
             submissions = {"source_status": "available", "open_over_30_count": len(findings), "exceptions": finding_dicts(findings)}
         all_tracker_findings = []
+        missed_call_reconciliation = []
+        workload_attestations = []
         tracker_errors = []
         for spec in args.tracker:
             try:
@@ -222,19 +248,39 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if not path.exists():
                     tracker_errors.append(f"{key}: missing file {path}")
                     continue
-                all_tracker_findings.extend(audit_tracker_csv(path, definition, as_of=as_of.date()))
+                findings = audit_tracker_csv(path, definition, as_of=as_of.date())
+                if key == "voicemail_email":
+                    workload_attestations.extend(voicemail_email_attestations(path))
+                if key == "missed_calls" and call_data.get("source_status") == "available":
+                    missed_call_reconciliation.extend(findings)
+                else:
+                    all_tracker_findings.extend(findings)
             except (ValueError, KeyError):
                 tracker_errors.append(f"invalid tracker specification: {spec}")
         tracker_data = {
             "source_status": "available" if args.tracker and not tracker_errors else ("not supplied" if not args.tracker else "; ".join(tracker_errors)),
             "exceptions": tracker_dicts(all_tracker_findings),
+            "missed_call_reconciliation": tracker_dicts(missed_call_reconciliation),
         }
+        phone_by_name = {
+            str(item.get("employee") or "").casefold(): int(item.get("unreturned") or 0)
+            for item in call_data.get("employee_rows", [])
+        }
+        email_by_user = (_json(args.email_json).get("by_employee") or {}) if args.email_json else {}
+        mismatches = []
+        for item in workload_attestations:
+            email_fact = dict(email_by_user.get(item.get("email"), {}) or {})
+            evidenced = phone_by_name.get(str(item.get("employee") or "").casefold(), 0) + int(email_fact.get("stalled_threads") or 0)
+            reported = item.get("reported_unresolved")
+            if reported is not None and reported != evidenced:
+                mismatches.append({**item, "evidenced_unresolved": evidenced})
+        tracker_data["attestation_mismatches"] = mismatches
         if args.tracker and not tracker_errors:
             tracker_data["exception_count"] = len(all_tracker_findings)
         report = suite.build_weekly_report(
             call_data,
             task_data,
-            _json(args.sales_json),
+            sales_data,
             retention,
             _json(args.email_json),
             submissions,
@@ -245,7 +291,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         churn_data = _json(args.churn_json)
         churn_cases = churn_data.get("cases", []) if churn_data.get("source_status") == "available" else []
-        report = suite.build_monthly_report(_json(args.monthly_kpis_json), churn_cases)
+        report = suite.build_monthly_report(_json(args.monthly_kpis_json), churn_cases, sales_data)
     if args.output:
         args.output.write_text(report + "\n", encoding="utf-8")
     else:

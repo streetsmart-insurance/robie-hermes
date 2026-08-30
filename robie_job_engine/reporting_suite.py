@@ -94,6 +94,7 @@ class ReportingSuite:
         call_data: Dict[str, Any],
         task_data: Dict[str, Any],
         magellan_data: Optional[Dict[str, Any]] = None,
+        sales_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Daily: Phones + Overdue Tasks + Unreturned Calls SLA."""
         lines = [
@@ -127,12 +128,23 @@ class ReportingSuite:
             lines.append(f"| {rep} | {stats.get('inbound', 0)} | {ans_rate} | {badge} {unret} | {overdue_display} |")
 
         magellan_data = magellan_data or {"source_status": "not supplied"}
+        sales_data = sales_data or {"source_status": "not supplied"}
+        sales_exceptions = sales_data.get("exceptions", [])
+        if sales_exceptions:
+            lines.extend(["", "📈 *SALES CENTER INACTIVE OPPORTUNITIES*"])
+            for item in sales_exceptions[:20]:
+                lines.append(
+                    f"• {item.get('account_name', 'Unknown account')} — {item.get('producer', 'Unassigned')} | "
+                    f"{item.get('stage', 'Unknown')} | last touch {item.get('days_since_touch', 'unknown')}d ago | "
+                    f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
+                )
         warnings = [
             warning
             for warning in (
                 _source_warning("RingCentral", call_data),
                 _source_warning("EZLynx Tasks", task_data),
                 _source_warning("Magellan", magellan_data),
+                _source_warning("EZLynx Sales Center", sales_data),
             )
             if warning
         ]
@@ -167,6 +179,7 @@ class ReportingSuite:
             f"• Unreturned Voicemails: {_display_metric(call_data, 'unreturned_total')}",
             f"• Overdue Tasks: {_display_metric(task_data, 'total_overdue')}",
             f"• Sales Center Quotes Created: {_display_metric(sales_data, 'quotes_created')}",
+            f"• Sales Opportunities With No Recent Touch: {_display_metric(sales_data, 'inactive_opportunity_count')}",
             f"• Retention Reviews Completed: {_display_metric(retention_data, 'reviews_completed')}",
             f"• Retention Accounts Requiring Review: {_display_metric(retention_data, 'exception_count')}",
             f"• Open Submissions Over 30 Days: {_display_metric(submission_data, 'open_over_30_count')}",
@@ -197,6 +210,16 @@ class ReportingSuite:
             lines.append("• Employee comparison: UNVERIFIED — no normalized employee rows supplied")
 
         retention_exceptions = retention_data.get("exceptions", [])
+
+        sales_exceptions = sales_data.get("exceptions", [])
+        if sales_exceptions:
+            lines.extend(["", "📈 *SALES CENTER INACTIVE OPPORTUNITIES*"])
+            for item in sales_exceptions[:20]:
+                lines.append(
+                    f"• {item.get('account_name', 'Unknown account')} — {item.get('producer', 'Unassigned')} | "
+                    f"{item.get('stage', 'Unknown')} | last touch {item.get('days_since_touch', 'unknown')}d ago | "
+                    f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
+                )
         if retention_exceptions:
             lines.extend(["", "🛡️ *RETENTION CENTER EXCEPTIONS*"])
             for item in retention_exceptions[:20]:
@@ -228,8 +251,30 @@ class ReportingSuite:
                     lines.append(
                         f"• {item.get('account', 'Unknown item')} — {item.get('owner', 'Unassigned')} | "
                         f"{item.get('status', 'Unknown')} | {'; '.join(item.get('reasons', []))} | "
-                        f"source row {item.get('source_row_number', '?')}"
+                        f"blocker: {item.get('blocker_party', 'unclear')} | "
+                        f"next: {item.get('next_action', 'Review EZLynx')} | "
+                        f"alert draft for: {item.get('notification_target', 'Unassigned')} | "
+                        f"EZLynx: {item.get('ezlynx_reference', 'UNVERIFIED')} | source row {item.get('source_row_number', '?')}"
                     )
+
+        missed_call_reconciliation = tracker_data.get("missed_call_reconciliation", [])
+        if missed_call_reconciliation:
+            lines.extend(["", "☎️ *MISSED CALL TRACKER ↔ RINGCENTRAL RECONCILIATION (NOT DOUBLE-COUNTED)*"])
+            for item in missed_call_reconciliation[:20]:
+                lines.append(
+                    f"• {item.get('account', 'Unknown caller')} — {item.get('owner', 'Unassigned')} | "
+                    f"tracker row {item.get('source_row_number', '?')} requires RingCentral callback match"
+                )
+
+        attestation_mismatches = tracker_data.get("attestation_mismatches", [])
+        if attestation_mismatches:
+            lines.extend(["", "⚠️ *VOICEMAIL/EMAIL TRACKER ATTESTATION MISMATCHES*"])
+            for item in attestation_mismatches[:20]:
+                lines.append(
+                    f"• {item.get('employee', 'Unknown')} reported {item.get('reported_unresolved')} unresolved, "
+                    f"but RingCentral/Gmail evidence shows {item.get('evidenced_unresolved')} | "
+                    f"tracker row {item.get('source_row_number', '?')}"
+                )
 
         warnings = [
             warning
@@ -250,7 +295,12 @@ class ReportingSuite:
             lines.extend(["", "⚠️ *DATA LIMITATIONS*"] + [f"• {warning}" for warning in warnings])
         return "\n".join(lines)
 
-    def build_monthly_report(self, monthly_kpis: Dict[str, Any], churn_autopsies: List[Dict[str, Any]]) -> str:
+    def build_monthly_report(
+        self,
+        monthly_kpis: Dict[str, Any],
+        churn_autopsies: List[Dict[str, Any]],
+        sales_data: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Monthly: Holistic 30-Day Agency Score + Lost Customer Churn Root Cause Autopsies."""
         grade = monthly_kpis.get("grade")
         score = monthly_kpis.get("holistic_score")
@@ -259,6 +309,7 @@ class ReportingSuite:
             grade_line = "📊 *30-DAY HOLISTIC AGENCY GRADE: UNVERIFIED — approved weighting formula or evidence missing*"
         else:
             grade_line = f"📊 *30-DAY HOLISTIC AGENCY GRADE: {grade} ({score}/100)* — formula {approved_formula}"
+        sales_data = sales_data or {"source_status": "not supplied"}
         lines = [
             "🏛️ *STREETSMART MONTHLY EXECUTIVE AUDIT & CHURN AUTOPSY*",
             f"📅 Month: {datetime.now(timezone.utc).strftime('%B %Y')}",
@@ -266,6 +317,7 @@ class ReportingSuite:
             grade_line,
             f"• Total Calls Processed: {_display_metric(monthly_kpis, 'total_calls')}",
             f"• Active Policies Serviced: {_display_metric(monthly_kpis, 'policies_serviced')}",
+            f"• Sales Opportunities With No Recent Touch: {_display_metric(sales_data, 'inactive_opportunity_count')}",
             f"• Confirmed Churn / Cancellation Cases Supplied: {len(churn_autopsies)}",
             "",
             "🔍 *LOST CUSTOMER ROOT CAUSE AUTOPSIES*",

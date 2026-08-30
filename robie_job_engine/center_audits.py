@@ -28,6 +28,17 @@ _CLOSED_SUBMISSION_STATUSES = {
     "completed",
 }
 
+_CLOSED_SALES_STATUSES = {
+    "bound",
+    "closed",
+    "lost",
+    "declined",
+    "withdrawn",
+    "cancelled",
+    "canceled",
+    "completed",
+}
+
 _GENERIC_NOTE_PATTERNS = (
     r"^called(?: the)? (?:client|customer|insured)$",
     r"^left (?:a )?(?:message|voicemail|vm)$",
@@ -184,6 +195,34 @@ class SubmissionException:
     owner: str
     carrier: str
     status: str
+    age_days: Optional[int]
+    days_since_touch: Optional[int]
+    severity: str
+    reasons: tuple[str, ...]
+    note_quality_reasons: tuple[str, ...]
+    source_row_number: int
+
+
+@dataclass(frozen=True)
+class SalesRecord:
+    record_id: str
+    opportunity_id: str
+    account_name: str
+    producer: str
+    stage: str
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+    last_note: str
+    source_row_number: int
+
+
+@dataclass(frozen=True)
+class SalesException:
+    record_id: str
+    opportunity_id: str
+    account_name: str
+    producer: str
+    stage: str
     age_days: Optional[int]
     days_since_touch: Optional[int]
     severity: str
@@ -365,5 +404,96 @@ def audit_submission_records(
     return sorted(findings, key=lambda item: (-(item.age_days or -1), item.account_name.lower()))
 
 
-def finding_dicts(findings: Iterable[RetentionException | SubmissionException]) -> list[dict[str, Any]]:
+def parse_sales_csv(source: Path | str) -> list[SalesRecord]:
+    """Parse an EZLynx Sales Center export without assuming one fixed header set."""
+
+    records: list[SalesRecord] = []
+    for row_number, row in enumerate(_read_csv_rows(source), start=2):
+        opportunity_id = _row_value(row, "Opportunity ID", "Sales ID", "Quote ID", "ID")
+        account_name = _row_value(row, "Account Name", "Applicant Name", "Customer Name", "Insured")
+        producer = _row_value(row, "Producer", "Owner", "Assigned To", "Sales Rep", "Agent") or "Unassigned"
+        stage = _row_value(row, "Stage", "Pipeline Stage", "Opportunity Status", "Status") or "Unknown"
+        created_at = parse_datetime(_row_value(row, "Created Date", "Created At", "Opportunity Created Date", "Date Created"))
+        last_activity_at = parse_datetime(
+            _row_value(row, "Last Activity", "Last Activity Date", "Last Touch", "Last Contact", "Modified Date", "Updated At")
+        )
+        last_note = _row_value(row, "Last Note", "Latest Note", "Notes", "Activity Note", "Description")
+        record_id = _row_value(row, "Record ID") or opportunity_id or f"sales-row-{row_number}"
+        records.append(
+            SalesRecord(
+                record_id=record_id,
+                opportunity_id=opportunity_id,
+                account_name=account_name or "Unknown account",
+                producer=producer,
+                stage=stage,
+                created_at=created_at,
+                last_activity_at=last_activity_at,
+                last_note=last_note,
+                source_row_number=row_number,
+            )
+        )
+    return records
+
+
+def audit_sales_records(
+    records: Iterable[SalesRecord],
+    *,
+    as_of: datetime,
+    untouched_days: int = 5,
+) -> list[SalesException]:
+    """Surface open producer opportunities with no documented recent activity."""
+
+    findings: list[SalesException] = []
+    for record in records:
+        if record.stage.strip().lower() in _CLOSED_SALES_STATUSES:
+            continue
+        age_days = (
+            max(0, int((as_of - record.created_at.astimezone(as_of.tzinfo or timezone.utc)).total_seconds() // 86400))
+            if record.created_at
+            else None
+        )
+        days_since_touch = (
+            max(0, int((as_of - record.last_activity_at.astimezone(as_of.tzinfo or timezone.utc)).total_seconds() // 86400))
+            if record.last_activity_at
+            else None
+        )
+        reasons: list[str] = []
+        if record.last_activity_at is None:
+            reasons.append("no last-touch timestamp in export")
+        elif days_since_touch is not None and days_since_touch > untouched_days:
+            reasons.append(f"no recorded touch for {days_since_touch} days (threshold {untouched_days})")
+        if record.producer == "Unassigned":
+            reasons.append("producer is unassigned")
+        if record.stage == "Unknown":
+            reasons.append("pipeline stage is missing")
+        if not reasons:
+            continue
+        note_reasons = vague_note_reasons(record.last_note)
+        if note_reasons:
+            reasons.append("latest note may not document an outcome or next step sufficiently")
+        severity = "high" if days_since_touch is not None and days_since_touch > untouched_days * 2 else "medium"
+        if days_since_touch is None:
+            severity = "unknown"
+        findings.append(
+            SalesException(
+                record_id=record.record_id,
+                opportunity_id=record.opportunity_id,
+                account_name=record.account_name,
+                producer=record.producer,
+                stage=record.stage,
+                age_days=age_days,
+                days_since_touch=days_since_touch,
+                severity=severity,
+                reasons=tuple(reasons),
+                note_quality_reasons=tuple(note_reasons),
+                source_row_number=record.source_row_number,
+            )
+        )
+    return sorted(
+        findings,
+        key=lambda item: (item.days_since_touch is None, -(item.days_since_touch or -1), item.account_name.lower()),
+    )
+
+
+def finding_dicts(findings: Iterable[RetentionException | SubmissionException | SalesException]) -> list[dict[str, Any]]:
     return [asdict(item) for item in findings]

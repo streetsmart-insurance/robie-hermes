@@ -45,6 +45,19 @@ The current cloud path uses the canonical authenticated browser profile and
 Secret Manager references already used for session refresh. Test must prove
 exports for Tasks, Activities, Sales Center, Retention Center, and Submission
 Center. A failed or stale export produces `UNVERIFIED`, never a favorable score.
+Sales Center open opportunities are grouped by producer and flagged when the
+export shows no touch beyond `rules.sales_untouched_days` (five days by
+default). The exception preserves opportunity, stage, last-touch age, note
+quality, and source row. Submission Center flags non-terminal submissions open
+more than 30 days.
+
+EZLynx is the account-level source of truth. RingCentral, Gmail, Magellan, and
+department trackers are external evidence to reconcile to the EZLynx account,
+owner, tasks, activities, and notes. Policy changes are escalated after seven
+days and classified as carrier-, client-, StreetSmart-, or unclear-blocked.
+Expiration and pending COI/endorsement exceptions must show the producer/CSR,
+documented outreach, blocker, and next action. Missing EZLynx identity is
+reported as `UNVERIFIED`.
 
 ### Magellan
 
@@ -64,6 +77,12 @@ and age; it does not publish message bodies. Shared inboxes, spam, bulk mail,
 auto-replies, internal-only threads, PTO, and approved delegations need written
 exclusion rules.
 
+The cloud implementation uses keyless IAM signing for the delegated service
+account and requests only `https://www.googleapis.com/auth/gmail.metadata`.
+Set `ACCOUNTABILITY_GMAIL_USERS` to an explicit mailbox allowlist. The output
+contains per-mailbox counts, reply ownership, ages, and hashed evidence IDs;
+it does not contain bodies or subjects.
+
 ### AppSheet
 
 Preferred order:
@@ -82,6 +101,12 @@ The implementation exposes no Add, Edit, or Delete method.
 Share only the required spreadsheets with the cloud service identity. The
 connection manifest maps every tracker key to a normalized export path. Each
 finding keeps its tracker name and source row.
+The Missed Calls tracker is a RingCentral reconciliation source and is not
+added to call totals a second time. Pending Payouts remains available as an
+optional definition but is excluded from the initial active manifest.
+
+Employee alerts are drafts in Test. Enabling delivery requires a separately
+approved recipient map and delivery connection; Test never messages employees.
 
 ## Test activation
 

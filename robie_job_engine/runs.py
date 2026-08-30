@@ -225,7 +225,15 @@ class IsolatedRunStore:
         owner: str,
         lease_seconds: int = 60,
     ) -> dict[str, Any]:
-        """Heartbeat only a live, unexpired run owned by this worker."""
+        """Heartbeat only a live run still owned by this worker.
+
+        A delayed heartbeat may arrive just after its timestamp expires when a
+        busy runner pauses the heartbeat thread.  Ownership is still
+        authoritative until ``start`` reconciles the run as ABANDONED.  The
+        status and owner predicates below therefore allow that same worker to
+        recover, while still refusing a terminal run or a run taken over by a
+        different worker.
+        """
         now = datetime.now(timezone.utc)
         stamp = now.isoformat()
         expiry = (now + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
@@ -234,13 +242,12 @@ class IsolatedRunStore:
                 """UPDATE isolated_runs
                    SET heartbeat_at=?, lease_expires_at=?, updated_at=?
                    WHERE id=? AND owner=? AND status='ACTIVE'
-                     AND terminal_event IS NULL
-                     AND lease_expires_at>?""",
-                (stamp, expiry, stamp, run_id, owner, stamp),
+                     AND terminal_event IS NULL""",
+                (stamp, expiry, stamp, run_id, owner),
             ).rowcount
         if changed != 1:
             raise RunIsolationError(
-                f"run lease is expired, terminal, missing, or owned by another worker: {run_id}"
+                f"run lease is terminal, missing, or owned by another worker: {run_id}"
             )
         return self.get(run_id)
 

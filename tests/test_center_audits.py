@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 
 from robie_job_engine.center_audits import (
+    audit_sales_records,
     audit_retention_records,
     audit_submission_records,
     parse_retention_csv,
+    parse_sales_csv,
     parse_submission_csv,
     vague_note_reasons,
 )
@@ -56,6 +58,21 @@ S-3,Old Bound Risk,Alexis Martinez,Carrier C,06/01/2026,06/20/2026,Bound and han
     assert findings[0].age_days == 76
     assert findings[0].severity == "high"
     assert "submission open for 76 days" in findings[0].reasons
+
+
+def test_sales_audit_flags_open_producer_opportunity_without_recent_touch():
+    records = parse_sales_csv(
+        "Opportunity ID,Account Name,Producer,Stage,Created Date,Last Activity,Last Note\n"
+        "O-1,Inactive Risk,Alexis Martinez,Quoting,2026-07-01,2026-08-20,Followed up\n"
+        "O-2,Active Risk,Nelson Maldonado,Proposed,2026-08-20,2026-08-28,Proposal sent; call again 09/01\n"
+        "O-3,Bound Risk,Nelson Maldonado,Bound,2026-07-01,2026-07-10,Bound\n"
+    )
+    findings = audit_sales_records(records, as_of=AS_OF, untouched_days=5)
+    assert len(findings) == 1
+    assert findings[0].opportunity_id == "O-1"
+    assert findings[0].producer == "Alexis Martinez"
+    assert findings[0].days_since_touch == 10
+    assert "threshold 5" in findings[0].reasons[0]
 
 
 def test_vague_note_is_a_signal_not_a_keyword_only_rule():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ SOURCE_FLAGS = {
     "ringcentral": "--ringcentral",
     "tasks": "--tasks",
     "activities": "--activities",
+    "sales": "--sales",
     "sales_json": "--sales-json",
     "retention": "--retention",
     "retention_summary_json": "--retention-summary-json",
@@ -83,6 +85,16 @@ class AccountabilityReportWorker:
                 value = (manifest.get("sources") or {}).get(key)
                 if value:
                     arguments.extend([flag, str(Path(str(value)).expanduser().resolve())])
+            if mode in {"daily", "weekly"} and not (manifest.get("sources") or {}).get("email_json"):
+                from .gmail_accountability import collect_agency_summary
+
+                gmail_snapshot = collect_agency_summary(environment=os.environ)
+                gmail_path = output_dir / f"gmail-{run_at:%Y%m%dT%H%M%SZ}.json"
+                gmail_path.write_text(json.dumps(gmail_snapshot, indent=2, default=str), encoding="utf-8")
+                arguments.extend(["--email-json", str(gmail_path)])
+            sales_untouched_days = (manifest.get("rules") or {}).get("sales_untouched_days")
+            if sales_untouched_days is not None:
+                arguments.extend(["--sales-untouched-days", str(max(1, int(sales_untouched_days)))])
             for key, value in sorted(((manifest.get("sources") or {}).get("trackers") or {}).items()):
                 arguments.extend(["--tracker", f"{key}={Path(str(value)).expanduser().resolve()}"])
             appsheet = dict(manifest.get("appsheet") or {})
