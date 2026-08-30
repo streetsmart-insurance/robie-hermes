@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from robie_job_engine.ezlynx_policy_setup import (
     BuildingItem,
+    CommercialAutoCoverageItem,
     DriverItem,
     EzlynxPolicySetupPage,
     GLCoverageItem,
@@ -389,5 +390,166 @@ def test_vehicle_garaging_fails_closed_when_dropdown_mode_is_disabled():
             assert str(exc).startswith("PLAYWRIGHT_BLOCKED:")
         else:
             raise AssertionError("disabled dropdown mode must fail closed")
+
+    asyncio.run(_run())
+
+
+def test_fill_commercial_auto_coverages_ui():
+    async def _run():
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.wait_for = AsyncMock()
+        mock_locator.click = AsyncMock()
+        mock_locator.fill = AsyncMock()
+        mock_locator.select_option = AsyncMock()
+        mock_locator.dispatch_event = AsyncMock()
+        mock_locator.count = AsyncMock(return_value=1)
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.is_enabled = AsyncMock(return_value=True)
+        mock_locator.first = mock_locator
+
+        mock_page.locator = MagicMock(return_value=mock_locator)
+        mock_page.wait_for_timeout = AsyncMock()
+
+        page_obj = EzlynxPolicySetupPage(mock_page)
+        cov = CommercialAutoCoverageItem(
+            csl_limit="1000000",
+            bi_per_person="1000000",
+            bi_per_accident="1000000",
+            pd_per_accident="1000000",
+            um_uim_limit="1000000",
+            med_pay="5000",
+            pip="250000",
+        )
+        await page_obj.fill_commercial_auto_coverages(cov)
+
+        assert mock_page.locator.called
+        assert mock_locator.fill.await_count >= 7
+        assert mock_locator.dispatch_event.await_count >= 14
+
+    asyncio.run(_run())
+
+
+def test_add_vehicle_and_driver_ui():
+    async def _run():
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.wait_for = AsyncMock()
+        mock_locator.click = AsyncMock()
+        mock_locator.fill = AsyncMock()
+        mock_locator.select_option = AsyncMock()
+        mock_locator.dispatch_event = AsyncMock()
+        mock_locator.count = AsyncMock(return_value=1)
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.is_enabled = AsyncMock(return_value=True)
+        mock_locator.evaluate = AsyncMock(return_value="SELECT")
+        mock_locator.all = AsyncMock(return_value=[mock_locator, mock_locator])
+        mock_locator.first = mock_locator
+        mock_locator.locator = MagicMock(return_value=mock_locator)
+
+        mock_page.locator = MagicMock(return_value=mock_locator)
+        mock_page.wait_for_timeout = AsyncMock()
+
+        page_obj = EzlynxPolicySetupPage(mock_page)
+
+        # 1. Add Vehicle
+        vehicle = VehicleItem(
+            vin="1FTNE2Y84NKA12345",
+            year="2022",
+            make="Ford",
+            model="Transit-250",
+            cost_new="45000",
+            premium="2450.00",
+            comp_deductible="1000",
+            coll_deductible="1000",
+        )
+        await page_obj.add_vehicle(vehicle)
+        assert mock_locator.fill.await_count >= 5
+
+        # Reset mocks
+        mock_locator.fill.reset_mock()
+
+        # 2. Add Driver
+        driver = DriverItem(
+            first_name="Carlo",
+            last_name="Ferrara",
+            dob="01/01/1985",
+            license_number="F12345678901234",
+            license_state="NJ",
+            experience_years="15",
+            licensed_year="2005",
+        )
+        await page_obj.add_driver(driver, driver_num="1")
+        assert mock_locator.fill.await_count >= 5
+
+    asyncio.run(_run())
+
+
+def test_execute_formentry_schedules_test_only():
+    async def _run():
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.wait_for = AsyncMock()
+        mock_locator.click = AsyncMock()
+        mock_locator.fill = AsyncMock()
+        mock_locator.select_option = AsyncMock()
+        mock_locator.dispatch_event = AsyncMock()
+        mock_locator.count = AsyncMock(return_value=1)
+        mock_locator.is_visible = AsyncMock(return_value=True)
+        mock_locator.is_enabled = AsyncMock(return_value=True)
+        mock_locator.evaluate = AsyncMock(return_value="SELECT")
+        mock_locator.all = AsyncMock(return_value=[mock_locator, mock_locator])
+        mock_locator.first = mock_locator
+        mock_locator.locator = MagicMock(return_value=mock_locator)
+
+        mock_page.locator = MagicMock(return_value=mock_locator)
+        mock_page.wait_for_timeout = AsyncMock()
+
+        page_obj = EzlynxPolicySetupPage(mock_page)
+
+        shell_input = PolicyShellInput(
+            applicant_id="220250093",
+            lob="commercial_auto",
+            policy_number="CA-ROBIE-LIVE-02",
+            vehicles=(
+                VehicleItem(
+                    vin="1FTNE2Y84NKA12345",
+                    year="2022",
+                    make="Ford",
+                    model="Transit-250",
+                    cost_new="45000",
+                    premium="2450.00",
+                    comp_deductible="1000",
+                    coll_deductible="1000",
+                ),
+            ),
+            drivers=(
+                DriverItem(
+                    first_name="Carlo",
+                    last_name="Ferrara",
+                    dob="01/01/1985",
+                    license_number="F12345678901234",
+                    license_state="NJ",
+                    experience_years="15",
+                ),
+            ),
+            commercial_auto_coverage=CommercialAutoCoverageItem(
+                csl_limit="1000000",
+                bi_per_person="1000000",
+                bi_per_accident="1000000",
+                pd_per_accident="1000000",
+                um_uim_limit="1000000",
+                med_pay="5000",
+                pip="250000",
+            ),
+        )
+
+        res = await page_obj.execute_formentry_schedules_test_only(shell_input)
+        assert res["success"] is True
+        assert res["applicant_id"] == "220250093"
+        assert res["policy_number"] == "CA-ROBIE-LIVE-02"
+        assert "vehicle:1FTNE2Y84NKA12345" in res["schedules_applied"]
+        assert "driver:Carlo Ferrara" in res["schedules_applied"]
+        assert "commercial_auto_coverages" in res["schedules_applied"]
 
     asyncio.run(_run())
