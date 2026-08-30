@@ -371,7 +371,7 @@ class ChatVerifierRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             classify_request("Create a program in Ascend").action_type,
-            "ascend.create_program",
+            "hermes.unavailable",
         )
         self.assertEqual(
             classify_request(
@@ -387,7 +387,7 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             "ezlynx.submission_audit",
         )
 
-    def test_ascend_create_program_chat_is_api_only(self):
+    def test_ascend_create_program_chat_is_unavailable(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(
@@ -413,10 +413,10 @@ class ChatVerifierRoutingTests(unittest.TestCase):
                 },
             )
             job = JobStore(db).get_job(job_id)
-            self.assertEqual(job["action_type"], "ascend.create_program")
-            self.assertEqual(job["payload"]["worker"], "ascend-api")
-            self.assertTrue(job["payload"]["execute"])
-            self.assertTrue(job["payload"]["api_only"])
+            self.assertEqual(job["action_type"], "hermes.unavailable")
+            self.assertEqual(job["status"], JobStatus.FAILED.value)
+            self.assertEqual(job["payload"]["worker"], "hermes-cua")
+            self.assertIn("ASCEND_UNAVAILABLE", job["last_error"])
             self.assertNotIn("programs_url", job["payload"])
 
 

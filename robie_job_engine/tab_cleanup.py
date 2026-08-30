@@ -826,6 +826,81 @@ def close_playwright_page(page: Any) -> dict[str, Any]:
     return {"ok": True, "id": identity, "url": str(getattr(page, "url", "") or "")}
 
 
+def reset_ezlynx_workspace(page: Any) -> dict[str, Any]:
+    """Close visible workspace chrome and return the session to neutral state."""
+    if not is_ezlynx_url(str(getattr(page, "url", "") or "")):
+        return {"ok": False, "error": "neutral reset target is not EZLynx"}
+    panel_selector = ", ".join(
+        (
+            "[aria-label='Add Note']:visible",
+            "[role='dialog']:visible",
+            "[aria-modal='true']:visible",
+            ".modal.show:visible",
+            ".workspace-pane:visible",
+            ".workspace-panel:visible",
+        )
+    )
+    control_selector = ", ".join(
+        (
+            "button[aria-label='Unpin']:visible",
+            "button[title='Unpin']:visible",
+            "button[aria-label='Close']:visible",
+            "button[title='Close']:visible",
+            "[data-action='unpin']:visible",
+            "[data-action='close']:visible",
+            ".modal button[data-dismiss='modal']:visible",
+        )
+    )
+    panels = page.locator(panel_selector).all()
+    clicked = 0
+    for panel in panels:
+        if not panel.is_visible():
+            continue
+        for control in panel.locator(control_selector).all():
+            if control.is_visible() and control.is_enabled():
+                control.click()
+                clicked += 1
+    remaining = [panel for panel in panels if panel.is_visible()]
+    if remaining:
+        return {
+            "ok": False,
+            "controls_clicked": clicked,
+            "remaining_panels": len(remaining),
+            "error": "visible workspace pane or modal could not be closed",
+        }
+    page.goto(SESSION_SEED_URL, wait_until="domcontentloaded")
+    return {
+        "ok": True,
+        "controls_clicked": clicked,
+        "remaining_panels": 0,
+        "neutral_url": SESSION_SEED_URL,
+    }
+
+
+def reset_workspace_via_cdp(*, cdp_url: str | None = None) -> dict[str, Any]:
+    """Attach to the persistent browser and reset its surviving EZLynx page."""
+    playwright = None
+    try:
+        from playwright.sync_api import sync_playwright
+
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.connect_over_cdp(_cdp_url(cdp_url))
+        pages = [page for context in browser.contexts for page in context.pages]
+        candidates = [page for page in pages if is_ezlynx_url(str(page.url or ""))]
+        if not candidates:
+            return {"ok": False, "error": "no EZLynx page available for neutral reset"}
+        selected = max(
+            candidates,
+            key=lambda page: session_keep_rank(str(page.url or "")),
+        )
+        return reset_ezlynx_workspace(selected)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        if playwright is not None:
+            playwright.stop()
+
+
 def apply_cleanup(
     plan: CleanupPlan,
     *,
@@ -892,6 +967,7 @@ def cleanup_terminal_job_tabs(
     closer: Callable[[BrowserTab], Any] | None = None,
     cdp_url: str | None = None,
     http_get: Callable[[str], tuple[int, bytes]] | None = None,
+    workspace_resetter: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Close pages this finished job opened. Leaves one /web/ session tab."""
     path = _jobs_db(db_path)
@@ -906,6 +982,29 @@ def cleanup_terminal_job_tabs(
         return {"ok": True, "skipped": "job is not terminal", "job_id": job_id}
     job_claims = claims_for_job(store, job) if store is not None and job is not None else claims_from_text(job_id)
     live = live_tab_claims(path)
+    if pages is not None:
+        ezlynx_pages = [
+            page
+            for page in pages
+            if is_ezlynx_url(str(getattr(page, "url", "") or ""))
+        ]
+        reset = (
+            reset_ezlynx_workspace(
+                max(
+                    ezlynx_pages,
+                    key=lambda page: session_keep_rank(
+                        str(getattr(page, "url", "") or "")
+                    ),
+                )
+            )
+            if ezlynx_pages
+            else {"ok": False, "error": "no EZLynx page available for neutral reset"}
+        )
+    else:
+        resetter = workspace_resetter or (
+            lambda: reset_workspace_via_cdp(cdp_url=cdp_url)
+        )
+        reset = resetter()
     listed = tabs_from_pages(pages) if pages is not None else list_cdp_tabs(
         cdp_url=cdp_url, http_get=http_get, tabs=tabs
     )
@@ -921,11 +1020,12 @@ def cleanup_terminal_job_tabs(
     )
     applied.update(
         {
-            "ok": not applied["errors"],
+            "ok": not applied["errors"] and bool(reset.get("ok")),
             "job_id": job_id,
             "mode": TERMINAL_MODE,
             "hint": hint,
             "selection_mode": "recent_navigation",
+            "workspace_reset": reset,
         }
     )
     return applied

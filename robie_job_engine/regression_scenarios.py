@@ -929,6 +929,44 @@ def run_action_gate_scenario(*, work_dir: Path) -> dict[str, Any]:
     db = str(work_dir / "action-gate.db")
     passes = work_dir / "passes"
     passes.mkdir(parents=True, exist_ok=True)
+    # The non-Ascend release supersedes the old N=1 enablement path: both Test
+    # and Production must now refuse before a worker, recorder, API, or browser
+    # can start, even if historical Test-pass evidence exists.
+    try:
+        from .recording import RecordingStore
+
+        for index, environment in enumerate(("TEST", "PRODUCTION")):
+            with patch.dict(os.environ, {"ROBIE_ENV": environment}, clear=False):
+                job_id = open_chat_job(
+                    db,
+                    f"spaces/action-gate/messages/non-ascend-{index}",
+                    CHAT_SHAPED_ASCEND,
+                    requested_by="Carlo Ferrara",
+                    conversation_id=f"spaces/action-gate-{index}",
+                )
+            job = JobStore(db).get_job(job_id)
+            if (
+                job["action_type"] != "hermes.unavailable"
+                or job["status"] != JobStatus.FAILED.value
+                or "ASCEND_UNAVAILABLE" not in str(job.get("last_error") or "")
+                or RecordingStore(db).latest(job_id) is not None
+            ):
+                return _fail(
+                    ACTION_GATE_SCENARIO_ID,
+                    f"{environment} did not fail closed before execution: {job}",
+                )
+        return _result(
+            ACTION_GATE_SCENARIO_ID,
+            ok=True,
+            outcome="PASS",
+            evidence=(
+                "Ascend is unavailable in Test and Production; no worker or "
+                "recording started and no historical pass can enable it"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(ACTION_GATE_SCENARIO_ID, f"{type(exc).__name__}: {exc}")
+
     errors: list[str] = []
     refused_id: str | None = None
     try:
@@ -1190,17 +1228,20 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     results = [run_same_day_scenario_rule()]
     results.extend(run_hitl_resume_scenarios(work_dir=work_dir / "hitl"))
     results.append(run_false_success_scenario(work_dir=work_dir / "false-success"))
-    results.append(run_ascend_locator_audit_scenario(work_dir=work_dir / "ascend-audit"))
-    results.append(run_concat_job_id_eb96f620_scenario(work_dir=work_dir / "eb96f620"))
+    ascend_runtime_present = (Path(__file__).with_name("ascend_api.py").is_file())
+    if ascend_runtime_present:
+        results.append(run_ascend_locator_audit_scenario(work_dir=work_dir / "ascend-audit"))
+        results.append(run_concat_job_id_eb96f620_scenario(work_dir=work_dir / "eb96f620"))
     results.append(run_hitl_tone_scenario())
-    results.append(run_sender_not_robie_ai_scenario())
-    results.append(run_wait_spinner_scenario())
-    results.append(run_accessible_name_scenario())
-    results.append(run_spinner_timing_scenario())
-    results.append(run_agency_fee_default_scenario())
-    results.append(run_too_soon_zero_element_scenario())
-    results.append(run_unique_listbox_option_scenario())
-    results.append(run_customer_type_lob_scenario())
+    if ascend_runtime_present:
+        results.append(run_sender_not_robie_ai_scenario())
+        results.append(run_wait_spinner_scenario())
+        results.append(run_accessible_name_scenario())
+        results.append(run_spinner_timing_scenario())
+        results.append(run_agency_fee_default_scenario())
+        results.append(run_too_soon_zero_element_scenario())
+        results.append(run_unique_listbox_option_scenario())
+        results.append(run_customer_type_lob_scenario())
     results.append(
         run_follow_live_playwright_tab_scenario(work_dir=work_dir / "follow-tab")
     )
