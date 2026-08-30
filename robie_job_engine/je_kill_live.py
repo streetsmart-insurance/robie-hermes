@@ -447,16 +447,18 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         page.reload(wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
-        self._wait_label_control()
         loc = self._locator(self.scenario.applied_label)
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + max(0.0, LABEL_CONTROL_SETTLE_TIMEOUT_MS / 1000.0)
         while time.monotonic() < deadline:
-            count = loc.count()
-            if count > 0:
+            if loc.count() > 0:
                 break
-            time.sleep(0.2)
+            label_ctrl = self._locator(self.scenario.label_control)
+            if label_ctrl.count() > 0:
+                break
+            time.sleep(UNIQUE_LOCATOR_POLL_INTERVAL_S)
         count = loc.count()
         if count == 0:
+            self._wait_label_control()
             return {}
         if count != 1:
             raise RuntimeError(
