@@ -488,8 +488,12 @@ class EzlynxPolicySetupPage:
         await raw.dispatch_event("change")
 
     async def add_vehicle(self, vehicle: VehicleItem) -> None:
+        edit_btn = self.page.locator("a[data-original-title='Edit'], button[data-original-title='Edit']")
         add_btn = self.page.locator("input[value='Add Vehicle'], button:has-text('Add Vehicle'), #add-vehicle-btn")
-        if await add_btn.count() > 0:
+        if await edit_btn.count() > 0:
+            await edit_btn.first.click()
+            await self.page.wait_for_timeout(500)
+        elif await add_btn.count() > 0:
             await add_btn.click()
             await self.page.wait_for_timeout(500)
 
@@ -614,8 +618,12 @@ class EzlynxPolicySetupPage:
             await self.page.wait_for_timeout(1000)
 
     async def add_driver(self, driver: DriverItem, driver_num: str = "1") -> None:
+        edit_btn = self.page.locator("a[data-original-title='Edit'], button[data-original-title='Edit']")
         add_btn = self.page.locator("input[value='Add Driver'], button:has-text('Add Driver'), #add-driver-btn")
-        if await add_btn.count() > 0:
+        if await edit_btn.count() > 0:
+            await edit_btn.first.click()
+            await self.page.wait_for_timeout(500)
+        elif await add_btn.count() > 0:
             await add_btn.click()
             await self.page.wait_for_timeout(500)
 
@@ -909,17 +917,31 @@ class EzlynxPolicySetupPage:
         schedules_applied: list[str] = []
 
         # 1. Vehicles
-        for v in shell_input.vehicles:
-            await self.add_vehicle(v)
-            schedules_applied.append(f"vehicle:{v.vin}")
+        if shell_input.vehicles:
+            veh_tab = self.page.locator("a:has-text('Vehicles'), span:has-text('Vehicles'), #vehicles-tab")
+            if await veh_tab.count() > 0:
+                await veh_tab.first.click()
+                await self.page.wait_for_timeout(500)
+            for v in shell_input.vehicles:
+                await self.add_vehicle(v)
+                schedules_applied.append(f"vehicle:{v.vin}")
 
         # 2. Drivers
-        for idx, d in enumerate(shell_input.drivers, start=1):
-            await self.add_driver(d, driver_num=str(idx))
-            schedules_applied.append(f"driver:{d.first_name} {d.last_name}")
+        if shell_input.drivers:
+            driver_tab = self.page.locator("a:has-text('Drivers'), span:has-text('Drivers'), #drivers-tab")
+            if await driver_tab.count() > 0:
+                await driver_tab.first.click()
+                await self.page.wait_for_timeout(500)
+            for idx, d in enumerate(shell_input.drivers, start=1):
+                await self.add_driver(d, driver_num=str(idx))
+                schedules_applied.append(f"driver:{d.first_name} {d.last_name}")
 
         # 3. Commercial Auto Coverages / Limits
         if shell_input.commercial_auto_coverage:
+            cov_tab = self.page.locator("a:has-text('Coverages'), span:has-text('Coverages'), #coverages-tab")
+            if await cov_tab.count() > 0:
+                await cov_tab.first.click()
+                await self.page.wait_for_timeout(500)
             await self.fill_commercial_auto_coverages(shell_input.commercial_auto_coverage)
             schedules_applied.append("commercial_auto_coverages")
 
