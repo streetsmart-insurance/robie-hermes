@@ -16,6 +16,7 @@ def test_remote_proof_checks_process_configuration_and_no_network_path():
     script = Path("scripts/verify-ascend-disabled-test.sh").read_text()
     assert "/proc/${gateway_pid}/environ" in script
     assert 'readlink -f "/proc/${gateway_pid}/exe"' in script
+    assert "sudo -u streetsmart-hermes" not in script
     assert "ROBIE_ASCEND_API_KEY_SECRET" in script
     assert "Ascend API execution is not enabled" in script
     assert '"outbound_ascend_post_requests": 0' in script

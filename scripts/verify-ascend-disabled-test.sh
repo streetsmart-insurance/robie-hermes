@@ -46,7 +46,7 @@ echo "ASCEND DISABLED CHECK: execution disabled and credential absent"
 
 python_bin="$(readlink -f "/proc/${gateway_pid}/exe")"
 test -x "${python_bin}" || fail "Test Python runtime missing"
-sudo -u streetsmart-hermes env \
+env \
   -u ROBIE_ASCEND_API_ENABLED \
   -u ROBIE_ASCEND_API_KEY_SECRET \
   -u ROBIE_ASCEND_API_PRODUCTION_ENABLED \
