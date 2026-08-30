@@ -31,6 +31,7 @@ from .store import JobStore
 REQUIRED_CLEAN_TEST_PASSES = 1
 CREATE_PROGRAM_ACTION = "ascend.create_program"
 COMMERCIAL_AUTO_ACTION = "ezlynx.commercial_auto"
+POLICY_SETUP_ACTION = "ezlynx.policy_setup"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATE_DIR = REPO_ROOT / "deploy" / "action_gate"
 ACTIONS_PATH = GATE_DIR / "actions.json"
@@ -68,7 +69,7 @@ SKILL_MARKERS = (
     "ascend.create_program",
     "ascend.locator_artifact_audit",
 )
-DEFAULT_GATED_ACTIONS = frozenset({CREATE_PROGRAM_ACTION})
+DEFAULT_GATED_ACTIONS = frozenset({CREATE_PROGRAM_ACTION, POLICY_SETUP_ACTION})
 DEFAULT_GRANDFATHERED_ACTIONS = frozenset({COMMERCIAL_AUTO_ACTION})
 DEFAULT_NO_RETRY_PREFIXES = ("807f8920", "38c0fa79")
 
@@ -77,6 +78,11 @@ CHAT_REFUSE_NOTE = (
     "Production is not the first test. HITL after a miss is not the gate. "
     "Do not send an Ascend API create request until a recorded clean Test "
     "API creation and fresh-readback PASS exists for this exact action."
+)
+POLICY_SETUP_REFUSE_NOTE = (
+    "EZLynx Policy Setup v0.1.0-draft is Test-only. All profiles remain "
+    "Testing with consequential writes disabled; Production must not start "
+    "this action."
 )
 LEFTOVER_RETRY_NOTE = (
     "Leftover Production job ids must not RETRY around the action gate. "
@@ -211,6 +217,13 @@ def classify_action(
     ).strip()
     job_type = str(action_type or job.get("action_type") or payload.get("action_type") or "").strip()
     blob = _normalized_blob(text, _payload_blob(payload), job_type, code)
+    if (
+        declared == POLICY_SETUP_ACTION
+        or job_type == POLICY_SETUP_ACTION
+        or "ezlynx-policy-setup" in blob
+        or "ezlynx.policy_setup" in blob
+    ):
+        return POLICY_SETUP_ACTION
     if declared in grandfathered_actions() or job_type == COMMERCIAL_AUTO_ACTION:
         if not _looks_like_ascend_action(blob, job_type, declared):
             return COMMERCIAL_AUTO_ACTION
@@ -275,14 +288,17 @@ def action_hold_reason(
         return None
     if environment not in PRODUCTION_ENV_NAMES:
         return None
+    if action_id == POLICY_SETUP_ACTION:
+        return f"{REFUSAL_TOKEN}: {POLICY_SETUP_REFUSE_NOTE}"
     if has_clean_test_pass(action_id):
         return None
     needed = required_clean_test_passes()
     have = passing_test_count(load_pass_record(action_id))
+    note = POLICY_SETUP_REFUSE_NOTE if action_id == POLICY_SETUP_ACTION else CHAT_REFUSE_NOTE
     return (
         f"{REFUSAL_TOKEN}: Test has no clean pass for action {action_id} "
         f"({have}/{needed} recorded on hermes-test-01). "
-        f"{CHAT_REFUSE_NOTE}"
+        f"{note}"
     )
 
 

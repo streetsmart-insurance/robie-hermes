@@ -11,6 +11,7 @@ from durable_temp import durable_temporary_directory
 
 from robie_job_engine.action_gate import (
     CREATE_PROGRAM_ACTION,
+    POLICY_SETUP_ACTION,
     REFUSAL_TOKEN,
     REQUIRED_CLEAN_TEST_PASSES,
     apply_action_gate,
@@ -66,6 +67,54 @@ class ActionGateTests(unittest.TestCase):
             action_type="hermes.google_chat_task",
         )
         self.assertNotEqual(commercial, CREATE_PROGRAM_ACTION)
+
+    def test_generic_chat_and_grandfathered_auto_cannot_hide_policy_setup(self):
+        for payload, action_type in (
+            (
+                {"text": "use EZLynx Policy Setup", "skill": "ezlynx-policy-setup"},
+                "hermes.google_chat_task",
+            ),
+            ({"action": "ezlynx.policy_setup"}, "ezlynx.commercial_auto"),
+        ):
+            self.assertEqual(
+                classify_action("", payload=payload, action_type=action_type),
+                POLICY_SETUP_ACTION,
+            )
+
+    def test_policy_setup_is_refused_in_production_even_through_chat(self):
+        reason = hold_reason_for_job(
+            {
+                "id": "policy-setup-prod",
+                "action_type": "hermes.google_chat_task",
+                "payload": {"skill": "ezlynx-policy-setup"},
+            },
+            env="PRODUCTION",
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn(REFUSAL_TOKEN, reason or "")
+        self.assertIn("consequential writes disabled", reason or "")
+
+    def test_policy_setup_draft_stays_refused_even_with_a_test_pass_record(self):
+        with durable_temporary_directory() as tmp:
+            passes = Path(tmp) / "passes"
+            passes.mkdir()
+            with patch("robie_job_engine.action_gate.PASSES_DIR", passes):
+                record_test_action_pass(
+                    POLICY_SETUP_ACTION,
+                    job_id="sanitized-policy-setup-test",
+                    verdict="PASS",
+                )
+                self.assertTrue(has_clean_test_pass(POLICY_SETUP_ACTION))
+                reason = hold_reason_for_job(
+                    {
+                        "id": "policy-setup-prod-after-pass",
+                        "action_type": "hermes.google_chat_task",
+                        "payload": {"skill": "ezlynx-policy-setup"},
+                    },
+                    env="PRODUCTION",
+                )
+        self.assertIsNotNone(reason)
+        self.assertIn("Test-only", reason or "")
 
     def test_production_without_record_refuses_before_api(self):
         with durable_temporary_directory() as tmp:

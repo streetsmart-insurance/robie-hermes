@@ -647,67 +647,27 @@ class EzlynxPolicySetupPage:
 
     # Unified LOB Orchestrator
     async def setup_policy_by_lob(self, shell_input: PolicyShellInput) -> PolicySetupResult:
-        """Executes full policy setup for any Line of Business from start to finish."""
-        lob_key = shell_input.lob.lower().replace(" ", "_")
+        """Refuse the legacy write path while Policy Setup remains a Test draft.
+
+        The original implementation created a shell and performed multiple
+        saves without an authoritative duplicate check, durable checkpoints,
+        or reopen verification.  Keep the page-object helpers available for
+        selector-level Test work, but never enter the consequential
+        orchestrator until a later, reviewed implementation supplies those
+        controls.
+        """
         normalized = normalize_lob(shell_input.lob)
 
-        # 1. Fill Shell and Advance to Form Entry
-        shell_ok = await self.fill_policy_shell(shell_input, save_and_edit=True)
-        if not shell_ok:
-            return PolicySetupResult(
-                success=False,
-                applicant_id=shell_input.applicant_id,
-                policy_number=shell_input.policy_number,
-                lob=normalized,
-                phase_reached="policy_shell_failed",
-                error="Failed to create policy shell and advance to form entry",
-            )
-
-        # 2. Populate LOB Specific Detail Components
-        if "auto" in lob_key:
-            for veh in shell_input.vehicles:
-                await self.add_vehicle(veh)
-            for drv in shell_input.drivers:
-                await self.add_driver(drv)
-        elif "bop" in lob_key or "business_owners" in lob_key or "property" in lob_key:
-            for loc in shell_input.locations:
-                await self.add_location(loc)
-            for bldg in shell_input.buildings:
-                await self.add_building(bldg)
-            if shell_input.gl_coverage:
-                await self.fill_gl_coverages(shell_input.gl_coverage)
-        elif "general_liability" in lob_key or lob_key == "gl":
-            if shell_input.gl_coverage:
-                await self.fill_gl_coverages(shell_input.gl_coverage)
-        elif "workers_comp" in lob_key or lob_key == "wc":
-            if shell_input.wc_coverage:
-                await self.fill_wc_coverages(shell_input.wc_coverage)
-        elif "umbrella" in lob_key:
-            if shell_input.umbrella_coverage:
-                await self.fill_umbrella_coverages(shell_input.umbrella_coverage)
-        elif "homeowners" in lob_key or "dwelling" in lob_key:
-            if shell_input.homeowners_coverage:
-                await self.fill_homeowners_coverages(shell_input.homeowners_coverage)
-        elif "inland_marine" in lob_key:
-            for im in shell_input.inland_marine_items:
-                await self.add_inland_marine_item(im)
-
-        # 3. Add Discussion Note
-        note_title = shell_input.discussion_note_title or f"{normalized} Policy Setup"
-        note_body = shell_input.discussion_note_body or build_discussion_note(
-            normalized, shell_input.policy_number, shell_input.writing_company_text or "Carrier"
-        )
-        await self.add_discussion_note(note_title, note_body)
-
-        # 4. Save and Close Form Entry
-        await self.save_and_close_form_entry()
-
         return PolicySetupResult(
-            success=True,
+            success=False,
             applicant_id=shell_input.applicant_id,
             policy_number=shell_input.policy_number,
             lob=normalized,
-            phase_reached="completed_form_entry",
-            note_added=True,
+            phase_reached="draft_write_gate",
+            error=(
+                "NEEDS_CLARIFICATION: EZLynx Policy Setup v0.1.0-draft "
+                "does not authorize consequential writes"
+            ),
+            note_added=False,
             stopped_before_bind=True,
         )
