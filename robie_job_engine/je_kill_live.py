@@ -380,7 +380,9 @@ class PersistentChromeEzlynxPort:
     def exact_option(self, *, stable_id: str, exact_text: str, scope: Any | None = None) -> Any:
         if stable_id != self.scenario.label_id or exact_text != self.scenario.label:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: option is outside approved Test fixture")
-        return self._require_one(self._locator(self.scenario.label_option, scope=scope), "label option")
+        locator = self._locator(self.scenario.label_option, scope=scope)
+        locator.wait_for(state="visible", timeout=10_000)
+        return self._require_one(locator, "label option")
 
     @_on_playwright_thread
     def click(self, target: Any) -> None:
@@ -406,6 +408,7 @@ class PersistentChromeEzlynxPort:
         locator = self._locator(spec, scope=scope)
         self._wait_unique(locator, name, timeout_ms)
         locator.wait_for(state="visible", timeout=timeout_ms)
+        self._require_one(locator, name)
         if not locator.is_enabled():
             raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {name} is disabled")
         return locator
