@@ -381,7 +381,12 @@ def run_logic_suite(
     env["PYTHONPATH"] = str(root) + (
         (":" + os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else ""
     )
-    want_pytest = pytest_available() if include_pytest is None else include_pytest
+    runtime_only = os.environ.get("ROBIE_RUNTIME_ONLY_RELEASE") == "1"
+    want_pytest = (
+        False
+        if runtime_only
+        else pytest_available() if include_pytest is None else include_pytest
+    )
     completed = [
         _run_step(
             logic_job_type_argv(python),
@@ -391,6 +396,8 @@ def run_logic_suite(
             name="job-type-gate",
         )
     ]
+    if runtime_only:
+        return completed
     if want_pytest:
         completed.append(
             _run_step(

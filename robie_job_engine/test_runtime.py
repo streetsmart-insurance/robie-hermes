@@ -112,8 +112,6 @@ def build_runtime_engine(
         "hermes-cua": ezlynx_worker,
         "submission-audit": EzlynxSubmissionAuditWorker(),
         "session-refresh": EzlynxSessionRefreshWorker(),
-        "ascend-locator-audit": _UnavailableWorker(),
-        "ascend-api": _UnavailableWorker(),
     }
     verifiers: dict[str, Any] = {}
     if destination is not None:
@@ -130,17 +128,11 @@ def build_runtime_engine(
         from .chat_verifiers import FilesystemSkillUpdateVerifier
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
-    from .ascend_locator_audit import AscendLocatorAuditVerifier, AscendLocatorAuditWorker
-    from .ascend_api import AscendCreateProgramVerifier, AscendCreateProgramWorker
     from .chat_verifiers import EzlynxSubmissionAuditVerifier
     from .skill_sync import DriveSkillSyncVerifier, DriveSkillSyncWorker
 
     workers["drive-skill-sync"] = DriveSkillSyncWorker()
-    workers["ascend-locator-audit"] = AscendLocatorAuditWorker()
-    workers["ascend-api"] = AscendCreateProgramWorker()
     verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
-    verifiers["ascend.locator_artifact_audit"] = AscendLocatorAuditVerifier()
-    verifiers["ascend.create_program"] = AscendCreateProgramVerifier()
 
     verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
         submission_readback or SubprocessSubmissionReadback()
@@ -227,6 +219,8 @@ def dispatch_operational_chat(
     except Exception:
         return True
     error = str(job.get("last_error") or "")
+    if JobStatus(job["status"]) == JobStatus.FAILED:
+        return True
     if is_action_gate_refusal(job):
         return True
     durable_failed = (

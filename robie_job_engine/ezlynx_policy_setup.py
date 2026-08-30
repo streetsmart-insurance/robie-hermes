@@ -408,6 +408,58 @@ class EzlynxPolicySetupPage:
             return True
 
     # Detailed Sub-Tab / Schedule Handlers
+    async def select_vehicle_garaging_address(self, vehicle: VehicleItem) -> None:
+        """Choose garaging from EZLynx's active UI mode, failing closed.
+
+        EZLynx normally renders a location dropdown and leaves the legacy raw
+        address input hidden/disabled.  Never force-fill that legacy input
+        while dropdown mode is present.
+        """
+        dropdown = self.page.locator("#Vehicle_GaragingAddressId")
+        if await dropdown.count() > 0:
+            if not await dropdown.is_visible() or not await dropdown.is_enabled():
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: garaging-address dropdown is present but unavailable"
+                )
+            requested = vehicle.garaging_address.strip()
+            if requested:
+                await dropdown.select_option(label=requested)
+                await dropdown.dispatch_event("change")
+                return
+            current = str(await dropdown.input_value() or "").strip()
+            if current:
+                return
+            options = await dropdown.locator("option:not([disabled])").all()
+            eligible: list[Any] = []
+            for option in options:
+                value = str(await option.get_attribute("value") or "").strip()
+                label = str(await option.text_content() or "").strip()
+                if value and label and "select" not in label.casefold():
+                    eligible.append(option)
+            if len(eligible) != 1:
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: garaging address is missing or ambiguous"
+                )
+            value = str(await eligible[0].get_attribute("value") or "").strip()
+            await dropdown.select_option(value=value)
+            await dropdown.dispatch_event("change")
+            return
+
+        raw = self.page.locator("#Vehicle_PhysicalAddress_LineOne_A")
+        if await raw.count() != 1:
+            raise RuntimeError(
+                "PLAYWRIGHT_BLOCKED: no unique garaging-address control is available"
+            )
+        if not await raw.is_visible() or not await raw.is_enabled():
+            raise RuntimeError(
+                "PLAYWRIGHT_BLOCKED: raw garaging-address input is hidden or disabled"
+            )
+        requested = vehicle.garaging_address.strip()
+        if not requested:
+            raise RuntimeError("MISSING_REQUIRED_FIELD: garaging_address")
+        await raw.fill(requested)
+        await raw.dispatch_event("change")
+
     async def add_vehicle(self, vehicle: VehicleItem) -> None:
         add_btn = self.page.locator("input[value='Add Vehicle'], button:has-text('Add Vehicle'), #add-vehicle-btn")
         await add_btn.click()
@@ -448,6 +500,8 @@ class EzlynxPolicySetupPage:
             coll = self.page.locator("#Vehicle_Collision_DeductibleAmount_A, #Vehicle_CollDeductible")
             if await coll.count() > 0:
                 await coll.fill(clean_currency(vehicle.coll_deductible))
+
+        await self.select_vehicle_garaging_address(vehicle)
 
         # Save modal
         save_btn = self.page.locator(".modal button:has-text('Save'), .modal input[value='Save'], button.btn-primary:has-text('Save')")

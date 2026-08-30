@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,6 @@ from typing import Any, Iterable
 
 from .attachments import AttachmentRef, ingest_attachment_refs
 from .chat_policy import execution_contract_lines, forbidden_tool_request
-from .ascend_sender_roles import ascend_new_program_contract_lines
 from .ezlynx_account_nav import account_nav_contract_lines
 from .context_policy import (
     CONTINUATION_PREFIXES,
@@ -38,6 +38,35 @@ from .store import JobStore
 
 
 logger = logging.getLogger(__name__)
+
+_BOUND_POLICY_TERMS = re.compile(
+    r"(?:\b(?:renew|endorse|cancel|reassign)\b|"
+    r"\b(?:process|complete|execute|handle|do)\s+(?:this\s+|the\s+)?"
+    r"(?:renewal|endorsement|cancellation|reassignment)\b)",
+    re.IGNORECASE,
+)
+
+
+def pre_execution_hold_reason(
+    text: str,
+    payload: dict[str, Any] | None = None,
+) -> str | None:
+    """Return the deterministic exceptions to skipping generic confirmation."""
+    values = dict(payload or {})
+    if _BOUND_POLICY_TERMS.search(str(text or "")):
+        return "clarify/HITL required for an already-bound policy action"
+    if values.get("ambiguous_fields"):
+        return "clarify/HITL required for ambiguous fields"
+    if values.get("conflicting_fields"):
+        return "clarify/HITL required for conflicting fields"
+    if "target_match_count" in values:
+        try:
+            match_count = int(values["target_match_count"])
+        except (TypeError, ValueError):
+            match_count = -1
+        if match_count != 1:
+            return "clarify/HITL required unless the target resolves to exactly one match"
+    return None
 
 _CHAT_VERIFIERS: dict[str, Any] = {}
 _GENERIC_CHAT_HEARTBEATS: dict[tuple[str, str], tuple[threading.Event, threading.Thread]] = {}
@@ -542,8 +571,8 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             )
         )
     lines.extend([
-        "When the request requires browser interaction on a website or web application (EZLynx, carrier portals, or external sites), you MUST execute it by calling the 'playwright_exec' tool directly. Do not output text claiming 'playwright_exec is unavailable' or simulating error messages without having actually executed the tool. Do not use generic terminal/bash commands for browser automation. Ascend program creation is API-only and is not browser interaction.",
-        "When the user request provides complete policy or task parameters (such as applicant ID, policy number, carrier, dates, premium, and schedule details), proceed immediately with autonomous execution. Do not ask for confirmation or call clarify before starting. Reserve clarify/HITL strictly for missing required fields (e.g. missing VIN or missing policy number) or genuine blockers.",
+        "When the request requires browser interaction on a website or web application (EZLynx, carrier portals, or external sites), you MUST execute it by calling the 'playwright_exec' tool directly. Do not output text claiming 'playwright_exec is unavailable' or simulating error messages without having actually executed the tool. Do not use generic terminal/bash commands for browser automation.",
+        "When the user request provides every field the job schema requires, do not re-prompt with a generic 'Ready to proceed?' confirmation — proceed directly to execution. This does not relax clarify/HITL for genuinely ambiguous or conflicting fields, for any request affecting an already-bound policy (renewal, endorsement, cancellation, reassignment) regardless of field completeness, or for any case where the target account/applicant can't be resolved to exactly one match. Every action remains subject to independent post-job verification — destination evidence and structured playwright_exec proof — before COMPLETE is authorized; skipping the pre-execution prompt does not skip or weaken that check in any way.",
         "When navigating to an EZLynx account, try the direct URL (e.g. https://app.ezlynx.com/web/account/<id>/policies). If direct navigation does not find the applicant or stays on a listing page, use the global search bar to locate the applicant.",
         "When the request requires an upload, set the browser file chooser to the exact staged_path before clicking Upload.",
         "Complete every requested mutation (including status, premium, document attachment, and note when requested).",
@@ -561,7 +590,6 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     payload = dict(job.get("payload") or {})
     payload.setdefault("action_type", job.get("action_type"))
     lines.extend(account_nav_contract_lines(text, payload))
-    lines.extend(ascend_new_program_contract_lines(text, payload))
     payload = dict(job.get("payload") or {})
     original = str(payload.get("text") or "").strip()
     if original and original != text:
@@ -615,6 +643,11 @@ def open_chat_job(
         normalized.startswith(prefix)
         for prefix in (*CONTINUATION_PREFIXES, *CORRECTION_PREFIXES)
     )
+    if classification.hold_status == JobStatus.FAILED.value:
+        # Removed integrations never resume or retarget an existing executable
+        # job, even when the message uses continuation-shaped language.
+        related_only = False
+        explicit_continuation = False
     resume_context = queue.active_conversation_job(context_key)
     resume_state = dict((resume_context or {}).get("interaction_state") or {})
     if (
@@ -701,15 +734,6 @@ def open_chat_job(
         )
     if classification.action_type == "ezlynx.submission_audit":
         server_payload.update(_submission_audit_payload())
-    if classification.action_type == "ascend.locator_artifact_audit":
-        from .ascend_locator_audit import default_audit_payload
-
-        server_payload.update(default_audit_payload(live=False))
-    if classification.action_type == "ascend.create_program":
-        # Execution intent comes from the explicit create-program request.
-        # Program/billable values still must pass the bounded API schema;
-        # missing values hold for clarification before any credential loads.
-        server_payload.update({"execute": True, "api_only": True})
     server_payload.update(dict(action_payload or {}))
     if continued_job is None:
         from .engine import is_retry_text, leftover_retry_hold_reason
@@ -769,9 +793,42 @@ def open_chat_job(
     )
     if route_failed:
         return job["id"]
-    refused = apply_action_gate(store, store.get_job(job["id"]), text=text)
+    refused = (
+        None
+        if classification.hold_status == JobStatus.FAILED.value
+        else apply_action_gate(store, store.get_job(job["id"]), text=text)
+    )
     if refused is not None:
         return refused["id"]
+    if classification.hold_status == JobStatus.FAILED.value:
+        current = store.get_job(job["id"])
+        if JobStatus(current["status"]) not in TERMINAL_STATUSES:
+            store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                expected={JobStatus.PENDING, JobStatus.RUNNING},
+                error="ASCEND_UNAVAILABLE: Ascend is excluded from this release",
+                release_lease=True,
+            )
+        store.checkpoint(
+            job["id"],
+            "destination_verification",
+            {"verified": False, "reason": "ASCEND_UNAVAILABLE"},
+        )
+        return job["id"]
+    pre_execution_hold = pre_execution_hold_reason(text, server_payload)
+    if pre_execution_hold:
+        current = store.get_job(job["id"])
+        if current["status"] == JobStatus.PENDING.value:
+            store.transition(
+                job["id"],
+                JobStatus.NEEDS_CLARIFICATION,
+                expected={JobStatus.PENDING},
+                error=pre_execution_hold,
+                resume_status=JobStatus.PENDING,
+                release_lease=True,
+            )
+        return job["id"]
     try:
         ledger = DurableWorkLedger(db_path)
         ledger.reserve(job["action_type"], job["idempotency_key"])
