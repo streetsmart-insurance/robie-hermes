@@ -33,6 +33,12 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
 
     ringcentral_export = file_state("ringcentral")
     ringcentral_api = _env_ready(environment, ("RINGCENTRAL_CLIENT_ID", "RINGCENTRAL_CLIENT_SECRET", "RINGCENTRAL_JWT"))
+    ringcentral_email = dict(((manifest.get("collection") or {}).get("ringcentral_email") or {}))
+    ringcentral_email_ready = bool(
+        ringcentral_email.get("enabled")
+        and (ringcentral_email.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
+        and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
+    )
     ezlynx_exports = {key: file_state(key) for key in ("tasks", "activities", "retention", "submissions")}
     ezlynx_browser = _env_ready(environment, ("ROBIE_EZLYNX_USERNAME_SECRET", "ROBIE_EZLYNX_PASSWORD_SECRET"))
     gmail_backend = (
@@ -41,15 +47,20 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
     )
     appsheet_enabled = bool((manifest.get("appsheet") or {}).get("enabled"))
     appsheet_ready = _env_ready(environment, ("APPSHEET_APP_ID", "APPSHEET_APPLICATION_ACCESS_KEY"))
+    google_sheets = dict(manifest.get("google_sheets") or {})
+    google_sheets_enabled = bool(google_sheets.get("enabled"))
+    google_sheets_ready = bool(google_sheets.get("spreadsheet_id") and google_sheets.get("tables"))
+    delivery = dict(manifest.get("delivery") or {})
     tracker_states = {
         key: {"configured": True, "available": Path(str(value)).expanduser().is_file(), "path": str(value)}
         for key, value in trackers.items()
     }
     connections = {
         "ringcentral": {
-            "ready": ringcentral_export["available"] or ringcentral_api,
+            "ready": ringcentral_export["available"] or ringcentral_api or ringcentral_email_ready,
             "export": ringcentral_export,
             "api_credentials_configured": ringcentral_api,
+            "scheduled_email_configured": ringcentral_email_ready,
         },
         "ezlynx": {
             "ready": ezlynx_browser or any(item["available"] for item in ezlynx_exports.values()),
@@ -65,6 +76,19 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
             "enabled": appsheet_enabled,
             "ready": (not appsheet_enabled) or appsheet_ready,
             "credentials_configured": appsheet_ready,
+        },
+        "google_sheets": {
+            "enabled": google_sheets_enabled,
+            "ready": (not google_sheets_enabled) or google_sheets_ready,
+            "explicit_column_allowlists": all(
+                bool((item or {}).get("allowed_columns")) for item in (google_sheets.get("tables") or {}).values()
+            ) if google_sheets_enabled else True,
+        },
+        "delivery": {
+            "enabled": bool(delivery.get("enabled")),
+            "ready": (not delivery.get("enabled")) or bool(delivery.get("chat_spaces") or delivery.get("email_recipients")),
+            "chat_destinations": len(delivery.get("chat_spaces") or []),
+            "email_sender_configured": bool(delivery.get("email_sender")),
         },
         "magellan": {
             "ready": file_state("magellan_json")["available"],

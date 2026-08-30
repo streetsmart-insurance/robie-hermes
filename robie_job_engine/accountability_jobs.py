@@ -31,6 +31,7 @@ SOURCE_FLAGS = {
     "email_json": "--email-json",
     "appsheet_json": "--appsheet-json",
     "magellan_json": "--magellan-json",
+    "roles_json": "--roles-json",
     "monthly_kpis_json": "--monthly-kpis-json",
     "churn_json": "--churn-json",
 }
@@ -81,11 +82,41 @@ class AccountabilityReportWorker:
             run_at = datetime.now(timezone.utc)
             output = output_dir / f"streetsmart-{mode}-{run_at:%Y%m%dT%H%M%SZ}.md"
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
+            sources = dict(manifest.get("sources") or {})
+            collection = dict(manifest.get("collection") or {})
+            ringcentral_email = dict(collection.get("ringcentral_email") or {})
+            if ringcentral_email.get("enabled"):
+                from .ringcentral_email_sync import collect_scheduled_ringcentral_report
+
+                mailbox = str(ringcentral_email.get("mailbox") or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")).strip()
+                service_account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
+                sources["ringcentral"] = str(collect_scheduled_ringcentral_report(
+                    service_account_email=service_account,
+                    mailbox=mailbox,
+                    output_dir=output_dir / "ringcentral",
+                    max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
+                ))
             for key, flag in SOURCE_FLAGS.items():
-                value = (manifest.get("sources") or {}).get(key)
+                value = sources.get(key)
                 if value:
                     arguments.extend([flag, str(Path(str(value)).expanduser().resolve())])
-            if mode in {"daily", "weekly"} and not (manifest.get("sources") or {}).get("email_json"):
+            google_sheets = dict(manifest.get("google_sheets") or {})
+            if google_sheets.get("enabled"):
+                from .google_sheets_accountability import collect_allowlisted_tables, role_registry_from_snapshot
+
+                sheet_snapshot = collect_allowlisted_tables(google_sheets)
+                sheet_path = output_dir / f"appsheet-backing-sheet-{run_at:%Y%m%dT%H%M%SZ}.json"
+                sheet_path.write_text(json.dumps(sheet_snapshot, indent=2, default=str), encoding="utf-8")
+                if mode == "weekly" and not (manifest.get("sources") or {}).get("appsheet_json"):
+                    arguments.extend(["--appsheet-json", str(sheet_path)])
+                configured_roles = sources.get("roles_json")
+                roles_available = bool(configured_roles and Path(str(configured_roles)).expanduser().is_file())
+                if not roles_available:
+                    roles = role_registry_from_snapshot(sheet_snapshot, google_sheets)
+                    roles_path = output_dir / f"employee-roles-{run_at:%Y%m%dT%H%M%SZ}.json"
+                    roles_path.write_text(json.dumps(roles, indent=2, default=str), encoding="utf-8")
+                    arguments.extend(["--roles-json", str(roles_path)])
+            if mode in {"daily", "weekly"} and not sources.get("email_json"):
                 from .gmail_accountability import collect_agency_summary
 
                 gmail_snapshot = collect_agency_summary(environment=os.environ)
@@ -130,10 +161,26 @@ class AccountabilityReportWorker:
                 retryable=True,
                 error=f"accountability report generation failed: {type(exc).__name__}: {exc}",
             )
+        receipts: list[dict[str, Any]] = []
+        delivery = dict(manifest.get("delivery") or {})
+        if delivery.get("enabled"):
+            try:
+                from .accountability_delivery import deliver_report
+
+                receipts = deliver_report(output, mode=mode, delivery=delivery, environment=os.environ)
+            except Exception as exc:
+                return WorkerResult(
+                    False,
+                    action,
+                    {"artifact_path": str(output)},
+                    {"sha256": _checksum(output), "delivery_receipts": receipts},
+                    retryable=True,
+                    error=f"accountability delivery failed: {type(exc).__name__}: {exc}",
+                )
         return WorkerResult(
             True,
             action,
-            {"artifact_path": str(output)},
+            {"artifact_path": str(output), "delivery_receipts": receipts},
             {
                 "sha256": _checksum(output),
                 "mode": mode,
@@ -171,9 +218,19 @@ class AccountabilityReportVerifier:
                 and observed["contains_expected_title"]
                 and not observed["simulation_marker"]
             )
+        receipts = list(destination.get("delivery_receipts") or [])
+        if verified and receipts:
+            try:
+                from .accountability_delivery import verify_delivery_receipts
+
+                delivery_verified, delivery_observed = verify_delivery_receipts(receipts)
+            except Exception as exc:
+                delivery_verified, delivery_observed = False, [{"error": f"{type(exc).__name__}: {exc}"}]
+            observed["delivery"] = delivery_observed
+            verified = verified and delivery_verified
         evidence = VerificationEvidence(
-            method="FRESH_FILESYSTEM_READBACK",
-            source="accountability-report-artifact",
+            method="FRESH_DESTINATION_AND_FILESYSTEM_READBACK" if receipts else "FRESH_FILESYSTEM_READBACK",
+            source="accountability-report-and-delivery" if receipts else "accountability-report-artifact",
             expected={"sha256": detail.get("sha256"), "mode": mode, "simulation_marker": False},
             observed=observed,
             authoritative=True,

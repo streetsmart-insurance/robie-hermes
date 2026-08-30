@@ -28,6 +28,7 @@ from .operational_trackers import (
 )
 from .productivity import ProductivityAuditor, RingCentralCall, normalize_phone
 from .reporting_suite import ReportingSuite
+from .role_accountability import build_role_rows
 
 
 def _first(row: dict[str, Any], *names: str) -> str:
@@ -195,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--email-json", type=Path)
     parser.add_argument("--appsheet-json", type=Path)
     parser.add_argument("--magellan-json", type=Path)
+    parser.add_argument("--roles-json", type=Path, help="Approved employee-to-role registry")
     parser.add_argument("--tracker", action="append", default=[], metavar="KEY=CSV", help=f"Repeatable. Keys: {', '.join(TRACKER_DEFINITIONS)}")
     parser.add_argument("--monthly-kpis-json", type=Path)
     parser.add_argument("--churn-json", type=Path)
@@ -210,6 +212,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     suite = ReportingSuite()
     magellan_data = _json(args.magellan_json)
     sales_data = _json(args.sales_json)
+    roles_data = _json(args.roles_json)
     if args.sales and args.sales.exists():
         sales_findings = audit_sales_records(
             parse_sales_csv(args.sales),
@@ -225,8 +228,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             }
         )
     call_data, task_data = _call_report(args.ringcentral, as_of, args.tasks, args.activities, magellan_data)
+    role_rows = build_role_rows(
+        roles_data.get("employees", {}),
+        call_data=call_data,
+        task_data=task_data,
+        sales_data=sales_data,
+        email_data=_json(args.email_json),
+        magellan_data=magellan_data,
+    ) if roles_data.get("employees") else []
     if args.mode == "daily":
-        report = suite.build_daily_report(call_data, task_data, magellan_data, sales_data)
+        report = suite.build_daily_report(call_data, task_data, magellan_data, sales_data, role_rows)
     elif args.mode == "weekly":
         retention = _json(args.retention_summary_json)
         if args.retention and args.retention.exists():
@@ -287,11 +298,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             tracker_data,
             _json(args.appsheet_json),
             magellan_data,
+            role_rows,
         )
     else:
         churn_data = _json(args.churn_json)
         churn_cases = churn_data.get("cases", []) if churn_data.get("source_status") == "available" else []
-        report = suite.build_monthly_report(_json(args.monthly_kpis_json), churn_cases, sales_data)
+        report = suite.build_monthly_report(_json(args.monthly_kpis_json), churn_cases, sales_data, role_rows)
     if args.output:
         args.output.write_text(report + "\n", encoding="utf-8")
     else:

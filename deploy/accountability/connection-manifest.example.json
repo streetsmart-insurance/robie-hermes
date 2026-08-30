@@ -12,6 +12,7 @@
     "email_json": "/opt/streetsmart-hermes/accountability/inbox/email_summary.json",
     "appsheet_json": "/opt/streetsmart-hermes/accountability/inbox/appsheet_summary.json",
     "magellan_json": "/opt/streetsmart-hermes/accountability/inbox/magellan_summary.json",
+    "roles_json": "/opt/streetsmart-hermes/accountability/inbox/employee_roles.json",
     "monthly_kpis_json": "/opt/streetsmart-hermes/accountability/inbox/monthly_kpis.json",
     "churn_json": "/opt/streetsmart-hermes/accountability/inbox/churn_cases.json",
     "trackers": {
@@ -30,11 +31,44 @@
     "sales_untouched_days": 5,
     "submission_open_days": 30
   },
+  "collection": {
+    "ringcentral_email": {
+      "enabled": false,
+      "mailbox": "robie@streetsmart.insurance",
+      "max_age_hours": 36
+    }
+  },
   "appsheet": {
     "enabled": false,
     "app_id_env": "APPSHEET_APP_ID",
     "application_access_key_env": "APPSHEET_APPLICATION_ACCESS_KEY",
     "region_env": "APPSHEET_REGION",
     "tables": {}
+  },
+  "google_sheets": {
+    "enabled": false,
+    "spreadsheet_id": "1dFmE_J-YM9ua7v_B2UDgHHFr6BofIpIuU9qEXXtoZnA",
+    "employee_role_table": "employees",
+    "employee_role_columns": {"name": "Name", "role": "Role", "email": "Email"},
+    "tables": {
+      "employees": {
+        "range": "Employees!A:Z",
+        "allowed_columns": ["Name", "Role", "Email", "Department", "Active"]
+      },
+      "employee_performance": {
+        "range": "Employee Performance!A:Z",
+        "allowed_columns": ["Employee", "Date", "Metric", "Value", "Status"]
+      }
+    }
+  },
+  "delivery": {
+    "enabled": false,
+    "chat_spaces": [],
+    "email_sender": "robie@streetsmart.insurance",
+    "email_recipients": {
+      "daily": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"],
+      "weekly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"],
+      "monthly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"]
+    }
   }
 }
