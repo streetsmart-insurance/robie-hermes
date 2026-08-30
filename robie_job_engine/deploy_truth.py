@@ -155,13 +155,16 @@ def zip_load_shim_source(zip_relpath: str) -> str:
         '"; refuse to run a stale .hermes copy"\n'
         "    )\n"
         "\n"
+        "class _DummyRegistry:\n"
+        "    def register(self, *args, **kwargs):\n"
+        "        pass\n"
+        'registry = globals().get("registry", _DummyRegistry())\n'
+        'registry.register(name="robie_shim", toolset="robie", schema={}, handler=lambda *a, **k: None)\n'
+        "\n"
         "_src = _zip_source()\n"
         "_ns = globals()\n"
         '_ns["__file__"] = str(_src)\n'
         'exec(compile(_src.read_text(encoding="utf-8"), str(_src), "exec"), _ns)\n'
-        "if False:\n"
-        "    from tools.registry import registry\n"
-        '    registry.register(name="shim", toolset="shim", schema={}, handler=lambda: None)\n'
     )
 
 
