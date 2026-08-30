@@ -352,6 +352,7 @@ class PersistentChromeEzlynxPort:
     @_on_playwright_thread
     def click(self, target: Any) -> None:
         locator = self._locator(target) if isinstance(target, dict) else target
+        locator.wait_for(state="visible", timeout=15_000)
         self._require_one(locator, "click target").click()
 
     @_on_playwright_thread
@@ -404,6 +405,11 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         page.reload(wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
+        row = self._locator({"kind": "css", "value": f"tr:has(#document-checkbox-{self.scenario.resource_id}-input)"})
+        try:
+            row.wait_for(state="visible", timeout=10_000)
+        except Exception:
+            pass
         loc = self._locator(self.scenario.applied_label)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
