@@ -542,8 +542,9 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             )
         )
     lines.extend([
-        "When the request requires browser interaction on a website or web application (EZLynx, carrier portals, or external sites), execute it strictly via the 'playwright_exec' tool directly. Do not use generic terminal/bash commands for browser automation. Ascend program creation is API-only and is not browser interaction.",
+        "When the request requires browser interaction on a website or web application (EZLynx, carrier portals, or external sites), you MUST execute it by calling the 'playwright_exec' tool directly. Do not output text claiming 'playwright_exec is unavailable' or simulating error messages without having actually executed the tool. Do not use generic terminal/bash commands for browser automation. Ascend program creation is API-only and is not browser interaction.",
         "When the user request provides complete policy or task parameters (such as applicant ID, policy number, carrier, dates, premium, and schedule details), proceed immediately with autonomous execution. Do not ask for confirmation or call clarify before starting. Reserve clarify/HITL strictly for missing required fields (e.g. missing VIN or missing policy number) or genuine blockers.",
+        "When navigating to an EZLynx account, try the direct URL (e.g. https://app.ezlynx.com/web/account/<id>/policies). If direct navigation does not find the applicant or stays on a listing page, use the global search bar to locate the applicant.",
         "When the request requires an upload, set the browser file chooser to the exact staged_path before clicking Upload.",
         "Complete every requested mutation (including status, premium, document attachment, and note when requested).",
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
