@@ -38,11 +38,12 @@ if grep -Fq '/opt/streetsmart-hermes/releases/current' <<<"${gateway_environment
   exit 1
 fi
 
-python_bin=/opt/streetsmart-hermes-test/.hermes/hermes-agent/venv/bin/python
-if ! test -x "${python_bin}"; then
-  echo 'fixture readiness refused: Test browser Python runtime is missing' >&2
+node_bin=/usr/bin/node
+node_modules=/opt/streetsmart-hermes-test/.hermes/hermes-agent/node_modules
+if ! test -x "${node_bin}" || ! test -d "${node_modules}/playwright"; then
+  echo 'fixture readiness refused: Test browser Playwright runtime is missing' >&2
   exit 1
 fi
-env ROBIE_ENV=TEST "${python_bin}" "${AUDIT_SCRIPT}" \
+env ROBIE_ENV=TEST NODE_PATH="${node_modules}" "${node_bin}" "${AUDIT_SCRIPT}" \
   --expected-sha "${EXPECTED_TEST_SHA}" \
   --cdp-url http://127.0.0.1:9222
