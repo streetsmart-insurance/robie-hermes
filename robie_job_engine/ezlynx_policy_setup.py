@@ -553,7 +553,7 @@ class EzlynxPolicySetupPage:
             await self.page.wait_for_timeout(300)
 
         # Garaging location
-        loc_select = self.page.locator("select[name='Form127.Ez_Vehicle_RepeaterKey_A'], #Form127_Ez_Vehicle_RepeaterKey_A")
+        loc_select = self.page.locator(".repeaterEntryModal.in select[name='Form127.Ez_Vehicle_RepeaterKey_A'], select[name='Form127.Ez_Vehicle_RepeaterKey_A'], #Form127_Ez_Vehicle_RepeaterKey_A")
         if await loc_select.count() > 0:
             if vehicle.garaging_address:
                 await loc_select.select_option(label=vehicle.garaging_address)
@@ -562,7 +562,7 @@ class EzlynxPolicySetupPage:
                 if len(options) > 1:
                     await loc_select.select_option(index=1)
             await loc_select.dispatch_event("change")
-        else:
+        elif await self.page.locator("#Vehicle_GaragingAddressId").count() > 0:
             await self.select_vehicle_garaging_address(vehicle)
 
         if vehicle.use:
@@ -906,10 +906,11 @@ class EzlynxPolicySetupPage:
                     await close_btn.click()
 
     async def save_and_close_form_entry(self) -> None:
-        save_close_btn = self.page.locator("#finishButton-header")
-        await save_close_btn.wait_for(state="visible", timeout=10000)
-        await save_close_btn.click()
-        await self.page.wait_for_load_state("domcontentloaded")
+        save_close_btn = self.page.locator("#finishButton-header, button:has-text('Save & Close'), a:has-text('Save & Close'), #btnSaveClose")
+        if await save_close_btn.count() > 0:
+            await save_close_btn.first.click()
+            await self.page.wait_for_load_state("domcontentloaded")
+            await self.page.wait_for_timeout(2000)
 
     # Explicit Test-Only Schedule Executor
     async def execute_formentry_schedules_test_only(self, shell_input: PolicyShellInput) -> dict[str, Any]:
