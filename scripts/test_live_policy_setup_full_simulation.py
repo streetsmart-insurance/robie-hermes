@@ -7,20 +7,39 @@ from playwright.async_api import async_playwright
 CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
 
 
-async def inspect_status() -> None:
+async def add_discussion_note() -> None:
+    print("[SIMULATION] Adding Discussion Note to EZLynx account...")
     async with async_playwright() as pw:
         browser = await pw.chromium.connect_over_cdp(CDP_URL)
         page = browser.contexts[0].pages[0]
 
-        # Inspect elements matching status
-        status_els = page.locator("[id*='Status'], [name*='Status'], [class*='status'], .ui-select-container")
-        count = await status_els.count()
-        print(f"Elements matching status/select2: {count}")
-        for i in range(count):
-            el_id = await status_els.nth(i).get_attribute("id")
-            el_class = await status_els.nth(i).get_attribute("class")
-            print(f"  El #{i}: id={el_id}, class={el_class}")
+        # Click Discussions / Notes button or tab
+        # In EZLynx, the top bar has #add-note-header or we can navigate to /discussions
+        add_note_btn = page.locator("#add-note-header, [data-testid='add-note-header']")
+        if await add_note_btn.count() > 0:
+            await add_note_btn.click()
+            await page.wait_for_timeout(1000)
+
+            # Title input
+            title_input = page.locator("#txtDiscussionTitle, [name='discussionTitle']")
+            if await title_input.count() > 0:
+                await title_input.fill("New Policy - Commercial Auto")
+
+            # Note body
+            body_input = page.locator("#txtDiscussionBody, textarea.k-editor-textarea, [name='discussionBody'], .note-editor textarea, [contenteditable='true']")
+            if await body_input.count() > 0:
+                await body_input.first.fill("Completed Commercial Auto policy setup for Policy #CA-ROBIE-CLOUD-01 with Progressive Commercial.\n\nROBIE was here")
+
+            # Save note
+            save_note_btn = page.locator("#btnSaveNote, [data-testid='save-note-btn'], button:has-text('Save Note'), button:has-text('Save')")
+            if await save_note_btn.count() > 0:
+                await save_note_btn.first.click()
+                await page.wait_for_timeout(3000)
+                print("Discussion note saved successfully!")
+
+        await page.screenshot(path="/tmp/robie_live_test/step17_discussion_note_added.png")
+        print("Step 17 screenshot saved.")
 
 
 if __name__ == "__main__":
-    asyncio.run(inspect_status())
+    asyncio.run(add_discussion_note())
