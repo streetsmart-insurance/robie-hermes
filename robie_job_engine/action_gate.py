@@ -42,9 +42,18 @@ REFUSAL_TOKEN = "ACTION_GATE_REFUSED"
 
 # Tight markers. "producer" / "account manager" alone are EZLynx-common
 # and must not classify a commercial-auto Chat job as Ascend.
-ASCEND_ACTION_MARKERS = (
-    "ascend",
-    "useascend",
+#
+# 264a708f: a Chat message that only *names* the parked Ascend site (e.g.
+# to say "don't use Ascend, just do the EZLynx setup") was misclassified as
+# ascend.create_program and fail-closed before EZLynx, even though the
+# request was ordinary policy-setup work. Root cause: "ascend"/"useascend"
+# were treated as sufficient evidence on their own. They are name-only
+# mentions and must not, alone, classify a job as an Ascend action — only
+# an unambiguous marker (a real Ascend URL, PAWIVA/221398001, premium
+# finance wording, or explicit create-program phrasing) may do that by
+# itself. A bare name mention still counts, but only *combined with*
+# actual create-program intent language (see _looks_like_ascend_action).
+STRONG_ASCEND_ACTION_MARKERS = (
     "app.ascend.com",
     "dashboard.useascend.com",
     "premium finance",
@@ -56,6 +65,15 @@ ASCEND_ACTION_MARKERS = (
     "new program",
     "create-program",
 )
+WEAK_ASCEND_NAME_MARKERS = (
+    "ascend",
+    "useascend",
+)
+# Back-compat alias: previously this bare list (including "ascend" and
+# "useascend") was used directly as sufficient evidence. Keep the name
+# for anything still importing it, but classification logic below no
+# longer treats a name-only hit as conclusive on its own.
+ASCEND_ACTION_MARKERS = STRONG_ASCEND_ACTION_MARKERS + WEAK_ASCEND_NAME_MARKERS
 CREATE_PROGRAM_MARKERS = (
     "create a program",
     "create program",
@@ -247,10 +265,17 @@ def _looks_like_ascend_action(blob: str, job_type: str, declared: str) -> bool:
         return True
     if any(marker in blob for marker in SKILL_MARKERS):
         return True
-    if any(marker in blob for marker in ASCEND_ACTION_MARKERS):
+    if any(marker in blob for marker in STRONG_ASCEND_ACTION_MARKERS):
         return True
     if any(marker in blob for marker in CREATE_PROGRAM_MARKERS) and (
         "finance" in blob or "ascend" in blob or "pawiva" in blob
+    ):
+        return True
+    # A bare name-only mention ("ascend"/"useascend") is not, on its own,
+    # evidence of an Ascend action — 264a708f. It only counts alongside
+    # actual create-program intent language.
+    if any(marker in blob for marker in WEAK_ASCEND_NAME_MARKERS) and any(
+        marker in blob for marker in CREATE_PROGRAM_MARKERS
     ):
         return True
     return False
