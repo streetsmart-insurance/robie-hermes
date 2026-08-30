@@ -24,7 +24,13 @@ print("fixture_job_inventory=0")
 PY
 
 systemctl is-active --quiet robie-gateway
-systemctl show robie-gateway -p Environment --value --no-pager | grep -q 'ROBIE_ENV=TEST'
+gateway_environment="$(systemctl show robie-gateway -p Environment --value --no-pager)"
+grep -Fq 'ROBIE_CANONICAL_JOB_ENGINE_ROOT=/opt/streetsmart-hermes-test/releases/current' \
+  <<<"${gateway_environment}"
+if grep -Fq '/opt/streetsmart-hermes/releases/current' <<<"${gateway_environment}"; then
+  echo 'fixture readiness refused: Test gateway references the Production release root' >&2
+  exit 1
+fi
 
 python_bin=/home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
 test -x "${python_bin}"
