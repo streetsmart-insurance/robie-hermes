@@ -323,7 +323,7 @@ def test_playwright_page_object_mock_orchestrator():
         vehicle = VehicleItem(vin="TEST-VIN-001")
         driver = DriverItem(first_name="SYNTHETIC-FIRST", last_name="SYNTHETIC-LAST")
         shell_input = PolicyShellInput(
-            applicant_id="SANITIZED-APPLICANT-001",
+            applicant_id="220250093",
             lob="commercial_auto",
             policy_number="TEST-POLICY-CA-001",
             effective_date="09/01/2026",

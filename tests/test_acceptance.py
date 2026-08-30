@@ -101,19 +101,37 @@ class AcceptanceTests(unittest.TestCase):
     def test_reassignment_uses_stable_id_not_partial_text(self):
         browser = FakeEzlynx()
         worker = HermesCuaEzlynxWorker(browser)
-        job = {"action_type": "ezlynx.reassign", "payload": {"resource_id": "task-1", "assignee_id": "user-7", "assignee_name": "Ann"}}
+        job = {"action_type": "ezlynx.reassign", "payload": {"applicant_id": "220250093", "resource_id": "task-1", "assignee_id": "user-7", "assignee_name": "Ann"}}
         result = worker.perform(job, idempotency_key="same-key")
         self.assertEqual(result.destination["assignee_id"], "user-7")
+
+    def test_worker_refuses_non_allowlisted_applicant_before_browser_action(self):
+        browser = FakeEzlynx()
+        worker = HermesCuaEzlynxWorker(browser)
+        job = {
+            "action_type": "ezlynx.apply_label",
+            "payload": {
+                "account_id": "220250094",
+                "resource_id": "doc-1",
+                "label_control": "add-label",
+                "label_id": "label-2",
+                "label": "Renewal",
+            },
+        }
+        result = worker.perform(job, idempotency_key="must-not-run")
+        self.assertFalse(result.succeeded)
+        self.assertIn("EZLYNX_WRITE_SCOPE_REFUSED", result.error or "")
+        self.assertEqual(browser.calls, [])
 
     def test_angular_dialog_race_waits_for_interactable_dialog(self):
         browser = FakeEzlynx()
         browser.dialog_after = 3
         worker = HermesCuaEzlynxWorker(browser)
-        job = {"action_type": "ezlynx.move_document", "payload": {"account_id": "account-4", "document_id": "doc-1", "document_name": "policy.pdf", "move_control": "move", "destination_id": "acct-9", "destination_name": "Acme Test"}}
+        job = {"action_type": "ezlynx.move_document", "payload": {"account_id": "220250093", "document_id": "doc-1", "document_name": "policy.pdf", "move_control": "move", "destination_id": "acct-9", "destination_name": "Acme Test"}}
         result = worker.perform(job, idempotency_key="move-key")
         self.assertTrue(result.succeeded)
         self.assertGreaterEqual(browser.polls, 1)
-        self.assertIn(("wait_frame", "/Applicant/account-4/DocumentLibrary/MoveDocument", "Select the folder you would like to move your file to...", "Move"), browser.calls)
+        self.assertIn(("wait_frame", "/Applicant/220250093/DocumentLibrary/MoveDocument", "Select the folder you would like to move your file to...", "Move"), browser.calls)
 
     def test_local_label_value_without_server_persistence_is_unverified(self):
         result = WorkerResult(True, "ezlynx.apply_label", {"resource_id": "doc-1", "label_id": "label-2"})
@@ -128,7 +146,7 @@ class AcceptanceTests(unittest.TestCase):
         job = {
             "action_type": "ezlynx.apply_label",
             "payload": {
-                "account_id": "account-4",
+                "account_id": "220250093",
                 "resource_id": "doc-1",
                 "document_name": "policy.pdf",
                 "label_control": "add-label",

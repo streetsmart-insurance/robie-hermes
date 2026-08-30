@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .chat_policy import forbidden_tool_request
+from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 from .models import (
     JobStatus,
     ReconciliationOutcome,
@@ -16,7 +17,12 @@ from .models import (
 
 
 EZLYNX_REQUIRED_FIELDS = {
-    "ezlynx.reassign": ("resource_id", "assignee_id", "assignee_name"),
+    "ezlynx.reassign": (
+        "resource_id",
+        "applicant_id",
+        "assignee_id",
+        "assignee_name",
+    ),
     "ezlynx.move_document": (
         "document_id",
         "account_id",
@@ -61,6 +67,7 @@ def _ezlynx_destination(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     if action == "ezlynx.reassign":
         return {
             "resource_id": payload["resource_id"],
+            "applicant_id": payload["applicant_id"],
             "assignment_field": payload.get("assignment_field", "Assigned Producer"),
             "assignee_id": payload["assignee_id"],
             "assignee_name": payload["assignee_name"],
@@ -295,6 +302,19 @@ class HermesCuaEzlynxWorker:
     def perform(self, job: dict[str, Any], *, idempotency_key: str) -> WorkerResult:
         payload = job["payload"]
         action = job["action_type"]
+        try:
+            require_allowed_ezlynx_write_applicant(
+                payload.get("applicant_id") or payload.get("account_id")
+            )
+        except RuntimeError as exc:
+            return WorkerResult(
+                False,
+                action,
+                {},
+                retryable=False,
+                error=str(exc),
+                hold_status=JobStatus.FAILED,
+            )
         forbidden = forbidden_tool_request(payload, str(payload.get("text") or ""))
         if forbidden:
             return WorkerResult(False, action, {}, retryable=False, error=forbidden)
@@ -326,6 +346,7 @@ class HermesCuaEzlynxWorker:
             "ezlynx.reassign",
             {
                 "resource_id": payload["resource_id"],
+                "applicant_id": payload["applicant_id"],
                 "assignment_field": payload.get("assignment_field", "Assigned Producer"),
                 "assignee_id": payload["assignee_id"],
                 "assignee_name": payload["assignee_name"],

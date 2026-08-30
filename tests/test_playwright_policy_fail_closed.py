@@ -6,9 +6,11 @@ Production release stays FAIL. live_test_complete stays false.
 
 from __future__ import annotations
 
+import os
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from durable_temp import durable_temporary_directory
 
@@ -142,6 +144,35 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "PLAYWRIGHT_BLOCKED"):
             FakePlaywrightLocator.fill(target, "12-3456789")
         self.assertEqual(target.fills, [])
+
+    def test_generic_ezlynx_write_requires_matching_compiled_applicant_scope(self):
+        class ScopedLocator:
+            fill = FakeLocator.fill
+
+        allowed_page = FakePage({})
+        allowed_page.url = "https://app.ezlynx.com/web/account/220250093/policies"
+        allowed = FakeLocator(1, "#PolicyNumber", page=allowed_page)
+        scope = {"Locator": ScopedLocator}
+        install_playwright_write_guards(scope)
+        with patch.dict(
+            os.environ,
+            {"ROBIE_EZLYNX_WRITE_APPLICANT_ID": "220250093"},
+            clear=False,
+        ):
+            ScopedLocator.fill(allowed, "SYNTHETIC-POLICY")
+        self.assertEqual(allowed.fills, ["SYNTHETIC-POLICY"])
+
+        wrong_page = FakePage({})
+        wrong_page.url = "https://app.ezlynx.com/web/account/220250094/policies"
+        wrong = FakeLocator(1, "#PolicyNumber", page=wrong_page)
+        with patch.dict(
+            os.environ,
+            {"ROBIE_EZLYNX_WRITE_APPLICANT_ID": "220250093"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "EZLYNX_WRITE_SCOPE_REFUSED"):
+                ScopedLocator.fill(wrong, "MUST-NOT-WRITE")
+        self.assertEqual(wrong.fills, [])
 
     def test_timeout_on_hidden_combobox_fill_is_playwright_blocked_not_bare_timeout(self):
         """c31f9c69: unique hidden/combobox fill TimeoutError must HITL, not retry."""

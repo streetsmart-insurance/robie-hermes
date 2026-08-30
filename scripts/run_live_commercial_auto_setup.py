@@ -4,12 +4,18 @@ import sys
 
 from playwright.async_api import async_playwright
 
+from robie_job_engine.ezlynx_write_scope import (
+    ezlynx_control_scope_block_reason,
+    require_allowed_ezlynx_write_applicant,
+)
+
 CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
 APPLICANT_ID = "220250093"
 POLICY_NUM = "CA-ROBIE-LIVE-02"
 
 
 async def run_production_setup() -> None:
+    applicant_id = require_allowed_ezlynx_write_applicant(APPLICANT_ID)
     print(f"[LIVE PRODUCTION RUN] Starting Commercial Auto policy setup for Policy #{POLICY_NUM}...")
     async with async_playwright() as pw:
         browser = await pw.chromium.connect_over_cdp(CDP_URL)
@@ -18,8 +24,13 @@ async def run_production_setup() -> None:
 
         # Step 1: Navigate to Policies tab
         print(f"[LIVE STEP 1] Navigating to Policies tab for Applicant {APPLICANT_ID}...")
-        await page.goto(f"https://app.ezlynx.com/web/account/{APPLICANT_ID}/policies", wait_until="domcontentloaded")
+        await page.goto(f"https://app.ezlynx.com/web/account/{applicant_id}/policies", wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
+        scope_block = ezlynx_control_scope_block_reason(
+            page.url, requested_applicant_id=applicant_id
+        )
+        if scope_block:
+            raise RuntimeError(scope_block)
 
         # Step 2: Click '+ Add policy'
         print("[LIVE STEP 2] Opening Policy Add modal...")
@@ -130,7 +141,7 @@ async def run_production_setup() -> None:
 
         # Step 5: Read-back & Verify on Policies Tab
         print("[LIVE STEP 5] Authoritative read-back from Policies tab...")
-        await page.goto(f"https://app.ezlynx.com/web/account/{APPLICANT_ID}/policies", wait_until="domcontentloaded")
+        await page.goto(f"https://app.ezlynx.com/web/account/{applicant_id}/policies", wait_until="domcontentloaded")
         await page.wait_for_timeout(4000)
 
         body_text = await page.locator("body").inner_text()

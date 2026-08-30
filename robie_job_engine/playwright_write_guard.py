@@ -288,6 +288,45 @@ def _page_url_text(page: Any) -> str:
     return str(value or "").strip()
 
 
+def _ezlynx_write_scope_block_reason(
+    owner: Any,
+    *,
+    page_level: bool,
+    method_name: str,
+    selector: Any = None,
+) -> str | None:
+    """Apply the compiled applicant allowlist before any generic EZLynx control action."""
+
+    page = _page_from_target(owner, page_level=page_level)
+    url = _page_url_text(page)
+    if "app.ezlynx.com" not in url.casefold():
+        return None
+    # Filtering the policy listing is a read operation, not a business-record
+    # mutation. Keep this exemption exact; subsequent edit/FormEntry controls
+    # remain applicant-scoped by the URL parser below.
+    if (
+        "/applicantportal/policies" in url.casefold()
+        and method_name in {"fill", "type"}
+        and str(selector or "").strip().casefold() == "#search"
+    ):
+        return None
+    try:
+        from robie_job_engine.ezlynx_write_scope import (
+            ezlynx_control_scope_block_reason,
+        )
+    except Exception:
+        return (
+            "EZLYNX_WRITE_SCOPE_REFUSED: applicant scope guard is unavailable; "
+            "refuse generic EZLynx control action"
+        )
+    return ezlynx_control_scope_block_reason(
+        url,
+        requested_applicant_id=os.environ.get(
+            "ROBIE_EZLYNX_WRITE_APPLICANT_ID", ""
+        ),
+    )
+
+
 def collect_blocked_dialog(page: Any) -> tuple[str, list[str]]:
     """Read dialog title and visible labels only. Never include passwords."""
     title = ""
@@ -458,6 +497,14 @@ def _wrap_write(
 
     def wrapped(self, *args, **kwargs):
         selector = args[0] if page_level and args else None
+        scope_reason = _ezlynx_write_scope_block_reason(
+            self,
+            page_level=page_level,
+            method_name=method_name,
+            selector=selector,
+        )
+        if scope_reason:
+            raise RuntimeError(scope_reason)
         try:
             reason = unique_write_block_reason(self, selector=selector)
             if reason is None and method_name in CONTROL_ACTION_METHODS:

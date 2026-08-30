@@ -19,7 +19,7 @@ from robie_job_engine.ezlynx_policy_setup_profiles import (
 
 def _base(**extra):
     return {
-        "applicant_id": "SANITIZED-001",
+        "applicant_id": "220250093",
         "carrier": "Test Carrier",
         "policy_number": "TEST-0001",
         "effective_date": "09/01/2026",
@@ -125,6 +125,22 @@ def test_supported_bond_variant_can_reach_ready_without_enabling_save():
     )
     assert result.status == READY
     assert result.consequential_writes_enabled is False
+
+
+def test_non_allowlisted_applicant_never_reaches_ready():
+    result = preflight_policy_setup(
+        {
+            **_base(
+                lob="Bonds",
+                bond_type="Home Improvement Bond",
+                bond_amount="SANITIZED",
+                obligee="SANITIZED",
+            ),
+            "applicant_id": "220250094",
+        }
+    )
+    assert result.status == NEEDS_CLARIFICATION
+    assert "business-write allowlist" in " ".join(result.reasons)
 
 
 def test_expected_actual_requires_reopened_exact_match_and_never_completes():

@@ -414,6 +414,7 @@ class Job468d1575RecordingTests(unittest.TestCase):
             root = Path(tmp) / "recordings"
             hint = root / "job.hint.json"
             os.environ["ROBIE_RECORDING_ROOT"] = str(root)
+            os.environ["ROBIE_EZLYNX_WRITE_APPLICANT_ID"] = "220250093"
             os.environ.pop("ROBIE_RECORDING_HINT_FILE", None)
             try:
                 publish_active_hint_pointer(hint, root=root)
@@ -438,6 +439,7 @@ class Job468d1575RecordingTests(unittest.TestCase):
             finally:
                 os.environ.pop("ROBIE_RECORDING_ROOT", None)
                 os.environ.pop("ROBIE_RECORDING_HINT_FILE", None)
+                os.environ.pop("ROBIE_EZLYNX_WRITE_APPLICANT_ID", None)
 
 
 class Job468d1575SecretHealthTests(unittest.TestCase):

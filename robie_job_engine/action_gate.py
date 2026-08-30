@@ -26,6 +26,7 @@ from typing import Any
 from .models import TERMINAL_STATUSES, JobStatus
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .store import JobStore
+from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id
 
 
 REQUIRED_CLEAN_TEST_PASSES = 1
@@ -80,9 +81,8 @@ CHAT_REFUSE_NOTE = (
     "API creation and fresh-readback PASS exists for this exact action."
 )
 POLICY_SETUP_REFUSE_NOTE = (
-    "EZLynx Policy Setup v0.1.0-draft is Test-only. All profiles remain "
-    "Testing with consequential writes disabled; Production must not start "
-    "this action."
+    "EZLynx Policy Setup may run only for a compiled-allowlisted applicant. "
+    "A missing or different applicant id must refuse before Playwright."
 )
 LEFTOVER_RETRY_NOTE = (
     "Leftover Production job ids must not RETRY around the action gate. "
@@ -271,6 +271,7 @@ def action_hold_reason(
     *,
     env: str | None = None,
     job_id: str | None = None,
+    applicant_id: str | None = None,
 ) -> str | None:
     """Return a refuse reason when Production must not start this action."""
     environment = (env if env is not None else current_robie_env()).upper()
@@ -289,7 +290,13 @@ def action_hold_reason(
     if environment not in PRODUCTION_ENV_NAMES:
         return None
     if action_id == POLICY_SETUP_ACTION:
-        return f"{REFUSAL_TOKEN}: {POLICY_SETUP_REFUSE_NOTE}"
+        applicant = normalize_applicant_id(applicant_id)
+        if applicant_is_write_allowed(applicant):
+            return None
+        return (
+            f"{REFUSAL_TOKEN}: {POLICY_SETUP_REFUSE_NOTE} "
+            f"Requested applicant={applicant or '<missing>'}."
+        )
     if has_clean_test_pass(action_id):
         return None
     needed = required_clean_test_passes()
@@ -323,6 +330,7 @@ def hold_reason_for_job(
         action_id,
         env=env,
         job_id=str(job.get("id") or ""),
+        applicant_id=str(payload.get("applicant_id") or payload.get("account_id") or ""),
     )
 
 
