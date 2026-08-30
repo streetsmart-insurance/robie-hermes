@@ -1,0 +1,40 @@
+{
+  "output_dir": "/opt/streetsmart-hermes/accountability/reports",
+  "sources": {
+    "ringcentral": "/opt/streetsmart-hermes/accountability/inbox/ringcentral.csv",
+    "tasks": "/opt/streetsmart-hermes/accountability/inbox/ezlynx_tasks.csv",
+    "activities": "/opt/streetsmart-hermes/accountability/inbox/ezlynx_activities.csv",
+    "sales": "/opt/streetsmart-hermes/accountability/inbox/ezlynx_sales_center.csv",
+    "sales_json": "/opt/streetsmart-hermes/accountability/inbox/sales_summary.json",
+    "retention": "/opt/streetsmart-hermes/accountability/inbox/retention.csv",
+    "retention_summary_json": "/opt/streetsmart-hermes/accountability/inbox/retention_summary.json",
+    "submissions": "/opt/streetsmart-hermes/accountability/inbox/submissions.csv",
+    "email_json": "/opt/streetsmart-hermes/accountability/inbox/email_summary.json",
+    "appsheet_json": "/opt/streetsmart-hermes/accountability/inbox/appsheet_summary.json",
+    "magellan_json": "/opt/streetsmart-hermes/accountability/inbox/magellan_summary.json",
+    "monthly_kpis_json": "/opt/streetsmart-hermes/accountability/inbox/monthly_kpis.json",
+    "churn_json": "/opt/streetsmart-hermes/accountability/inbox/churn_cases.json",
+    "trackers": {
+      "bor": "/opt/streetsmart-hermes/accountability/inbox/bor.csv",
+      "policy_changes": "/opt/streetsmart-hermes/accountability/inbox/policy_changes.csv",
+      "referrals": "/opt/streetsmart-hermes/accountability/inbox/referrals.csv",
+      "missed_calls": "/opt/streetsmart-hermes/accountability/inbox/missed_calls.csv",
+      "coi_endorsements": "/opt/streetsmart-hermes/accountability/inbox/coi_endorsements.csv",
+      "expirations": "/opt/streetsmart-hermes/accountability/inbox/expirations.csv",
+      "voicemail_email": "/opt/streetsmart-hermes/accountability/inbox/voicemail_email.csv",
+      "case_studies": "/opt/streetsmart-hermes/accountability/inbox/case_studies.csv",
+      "policy_transactions": "/opt/streetsmart-hermes/accountability/inbox/policy_transactions.csv"
+    }
+  },
+  "rules": {
+    "sales_untouched_days": 5,
+    "submission_open_days": 30
+  },
+  "appsheet": {
+    "enabled": false,
+    "app_id_env": "APPSHEET_APP_ID",
+    "application_access_key_env": "APPSHEET_APPLICATION_ACCESS_KEY",
+    "region_env": "APPSHEET_REGION",
+    "tables": {}
+  }
+}

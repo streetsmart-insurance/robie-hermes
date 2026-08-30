@@ -7,6 +7,7 @@ from robie_job_engine.ezlynx_productivity_sync import EZLynxProductivityParser
 from robie_job_engine.productivity import (
     EZLynxActivityMetric,
     EZLynxTaskMetric,
+    EmployeeProductivityReport,
     ProductivityAuditor,
     RingCentralCall,
     format_phone,
@@ -21,6 +22,29 @@ def test_normalize_phone():
     assert normalize_phone("15551234567") == "5551234567"
     assert normalize_phone("5551234567") == "5551234567"
     assert format_phone("5551234567") == "(555) 123-4567"
+
+
+def test_no_inbound_calls_is_not_a_perfect_answer_rate():
+    report = EmployeeProductivityReport(employee_name="No Volume")
+    assert report.answer_rate_percent is None
+    assert report.callback_resolution_rate_percent is None
+
+
+def test_failed_outbound_dial_does_not_resolve_voicemail():
+    auditor = ProductivityAuditor(sla_warning_minutes=30)
+    base_time = datetime(2026, 8, 29, 14, 0, 0, tzinfo=timezone.utc)
+    calls = [
+        RingCentralCall(
+            "in-1", "Inbound", "5551234567", "5559990001", "Voicemail", 30,
+            base_time, "101", "Sarah"
+        ),
+        RingCentralCall(
+            "out-1", "Outbound", "5559990001", "5551234567", "No Answer", 0,
+            base_time + timedelta(minutes=10), "101", "Sarah"
+        ),
+    ]
+    incidents = auditor.reconcile_missed_calls(calls, reference_time=base_time + timedelta(hours=1))
+    assert incidents[0].status == "ORPHANED_ALERT"
 
 
 def test_missed_call_reconciliation_resolved():
@@ -285,3 +309,115 @@ def test_unassigned_orphaned_call_reconciliation():
     assert len(audit["critical_alerts"]) == 1
     assert "Unassigned / General Queue" in audit["critical_alerts"][0]
     assert "(555) 777-6666" in audit["critical_alerts"][0]
+
+
+def test_split_messages_google_chat_delivery():
+    auditor = ProductivityAuditor(sla_warning_minutes=30)
+    base_time = datetime(2026, 8, 29, 10, 0, 0, tzinfo=timezone.utc)
+    ref_time = base_time + timedelta(hours=2)
+
+    calls = [
+        RingCentralCall(
+            call_id="call-orphaned",
+            direction="Inbound",
+            from_number="5559876543",
+            to_number="5559990002",
+            result="Voicemail",
+            duration_seconds=30,
+            start_time=base_time,
+            extension="102",
+            employee_name="Jackie",
+        )
+    ]
+
+    pipeline = ProductivityPipeline(
+        auditor=auditor,
+        chat_space="spaces/AAQAZbLJO78",
+        alert_thread_name="productivity-sla-alerts",
+        scorecard_thread_name="productivity-daily-digest",
+    )
+
+    with patch("robie_job_engine.productivity_pipeline.post_as_chat_app") as mock_post:
+        # Run with split_messages=True
+        audit = pipeline.run(calls=calls, post_to_chat=True, split_messages=True)
+        assert len(mock_post.call_args_list) == 2
+
+        # First call: Critical Alerts to alert thread
+        alert_args, alert_kwargs = mock_post.call_args_list[0]
+        assert alert_args[0] == "spaces/AAQAZbLJO78"
+        assert "CRITICAL ACCOUNT RISK" in alert_args[1]
+        assert "(555) 987-6543" in alert_args[1]
+        assert alert_kwargs.get("thread_name") == "productivity-sla-alerts"
+
+        # Second call: Scorecard to daily digest thread (without redundant critical block)
+        score_args, score_kwargs = mock_post.call_args_list[1]
+        assert score_args[0] == "spaces/AAQAZbLJO78"
+        assert "Daily Agency Productivity" in score_args[1]
+        assert "CRITICAL ACCOUNT RISK" not in score_args[1]
+        assert score_kwargs.get("thread_name") == "productivity-daily-digest"
+
+
+def test_poll_and_ingest_reports_intake_dir(tmp_path):
+    intake = tmp_path / "intake"
+    archive = tmp_path / "archive"
+    intake.mkdir()
+    
+    # Write sample tasks CSV
+    task_csv = intake / "Task_Aging_Report_20260830.csv"
+    task_csv.write_text("Assigned To,Subject,Due Date,Status,Customer Name\nJackie,Renew policy,08/20/2026,Open,John Doe\nJackie,Send ID card,08/30/2026,Completed,Jane Smith\n")
+
+    # Write sample activities CSV
+    act_csv = intake / "Activity_Summary_20260830.csv"
+    act_csv.write_text("Created By,Activity Type,Action Date,Details\nJackie,Note Added,08/30/2026,Called client\n")
+
+    tasks, acts = EZLynxProductivityParser.poll_and_ingest_reports(intake_dir=intake, archive_dir=archive)
+    assert len(tasks) == 1
+    assert tasks[0].employee_name == "Jackie"
+    assert tasks[0].overdue == 1
+    assert tasks[0].completed_today == 1
+
+    assert len(acts) == 1
+    assert acts[0].employee_name == "Jackie"
+    assert acts[0].notes_count == 1
+
+    # Verify archived
+    assert (archive / task_csv.name).exists()
+    assert (archive / act_csv.name).exists()
+
+
+def test_ringcentral_client_from_env_and_polling():
+    with patch.dict("os.environ", {
+        "RINGCENTRAL_CLIENT_ID": "mock_id",
+        "RINGCENTRAL_CLIENT_SECRET": "mock_secret",
+        "RINGCENTRAL_JWT": "mock_jwt",
+    }):
+        rc = RingCentralClient.from_env()
+        assert rc.is_configured() is True
+        assert rc.client_id == "mock_id"
+
+    with patch.object(RingCentralClient, "fetch_call_logs") as mock_fetch:
+        now = datetime(2026, 8, 30, 15, 0, 0, tzinfo=timezone.utc)
+        mock_fetch.return_value = [
+            RingCentralCall(
+                call_id="call-orphaned-1",
+                direction="Inbound",
+                from_number="5559876543",
+                to_number="5559990002",
+                result="Voicemail",
+                duration_seconds=30,
+                start_time=now - timedelta(minutes=45),
+                extension="102",
+                employee_name="Jackie",
+            )
+        ]
+        rc = RingCentralClient(access_token="mock_token")
+        with patch("robie_job_engine.ringcentral_client.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.strptime = datetime.strptime
+            
+            # Since datetime arithmetic is needed
+            orphaned = rc.poll_unreturned_missed_calls(lookback_minutes=60, sla_minutes=30)
+            assert len(orphaned) == 1
+            assert orphaned[0]["caller_phone"] == "5559876543"
+            assert orphaned[0]["status"] == "ORPHANED_ALERT"

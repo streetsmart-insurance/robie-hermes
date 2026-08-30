@@ -61,6 +61,28 @@ def _contract(result: str, verifier: str, *, attempts: int = 3) -> ExecutableSki
 
 
 EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
+    **{
+        action: ExecutableSkillContract(
+            expected_destination_result=(
+                "a read-only accountability report artifact exists and its fresh SHA-256 "
+                "and report title match the requested reporting period"
+            ),
+            recording_policy="EXEMPT",
+            independent_verifier="AccountabilityReportVerifier",
+            maximum_attempts=2,
+            success_conditions=(
+                "the artifact is freshly reread from the configured report directory",
+                "the artifact SHA-256 matches the worker checkpoint",
+                "the report contains the requested period title and no simulation marker",
+            ),
+            failure_conditions=(
+                "the connection manifest is missing or invalid",
+                "report generation does not create an artifact",
+                "fresh artifact read-back or checksum verification fails",
+            ),
+        )
+        for action in ("accountability.daily", "accountability.weekly", "accountability.monthly")
+    },
     "drive.skill_sync": ExecutableSkillContract(
         expected_destination_result=(
             "an immutable local snapshot contains only approved Core Rules and Active Skills"
@@ -130,6 +152,14 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
 
 
 BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
+    **{
+        action: {
+            "schema_verified": True,
+            "required": ("manifest_path",),
+            "identity": ("manifest_path",),
+        }
+        for action in ("accountability.daily", "accountability.weekly", "accountability.monthly")
+    },
     "drive.skill_sync": {
         "schema_verified": True,
         "required": ("destination_root",),

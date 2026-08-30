@@ -61,3 +61,59 @@ def test_reporting_suite_generation():
     )
     assert "STREETSMART MONTHLY EXECUTIVE AUDIT & CHURN AUTOPSY" in monthly
     assert "Costa 1 Cleaning" in monthly
+    assert "UNVERIFIED claim" in monthly
+
+
+def test_weekly_report_never_invents_missing_sources():
+    suite = ReportingSuite()
+    weekly = suite.build_weekly_report(
+        {"source_status": "missing"},
+        {"source_status": "missing"},
+        {"source_status": "missing"},
+        {"source_status": "missing"},
+        {"source_status": "missing"},
+    )
+    assert "51.8%" not in weekly
+    assert "249" not in weekly
+    assert "UNVERIFIED" in weekly
+    assert "DATA LIMITATIONS" in weekly
+
+
+def test_weekly_report_includes_retention_and_submission_ledgers():
+    suite = ReportingSuite()
+    weekly = suite.build_weekly_report(
+        {"answer_rate": "80.0%", "unreturned_total": 1, "employee_rows": []},
+        {"total_overdue": 2},
+        {"quotes_created": 3},
+        {
+            "reviews_completed": 4,
+            "exception_count": 1,
+            "exceptions": [
+                {
+                    "account_name": "Costa 1 Cleaning Services",
+                    "owner": "Jackie Arriola",
+                    "days_to_expiration": 16,
+                    "reasons": ["no recorded touch for 29 days"],
+                    "source_row_number": 2,
+                }
+            ],
+        },
+        {"stalled_threads": 0},
+        submission_data={
+            "open_over_30_count": 1,
+            "exceptions": [
+                {
+                    "account_name": "Old Open Risk",
+                    "owner": "Alexis Martinez",
+                    "age_days": 76,
+                    "status": "Quoting",
+                    "reasons": ["submission open for 76 days"],
+                    "source_row_number": 4,
+                }
+            ],
+        },
+    )
+    assert "RETENTION CENTER EXCEPTIONS" in weekly
+    assert "Costa 1 Cleaning Services" in weekly
+    assert "SUBMISSION CENTER EXCEPTIONS" in weekly
+    assert "Old Open Risk" in weekly

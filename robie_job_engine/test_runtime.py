@@ -128,11 +128,17 @@ def build_runtime_engine(
         from .chat_verifiers import FilesystemSkillUpdateVerifier
 
         verifiers["filesystem.skill_update"] = FilesystemSkillUpdateVerifier(skill_roots)
+    from .accountability_jobs import AccountabilityReportVerifier, AccountabilityReportWorker
     from .chat_verifiers import EzlynxSubmissionAuditVerifier
     from .skill_sync import DriveSkillSyncVerifier, DriveSkillSyncWorker
 
     workers["drive-skill-sync"] = DriveSkillSyncWorker()
+    workers["accountability-report"] = AccountabilityReportWorker()
     verifiers["drive.skill_sync"] = DriveSkillSyncVerifier()
+    accountability_verifier = AccountabilityReportVerifier()
+    verifiers["accountability.daily"] = accountability_verifier
+    verifiers["accountability.weekly"] = accountability_verifier
+    verifiers["accountability.monthly"] = accountability_verifier
 
     verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
         submission_readback or SubprocessSubmissionReadback()

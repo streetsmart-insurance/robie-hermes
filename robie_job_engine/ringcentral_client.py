@@ -68,6 +68,37 @@ class RingCentralClient:
             self._access_token = body.get("access_token")
             return self._access_token
 
+    @classmethod
+    def from_env(cls) -> RingCentralClient:
+        """Instantiates client from standard environment variables."""
+        import os
+        return cls(
+            client_id=os.environ.get("RINGCENTRAL_CLIENT_ID"),
+            client_secret=os.environ.get("RINGCENTRAL_CLIENT_SECRET"),
+            jwt_token=os.environ.get("RINGCENTRAL_JWT"),
+            server_url=os.environ.get("RINGCENTRAL_SERVER_URL"),
+        )
+
+    def is_configured(self) -> bool:
+        """Returns True if API credentials are provided."""
+        return bool((self.client_id and self.client_secret and self.jwt_token) or self._access_token)
+
+    def poll_unreturned_missed_calls(
+        self,
+        lookback_minutes: int = 120,
+        sla_minutes: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """Directly fetches recent call logs and identifies unreturned missed calls exceeding SLA."""
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(minutes=lookback_minutes)
+        calls = self.fetch_call_logs(date_from=start_time, date_to=now)
+        
+        from robie_job_engine.productivity import ProductivityAuditor
+        auditor = ProductivityAuditor(sla_warning_minutes=sla_minutes, employee_mapping=self.employee_mapping)
+        audit = auditor.generate_audit(calls, reference_time=now)
+        
+        return [inc for inc in audit.get("incidents", []) if inc.get("status") == "ORPHANED_ALERT"]
+
     def _get_headers(self) -> Dict[str, str]:
         if not self._access_token and self.jwt_token:
             self.authenticate_jwt()

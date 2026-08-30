@@ -50,3 +50,6 @@ venv/
 dist/
 build/
 release-artifacts/
+
+# Local accountability inboxes, generated reports, and connection manifests
+runtime/accountability/

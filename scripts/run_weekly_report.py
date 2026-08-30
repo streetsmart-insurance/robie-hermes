@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility wrapper for the evidence-backed weekly report builder."""
+"""Build a weekly report from explicitly supplied evidence exports."""
 
 import sys
 

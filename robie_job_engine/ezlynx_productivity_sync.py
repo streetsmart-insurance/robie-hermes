@@ -98,6 +98,39 @@ class EZLynxProductivityParser:
         return metrics
 
     @classmethod
+    def poll_and_ingest_reports(
+        cls,
+        intake_dir: Union[str, Path] = "/tmp/ezlynx_reports",
+        archive_dir: Optional[Union[str, Path]] = None,
+    ) -> Tuple[List[EZLynxTaskMetric], List[EZLynxActivityMetric]]:
+        """Polls an intake directory for incoming EZLynx Task and Activity CSV reports.
+        
+        Parses them into normalized metrics and optionally moves them to an archive directory.
+        """
+        intake_path = Path(intake_dir)
+        intake_path.mkdir(parents=True, exist_ok=True)
+        
+        task_metrics: List[EZLynxTaskMetric] = []
+        activity_metrics: List[EZLynxActivityMetric] = []
+
+        # Find latest task and activity CSVs
+        csv_files = sorted(intake_path.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        for p in csv_files:
+            fname = p.name.lower()
+            if "task" in fname:
+                task_metrics = cls.parse_tasks_csv(p)
+            elif "activity" in fname or "discussion" in fname or "log" in fname:
+                activity_metrics = cls.parse_activities_csv(p)
+            
+            if archive_dir:
+                arch_path = Path(archive_dir)
+                arch_path.mkdir(parents=True, exist_ok=True)
+                p.rename(arch_path / p.name)
+
+        return task_metrics, activity_metrics
+
+    @classmethod
     def parse_activities_csv(cls, csv_content_or_path: Union[str, Path]) -> List[EZLynxActivityMetric]:
         """Parses EZLynx Activity Log / Discussion Notes CSV export."""
         if isinstance(csv_content_or_path, Path) or (isinstance(csv_content_or_path, str) and "\n" not in csv_content_or_path and Path(csv_content_or_path).exists()):

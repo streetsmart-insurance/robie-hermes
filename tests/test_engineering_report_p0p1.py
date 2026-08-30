@@ -163,6 +163,22 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         with self.assertRaises(RunIsolationError):
             runs.assert_can_work(second["id"])
 
+    def test_phase03_same_owner_can_renew_after_scheduler_pause_until_reconciled(self):
+        runs = IsolatedRunStore(self.db)
+        first = runs.start(owner="worker-a", job_id="job-a", lease_seconds=1)
+        with runs._connect() as conn:
+            conn.execute(
+                "UPDATE isolated_runs SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+                (first["id"],),
+            )
+        renewed = runs.renew_lease(first["id"], owner="worker-a", lease_seconds=1)
+        self.assertEqual(renewed["status"], "ACTIVE")
+        with self.assertRaises(RunIsolationError):
+            runs.renew_lease(first["id"], owner="worker-b", lease_seconds=1)
+        runs.terminate(first["id"], "ABANDONED")
+        with self.assertRaises(RunIsolationError):
+            runs.renew_lease(first["id"], owner="worker-a", lease_seconds=1)
+
     def test_phase04_durable_idempotency_at_most_one_action(self):
         self._assert_canonical_ephemeral_paths_rejected()
         with self.assertRaises(TypeError):
