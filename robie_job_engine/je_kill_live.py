@@ -45,6 +45,11 @@ POSITIONAL_MARKERS = (".first", ".last", ".nth", ":nth", "nth=")
 GREENLET_THREAD_SWITCH = (
     "Cannot switch to a different thread — Current: <greenlet"
 )
+# Angular documents table is empty at domcontentloaded. Wait for the
+# Carlo-approved fixture label_control (row-scoped CSS, not page-wide
+# "Add label") to be uniquely present before the opening click.
+LABEL_CONTROL_SETTLE_TIMEOUT_MS = 15_000
+UNIQUE_LOCATOR_POLL_INTERVAL_S = 0.1
 
 
 class PlaywrightThread:
@@ -324,13 +329,40 @@ class PersistentChromeEzlynxPort:
         return target.locator(value)
 
     @staticmethod
+    def _blocked_count(name: str, count: int) -> RuntimeError:
+        return RuntimeError(
+            f"PLAYWRIGHT_BLOCKED: {name} matched {count} elements; refuse to guess"
+        )
+
+    @staticmethod
     def _require_one(locator: Any, name: str) -> Any:
         count = locator.count()
         if count != 1:
-            raise RuntimeError(
-                f"PLAYWRIGHT_BLOCKED: {name} matched {count} elements; refuse to guess"
-            )
+            raise PersistentChromeEzlynxPort._blocked_count(name, count)
         return locator
+
+    @staticmethod
+    def _wait_unique(locator: Any, name: str, timeout_ms: int) -> Any:
+        """Poll until count==1. 0 at timeout and count>1 stay PLAYWRIGHT_BLOCKED."""
+        deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+        last_count = 0
+        while True:
+            last_count = locator.count()
+            if last_count == 1:
+                return locator
+            if last_count > 1:
+                raise PersistentChromeEzlynxPort._blocked_count(name, last_count)
+            now = time.monotonic()
+            if now >= deadline:
+                raise PersistentChromeEzlynxPort._blocked_count(name, last_count)
+            time.sleep(min(UNIQUE_LOCATOR_POLL_INTERVAL_S, deadline - now))
+
+    def _wait_label_control(self) -> Any:
+        return self._wait_unique(
+            self._locator(self.scenario.label_control),
+            "click target",
+            LABEL_CONTROL_SETTLE_TIMEOUT_MS,
+        )
 
     def preflight(self) -> None:
         """Fail closed on tab/auth before a kill cycle. Disconnect after."""
@@ -342,6 +374,7 @@ class PersistentChromeEzlynxPort:
         page = self._connect()
         page.goto(self.scenario.action_url, wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
+        self._wait_label_control()
 
     @_on_playwright_thread
     def exact_option(self, *, stable_id: str, exact_text: str, scope: Any | None = None) -> Any:
@@ -352,6 +385,11 @@ class PersistentChromeEzlynxPort:
     @_on_playwright_thread
     def click(self, target: Any) -> None:
         locator = self._locator(target) if isinstance(target, dict) else target
+        if isinstance(target, dict) and target == self.scenario.label_control:
+            self._wait_unique(
+                locator, "click target", LABEL_CONTROL_SETTLE_TIMEOUT_MS
+            ).click()
+            return
         locator.wait_for(state="visible", timeout=15_000)
         self._require_one(locator, "click target").click()
 
@@ -365,7 +403,8 @@ class PersistentChromeEzlynxPort:
             spec = self.scenario.apply_button
         else:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: control is outside approved Test fixture")
-        locator = self._require_one(self._locator(spec, scope=scope), name)
+        locator = self._locator(spec, scope=scope)
+        self._wait_unique(locator, name, timeout_ms)
         locator.wait_for(state="visible", timeout=timeout_ms)
         if not locator.is_enabled():
             raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {name} is disabled")
@@ -405,11 +444,7 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         page.reload(wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
-        row = self._locator({"kind": "css", "value": f"tr:has(#document-checkbox-{self.scenario.resource_id}-input)"})
-        try:
-            row.wait_for(state="visible", timeout=10_000)
-        except Exception:
-            pass
+        self._wait_label_control()
         loc = self._locator(self.scenario.applied_label)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:

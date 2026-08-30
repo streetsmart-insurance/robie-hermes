@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from robie_job_engine.ezlynx import EzlynxDestinationVerifier, HermesCuaEzlynxWo
 from robie_job_engine.je_kill_live import (
     ACTION,
     GREENLET_THREAD_SWITCH,
+    LABEL_CONTROL_SETTLE_TIMEOUT_MS,
     PHASES,
     FixtureWorker,
     PersistentChromeEzlynxPort,
@@ -564,6 +566,205 @@ class JeKillPlaywrightAffinityTests(unittest.TestCase):
             self.assertEqual(seen, [owner.thread_id, owner.thread_id])
         finally:
             owner.shutdown()
+
+
+class _DelayedLabelControlPage:
+    """Fake documents table: label_control is 0 until appear_after_s after goto/reload."""
+
+    def __init__(
+        self,
+        *,
+        appear_after_s: float | None,
+        count_when_ready: int = 1,
+    ) -> None:
+        self.url = "https://app.ezlynx.com/web/account/test-account/documents"
+        self.appear_after_s = appear_after_s
+        self.count_when_ready = count_when_ready
+        self.nav_at: float | None = None
+        self.clicks = 0
+        self.locator_queries: list[tuple[str, str]] = []
+
+    def _mark_nav(self) -> None:
+        self.nav_at = time.monotonic()
+
+    def goto(self, url, **kwargs):
+        self.url = url
+        self._mark_nav()
+
+    def reload(self, **kwargs):
+        self._mark_nav()
+
+    def _control_locator(self):
+        return _DelayedCountLocator(self)
+
+    def get_by_role(self, role, name="", exact=True):
+        self.locator_queries.append(("role", str(name)))
+        if name == "Password":
+            return _CountLocator(0)
+        if name == "Labels":
+            return self._control_locator()
+        return _CountLocator(1)
+
+    def get_by_text(self, value, exact=True):
+        self.locator_queries.append(("text", str(value)))
+        return _CountLocator(0)
+
+    def get_by_label(self, *args, **kwargs):
+        return _CountLocator(1)
+
+    def get_by_test_id(self, *args, **kwargs):
+        return _CountLocator(1)
+
+    def locator(self, selector):
+        self.locator_queries.append(("css", str(selector)))
+        return self._control_locator()
+
+    def wait_for_load_state(self, *args, **kwargs):
+        return None
+
+    def wait_for_timeout(self, *args, **kwargs):
+        return None
+
+
+class _DelayedCountLocator:
+    def __init__(self, page: _DelayedLabelControlPage) -> None:
+        self.page = page
+
+    def count(self):
+        if self.page.nav_at is None or self.page.appear_after_s is None:
+            return 0
+        if time.monotonic() - self.page.nav_at < self.page.appear_after_s:
+            return 0
+        return self.page.count_when_ready
+
+    def click(self):
+        if self.count() != 1:
+            raise AssertionError("clicked before label_control was uniquely present")
+        self.page.clicks += 1
+
+    def fill(self, value):
+        return None
+
+    def wait_for(self, **kwargs):
+        return None
+
+    def is_enabled(self):
+        return True
+
+
+class JeKillLabelControlSettleTests(unittest.TestCase):
+    """Post-navigation race: wait for unique fixture label_control, never guess."""
+
+    def tearDown(self) -> None:
+        for port in getattr(self, "_ports", []):
+            try:
+                port.close()
+            except Exception:
+                pass
+
+    def _scenario(self, payload: dict | None = None):
+        with durable_temporary_directory() as tmp:
+            path = Path(tmp) / "fixture.json"
+            path.write_text(json.dumps(payload or fixture_payload()), encoding="utf-8")
+            return load_fixture(path).scenarios["before_action"]
+
+    def _port(self, scenario, page) -> PersistentChromeEzlynxPort:
+        port = PersistentChromeEzlynxPort(scenario, cdp_url="http://127.0.0.1:9222")
+        self._ports = getattr(self, "_ports", [])
+        self._ports.append(port)
+        port._start_playwright = lambda: _FakePlaywright(_FakeBrowser(page))  # type: ignore[method-assign]
+        return port
+
+    def test_begin_action_waits_until_label_control_count_is_one_then_click_succeeds(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(appear_after_s=0.15)
+        port = self._port(scenario, page)
+        port.begin_action()
+        port.click(scenario.label_control)
+        self.assertEqual(page.clicks, 1)
+        self.assertIn(("role", "Labels"), page.locator_queries)
+        self.assertNotIn(("role", "Add label"), page.locator_queries)
+
+    def test_begin_action_stays_blocked_when_label_control_stays_zero(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(appear_after_s=None)
+        port = self._port(scenario, page)
+        with patch(
+            "robie_job_engine.je_kill_live.LABEL_CONTROL_SETTLE_TIMEOUT_MS",
+            250,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"PLAYWRIGHT_BLOCKED: click target matched 0 elements; refuse to guess",
+            ):
+                port.begin_action()
+        self.assertEqual(page.clicks, 0)
+
+    def test_begin_action_refuses_non_unique_label_control(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(appear_after_s=0.0, count_when_ready=8)
+        port = self._port(scenario, page)
+        started = time.monotonic()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"PLAYWRIGHT_BLOCKED: click target matched 8 elements; refuse to guess",
+        ):
+            port.begin_action()
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(page.clicks, 0)
+
+    def test_fresh_page_state_waits_for_unique_label_control_after_reload(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(appear_after_s=0.15)
+        port = self._port(scenario, page)
+        observed = port.fresh_page_state(ACTION, scenario.payload())
+        self.assertEqual(observed, {})
+        self.assertIn(("role", "Labels"), page.locator_queries)
+        self.assertNotIn(("role", "Add label"), page.locator_queries)
+
+    def test_fresh_page_state_stays_blocked_when_label_control_stays_zero(self):
+        scenario = self._scenario()
+        page = _DelayedLabelControlPage(appear_after_s=None)
+        port = self._port(scenario, page)
+        with patch(
+            "robie_job_engine.je_kill_live.LABEL_CONTROL_SETTLE_TIMEOUT_MS",
+            250,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"PLAYWRIGHT_BLOCKED: click target matched 0 elements; refuse to guess",
+            ):
+                port.fresh_page_state(ACTION, scenario.payload())
+
+    def test_css_fixture_label_control_is_used_not_page_wide_add_label_role(self):
+        row_css = (
+            'tr:has(#document-checkbox-test-1-input) button:has-text("Add label")'
+        )
+        payload = fixture_payload()
+        payload["scenarios"]["before_action"]["label_control"] = {
+            "kind": "css",
+            "value": row_css,
+        }
+        scenario = self._scenario(payload)
+        page = _DelayedLabelControlPage(appear_after_s=0.15)
+        port = self._port(scenario, page)
+        port.begin_action()
+        port.click(scenario.label_control)
+        self.assertEqual(page.clicks, 1)
+        self.assertIn(("css", row_css), page.locator_queries)
+        self.assertNotIn(("role", "Add label"), page.locator_queries)
+
+    def test_runner_does_not_invent_page_wide_add_label_role_click(self):
+        source = Path("robie_job_engine/je_kill_live.py").read_text(encoding="utf-8")
+        self.assertIn("LABEL_CONTROL_SETTLE_TIMEOUT_MS", source)
+        self.assertIn("_wait_unique", source)
+        self.assertIn("_wait_label_control", source)
+        self.assertEqual(LABEL_CONTROL_SETTLE_TIMEOUT_MS, 15_000)
+        self.assertNotIn('get_by_role("button", name="Add label"', source)
+        self.assertNotIn("get_by_role('button', name='Add label'", source)
+        self.assertNotIn('name="Add label"', source)
+        self.assertNotIn("document-checkbox-", source)
+        self.assertNotIn("except Exception:\n            pass", source)
 
 
 if __name__ == "__main__":
