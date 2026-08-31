@@ -258,13 +258,30 @@ import sys
 
 skill = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 profiles = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
-assert 'version: "0.1.0-draft"' in skill
+assert 'version: "0.2.0-test"' in skill
 assert 'status: "Testing"' in skill
 assert "production_ready: false" in skill
 assert profiles.get("production_ready") is False
 assert len(profiles.get("profiles") or []) == 12
 assert all(item.get("state") == "Testing" for item in profiles["profiles"])
-assert all(item.get("consequential_writes_enabled") is False for item in profiles["profiles"])
+enabled = [
+    item for item in profiles["profiles"]
+    if item.get("consequential_writes_enabled") is True
+]
+assert [item.get("id") for item in enabled] == ["homeowners"]
+assert enabled[0].get("test_write_constraints") == {
+    "environment": "TEST",
+    "applicant_id": "220250093",
+    "policy_number_prefix": "TEST-HO-",
+    "premium": "1.00",
+    "synthetic_fixture_required": True,
+    "explicit_save_authorization_required": True,
+}
+assert all(
+    item.get("consequential_writes_enabled") is False
+    for item in profiles["profiles"]
+    if item.get("id") != "homeowners"
+)
 PY
 then
   echo "Policy Setup Test-only package validation failed" >&2
@@ -348,7 +365,7 @@ payload = {
     "proof_path": sys.argv[9],
     "test_skill": {
         "name": "ezlynx-policy-setup",
-        "version": "0.1.0-draft",
+        "version": "0.2.0-test",
         "state": "Testing",
         "destination": sys.argv[10],
         "source": sys.argv[11],
@@ -356,7 +373,16 @@ payload = {
         "selector_inventory": sys.argv[11] + "/references/selector-inventory.md",
         "content_digest": sys.argv[12],
         "previous_target": sys.argv[13] or None,
-        "consequential_writes_enabled": False,
+        "consequential_writes_enabled": {
+            "homeowners_test_only": True,
+            "all_other_profiles": False,
+            "environment": "TEST",
+            "applicant_id": "220250093",
+            "policy_number_prefix": "TEST-HO-",
+            "premium": "1.00",
+            "synthetic_fixture_required": True,
+            "explicit_save_authorization_required": True,
+        },
     },
     "gateway_playwright_runtime": {
         "root": sys.argv[14],
