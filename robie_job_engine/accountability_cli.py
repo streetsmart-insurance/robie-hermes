@@ -374,6 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retention", type=Path)
     parser.add_argument("--retention-summary-json", type=Path)
     parser.add_argument("--submissions", type=Path)
+    parser.add_argument("--submissions-json", type=Path, help="Fresh read-only Submission Center audit JSON")
     parser.add_argument("--email-json", type=Path)
     parser.add_argument("--appsheet-json", type=Path)
     parser.add_argument("--magellan-json", type=Path)
@@ -424,8 +425,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.retention and args.retention.exists():
             findings = audit_retention_records(parse_retention_csv(args.retention), as_of=as_of)
             retention.update({"source_status": "available", "exception_count": len(findings), "exceptions": finding_dicts(findings)})
-        submissions: dict[str, Any] = {"source_status": "not supplied"}
-        if args.submissions and args.submissions.exists():
+        submissions: dict[str, Any] = _json(args.submissions_json) if args.submissions_json else {"source_status": "not supplied"}
+        if args.submissions_json and args.submissions_json.exists():
+            raw_records = list(submissions.get("qualifying_records") or [])
+            submissions.update({
+                "source_status": "available" if submissions.get("first_closed_row_inspected") else "partial: closed-row boundary not verified",
+                "open_over_30_count": len(raw_records),
+                "exceptions": [
+                    {
+                        "account_name": item.get("applicant", "Unknown applicant"),
+                        "owner": item.get("assigned_producer", "Unassigned"),
+                        "age_days": item.get("age_days"),
+                        "status": item.get("status", "Unknown"),
+                        "reasons": ["live red Quote Due Date is more than 30 calendar days overdue"],
+                        "source_row_number": f"page {item.get('source_page', '?')} row {item.get('source_row', '?')}",
+                        "submission_url": item.get("submission_url", ""),
+                    }
+                    for item in raw_records
+                ],
+            })
+        elif args.submissions and args.submissions.exists():
             findings = audit_submission_records(parse_submission_csv(args.submissions), as_of=as_of)
             submissions = {"source_status": "available", "open_over_30_count": len(findings), "exceptions": finding_dicts(findings)}
         all_tracker_findings = []

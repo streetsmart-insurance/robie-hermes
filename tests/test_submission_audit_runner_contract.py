@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import date, datetime
 import unittest
 from pathlib import Path
 
@@ -106,6 +107,46 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             status_block.index("header.click()"),
             status_block.rindex("ascending sort showed a closed first row"),
         )
+
+    def test_day_31_date_rule_is_explicit_and_date_parser_is_bounded(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        tree = ast.parse(source)
+        parser = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_parse_visible_date"
+        )
+        namespace = {
+            "datetime": datetime,
+            "date": date,
+            "DATE_FORMATS": ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"),
+        }
+        exec(compile(ast.Module(body=[parser], type_ignores=[]), "<date-parser>", "exec"), namespace)
+        parse = namespace["_parse_visible_date"]
+        self.assertEqual(parse("07/31/2026").isoformat(), "2026-07-31")
+        self.assertIsNone(parse("GC0"))
+        self.assertIn("age_days > 30", source)
+        self.assertIn("day_31_qualifies", source)
+
+    def test_live_red_state_and_cross_page_boundary_are_required(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        self.assertIn('RED_OVERDUE_COLOR = "rgb(211, 47, 47)"', source)
+        self.assertIn("getComputedStyle(element).color", source)
+        self.assertIn('"overdue_class": overdue_class', source)
+        self.assertIn("def _advance_page", source)
+        audit_block = source.split("def audit", 1)[1]
+        self.assertIn("while first_closed_page is None", audit_block)
+        self.assertIn("_advance_page(page, start)", audit_block)
+        self.assertIn('"qualifying_records": qualifying', audit_block)
+        self.assertIn('"email_delivery_enabled": False', audit_block)
 
 
 if __name__ == "__main__":

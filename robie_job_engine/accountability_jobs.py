@@ -28,6 +28,7 @@ SOURCE_FLAGS = {
     "retention": "--retention",
     "retention_summary_json": "--retention-summary-json",
     "submissions": "--submissions",
+    "submissions_json": "--submissions-json",
     "email_json": "--email-json",
     "appsheet_json": "--appsheet-json",
     "magellan_json": "--magellan-json",
@@ -131,6 +132,43 @@ class AccountabilityReportWorker:
                     required_sheets=configured_sheets.get(mode),
                     max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
                 ))
+            submission_center = dict(collection.get("ezlynx_submission_center") or {})
+            if mode == "weekly" and submission_center.get("enabled"):
+                from .submission_audit import DEFAULT_SCOPE, EzlynxSubmissionAuditWorker
+
+                audit = EzlynxSubmissionAuditWorker().perform(
+                    {
+                        "payload": {
+                            "read_only": True,
+                            "scope": DEFAULT_SCOPE,
+                            "expected_postcondition": {
+                                "source_status": "available",
+                                "status_aria_sort": "ascending",
+                                "first_row_non_closed": True,
+                                "first_closed_row_inspected": True,
+                                "day_31_qualifies": True,
+                                "email_delivery_enabled": False,
+                            },
+                        }
+                    },
+                    idempotency_key=f"{idempotency_key}:submission-center",
+                )
+                if not audit.succeeded:
+                    return WorkerResult(
+                        False,
+                        action,
+                        {},
+                        retryable=audit.retryable,
+                        error=f"Submission Center evidence unavailable: {audit.error}",
+                        hold_status=audit.hold_status,
+                    )
+                submission_snapshot = dict(audit.destination.get("expected_postcondition") or {})
+                submission_path = output_dir / f"submission-center-{run_at:%Y%m%dT%H%M%SZ}.json"
+                submission_path.write_text(
+                    json.dumps(submission_snapshot, indent=2, default=str),
+                    encoding="utf-8",
+                )
+                sources["submissions_json"] = str(submission_path)
             for key, flag in SOURCE_FLAGS.items():
                 value = sources.get(key)
                 if value:

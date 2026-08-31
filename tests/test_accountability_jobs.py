@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from robie_job_engine.accountability_jobs import AccountabilityReportWorker
 from robie_job_engine.accountability_schedule import install_accountability_schedules
+from robie_job_engine.models import WorkerResult
 from robie_job_engine.operations import OperationsStore
 
 
@@ -72,3 +73,61 @@ def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_pat
     assert result.succeeded
     assert collect.call_args.kwargs["required_users"] == ["Alex Example", "Blair Example"]
     assert collect.call_args.kwargs["required_queue_members"] == {"Commercial Test": ["Alex Example"]}
+
+
+def test_weekly_worker_collects_fresh_read_only_submission_snapshot_without_email(tmp_path: Path):
+    email = tmp_path / "email.json"
+    email.write_text('{"source_status":"available","by_employee":{}}', encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "output_dir": str(tmp_path / "reports"),
+        "sources": {"email_json": str(email)},
+        "rules": {"require_complete_evidence": False},
+        "collection": {"ezlynx_submission_center": {
+            "enabled": True,
+            "read_only": True,
+            "email_delivery_enabled": False,
+        }},
+        "delivery": {"enabled": False},
+    }), encoding="utf-8")
+    observed = {
+        "source_status": "available",
+        "status_aria_sort": "ascending",
+        "first_row_non_closed": True,
+        "first_closed_row_inspected": True,
+        "day_31_qualifies": True,
+        "email_delivery_enabled": False,
+        "open_over_30_count": 1,
+        "qualifying_records": [{"applicant": "Example LLC"}],
+    }
+
+    def fake_build(arguments):
+        output = Path(arguments[arguments.index("--output") + 1])
+        output.write_text("🏆 *STREETSMART WEEKLY EXECUTIVE PERFORMANCE SCORECARD*\n", encoding="utf-8")
+        return 0
+
+    with patch(
+        "robie_job_engine.submission_audit.EzlynxSubmissionAuditWorker.perform",
+        return_value=WorkerResult(
+            True,
+            "ezlynx.submission_audit",
+            {"expected_postcondition": observed},
+            retryable=False,
+        ),
+    ) as collect, patch(
+        "robie_job_engine.accountability_jobs.build_report", side_effect=fake_build
+    ) as build:
+        result = AccountabilityReportWorker().perform(
+            {"action_type": "accountability.weekly", "payload": {"manifest_path": str(manifest)}},
+            idempotency_key="weekly-live-submissions",
+        )
+
+    assert result.succeeded
+    collect.assert_called_once()
+    job = collect.call_args.args[0]
+    assert job["payload"]["read_only"] is True
+    assert job["payload"]["expected_postcondition"]["email_delivery_enabled"] is False
+    arguments = build.call_args.args[0]
+    snapshot_path = Path(arguments[arguments.index("--submissions-json") + 1])
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["open_over_30_count"] == 1

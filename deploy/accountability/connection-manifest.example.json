@@ -36,6 +36,11 @@
       "enabled": false,
       "mailbox": "robie@streetsmart.insurance",
       "max_age_hours": 36
+    },
+    "ezlynx_submission_center": {
+      "enabled": false,
+      "read_only": true,
+      "email_delivery_enabled": false
     }
   },
   "appsheet": {

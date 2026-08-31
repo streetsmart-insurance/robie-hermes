@@ -41,6 +41,8 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
     )
     ezlynx_exports = {key: file_state(key) for key in ("tasks", "activities", "retention", "submissions")}
     ezlynx_browser = _env_ready(environment, ("ROBIE_EZLYNX_USERNAME_SECRET", "ROBIE_EZLYNX_PASSWORD_SECRET"))
+    submission_center = dict(((manifest.get("collection") or {}).get("ezlynx_submission_center") or {}))
+    submission_center_ready = bool(submission_center.get("enabled") and ezlynx_browser)
     gmail_backend = (
         _env_ready(environment, ("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "ACCOUNTABILITY_GMAIL_USERS"))
         or _env_ready(environment, ("ACCOUNTABILITY_GMAIL_TOKEN_PATH", "ACCOUNTABILITY_GMAIL_USERS"))
@@ -65,6 +67,7 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         "ezlynx": {
             "ready": ezlynx_browser or any(item["available"] for item in ezlynx_exports.values()),
             "browser_secret_references_configured": ezlynx_browser,
+            "submission_center_live_read_configured": submission_center_ready,
             "exports": ezlynx_exports,
         },
         "gmail": {

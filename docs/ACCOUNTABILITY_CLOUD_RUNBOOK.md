@@ -31,7 +31,8 @@ minimum runtime environment references.
 Choose one:
 
 1. Schedule Detailed Call Log and queue reports to
-   `robie@streetsmart.insurance`; the cloud Gmail identity downloads the CSVs.
+   `robie@streetsmart.insurance`; the cloud Gmail identity downloads bounded
+   CSV or macro-free XLSX attachments and checksum-binds the evidence.
 2. Configure a read-only RingCentral application with client ID, client secret,
    and JWT stored in Secret Manager.
 
@@ -42,14 +43,26 @@ connected outbound callbacks.
 ### EZLynx
 
 The current cloud path uses the canonical authenticated browser profile and
-Secret Manager references already used for session refresh. Test must prove
-exports for Tasks, Activities, Sales Center, Retention Center, and Submission
-Center. A failed or stale export produces `UNVERIFIED`, never a favorable score.
+Secret Manager references already used for session refresh. The weekly job can
+collect Submission Center evidence directly when
+`collection.ezlynx_submission_center.enabled` is true. That collector is
+read-only: it sets All Submissions / Streetsmart Insurance, uses 100 rows,
+verifies Status ascending with a non-closed first row, follows every page until
+the first closed record, and requires both the live `overdue` class and
+`rgb(211, 47, 47)` before applying the day-31 rule. It captures direct links and
+groups qualifying records by assigned producer. Cached rows and capped exports
+are never completeness proof.
+
+Test must also prove evidence for Tasks, Activities, Sales Center, and Retention
+Center. A failed browser read or stale export produces `UNVERIFIED`, never a favorable score.
 Sales Center open opportunities are grouped by producer and flagged when the
 export shows no touch beyond `rules.sales_untouched_days` (five days by
 default). The exception preserves opportunity, stage, last-touch age, note
-quality, and source row. Submission Center flags non-terminal submissions open
-more than 30 days.
+quality, and source row. Submission Center flags only non-terminal records whose
+live red Quote Due Date is more than 30 calendar days old. Producer cleanup
+emails are a separate gate: the collector records
+`email_delivery_enabled=false`, and no employee email may be sent without
+current recipient verification and an immediate user confirmation.
 
 EZLynx is the account-level source of truth. RingCentral, Gmail, Magellan, and
 department trackers are external evidence to reconcile to the EZLynx account,
@@ -147,6 +160,7 @@ approved recipient map and delivery connection; Test never messages employees.
 2. Create the Test-only manifest from
    `deploy/accountability/connection-manifest.example.json` under
    `/opt/streetsmart-hermes-test/accountability/`.
+   Keep leadership delivery and producer cleanup email disabled.
 3. Run the redacted connection check. It must not print secret values.
 4. Install the three recurring schedules into the Test Job database.
 5. Run each reporting mode against non-production fixtures, followed by fresh

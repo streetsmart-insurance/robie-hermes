@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from robie_job_engine.accountability_cli import main
@@ -88,3 +89,29 @@ def test_daily_cli_without_ringcentral_fails_closed(capsys):
     output = capsys.readouterr().out
     assert "UNVERIFIED — RingCentral evidence is unavailable." in output
     assert "All client voicemails and missed calls resolved!" not in output
+
+
+def test_weekly_cli_accepts_fresh_live_submission_audit_json(tmp_path: Path, capsys):
+    submissions = tmp_path / "submissions.json"
+    submissions.write_text(json.dumps({
+        "source_status": "available",
+        "first_closed_row_inspected": True,
+        "open_over_30_count": 1,
+        "qualifying_records": [{
+            "applicant": "Example LLC",
+            "assigned_producer": "Alex Example",
+            "status": "Submitted",
+            "age_days": 31,
+            "submission_url": "https://app.ezlynx.com/web/submission-center/example",
+            "source_page": 1,
+            "source_row": 2,
+        }],
+    }), encoding="utf-8")
+    assert main([
+        "weekly",
+        "--as-of", "2026-08-31T17:00:00-04:00",
+        "--submissions-json", str(submissions),
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "Open Submissions Over 30 Days: 1" in output
+    assert "Example LLC — Alex Example" in output
