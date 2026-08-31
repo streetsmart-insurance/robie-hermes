@@ -65,12 +65,22 @@ jobs:
       - name: Audit Test browser without writes
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           staging="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="sudo env ROBIE_ENV=TEST TEST_ROOT='${TEST_ROOT}' EXPECTED_TEST_SHA='${EXPECTED_TEST_SHA}' AUDIT_SCRIPT='${staging}/audit-policy-setup-fixture-readiness.py' bash '${staging}/run-policy-setup-fixture-readiness-remote.sh'" \
-            | tee "${RUNNER_TEMP}/fixture-readiness.log"
+            >"${RUNNER_TEMP}/fixture-readiness.log" 2>&1
+          ssh_status=$?
+          cat "${RUNNER_TEMP}/fixture-readiness.log"
+          if [ "${ssh_status}" -ne 0 ]; then
+            echo "::group::fixture-readiness.log (audit failed, exit ${ssh_status})"
+            while IFS= read -r line; do
+              echo "::error::${line}"
+            done < "${RUNNER_TEMP}/fixture-readiness.log"
+            echo "::endgroup::"
+            exit "${ssh_status}"
+          fi
           grep -Fq '"result": "TEST READINESS VERIFIED"' "${RUNNER_TEMP}/fixture-readiness.log"
           grep -Fq '"consequential_writes": 0' "${RUNNER_TEMP}/fixture-readiness.log"
           grep -Fq '"production_touched": false' "${RUNNER_TEMP}/fixture-readiness.log"
