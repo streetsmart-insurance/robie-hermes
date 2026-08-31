@@ -65,15 +65,13 @@ jobs:
       - name: Audit Test browser without writes
         shell: bash
         run: |
-          set -uo pipefail
-          echo "::error::DEBUG step7 started"
+          set +e -uo pipefail
           staging="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="sudo env ROBIE_ENV=TEST TEST_ROOT='${TEST_ROOT}' EXPECTED_TEST_SHA='${EXPECTED_TEST_SHA}' AUDIT_SCRIPT='${staging}/audit-policy-setup-fixture-readiness.py' bash '${staging}/run-policy-setup-fixture-readiness-remote.sh'" \
             >"${RUNNER_TEMP}/fixture-readiness.log" 2>&1
           ssh_status=$?
-          echo "::error::DEBUG ssh_status=${ssh_status}"
           cat "${RUNNER_TEMP}/fixture-readiness.log"
           ok=1
           [ "${ssh_status}" -eq 0 ] || ok=0
