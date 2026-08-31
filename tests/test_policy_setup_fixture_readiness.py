@@ -22,6 +22,8 @@ def test_workflow_is_protected_main_test_only_and_read_only():
     assert "hermes-poc-01" not in text
     assert "systemctl restart" not in text
     assert "deploy-test-release" not in text
+    assert "::error::fixture-readiness audit failed: ssh_status=" in text
+    assert "log_bytes=" in text
 
 
 def test_remote_audit_requires_test_runtime_and_zero_active_jobs():

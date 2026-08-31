@@ -85,7 +85,9 @@ jobs:
             ok=0
           fi
           if [ "${ok}" -ne 1 ]; then
-            echo "::group::fixture-readiness.log (audit failed, ssh_status=${ssh_status})"
+            log_bytes=$(wc -c < "${RUNNER_TEMP}/fixture-readiness.log" | tr -d '[:space:]')
+            echo "::error::fixture-readiness audit failed: ssh_status=${ssh_status} log_bytes=${log_bytes}"
+            echo "::group::fixture-readiness.log (audit failed, ssh_status=${ssh_status}, log_bytes=${log_bytes})"
             while IFS= read -r line; do
               echo "::error::${line}"
             done < "${RUNNER_TEMP}/fixture-readiness.log"
