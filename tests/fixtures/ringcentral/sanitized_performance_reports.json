@@ -1,0 +1,113 @@
+{
+  "filters": [
+    ["Selected Users", "Alex Example; Blair Example"],
+    ["Selected Queues", "Commercial Test; Personal Test"],
+    ["Period", "08/24/2026 - 08/28/2026"]
+  ],
+  "users": [
+    {"Name": "Alex Example", "Ext": "101"},
+    {"Name": "Blair Example", "Ext": "102"}
+  ],
+  "queues": [
+    {
+      "Name": "Commercial Test",
+      "Ext": "9006",
+      "# Inbound": 2,
+      "# Answered": 1,
+      "# Abandoned": 1,
+      "Avg. Handle Time": "00:02:00",
+      "# Holds": 0,
+      "# Refused": 1
+    },
+    {
+      "Name": "Personal Test",
+      "Ext": "9008",
+      "# Inbound": 0,
+      "# Answered": 0,
+      "# Abandoned": 0,
+      "Avg. Handle Time": "00:00:00",
+      "# Holds": 0,
+      "# Refused": 0
+    }
+  ],
+  "calls": [
+    {
+      "Session Id": "direct-answered",
+      "From Name": "Caller One",
+      "From Number": "+1 202-555-0101",
+      "To Name": "Alex Example",
+      "To Number": "+1 202-555-0191",
+      "Result": "Answered",
+      "Call Length": "00:03:00",
+      "Handle Time": "00:03:10",
+      "Call Start Time": "08/28/2026 09:00 AM",
+      "Call Direction": "Inbound",
+      "Queue": ""
+    },
+    {
+      "Session Id": "direct-missed",
+      "From Name": "Caller Two",
+      "From Number": "+1 202-555-0102",
+      "To Name": "Alex Example",
+      "To Number": "+1 202-555-0191",
+      "Result": "Voicemail",
+      "Call Length": "00:00:30",
+      "Handle Time": "00:00:30",
+      "Call Start Time": "08/28/2026 10:00 AM",
+      "Call Direction": "Inbound",
+      "Queue": ""
+    },
+    {
+      "Session Id": "callback-connected",
+      "From Name": "Alex Example",
+      "From Number": "+1 202-555-0191",
+      "To Name": "Caller Two",
+      "To Number": "+1 202-555-0102",
+      "Result": "Call connected",
+      "Call Length": "00:02:00",
+      "Handle Time": "00:02:05",
+      "Call Start Time": "08/28/2026 10:20 AM",
+      "Call Direction": "Outbound",
+      "Queue": ""
+    },
+    {
+      "Session Id": "queue-answered",
+      "From Name": "Caller Three",
+      "From Number": "+1 202-555-0103",
+      "To Name": "Blair Example",
+      "To Number": "+1 202-555-0192",
+      "Result": "Refused",
+      "Call Length": "00:00:10",
+      "Handle Time": "00:00:10",
+      "Call Start Time": "08/28/2026 11:00 AM",
+      "Call Direction": "Inbound",
+      "Queue": "Commercial Test"
+    },
+    {
+      "Session Id": "queue-answered",
+      "From Name": "Caller Three",
+      "From Number": "+1 202-555-0103",
+      "To Name": "Alex Example",
+      "To Number": "+1 202-555-0191",
+      "Result": "Answered",
+      "Call Length": "00:02:00",
+      "Handle Time": "00:02:10",
+      "Call Start Time": "08/28/2026 11:00 AM",
+      "Call Direction": "Inbound",
+      "Queue": "Commercial Test"
+    },
+    {
+      "Session Id": "queue-abandoned",
+      "From Name": "Caller Four",
+      "From Number": "+1 202-555-0104",
+      "To Name": "Blair Example",
+      "To Number": "+1 202-555-0192",
+      "Result": "No Answer",
+      "Call Length": "00:00:45",
+      "Handle Time": "00:00:45",
+      "Call Start Time": "08/28/2026 12:00 PM",
+      "Call Direction": "Inbound",
+      "Queue": "Commercial Test"
+    }
+  ]
+}

@@ -104,14 +104,14 @@ class ChatVerifierRoutingTests(unittest.TestCase):
     def test_submission_audit_completes_from_fresh_authenticated_playwright_evidence(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
-            scope = {"producer": "Jake", "age_days": 30}
+            scope = {"producer": "Example Producer", "age_days": 30}
             postcondition = {"overdue_count": 4}
             job_id = open_chat_job(
                 db,
                 "submission-audit-1",
                 "Audit the EZLynx Submission Center overdue items",
                 action_payload={
-                    "resource_id": "submission-center:jake",
+                    "resource_id": "submission-center:example-producer",
                     "scope": scope,
                     "expected_postcondition": postcondition,
                 },
@@ -120,14 +120,14 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             store.checkpoint(job_id, "action", {
                 "action": "ezlynx.submission_audit",
                 "destination": {
-                    "resource_id": "submission-center:jake",
+                    "resource_id": "submission-center:example-producer",
                     "scope": scope,
                     "expected_postcondition": postcondition,
                 },
                 "detail": {},
             })
             readback = _SubmissionReadback({
-                "resource_id": "submission-center:jake",
+                "resource_id": "submission-center:example-producer",
                 "authenticated": True,
                 "scope": scope,
                 "postcondition": postcondition,
@@ -208,14 +208,14 @@ class ChatVerifierRoutingTests(unittest.TestCase):
     def test_complete_is_failed_when_control_center_publication_fails(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
-            scope = {"producer": "Jake"}
+            scope = {"producer": "Example Producer"}
             postcondition = {"overdue_count": 4}
             job_id = open_chat_job(
                 db,
                 "submission-audit-publication-failure",
                 "Audit the EZLynx Submission Center overdue items",
                 action_payload={
-                    "resource_id": "submission-center:jake",
+                    "resource_id": "submission-center:example-producer",
                     "scope": scope,
                     "expected_postcondition": postcondition,
                 },
@@ -224,14 +224,14 @@ class ChatVerifierRoutingTests(unittest.TestCase):
             store.checkpoint(job_id, "action", {
                 "action": "ezlynx.submission_audit",
                 "destination": {
-                    "resource_id": "submission-center:jake",
+                    "resource_id": "submission-center:example-producer",
                     "scope": scope,
                     "expected_postcondition": postcondition,
                 },
                 "detail": {},
             })
             readback = _SubmissionReadback({
-                "resource_id": "submission-center:jake",
+                "resource_id": "submission-center:example-producer",
                 "authenticated": True,
                 "scope": scope,
                 "postcondition": postcondition,
@@ -273,6 +273,10 @@ class ChatVerifierRoutingTests(unittest.TestCase):
                 },
             )
             store = JobStore(db)
+            # Bind the action evidence to the actual write time. Creating the
+            # durable job can exceed the verifier's one-second mtime rounding
+            # allowance on a loaded runner.
+            written_at = datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat()
             store.checkpoint(job_id, "action", {
                 "action": "filesystem.skill_update",
                 "destination": {
@@ -280,7 +284,7 @@ class ChatVerifierRoutingTests(unittest.TestCase):
                     "expected_content": expected_content,
                     "expected_sha256": digest,
                 },
-                "detail": {"written_at": datetime.now(timezone.utc).isoformat()},
+                "detail": {"written_at": written_at},
             })
             publication = {
                 "job_id": job_id,

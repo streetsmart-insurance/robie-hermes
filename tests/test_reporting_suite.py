@@ -7,21 +7,21 @@ def test_task_aging_auditor_detects_postponement():
         {
             "id": "T1",
             "title": "Update COI for Builder",
-            "assigned_user": "Jackie Arriola",
+            "assigned_user": "Alex Example",
             "age_days": 45,
             "postpone_count": 5,
         },
         {
             "id": "T2",
             "title": "Process Endorsement",
-            "assigned_user": "Erika Palacios",
+            "assigned_user": "Blair Example",
             "age_days": 3,
             "postpone_count": 0,
         },
         {
             "id": "T3",
             "title": "Renewal Followup",
-            "assigned_user": "Maria Bara",
+            "assigned_user": "Casey Example",
             "age_days": 10,
             "postpone_count": 3,
         }
@@ -29,21 +29,21 @@ def test_task_aging_auditor_detects_postponement():
 
     incidents = auditor.audit_task_aging(sample_tasks)
     assert len(incidents) == 2
-    assert incidents[0].assigned_user == "Jackie Arriola"
+    assert incidents[0].assigned_user == "Alex Example"
     assert incidents[0].is_habitual is True
     assert "45 days" in incidents[0].flag_reason
-    assert incidents[1].assigned_user == "Maria Bara"
+    assert incidents[1].assigned_user == "Casey Example"
     assert incidents[1].postpone_count == 3
 
 
 def test_reporting_suite_generation():
     suite = ReportingSuite()
     daily = suite.build_daily_report(
-        {"unreturned_calls": [{"name": "Piotr Gusciora", "phone": "9736528939", "rep": "Jackie", "time": "11:49 AM"}], "rep_stats": {"Jackie": {"inbound": 10, "answer_rate": "20.0%", "unreturned": 5}}},
-        {"overdue_by_rep": {"Jackie": 0}}
+        {"unreturned_calls": [{"name": "Example Caller", "phone": "2025550101", "rep": "Alex", "time": "11:49 AM"}], "rep_stats": {"Alex": {"inbound": 10, "answer_rate": "20.0%", "unreturned": 5}}},
+        {"overdue_by_rep": {"Alex": 0}}
     )
     assert "STREETSMART DAILY SERVICE & PHONE WATCHDOG" in daily
-    assert "Piotr Gusciora" in daily
+    assert "Example Caller" in daily
 
     weekly = suite.build_weekly_report(
         {"answer_rate": "51.8%", "unreturned_total": 249},
@@ -57,11 +57,12 @@ def test_reporting_suite_generation():
 
     monthly = suite.build_monthly_report(
         {"total_calls": 4500, "policies_serviced": 1200},
-        [{"client_name": "Costa 1 Cleaning", "policy_type": "BOP", "root_cause": "17m hold + 4-rep handoff confusion"}]
+        [{"client_name": "Example Cleaning LLC", "policy_type": "BOP", "root_cause": "17m hold + 4-rep handoff confusion"}]
     )
     assert "STREETSMART MONTHLY EXECUTIVE AUDIT & CHURN AUTOPSY" in monthly
-    assert "Costa 1 Cleaning" in monthly
+    assert "Example Cleaning LLC" in monthly
     assert "UNVERIFIED claim" in monthly
+    assert "DATA LIMITATIONS" in monthly
 
 
 def test_weekly_report_never_invents_missing_sources():
@@ -90,8 +91,8 @@ def test_weekly_report_includes_retention_and_submission_ledgers():
             "exception_count": 1,
             "exceptions": [
                 {
-                    "account_name": "Costa 1 Cleaning Services",
-                    "owner": "Jackie Arriola",
+                    "account_name": "Example Cleaning LLC",
+                    "owner": "Alex Example",
                     "days_to_expiration": 16,
                     "reasons": ["no recorded touch for 29 days"],
                     "source_row_number": 2,
@@ -104,7 +105,7 @@ def test_weekly_report_includes_retention_and_submission_ledgers():
             "exceptions": [
                 {
                     "account_name": "Old Open Risk",
-                    "owner": "Alexis Martinez",
+                    "owner": "Blair Example",
                     "age_days": 76,
                     "status": "Quoting",
                     "reasons": ["submission open for 76 days"],
@@ -114,7 +115,7 @@ def test_weekly_report_includes_retention_and_submission_ledgers():
         },
     )
     assert "RETENTION CENTER EXCEPTIONS" in weekly
-    assert "Costa 1 Cleaning Services" in weekly
+    assert "Example Cleaning LLC" in weekly
     assert "SUBMISSION CENTER EXCEPTIONS" in weekly
     assert "Old Open Risk" in weekly
 

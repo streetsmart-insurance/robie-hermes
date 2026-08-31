@@ -28,6 +28,7 @@ from .operational_trackers import (
 )
 from .productivity import ProductivityAuditor, RingCentralCall, normalize_phone
 from .reporting_suite import ReportingSuite
+from .ringcentral_workbooks import load_evidence_manifest, read_workbook
 from .role_accountability import build_role_rows
 
 
@@ -73,31 +74,152 @@ def _duration_seconds(value: str) -> int:
     return 0
 
 
-def load_ringcentral_csv(path: Path) -> tuple[list[RingCentralCall], list[str]]:
+def _call_from_row(row: dict[str, Any], row_number: int) -> tuple[RingCentralCall | None, str | None]:
+    timestamp = _parse_timestamp(_first(row, "Call Start Time", "Start Time", "StartTime", "Date/Time", "Time"))
+    if timestamp is None:
+        return None, f"row {row_number}: missing or invalid timestamp"
+    direction = _first(row, "Direction", "Call Direction")
+    employee = _first(row, "Employee", "User", "Name", "Extension Name", "Answered By")
+    if not employee:
+        employee = _first(row, "To Name") if direction.casefold().startswith("in") else _first(row, "From Name")
+    result = _first(row, "Result", "Action", "Call Result", "Disposition")
+    answered_by = _first(row, "Answered By", "Connected To", "Forwarded To")
+    if not answered_by and direction.casefold().startswith("in") and any(
+        token in result.casefold() for token in ("connect", "answer", "success")
+    ):
+        answered_by = _first(row, "To Name")
+    data = {
+        "call_id": _first(row, "Call ID", "Session ID", "Session Id", "ID") or f"ringcentral-row-{row_number}",
+        "direction": direction,
+        "from_number": _first(row, "From", "From Number", "Caller ID"),
+        "to_number": _first(row, "To", "To Number", "Dialed Number"),
+        "result": result,
+        "duration_seconds": _duration_seconds(_first(row, "Call Length", "Duration", "Duration Seconds", "Talk Time")),
+        "start_time": timestamp,
+        "extension": _first(row, "Extension", "Extension ID"),
+        "employee_name": employee,
+        "queue_name": _first(row, "Queue", "Queue Name", "Call Queue", "Called Queue"),
+        "answered_by": answered_by,
+        "queue_wait_seconds": _duration_seconds(_first(row, "Queue Wait Time", "Wait Time", "Hold Time")),
+    }
+    return RingCentralCall.from_dict(data), None
+
+
+def _calls_from_rows(rows: list[dict[str, Any]]) -> tuple[list[RingCentralCall], list[str]]:
     calls: list[RingCentralCall] = []
     errors: list[str] = []
-    with path.open(encoding="utf-8-sig", errors="replace", newline="") as handle:
-        for row_number, row in enumerate(csv.DictReader(handle), start=2):
-            timestamp = _parse_timestamp(_first(row, "Start Time", "StartTime", "Date/Time", "Time"))
-            if timestamp is None:
-                errors.append(f"row {row_number}: missing or invalid timestamp")
-                continue
-            data = {
-                "call_id": _first(row, "Call ID", "Session ID", "ID") or f"ringcentral-row-{row_number}",
-                "direction": _first(row, "Direction", "Call Direction"),
-                "from_number": _first(row, "From", "From Number", "Caller ID"),
-                "to_number": _first(row, "To", "To Number", "Dialed Number"),
-                "result": _first(row, "Result", "Action", "Call Result", "Disposition"),
-                "duration_seconds": _duration_seconds(_first(row, "Duration", "Duration Seconds", "Talk Time")),
-                "start_time": timestamp,
-                "extension": _first(row, "Extension", "Extension ID"),
-                "employee_name": _first(row, "Employee", "User", "Name", "Extension Name", "Answered By"),
-                "queue_name": _first(row, "Queue", "Queue Name", "Call Queue", "Called Queue"),
-                "answered_by": _first(row, "Answered By", "Connected To", "Forwarded To"),
-                "queue_wait_seconds": _duration_seconds(_first(row, "Queue Wait Time", "Wait Time", "Hold Time")),
-            }
-            calls.append(RingCentralCall.from_dict(data))
+    seen: set[tuple[Any, ...]] = set()
+    for row_number, row in enumerate(rows, start=2):
+        call, error = _call_from_row(row, row_number)
+        if error:
+            errors.append(error)
+            continue
+        assert call is not None
+        fingerprint = (
+            call.call_id, call.direction, call.from_number, call.to_number,
+            call.result, call.duration_seconds, call.start_time.isoformat(),
+            call.extension, call.employee_name, call.queue_name, call.answered_by,
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        calls.append(call)
     return calls, errors
+
+
+def load_ringcentral_csv(path: Path) -> tuple[list[RingCentralCall], list[str]]:
+    with path.open(encoding="utf-8-sig", errors="replace", newline="") as handle:
+        return _calls_from_rows(list(csv.DictReader(handle)))
+
+
+def load_ringcentral_source(
+    path: Path,
+    *,
+    expected_kind: str,
+    as_of: datetime | None = None,
+) -> tuple[list[RingCentralCall], list[str], dict[str, Any]]:
+    """Load legacy CSV or checksum-bound XLSX collection evidence."""
+    if path.suffix.casefold() == ".csv":
+        calls, errors = load_ringcentral_csv(path)
+        errors.append("legacy CSV lacks current-user/current-queue coverage proof")
+        return calls, errors, {"format": "csv", "coverage_verified": False}
+    if path.suffix.casefold() == ".xlsx":
+        workbook = read_workbook(path, required_sheets=("Calls",))
+        calls, errors = _calls_from_rows(workbook["tables"]["Calls"]["rows"])
+        errors.append("direct XLSX lacks a checksum-bound collection manifest and coverage proof")
+        return calls, errors, {"format": "xlsx", "coverage_verified": False, "workbooks": [workbook]}
+    if path.suffix.casefold() != ".json":
+        raise ValueError("RingCentral evidence must be CSV, XLSX, or a collector JSON manifest")
+    evidence = load_evidence_manifest(path, expected_kind=expected_kind, as_of=as_of)
+    call_rows = [
+        row
+        for workbook in evidence["workbooks"]
+        for row in ((workbook.get("tables") or {}).get("Calls") or {}).get("rows", [])
+    ]
+    calls, errors = _calls_from_rows(call_rows)
+    queue_rows = [
+        row
+        for workbook in evidence["workbooks"]
+        for row in ((workbook.get("tables") or {}).get("Queues") or {}).get("rows", [])
+    ]
+    user_rows = [
+        row
+        for workbook in evidence["workbooks"]
+        for row in ((workbook.get("tables") or {}).get("Users") or {}).get("rows", [])
+    ]
+    return calls, errors, {
+        "format": "xlsx-manifest",
+        "coverage_verified": True,
+        "queue_rows": queue_rows,
+        "user_rows": user_rows,
+        "attachment_sha256": [item["sha256"] for item in evidence["attachments"]],
+    }
+
+
+def _integer(value: Any) -> int:
+    text = str(value or "").replace(",", "").strip()
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def _queue_export_rows(rows: list[dict[str, Any]], calls: list[RingCentralCall]) -> tuple[list[dict[str, Any]], list[str]]:
+    detailed = {row["queue"].casefold(): row for row in _queue_rows(calls)}
+    output: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        name = _first(row, "Name")
+        folded = name.casefold()
+        if not name or folded in seen:
+            errors.append(f"Queues worksheet has a missing or duplicate queue name: {name or '<blank>'}")
+            continue
+        seen.add(folded)
+        offered = _integer(_first(row, "# Inbound"))
+        answered = _integer(_first(row, "# Answered"))
+        abandoned = _integer(_first(row, "# Abandoned"))
+        refused = _integer(_first(row, "# Refused"))
+        if answered + abandoned > offered:
+            errors.append(f"Queues worksheet totals are inconsistent for {name}")
+        detail = detailed.get(folded, {})
+        detailed_offered = detail.get("offered")
+        if detailed_offered is not None and detailed_offered != offered:
+            errors.append(
+                f"queue reconciliation mismatch for {name}: Calls={detailed_offered}, Queues={offered}"
+            )
+        output.append({
+            "queue": name,
+            "offered": offered,
+            "answered": answered,
+            "abandoned_or_voicemail": abandoned,
+            "refused_member_legs": refused,
+            "answer_rate": "NOT EVALUABLE" if not offered else f"{round(answered / offered * 100, 1)}%",
+            "max_wait_seconds": None,
+            "answered_by": detail.get("answered_by", {}),
+            "missed_by": detail.get("missed_by", {}),
+        })
+    return output, errors
 
 
 def _queue_rows(calls: list[RingCentralCall]) -> list[dict[str, Any]]:
@@ -163,12 +285,14 @@ def _call_report(
     as_of: datetime,
     tasks_path: Optional[Path],
     activities_path: Optional[Path],
+    mode: str,
     magellan_data: Optional[dict[str, Any]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if path is None or not path.exists():
         status = "not supplied" if path is None else f"missing file: {path}"
         return {"source_status": status, "rep_stats": {}, "employee_rows": []}, {"source_status": "not supplied", "overdue_by_rep": {}}
-    calls, row_errors = load_ringcentral_csv(path)
+    expected_kind = "daily" if mode == "daily" else "weekly"
+    calls, row_errors, evidence = load_ringcentral_source(path, expected_kind=expected_kind, as_of=as_of)
     tasks = EZLynxProductivityParser.parse_tasks_csv(tasks_path) if tasks_path and tasks_path.exists() else None
     activities = EZLynxProductivityParser.parse_activities_csv(activities_path) if activities_path and activities_path.exists() else None
     audit = ProductivityAuditor().generate_audit(calls, tasks=tasks, activities=activities, reference_time=as_of)
@@ -200,12 +324,16 @@ def _call_report(
         for item in (magellan_data or {}).get("records", [])
         if normalize_phone(str(item.get("phone") or item.get("from_number") or ""))
     }
+    queue_rows = _queue_rows(calls)
+    if evidence.get("queue_rows"):
+        queue_rows, queue_errors = _queue_export_rows(evidence["queue_rows"], calls)
+        row_errors.extend(queue_errors)
     call_data = {
-        "source_status": "available" if calls and not row_errors else ("empty export" if not calls else f"partial: {len(row_errors)} rejected row(s)"),
+        "source_status": "available" if calls and not row_errors else ("empty export" if not calls else f"partial: {len(row_errors)} evidence error(s)"),
         "answer_rate": "NOT EVALUABLE" if not total_inbound else f"{round(total_answered / total_inbound * 100, 1)}%",
         "unreturned_total": sum(item["unreturned"] for item in employee_rows),
         "employee_rows": employee_rows,
-        "queue_rows": _queue_rows(calls),
+        "queue_rows": queue_rows,
         "rep_stats": rep_stats,
         "unreturned_calls": [
             {
@@ -221,6 +349,9 @@ def _call_report(
             if item.get("status") == "ORPHANED_ALERT"
         ],
         "row_errors": row_errors,
+        "evidence_format": evidence.get("format"),
+        "coverage_verified": evidence.get("coverage_verified", False),
+        "attachment_sha256": evidence.get("attachment_sha256", []),
     }
     task_data = {
         "source_status": "available" if tasks is not None else "not supplied",
@@ -234,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build evidence-backed StreetSmart accountability reports")
     parser.add_argument("mode", choices=("daily", "weekly", "monthly"))
     parser.add_argument("--as-of", help="ISO timestamp; defaults to now in UTC")
-    parser.add_argument("--ringcentral", type=Path)
+    parser.add_argument("--ringcentral", type=Path, help="RingCentral CSV, XLSX, or collector evidence manifest")
     parser.add_argument("--tasks", type=Path)
     parser.add_argument("--activities", type=Path)
     parser.add_argument("--sales-json", type=Path)
@@ -277,7 +408,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "untouched_days_threshold": max(1, args.sales_untouched_days),
             }
         )
-    call_data, task_data = _call_report(args.ringcentral, as_of, args.tasks, args.activities, magellan_data)
+    call_data, task_data = _call_report(args.ringcentral, as_of, args.tasks, args.activities, args.mode, magellan_data)
     role_rows = build_role_rows(
         roles_data.get("employees", {}),
         call_data=call_data,
@@ -353,7 +484,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         churn_data = _json(args.churn_json)
         churn_cases = churn_data.get("cases", []) if churn_data.get("source_status") == "available" else []
-        report = suite.build_monthly_report(_json(args.monthly_kpis_json), churn_cases, sales_data, role_rows)
+        report = suite.build_monthly_report(
+            _json(args.monthly_kpis_json),
+            churn_cases,
+            sales_data,
+            role_rows,
+            churn_source_status=str(churn_data.get("source_status") or "not supplied"),
+        )
     if args.output:
         args.output.write_text(report + "\n", encoding="utf-8")
     else:
