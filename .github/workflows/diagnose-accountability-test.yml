@@ -50,7 +50,7 @@ jobs:
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             scripts/diagnose-accountability-test-readonly.py "${TEST_VM}:${STAGING}/"
           gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes-test/releases/current /opt/streetsmart-hermes-test/releases/current/.gateway-runtime/bin/python '${STAGING}/diagnose-accountability-test-readonly.py'" \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes-test/releases/current/.gateway-runtime:/opt/streetsmart-hermes-test/releases/current python3 '${STAGING}/diagnose-accountability-test-readonly.py'" \
             | tee "${RUNNER_TEMP}/accountability-readiness.json"
       - name: Publish redacted evidence
         if: always()
