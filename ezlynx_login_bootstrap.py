@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -45,11 +46,28 @@ class MailboxIdentityError(RuntimeError):
     pass
 
 
+def build_keyless_mailbox_service(service_account_email: str):
+    from robie_job_engine.ringcentral_email_sync import (
+        build_keyless_report_mailbox_service,
+    )
+
+    return build_keyless_report_mailbox_service(
+        service_account_email,
+        EXPECTED_MAILBOX,
+    )
+
+
 def gmail_service():
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    service_account = os.environ.get(
+        "ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", ""
+    ).strip()
+    if service_account:
+        service = build_keyless_mailbox_service(service_account)
+    else:
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     profile = service.users().getProfile(userId="me").execute()
     mailbox = str(profile.get("emailAddress") or "").strip().casefold()
     if mailbox != EXPECTED_MAILBOX:
