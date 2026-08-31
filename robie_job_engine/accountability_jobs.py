@@ -84,22 +84,6 @@ class AccountabilityReportWorker:
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
             sources = dict(manifest.get("sources") or {})
             collection = dict(manifest.get("collection") or {})
-            ringcentral_email = dict(collection.get("ringcentral_email") or {})
-            if ringcentral_email.get("enabled"):
-                from .ringcentral_email_sync import collect_scheduled_ringcentral_report
-
-                mailbox = str(ringcentral_email.get("mailbox") or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")).strip()
-                service_account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
-                sources["ringcentral"] = str(collect_scheduled_ringcentral_report(
-                    service_account_email=service_account,
-                    mailbox=mailbox,
-                    output_dir=output_dir / "ringcentral",
-                    max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
-                ))
-            for key, flag in SOURCE_FLAGS.items():
-                value = sources.get(key)
-                if value:
-                    arguments.extend([flag, str(Path(str(value)).expanduser().resolve())])
             google_sheets = dict(manifest.get("google_sheets") or {})
             if google_sheets.get("enabled"):
                 from .google_sheets_accountability import collect_allowlisted_tables, role_registry_from_snapshot
@@ -115,7 +99,42 @@ class AccountabilityReportWorker:
                     roles = role_registry_from_snapshot(sheet_snapshot, google_sheets)
                     roles_path = output_dir / f"employee-roles-{run_at:%Y%m%dT%H%M%SZ}.json"
                     roles_path.write_text(json.dumps(roles, indent=2, default=str), encoding="utf-8")
-                    arguments.extend(["--roles-json", str(roles_path)])
+                    sources["roles_json"] = str(roles_path)
+            ringcentral_email = dict(collection.get("ringcentral_email") or {})
+            if ringcentral_email.get("enabled"):
+                from .ringcentral_email_sync import collect_scheduled_ringcentral_report
+
+                mailbox = str(ringcentral_email.get("mailbox") or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")).strip()
+                service_account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
+                required_users = [str(value).strip() for value in ringcentral_email.get("required_users", []) if str(value).strip()]
+                if not required_users:
+                    role_source = Path(str(sources.get("roles_json") or "")).expanduser()
+                    if role_source.is_file():
+                        role_data = _manifest(role_source)
+                        required_users = [str(value).strip() for value in (role_data.get("employees") or {}) if str(value).strip()]
+                excluded_users = {str(value).strip().casefold() for value in ringcentral_email.get("excluded_users", [])}
+                required_users = [value for value in required_users if value.casefold() not in excluded_users]
+                required_queues = [str(value).strip() for value in ringcentral_email.get("required_queues", []) if str(value).strip()]
+                required_queue_members = {
+                    str(queue).strip(): [str(member).strip() for member in members if str(member).strip()]
+                    for queue, members in dict(ringcentral_email.get("required_queue_members") or {}).items()
+                }
+                configured_sheets = dict(ringcentral_email.get("required_sheets") or {})
+                sources["ringcentral"] = str(collect_scheduled_ringcentral_report(
+                    service_account_email=service_account,
+                    mailbox=mailbox,
+                    output_dir=output_dir / "ringcentral",
+                    report_kind="daily" if mode == "daily" else "weekly",
+                    required_users=required_users,
+                    required_queues=required_queues,
+                    required_queue_members=required_queue_members,
+                    required_sheets=configured_sheets.get(mode),
+                    max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
+                ))
+            for key, flag in SOURCE_FLAGS.items():
+                value = sources.get(key)
+                if value:
+                    arguments.extend([flag, str(Path(str(value)).expanduser().resolve())])
             if mode in {"daily", "weekly"} and not sources.get("email_json"):
                 from .gmail_accountability import collect_agency_summary
 
@@ -153,6 +172,17 @@ class AccountabilityReportWorker:
             exit_code = build_report(arguments)
             if exit_code != 0 or not output.exists():
                 raise RuntimeError(f"report builder exited {exit_code}")
+            report_content = output.read_text(encoding="utf-8", errors="replace")
+            require_complete = bool((manifest.get("rules") or {}).get("require_complete_evidence", True))
+            if require_complete and "⚠️ *DATA LIMITATIONS*" in report_content:
+                return WorkerResult(
+                    False,
+                    action,
+                    {"artifact_path": str(output)},
+                    {"sha256": _checksum(output), "mode": mode, "manifest_path": str(manifest_path)},
+                    retryable=True,
+                    error="accountability report contains missing, stale, partial, or unreconciled required evidence",
+                )
         except Exception as exc:
             return WorkerResult(
                 False,
