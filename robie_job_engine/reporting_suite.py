@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 def _display_metric(data: Dict[str, Any], key: str, *, suffix: str = "") -> str:
     """Render absent evidence as UNVERIFIED instead of inventing a default."""
 
+    if _source_warning("source", data):
+        return "UNVERIFIED"
     value = data.get(key)
     if value is None or value == "":
         return "UNVERIFIED"
@@ -106,6 +108,7 @@ class ReportingSuite:
         ]
         unreturned = call_data.get("unreturned_calls", [])
         call_source_warning = _source_warning("RingCentral", call_data)
+        call_verified = call_source_warning is None
         if call_source_warning:
             lines.append("   ⚠️ UNVERIFIED — RingCentral evidence is unavailable.")
         elif not unreturned:
@@ -124,15 +127,15 @@ class ReportingSuite:
             "| :--- | :---: | :---: | :---: | :---: |",
         ])
         for rep, stats in call_data.get("rep_stats", {}).items():
-            ans_rate = stats.get("answer_rate") or "NOT EVALUABLE"
+            ans_rate = (stats.get("answer_rate") or "NOT EVALUABLE") if call_verified else "UNVERIFIED"
             overdue = task_data.get("overdue_by_rep", {}).get(rep)
             overdue_display = "UNVERIFIED" if overdue is None else str(overdue)
-            unret = stats.get("unreturned", 0)
-            badge = "🔴" if unret > 0 else "🟢"
+            unret = stats.get("unreturned", 0) if call_verified else "UNVERIFIED"
+            badge = "🔴" if isinstance(unret, int) and unret > 0 else ("🟢" if isinstance(unret, int) else "⚠️")
             lines.append(f"| {rep} | {stats.get('inbound', 0)} | {ans_rate} | {badge} {unret} | {overdue_display} |")
 
         queue_rows = call_data.get("queue_rows", [])
-        if queue_rows:
+        if queue_rows and call_verified:
             lines.extend([
                 "",
                 "☎️ *CALL QUEUE PICKUP & MEMBER LEGS*",
@@ -350,6 +353,7 @@ class ReportingSuite:
         churn_autopsies: List[Dict[str, Any]],
         sales_data: Optional[Dict[str, Any]] = None,
         role_rows: Optional[List[Dict[str, Any]]] = None,
+        churn_source_status: str = "not supplied",
     ) -> str:
         """Monthly: Holistic 30-Day Agency Score + Lost Customer Churn Root Cause Autopsies."""
         grade = monthly_kpis.get("grade")
@@ -389,4 +393,16 @@ class ReportingSuite:
             for row in role_rows:
                 lines.append(f"*{row['employee']} — {row['role']}*")
                 lines.extend(f"• {fact}" for fact in row.get("facts", []))
+        warnings = [
+            warning
+            for warning in (
+                _source_warning("Monthly KPI evidence", monthly_kpis),
+                _source_warning("EZLynx Sales Center", sales_data),
+                None if churn_source_status.casefold() in {"available", "complete", "verified"}
+                else f"Churn evidence: {churn_source_status}",
+            )
+            if warning
+        ]
+        if warnings:
+            lines.extend(["", "⚠️ *DATA LIMITATIONS*"] + [f"• {warning}" for warning in warnings])
         return "\n".join(lines)
