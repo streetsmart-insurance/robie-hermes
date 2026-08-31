@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping
 
 
 SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
-def _sheets_client() -> Any:
+def _sheets_client(service_account_email: str | None = None) -> Any:
     import google.auth
+    from google.auth import iam
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
-    credentials, _ = google.auth.default(scopes=[SHEETS_READONLY_SCOPE])
+    service_account_email = (
+        service_account_email
+        or os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "")
+    ).strip()
+    if service_account_email:
+        source, _ = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
+        credentials = service_account.Credentials(
+            signer=iam.Signer(Request(), source, service_account_email),
+            service_account_email=service_account_email,
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=[SHEETS_READONLY_SCOPE],
+        )
+    else:
+        credentials, _ = google.auth.default(scopes=[SHEETS_READONLY_SCOPE])
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
