@@ -73,14 +73,22 @@ jobs:
             >"${RUNNER_TEMP}/fixture-readiness.log" 2>&1
           ssh_status=$?
           cat "${RUNNER_TEMP}/fixture-readiness.log"
-          if [ "${ssh_status}" -ne 0 ]; then
-            echo "::group::fixture-readiness.log (audit failed, exit ${ssh_status})"
+          ok=1
+          [ "${ssh_status}" -eq 0 ] || ok=0
+          if [ "${ok}" -eq 1 ] && ! grep -Fq '"result": "TEST READINESS VERIFIED"' "${RUNNER_TEMP}/fixture-readiness.log"; then
+            ok=0
+          fi
+          if [ "${ok}" -eq 1 ] && ! grep -Fq '"consequential_writes": 0' "${RUNNER_TEMP}/fixture-readiness.log"; then
+            ok=0
+          fi
+          if [ "${ok}" -eq 1 ] && ! grep -Fq '"production_touched": false' "${RUNNER_TEMP}/fixture-readiness.log"; then
+            ok=0
+          fi
+          if [ "${ok}" -ne 1 ]; then
+            echo "::group::fixture-readiness.log (audit failed, ssh_status=${ssh_status})"
             while IFS= read -r line; do
               echo "::error::${line}"
             done < "${RUNNER_TEMP}/fixture-readiness.log"
             echo "::endgroup::"
-            exit "${ssh_status}"
+            exit 1
           fi
-          grep -Fq '"result": "TEST READINESS VERIFIED"' "${RUNNER_TEMP}/fixture-readiness.log"
-          grep -Fq '"consequential_writes": 0' "${RUNNER_TEMP}/fixture-readiness.log"
-          grep -Fq '"production_touched": false' "${RUNNER_TEMP}/fixture-readiness.log"
