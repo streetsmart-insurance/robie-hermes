@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from google.auth.transport.requests import Request
-from google.cloud import secretmanager
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from playwright.sync_api import sync_playwright
@@ -28,6 +27,8 @@ INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def secret(name: str) -> str:
+    from google.cloud import secretmanager
+
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/streetsmart-hermes-poc/secrets/{name}"
     enabled = list(
