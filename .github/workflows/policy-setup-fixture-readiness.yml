@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13
+        description: Type AUDIT_POLICY_SETUP_FIXTURES_ON_9EFCC8D374CC
         required: true
         type: string
 
@@ -16,7 +16,7 @@ jobs:
   fixture-readiness:
     if: >-
       github.ref == 'refs/heads/main' &&
-      inputs.confirmation == 'AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13'
+      inputs.confirmation == 'AUDIT_POLICY_SETUP_FIXTURES_ON_9EFCC8D374CC'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: Test
@@ -25,7 +25,7 @@ jobs:
       ZONE: us-east1-b
       TEST_VM: hermes-test-01
       TEST_ROOT: /opt/streetsmart-hermes-test
-      EXPECTED_TEST_SHA: e18fcfa2ed13
+      EXPECTED_TEST_SHA: 9efcc8d374cc
       STAGING_ROOT: /var/tmp/robie-policy-setup-fixture-readiness
       ROBIE_ENV: TEST
     steps:
@@ -44,7 +44,7 @@ jobs:
           test "${GITHUB_REF}" = refs/heads/main
           test "${TEST_VM}" = hermes-test-01
           test "${TEST_ROOT}" = /opt/streetsmart-hermes-test
-          test "${EXPECTED_TEST_SHA}" = e18fcfa2ed13
+          test "${EXPECTED_TEST_SHA}" = 9efcc8d374cc
           test "${ROBIE_ENV}" = TEST
           gcloud compute instances describe "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" \

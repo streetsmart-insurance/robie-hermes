@@ -16,8 +16,8 @@ def test_workflow_is_protected_main_test_only_and_read_only():
     assert "github.ref == 'refs/heads/main'" in text
     assert "TEST_VM: hermes-test-01" in text
     assert "TEST_ROOT: /opt/streetsmart-hermes-test" in text
-    assert "EXPECTED_TEST_SHA: e18fcfa2ed13" in text
-    assert "AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13" in text
+    assert "EXPECTED_TEST_SHA: 9efcc8d374cc" in text
+    assert "AUDIT_POLICY_SETUP_FIXTURES_ON_9EFCC8D374CC" in text
     assert "id-token: write" in text
     assert "hermes-poc-01" not in text
     assert "systemctl restart" not in text
