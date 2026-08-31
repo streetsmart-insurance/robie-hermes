@@ -1,10 +1,11 @@
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from contextlib import nullcontext
 
-from robie_job_engine.accountability_jobs import AccountabilityReportWorker
+from robie_job_engine.accountability_jobs import AccountabilityReportVerifier, AccountabilityReportWorker
 from robie_job_engine.accountability_schedule import install_accountability_schedules
 from robie_job_engine.operations import OperationsStore
 
@@ -110,3 +111,32 @@ def test_weekly_worker_collects_live_submission_center_read_only(tmp_path: Path)
     generated = list((tmp_path / "reports").glob("submission-center-*.csv"))
     assert len(generated) == 1
     assert "https://example.test/s/1" in generated[0].read_text(encoding="utf-8")
+
+
+def test_verifier_independently_checks_source_attachment_digests(tmp_path: Path):
+    report = tmp_path / "daily.md"
+    report.write_text("STREETSMART DAILY SERVICE & PHONE WATCHDOG\n", encoding="utf-8")
+    tasks = tmp_path / "tasks.csv"
+    tasks.write_text("Assigned To,Status\nAlex Example,Open\n", encoding="utf-8")
+    digest = hashlib.sha256(tasks.read_bytes()).hexdigest()
+    direct_manifest = tmp_path / "direct-evidence.json"
+    direct_manifest.write_text(json.dumps({
+        "attachments": [{"source": "tasks", "path": str(tasks), "sha256": digest}],
+    }), encoding="utf-8")
+    scheduled_manifest = tmp_path / "scheduled-evidence.json"
+    scheduled_manifest.write_text(json.dumps({
+        "sources": {"tasks": str(tasks)},
+        "trackers": {},
+        "evidence": {"tasks": {"source_status": "available", "normalized_csv_sha256": digest}},
+    }), encoding="utf-8")
+    action = {
+        "destination": {
+            "artifact_path": str(report),
+            "source_evidence_manifests": [str(direct_manifest), str(scheduled_manifest)],
+        },
+        "detail": {"sha256": hashlib.sha256(report.read_bytes()).hexdigest()},
+    }
+    job = {"action_type": "accountability.daily"}
+    assert AccountabilityReportVerifier().verify(job, action).verified
+    tasks.write_text("Assigned To,Status\nTampered,Closed\n", encoding="utf-8")
+    assert not AccountabilityReportVerifier().verify(job, action).verified

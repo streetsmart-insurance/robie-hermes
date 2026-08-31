@@ -191,6 +191,19 @@ def _allowed_sender(sender: str, config: Mapping[str, Any]) -> bool:
     return address in addresses or domain in domains
 
 
+def _authenticated_sender(payload: Mapping[str, Any], config: Mapping[str, Any]) -> bool:
+    sender = _header(payload, "From")
+    if not _allowed_sender(sender, config):
+        return False
+    match = re.search(r"<([^<>]+)>", sender.casefold())
+    address = (match.group(1) if match else sender.casefold()).strip()
+    domain = address.rsplit("@", 1)[-1] if "@" in address else ""
+    authentication = _header(payload, "Authentication-Results").casefold()
+    return "dmarc=pass" in authentication and bool(
+        re.search(rf"header\.from\s*=\s*{re.escape(domain)}(?:\s|;|$)", authentication)
+    )
+
+
 def collect_scheduled_tabular_reports(
     service: Any, *, output_dir: Path, config: Mapping[str, Any], as_of: datetime | None = None
 ) -> dict[str, Any]:
@@ -204,7 +217,9 @@ def collect_scheduled_tabular_reports(
     message_refs: list[Mapping[str, Any]] = []
     page_token: str | None = None
     for _ in range(10):
-        request: dict[str, Any] = {"userId": "me", "q": "has:attachment newer_than:10d", "maxResults": 100}
+        request: dict[str, Any] = {
+            "userId": "me", "q": "has:attachment newer_than:10d -in:spam -in:trash", "maxResults": 100,
+        }
         if page_token:
             request["pageToken"] = page_token
         response = service.users().messages().list(**request).execute()
@@ -226,7 +241,7 @@ def collect_scheduled_tabular_reports(
         if age_hours < 0 or age_hours > max_age_hours:
             continue
         payload = message.get("payload", {}) or {}
-        if not _allowed_sender(_header(payload, "From"), config):
+        if not _authenticated_sender(payload, config):
             continue
         subject = _header(payload, "Subject")
         for part in _parts(payload):
