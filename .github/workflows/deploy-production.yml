@@ -1,0 +1,179 @@
+name: Deploy immutable release to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact 40-character release commit
+        required: true
+        type: string
+      sha256:
+        description: Exact SHA-256 from the approved immutable artifact
+        required: true
+        type: string
+      confirmation:
+        description: Type DEPLOY_TO_HERMES_POC_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: robie-hermes-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01'
+    environment: Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      PROJECT_NUMBER: "751771086524"
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      PRODUCTION_VM_ID: "5649534881067121807"
+      STAGING_DIR: /var/tmp/robie-production-deploy/${{ inputs.commit }}
+    steps:
+      - name: Validate immutable release request
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          REQUESTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "${REQUESTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${REQUESTED_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+
+      - name: Check out protected deployment controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          persist-credentials: false
+
+      - name: Check out only the exact release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          path: release-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse a substituted or newer release revision
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          test "$(git -C release-source rev-parse HEAD)" = "${REQUESTED_COMMIT}"
+          test "$(git -C controller rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Build and verify the exact immutable artifact
+        id: release
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          REQUESTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python -m pip install "pytest>=8.3,<9"
+          mkdir -p "${RUNNER_TEMP}/releases"
+          (
+            cd release-source
+            bash scripts/build-release.sh "${RUNNER_TEMP}/releases"
+          ) | tee "${RUNNER_TEMP}/release.env"
+          source "${RUNNER_TEMP}/release.env"
+          test "${release_commit}" = "${REQUESTED_COMMIT}"
+          test "${release_sha256}" = "${REQUESTED_SHA256}"
+          (
+            cd release-source
+            bash scripts/verify-release.sh "${release_archive}" "${release_archive}.sha256"
+          )
+          echo "archive=${release_archive}" >>"${GITHUB_OUTPUT}"
+          echo "checksum=${release_archive}.sha256" >>"${GITHUB_OUTPUT}"
+          echo "sha256=${release_sha256}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate with short-lived Production identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except the designated Production VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(gcloud compute instances describe "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(name,id,status,zone.basename())')"
+          read -r name instance_id status zone <<<"${actual}"
+          test "${name}" = "hermes-poc-01"
+          test "${instance_id}" = "${PRODUCTION_VM_ID}"
+          test "${status}" = "RUNNING"
+          test "${zone}" = "us-east1-b"
+
+      - name: Create bounded Production staging directory
+        run: |
+          gcloud compute ssh "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING_DIR}'"
+
+      - name: Transfer only the exact artifact and reviewed installer
+        run: |
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${{ steps.release.outputs.archive }}" \
+            "${{ steps.release.outputs.checksum }}" \
+            controller/scripts/deploy-production-release.sh \
+            "${PRODUCTION_VM}:${STAGING_DIR}/"
+
+      - name: Install and verify Production
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          REQUESTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          archive="${STAGING_DIR}/$(basename '${{ steps.release.outputs.archive }}')"
+          checksum="${archive}.sha256"
+          gcloud compute ssh "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo bash '${STAGING_DIR}/deploy-production-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${REQUESTED_COMMIT}' --digest '${REQUESTED_SHA256}'"
+
+      - name: Retrieve immutable Production evidence
+        if: always()
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          short="${REQUESTED_COMMIT:0:12}"
+          evidence="${RUNNER_TEMP}/production-deploy-evidence.json"
+          if gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${PRODUCTION_VM}:/opt/streetsmart-hermes/deployments/${short}/production-deploy-evidence.json" \
+            "${evidence}"; then
+            {
+              echo "## ROBIE Production deployment"
+              echo
+              echo '```json'
+              cat "${evidence}"
+              echo '```'
+            } >>"${GITHUB_STEP_SUMMARY}"
+          else
+            {
+              echo "## ROBIE Production deployment"
+              echo
+              echo "No final evidence file was available. The deployment is not verified."
+            } >>"${GITHUB_STEP_SUMMARY}"
+          fi
