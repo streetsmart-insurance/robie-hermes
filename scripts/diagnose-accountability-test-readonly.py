@@ -76,8 +76,8 @@ def main() -> int:
     if service_account and users:
         try:
             from robie_job_engine.gmail_accountability import build_keyless_delegated_service
-            build_keyless_delegated_service(service_account, users[0]).users().messages().list(
-                userId="me", q="newer_than:1d", maxResults=1
+            build_keyless_delegated_service(service_account, users[0]).users().threads().list(
+                userId="me", maxResults=1
             ).execute()
             result["gmail_employee_metadata_read"] = True
         except Exception as exc:
