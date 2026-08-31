@@ -6,12 +6,14 @@ from robie_job_engine.gmail_accountability import mailbox_allowlist, summarize_m
 AS_OF = datetime(2026, 8, 30, 17, tzinfo=timezone.utc)
 
 
-def _thread(thread_id: str, sender: str, when_ms: int):
+def _thread(thread_id: str, sender: str, when_ms: int, **headers):
+    values = [{"name": "From", "value": sender}]
+    values.extend({"name": name, "value": value} for name, value in headers.items())
     return {
         "id": thread_id,
         "messages": [{
             "internalDate": str(when_ms),
-            "payload": {"headers": [{"name": "From", "value": sender}]},
+            "payload": {"headers": values},
         }],
     }
 
@@ -41,3 +43,32 @@ def test_mailbox_allowlist_is_explicit_normalized_and_deduplicated():
         "jackie@streetsmart.insurance",
         "jazmin@streetsmart.insurance",
     )
+
+
+def test_summary_excludes_internal_automated_and_ambiguous_threads():
+    summary = summarize_mailbox_threads(
+        "jackie@streetsmart.insurance",
+        [
+            _thread("internal", "Jazmin <jazmin@streetsmart.insurance>", _millis(AS_OF)),
+            _thread("bulk", "news@example.com", _millis(AS_OF), Precedence="bulk"),
+            _thread("auto", "no-reply@example.com", _millis(AS_OF)),
+            _thread("missing", "", _millis(AS_OF)),
+            _thread("customer", "client@example.com", _millis(AS_OF)),
+        ],
+        as_of=AS_OF,
+    )
+    assert summary["threads_reviewed"] == 1
+    assert summary["awaiting_employee"] == 1
+    assert summary["threads_excluded"] == 4
+    assert summary["exclusion_counts"] == {"internal": 1, "automated": 2, "ambiguous": 1}
+
+
+def test_summary_treats_explicit_mailbox_alias_as_employee_reply():
+    summary = summarize_mailbox_threads(
+        "jackie@streetsmart.insurance",
+        [_thread("alias", "service@streetsmart.insurance", _millis(AS_OF))],
+        as_of=AS_OF,
+        mailbox_aliases=["service@streetsmart.insurance"],
+    )
+    assert summary["awaiting_customer"] == 1
+    assert summary["threads_excluded"] == 0

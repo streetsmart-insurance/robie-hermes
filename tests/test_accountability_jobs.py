@@ -1,9 +1,10 @@
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from robie_job_engine.accountability_jobs import AccountabilityReportWorker
+from robie_job_engine.accountability_jobs import AccountabilityReportVerifier, AccountabilityReportWorker
 from robie_job_engine.accountability_schedule import install_accountability_schedules
 from robie_job_engine.operations import OperationsStore
 
@@ -72,3 +73,26 @@ def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_pat
     assert result.succeeded
     assert collect.call_args.kwargs["required_users"] == ["Alex Example", "Blair Example"]
     assert collect.call_args.kwargs["required_queue_members"] == {"Commercial Test": ["Alex Example"]}
+
+
+def test_verifier_independently_checks_collected_source_attachment_digest(tmp_path: Path):
+    report = tmp_path / "daily.md"
+    report.write_text("STREETSMART DAILY SERVICE & PHONE WATCHDOG\n", encoding="utf-8")
+    attachment = tmp_path / "tasks.csv"
+    attachment.write_text("Assigned To,Status\nAlex Example,Open\n", encoding="utf-8")
+    digest = hashlib.sha256(attachment.read_bytes()).hexdigest()
+    source_manifest = tmp_path / "source-evidence.json"
+    source_manifest.write_text(json.dumps({
+        "attachments": [{"source": "tasks", "path": str(attachment), "sha256": digest}],
+    }), encoding="utf-8")
+    action = {
+        "destination": {
+            "artifact_path": str(report),
+            "source_evidence_manifests": [str(source_manifest)],
+        },
+        "detail": {"sha256": hashlib.sha256(report.read_bytes()).hexdigest()},
+    }
+    job = {"action_type": "accountability.daily"}
+    assert AccountabilityReportVerifier().verify(job, action).verified
+    attachment.write_text("Assigned To,Status\nTampered,Closed\n", encoding="utf-8")
+    assert not AccountabilityReportVerifier().verify(job, action).verified

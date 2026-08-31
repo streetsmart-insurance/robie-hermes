@@ -29,13 +29,47 @@
   },
   "rules": {
     "sales_untouched_days": 5,
-    "submission_open_days": 30
+    "submission_open_days": 30,
+    "require_complete_evidence": true,
+    "required_connection_sources": ["ringcentral", "ezlynx", "gmail", "magellan"]
   },
   "collection": {
     "ringcentral_email": {
       "enabled": false,
       "mailbox": "robie@streetsmart.insurance",
       "max_age_hours": 36
+    },
+    "gmail": {
+      "confirmed_scopes": [],
+      "agency_domains": ["streetsmart.insurance"],
+      "excluded_mailboxes": [],
+      "mailbox_aliases": {},
+      "stalled_hours": 24,
+      "max_threads": 500
+    },
+    "evidence_email": {
+      "enabled": false,
+      "mailbox": "robie@streetsmart.insurance",
+      "sources": {
+        "tasks": {
+          "sender_allowlist": ["replace-with-verified-sender@example.com"],
+          "subject_markers": ["ROBIE_EZLYNX_TASKS"],
+          "filename_markers": ["tasks"],
+          "extensions": [".csv"],
+          "required_columns": ["Assigned To", "Status"],
+          "modes": ["daily", "weekly"],
+          "max_age_hours": 36
+        },
+        "magellan_json": {
+          "sender_allowlist": ["replace-with-verified-sender@example.com"],
+          "subject_markers": ["ROBIE_MAGELLAN"],
+          "filename_markers": ["magellan"],
+          "extensions": [".json"],
+          "required_json_keys": ["source_status", "records", "by_employee"],
+          "modes": ["daily", "weekly"],
+          "max_age_hours": 36
+        }
+      }
     }
   },
   "appsheet": {

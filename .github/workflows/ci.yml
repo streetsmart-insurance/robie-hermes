@@ -39,6 +39,9 @@ jobs:
           PYTHONPATH=. python -m pytest -q \
             tests/test_ringcentral_workbooks.py \
             tests/test_ringcentral_email_sync.py \
+            tests/test_evidence_email_sync.py \
+            tests/test_gmail_accountability.py \
+            tests/test_accountability_connections.py \
             tests/test_accountability_cli.py \
             tests/test_accountability_jobs.py \
             tests/test_reporting_suite.py \

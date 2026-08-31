@@ -1,5 +1,15 @@
 # Hermes handoff — Friday 28 Aug 2026 after 2:32pm ET
 
+## Accountability evidence hardening candidate (2026-08-31)
+
+Branch `feat/accountability-evidence-hardening` adds fail-closed scheduled-email
+intake for explicitly configured EZLynx/Magellan CSV or JSON evidence, metadata-
+only individual Gmail aging with internal/automated exclusions, required Gmail
+scope confirmation, and independent attachment digest read-back. It is not
+deployed and does not enable delivery or Production. Validation instructions and
+remaining inputs are in
+[docs/accountability-test-validation.md](docs/accountability-test-validation.md).
+
 ## MUST-CALL — diagnose any Hermes job
 
 Do **not** diagnose from Google Chat text, the published recording, or by

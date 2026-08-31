@@ -84,6 +84,7 @@ class AccountabilityReportWorker:
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
             sources = dict(manifest.get("sources") or {})
             collection = dict(manifest.get("collection") or {})
+            source_evidence_manifests: list[str] = []
             google_sheets = dict(manifest.get("google_sheets") or {})
             if google_sheets.get("enabled"):
                 from .google_sheets_accountability import collect_allowlisted_tables, role_registry_from_snapshot
@@ -131,6 +132,35 @@ class AccountabilityReportWorker:
                     required_sheets=configured_sheets.get(mode),
                     max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
                 ))
+            evidence_email = dict(collection.get("evidence_email") or {})
+            if evidence_email.get("enabled"):
+                from .evidence_email_sync import collect_scheduled_evidence
+
+                all_source_specs = dict(evidence_email.get("sources") or {})
+                source_specs = {
+                    key: value
+                    for key, value in all_source_specs.items()
+                    if not (value or {}).get("modes") or mode in (value or {}).get("modes", [])
+                }
+                mailbox = str(
+                    evidence_email.get("mailbox")
+                    or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")
+                ).strip()
+                service_account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
+                if source_specs:
+                    collected_sources, evidence_manifest = collect_scheduled_evidence(
+                        service_account_email=service_account,
+                        mailbox=mailbox,
+                        output_dir=output_dir / "source-evidence",
+                        source_specs=source_specs,
+                    )
+                    conflicts = sorted(set(collected_sources).intersection(key for key, value in sources.items() if value))
+                    if conflicts:
+                        raise ValueError(
+                            "scheduled evidence conflicts with configured source paths: " + ", ".join(conflicts)
+                        )
+                    sources.update(collected_sources)
+                    source_evidence_manifests.append(str(evidence_manifest))
             for key, flag in SOURCE_FLAGS.items():
                 value = sources.get(key)
                 if value:
@@ -138,7 +168,10 @@ class AccountabilityReportWorker:
             if mode in {"daily", "weekly"} and not sources.get("email_json"):
                 from .gmail_accountability import collect_agency_summary
 
-                gmail_snapshot = collect_agency_summary(environment=os.environ)
+                gmail_snapshot = collect_agency_summary(
+                    environment=os.environ,
+                    config=dict(collection.get("gmail") or {}),
+                )
                 gmail_path = output_dir / f"gmail-{run_at:%Y%m%dT%H%M%SZ}.json"
                 gmail_path.write_text(json.dumps(gmail_snapshot, indent=2, default=str), encoding="utf-8")
                 arguments.extend(["--email-json", str(gmail_path)])
@@ -178,7 +211,7 @@ class AccountabilityReportWorker:
                 return WorkerResult(
                     False,
                     action,
-                    {"artifact_path": str(output)},
+                    {"artifact_path": str(output), "source_evidence_manifests": source_evidence_manifests},
                     {"sha256": _checksum(output), "mode": mode, "manifest_path": str(manifest_path)},
                     retryable=True,
                     error="accountability report contains missing, stale, partial, or unreconciled required evidence",
@@ -202,7 +235,7 @@ class AccountabilityReportWorker:
                 return WorkerResult(
                     False,
                     action,
-                    {"artifact_path": str(output)},
+                    {"artifact_path": str(output), "source_evidence_manifests": source_evidence_manifests},
                     {"sha256": _checksum(output), "delivery_receipts": receipts},
                     retryable=True,
                     error=f"accountability delivery failed: {type(exc).__name__}: {exc}",
@@ -210,7 +243,11 @@ class AccountabilityReportWorker:
         return WorkerResult(
             True,
             action,
-            {"artifact_path": str(output), "delivery_receipts": receipts},
+            {
+                "artifact_path": str(output),
+                "delivery_receipts": receipts,
+                "source_evidence_manifests": source_evidence_manifests,
+            },
             {
                 "sha256": _checksum(output),
                 "mode": mode,
@@ -249,6 +286,34 @@ class AccountabilityReportVerifier:
                 and not observed["simulation_marker"]
             )
         receipts = list(destination.get("delivery_receipts") or [])
+        source_evidence = []
+        for raw_manifest in destination.get("source_evidence_manifests", []) or []:
+            evidence_path = Path(str(raw_manifest))
+            item: dict[str, Any] = {"manifest": str(evidence_path), "exists": evidence_path.is_file()}
+            if item["exists"]:
+                try:
+                    evidence_data = _manifest(evidence_path)
+                    attachment_checks = []
+                    for receipt in evidence_data.get("attachments", []) or []:
+                        attachment = Path(str(receipt.get("path") or ""))
+                        actual = _checksum(attachment) if attachment.is_file() else None
+                        attachment_checks.append({
+                            "source": receipt.get("source"),
+                            "exists": attachment.is_file(),
+                            "sha256_matches": bool(actual and actual == receipt.get("sha256")),
+                        })
+                    item["attachments"] = attachment_checks
+                    item["verified"] = bool(attachment_checks) and all(
+                        check["exists"] and check["sha256_matches"] for check in attachment_checks
+                    )
+                except Exception as exc:
+                    item.update({"verified": False, "error_type": type(exc).__name__})
+            else:
+                item["verified"] = False
+            source_evidence.append(item)
+        if source_evidence:
+            observed["source_evidence"] = source_evidence
+            verified = verified and all(item.get("verified") for item in source_evidence)
         if verified and receipts:
             try:
                 from .accountability_delivery import verify_delivery_receipts
