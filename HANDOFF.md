@@ -9,6 +9,9 @@ scope confirmation, and independent attachment digest read-back. It is not
 deployed and does not enable delivery or Production. Validation instructions and
 remaining inputs are in
 [docs/accountability-test-validation.md](docs/accountability-test-validation.md).
+The review is PR #161. It was integrated with the accountability dashboard and
+weekly scheduled-report work that reached `main` at `b988016` while the PR was
+being prepared; the combined candidate must be reverified by CI and in Test.
 
 ## MUST-CALL — diagnose any Hermes job
 

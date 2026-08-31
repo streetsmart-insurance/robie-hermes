@@ -34,7 +34,7 @@ jobs:
         run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine tests
       - name: Run regression battery
         run: PYTHONPATH=. python -m robie_job_engine.regression_battery --ci
-      - name: Test RingCentral accountability workbooks
+      - name: Test accountability evidence and dashboard pipeline
         run: |
           PYTHONPATH=. python -m pytest -q \
             tests/test_ringcentral_workbooks.py \
@@ -44,6 +44,12 @@ jobs:
             tests/test_accountability_connections.py \
             tests/test_accountability_cli.py \
             tests/test_accountability_jobs.py \
+            tests/test_accountability_dashboard.py \
+            tests/test_scheduled_report_email_sync.py \
+            tests/test_center_audits.py \
+            tests/test_operational_trackers.py \
+            tests/test_submission_audit_runtime.py \
+            tests/test_submission_audit_runner_contract.py \
             tests/test_reporting_suite.py \
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py

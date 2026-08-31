@@ -39,6 +39,14 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         and (ringcentral_email.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
         and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
     )
+    scheduled_reports = dict(((manifest.get("collection") or {}).get("scheduled_reports_email") or {}))
+    scheduled_reports_ready = bool(
+        scheduled_reports.get("enabled")
+        and (scheduled_reports.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
+        and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
+        and scheduled_reports.get("reports")
+        and (scheduled_reports.get("allowed_senders") or scheduled_reports.get("allowed_sender_domains"))
+    )
     collection = dict(manifest.get("collection") or {})
     evidence_email = dict(collection.get("evidence_email") or {})
     evidence_specs = dict(evidence_email.get("sources") or {})
@@ -58,7 +66,7 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
     )
     ezlynx_exports = {key: file_state(key) for key in ("tasks", "activities", "retention", "submissions")}
     ezlynx_browser = _env_ready(environment, ("ROBIE_EZLYNX_USERNAME_SECRET", "ROBIE_EZLYNX_PASSWORD_SECRET"))
-    gmail_backend_configured = (
+    gmail_backend = (
         _env_ready(environment, ("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "ACCOUNTABILITY_GMAIL_USERS"))
         or _env_ready(environment, ("ACCOUNTABILITY_GMAIL_TOKEN_PATH", "ACCOUNTABILITY_GMAIL_USERS"))
     )
@@ -79,20 +87,23 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
     connections = {
         "ringcentral": {
             "ready": ringcentral_export["available"] or ringcentral_api or ringcentral_email_ready,
+            "evidence_ready": ringcentral_export["available"],
             "export": ringcentral_export,
             "api_credentials_configured": ringcentral_api,
             "scheduled_email_configured": ringcentral_email_ready,
         },
         "ezlynx": {
-            "ready": any(item["available"] for item in ezlynx_exports.values()),
+            "ready": ezlynx_browser or scheduled_reports_ready or any(item["available"] for item in ezlynx_exports.values()),
+            "evidence_ready": any(item["available"] for item in ezlynx_exports.values()),
             "browser_secret_references_configured": ezlynx_browser,
-            "scheduled_email_configured": evidence_email_configured,
-            "scheduled_sources": sorted(key for key in evidence_specs if key in ezlynx_exports or key in {"sales", "sales_json"}),
+            "scheduled_reports_configured": scheduled_reports_ready,
+            "evidence_email_configured": evidence_email_configured,
             "exports": ezlynx_exports,
         },
         "gmail": {
-            "ready": (gmail_backend_configured and gmail_scopes_confirmed) or file_state("email_json")["available"],
-            "domain_delegation_configuration_present": gmail_backend_configured,
+            "ready": (gmail_backend and gmail_scopes_confirmed) or file_state("email_json")["available"],
+            "evidence_ready": (gmail_backend and gmail_scopes_confirmed) or file_state("email_json")["available"],
+            "domain_delegation_configuration_present": gmail_backend,
             "required_scopes": sorted(required_gmail_scopes),
             "scopes_confirmed": gmail_scopes_confirmed,
             "summary_export": file_state("email_json"),
@@ -109,6 +120,14 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
                 bool((item or {}).get("allowed_columns")) for item in (google_sheets.get("tables") or {}).values()
             ) if google_sheets_enabled else True,
         },
+        "dashboard": {
+            "enabled": bool((manifest.get("dashboard") or {}).get("enabled")),
+            "ready": not (manifest.get("dashboard") or {}).get("enabled") or bool(
+                (manifest.get("dashboard") or {}).get("spreadsheet_id")
+                and (manifest.get("dashboard") or {}).get("sheet_name")
+            ),
+            "aggregate_only": True,
+        },
         "delivery": {
             "enabled": bool(delivery.get("enabled")),
             "ready": (not delivery.get("enabled")) or bool(delivery.get("chat_spaces") or delivery.get("email_recipients")),
@@ -117,6 +136,7 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         },
         "magellan": {
             "ready": file_state("magellan_json")["available"],
+            "evidence_ready": file_state("magellan_json")["available"],
             "scheduled_email_configured": evidence_email_configured and "magellan_json" in evidence_specs,
             "summary_export": file_state("magellan_json"),
         },
@@ -128,12 +148,12 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
     critical = tuple((manifest.get("rules") or {}).get("required_connection_sources") or ("ringcentral", "ezlynx"))
     unknown = sorted(set(critical) - set(connections))
     return {
-        "ready": not unknown and all(connections[name]["ready"] for name in critical),
+        "ready": not unknown and all(connections[name].get("evidence_ready", connections[name]["ready"]) for name in critical),
         "required_connections": list(critical),
         "unknown_required_connections": unknown,
         "manifest": str(path),
         "connections": connections,
-        "note": "ready requires observed files or confirmed delegated scopes; configured collectors alone are not fresh evidence",
+        "note": "ready requires observed evidence or confirmed delegated Gmail scopes; configured collectors alone are not fresh evidence",
     }
 
 

@@ -7,6 +7,7 @@ import json
 import re
 import sys
 from typing import Any
+from urllib.parse import urljoin
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -188,15 +189,18 @@ def _set_page_size(page: Page) -> None:
 
 
 def _verify_page_size_result(page: Page) -> None:
+    total = _pager_total(page)
+    expected_rows = min(100, total)
     try:
         page.wait_for_function(
-            "() => document.querySelectorAll('mat-row').length === 100",
+            "expected => document.querySelectorAll('mat-row').length === expected",
+            arg=expected_rows,
             timeout=15_000,
         )
     except PlaywrightTimeoutError as exc:
         rows = page.locator("mat-row").count()
         raise RuntimeError(
-            f"PLAYWRIGHT_BLOCKED: 100-row selection rendered {rows} mat-row elements"
+            f"PLAYWRIGHT_BLOCKED: page-size selection expected {expected_rows} rows and rendered {rows}"
         ) from exc
     paginator = page.locator("mat-paginator")
     selected_value = paginator.locator(
@@ -207,12 +211,12 @@ def _verify_page_size_result(page: Page) -> None:
     range_label = paginator.locator(
         ".mat-paginator-range-label, .mat-mdc-paginator-range-label"
     )
-    if not range_label.count() or not re.search(
-        r"^1\s*[\-–—]\s*100\s+of\s+[\d,]+$",
-        " ".join(range_label.first.inner_text().split()),
-        re.I,
-    ):
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not confirm rows 1-100")
+    if not range_label.count():
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator range label is missing")
+    observed = " ".join(range_label.first.inner_text().split())
+    match = re.search(r"^1\s*[\-–—]\s*([\d,]+)\s+of\s+([\d,]+)$", observed, re.I)
+    if not match or int(match.group(1).replace(",", "")) != expected_rows or int(match.group(2).replace(",", "")) != total:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not confirm the selected page size")
 
 
 def _headers(page: Page) -> list[str]:
@@ -294,6 +298,149 @@ def _pager_total(page: Page) -> int:
     return int(match.group(1).replace(",", ""))
 
 
+def _normalized_header(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _required_columns(headers: list[str]) -> dict[str, int]:
+    normalized = {_normalized_header(value): index for index, value in enumerate(headers)}
+    aliases = {
+        "title": ("submissiontitle", "submission", "title"),
+        "applicant": ("applicant", "applicantname", "accountname", "insured"),
+        "assigned_producer": ("assignedproducer",),
+        "status": ("status", "submissionstatus"),
+        "quote_due_date": ("quoteduedate", "quotedue"),
+        "effective_date": ("effectivedate",),
+    }
+    result: dict[str, int] = {}
+    for key, choices in aliases.items():
+        index = next((normalized[value] for value in choices if value in normalized), None)
+        if index is None:
+            raise RuntimeError(f"PLAYWRIGHT_BLOCKED: required Submission Center column missing: {key}")
+        result[key] = index
+    return result
+
+
+def _red_overdue_evidence(cell: Locator) -> bool:
+    evidence = cell.evaluate(
+        """el => ({
+          color: getComputedStyle(el).color || '',
+          className: String(el.className || ''),
+          html: String(el.innerHTML || '').slice(0, 500)
+        })"""
+    )
+    tokens = f"{evidence.get('className', '')} {evidence.get('html', '')}".casefold()
+    if re.search(r"\b(overdue|past-due|warn|error|red)\b", tokens):
+        return True
+    match = re.search(r"rgba?\((\d+),\s*(\d+),\s*(\d+)", str(evidence.get("color") or ""))
+    if not match:
+        return False
+    red, green, blue = (int(value) for value in match.groups())
+    return red >= 150 and red >= green * 1.25 and red >= blue * 1.25
+
+
+def _extract_open_rows(page: Page) -> list[dict[str, Any]]:
+    positions = _required_columns(_headers(page))
+    output: list[dict[str, Any]] = []
+    rows = page.locator("mat-row")
+    for index in range(rows.count()):
+        row = rows.nth(index)
+        cells = row.locator("mat-cell")
+        if cells.count() <= max(positions.values()):
+            raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center row has missing cells")
+        status = cells.nth(positions["status"]).inner_text().strip()
+        if status in CLOSED:
+            continue
+        link = row.locator("a[href]")
+        href = link.first.get_attribute("href") if link.count() else ""
+        if not href:
+            raise RuntimeError("PLAYWRIGHT_BLOCKED: open submission has no direct link")
+        output.append({
+            "Submission Title": cells.nth(positions["title"]).inner_text().strip(),
+            "Submission URL": urljoin(SUBMISSION_URL, href),
+            "Applicant": cells.nth(positions["applicant"]).inner_text().strip(),
+            "Assigned Producer": cells.nth(positions["assigned_producer"]).inner_text().strip(),
+            "Status": status,
+            "Quote Due Date": cells.nth(positions["quote_due_date"]).inner_text().strip(),
+            "Effective Date": cells.nth(positions["effective_date"]).inner_text().strip(),
+            "Overdue": "Red" if _red_overdue_evidence(cells.nth(positions["quote_due_date"])) else "No",
+        })
+    return output
+
+
+def _pager_range(page: Page) -> tuple[int, int, int]:
+    label = page.locator(".mat-paginator-range-label, .mat-mdc-paginator-range-label").first.inner_text()
+    match = re.search(r"([\d,]+)\s*[\-–—]\s*([\d,]+)\s+of\s+([\d,]+)", label, re.I)
+    if not match:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: live pager range not found")
+    return tuple(int(value.replace(",", "")) for value in match.groups())
+
+
+def _next_page(page: Page) -> bool:
+    button = page.get_by_role("button", name=re.compile(r"next page", re.I))
+    if not button.count():
+        button = page.locator("button.mat-paginator-navigation-next, button.mat-mdc-paginator-navigation-next")
+    if not button.count():
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: next-page control not found")
+    if button.first.is_disabled() or button.first.get_attribute("aria-disabled") == "true":
+        return False
+    before = page.locator(".mat-paginator-range-label, .mat-mdc-paginator-range-label").first.inner_text()
+    button.first.click()
+    try:
+        page.wait_for_function(
+            "before => { const label=document.querySelector('.mat-paginator-range-label,.mat-mdc-paginator-range-label'); return label && label.innerText !== before; }",
+            arg=before,
+            timeout=15_000,
+        )
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not advance") from exc
+    return True
+
+
+def weekly_report_audit(*, fresh: bool) -> dict[str, Any]:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(CDP_URL, timeout=15_000)
+        page = _matching_page(browser)
+        page.set_default_timeout(15_000)
+        if fresh:
+            page.reload(wait_until="domcontentloaded")
+        if not _authenticated(page):
+            raise PermissionError("NEEDS_AUTH")
+        _select_single(page, "Time frame", "All Submissions")
+        _set_agency_scope(page)
+        _set_page_size(page)
+        _set_agency_scope(page)
+        _verify_page_size_result(page)
+        records: list[dict[str, Any]] = []
+        seen_pages: set[tuple[int, int, int]] = set()
+        rows_inspected = 0
+        while True:
+            current = _pager_range(page)
+            if current in seen_pages:
+                raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator repeated a results page")
+            seen_pages.add(current)
+            rows_inspected += page.locator("mat-row").count()
+            records.extend(_extract_open_rows(page))
+            if not _next_page(page):
+                break
+        total = next(iter(seen_pages))[2] if seen_pages else 0
+        if rows_inspected != total:
+            raise RuntimeError(f"PLAYWRIGHT_BLOCKED: inspected {rows_inspected} rows but pager reported {total}")
+        unique = {item["Submission URL"]: item for item in records}
+        return {
+            "read_only": True,
+            "scope_time_frame": "All Submissions",
+            "scope_assigned_producer": "Streetsmart Insurance",
+            "scope_my_submissions": False,
+            "all_pages_inspected": True,
+            "pages_inspected": len(seen_pages),
+            "rows_inspected": rows_inspected,
+            "pager_total": total,
+            "open_records": list(unique.values()),
+            "open_records_deduplicated": len(unique),
+        }
+
+
 def audit(*, fresh: bool) -> dict[str, Any]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(CDP_URL, timeout=15_000)
@@ -348,9 +495,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--reuse", action="store_true")
+    parser.add_argument("--weekly-report", action="store_true")
     args = parser.parse_args()
     try:
-        print(json.dumps(audit(fresh=args.fresh), sort_keys=True))
+        result = weekly_report_audit(fresh=args.fresh) if args.weekly_report else audit(fresh=args.fresh)
+        print(json.dumps(result, sort_keys=True))
         return 0
     except PermissionError:
         print("NEEDS_AUTH")
