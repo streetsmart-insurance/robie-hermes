@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -27,10 +28,29 @@ class DashboardPublicationError(RuntimeError):
     """The aggregate dashboard could not be updated and verified safely."""
 
 
-def _client() -> Any:
+def _client(service_account_email: str | None = None) -> Any:
     import google.auth
+    from google.auth import iam
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
     from googleapiclient.discovery import build
-    credentials, _ = google.auth.default(scopes=[SHEETS_SCOPE])
+
+    service_account_email = (
+        service_account_email
+        or os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "")
+    ).strip()
+    if service_account_email:
+        source, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        credentials = service_account.Credentials(
+            signer=iam.Signer(Request(), source, service_account_email),
+            service_account_email=service_account_email,
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=[SHEETS_SCOPE],
+        )
+    else:
+        credentials, _ = google.auth.default(scopes=[SHEETS_SCOPE])
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
