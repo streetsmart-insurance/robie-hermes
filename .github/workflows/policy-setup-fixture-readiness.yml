@@ -86,11 +86,10 @@ jobs:
           fi
           if [ "${ok}" -ne 1 ]; then
             log_bytes=$(wc -c < "${RUNNER_TEMP}/fixture-readiness.log" | tr -d '[:space:]')
-            echo "::error::fixture-readiness audit failed: ssh_status=${ssh_status} log_bytes=${log_bytes}"
             echo "::group::fixture-readiness.log (audit failed, ssh_status=${ssh_status}, log_bytes=${log_bytes})"
-            while IFS= read -r line; do
-              echo "::error::${line}"
-            done < "${RUNNER_TEMP}/fixture-readiness.log"
+            cat "${RUNNER_TEMP}/fixture-readiness.log"
             echo "::endgroup::"
+            escaped=$(sed -e ':a' -e 'N' -e '$!ba' -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g' "${RUNNER_TEMP}/fixture-readiness.log")
+            echo "::error::fixture-readiness audit failed: ssh_status=${ssh_status} log_bytes=${log_bytes}%0A${escaped}"
             exit 1
           fi
