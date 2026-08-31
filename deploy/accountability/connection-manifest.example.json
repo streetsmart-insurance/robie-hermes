@@ -32,10 +32,34 @@
     "submission_open_days": 30
   },
   "collection": {
+    "ezlynx_submission_browser": {
+      "enabled": false,
+      "read_only": true,
+      "scope": "Streetsmart Insurance",
+      "time_frame": "All Submissions"
+    },
     "ringcentral_email": {
       "enabled": false,
-      "mailbox": "robie@streetsmart.insurance",
+      "mailbox": "report-mailbox@example.test",
       "max_age_hours": 36
+    },
+    "scheduled_reports_email": {
+      "enabled": false,
+      "modes": ["weekly"],
+      "mailbox": "report-mailbox@example.test",
+      "max_age_hours": 192,
+      "allowed_sender_domains": ["ezlynx.com"],
+      "allowed_senders": [],
+      "reports": {
+        "tasks": {"label": "ROBIE_EZLYNX_TASKS", "destination": "source", "required": true, "worksheet": "Tasks", "required_columns": ["Assigned To", "Status"]},
+        "activities": {"label": "ROBIE_EZLYNX_ACTIVITIES", "destination": "source", "required": true, "worksheet": "Activities", "required_columns": ["Description"]},
+        "sales": {"label": "ROBIE_EZLYNX_SALES", "destination": "source", "required": true, "worksheet": "Sales Center", "required_columns": ["Assigned Producer", "Status"]},
+        "retention": {"label": "ROBIE_EZLYNX_RETENTION", "destination": "source", "required": true, "worksheet": "Retention", "required_columns": ["Expiration Date", "Status"]},
+        "submissions": {"label": "ROBIE_EZLYNX_SUBMISSIONS", "destination": "source", "required": true, "worksheet": "Submissions", "required_columns": ["Submission Title", "Submission URL", "Applicant", "Assigned Producer", "Status", "Quote Due Date", "Effective Date", "Overdue"]},
+        "policy_changes": {"label": "ROBIE_POLICY_CHANGES", "destination": "tracker", "required": true, "worksheet": "Policy Changes", "required_columns": ["Status", "Request Date"]},
+        "coi_endorsements": {"label": "ROBIE_COI_ENDORSEMENTS", "destination": "tracker", "required": true, "worksheet": "Certificates", "required_columns": ["Status", "Request Date"]},
+        "expirations": {"label": "ROBIE_EXPIRATIONS", "destination": "tracker", "required": true, "worksheet": "Expirations", "required_columns": ["Status", "Expiration Date"]}
+      }
     }
   },
   "appsheet": {
@@ -45,9 +69,16 @@
     "region_env": "APPSHEET_REGION",
     "tables": {}
   },
+  "dashboard": {
+    "enabled": false,
+    "spreadsheet_id": "REPLACE_WITH_PRIVATE_CONTROL_CENTER_SHEET_ID",
+    "sheet_name": "Agency Accountability",
+    "inspection_range": "A1:L120",
+    "environment_label": "TEST"
+  },
   "google_sheets": {
     "enabled": false,
-    "spreadsheet_id": "1dFmE_J-YM9ua7v_B2UDgHHFr6BofIpIuU9qEXXtoZnA",
+    "spreadsheet_id": "REPLACE_WITH_PRIVATE_APPSHEET_BACKING_SHEET_ID",
     "employee_role_table": "employees",
     "employee_role_columns": {"name": "Name", "role": "Role", "email": "Email"},
     "tables": {
@@ -64,11 +95,11 @@
   "delivery": {
     "enabled": false,
     "chat_spaces": [],
-    "email_sender": "robie@streetsmart.insurance",
+    "email_sender": "report-mailbox@example.test",
     "email_recipients": {
-      "daily": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"],
-      "weekly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"],
-      "monthly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"]
+      "daily": ["leader.one@example.test", "leader.two@example.test"],
+      "weekly": ["leader.one@example.test", "leader.two@example.test"],
+      "monthly": ["leader.one@example.test", "leader.two@example.test"]
     }
   }
 }

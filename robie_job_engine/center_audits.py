@@ -27,6 +27,7 @@ _CLOSED_SUBMISSION_STATUSES = {
     "canceled",
     "completed",
 }
+_WEEKLY_CLOSED_SUBMISSION_STATUSES = {"closed - not sold", "closed - bound"}
 
 _CLOSED_SALES_STATUSES = {
     "bound",
@@ -185,6 +186,11 @@ class SubmissionRecord:
     last_note: str
     status: str
     source_row_number: int
+    title: str = ""
+    submission_url: str = ""
+    quote_due_date: Optional[date] = None
+    effective_date: Optional[date] = None
+    overdue_marker: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,11 @@ class SubmissionException:
     reasons: tuple[str, ...]
     note_quality_reasons: tuple[str, ...]
     source_row_number: int
+    title: str = ""
+    submission_url: str = ""
+    quote_due_date: Optional[str] = None
+    effective_date: Optional[str] = None
+    overdue_days: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -323,7 +334,7 @@ def parse_submission_csv(source: Path | str) -> list[SubmissionRecord]:
     for row_number, row in enumerate(_read_csv_rows(source), start=2):
         submission_id = _row_value(row, "Submission ID", "Submission #", "ID")
         account_name = _row_value(row, "Account Name", "Customer Name", "Applicant Name", "Insured")
-        owner = _row_value(row, "Owner", "Assigned To", "Producer", "Account Manager", "CSR") or "Unassigned"
+        owner = _row_value(row, "Assigned Producer", "Owner", "Assigned To", "Producer", "Account Manager", "CSR") or "Unassigned"
         carrier = _row_value(row, "Carrier", "Market", "Company")
         created = parse_datetime(_row_value(row, "Created Date", "Created At", "Submission Date", "Date Created"))
         last_activity = parse_datetime(
@@ -331,6 +342,18 @@ def parse_submission_csv(source: Path | str) -> list[SubmissionRecord]:
         )
         note = _row_value(row, "Last Note", "Latest Note", "Notes", "Activity Note", "Description")
         status = _row_value(row, "Status", "Submission Status", "Stage") or "Unknown"
+        title = _row_value(row, "Submission Title", "Title", "Submission")
+        submission_url = _row_value(row, "Submission URL", "Submission Link", "URL", "Link")
+        quote_due_date = parse_date(_row_value(row, "Quote Due Date", "Quote Due", "Due Date"))
+        effective_date = parse_date(_row_value(row, "Effective Date", "Policy Effective Date"))
+        marker_text = _row_value(row, "Overdue", "Overdue Marker", "Quote Due Status", "Due Status")
+        marker_normalized = marker_text.casefold().strip()
+        if marker_normalized in {"yes", "true", "1", "red", "overdue", "past due"}:
+            overdue_marker: Optional[bool] = True
+        elif marker_normalized in {"no", "false", "0", "current", "not overdue"}:
+            overdue_marker = False
+        else:
+            overdue_marker = None
         record_id = _row_value(row, "Record ID") or submission_id or f"submission-row-{row_number}"
         records.append(
             SubmissionRecord(
@@ -344,9 +367,67 @@ def parse_submission_csv(source: Path | str) -> list[SubmissionRecord]:
                 last_note=note,
                 status=status,
                 source_row_number=row_number,
+                title=title or account_name or submission_id or f"Submission row {row_number}",
+                submission_url=submission_url,
+                quote_due_date=quote_due_date,
+                effective_date=effective_date,
+                overdue_marker=overdue_marker,
             )
         )
     return records
+
+
+def audit_overdue_submission_records(
+    records: Iterable[SubmissionRecord], *, as_of: datetime
+) -> list[SubmissionException]:
+    """Apply the approved weekly red-marker and day-31 rule exactly."""
+    findings: list[SubmissionException] = []
+    seen_urls: set[str] = set()
+    run_date = as_of.date()
+    for record in records:
+        if record.status.strip().casefold() in _WEEKLY_CLOSED_SUBMISSION_STATUSES:
+            continue
+        missing: list[str] = []
+        if record.overdue_marker is None:
+            missing.append("red/overdue marker")
+        if record.quote_due_date is None:
+            missing.append("Quote Due Date")
+        if not record.submission_url:
+            missing.append("full submission URL")
+        if not record.owner or record.owner == "Unassigned":
+            missing.append("Assigned Producer")
+        if missing:
+            raise ValueError(
+                f"submission row {record.source_row_number} lacks required live evidence: {', '.join(missing)}"
+            )
+        if record.submission_url in seen_urls:
+            continue
+        seen_urls.add(record.submission_url)
+        overdue_days = (run_date - record.quote_due_date).days
+        if record.overdue_marker is not True or overdue_days <= 30:
+            continue
+        if record.effective_date is None:
+            raise ValueError(f"qualifying submission row {record.source_row_number} lacks Effective Date")
+        findings.append(SubmissionException(
+            record_id=record.record_id,
+            submission_id=record.submission_id,
+            account_name=record.account_name,
+            owner=record.owner,
+            carrier=record.carrier,
+            status=record.status,
+            age_days=overdue_days,
+            days_since_touch=None,
+            severity="high" if overdue_days > 60 else "medium",
+            reasons=(f"Quote Due Date is red and {overdue_days} days overdue",),
+            note_quality_reasons=(),
+            source_row_number=record.source_row_number,
+            title=record.title,
+            submission_url=record.submission_url,
+            quote_due_date=record.quote_due_date.isoformat(),
+            effective_date=record.effective_date.isoformat(),
+            overdue_days=overdue_days,
+        ))
+    return sorted(findings, key=lambda item: (item.owner.casefold(), -(item.overdue_days or 0), item.title.casefold()))
 
 
 def audit_submission_records(

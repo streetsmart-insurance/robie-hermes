@@ -204,6 +204,17 @@ class ReportingSuite:
         appsheet_data = appsheet_data or {"source_status": "not supplied"}
         magellan_data = magellan_data or {"source_status": "not supplied"}
         role_rows = role_rows or []
+        blocker_split = "UNVERIFIED"
+        if _source_warning("Department Trackers", tracker_data) is None:
+            counts = dict(tracker_data.get("counts_by_key") or {})
+            tracker_data.setdefault("policy_changes_count", counts.get("policy_changes", 0))
+            tracker_data.setdefault("coi_endorsements_count", counts.get("coi_endorsements", 0))
+            tracker_data.setdefault("expirations_count", counts.get("expirations", 0))
+            blockers = dict(tracker_data.get("policy_change_blockers") or {})
+            blocker_split = (
+                f"carrier {blockers.get('carrier', 0)} / StreetSmart {blockers.get('StreetSmart', 0)} / "
+                f"client {blockers.get('client', 0)} / unclear {blockers.get('unclear', 0)}"
+            )
         lines = [
             "🏆 *STREETSMART WEEKLY EXECUTIVE PERFORMANCE SCORECARD*",
             f"📅 Period: Past 7 Days ({datetime.now(timezone.utc).strftime('%B %d, %Y')})",
@@ -219,6 +230,10 @@ class ReportingSuite:
             f"• Open Submissions Over 30 Days: {_display_metric(submission_data, 'open_over_30_count')}",
             f"• Email Threads >24h Awaiting Employee: {_display_metric(email_data, 'stalled_threads')}",
             f"• Department Tracker Exceptions: {_display_metric(tracker_data, 'exception_count')}",
+            f"• Policy Changes Over 7 Days: {_display_metric(tracker_data, 'policy_changes_count')}",
+            f"• Policy Change Blocker Split: {blocker_split}",
+            f"• COI / Endorsement Exceptions: {_display_metric(tracker_data, 'coi_endorsements_count')}",
+            f"• Expiration / Renewal Gaps: {_display_metric(tracker_data, 'expirations_count')}",
             f"• AppSheet Accountability Rows: {_display_metric(appsheet_data, 'total_rows')}",
             f"• Magellan At-Risk Calls: {_display_metric(magellan_data, 'at_risk_calls')}",
             "",

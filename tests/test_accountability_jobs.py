@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from contextlib import nullcontext
 
 from robie_job_engine.accountability_jobs import AccountabilityReportWorker
 from robie_job_engine.accountability_schedule import install_accountability_schedules
@@ -58,7 +59,7 @@ def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_pat
         "rules": {"require_complete_evidence": False},
         "collection": {"ringcentral_email": {
             "enabled": True,
-            "mailbox": "robie@streetsmart.insurance",
+            "mailbox": "report-mailbox@example.test",
             "required_queues": ["Commercial Test"],
             "required_queue_members": {"Commercial Test": ["Alex Example"]},
         }},
@@ -72,3 +73,40 @@ def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_pat
     assert result.succeeded
     assert collect.call_args.kwargs["required_users"] == ["Alex Example", "Blair Example"]
     assert collect.call_args.kwargs["required_queue_members"] == {"Commercial Test": ["Alex Example"]}
+
+
+def test_weekly_worker_collects_live_submission_center_read_only(tmp_path: Path):
+    email = tmp_path / "email.json"
+    email.write_text('{"source_status":"available","by_employee":{}}', encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "output_dir": str(tmp_path / "reports"),
+        "sources": {"email_json": str(email)},
+        "rules": {"require_complete_evidence": False},
+        "collection": {"ezlynx_submission_browser": {"enabled": True, "read_only": True}},
+    }), encoding="utf-8")
+    observed = {"pages_inspected": 2, "rows_inspected": 101, "pager_total": 101,
+                "open_records_deduplicated": 1, "open_records": [{
+                    "Submission Title": "Example", "Submission URL": "https://example.test/s/1",
+                    "Applicant": "Example Applicant", "Assigned Producer": "Producer One", "Status": "Quoted",
+                    "Quote Due Date": "2026-06-01", "Effective Date": "2026-09-01", "Overdue": "red",
+                }]}
+
+    def fake_build(arguments):
+        output = Path(arguments[arguments.index("--output") + 1])
+        output.write_text("STREETSMART WEEKLY EXECUTIVE PERFORMANCE SCORECARD\n", encoding="utf-8")
+        return 0
+
+    with patch("robie_job_engine.ezlynx_session_lock.exclusive_session", return_value=nullcontext()), \
+         patch("robie_job_engine.submission_audit.ensure_ezlynx_login"), \
+         patch("robie_job_engine.submission_audit.run_weekly_submission_read", return_value=observed) as read, \
+         patch("robie_job_engine.accountability_jobs.build_report", side_effect=fake_build):
+        result = AccountabilityReportWorker().perform(
+            {"action_type": "accountability.weekly", "payload": {"manifest_path": str(manifest)}},
+            idempotency_key="weekly-live",
+        )
+    assert result.succeeded
+    read.assert_called_once_with(fresh=True)
+    generated = list((tmp_path / "reports").glob("submission-center-*.csv"))
+    assert len(generated) == 1
+    assert "https://example.test/s/1" in generated[0].read_text(encoding="utf-8")
