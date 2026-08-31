@@ -1,0 +1,55 @@
+name: Diagnose Test VM EZLynx login readiness (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_TEST_LOGIN_READINESS
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'DIAGNOSE_TEST_LOGIN_READINESS'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+      - name: Check for a Test copy of the Robie Gmail OAuth token (existence only)
+        shell: bash
+        run: |
+          set +e -uo pipefail
+          out=$(gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command='
+              echo "--- does the Production-path token file exist on Test (it should NOT be used, but checking) ---";
+              (test -f /opt/streetsmart-hermes/.hermes/robie_google_token.json && echo "EXISTS (unexpected - this is the Production path)" || echo "does not exist (expected)");
+              echo "--- does a Test-scoped equivalent already exist ---";
+              (test -f /opt/streetsmart-hermes-test/.hermes/robie_google_token.json && echo "EXISTS" || echo "does not exist");
+              echo "--- listing /opt/streetsmart-hermes-test/.hermes for anything token/credential-shaped (names only) ---";
+              (ls -la /opt/streetsmart-hermes-test/.hermes/ 2>&1 || echo "(directory not found or not listable)");
+            ' 2>&1)
+          code=$?
+          escaped=$(printf '%s' "$out" | sed -e ':a' -e 'N' -e '$!ba' -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')
+          echo "::notice::Test login readiness (Gmail OAuth token check, ssh exit ${code}): ${escaped}"
+          exit 0
