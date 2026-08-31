@@ -48,8 +48,8 @@ class KeylessMailboxTests(unittest.TestCase):
                 side_effect=lambda account: calls.append(account) or service,
             ),
             patch.object(
-                bootstrap.Credentials,
-                "from_authorized_user_file",
+                bootstrap,
+                "build_legacy_mailbox_service",
                 side_effect=AssertionError("legacy OAuth token must not be read"),
             ),
         ):
