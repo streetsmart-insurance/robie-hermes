@@ -4,7 +4,7 @@ set -euo pipefail
 test "$(hostname -s)" = hermes-test-01
 test "${ROBIE_ENV:-}" = TEST
 test "${TEST_ROOT:-}" = /opt/streetsmart-hermes-test
-test "${EXPECTED_TEST_SHA:-}" = 9efcc8d374cc
+test "${EXPECTED_TEST_SHA:-}" = 11185ba7bad4
 
 job_db="${TEST_ROOT}/robie-job-engine/data/jobs.db"
 test -f "${job_db}"
