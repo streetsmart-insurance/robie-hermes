@@ -25,6 +25,20 @@ def secret(name: str) -> str:
 
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/streetsmart-hermes-poc/secrets/{name}"
+    reference_env = {
+        "ezlynx-username": "ROBIE_EZLYNX_USERNAME_SECRET",
+        "ezlynx-password": "ROBIE_EZLYNX_PASSWORD_SECRET",
+    }
+    reference = os.environ.get(reference_env.get(name, ""), "").strip()
+    if reference:
+        expected = rf"{re.escape(parent)}/versions/[1-9]\d*"
+        if not re.fullmatch(expected, reference):
+            raise RuntimeError(
+                f"Pinned Secret Manager reference is invalid for required secret {name}"
+            )
+        response = client.access_secret_version(request={"name": reference})
+        return response.payload.data.decode("utf-8").strip()
+
     enabled = list(
         client.list_secret_versions(
             request={"parent": parent, "filter": "state:ENABLED"}
