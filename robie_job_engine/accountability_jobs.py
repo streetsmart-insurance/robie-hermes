@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import json
 import os
 from datetime import datetime, timezone
@@ -131,6 +132,51 @@ class AccountabilityReportWorker:
                     required_sheets=configured_sheets.get(mode),
                     max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
                 ))
+            scheduled_reports = dict(collection.get("scheduled_reports_email") or {})
+            collected_trackers: dict[str, str] = {}
+            if scheduled_reports.get("enabled") and mode in set(scheduled_reports.get("modes") or ["weekly"]):
+                from .ringcentral_email_sync import build_keyless_report_mailbox_service
+                from .scheduled_report_email_sync import collect_scheduled_tabular_reports
+                mailbox = str(
+                    scheduled_reports.get("mailbox") or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")
+                ).strip()
+                service_account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
+                if not mailbox or not service_account:
+                    raise ValueError("scheduled report collection requires report mailbox and delegated service account")
+                service = build_keyless_report_mailbox_service(service_account, mailbox)
+                collected = collect_scheduled_tabular_reports(
+                    service, output_dir=output_dir / "scheduled-reports", config=scheduled_reports, as_of=run_at
+                )
+                sources.update(collected["sources"])
+                collected_trackers.update(collected["trackers"])
+            submission_browser = dict(collection.get("ezlynx_submission_browser") or {})
+            if mode == "weekly" and submission_browser.get("enabled"):
+                from .ezlynx_session_lock import exclusive_session
+                from .submission_audit import ensure_ezlynx_login, run_weekly_submission_read
+                with exclusive_session():
+                    ensure_ezlynx_login()
+                    observed_submissions = run_weekly_submission_read(fresh=True)
+                submission_path = output_dir / f"submission-center-{run_at:%Y%m%dT%H%M%SZ}.csv"
+                headers = [
+                    "Submission Title", "Submission URL", "Applicant", "Assigned Producer",
+                    "Status", "Quote Due Date", "Effective Date", "Overdue",
+                ]
+                with submission_path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+                    writer.writeheader()
+                    writer.writerows(observed_submissions["open_records"])
+                submission_evidence = output_dir / f"submission-center-evidence-{run_at:%Y%m%dT%H%M%SZ}.json"
+                submission_evidence.write_text(json.dumps({
+                    "collected_at": run_at.isoformat(),
+                    "read_only": True,
+                    "all_pages_inspected": True,
+                    "pages_inspected": observed_submissions.get("pages_inspected"),
+                    "rows_inspected": observed_submissions.get("rows_inspected"),
+                    "pager_total": observed_submissions.get("pager_total"),
+                    "open_records_deduplicated": observed_submissions.get("open_records_deduplicated"),
+                    "normalized_csv_sha256": _checksum(submission_path),
+                }, indent=2), encoding="utf-8")
+                sources["submissions"] = str(submission_path)
             for key, flag in SOURCE_FLAGS.items():
                 value = sources.get(key)
                 if value:
@@ -145,7 +191,9 @@ class AccountabilityReportWorker:
             sales_untouched_days = (manifest.get("rules") or {}).get("sales_untouched_days")
             if sales_untouched_days is not None:
                 arguments.extend(["--sales-untouched-days", str(max(1, int(sales_untouched_days)))])
-            for key, value in sorted(((manifest.get("sources") or {}).get("trackers") or {}).items()):
+            tracker_sources = dict(((manifest.get("sources") or {}).get("trackers") or {}))
+            tracker_sources.update(collected_trackers)
+            for key, value in sorted(tracker_sources.items()):
                 arguments.extend(["--tracker", f"{key}={Path(str(value)).expanduser().resolve()}"])
             appsheet = dict(manifest.get("appsheet") or {})
             if mode == "weekly" and appsheet.get("enabled"):
@@ -183,6 +231,11 @@ class AccountabilityReportWorker:
                     retryable=True,
                     error="accountability report contains missing, stale, partial, or unreconciled required evidence",
                 )
+            dashboard_receipt: dict[str, Any] = {}
+            dashboard = dict(manifest.get("dashboard") or {})
+            if mode == "weekly" and dashboard.get("enabled"):
+                from .accountability_dashboard import publish_weekly_dashboard
+                dashboard_receipt = publish_weekly_dashboard(output, run_at=run_at, config=dashboard)
         except Exception as exc:
             return WorkerResult(
                 False,
@@ -210,10 +263,11 @@ class AccountabilityReportWorker:
         return WorkerResult(
             True,
             action,
-            {"artifact_path": str(output), "delivery_receipts": receipts},
+            {"artifact_path": str(output), "delivery_receipts": receipts, "dashboard_receipt": dashboard_receipt},
             {
                 "sha256": _checksum(output),
                 "mode": mode,
+                "dashboard_receipt": dashboard_receipt,
                 "manifest_path": str(manifest_path),
                 "idempotency_key": idempotency_key,
             },
@@ -249,6 +303,15 @@ class AccountabilityReportVerifier:
                 and not observed["simulation_marker"]
             )
         receipts = list(destination.get("delivery_receipts") or [])
+        dashboard_receipt = dict(destination.get("dashboard_receipt") or {})
+        if verified and dashboard_receipt:
+            try:
+                from .accountability_dashboard import verify_weekly_dashboard
+                dashboard_verified, dashboard_observed = verify_weekly_dashboard(dashboard_receipt)
+            except Exception as exc:
+                dashboard_verified, dashboard_observed = False, {"error": f"{type(exc).__name__}: {exc}"}
+            observed["dashboard"] = dashboard_observed
+            verified = verified and dashboard_verified
         if verified and receipts:
             try:
                 from .accountability_delivery import verify_delivery_receipts
@@ -259,8 +322,8 @@ class AccountabilityReportVerifier:
             observed["delivery"] = delivery_observed
             verified = verified and delivery_verified
         evidence = VerificationEvidence(
-            method="FRESH_DESTINATION_AND_FILESYSTEM_READBACK" if receipts else "FRESH_FILESYSTEM_READBACK",
-            source="accountability-report-and-delivery" if receipts else "accountability-report-artifact",
+            method="FRESH_DESTINATION_AND_FILESYSTEM_READBACK" if (receipts or dashboard_receipt) else "FRESH_FILESYSTEM_READBACK",
+            source="accountability-report-and-destinations" if (receipts or dashboard_receipt) else "accountability-report-artifact",
             expected={"sha256": detail.get("sha256"), "mode": mode, "simulation_marker": False},
             observed=observed,
             authoritative=True,

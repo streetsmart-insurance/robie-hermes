@@ -39,6 +39,14 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         and (ringcentral_email.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
         and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
     )
+    scheduled_reports = dict(((manifest.get("collection") or {}).get("scheduled_reports_email") or {}))
+    scheduled_reports_ready = bool(
+        scheduled_reports.get("enabled")
+        and (scheduled_reports.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
+        and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
+        and scheduled_reports.get("reports")
+        and (scheduled_reports.get("allowed_senders") or scheduled_reports.get("allowed_sender_domains"))
+    )
     ezlynx_exports = {key: file_state(key) for key in ("tasks", "activities", "retention", "submissions")}
     ezlynx_browser = _env_ready(environment, ("ROBIE_EZLYNX_USERNAME_SECRET", "ROBIE_EZLYNX_PASSWORD_SECRET"))
     gmail_backend = (
@@ -63,8 +71,9 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
             "scheduled_email_configured": ringcentral_email_ready,
         },
         "ezlynx": {
-            "ready": ezlynx_browser or any(item["available"] for item in ezlynx_exports.values()),
+            "ready": ezlynx_browser or scheduled_reports_ready or any(item["available"] for item in ezlynx_exports.values()),
             "browser_secret_references_configured": ezlynx_browser,
+            "scheduled_reports_configured": scheduled_reports_ready,
             "exports": ezlynx_exports,
         },
         "gmail": {
@@ -83,6 +92,14 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
             "explicit_column_allowlists": all(
                 bool((item or {}).get("allowed_columns")) for item in (google_sheets.get("tables") or {}).values()
             ) if google_sheets_enabled else True,
+        },
+        "dashboard": {
+            "enabled": bool((manifest.get("dashboard") or {}).get("enabled")),
+            "ready": not (manifest.get("dashboard") or {}).get("enabled") or bool(
+                (manifest.get("dashboard") or {}).get("spreadsheet_id")
+                and (manifest.get("dashboard") or {}).get("sheet_name")
+            ),
+            "aggregate_only": True,
         },
         "delivery": {
             "enabled": bool(delivery.get("enabled")),
