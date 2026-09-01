@@ -23,32 +23,16 @@ INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 def secret(name: str) -> str:
     from google.cloud import secretmanager
 
+    from robie_job_engine.secret_resolution import access_newest_enabled_secret
+
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/streetsmart-hermes-poc/secrets/{name}"
     reference_env = {
         "ezlynx-username": "ROBIE_EZLYNX_USERNAME_SECRET",
         "ezlynx-password": "ROBIE_EZLYNX_PASSWORD_SECRET",
     }
-    reference = os.environ.get(reference_env.get(name, ""), "").strip()
-    if reference:
-        expected = rf"{re.escape(parent)}/versions/[1-9]\d*"
-        if not re.fullmatch(expected, reference):
-            raise RuntimeError(
-                f"Pinned Secret Manager reference is invalid for required secret {name}"
-            )
-        response = client.access_secret_version(request={"name": reference})
-        return response.payload.data.decode("utf-8").strip()
-
-    enabled = list(
-        client.list_secret_versions(
-            request={"parent": parent, "filter": "state:ENABLED"}
-        )
-    )
-    if not enabled:
-        raise RuntimeError(f"No enabled version exists for required secret {name}")
-    newest = max(enabled, key=lambda version: version.create_time)
-    response = client.access_secret_version(request={"name": newest.name})
-    return response.payload.data.decode("utf-8").strip()
+    reference = os.environ.get(reference_env.get(name, ""), "").strip() or parent
+    return access_newest_enabled_secret(client, reference)
 
 
 class MailboxIdentityError(RuntimeError):

@@ -12,9 +12,12 @@ This page is the recurrence guard's operator text.
 - Project: **streetsmart-hermes-poc**
 - Secrets: `ezlynx-username`, `ezlynx-password`
 - Live login: zip-loaded `ezlynx_login_bootstrap.py` (`secret()`)
+- Library path: `robie_job_engine/secret_resolution.py` (`access_newest_enabled_secret`)
 
-`secret()` lists versions with `state:ENABLED` and accesses the **newest
-ENABLED** by `create_time`. It does **not** use `versions/latest`.
+`secret()` and `load_ezlynx_credentials()` always list versions with
+`state:ENABLED` and access the **newest ENABLED** by `create_time`. They do
+**not** call `access_secret_version` on `versions/latest` or a pinned numeric
+version when that version is DESTROYED.
 
 `versions/latest` is the newest version number, including DESTROYED. That is
 how a live password can look present while login HITLs.

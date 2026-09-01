@@ -26,6 +26,15 @@ class FakeAccessor:
         self.calls.append(resource_name)
         return self.values[resource_name]
 
+    def access_newest_enabled(self, reference_or_parent):
+        self.calls.append(reference_or_parent)
+        if reference_or_parent in self.values:
+            return self.values[reference_or_parent]
+        for key, value in self.values.items():
+            if reference_or_parent in key:
+                return value
+        raise KeyError(reference_or_parent)
+
 
 class FakeBrowser:
     def __init__(self, initial, after_login=SessionState.SIGNED_IN):
