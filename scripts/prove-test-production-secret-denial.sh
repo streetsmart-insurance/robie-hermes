@@ -17,15 +17,19 @@ SA=$(curl -sf -H Metadata-Flavor:Google \
   http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)
 echo "host=$(hostname -s) service_account=${SA}"
 for secret_id in ezlynx-username ezlynx-password; do
+  err_file="$(mktemp)"
   if gcloud secrets versions access latest \
     --secret="${secret_id}" \
-    --project=streetsmart-hermes-poc >/dev/null 2>/tmp/robie-deny-test.err; then
+    --project=streetsmart-hermes-poc > /dev/null 2>"${err_file}"; then
+    rm -f "${err_file}"
     echo "FAIL ${secret_id}: read succeeded (isolation broken)"
     exit 2
+  else
+    code=$?
+    stderr="$(tr "\n" " " <"${err_file}" | head -c 240)"
+    rm -f "${err_file}"
+    echo "DENIED ${secret_id}: exit=${code} stderr=${stderr}"
   fi
-  code=$?
-  echo "DENIED ${secret_id}: exit=${code} stderr=$(tr "\n" " " </tmp/robie-deny-test.err | head -c 240)"
-  rm -f /tmp/robie-deny-test.err
 done
 echo "PASS: Production secrets denied on Test VM"
 '
