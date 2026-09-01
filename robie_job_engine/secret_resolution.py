@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .secret_isolation import forbid_test_reading_production_secrets
+
 _SECRET_PARENT_RE = re.compile(
     r"^projects/(?P<project>[^/]+)/secrets/(?P<secret_id>[^/]+)$"
 )
@@ -71,6 +73,7 @@ def newest_enabled_version_name(client: Any, parent: str) -> str:
 
 def access_newest_enabled_secret(client: Any, reference_or_parent: str) -> str:
     """Read the newest ENABLED payload; ignores stale ``latest`` or pinned version suffixes."""
+    forbid_test_reading_production_secrets(reference_or_parent)
     version_name = newest_enabled_version_name(client, reference_or_parent)
     response = client.access_secret_version(request={"name": version_name})
     value = response.payload.data.decode("utf-8").strip()
