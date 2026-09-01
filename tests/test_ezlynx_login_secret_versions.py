@@ -75,10 +75,14 @@ class EzlynxLoginSecretVersionTests(TestCase):
         )
         page.wait_for_timeout.assert_called_once_with(2_000)
 
-    def test_secret_uses_pinned_version_without_listing_versions(self):
+    def test_secret_uses_pinned_destroyed_reference_but_reads_newest_enabled(self):
         client = Mock()
+        client.list_secret_versions.return_value = [
+            SimpleNamespace(name="versions/1", create_time=1),
+            SimpleNamespace(name="versions/3", create_time=3),
+        ]
         client.access_secret_version.return_value = SimpleNamespace(
-            payload=SimpleNamespace(data=b"pinned-credential\n")
+            payload=SimpleNamespace(data=b"newest-enabled\n")
         )
         google = ModuleType("google")
         google_cloud = ModuleType("google.cloud")
@@ -109,9 +113,14 @@ class EzlynxLoginSecretVersionTests(TestCase):
             spec.loader.exec_module(bootstrap)
             value = bootstrap.secret("ezlynx-password")
 
-        self.assertEqual(value, "pinned-credential")
-        client.list_secret_versions.assert_not_called()
+        self.assertEqual(value, "newest-enabled")
+        client.list_secret_versions.assert_called_once_with(
+            request={
+                "parent": "projects/streetsmart-hermes-poc/secrets/ezlynx-password",
+                "filter": "state:ENABLED",
+            }
+        )
         client.access_secret_version.assert_called_once_with(
-            request={"name": reference}
+            request={"name": "versions/3"}
         )
 

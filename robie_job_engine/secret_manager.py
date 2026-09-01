@@ -4,9 +4,12 @@ import os
 from dataclasses import dataclass
 from typing import Protocol
 
+from .secret_resolution import access_newest_enabled_secret, secret_parent
+
 
 class SecretAccessor(Protocol):
     def access(self, resource_name: str) -> str: ...
+    def access_newest_enabled(self, reference_or_parent: str) -> str: ...
 
 
 class GoogleSecretManagerAccessor:
@@ -32,6 +35,9 @@ class GoogleSecretManagerAccessor:
             raise ValueError("Secret Manager returned an empty or invalid credential")
         return value
 
+    def access_newest_enabled(self, reference_or_parent: str) -> str:
+        return access_newest_enabled_secret(self._client, reference_or_parent)
+
 
 @dataclass(frozen=True, repr=False)
 class EzlynxCredentials:
@@ -50,6 +56,6 @@ def load_ezlynx_credentials(accessor: SecretAccessor | None = None) -> EzlynxCre
             "ROBIE_EZLYNX_USERNAME_SECRET and ROBIE_EZLYNX_PASSWORD_SECRET must be configured"
         )
     accessor = accessor or GoogleSecretManagerAccessor()
-    username = accessor.access(username_ref)
-    password = accessor.access(password_ref)
+    username = accessor.access_newest_enabled(username_ref)
+    password = accessor.access_newest_enabled(password_ref)
     return EzlynxCredentials(username=username, password=password)
