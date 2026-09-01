@@ -43,19 +43,14 @@ Compute read.
 
 ## Ownership boundary with Pawel's infrastructure Task 1
 
-This keyless GitHub path does not replace Pawel's durable SSH/OS Login work.
+Task 1 (durable human SSH + non-interactive Test deploy) is documented separately
+in `docs/SSH_TEAM_ACCESS_RUNBOOK.md` and evidenced in
+`docs/TASK1_DURABLE_SSH_EVIDENCE.md`. Completed 2026-09-01: IAP-only SSH on
+`hermes-poc-net`, OS Login keys under `$HOME/.ssh`, GitHub Actions deploy uses
+`scripts/ensure-gcloud-ssh-key.sh`, instance-scoped `roles/compute.osLogin`.
 
-- Pawel Task 1 owns the human/bootstrap route: Cloud Shell, IAP, OS Login,
-  durable local SSH material, restart survival, and a no-manual-passphrase Test
-  deployment proof.
-- This runbook owns machine/LLM resource-plane audit access through GitHub WIF.
-- A future protected Test deployment workflow is separate again and is not
-  ready until least-privilege permissions, immutable artifact installation,
-  verification, and rollback are proven in Test.
-
-Keep Pawel Task 1 open until a full Cloud Shell restart and safe Test deploy
-satisfy its documented done condition. PR completion here is not evidence that
-his task passed.
+This keyless GitHub path remains the machine/LLM audit route through WIF. It does
+not replace human SSH for on-host debugging.
 
 ## Readiness workflow
 

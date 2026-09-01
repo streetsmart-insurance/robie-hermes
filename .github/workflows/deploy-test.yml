@@ -71,6 +71,9 @@ jobs:
       - name: Install Google Cloud CLI
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
 
+      - name: Prepare durable non-interactive SSH material
+        run: bash scripts/ensure-gcloud-ssh-key.sh
+
       - name: Refuse every target except Test
         shell: bash
         run: |

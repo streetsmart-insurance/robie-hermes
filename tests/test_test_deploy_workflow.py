@@ -24,6 +24,7 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.confirmation == 'DEPLOY_TO_HERMES_TEST_01'", text)
         self.assertIn("TEST_VM: hermes-test-01", text)
         self.assertIn("id-token: write", text)
+        self.assertIn("scripts/ensure-gcloud-ssh-key.sh", text)
         self.assertNotIn("hermes-poc-01", text)
         self.assertNotIn("systemctl restart hermes-gateway", text)
 
