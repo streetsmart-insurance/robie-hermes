@@ -4,10 +4,17 @@ set -euo pipefail
 
 PROJECT="${ROBIE_MONITOR_PROJECT:-streetsmart-hermes-poc}"
 POLICY_DIR="$(cd "$(dirname "$0")/../deploy/monitoring" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOKEN=$(gcloud auth print-access-token)
 
+prepare_ssh() {
+  if [[ -f "${SCRIPT_DIR}/ensure-gcloud-ssh-key.sh" ]]; then
+    bash "${SCRIPT_DIR}/ensure-gcloud-ssh-key.sh"
+  fi
+}
+
 pick_channel() {
-  local id="${ROBIE_MONITOR_NOTIFICATION_CHANNEL_ID:-}"
+  local id="${ROBIE_MONITOR_NOTIFICATION_CHANNEL_ID:-7011715453478665377}"
   if [[ -n "${id}" ]]; then
     echo "projects/${PROJECT}/notificationChannels/${id}"
     return
@@ -51,9 +58,10 @@ print(json.dumps(data))
     -H "Content-Type: application/json" \
     "https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies" \
     -d "${body}" \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); print('created', d.get('name','ERROR'), d.get('displayName',''))"
+    | python3 -c "import json,sys; d=json.load(sys.stdin); err=d.get('error'); print('created', d.get('name','ERROR'), d.get('displayName','')); if err: raise SystemExit(err.get('message','create failed'))"
 }
 
+prepare_ssh
 CHANNEL=$(pick_channel)
 echo "notification_channel=${CHANNEL}"
 

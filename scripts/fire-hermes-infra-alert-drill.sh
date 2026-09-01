@@ -4,9 +4,11 @@ set -euo pipefail
 
 PROJECT="${ROBIE_MONITOR_PROJECT:-streetsmart-hermes-poc}"
 TOKEN=$(gcloud auth print-access-token)
-CHANNEL="${ROBIE_MONITOR_NOTIFICATION_CHANNEL:-}"
+CHANNEL="${ROBIE_MONITOR_NOTIFICATION_CHANNEL:-projects/${PROJECT}/notificationChannels/7011715453478665377}"
 
-if [[ -z "${CHANNEL}" ]]; then
+if [[ "${CHANNEL}" == "projects/${PROJECT}/notificationChannels/7011715453478665377" ]]; then
+  : # default Carlo email channel
+elif [[ -z "${CHANNEL}" ]]; then
   CHANNEL=$(curl -s -H "Authorization: Bearer ${TOKEN}" \
     "https://monitoring.googleapis.com/v3/projects/${PROJECT}/notificationChannels" \
     | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(c['name'] for c in d['notificationChannels'] if c.get('enabled')))")
@@ -40,7 +42,8 @@ created=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   "https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies" \
   -d "${BODY}")
-POLICY_NAME=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['name'])" "${created}")
+POLICY_NAME=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); err=d.get('error'); print(d.get('name','')); if err: raise SystemExit(err.get('message','drill create failed'))" "${created}")
+[[ -n "${POLICY_NAME}" ]] || { echo "drill_policy_create_failed=${created}" >&2; exit 2; }
 echo "drill_policy_created=${POLICY_NAME}"
 echo "Wait 2-5 minutes for email at the configured notification channel, then deleting drill policy..."
 sleep 180
