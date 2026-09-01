@@ -1,0 +1,123 @@
+{
+  "project": "streetsmart-hermes-poc",
+  "billing_account": "01CAD2-76802C-85A6BB",
+  "principle": "least_privilege_per_identity",
+  "service_accounts": [
+    {
+      "email": "hermes-poc@streetsmart-hermes-poc.iam.gserviceaccount.com",
+      "purpose": "Production VM runtime (hermes-poc-01)",
+      "attached_vm": "hermes-poc-01",
+      "expected_project_roles": [],
+      "expected_secret_accessor": [
+        "api-server-key",
+        "ezlynx-username",
+        "ezlynx-password",
+        "hermes-api-token",
+        "robie-google-oauth-token"
+      ],
+      "expected_vm_oauth_scopes": [
+        "https://www.googleapis.com/auth/logging.write",
+        "https://www.googleapis.com/auth/monitoring.write",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file"
+      ],
+      "forbidden": [
+        "roles/editor",
+        "roles/owner",
+        "roles/iam.serviceAccountKeyAdmin"
+      ]
+    },
+    {
+      "email": "robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com",
+      "purpose": "Test VM runtime (hermes-test-01)",
+      "attached_vm": "hermes-test-01",
+      "expected_project_roles": [],
+      "expected_secret_accessor": [],
+      "forbidden_secret_accessor": [
+        "ezlynx-username",
+        "ezlynx-password",
+        "robie-google-oauth-token",
+        "hermes-api-token"
+      ],
+      "expected_vm_oauth_scopes": [
+        "https://www.googleapis.com/auth/logging.write",
+        "https://www.googleapis.com/auth/monitoring.write"
+      ],
+      "forbidden": [
+        "roles/editor",
+        "roles/owner",
+        "roles/secretmanager.secretAccessor on Production secrets"
+      ]
+    },
+    {
+      "email": "robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com",
+      "purpose": "GitHub WIF Production deploy (protected main only)",
+      "expected_instance_roles": {
+        "hermes-poc-01": "roles/compute.osAdminLogin"
+      },
+      "forbidden": [
+        "roles/editor",
+        "roles/owner",
+        "roles/secretmanager.secretAccessor"
+      ]
+    },
+    {
+      "email": "robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com",
+      "purpose": "GitHub WIF Test deploy + audits (streetsmart-robie-test project)",
+      "expected_instance_roles": {
+        "hermes-test-01": "roles/compute.osAdminLogin"
+      },
+      "forbidden": [
+        "roles/editor on streetsmart-hermes-poc",
+        "roles/secretmanager.secretAccessor"
+      ]
+    },
+    {
+      "email": "robie-chat-bridge@streetsmart-hermes-poc.iam.gserviceaccount.com",
+      "purpose": "Google Chat HTTPS bridge (review required)",
+      "audit_status": "UNVERIFIED"
+    },
+    {
+      "email": "robie-chat-build@streetsmart-hermes-poc.iam.gserviceaccount.com",
+      "purpose": "Chat bridge build identity (review required)",
+      "audit_status": "UNVERIFIED"
+    },
+    {
+      "email": "claude-cloud-diag@streetsmart-hermes-poc.iam.gserviceaccount.com",
+      "purpose": "Diagnostic identity (review required)",
+      "audit_status": "UNVERIFIED"
+    },
+    {
+      "email": "751771086524-compute@developer.gserviceaccount.com",
+      "purpose": "Default Compute Engine SA (must not be attached to Hermes VMs)",
+      "forbidden_vm_attachment": [
+        "hermes-poc-01",
+        "hermes-test-01"
+      ]
+    }
+  ],
+  "human_users": [
+    {
+      "email": "carlo@streetsmart.insurance",
+      "expected_instance_roles": {
+        "hermes-test-01": "roles/compute.osAdminLogin"
+      },
+      "notes": "Bootstrap operator; Production VM uses deploy SA osAdminLogin only"
+    },
+    {
+      "email": "pawelstasinskiuk@gmail.com",
+      "expected_instance_roles": {
+        "hermes-poc-01": "roles/compute.osLogin",
+        "hermes-test-01": "roles/compute.osLogin"
+      },
+      "expected_project_roles": [
+        "roles/iap.tunnelResourceAccessor"
+      ],
+      "forbidden": [
+        "roles/editor",
+        "roles/owner",
+        "roles/compute.osAdminLogin on hermes-poc-01"
+      ]
+    }
+  ]
+}
