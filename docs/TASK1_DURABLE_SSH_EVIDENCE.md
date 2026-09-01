@@ -19,7 +19,7 @@
 | No public SSH on Hermes network | **DONE** | `hermes-poc-net`: only `hermes-allow-iap-ssh` `35.235.240.0/20`; `default-allow-ssh` **disabled** |
 | Legacy VM `ssh-keys` metadata removed | **DONE** | `hermes-test-01` metadata: only `enable-oslogin` + startup-script |
 | Revocable per-person / per-key | **DONE** | OS Login keys per user; instance IAM per VM; runbook revoke commands |
-| Cloud Shell restart transcript | **N/A local** | Equivalent non-interactive bootstrap transcript captured from operator laptop (below). Cloud Shell uses same `ensure-gcloud-ssh-key.sh` path after `gcloud auth login`. |
+| Cloud Shell restart transcript | **PENDING Carlo** | Run `bash scripts/cloud-shell-restart-ssh-proof.sh` — see `docs/CLOUD_SHELL_SSH_BOOTSTRAP.md`. Laptop transcript below is equivalent bootstrap, not Cloud Shell. |
 
 ## Related repository commits (StreetSmart `main`)
 

@@ -56,3 +56,12 @@ range `35.235.240.0/20` (`hermes-allow-iap-ssh`). Legacy `default-allow-ssh` on
 the unused `default` network is disabled.
 
 Evidence and dumps: `docs/TASK1_DURABLE_SSH_EVIDENCE.md`.
+
+## Cloud Shell bootstrap (Task 1 transcript)
+
+```sh
+bash scripts/cloud-shell-restart-ssh-proof.sh | tee /tmp/robie-cloud-shell-ssh-proof.log
+```
+
+Details: `docs/CLOUD_SHELL_SSH_BOOTSTRAP.md`. Legacy passphrase keys are auto-rotated
+by `ensure-gcloud-ssh-key.sh`.

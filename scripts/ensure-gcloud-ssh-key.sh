@@ -10,11 +10,26 @@ PUB="${KEY}.pub"
 mkdir -p "${SSH_DIR}"
 chmod 700 "${SSH_DIR}"
 
+rotate_passphrase_key() {
+  local backup="${KEY}.passphrase-backup.$(date -u +%Y%m%dT%H%M%SZ)"
+  echo "rotating passphrase-protected deploy key to ${backup}" >&2
+  mv "${KEY}" "${backup}"
+  if [[ -f "${PUB}" ]]; then
+    mv "${PUB}" "${backup}.pub"
+  fi
+}
+
+if [[ -f "${KEY}" ]]; then
+  if ! ssh-keygen -y -f "${KEY}" -P "" >/dev/null 2>&1; then
+    rotate_passphrase_key
+  fi
+fi
+
 if [[ ! -f "${KEY}" ]]; then
   ssh-keygen -t rsa -b 4096 -f "${KEY}" -N "" -C "$(whoami)@$(hostname -s)" -q
 fi
 
-# Refuse to proceed if a passphrase is required — deploy must stay non-interactive.
+# Refuse to proceed if a passphrase is still required — deploy must stay non-interactive.
 if ! ssh-keygen -y -f "${KEY}" -P "" >/dev/null 2>&1; then
   echo "refusing passphrase-protected deploy key: ${KEY}" >&2
   exit 2
@@ -26,3 +41,4 @@ chmod 644 "${PUB}"
 gcloud compute os-login ssh-keys add --key-file="${PUB}" --ttl=0 >/dev/null
 
 echo "os_login_key_ready=${PUB}"
+echo "gcloud_ssh_key_file=${KEY}"
