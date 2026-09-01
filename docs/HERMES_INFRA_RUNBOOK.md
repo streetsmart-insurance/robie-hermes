@@ -42,8 +42,11 @@ One-time bootstrap:
 ```sh
 gcloud auth login your@email.com
 gcloud config set project streetsmart-hermes-poc
-bash scripts/ensure-gcloud-ssh-key.sh   # when available on main; see SSH runbook PR
+bash scripts/ensure-gcloud-ssh-key.sh
 ```
+
+Cloud Shell transcript proof: `bash scripts/cloud-shell-restart-ssh-proof.sh` — see
+`docs/CLOUD_SHELL_SSH_BOOTSTRAP.md`. Legacy passphrase keys are auto-rotated.
 
 Connect:
 
