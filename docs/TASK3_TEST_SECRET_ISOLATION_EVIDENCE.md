@@ -102,16 +102,9 @@ READ_OK 7
 
 Test VM **successfully read** Production `ezlynx-username` payload (7 bytes).
 
-### AFTER IAM fix — expected denial transcript
+### AFTER IAM fix — **CONFIRMED** (2026-09-01)
 
-Admin runs:
-
-```sh
-bash scripts/isolate-test-from-production-secrets.sh
-bash scripts/prove-test-production-secret-denial.sh
-```
-
-Expected:
+Carlo (Cloud Shell) and reviewer both ran `prove-test-production-secret-denial.sh`:
 
 ```text
 host=hermes-test-01 service_account=robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com
@@ -120,8 +113,15 @@ DENIED ezlynx-password: exit=1 stderr=PERMISSION_DENIED ... secretmanager.versio
 PASS: Production secrets denied on Test VM
 ```
 
-Reviewer `pawelstasinskiuk@gmail.com` lacks `secretmanager.secrets.setIamPolicy`; Carlo
-must run the revoke script or remove bindings in Console.
+Secret-level IAM: Test SA bindings **removed** from `ezlynx-username`, `ezlynx-password`,
+`robie-google-oauth-token`.
+
+Admin revoke (idempotent):
+
+```sh
+bash scripts/isolate-test-from-production-secrets.sh
+bash scripts/prove-test-production-secret-denial.sh
+```
 
 ## Runtime fail-closed backstop (defense in depth)
 
@@ -165,6 +165,6 @@ read Production EZLynx secrets (was previously always green).
 | --- | --- |
 | Test SA identified | **DONE** |
 | IAM policy exported (secret-level) | **DONE** |
-| Live denied attempt | **PENDING IAM revoke** (live proof shows reads still succeed) |
+| Live denied attempt | **DONE** (Carlo Cloud Shell + reviewer, exit=1 PERMISSION_DENIED) |
 | Runtime fail-closed on Test | **DONE** (code) |
 | CI fails on isolation break | **DONE** |
