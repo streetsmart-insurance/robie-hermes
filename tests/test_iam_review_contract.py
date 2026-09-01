@@ -37,4 +37,6 @@ class IamReviewContractTests(unittest.TestCase):
         self.assertIn("account-role-summary", audit)
         self.assertIn("default-allow-ssh", harden)
         self.assertIn("ezlynx-username", prove)
+        self.assertIn("mktemp", prove)
+        self.assertNotIn("/tmp/robie-deny-test.err", prove)
         self.assertIn("PASS: Production secrets denied", prove)
