@@ -58,7 +58,14 @@ print(json.dumps(data))
     -H "Content-Type: application/json" \
     "https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies" \
     -d "${body}" \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); err=d.get('error'); print('created', d.get('name','ERROR'), d.get('displayName','')); if err: raise SystemExit(err.get('message','create failed'))"
+    | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+err = d.get('error')
+print('created', d.get('name', 'ERROR'), d.get('displayName', ''))
+if err:
+    raise SystemExit(err.get('message', 'create failed'))
+"
 }
 
 prepare_ssh

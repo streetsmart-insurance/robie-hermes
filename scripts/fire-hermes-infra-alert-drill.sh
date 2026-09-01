@@ -42,7 +42,14 @@ created=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   "https://monitoring.googleapis.com/v3/projects/${PROJECT}/alertPolicies" \
   -d "${BODY}")
-POLICY_NAME=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); err=d.get('error'); print(d.get('name','')); if err: raise SystemExit(err.get('message','drill create failed'))" "${created}")
+POLICY_NAME=$(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+err = d.get('error')
+if err:
+    raise SystemExit(err.get('message', 'drill create failed'))
+print(d.get('name', ''))
+" "${created}")
 [[ -n "${POLICY_NAME}" ]] || { echo "drill_policy_create_failed=${created}" >&2; exit 2; }
 echo "drill_policy_created=${POLICY_NAME}"
 echo "Wait 2-5 minutes for email at the configured notification channel, then deleting drill policy..."
