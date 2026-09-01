@@ -1,0 +1,24 @@
+{
+  "displayName": "INFRA hermes-test-01 instance down",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "Test VM hermes-test-01 stopped reporting CPU (stopped or unreachable).",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "No CPU metric for 5 minutes",
+      "conditionAbsent": {
+        "filter": "resource.type = \"gce_instance\" AND resource.labels.instance_id = \"6971056864475829887\" AND metric.type = \"compute.googleapis.com/instance/cpu/utilization\"",
+        "duration": "300s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MEAN"
+          }
+        ]
+      }
+    }
+  ]
+}
