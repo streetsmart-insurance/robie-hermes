@@ -33,3 +33,14 @@ class InfraMonitoringContractTests(unittest.TestCase):
         self.assertIn("google-cloud-ops-agent", configure)
         self.assertIn("INFRA ALERT DRILL", drill)
         self.assertIn("notificationChannels", drill)
+
+    def test_gateway_crash_policy_targets_hermes_gateway_with_valid_log_filter(self):
+        path = MONITORING / "alert-hermes-poc-gateway-crash.json"
+        body = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("hermes-gateway", body["displayName"])
+        self.assertNotIn("robie-gateway", body["displayName"])
+        filt = body["conditions"][0]["conditionMatchedLog"]["filter"]
+        self.assertIn("log_id(\"syslog\")", filt)
+        self.assertIn("hermes-gateway", filt)
+        self.assertIn(" AND ", filt)
+        self.assertIn("5649534881067121807", filt)

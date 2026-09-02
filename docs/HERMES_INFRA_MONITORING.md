@@ -8,7 +8,7 @@ VM downtime, disk pressure, and gateway service crashes at the GCP/host layer.
 
 | VM | Alerts |
 | --- | --- |
-| `hermes-poc-01` | Instance down (no CPU metric 5m), root disk > 85%, `robie-gateway` systemd failure |
+| `hermes-poc-01` | Instance down (no CPU metric 5m), root disk > 85%, `hermes-gateway` systemd failure |
 | `hermes-test-01` | Instance down (no CPU metric 5m) |
 
 ## Prerequisites
@@ -22,6 +22,12 @@ VM downtime, disk pressure, and gateway service crashes at the GCP/host layer.
 ```sh
 export ROBIE_MONITOR_PROJECT=streetsmart-hermes-poc
 bash scripts/configure-hermes-infra-alerts.sh
+```
+
+If only the gateway crash policy failed on first bootstrap:
+
+```sh
+bash scripts/apply-hermes-gateway-crash-alert.sh
 ```
 
 Policy JSON: `deploy/monitoring/alert-*.json`

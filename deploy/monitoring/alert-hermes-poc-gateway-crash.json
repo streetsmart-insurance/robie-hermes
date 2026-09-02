@@ -1,16 +1,22 @@
 {
-  "displayName": "INFRA hermes-poc-01 robie-gateway service failed",
+  "displayName": "INFRA hermes-poc-01 hermes-gateway service failed",
   "combiner": "OR",
   "enabled": true,
   "documentation": {
-    "content": "systemd reported robie-gateway failed on hermes-poc-01 (crash/restart loop). Separate from application verification gates.",
+    "content": "systemd reported hermes-gateway failed on hermes-poc-01 (crash/restart loop). Separate from application verification gates.",
     "mimeType": "text/markdown"
+  },
+  "alertStrategy": {
+    "notificationRateLimit": {
+      "period": "300s"
+    },
+    "autoClose": "604800s"
   },
   "conditions": [
     {
-      "displayName": "robie-gateway failed in syslog",
+      "displayName": "hermes-gateway failed in syslog/journal",
       "conditionMatchedLog": {
-        "filter": "resource.type=\"gce_instance\" resource.labels.instance_id=\"5649534881067121807\" logName=\"projects/streetsmart-hermes-poc/logs/syslog\" (\"robie-gateway\" AND (\"Failed with result\" OR \"entered failed state\" OR \"Main process exited\"))"
+        "filter": "resource.type=\"gce_instance\" AND resource.labels.instance_id=\"5649534881067121807\" AND log_id(\"syslog\") AND \"hermes-gateway\" AND (\"Failed with result\" OR \"entered failed state\" OR \"Main process exited\")"
       }
     }
   ]

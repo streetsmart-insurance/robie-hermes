@@ -36,7 +36,7 @@ GET /v3/projects/streetsmart-hermes-poc/alertPolicies
 | --- | --- |
 | `deploy/monitoring/alert-hermes-poc-downtime.json` | `hermes-poc-01` no CPU metric 5m |
 | `deploy/monitoring/alert-hermes-poc-disk.json` | Root disk > 85% (Ops Agent) |
-| `deploy/monitoring/alert-hermes-poc-gateway-crash.json` | `robie-gateway` systemd failure in syslog |
+| `deploy/monitoring/alert-hermes-poc-gateway-crash.json` | `hermes-gateway` systemd failure in syslog |
 | `deploy/monitoring/alert-hermes-test-downtime.json` | `hermes-test-01` no CPU metric 5m |
 
 Instance IDs used in filters:
@@ -101,8 +101,22 @@ Live disk at drill time: `/dev/root` **59%** used (below 85% threshold).
 | --- | --- |
 | Alert policy definitions in repo | **DONE** |
 | Notification channel exists | **DONE** (Carlo email) |
-| Policies live in GCP | **PENDING** (`configure-hermes-infra-alerts.sh`) |
+| Policies live in GCP | **PARTIAL** — disk + both downtime live; gateway crash fixed in repo |
 | Proof alert fired & received | **PENDING** (`fire-hermes-infra-alert-drill.sh`) |
+
+### Gateway crash policy fix (2026-09-02)
+
+Original policy failed API create. Root causes:
+
+1. Wrong unit name: `robie-gateway` on `hermes-poc-01` (Production uses `hermes-gateway`).
+2. Invalid log filter: missing `AND` between clauses; used `logName=projects/.../logs/syslog`
+   instead of `log_id("syslog")`.
+
+Carlo apply (only the missing policy):
+
+```sh
+bash scripts/apply-hermes-gateway-crash-alert.sh
+```
 
 ## Related commits
 
