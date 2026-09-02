@@ -50,8 +50,30 @@ Required reconciliation:
 - AI-only answers do not close callback cases
 - zero pickups do not prove that an employee missed an offered queue call
 - client callback candidates remain visible even when Carlo is excluded from employee phone scoring
+- direct-inbound Handle Time, queue-inbound Handle Time, connected outbound Call Length, total measured connected time, and average measured connected time by employee
+- a dated queue-membership scoreboard showing eligible members, verified offers, answers, declines/timeouts, voicemail, and abandoned calls
+- requested-producer/direct-extension routing kept separate from queue ownership
+- every callback candidate linked to the matched EZLynx account and checked against same-day Eva/AI inbound-call discussions, later notes, and repeated attempts
+- separate `HOLD_REVIEW` and `QUEUE_WAIT_REVIEW` lists for explicit RingCentral duration fields above 120 seconds
+
+Do not infer hold or queue wait from `Call Length - Handle Time`. The August 31 workbook contains `Call Length` and `Handle Time` but no explicit hold-duration or queue-wait field, so exact hold/wait verification is unavailable from that export. A v2 run must export the explicit RingCentral field or mark that section `UNVERIFIED`.
+
+## Jake review comments incorporated into v2
+
+The accountability Google Doc had six unresolved Jake comments on 2026-09-01. V2 addresses all six as requirements:
+
+1. Add EZLynx account hyperlinks to missed-call/callback cases and validate the caller number against the account Activity tab.
+2. Investigate the reported long-hold/IVR test case. The internal RingCentral session map showed long AI and employee live-talk segments, but no explicit hold segment over two minutes. Classify it as an IVR/AI-duration service review, not a verified employee long-hold finding. Keep the client name, phone number, account identifier, exact timestamps, and employee-leg evidence only in access-controlled internal artifacts—not public Git.
+3. Add a call-queue scoreboard showing who is eligible, who answers, and who has verified unaccepted offers.
+4. Separate direct missed calls from queue-answered activity; do not treat the absence of a queue-missed summary as proof.
+5. Explain when a destination is a caller-requested producer/direct extension and how callback ownership is established.
+6. Define a missed routing leg as one failed destination attempt inside a parent call, not automatically a missed client call or employee offense.
 
 Missing or incomplete RingCentral export evidence makes the report `UNVERIFIED` and blocks the scheduled send.
+
+## V2 management layout
+
+Agency and department summaries use concise sections in this order: Phone & Queue Service, Client Follow-Up, Policy Service, Sales, Tasks & Activities, COIs & Submissions, Customer Sentiment, and Validation. Explicit hold or queue-wait values above 120 seconds appear first in Phone & Queue Service. Complete raw records remain in the Excel workbook.
 
 ## Delivery gates
 
