@@ -101,8 +101,25 @@ Live disk at drill time: `/dev/root` **59%** used (below 85% threshold).
 | --- | --- |
 | Alert policy definitions in repo | **DONE** |
 | Notification channel exists | **DONE** (Carlo email) |
-| Policies live in GCP | **PARTIAL** — disk + both downtime live; gateway crash fixed in repo |
+| Policies live in GCP | **PARTIAL** — 3/4 live (see below); gateway apply ready |
 | Proof alert fired & received | **PENDING** (`fire-hermes-infra-alert-drill.sh`) |
+
+### Live policies (2026-09-02 API read)
+
+```text
+INFRA hermes-test-01 instance down
+INFRA hermes-poc-01 root disk > 85%
+INFRA hermes-poc-01 instance down
+(missing: INFRA hermes-poc-01 hermes-gateway service failed)
+```
+
+Filter validation (reviewer):
+
+```text
+$ bash scripts/apply-hermes-gateway-crash-alert.sh
+log_filter_valid=ok
+create_failed Permission denied   # reviewer lacks monitoring.admin; Carlo can create
+```
 
 ### Gateway crash policy fix (2026-09-02)
 
