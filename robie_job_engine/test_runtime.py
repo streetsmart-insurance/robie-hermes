@@ -11,6 +11,7 @@ from .carrier_proposal import (
 )
 from .engine import JobEngine
 from .ezlynx import (
+    BoundedEzlynxPolicySetupWorker,
     BoundedEzlynxWorker,
     EzlynxDestinationVerifier,
     HermesCuaEzlynxWorker,
@@ -85,6 +86,7 @@ def build_runtime_engine(
     browser_port: Any | None = None,
     ezlynx_browser: Any | None = None,
     ezlynx_readback: Any | None = None,
+    ezlynx_policy_setup_browser: Any | None = None,
     skill_roots: tuple[str, ...] | None = None,
     submission_readback: Any | None = None,
     enforce_recording_policy: bool = True,
@@ -93,6 +95,13 @@ def build_runtime_engine(
 
     Does not open live EZLynx unless an explicit port is supplied.
     Hermes/cua-driver remains the path for non-bounded chat.
+
+    ``ezlynx_policy_setup_browser`` wires ``ezlynx.policy_setup`` onto the
+    same evidence-required pattern as reassign/move_document/apply_label.
+    It is a caller-supplied, opt-in parameter only -- passing nothing here
+    (the default for every existing caller) leaves behavior unchanged.
+    ``ezlynx.policy_setup`` is also not yet in ``BOUNDED_ENGINE_ACTIONS``, so
+    no real chat traffic reaches this path today regardless.
     """
     destination = proposal_destination
     if destination is None and current_robie_env() == TEST_ENV_NAME:
@@ -112,6 +121,11 @@ def build_runtime_engine(
         "hermes-cua": ezlynx_worker,
         "submission-audit": EzlynxSubmissionAuditWorker(),
         "session-refresh": EzlynxSessionRefreshWorker(),
+        "ezlynx-policy-setup": (
+            BoundedEzlynxPolicySetupWorker(ezlynx_policy_setup_browser)
+            if ezlynx_policy_setup_browser is not None
+            else _UnavailableWorker()
+        ),
     }
     verifiers: dict[str, Any] = {}
     if destination is not None:
@@ -124,6 +138,7 @@ def build_runtime_engine(
         verifiers["ezlynx.reassign"] = ezlynx_verifier
         verifiers["ezlynx.move_document"] = ezlynx_verifier
         verifiers["ezlynx.apply_label"] = ezlynx_verifier
+        verifiers["ezlynx.policy_setup"] = ezlynx_verifier
     if skill_roots:
         from .chat_verifiers import FilesystemSkillUpdateVerifier
 
