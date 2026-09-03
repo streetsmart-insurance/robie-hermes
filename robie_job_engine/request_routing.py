@@ -16,6 +16,7 @@ WORKER_FOR_ACTION = {
     "ezlynx.apply_label": "hermes-cua",
     "ezlynx.submission_audit": "submission-audit",
     "ezlynx.session_refresh": "session-refresh",
+    "ezlynx.policy_setup": "ezlynx-policy-setup",
     "filesystem.skill_update": "hermes-cua",
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
@@ -73,6 +74,16 @@ _MUTATION_WORDS = (
     "submit",
 )
 
+_EZLYNX_WRITE_PHRASES = (
+    "set up",
+    "setup",
+    "bind",
+    "issue a policy",
+    "write a policy",
+    "add a policy",
+    "rewrite",
+)
+
 _VAGUE = frozenset(
     {
         "do it",
@@ -128,6 +139,19 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         )
     if _is_browser_read(normalized):
         return RequestClassification("browser.read", WORKER_FOR_ACTION["browser.read"])
+    if _is_unbounded_ezlynx_write_request(normalized):
+        # An EZLynx request that intends to change something (create, submit,
+        # upload, apply, etc.) but does not match any of the specific bounded
+        # patterns above has no Worker/Verifier evidence contract available.
+        # Routing it to the free-form Hermes/cua-driver loop would let it
+        # report COMPLETE on the model's say-so alone, with nothing checking
+        # that the write actually happened (see job 6f0467db). Hold it for a
+        # human instead of letting it run unverified.
+        return RequestClassification(
+            "hermes.needs_clarification",
+            WORKER_FOR_ACTION["hermes.needs_clarification"],
+            hold_status="NEEDS_CLARIFICATION",
+        )
     if normalized in _VAGUE and attachment_count == 0:
         return RequestClassification(
             "hermes.needs_clarification",
@@ -164,6 +188,20 @@ def _is_browser_read(text: str) -> bool:
     if any(word in text for word in _MUTATION_WORDS):
         return False
     return any(phrase in text for phrase in _BROWSER_READ_PHRASES)
+
+
+def _is_unbounded_ezlynx_write_request(text: str) -> bool:
+    """An EZLynx ask that reads as a write, but isn't one of the bounded
+    patterns handled above (reassign/move_document/apply_label/submission
+    audit/policy setup-shaped asks are already routed by then). Scoped to
+    EZLynx specifically -- this is about writes to a real client system,
+    not generic chat phrasing like "create a summary"."""
+    if "ezlynx" not in text:
+        return False
+    positive = _positive_request_text(text)
+    if any(re.search(rf"\b{word}\b", positive) for word in _MUTATION_WORDS):
+        return True
+    return any(phrase in positive for phrase in _EZLYNX_WRITE_PHRASES)
 
 
 def _is_ascend_request(text: str) -> bool:
