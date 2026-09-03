@@ -16,6 +16,7 @@ WORKER_FOR_ACTION = {
     "ezlynx.apply_label": "hermes-cua",
     "ezlynx.submission_audit": "submission-audit",
     "ezlynx.session_refresh": "session-refresh",
+    "ezlynx.policy_setup": "ezlynx-policy-setup",
     "filesystem.skill_update": "hermes-cua",
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
