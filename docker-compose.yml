@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  renewal-engine:
+    build: .
+    container_name: renewal-automation-engine
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PLAYWRIGHT_HEADLESS=true
+      - DATABASE_URL=sqlite:////app/data/renewals.db
+    command: python src/main.py --daemon

@@ -1,0 +1,157 @@
+# Autonomous Daily Manual Renewal Engine for EZLynx
+
+An end-to-end autonomous insurance renewal system designed for **EZLynx** that runs on a daily schedule to:
+1. **Intake Expiring Policies**: Ingests daily reports and filters policies expiring within the **30 to 45 day** window.
+2. **Carrier Portal Automation**: Uses headless **Playwright** to log into carrier portals and download renewal proposals.
+3. **Underwriter Gmail Outreach**: Connects via **Gmail API** to request quotes from underwriters using tagged reference codes (`[RENEWAL-REQ-XXXX]`).
+4. **Follow-Up Cadence Tracking**: Enforces a strict **5 to 7 business day** follow-up cadence until terms are received or escalated.
+5. **EZLynx Discussion Notes**: Automatically logs detailed audit notes under the designated Discussion Title (e.g. `Manual Homeowners Renewal`, `Manual Commercial Auto Renewal`) for each applicant.
+6. **Quote Ingestion & Task Creation**: Parses downloaded PDF quotes for renewal premiums, uploads the documents to EZLynx, and generates review tasks for Account Managers.
+7. **Cloud & Headless Ready**: Pre-configured Docker environment (`Dockerfile` and `docker-compose.yml`) for seamless cloud hosting (GCP Cloud Run, AWS ECS, or DigitalOcean).
+
+---
+
+## 🏗 System Architecture
+
+```
+                               ┌───────────────────────────┐
+                               │   Daily Report / Intake   │
+                               │  (30-45 Days Expiration)  │
+                               └─────────────┬─────────────┘
+                                             │
+                                             ▼
+                             ┌───────────────────────────────┐
+                             │  Carrier Portal Check         │
+                             │  (Playwright Headless Chrome) │
+                             └───────┬───────────────┬───────┘
+                                     │               │
+                     Quote Retrieved │               │ Quote Not Ready / Unsupported
+                                     ▼               ▼
+                        ┌──────────────────┐   ┌───────────────────────────┐
+                        │ Parse PDF Quote  │   │ Underwriter Email Outreach│
+                        │ & Extract Limits │   │ (Gmail API with Tracking) │
+                        └────────┬─────────┘   └─────────────┬─────────────┘
+                                 │                           │
+                                 │               5-7 Day Cadence Follow-ups
+                                 │               & Inbox Reply Classification
+                                 │                           │
+                                 ▼                           ▼
+                        ┌──────────────────────────────────────────────────┐
+                        │               EZLynx Integration                 │
+                        │  • Post Audit Note to Discussion Title           │
+                        │  • Upload Proposal PDF to Applicant Documents    │
+                        │  • Create AM Renewal Presentation Task           │
+                        └──────────────────────────────────────────────────┘
+```
+
+---
+
+## 📁 Project Structure
+
+```
+renewal-automation-system/
+├── Dockerfile                   # Production container with Playwright & Cron
+├── docker-compose.yml           # Multi-container service configuration
+├── pyproject.toml               # Python package configuration & dependencies
+├── requirements.txt             # Locked dependencies
+├── .env.example                 # Template for environment variables & API keys
+├── data/
+│   ├── input_reports/           # Daily renewal reports (CSV/Excel)
+│   ├── downloads/               # Carrier quote PDFs & inbox attachments
+│   └── renewals.db              # SQLite persistence database
+├── src/
+│   ├── config.py                # Pydantic settings & application paths
+│   ├── main.py                  # CLI entrypoint for manual & daemon execution
+│   ├── database/
+│   │   ├── models.py            # SQLAlchemy ORM models (Policy, Thread, Audit, Doc)
+│   │   └── session.py           # DB engine and session manager
+│   ├── intake/
+│   │   ├── base_source.py       # Data source interface and RawRenewalItem schema
+│   │   └── report_ingestor.py   # Ingestion, 30-45d window filter, and note builder
+│   ├── ezlynx/
+│   │   ├── note_builder.py      # Standardized discussion note formatter
+│   │   ├── api_client.py        # EZLynx REST API client (Notes, Docs, Tasks)
+│   │   └── browser_adapter.py   # EZLynx Playwright UI automation fallback
+│   ├── email_outreach/
+│   │   ├── auth_setup.py        # Gmail OAuth2 & headless token management
+│   │   ├── gmail_client.py      # Gmail API sender, thread tracker, & downloader
+│   │   ├── templates.py         # Jinja2 outreach and 5-7d cadence templates
+│   │   ├── intent_classifier.py # Reply classifier (Quote, Info Needed, Decline)
+│   │   └── thread_tracker.py    # Outreach cadence & follow-up scheduler
+│   ├── portals/
+│   │   ├── base_portal.py       # Base carrier crawler interface
+│   │   └── carrier_agents.py    # Playwright crawlers (Travelers, Liberty, etc.)
+│   ├── extractor/
+│   │   └── quote_parser.py      # PDF text extractor for premiums and terms
+│   └── scheduler/
+│       └── daily_runner.py      # Master orchestrator & Rich terminal dashboard
+└── tests/
+    ├── test_intake_window.py
+    ├── test_ezlynx_note_builder.py
+    ├── test_gmail_cadence.py
+    ├── test_intent_classifier.py
+    └── test_quote_parser.py
+```
+
+---
+
+## ⚙️ Configuration & Setup
+
+### 1. Environment Variables
+Copy `.env.example` to `.env` and fill in your agency credentials:
+
+```bash
+cp .env.example .env
+```
+
+Key configuration options:
+- `RENEWAL_WINDOW_MIN_DAYS`: Default `30` (Start checking 30 days before expiration).
+- `RENEWAL_WINDOW_MAX_DAYS`: Default `45` (Start checking up to 45 days before expiration).
+- `FOLLOWUP_CADENCE_MIN_DAYS`: Default `5` (Days between underwriter follow-ups).
+- `FOLLOWUP_CADENCE_MAX_DAYS`: Default `7` (Max days before sending reminder).
+- `EZLYNX_CLIENT_ID` / `EZLYNX_CLIENT_SECRET`: EZLynx API credentials.
+- `GMAIL_BOT_EMAIL`: The designated mailbox for sending and tracking outreach.
+
+### 2. Gmail API Authorization
+To authorize the Gmail API locally:
+```bash
+python3 src/main.py --auth-gmail
+```
+This generates `token.json`. For cloud deployments without interactive browser logins, you can base64 encode `token.json` into the `GMAIL_TOKEN_BASE64` environment variable.
+
+---
+
+## 🚀 Running the Automation
+
+### Daily Manual Run
+Execute the daily pipeline for today:
+```bash
+PYTHONPATH=. python3 src/main.py --run-today
+```
+
+### Date-Specific Simulation (Test Follow-ups)
+Run for a simulated date (e.g. 7 days in the future to trigger follow-up emails):
+```bash
+PYTHONPATH=. python3 src/main.py --date 2026-09-08
+```
+
+### Daily Daemon Mode
+Run continuously as a 24-hour background daemon:
+```bash
+PYTHONPATH=. python3 src/main.py --daemon
+```
+
+### Running Automated Test Suite
+```bash
+PYTHONPATH=. pytest tests/ -v
+```
+
+---
+
+## ☁️ Cloud & Docker Deployment
+
+Build and run in headless container mode:
+```bash
+docker-compose up -d --build
+```
+This runs the daily cron scheduler inside a container equipped with headless Chromium, Playwright drivers, and persistent volume mounts for data storage.
