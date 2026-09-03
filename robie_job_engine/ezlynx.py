@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .chat_policy import forbidden_tool_request
+from .ezlynx_policy_setup import EzlynxPolicySetupPage, PolicyShellInput
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 from .models import (
     JobStatus,
@@ -30,6 +32,7 @@ EZLYNX_REQUIRED_FIELDS = {
         "destination_name",
     ),
     "ezlynx.apply_label": ("resource_id", "account_id", "label_id", "label"),
+    "ezlynx.policy_setup": ("applicant_id", "lob", "policy_number"),
 }
 
 
@@ -87,6 +90,13 @@ def _ezlynx_destination(action: str, payload: dict[str, Any]) -> dict[str, Any]:
             "document_name": payload.get("document_name"),
             "label_id": payload["label_id"],
             "label": payload["label"],
+        }
+    if action == "ezlynx.policy_setup":
+        return {
+            "resource_id": f"{payload['applicant_id']}:{payload['policy_number']}",
+            "applicant_id": payload["applicant_id"],
+            "lob": payload["lob"],
+            "policy_number": payload["policy_number"],
         }
     return {}
 
@@ -410,4 +420,103 @@ class HermesCuaEzlynxWorker:
                 "label": payload["label"],
             },
             receipt,
+        )
+
+
+class EzlynxPolicySetupBrowserPort(Protocol):
+    """Supplies a live (or fake) Playwright ``page`` for policy setup only.
+
+    Kept separate from ``EzlynxBrowserPort`` (used by reassign / move_document
+    / apply_label) because ``EzlynxPolicySetupPage`` wraps a raw Playwright
+    ``page`` object directly (an async Page Object across every line of
+    business), not the role/locator primitives the other three actions use.
+    """
+
+    def open_page(self) -> Any: ...
+
+
+class BoundedEzlynxPolicySetupWorker:
+    """Bounded worker for ``ezlynx.policy_setup``, evidence-required like the rest.
+
+    This closes the gap behind job 6f0467db (a policy-setup job that
+    completed with zero destination evidence): ``ezlynx.reassign`` /
+    ``move_document`` / ``apply_label`` already require a verified
+    destination readback before ``JobEngine`` will call them COMPLETE.
+    Policy setup never got that treatment because it still runs through the
+    free-form Hermes agent loop instead of a bounded worker. This class is
+    that missing bounded worker.
+
+    IMPORTANT: as of 2026-09-02, ``EzlynxPolicySetupPage.setup_policy_by_lob``
+    is a deliberate draft-mode stub (see its own docstring) that always
+    returns ``success=False`` / ``NEEDS_CLARIFICATION`` -- the prior author
+    intentionally refused the "legacy write path" until a real orchestrator
+    with a duplicate check, durable checkpoints, and reopen verification
+    exists. This worker does not remove or bypass that stub. Wiring it in now
+    is safe (every real call still comes back NEEDS_CLARIFICATION, same as
+    today) and means the evidence requirement is already in place for the day
+    someone finishes that real orchestrator, instead of that being a second
+    piece of work someone has to remember to add later.
+
+    Do not register ``ezlynx.policy_setup`` as reachable from real chat text
+    (in ``request_routing.classify_request``) until the orchestrator above is
+    real. Until then this worker is intentionally inert.
+    """
+
+    def __init__(self, browser: EzlynxPolicySetupBrowserPort) -> None:
+        self.browser = browser
+
+    def perform(self, job: dict[str, Any], *, idempotency_key: str) -> WorkerResult:
+        payload = dict(job["payload"])
+        action = job["action_type"]
+        try:
+            require_allowed_ezlynx_write_applicant(payload.get("applicant_id"))
+        except RuntimeError as exc:
+            return WorkerResult(
+                False, action, {}, retryable=False, error=str(exc), hold_status=JobStatus.FAILED
+            )
+        forbidden = forbidden_tool_request(payload, str(payload.get("text") or ""))
+        if forbidden:
+            return WorkerResult(False, action, {}, retryable=False, error=forbidden)
+        missing = _missing_ezlynx_fields(action, payload)
+        if missing:
+            return WorkerResult(
+                False,
+                action,
+                {},
+                retryable=False,
+                error=f"EZLynx policy setup request is missing fields: {', '.join(missing)}",
+                hold_status=JobStatus.NEEDS_CLARIFICATION,
+            )
+        shell_input = PolicyShellInput(
+            applicant_id=payload["applicant_id"],
+            lob=payload["lob"],
+            transaction_type=payload.get("transaction_type", "NBS"),
+            policy_number=payload["policy_number"],
+            effective_date=payload.get("effective_date", ""),
+            expiration_date=payload.get("expiration_date", ""),
+            lob_origination_date=payload.get("lob_origination_date", ""),
+            premium=payload.get("premium", ""),
+        )
+        page = self.browser.open_page()
+        result = asyncio.run(EzlynxPolicySetupPage(page).setup_policy_by_lob(shell_input))
+        if not result.success:
+            hold_status = (
+                JobStatus.NEEDS_CLARIFICATION
+                if result.error and "NEEDS_CLARIFICATION" in result.error
+                else JobStatus.FAILED
+            )
+            return WorkerResult(
+                False,
+                action,
+                {},
+                retryable=False,
+                error=result.error or "EZLynx policy setup did not complete",
+                hold_status=hold_status,
+            )
+        destination = _ezlynx_destination(action, payload)
+        return WorkerResult(
+            True,
+            action,
+            destination,
+            {"idempotency_key": idempotency_key, "phase_reached": result.phase_reached},
         )
