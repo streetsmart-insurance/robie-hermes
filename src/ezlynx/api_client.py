@@ -556,6 +556,11 @@ class EZLynxApiClient:
 
         return results
 
+    def search_applicant(self, query: str) -> Optional[Dict[str, Any]]:
+        """Searches for a single applicant matching query (ID, name, policy number)."""
+        res = self.search_applicants(query)
+        return res[0] if res else None
+
     def get_applicant_policies(
         self,
         applicant_id: str,
