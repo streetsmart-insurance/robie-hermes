@@ -236,21 +236,26 @@ class DailyRenewalOrchestrator:
             init_sent = self.cadence_mgr.process_pending_outreach(db, ref_date)
             results["initial_emails_sent"] = init_sent
 
-            # Step 4: 5-7 Day Follow-Up Cadence
+            # Step 4: 5-7 Day Follow-Up Cadence (quiet checks — no autodial)
             followups = self.cadence_mgr.process_due_followups(db, ref_date)
             results["followups_sent"] = followups
 
-            # Step 4b: After 2 unsuccessful email/portal attempts, one carrier Robie Call.
-            # Stops when the renewal is in hand. Never auto-dials the client.
+            # After Step 4's existing 5–7d follow-up budget (2 quiet checks)
+            # with no renewal in hand: exactly one carrier Robie Call via the
+            # existing CarrierVoiceClient. Not a parallel stack. Never a
+            # default client-call Step 5c. Step 5b below stays CSR
+            # "Email Robie to Call" only. Step 6 stays non-autodial.
             try:
                 from src.voice.renewal_cadence import process_carrier_voice_cadence
 
-                cadence_voice = process_carrier_voice_cadence(db, dry_run=False)
+                cadence_voice = process_carrier_voice_cadence(
+                    db, dry_run=False, reference_date=ref_date
+                )
                 results["carrier_voice_cadence"] = cadence_voice
                 dispatched = cadence_voice.get("dispatched") or []
                 if dispatched:
                     logger.info(
-                        "Carrier voice cadence: %s outcome(s) after 2-miss budget.",
+                        "Carrier voice cadence: %s outcome(s) after 2 quiet 5-7d checks.",
                         len(dispatched),
                     )
             except Exception as e:
@@ -269,7 +274,7 @@ class DailyRenewalOrchestrator:
             except Exception as e:
                 logger.warning(f"Could not process inbound carrier call commands: {e}")
 
-            # Step 6: 20-25 Day CSR Escalation Check
+            # Step 6: 20-25 Day CSR Escalation Check (non-autodial)
             # If no renewal quote received by day 20-25, assign task to CSR in existing discussion title
             pending_escalation = db.query(PolicyRenewal).filter(
                 PolicyRenewal.status.in_([

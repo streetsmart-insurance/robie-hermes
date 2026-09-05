@@ -19,10 +19,11 @@ from src.database.models import (
 )
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
 from src.voice.renewal_cadence import (
-    CARRIER_VOICE_ATTEMPT_THRESHOLD,
+    QUIET_FOLLOWUP_BUDGET,
     RenewalCarrierVoiceCadence,
     carrier_voice_already_placed,
-    count_unsuccessful_channel_attempts,
+    count_quiet_followup_checks,
+    in_late_csr_escalation_window,
     renewal_already_obtained,
 )
 
@@ -119,7 +120,8 @@ def test_cadence_does_not_fire_when_uw_reply_or_pdf_already_filed(test_db, proce
     assert result["status"] == "SKIPPED_RENEWAL_OBTAINED"
 
 
-def test_cadence_fires_once_after_two_misses(test_db, processed_store):
+def test_cadence_does_not_fire_on_same_day_portal_and_initial_email(test_db, processed_store):
+    """Steps 2–3 are not the 5–7d follow-up budget. No autodial that day."""
     policy = _policy()
     test_db.add(policy)
     test_db.commit()
@@ -128,7 +130,29 @@ def test_cadence_fires_once_after_two_misses(test_db, processed_store):
     test_db.commit()
     test_db.refresh(policy)
 
-    assert count_unsuccessful_channel_attempts(policy) == CARRIER_VOICE_ATTEMPT_THRESHOLD
+    assert count_quiet_followup_checks(policy) == 0
+    mock_voice = MagicMock()
+    cadence = RenewalCarrierVoiceCadence(
+        ezlynx_client=MagicMock(),
+        voice_client=mock_voice,
+        processed_store=processed_store,
+    )
+    result = cadence.process_policy(policy, db=test_db, dry_run=True)
+    assert result["status"] == "SKIPPED_UNDER_BUDGET"
+    mock_voice.dispatch_call.assert_not_called()
+
+
+def test_cadence_fires_once_after_two_quiet_followups(test_db, processed_store):
+    policy = _policy()
+    test_db.add(policy)
+    test_db.commit()
+    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT, "Emailed UW")
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
+    test_db.commit()
+    test_db.refresh(policy)
+
+    assert count_quiet_followup_checks(policy) == QUIET_FOLLOWUP_BUDGET
 
     mock_voice = MagicMock()
     mock_voice.dispatch_call.return_value = {
@@ -148,8 +172,12 @@ def test_cadence_fires_once_after_two_misses(test_db, processed_store):
         hydrator=mock_hydrator,
         processed_store=processed_store,
     )
-    first = cadence.process_policy(policy, db=test_db, dry_run=True)
-    second = cadence.process_policy(policy, db=test_db, dry_run=True)
+    first = cadence.process_policy(
+        policy, db=test_db, dry_run=True, reference_date=date(2026, 9, 5)
+    )
+    second = cadence.process_policy(
+        policy, db=test_db, dry_run=True, reference_date=date(2026, 9, 5)
+    )
 
     assert first["status"] == "DISPATCHED_SIMULATED"
     assert first["call_id"] == "sim_carrier_001"
@@ -171,7 +199,7 @@ def test_cadence_skips_under_two_attempts(test_db, processed_store):
     policy = _policy()
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT, "Emailed UW")
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
     test_db.commit()
     test_db.refresh(policy)
 
@@ -191,8 +219,8 @@ def test_cadence_posts_note_and_skips_when_no_carrier_phone(test_db, processed_s
     policy = _policy(carrier_name="Unknown Boutique MGA With No Phone")
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT)
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT)
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
     test_db.commit()
     test_db.refresh(policy)
 
@@ -218,7 +246,7 @@ def test_cadence_posts_note_and_skips_when_no_carrier_phone(test_db, processed_s
     assert "Robie was here" in note
 
 
-def test_cadence_does_not_count_successful_portal_quote_as_a_miss():
+def test_cadence_does_not_count_portal_or_initial_email_as_quiet_checks():
     policy = _policy()
     policy.notes = [
         AuditNoteLog(
@@ -227,9 +255,16 @@ def test_cadence_does_not_count_successful_portal_quote_as_a_miss():
             discussion_title="t",
             action_type=ActionType.PORTAL_CHECK,
             note_text="Status: ✅ RENEWAL QUOTE RETRIEVED",
-        )
+        ),
+        AuditNoteLog(
+            policy_id=1,
+            applicant_id="1",
+            discussion_title="t",
+            action_type=ActionType.INITIAL_EMAIL_SENT,
+            note_text="Emailed UW",
+        ),
     ]
-    assert count_unsuccessful_channel_attempts(policy) == 0
+    assert count_quiet_followup_checks(policy) == 0
     assert carrier_voice_already_placed(policy) is False
 
 
@@ -243,8 +278,51 @@ def test_cadence_counts_thread_followups_when_notes_missing():
             recipient_email="uw@example.com",
             subject_line="test",
             initial_sent_at=datetime(2026, 9, 1),
-            followup_count=1,
+            followup_count=2,
             status=ThreadStatus.ACTIVE,
         )
     ]
-    assert count_unsuccessful_channel_attempts(policy) == 2
+    assert count_quiet_followup_checks(policy) == 2
+
+
+def test_cadence_skips_escalated_manual_non_autodial(test_db, processed_store):
+    policy = _policy(status=RenewalStatus.ESCALATED_MANUAL)
+    test_db.add(policy)
+    test_db.commit()
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
+    test_db.commit()
+    test_db.refresh(policy)
+
+    mock_voice = MagicMock()
+    cadence = RenewalCarrierVoiceCadence(
+        ezlynx_client=MagicMock(),
+        voice_client=mock_voice,
+        processed_store=processed_store,
+    )
+    result = cadence.process_policy(policy, db=test_db, dry_run=True)
+    assert result["status"] == "SKIPPED_NOT_WAITING"
+    mock_voice.dispatch_call.assert_not_called()
+
+
+def test_cadence_skips_late_25d_csr_window(test_db, processed_store):
+    policy = _policy(expiration_date=date(2026, 9, 5) + timedelta(days=22))
+    test_db.add(policy)
+    test_db.commit()
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
+    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
+    test_db.commit()
+    test_db.refresh(policy)
+
+    assert in_late_csr_escalation_window(policy, date(2026, 9, 5)) is True
+    mock_voice = MagicMock()
+    cadence = RenewalCarrierVoiceCadence(
+        ezlynx_client=MagicMock(),
+        voice_client=mock_voice,
+        processed_store=processed_store,
+    )
+    result = cadence.process_policy(
+        policy, db=test_db, dry_run=True, reference_date=date(2026, 9, 5)
+    )
+    assert result["status"] == "SKIPPED_LATE_CSR_ESCALATION"
+    mock_voice.dispatch_call.assert_not_called()

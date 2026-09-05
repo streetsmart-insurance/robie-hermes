@@ -183,7 +183,7 @@ class EZLynxNoteBuilder:
             f"Policy: #{policy.policy_number} ({lob} - {cname})",
             "",
             "🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]",
-            f"Email/portal follow-up budget exhausted ({attempts} unsuccessful checks). "
+            f"5–7d follow-up budget exhausted ({attempts} quiet checks). "
             f"Robie placed one outbound carrier Robie Call to {cname} at {phone}.",
             "Call type: carrier",
             f"Call ID: {call_id or 'n/a'}",
@@ -203,8 +203,9 @@ class EZLynxNoteBuilder:
             f"Policy: #{policy.policy_number} ({lob} - {cname})",
             "",
             "⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]",
-            "Two email/portal attempts received no renewal. Robie would place one "
-            "carrier Robie Call, but no E.164 underwriter/carrier phone is on file. "
+            "The 5–7d follow-up budget (2 quiet checks) received no renewal. "
+            "Robie would place one carrier Robie Call, but no E.164 "
+            "underwriter/carrier phone is on file. "
             "Numbers are never invented.",
             "",
             'Reply with "Phone: (xxx) xxx-xxxx" to trigger the call.',

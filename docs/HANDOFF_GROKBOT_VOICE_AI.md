@@ -152,13 +152,15 @@ Writing the phrase in the discussion title or note body works the same as applyi
 - Assigned CSR for EZLynx notes/tasks remains Carlo Ferrara. Caller ID `+17322986745`. No Bland `max_duration`.
 - Creating the `Robie client outreach` org label in the live EZLynx UI is Carlo / Admin’s job; this repo only recognizes the name (and close variants / `robie cancellation` alias).
 
-#### Manual renewal WF — one carrier Robie Call after two misses (Carlo 2026-09-05)
-Daily pipeline (`src/voice/renewal_cadence.py`, hooked from `DailyRenewalOrchestrator` after email follow-ups):
-1. Email or portal first (existing channels).
-2. After **two** unsuccessful email/portal attempts with no renewal in hand, enqueue **exactly one** outbound Robie Call (`call_type=carrier`) to the carrier/underwriter. Same style as today’s email `Call Carrier:` / Robie Call path. Reuses `CarrierVoiceClient` — no second Bland stack.
+#### Manual renewal WF — one carrier Robie Call after two quiet 5–7d checks (Carlo 2026-09-05)
+Live insertion is `src/scheduler/daily_runner.py` `DailyRenewalOrchestrator.run_daily_cycle` — after Step 4 (`process_due_followups`), before Step 5b. Helper: `src/voice/renewal_cadence.py`. **Not** a parallel cron, orchestrator, or Bland stack.
+1. Steps 2–4 (portal + UW email + 5–7d follow-up) stay **non-autodial**.
+2. After the existing 5–7d follow-up budget (**2 quiet checks**) with no renewal in hand, enqueue **exactly one** outbound Robie Call (`call_type=carrier`) via existing `CarrierVoiceClient`. Same style as today’s email `Call Carrier:` path.
 3. If the renewal is obtained (renewal PDF filed, UW reply filer matched, or pipeline status says we have the dec/offer) → **STOP**. No more carrier calls. Do **not** auto-dial the client.
+- Step 5b (`email_call_dispatcher.process_inbound_call_requests`) stays CSR **Email Robie to Call** only. **No default client-call Step 5c.**
+- Step 6 (20–25d CSR escalation, “contact underwriter directly”) stays **non-autodial**.
+- Client outbound is label-driven `client_outreach` only.
 - Guards: skip if a carrier voice call was already placed for this policy/term; never invent a carrier phone; if no E.164 underwriter/carrier number, post an EZLynx note (`Robie was here`) and skip the dial.
-- Client outreach is **not** part of this sprinkle.
 - Production cron `0 9 * * *` on hermes-poc-01 is unchanged.
 
 ---

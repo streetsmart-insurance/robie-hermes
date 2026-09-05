@@ -1,14 +1,24 @@
-"""Manual-renewal carrier voice sprinkle after two unsuccessful channel attempts.
+"""Carrier Robie Call sprinkle on the live daily-runner stack.
+
+Insertion point is ``DailyRenewalOrchestrator.run_daily_cycle`` in
+``src/scheduler/daily_runner.py`` — after Step 4 (``process_due_followups``),
+before Step 5b (CSR ``Email Robie to Call``) and Step 6 (20–25d CSR
+escalation). Not a parallel cron, orchestrator, or Bland stack.
 
 Carlo lock 2026-09-05:
-1. Email or portal first (existing channels).
-2. After two unsuccessful email/portal attempts with no renewal in hand,
-   place exactly one outbound Robie Call (``call_type=carrier``).
+1. Steps 2–4 (portal + UW email + 5–7d follow-up) stay non-autodial.
+2. After the existing 5–7d follow-up budget (**2 quiet checks**) with no
+   renewal in hand, place exactly one outbound Robie Call
+   (``call_type=carrier``) via existing ``CarrierVoiceClient``.
 3. If the renewal is obtained (PDF filed, UW reply matched, or pipeline
    status says we have the dec/offer) → STOP. No more carrier calls.
    Do not auto-dial the client. Never fire ``renewal_reachout`` or any
    ``client_outreach`` pathway from this pipeline — those require an
    explicit CSR label/note.
+4. Step 5b stays CSR inbound email-to-call only. No default client-call
+   Step 5c.
+5. Step 6 (20–25d CSR escalation, "contact underwriter directly") stays
+   non-autodial.
 
 Never invent a carrier phone. If no E.164 underwriter/carrier number is on
 file, post an EZLynx note and skip the dial.
@@ -17,8 +27,10 @@ file, post an EZLynx note and skip the dial.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Any, Dict, List, Optional
 
+from src.config import settings
 from src.database.models import (
     ActionType,
     AuditNoteLog,
@@ -35,7 +47,10 @@ from src.voice.voice_client import CarrierVoiceClient
 
 logger = logging.getLogger("renewal_carrier_voice_cadence")
 
-CARRIER_VOICE_ATTEMPT_THRESHOLD = 2
+# Existing Step 4 5–7d follow-up budget. Initial UW email / first-day portal
+# evaluation are Steps 2–3 and do not count.
+QUIET_FOLLOWUP_BUDGET = 2
+CARRIER_VOICE_ATTEMPT_THRESHOLD = QUIET_FOLLOWUP_BUDGET
 
 # Pipeline statuses that mean we have (or no longer need) a renewal offer.
 RENEWAL_IN_HAND_STATUSES = frozenset(
@@ -52,25 +67,12 @@ RENEWAL_IN_HAND_STATUSES = frozenset(
     }
 )
 
-# Still waiting — eligible for the one carrier Robie Call after 2 misses.
+# Only policies still in the live email follow-up stack. Step 6
+# ESCALATED_MANUAL is intentionally excluded (non-autodial).
 ELIGIBLE_WAITING_STATUSES = frozenset(
     {
-        RenewalStatus.PENDING_EVALUATION,
-        RenewalStatus.CHECKING_PORTAL,
-        RenewalStatus.PORTAL_UNAVAILABLE,
-        RenewalStatus.OUTREACH_PENDING,
         RenewalStatus.EMAIL_SENT_AWAITING_REPLY,
         RenewalStatus.FOLLOWUP_SENT,
-        RenewalStatus.ESCALATED_MANUAL,
-    }
-)
-
-_CHANNEL_ATTEMPT_ACTIONS = frozenset(
-    {
-        ActionType.PORTAL_CHECK,
-        ActionType.INITIAL_EMAIL_SENT,
-        ActionType.FOLLOWUP_EMAIL_SENT,
-        ActionType.OUTREACH_SENT,
     }
 )
 
@@ -104,28 +106,42 @@ def renewal_already_obtained(policy: PolicyRenewal) -> bool:
     return False
 
 
-def count_unsuccessful_channel_attempts(policy: PolicyRenewal) -> int:
-    """Count prior email + unsuccessful portal attempts for this policy/term."""
-    count = 0
+def count_quiet_followup_checks(policy: PolicyRenewal) -> int:
+    """Count completed Step 4 5–7d quiet follow-ups (email).
+
+    First-day portal evaluation and the initial UW email are Steps 2–3 and
+    do **not** count. Voice fires only after this budget is exhausted.
+    """
+    followup_notes = 0
     for note in getattr(policy, "notes", None) or []:
-        action = getattr(note, "action_type", None)
-        if action not in _CHANNEL_ATTEMPT_ACTIONS:
-            continue
-        text = str(getattr(note, "note_text", "") or "").upper()
-        if action == ActionType.PORTAL_CHECK and "RENEWAL QUOTE RETRIEVED" in text:
-            continue
-        count += 1
-    if count:
-        return count
-    # Legacy rows that have a thread but no audit notes yet.
+        if getattr(note, "action_type", None) == ActionType.FOLLOWUP_EMAIL_SENT:
+            followup_notes += 1
+    thread_followups = 0
     for thread in getattr(policy, "threads", None) or []:
-        sent = 0
-        if getattr(thread, "initial_sent_at", None):
-            sent += 1
-        sent += int(getattr(thread, "followup_count", 0) or 0)
-        if sent:
-            return sent
-    return 0
+        thread_followups = max(
+            thread_followups, int(getattr(thread, "followup_count", 0) or 0)
+        )
+    return max(followup_notes, thread_followups)
+
+
+def count_unsuccessful_channel_attempts(policy: PolicyRenewal) -> int:
+    """Alias for the Step 4 quiet-follow-up budget (not portal + initial email)."""
+    return count_quiet_followup_checks(policy)
+
+
+def in_late_csr_escalation_window(
+    policy: PolicyRenewal,
+    reference_date: Optional[date] = None,
+) -> bool:
+    """True for Step 6 (20–25d) — must stay non-autodial."""
+    if getattr(policy, "status", None) == RenewalStatus.ESCALATED_MANUAL:
+        return True
+    expiration = getattr(policy, "expiration_date", None)
+    if expiration is None:
+        return False
+    ref = reference_date or date.today()
+    threshold = int(getattr(settings, "csr_escalation_threshold_days", 25) or 25)
+    return (expiration - ref).days <= threshold
 
 
 def carrier_voice_already_placed(
@@ -192,8 +208,9 @@ class RenewalCarrierVoiceCadence:
         *,
         db=None,
         dry_run: bool = False,
+        reference_date: Optional[date] = None,
     ) -> Dict[str, Any]:
-        """Evaluate one policy. Never dials the client."""
+        """Evaluate one policy. Never dials the client. Never autodials Step 6."""
         identity = cadence_voice_identity(policy)
         base = {
             "policy_number": policy.policy_number,
@@ -214,6 +231,9 @@ class RenewalCarrierVoiceCadence:
         if status not in ELIGIBLE_WAITING_STATUSES:
             return {**base, "status": "SKIPPED_NOT_WAITING"}
 
+        if in_late_csr_escalation_window(policy, reference_date):
+            return {**base, "status": "SKIPPED_LATE_CSR_ESCALATION"}
+
         if carrier_voice_already_placed(policy, self.processed_store):
             logger.info(
                 "Carrier voice cadence skip %s: call already placed for this term.",
@@ -221,8 +241,8 @@ class RenewalCarrierVoiceCadence:
             )
             return {**base, "status": "SKIPPED_ALREADY_CALLED"}
 
-        attempts = count_unsuccessful_channel_attempts(policy)
-        if attempts < CARRIER_VOICE_ATTEMPT_THRESHOLD:
+        attempts = count_quiet_followup_checks(policy)
+        if attempts < QUIET_FOLLOWUP_BUDGET:
             return {
                 **base,
                 "status": "SKIPPED_UNDER_BUDGET",
@@ -297,8 +317,9 @@ class RenewalCarrierVoiceCadence:
         *,
         dry_run: bool = False,
         policies: Optional[List[PolicyRenewal]] = None,
+        reference_date: Optional[date] = None,
     ) -> Dict[str, Any]:
-        """Scan waiting renewals and enqueue at most one carrier call each."""
+        """Scan the live email follow-up stack; at most one carrier call each."""
         rows = policies
         if rows is None:
             rows = (
@@ -309,7 +330,9 @@ class RenewalCarrierVoiceCadence:
         dispatched: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
         for policy in rows:
-            outcome = self.process_policy(policy, db=db, dry_run=dry_run)
+            outcome = self.process_policy(
+                policy, db=db, dry_run=dry_run, reference_date=reference_date
+            )
             status = outcome.get("status") or ""
             if status.startswith("SKIPPED"):
                 skipped.append(outcome)
@@ -366,7 +389,10 @@ def process_carrier_voice_cadence(
     *,
     dry_run: bool = False,
     cadence: Optional[RenewalCarrierVoiceCadence] = None,
+    reference_date: Optional[date] = None,
 ) -> Dict[str, Any]:
-    """Daily-pipeline entry: one carrier Robie Call after two misses."""
+    """daily_runner Step-4 insertion: one carrier Robie Call after 2 quiet checks."""
     engine = cadence or RenewalCarrierVoiceCadence()
-    return engine.process_due_policies(db, dry_run=dry_run)
+    return engine.process_due_policies(
+        db, dry_run=dry_run, reference_date=reference_date
+    )

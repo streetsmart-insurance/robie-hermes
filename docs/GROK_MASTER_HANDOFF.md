@@ -198,7 +198,7 @@ PYTHONPATH=. .venv/bin/python3 -m src.voice.webhook_server --port 8088
 ```
 
 ### Manual renewal carrier voice cadence (Carlo 2026-09-05)
-Email or portal first. After **two** unsuccessful channel attempts with no renewal in hand, the daily pipeline places **exactly one** outbound carrier Robie Call (`src/voice/renewal_cadence.py`). Stops when a renewal PDF / UW reply / in-hand status is present. Never auto-dials the client. Never invents a carrier phone. Sacred cron `0 9 * * *` on hermes-poc-01 is unchanged.
+Insertion is `src/scheduler/daily_runner.py` after Step 4 (`process_due_followups`) — not a parallel stack. Steps 2–4 stay non-autodial. After the existing 5–7d follow-up budget (**2 quiet checks**) with no renewal in hand, place **exactly one** carrier Robie Call via existing `CarrierVoiceClient`. Stops when a renewal PDF / UW reply / in-hand status is present. Never auto-dials the client. No default client-call Step 5c. Step 5b stays CSR “Email Robie to Call”. Step 6 (20–25d, “contact underwriter directly”) stays non-autodial. Never invents a carrier phone. Sacred cron `0 9 * * *` on hermes-poc-01 is unchanged.
 
 ### Running Test Suite:
 ```bash
