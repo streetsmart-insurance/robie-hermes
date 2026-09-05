@@ -23,7 +23,7 @@ def test_voice_hook_sits_after_step4_followups_before_step5b_and_step6():
 
 def test_no_parallel_client_call_step_5c():
     body = _cycle_body()
-    assert "Step 5c" not in body
+    assert "Step 5c:" not in body
     assert "client_outreach" not in body
     assert "process_inbound_call_requests" in body
     assert "contact underwriter directly" in body

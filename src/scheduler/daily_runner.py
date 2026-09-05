@@ -243,7 +243,7 @@ class DailyRenewalOrchestrator:
             # After Step 4's existing 5–7d follow-up budget (2 quiet checks)
             # with no renewal in hand: exactly one carrier Robie Call via the
             # existing CarrierVoiceClient. Not a parallel stack. Never a
-            # default client-call Step 5c. Step 5b below stays CSR
+            # default client autodial. Step 5b below stays CSR
             # "Email Robie to Call" only. Step 6 stays non-autodial.
             try:
                 from src.voice.renewal_cadence import process_carrier_voice_cadence
