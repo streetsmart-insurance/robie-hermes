@@ -25,13 +25,13 @@ class CarrierVoiceClient:
     ):
         self.provider = provider.lower()
         self.api_key = api_key or os.getenv("VOICE_AI_API_KEY") or getattr(settings, "voice_ai_api_key", None) or self._fetch_secret_key()
-        self.from_phone = from_phone_number or os.getenv("VOICE_CALLER_ID") or getattr(settings, "voice_caller_id", "+17324628343")
+        self.from_phone = from_phone_number or os.getenv("VOICE_CALLER_ID") or getattr(settings, "voice_caller_id", "+17322986745")
         self.encrypted_key = (
             encrypted_key
             or os.getenv("VOICE_ENCRYPTED_KEY")
             or os.getenv("BLAND_ENCRYPTED_KEY")
             or getattr(settings, "voice_encrypted_key", None)
-            or self._fetch_encrypted_key()
+            or (self._fetch_encrypted_key() if not self.api_key else None)
         )
 
     @staticmethod
@@ -52,7 +52,7 @@ class CarrierVoiceClient:
         except Exception:
             return None
 
-    def build_call_prompt(self, dossier: CallingDossier) -> str:
+    def build_call_prompt(self, dossier: CallingDossier, custom_instructions: Optional[str] = None) -> str:
         """Constructs conversational instructions for the Voice AI model."""
         agency_code_clause = (
             f"Our agency producer code with your company is {dossier.agency_code}."
@@ -64,9 +64,10 @@ class CarrierVoiceClient:
         if dossier.ivr_instructions:
             ivr_clause = f"\nPhone menu / IVR guidance: {dossier.ivr_instructions}"
 
+        ci = custom_instructions or dossier.custom_instructions
         custom_instructions_clause = ""
-        if dossier.custom_instructions:
-            custom_instructions_clause = f"\nSpecific CSR instructions to convey: {dossier.custom_instructions}"
+        if ci:
+            custom_instructions_clause = f"\nSpecific CSR instructions to convey: {ci}"
 
         prompt = f"""You are Robie, an autonomous operations and renewal specialist calling from StreetSmart Insurance.
 

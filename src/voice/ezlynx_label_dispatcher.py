@@ -322,19 +322,69 @@ class EZLynxLabelCallDispatcher:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Scan EZLynx for 'robie call' labeled notes and dispatch calls.")
-    parser.add_argument("--applicant-id", type=str, help="Specific applicant ID to scan")
-    parser.add_argument("--dry-run", action="store_true", help="Simulate call dispatch without hitting Bland AI")
+    parser = argparse.ArgumentParser(description="Scan EZLynx for 'Robie Call' labeled notes and dispatch calls.")
+    parser.add_argument("--applicant-id", type=str, help="Specific applicant ID to scan in EZLynx")
+    parser.add_argument("--test-note", type=str, help="Test raw note text directly from terminal")
+    parser.add_argument("--phone", type=str, help="Override phone number for test calls (e.g., cell number)")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate call dispatch without hitting Bland AI ($0 cost)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     dispatcher = EZLynxLabelCallDispatcher()
-    if args.applicant_id:
+
+    if args.test_note:
+        print("\n=== TESTING 'Robie Call' NOTE PARSING & DISPATCH ===")
+        parsed = parse_call_note_instructions(args.test_note)
+        print("1. Parsed Input:")
+        for k, v in parsed.items():
+            print(f"   {k}: {v}")
+
+        if not parsed["is_robie_call"]:
+            print("\n❌ Note did not trigger 'Robie Call'. Ensure note includes 'Robie Call'.")
+            return
+
+        carrier = parsed["target_name"] or "The Hartford"
+        phone = args.phone or parsed["phone_number"] or lookup_known_carrier_phone(carrier)
+        pol = parsed["policy_number"] or "PWC1239278"
+        instructions = parsed["instructions"] or "Inquire regarding renewal quote status."
+
+        print(f"\n2. Resolved Carrier: {carrier}")
+        print(f"3. Resolved Phone: {phone} (Source: {'--phone override' if args.phone else 'Directory/Note'})")
+        print(f"4. Associated Policy: {pol}")
+
+        if not phone:
+            print("\n⚠️ No phone number resolved. In production, Robie posts a clarification note to EZLynx.")
+            return
+
+        dossier = CallingDossier(
+            policy_number=pol,
+            insured_name="Test Insured LLC",
+            carrier_name=carrier,
+            carrier_phone=phone,
+            line_of_business="Commercial Lines",
+            applicant_id=args.applicant_id or "999999",
+            custom_instructions=instructions,
+        )
+
+        prompt = dispatcher.voice.build_call_prompt(
+            dossier=dossier,
+            custom_instructions=f"SPECIFIC CSR INSTRUCTIONS: {instructions}",
+        )
+        print("\n5. Generated Voice Prompt:")
+        print(f"   First Sentence: {dossier.carrier_name} Commercial Underwriting, this is Robie from StreetSmart Insurance calling regarding policy #{pol}.")
+        print(f"   Objective: {instructions}")
+
+        print(f"\n6. Dispatching Call ({'DRY RUN - SIMULATED' if args.dry_run else 'LIVE CALL'})...")
+        res = dispatcher.voice.dispatch_call(dossier=dossier, dry_run=args.dry_run)
+        print("   Result:", res)
+        print("\n✅ Test completed successfully.")
+
+    elif args.applicant_id:
         res = dispatcher.process_applicant_notes_for_calls(args.applicant_id, dry_run=args.dry_run)
         print(f"Processed {len(res)} calls for applicant {args.applicant_id}: {res}")
     else:
-        print("Please provide --applicant-id to scan.")
+        print("Please provide --applicant-id or --test-note to run.")
 
 
 if __name__ == "__main__":

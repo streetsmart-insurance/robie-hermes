@@ -168,7 +168,11 @@ class SecretsManager:
         seen = set()
         projects = [x for x in projects_to_try if not (x in seen or seen.add(x))]
 
-        client = secretmanager.SecretManagerServiceClient()
+        try:
+            client = secretmanager.SecretManagerServiceClient()
+        except Exception as e:
+            logger.debug(f"Failed to initialize GCP Secret Manager client: {e}")
+            return None
         svc_norm = service_name.lower().replace(" ", "").replace("-", "").replace("_", "")
         svc_snake = service_name.lower().replace(" ", "_").replace("-", "_")
         svc_kebab = service_name.lower().replace(" ", "-").replace("_", "-")
@@ -204,7 +208,11 @@ class SecretsManager:
                             if line.lower().startswith(f"{fld_norm}:"):
                                 return line.split(":", 1)[1].strip()
                     return raw_val
-                except Exception:
+                except Exception as e:
+                    err_str = str(e)
+                    if "Reauthentication is needed" in err_str or "RefreshError" in err_str or "invalid_grant" in err_str or "Unauthenticated" in err_str:
+                        logger.debug(f"GCP authentication unavailable ({e}); aborting GCP secret lookup.")
+                        return None
                     # If latest fails, inspect enabled versions
                     try:
                         parent = f"projects/{proj}/secrets/{sec_id}"
@@ -217,8 +225,10 @@ class SecretsManager:
                                         if line.lower().startswith(f"{fld_norm}:"):
                                             return line.split(":", 1)[1].strip()
                                 return raw_val
-                    except Exception:
-                        pass
+                    except Exception as inner_e:
+                        inner_err = str(inner_e)
+                        if "Reauthentication is needed" in inner_err or "RefreshError" in inner_err or "invalid_grant" in inner_err:
+                            return None
         return None
 
     def set_secret(self, secret_id: str, secret_value: str, project_id: str = "workspace-inbox-tracker") -> bool:
