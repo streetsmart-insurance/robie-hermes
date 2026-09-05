@@ -213,17 +213,57 @@ def test_extract_client_first_name_commercial_uses_contact_not_llc_token():
     ) == "Luis"
 
 
+def test_extract_client_first_name_trusts_classic_firstname_even_if_in_business_name():
+    """Live hermes-poc-01 2026-09-05: Classic FirstName is the spoken name.
+
+    Marek PKS (84705043): FirstName=Marek, BusinessName starts with Marek.
+    Green Lion (21587333): FirstName=Anthony. Buster (26356199): FirstName=Buster.
+    """
+    assert (
+        extract_client_first_name(
+            {
+                "ApplicantType": "Commercial",
+                "FirstName": "Marek",
+                "LastName": "PKS",
+                "BusinessName": "Marek PKS Transportation Inc",
+            },
+            "Marek PKS Transportation Inc",
+        )
+        == "Marek"
+    )
+    assert (
+        extract_client_first_name(
+            {
+                "ApplicantType": "Commercial",
+                "FirstName": "Anthony",
+                "BusinessName": GREEN_LION_INSURED,
+            },
+            GREEN_LION_INSURED,
+        )
+        == "Anthony"
+    )
+    assert extract_client_first_name(BUSTER_CLASSIC_APPLICANT, "Buster Brown") == "Buster"
+    assert extract_client_first_name({"FirstName": "Buster"}, "Buster Brown") == "Buster"
+
+
 def test_extract_client_first_name_commercial_llc_without_contact_is_generic():
-    """Do not greet 'Hi Green' from Green Lion Lawn Care LLC."""
+    """Do not greet 'Hi Green' from Green Lion Lawn Care LLC when FirstName is missing."""
     assert extract_client_first_name(GREEN_LION_NO_CONTACT, GREEN_LION_INSURED) is None
     assert extract_client_first_name({}, GREEN_LION_INSURED) is None
-    assert extract_client_first_name(MAREK_PKS_NO_CONTACT, "Marek PKS") is None
-    # FirstName that is only the LLC's first token is rejected.
+    assert extract_client_first_name(MAREK_PKS_NO_CONTACT, "Marek PKS Transportation Inc") is None
     assert extract_client_first_name(
         {
             "ApplicantType": "Commercial",
             "BusinessName": GREEN_LION_INSURED,
-            "FirstName": "Green",
+            "FirstName": "",
+        },
+        GREEN_LION_INSURED,
+    ) is None
+    assert extract_client_first_name(
+        {
+            "ApplicantType": "Commercial",
+            "BusinessName": GREEN_LION_INSURED,
+            "FirstName": "n/a",
         },
         GREEN_LION_INSURED,
     ) is None

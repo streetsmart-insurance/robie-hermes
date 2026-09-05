@@ -159,6 +159,20 @@ _BUSINESS_NAME_RE = re.compile(
     r"services|enterprises|associates|holdings)\b",
     re.IGNORECASE,
 )
+# Classic FirstName placeholders — not a real person name (hermes live verify).
+_PLACEHOLDER_FIRST_NAMES = frozenset(
+    {
+        "n/a",
+        "na",
+        "n.a",
+        "n.a.",
+        "none",
+        "null",
+        "-",
+        "--",
+        "unknown",
+    }
+)
 
 
 def normalize_call_type(raw: Optional[str]) -> str:
@@ -380,18 +394,25 @@ def client_account_context_name(
     return None
 
 
+def _is_placeholder_first_name(value: str) -> bool:
+    token = " ".join(value.split()).strip().lower().rstrip(".")
+    return token in _PLACEHOLDER_FIRST_NAMES
+
+
 def _spoken_first_token(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     cleaned = " ".join(value.split())
     if not cleaned or "@" in cleaned:
         return None
+    if _is_placeholder_first_name(cleaned):
+        return None
     if _looks_like_business_name(cleaned):
         return None
     token = cleaned.split()[0].strip(".,")
-    if token and not _looks_like_business_name(token):
-        return token
-    return None
+    if not token or _is_placeholder_first_name(token) or _looks_like_business_name(token):
+        return None
+    return token
 
 
 def _business_name_from_sources(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -491,17 +512,17 @@ def _iter_person_dicts(mapping: Optional[Dict[str, Any]], depth: int = 0):
                     yield from _iter_person_dicts(row, depth + 1)
 
 
-def _first_name_from_person_dict(
-    mapping: Dict[str, Any],
-    *rejected_business_names: Optional[str],
-) -> Optional[str]:
+def _first_name_from_person_dict(mapping: Dict[str, Any]) -> Optional[str]:
+    """Trust an explicit person FirstName field. Do not reject because it
+    matches the first word of BusinessName (Marek / Marek PKS Transportation Inc).
+    """
     for key in _COMMERCIAL_FIRST_NAME_KEYS:
         token = _spoken_first_token(mapping.get(key))
-        if token and not _is_llc_first_token(token, *rejected_business_names):
+        if token:
             return token
     for key in _COMBINED_PERSON_NAME_KEYS:
         token = _spoken_first_token(mapping.get(key))
-        if token and not _is_llc_first_token(token, *rejected_business_names):
+        if token:
             return token
     return None
 
@@ -513,12 +534,14 @@ def extract_client_first_name(
 ) -> Optional[str]:
     """First name for client-facing voice copy.
 
-    Personal: EZLynx ``FirstName`` / preferred / nickname, then personal display
-    name (first token of ``First Last`` only).
+    Always trust Classic ``FirstName`` / preferred / nickname when present and
+    not a placeholder (n/a, none, null, -). A person named Marek on
+    ``Marek PKS Transportation Inc`` is valid — do not drop FirstName just
+    because it appears in BusinessName.
 
-    Commercial: never the first token of an LLC / BusinessName. Prefer a real
-    person under CommercialDetail, PrimaryContact, Contacts[], ContactFirstName,
-    PrincipalFirstName, OwnerFirstName, or sidebar contact objects.
+    When FirstName is missing: nested commercial contacts, then personal
+    display name (first token of ``First Last`` only if it is not
+    business-looking). Never invent a name from an LLC token.
     """
     sidebar_applicant = None
     if isinstance(sidebar, dict):
@@ -527,19 +550,18 @@ def extract_client_first_name(
             sidebar_applicant = inner
 
     business = _business_name_from_sources(applicant, sidebar_applicant, sidebar)
-    rejected = (business, insured_name)
-
     sources: List[Optional[Dict[str, Any]]] = [applicant, sidebar_applicant, sidebar]
-    # Personal / preferred keys on the top-level applicant first (existing path).
+    # Classic Applicant/v2 FirstName wins. Live: Marek PKS 84705043 FirstName=Marek;
+    # Green Lion 21587333 FirstName=Anthony; Buster 26356199 FirstName=Buster.
     if isinstance(applicant, dict):
         for key in _FIRST_NAME_KEYS:
             token = _spoken_first_token(applicant.get(key))
-            if token and not _is_llc_first_token(token, *rejected):
+            if token:
                 return token
 
     for source in sources:
         for person in _iter_person_dicts(source):
-            token = _first_name_from_person_dict(person, *rejected)
+            token = _first_name_from_person_dict(person)
             if token:
                 return token
 
