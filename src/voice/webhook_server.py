@@ -58,6 +58,19 @@ def handle_completed_call(data: Dict[str, Any]) -> Dict[str, Any]:
                 insured_name = pol_record.insured_name
             lob = pol_record.line_of_business or lob
 
+        # Fallback: Search EZLynx directly by policy number if applicant_id still unresolved
+        if not applicant_id and policy_number:
+            try:
+                client = EZLynxApiClient()
+                search_hit = client.search_applicant(policy_number.strip())
+                if search_hit and search_hit.get("applicant_id"):
+                    applicant_id = str(search_hit["applicant_id"])
+                    if not insured_name or insured_name == "Insured Account":
+                        insured_name = search_hit.get("applicant_name", insured_name)
+                    logger.info(f"Resolved applicant_id {applicant_id} for policy {policy_number} via EZLynx search API")
+            except Exception as e:
+                logger.debug(f"EZLynx direct search fallback failed for {policy_number}: {e}")
+
             # Check if quote was issued
             if any(k in summary.lower() for k in ["quote issued", "terms released", "quoted", "available in portal"]):
                 pol_record.status = RenewalStatus.QUOTE_RECEIVED

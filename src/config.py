@@ -83,7 +83,7 @@ class Settings(BaseSettings):
 
     # 6. Autonomous Carrier Voice Calling
     voice_ai_api_key: Optional[str] = None
-    voice_caller_id: str = "+17324628343"
+    voice_caller_id: str = "+17322986745"
     voice_encrypted_key: Optional[str] = None
 
     @property
