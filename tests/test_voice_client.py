@@ -71,3 +71,28 @@ def test_retell_payload_omits_call_duration_override(mock_post, monkeypatch):
     payload = mock_post.call_args.kwargs["json"]
     assert "agent_override" not in payload
     assert "max_call_duration_ms" not in payload
+
+
+@patch("src.voice.voice_client.requests.get")
+def test_get_call_fetches_bland_details(mock_get):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"{}"
+    mock_resp.json.return_value = {
+        "call_id": "call_abc",
+        "recording_url": "https://api.bland.ai/recordings/call_abc.mp3",
+        "concatenated_transcript": "hello",
+        "summary": "done",
+    }
+    mock_get.return_value = mock_resp
+    client = CarrierVoiceClient(api_key="test-key", provider="bland_ai")
+    data = client.get_call("call_abc")
+    assert data["recording_url"].endswith(".mp3")
+    assert data["concatenated_transcript"] == "hello"
+    assert mock_get.call_args[0][0] == "https://api.bland.ai/v1/calls/call_abc"
+    assert "max_duration" not in (mock_get.call_args.kwargs.get("json") or {})
+
+
+def test_get_call_skips_without_api_key():
+    client = CarrierVoiceClient(api_key=None, provider="bland_ai")
+    assert client.get_call("call_abc") == {}

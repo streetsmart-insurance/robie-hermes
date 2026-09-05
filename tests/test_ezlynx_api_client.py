@@ -341,3 +341,17 @@ def test_get_applicant_discussions_uses_live_portal_endpoint(mock_get, api_clien
     assert "applicantContext=true" in url
     assert "pageSize=50" in url
     assert mock_get.call_args.kwargs["cookies"]["EZSESSION"] == "portal-cookie"
+
+
+def test_document_data_uri_uses_audio_and_text_mime(tmp_path):
+    mp3 = tmp_path / "call.mp3"
+    mp3.write_bytes(b"ID3audio")
+    txt = tmp_path / "transcript.txt"
+    txt.write_text("hello", encoding="utf-8")
+    from src.ezlynx.api_client import EZLynxApiClient
+
+    mp3_uri = EZLynxApiClient._document_data_uri(mp3)
+    txt_uri = EZLynxApiClient._document_data_uri(txt)
+    assert mp3_uri.startswith("data:audio/mpeg;base64,")
+    assert txt_uri.startswith("data:text/plain;base64,")
+    assert "application/pdf" not in mp3_uri

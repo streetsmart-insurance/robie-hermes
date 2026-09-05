@@ -1188,6 +1188,101 @@ class EZLynxApiClient:
             "text": note_text
         }
 
+    @staticmethod
+    def _document_data_uri(file_path: Path) -> str:
+        """Encode a local file as a data URI using the real MIME type (not PDF-only)."""
+        import base64
+
+        mime_map = {
+            ".pdf": "application/pdf",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".m4a": "audio/mp4",
+            ".mpeg": "audio/mpeg",
+            ".txt": "text/plain",
+            ".json": "application/json",
+        }
+        mime = mime_map.get(file_path.suffix.lower(), "application/octet-stream")
+        encoded = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+        return f"data:{mime};base64,{encoded}"
+
+    def _upload_document_via_api(
+        self,
+        applicant_id: str,
+        file_path: Path,
+        folder_name: Optional[str],
+        description: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not (self._classic_token or self.authenticate_classic()):
+            return None
+        endpoint = f"{self.services_url}/document"
+        payload = {
+            "ApplicantId": int(applicant_id) if str(applicant_id).isdigit() else applicant_id,
+            "DocumentName": description or file_path.name,
+            "FolderPath": folder_name,
+            "Document": self._document_data_uri(file_path),
+        }
+        try:
+            resp = requests.post(endpoint, json=payload, headers=self._get_classic_headers(), timeout=30)
+            if resp.status_code in (200, 201):
+                return {"status": "success", "method": "api", "data": resp.json()}
+            logger.debug("Direct API document upload HTTP %s: %s", resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.debug(f"Direct API document upload error: {e}")
+        return None
+
+    def _upload_document_via_playwright(
+        self,
+        applicant_id: str,
+        file_path: Path,
+        folder_name: Optional[str],
+        description: Optional[str],
+        policy_number: Optional[str],
+        doc_type: str,
+        label_to_apply: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            from src.ezlynx.document_uploader import EZLynxDocumentUploader
+            uploader = EZLynxDocumentUploader(cdp_url=settings.ezlynx_cdp_endpoint or "http://localhost:9222")
+
+            async def _upload():
+                return await uploader.upload_document(
+                    applicant_id=applicant_id,
+                    file_path=file_path,
+                    policy_number=policy_number,
+                    doc_type=doc_type,
+                    doc_title=description,
+                    label_to_apply=label_to_apply,
+                    target_folder=folder_name
+                )
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import nest_asyncio
+                    nest_asyncio.apply()
+                    res = loop.run_until_complete(_upload())
+                else:
+                    res = loop.run_until_complete(_upload())
+            except RuntimeError:
+                res = asyncio.run(_upload())
+
+            if res.get("success"):
+                logger.info(f"Successfully uploaded document via Playwright CDP for Applicant {applicant_id}.")
+                return {
+                    "status": "success",
+                    "method": "playwright",
+                    "applicant_id": applicant_id,
+                    "document_name": res.get("document_name"),
+                    "policy_number": res.get("policy_number"),
+                    "applied_label": res.get("applied_label"),
+                    "screenshot_path": res.get("screenshot_path"),
+                }
+            logger.warning(f"Playwright document uploader returned error: {res.get('error')}. Checking API/simulation.")
+        except Exception as e:
+            logger.warning(f"Playwright uploader fallback encountered exception: {e}. Checking API/simulation.")
+        return None
+
     def upload_document(
         self,
         applicant_id: str,
@@ -1197,77 +1292,41 @@ class EZLynxApiClient:
         policy_number: Optional[str] = None,
         doc_type: str = "renewal",
         label_to_apply: Optional[str] = None,
-        use_playwright_fallback: bool = True
+        use_playwright_fallback: bool = True,
+        prefer_api: bool = False,
     ) -> Dict[str, Any]:
-        """Uploads a PDF document to the Applicant's Document Management folder in EZLynx."""
+        """Uploads a document to the Applicant's Document Management folder in EZLynx.
+
+        ``prefer_api=True`` tries Classic REST first (voice recordings / transcripts).
+        Playwright remains the default first path for renewal PDFs so existing
+        callers are unchanged. Playwright is fallback-only when prefer_api is set.
+        """
         if not file_path.exists():
             return {"status": "error", "error": f"File not found: {file_path}"}
 
-        # 1. Seamless Browser Fallback: Playwright / Chrome CDP Document Uploader
-        if use_playwright_fallback:
-            try:
-                from src.ezlynx.document_uploader import EZLynxDocumentUploader
-                uploader = EZLynxDocumentUploader(cdp_url=settings.ezlynx_cdp_endpoint or "http://localhost:9222")
+        api_result = None
+        pw_result = None
+        if prefer_api:
+            api_result = self._upload_document_via_api(applicant_id, file_path, folder_name, description)
+            if api_result and api_result.get("status") == "success":
+                return api_result
+            if use_playwright_fallback:
+                pw_result = self._upload_document_via_playwright(
+                    applicant_id, file_path, folder_name, description, policy_number, doc_type, label_to_apply
+                )
+                if pw_result and pw_result.get("status") == "success":
+                    return pw_result
+        else:
+            if use_playwright_fallback:
+                pw_result = self._upload_document_via_playwright(
+                    applicant_id, file_path, folder_name, description, policy_number, doc_type, label_to_apply
+                )
+                if pw_result and pw_result.get("status") == "success":
+                    return pw_result
+            api_result = self._upload_document_via_api(applicant_id, file_path, folder_name, description)
+            if api_result and api_result.get("status") == "success":
+                return api_result
 
-                async def _upload():
-                    return await uploader.upload_document(
-                        applicant_id=applicant_id,
-                        file_path=file_path,
-                        policy_number=policy_number,
-                        doc_type=doc_type,
-                        doc_title=description,
-                        label_to_apply=label_to_apply,
-                        target_folder=folder_name
-                    )
-
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        import nest_asyncio
-                        nest_asyncio.apply()
-                        res = loop.run_until_complete(_upload())
-                    else:
-                        res = loop.run_until_complete(_upload())
-                except RuntimeError:
-                    res = asyncio.run(_upload())
-
-                if res.get("success"):
-                    logger.info(f"Successfully uploaded document via Playwright CDP for Applicant {applicant_id}.")
-                    return {
-                        "status": "success",
-                        "method": "playwright",
-                        "applicant_id": applicant_id,
-                        "document_name": res.get("document_name"),
-                        "policy_number": res.get("policy_number"),
-                        "applied_label": res.get("applied_label"),
-                        "screenshot_path": res.get("screenshot_path"),
-                    }
-                else:
-                    logger.warning(f"Playwright document uploader returned error: {res.get('error')}. Checking API/simulation.")
-            except Exception as e:
-                logger.warning(f"Playwright uploader fallback encountered exception: {e}. Checking API/simulation.")
-
-        # 2. Classic API Upload Attempt
-        if self._classic_token or self.authenticate_classic():
-            endpoint = f"{self.services_url}/document"
-            payload = {
-                "ApplicantId": int(applicant_id) if applicant_id.isdigit() else applicant_id,
-                "DocumentName": file_path.name,
-                "FolderPath": folder_name,
-            }
-            try:
-                with open(file_path, "rb") as f:
-                    import base64
-                    encoded = base64.b64encode(f.read()).decode("utf-8")
-                    payload["Document"] = f"data:application/pdf;base64,{encoded}"
-
-                resp = requests.post(endpoint, json=payload, headers=self._get_classic_headers(), timeout=30)
-                if resp.status_code in (200, 201):
-                    return {"status": "success", "method": "api", "data": resp.json()}
-            except Exception as e:
-                logger.debug(f"Direct API document upload error: {e}")
-
-        # 3. Fallback: Simulation record
         logger.info(f"[SIMULATION] Document '{file_path.name}' uploaded to Applicant {applicant_id} (Folder: {folder_name})")
         return {
             "status": "simulated",
@@ -1286,6 +1345,8 @@ class EZLynxApiClient:
         due_days_out: int = 3
     ) -> Dict[str, Any]:
         """Creates a follow-up task for the account manager in EZLynx."""
+        if assigned_user and "robie" in str(assigned_user).lower():
+            assigned_user = "Carlo Ferrara"
         logger.info(
             f"[TASK] EZLynx Task Created for Applicant: {applicant_id} | Title: '{title}' | Assigned: {assigned_user or 'Account Manager'}"
         )

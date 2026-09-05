@@ -14,6 +14,7 @@ FOLDER_ROUTING = {
     "loss runs": ["Loss Runs", "Prior Policies & Loss Runs", "Loss History", "Documents"],
     "loss run": ["Loss Runs", "Prior Policies & Loss Runs", "Loss History", "Documents"],
     "application": ["Applications", "Renewal Applications", "Documents"],
+    "correspondence": ["Documents", "Correspondence"],
 }
 
 LABEL_ROUTING = {
@@ -24,6 +25,7 @@ LABEL_ROUTING = {
     "loss runs": "Loss Runs",
     "loss run": "Loss Runs",
     "application": "Application",
+    "correspondence": "Correspondence",
 }
 
 SUFFIX_ROUTING = {

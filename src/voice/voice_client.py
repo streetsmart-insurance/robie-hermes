@@ -256,3 +256,65 @@ CALL OBJECTIVES:
             return {"success": False, "error": data.get("message", f"HTTP {resp.status_code}")}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _auth_headers(self) -> Dict[str, str]:
+        headers = {"Authorization": self.api_key or "", "Content-Type": "application/json"}
+        if self.encrypted_key:
+            headers["encrypted_key"] = self.encrypted_key
+        return headers
+
+    def get_call(self, call_id: str) -> Dict[str, Any]:
+        """Fetch a completed Bland call (recording_url, transcript, summary)."""
+        if not call_id:
+            return {}
+        if not self.api_key:
+            logger.info("Skipping Bland get_call for %s: no VOICE_AI_API_KEY configured", call_id)
+            return {}
+        url = f"https://api.bland.ai/v1/calls/{call_id}"
+        try:
+            resp = requests.get(url, headers=self._auth_headers(), timeout=20)
+            data = resp.json() if resp.content else {}
+            if resp.status_code != 200 or not isinstance(data, dict):
+                logger.warning(
+                    "Bland get_call %s returned HTTP %s: %s",
+                    call_id,
+                    resp.status_code,
+                    data if isinstance(data, dict) else resp.text[:200],
+                )
+                return {}
+            return data
+        except Exception as exc:
+            logger.error("Failed to fetch Bland call %s: %s", call_id, exc)
+            return {}
+
+    def download_recording(self, recording_url: str, dest_path) -> bool:
+        """Download a Bland recording URL to dest_path. Returns True on success."""
+        from pathlib import Path
+
+        if not recording_url:
+            return False
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        headers: Dict[str, str] = {}
+        if self.api_key:
+            headers["Authorization"] = self.api_key
+        if self.encrypted_key:
+            headers["encrypted_key"] = self.encrypted_key
+        try:
+            resp = requests.get(recording_url, headers=headers, timeout=60, stream=True)
+            if resp.status_code != 200:
+                logger.warning(
+                    "Recording download HTTP %s from %s", resp.status_code, recording_url
+                )
+                return False
+            with dest.open("wb") as handle:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        handle.write(chunk)
+            if dest.stat().st_size <= 0:
+                logger.warning("Recording download produced empty file: %s", dest)
+                return False
+            return True
+        except Exception as exc:
+            logger.error("Failed to download recording from %s: %s", recording_url, exc)
+            return False

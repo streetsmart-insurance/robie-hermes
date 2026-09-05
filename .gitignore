@@ -26,6 +26,7 @@ reports/
 data/*.json
 data/**/*.json
 !data/*.example.json
+!data/voice_call_directory.seed.json
 data/credentials/
 data/coterie_*
 data/google_doc_text.txt

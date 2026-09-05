@@ -1,7 +1,7 @@
 """Unit tests for Voice Webhook Receiver and EZLynx note handling."""
 
 from unittest.mock import patch, MagicMock
-import pytest
+
 from src.voice.webhook_server import handle_completed_call
 
 
@@ -21,8 +21,18 @@ def test_handle_completed_call_formatting_and_sync():
         }
     }
 
-    with patch("src.voice.webhook_server.EZLynxApiClient") as mock_ezlynx_cls, \
-         patch("src.voice.webhook_server.GmailRenewalClient") as mock_gmail_cls:
+    with patch("src.voice.call_completion.EZLynxApiClient") as mock_ezlynx_cls, \
+         patch("src.voice.call_completion.GmailRenewalClient") as mock_gmail_cls, \
+         patch("src.voice.call_completion.fetch_bland_call_details", return_value={}), \
+         patch(
+             "src.voice.call_completion.upload_call_artifacts",
+             return_value={"recording_uploaded": True, "transcript_uploaded": False},
+         ), \
+         patch("src.voice.call_completion.SessionLocal") as mock_session:
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        mock_session.return_value = db
 
         mock_client = MagicMock()
         mock_client.add_note_to_discussion.return_value = {
@@ -42,7 +52,6 @@ def test_handle_completed_call_formatting_and_sync():
         assert res["note_id"] == 998877
         assert res["email_sent"] is True
 
-        # Verify EZLynx call arguments
         mock_client.add_note_to_discussion.assert_called_once()
         call_kwargs = mock_client.add_note_to_discussion.call_args[1]
         assert call_kwargs["applicant_id"] == 21588091
@@ -50,8 +59,8 @@ def test_handle_completed_call_formatting_and_sync():
         assert "Policy: #PWC1239278 (Workers comp - Associated Specialty Insurance Agency MGA)" in call_kwargs["note_text"]
         assert "Robie was here" in call_kwargs["note_text"]
         assert "https://api.bland.ai/recordings/call_12345.mp3" in call_kwargs["note_text"]
+        assert "Agent: Hello from StreetSmart" in call_kwargs["note_text"]
 
-        # Verify CSR email
         mock_gmail.send_email.assert_called_once()
         email_kwargs = mock_gmail.send_email.call_args[1]
         assert email_kwargs["to_email"] == "eimy@streetsmart.insurance"

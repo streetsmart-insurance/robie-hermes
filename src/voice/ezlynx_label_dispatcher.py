@@ -10,10 +10,15 @@ Enables CSRs and Account Managers to trigger autonomous calls directly from EZLy
 """
 
 import logging
+import os
 import re
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Iterable
 
 from src.ezlynx.api_client import EZLynxApiClient
+from src.voice.call_directory import (
+    HARDCODED_CARRIER_PHONES,
+    lookup_carrier_phone,
+)
 from src.voice.voice_client import CarrierVoiceClient
 from src.voice.context_hydrator import CallingDossier
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
@@ -251,54 +256,13 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
     return result
 
 
-KNOWN_CARRIER_PHONES = {
-    "the hartford": "+18005551234",
-    "hartford": "+18005551234",
-    "travelers": "+18002386225",
-    "coterie": "+18555673421",
-    "coterie insurance": "+18555673421",
-    "progressive": "+18008765581",
-    "tapco": "+18003345579",
-    "tapco underwriters": "+18003345579",
-    "chubb": "+18002524670",
-    "chubb group": "+18002524670",
-    "amtrust": "+18775287878",
-    "cna": "+18002622000",
-    "cna surety": "+18002622000",
-    "liberty mutual": "+18003440197",
-    "employers": "+18886826671",
-    "guard": "+18006732265",
-    "berkshire hathaway guard": "+18006732265",
-    "bhhc": "+18884958949",
-    "berkshire hathaway": "+18884958949",
-    "rps": "+18665958405",
-    "risk placement services": "+18665958405",
-    "amwins": "+18002213824",
-    "jimcor": "+18006440333",
-    "specialty coverage": "+18002422200",
-    "new england excess": "+18005484301",
-    "markel": "+18004311270",
-    "utica first": "+18005565376",
-    "utica first insurance company": "+18005565376",
-    "tip national": "+18006888408",
-    "tip national llc": "+18006888408",
-    "carlo": "+17329953409",
-    "carlo ferrara": "+17329953409",
-    "buster brown": "+17329953409",
-    "jake": "+17326688161",
-    "jimmy": "+17329954324",
-}
+# Hardcoded fallback only. Dispatcher lookup prefers the server store, then seed.
+KNOWN_CARRIER_PHONES = HARDCODED_CARRIER_PHONES
 
 
 def lookup_known_carrier_phone(carrier_name: Optional[str]) -> Optional[str]:
-    """Resolves carrier phone number from known directory or hydrator."""
-    if not carrier_name:
-        return None
-    clean_name = carrier_name.lower().strip()
-    for key, phone in KNOWN_CARRIER_PHONES.items():
-        if key in clean_name or clean_name in key:
-            return phone
-    return None
+    """Resolve phone from runtime store → seed JSON → hardcoded map."""
+    return lookup_carrier_phone(carrier_name)
 
 
 class EZLynxLabelCallDispatcher:
@@ -463,6 +427,7 @@ class EZLynxLabelCallDispatcher:
                 line_of_business="Commercial Lines",
                 applicant_id=applicant_id,
                 custom_instructions=instructions,
+                assigned_csr_email="carlo@streetsmart.insurance",
             )
 
             # Build call prompt
@@ -539,11 +504,116 @@ class EZLynxLabelCallDispatcher:
             carrier_name=carrier_name,
         )
 
+    def process_watch_queue(
+        self,
+        dry_run: bool = False,
+        watch_file: Optional[str] = None,
+        extra_ids: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        """Scan known applicants for fresh Robie Call labels (server cron entry)."""
+        applicant_ids = collect_watch_applicant_ids(
+            watch_file=watch_file,
+            extra_ids=extra_ids,
+        )
+        results: List[Dict[str, Any]] = []
+        errors: List[Dict[str, str]] = []
+        for applicant_id in applicant_ids:
+            try:
+                results.extend(
+                    self.process_applicant_notes_for_calls(applicant_id, dry_run=dry_run)
+                )
+            except Exception as exc:
+                logger.error("Robie Call scan failed for applicant %s: %s", applicant_id, exc)
+                errors.append({"applicant_id": str(applicant_id), "error": str(exc)})
+        return {
+            "applicants_scanned": len(applicant_ids),
+            "applicant_ids": applicant_ids,
+            "dispatched": results,
+            "errors": errors,
+            "dry_run": dry_run,
+        }
+
+
+def collect_watch_applicant_ids(
+    watch_file: Optional[str] = None,
+    extra_ids: Optional[Iterable[str]] = None,
+) -> List[str]:
+    """Applicant IDs from renewals.db + ROBIE_CALL_WATCH_APPLICANTS + optional file."""
+    seen = set()
+    ordered: List[str] = []
+
+    def _add(raw: Optional[str]) -> None:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+
+    env_raw = os.getenv("ROBIE_CALL_WATCH_APPLICANTS") or ""
+    for part in re.split(r"[,\s]+", env_raw):
+        _add(part)
+
+    path = watch_file or os.getenv("ROBIE_CALL_WATCH_FILE")
+    if path:
+        try:
+            from pathlib import Path
+            import json
+
+            text = Path(path).read_text(encoding="utf-8")
+            payload = json.loads(text) if text.strip().startswith(("{", "[")) else None
+            if isinstance(payload, list):
+                for item in payload:
+                    if isinstance(item, dict):
+                        _add(item.get("applicant_id") or item.get("applicantId"))
+                    else:
+                        _add(item)
+            elif isinstance(payload, dict):
+                for item in payload.get("applicant_ids") or payload.get("applicants") or []:
+                    _add(item)
+            else:
+                for line in text.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        _add(line)
+        except Exception as exc:
+            logger.warning("Could not read Robie Call watch file %s: %s", path, exc)
+
+    try:
+        from src.database.models import PolicyRenewal, RenewalStatus
+        from src.database.session import SessionLocal
+
+        excluded = {
+            RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+            RenewalStatus.EXCLUDED_TEST_ACCOUNT,
+        }
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(PolicyRenewal.applicant_id)
+                .filter(PolicyRenewal.applicant_id.isnot(None))
+                .filter(~PolicyRenewal.status.in_(excluded))
+                .distinct()
+                .all()
+            )
+            for (applicant_id,) in rows:
+                _add(applicant_id)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Could not load applicant IDs from renewals.db: %s", exc)
+
+    if extra_ids:
+        for item in extra_ids:
+            _add(item)
+
+    return ordered
+
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Scan EZLynx for 'Robie Call' labeled notes and dispatch calls.")
     parser.add_argument("--applicant-id", type=str, help="Specific applicant ID to scan in EZLynx")
+    parser.add_argument("--scan-queue", action="store_true", help="Scan renewals.db + watch-list applicants (server cron)")
+    parser.add_argument("--watch-file", type=str, default=None, help="Optional extra applicant ID JSON/list file")
     parser.add_argument("--test-note", type=str, help="Test raw note text directly from terminal")
     parser.add_argument("--phone", type=str, help="Override phone number for test calls (e.g., cell number)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate call dispatch without hitting Bland AI ($0 cost)")
@@ -652,8 +722,12 @@ def main():
     elif args.applicant_id:
         res = dispatcher.process_applicant_notes_for_calls(args.applicant_id, dry_run=args.dry_run)
         print(f"Processed {len(res)} calls for applicant {args.applicant_id}: {res}")
+    elif args.scan_queue:
+        import json
+        res = dispatcher.process_watch_queue(dry_run=args.dry_run, watch_file=args.watch_file)
+        print(json.dumps(res, indent=2, default=str))
     else:
-        print("Please provide --applicant-id or --test-note to run.")
+        print("Please provide --applicant-id, --scan-queue, or --test-note to run.")
 
 
 if __name__ == "__main__":

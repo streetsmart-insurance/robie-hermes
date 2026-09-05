@@ -26,3 +26,5 @@ def test_routing_maps():
     assert SUFFIX_ROUTING["loss runs"] == "Loss Runs.pdf"
     assert SUFFIX_ROUTING["non renewal"] == "Non Renewal.pdf"
     assert SUFFIX_ROUTING["renewal"] == "Renewal Offer.pdf"
+    assert "Documents" in FOLDER_ROUTING["correspondence"]
+    assert LABEL_ROUTING["correspondence"] == "Correspondence"
