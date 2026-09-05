@@ -162,6 +162,8 @@ def test_cadence_fires_once_after_two_misses(test_db, processed_store):
     ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "Robie was here" in ack
     assert "Call type: carrier" in ack
+    assert "client_outreach" not in ack
+    assert "renewal_reachout" not in ack
     assert "Policy: #" in ack
 
 

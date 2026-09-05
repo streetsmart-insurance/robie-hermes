@@ -6,7 +6,9 @@ Carlo lock 2026-09-05:
    place exactly one outbound Robie Call (``call_type=carrier``).
 3. If the renewal is obtained (PDF filed, UW reply matched, or pipeline
    status says we have the dec/offer) → STOP. No more carrier calls.
-   Do not auto-dial the client.
+   Do not auto-dial the client. Never fire ``renewal_reachout`` or any
+   ``client_outreach`` pathway from this pipeline — those require an
+   explicit CSR label/note.
 
 Never invent a carrier phone. If no E.164 underwriter/carrier number is on
 file, post an EZLynx note and skip the dial.

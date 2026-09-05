@@ -136,16 +136,17 @@ Writing the phrase in the discussion title or note body works the same as applyi
 - **Dial order (locked):** always primary applicant first, then secondary / co-applicant when both have phones. Phone fields: `CellPhone` → `HomePhone` → `WorkPhone` (Classic Applicant/v2 `BusinessPhone` is the work-line alias; portal sidebar `ContactInfo` is also read). Skip anyone with no valid US E.164 — **never invent numbers**. If primary and secondary share the same number, call once.
 - **Buster Brown (applicant `26356199`):** primary cell `7329953409`; co-applicant currently has no cell — secondary dial is skipped until a phone exists.
 - **Each call:** greet that person by **first name only** (same commercial-contact sources as lead follow-up; generic Hi/Hello if none — never “Hi Green Lion…”). On a clear yes, warm-transfer to the **account Assigned Producer** (`GetApplicantSidebar` → `Applicant.Assignment.AssignedTo` full name, resolved via `lookup_producer` / RingCentral DID). **Not** Sales Center `producerName`. **Not** the label invoker. If Assigned Producer has no E.164 DID, skip transfer (voicemail still asks them to call **732-462-8343**). Never fall back to Sales Center producer or another staff DID. Do **not** say “the quote {Sales Center producer} put together”.
-- **Splice-replacement conversational pathways** (no press-1 / press-2 / Splice toll-free / opt-out IVR), inferred from CSR `What to say` / note body / alias:
-  - `cancellation` / `robie cancellation` → Cancellation Notice (default when the reason looks like cancel/non-pay): “Hi {first}, this is Robie from StreetSmart Insurance. I'm calling with an important notice about your {LOB} policy with {carrier}. Your {policy type} is set to be cancelled due to an overdue payment. To avoid a lapse in coverage, please make a payment by {date}. If you want, I can connect you to {Assigned Producer first name} now.” VM: same facts + “Please call us back at 732-462-8343.”
-  - `audit` → audit incomplete, please finish the audit.
-  - `returned_mail` → returned mail, update address.
-  - `esign` → e-signature needed to avoid interruption.
-  - `additional_info` → we need additional information.
-  - `recommendations` → follow up on recommendations.
-  - `unresponsive` → reaching out about your policies.
+- **Splice-replacement conversational pathways** — source of truth is Carlo's Google Doc Manual WFs ([doc](https://docs.google.com/document/d/1cZCe_9cz_fuNWYZLjdNvP1Z3jhkUIqGrYZq2pwJdaPM/edit)). Conversational Robie only (no press-1 / 2 / 4 / 6, no Splice toll-free). `<<Agent>>` = Assigned Producer (first name in client copy). Inferred from CSR `What to say` / note body / alias:
+  - `audit` → “It appears that an audit for your account is currently incomplete. Please take the necessary steps to finalize this audit as soon as possible.”
+  - `recommendations` → “We are following up on some recommendations that were made for your account. Please take the necessary steps to address these recommendations as soon as possible.”
+  - `returned_mail` → “We have received some returned mail for your account. Please contact our office to update your information as soon as possible.”
+  - `esign` → “We are following up on an e-signature request for your account. Please complete the e-signature process as soon as possible.”
+  - `additional_info` → “We are following up on a request for additional information for your account. Please provide the requested information as soon as possible.”
+  - `unresponsive` → “We are reaching out regarding your policies.”
+  - `renewal_reachout` → “Your insurance policy will be up for renewal soon. We want to ensure you have the proper coverage and would like to discuss your options.” Fires **only** if the CSR labels/notes this phrase — **not** from the manual renewal pipeline.
+  - `cancellation` / `robie cancellation` → Cancellation Notice PDF (not in that doc body): overdue payment, policy set to be cancelled, pay by {date} to avoid lapse. Default when the note looks like cancel/non-pay.
   - fallback → existing generic outreach (CSR What to say).
-- Sales Center / winback / birthday / marketing Splice workflows are **not** ported. Lead follow-up already covers quote follow-up.
+- **Not ported:** Birthday, Additional Policy, Applicant Created, New Customer/Welcome, Policy Reinstatement, Policy Renewed, Upcoming Renewal/Expiration EZLynx automations, Winback, Sales Center New/Contacted/Quoted/Won. Sales Center Reviewed Status (“quote we released a few days ago”) is already **Robie lead follow-up** — leave that path alone.
 - **Both `Robie Call` and `Robie client outreach` on the same note:** client outreach wins → `client_outreach`.
 - **`Robie lead follow-up` is unchanged** — still `client_followup` with the Sales Center `producerName` greeting and transfer to the **label invoker**.
 - Assigned CSR for EZLynx notes/tasks remains Carlo Ferrara. Caller ID `+17322986745`. No Bland `max_duration`.

@@ -40,7 +40,7 @@ Outbound email outreach is conducted using Google Workspace Gmail APIs.
 ### Outreach Cadence & Timing Rules:
 1. **Outreach Window (Day 45 to Day 25)**: Initial outreach begins at Day 45 prior to policy expiration. Policies expiring in > 45 days remain in the upcoming queue.
 2. **Follow-Up Frequency**: Check back **no more than twice** (email and/or portal). After **two** unsuccessful attempts with no renewal in hand, place **exactly one** outbound carrier **Robie Call** (`call_type=carrier`) via `src/voice/renewal_cadence.py` / existing `CarrierVoiceClient`. Same style as today’s email `Call Carrier:` path. Never invent a carrier phone; if no E.164 underwriter/carrier number, post an EZLynx note ending with `Robie was here` and skip the dial.
-3. **Stop when the renewal lands**: If a renewal PDF is filed, the UW reply filer matched, or pipeline status says we have the dec/offer → **STOP**. No more carrier calls. Do **not** auto-dial the client on a successful or in-progress manual renewal.
+3. **Stop when the renewal lands**: If a renewal PDF is filed, the UW reply filer matched, or pipeline status says we have the dec/offer → **STOP**. No more carrier calls. Do **not** auto-dial the client on a successful or in-progress manual renewal. CSR-only Splice replacements (`renewal_reachout` / `Robie client outreach`) never fire from this pipeline — they require an explicit CSR label or note.
 4. **25-Day Auto-Escalation to CSR**: If no renewal quote is received by **Day 25** prior to expiration (or if email follow-ups are exhausted), the engine automatically:
    - Sets status to `RenewalStatus.ESCALATED_MANUAL`.
    - Posts a high-priority audit note to the EZLynx discussion card ending with `Robie was here`.

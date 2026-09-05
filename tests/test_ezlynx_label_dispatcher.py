@@ -1205,8 +1205,10 @@ def test_dispatcher_client_outreach_label_forces_client_outreach(processed_store
     assert results[0]["producer_name"] is None
     assert results[0]["assigned_producer_name"] == "Carlo Ferrara"
     assert results[0]["assigned_producer_phone"] == "+17324622360"
+    assert results[0]["outreach_pathway"] == "cancellation"
     dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
     assert dossier.call_type == "client_outreach"
+    assert dossier.outreach_pathway == "cancellation"
     assert dossier.client_first_name == "Buster"
     assert dossier.producer_name is None
     assert dossier.assigned_producer_phone == "+17324622360"
@@ -1504,4 +1506,56 @@ def test_dispatcher_client_outreach_skips_transfer_when_assigned_producer_has_no
     ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "Warm transfer: not available" in ack
     assert results[0]["phones"] == ["+17329953409"]
+
+
+def _outreach_mocks(mock_voice, processed_store, note_text, note_id=555400):
+    mock_ezlynx = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_path", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        _outreach_card(note_id=note_id, phone_note=note_text)
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"FirstName": "Buster", "CellPhone": "7329953409"},
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_applicant_sidebar.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
+    }
+    return _dispatcher(mock_ezlynx, mock_voice, processed_store)
+
+
+def test_dispatcher_outreach_pathway_from_manual_wf_note(processed_store):
+    mock_voice = MagicMock()
+    dispatcher = _outreach_mocks(
+        mock_voice, processed_store, "What to say: Please finish the audit."
+    )
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    assert results[0]["outreach_pathway"] == "audit"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.outreach_pathway == "audit"
+
+
+def test_dispatcher_renewal_reachout_only_when_csr_labels_it(processed_store):
+    mock_voice = MagicMock()
+    reach = _outreach_mocks(
+        mock_voice,
+        processed_store,
+        "What to say: renewal reachout",
+        note_id=555401,
+    )
+    reach_results = reach.process_applicant_notes_for_calls("26356199", dry_run=True)
+    assert reach_results[0]["outreach_pathway"] == "renewal_reachout"
+
+    mock_voice_pipeline = MagicMock()
+    pipeline = _outreach_mocks(
+        mock_voice_pipeline,
+        processed_store,
+        "What to say: Check if the renewal quote has been released",
+        note_id=555402,
+    )
+    pipeline_results = pipeline.process_applicant_notes_for_calls("26356199", dry_run=True)
+    assert pipeline_results[0]["outreach_pathway"] == "generic"
+    assert pipeline_results[0]["outreach_pathway"] != "renewal_reachout"
 

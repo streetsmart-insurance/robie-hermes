@@ -1,11 +1,21 @@
 """Splice-replacement conversational pathways for ``call_type=client_outreach``.
 
-Source of truth: StreetSmart Splice pack (Cancellation Notice + action-needed
-scripts). No press-1 / press-2 / Splice toll-free / opt-out IVR.
+Source of truth: Carlo's Google Doc Manual WFs/Scripts
+https://docs.google.com/document/d/1cZCe_9cz_fuNWYZLjdNvP1Z3jhkUIqGrYZq2pwJdaPM/edit
 
-Sales Center / winback / birthday / marketing Splice workflows are not ported.
-Lead follow-up stays on its own prompt (Sales Center producer greeting +
-label-invoker transfer).
+Use ONLY those written Manual WF body sentences. Conversational Robie — no
+press-1 / press-2 / press-4 / press-6, no Splice toll-free, no opt-out IVR.
+
+``<<Agent>>`` in Splice = account Assigned Producer (first name in client copy).
+Voicemail / callback is always agency main 732-462-8343.
+Warm-transfer on a clear yes to Assigned Producer DID — not Sales Center,
+not the label invoker.
+
+Not ported from this pass: Birthday, Additional Policy, Applicant Created,
+New Customer/Welcome, Policy Reinstatement, Policy Renewed, Upcoming
+Renewal/Expiration EZLynx automations, Winback, Sales Center
+New/Contacted/Quoted/Won. Sales Center Reviewed Status is already
+``Robie lead follow-up`` (leave that path alone).
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ PATHWAY_ESIGN = "esign"
 PATHWAY_ADDITIONAL_INFO = "additional_info"
 PATHWAY_RECOMMENDATIONS = "recommendations"
 PATHWAY_UNRESPONSIVE = "unresponsive"
+PATHWAY_RENEWAL_REACHOUT = "renewal_reachout"
 PATHWAY_GENERIC = "generic"
 
 OUTREACH_PATHWAYS = (
@@ -38,8 +49,39 @@ OUTREACH_PATHWAYS = (
     PATHWAY_ADDITIONAL_INFO,
     PATHWAY_RECOMMENDATIONS,
     PATHWAY_UNRESPONSIVE,
+    PATHWAY_RENEWAL_REACHOUT,
     PATHWAY_GENERIC,
 )
+
+# Exact body sentences from the Google Doc Manual WFs/Scripts tab.
+# Cancellation Notice is the separate Splice PDF (not in that doc body).
+MANUAL_WF_BODIES = {
+    PATHWAY_AUDIT: (
+        "It appears that an audit for your account is currently incomplete. "
+        "Please take the necessary steps to finalize this audit as soon as possible."
+    ),
+    PATHWAY_RECOMMENDATIONS: (
+        "We are following up on some recommendations that were made for your account. "
+        "Please take the necessary steps to address these recommendations as soon as possible."
+    ),
+    PATHWAY_RETURNED_MAIL: (
+        "We have received some returned mail for your account. "
+        "Please contact our office to update your information as soon as possible."
+    ),
+    PATHWAY_ESIGN: (
+        "We are following up on an e-signature request for your account. "
+        "Please complete the e-signature process as soon as possible."
+    ),
+    PATHWAY_ADDITIONAL_INFO: (
+        "We are following up on a request for additional information for your account. "
+        "Please provide the requested information as soon as possible."
+    ),
+    PATHWAY_UNRESPONSIVE: "We are reaching out regarding your policies.",
+    PATHWAY_RENEWAL_REACHOUT: (
+        "Your insurance policy will be up for renewal soon. "
+        "We want to ensure you have the proper coverage and would like to discuss your options."
+    ),
+}
 
 # Alias / label tokens that force the Cancellation Notice pathway.
 _CANCELLATION_ALIAS_COLLAPSED = (
@@ -47,7 +89,20 @@ _CANCELLATION_ALIAS_COLLAPSED = (
     "cancellationnotice",
 )
 
+# CSR must label/note this explicitly. Never infer from generic "renewal"
+# or from the manual renewal pipeline.
+_RENEWAL_REACHOUT_COLLAPSED = (
+    "renewalreachout",
+    "robierenewalreachout",
+    "renewalreachouttemplate",
+)
+_RENEWAL_REACHOUT_PHRASE = re.compile(
+    r"renewal\s+reach[\s-]*out|robie\s+renewal\s+reach",
+    re.IGNORECASE,
+)
+
 # More specific pathways first so "audit incomplete" does not fall into generic.
+# renewal_reachout is handled separately (explicit CSR phrase only).
 _PATHWAY_PATTERNS = (
     (
         PATHWAY_RETURNED_MAIL,
@@ -136,8 +191,10 @@ def infer_outreach_pathway(
     """Resolve a Splice-replacement pathway from CSR copy / labels / alias.
 
     ``robie cancellation`` / cancel / non-pay → Cancellation Notice (default
-    when the reason looks like cancel). Other keywords map to the matching
-    Splice script. Otherwise ``generic`` (CSR What to say).
+    when the reason looks like cancel). ``renewal_reachout`` fires only when
+    the CSR explicitly labels/notes that phrase — never from generic
+    "renewal" copy or the manual renewal pipeline. Otherwise the matching
+    Manual WF, or ``generic`` (CSR What to say).
     """
     parts = [text or "", alias or ""]
     if labels:
@@ -148,6 +205,10 @@ def infer_outreach_pathway(
         return PATHWAY_CANCELLATION
     if alias and "cancel" in alias.lower():
         return PATHWAY_CANCELLATION
+    if any(token in collapsed for token in _RENEWAL_REACHOUT_COLLAPSED):
+        return PATHWAY_RENEWAL_REACHOUT
+    if _RENEWAL_REACHOUT_PHRASE.search(blob):
+        return PATHWAY_RENEWAL_REACHOUT
 
     lower = blob.lower()
     for pathway, patterns in _PATHWAY_PATTERNS:
@@ -193,6 +254,21 @@ def _connect_offer(producer_first: Optional[str]) -> str:
     return "If you want, I can connect you to your producer now."
 
 
+def _callback_sentence() -> str:
+    return (
+        f"Please call us back at {AGENCY_MAIN_CALLBACK_DISPLAY} — "
+        f"that's {AGENCY_MAIN_CALLBACK_SPOKEN}. Thank you!"
+    )
+
+
+def _wrap_live(greeting: str, body: str, connect: str) -> str:
+    return f"{greeting}, this is Robie from StreetSmart Insurance. {body} {connect}"
+
+
+def _wrap_voicemail(greeting: str, body: str) -> str:
+    return f"{greeting}, this is Robie from StreetSmart Insurance. {body} {_callback_sentence()}"
+
+
 def build_outreach_live_script(
     *,
     pathway: str,
@@ -203,7 +279,7 @@ def build_outreach_live_script(
     action_date: Optional[str],
     csr_instructions: Optional[str] = None,
 ) -> str:
-    """Conversational live opener for a Splice-replacement pathway."""
+    """Conversational live opener using Carlo's Manual WF body (or Cancellation PDF)."""
     greeting = f"Hi {client_first}" if client_first else "Hi"
     lob = (line_of_business or "insurance").strip() or "insurance"
     carrier = (carrier_name or "your carrier").strip() or "your carrier"
@@ -212,61 +288,21 @@ def build_outreach_live_script(
     connect = _connect_offer(producer_first)
 
     if pathway == PATHWAY_CANCELLATION:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
+        body = (
             f"I'm calling with an important notice about your {lob} policy with {carrier}. "
             f"Your {policy_type} is set to be cancelled due to an overdue payment. "
-            f"To avoid a lapse in coverage, please make a payment by {due}. "
-            f"{connect}"
+            f"To avoid a lapse in coverage, please make a payment by {due}."
         )
-    if pathway == PATHWAY_AUDIT:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm calling about your {lob} policy with {carrier}. "
-            f"Your audit is incomplete — please finish the audit so we can keep "
-            f"your coverage in good standing. {connect}"
-        )
-    if pathway == PATHWAY_RETURNED_MAIL:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm calling about your {lob} policy with {carrier}. "
-            f"We received returned mail and need you to update your address. "
-            f"{connect}"
-        )
-    if pathway == PATHWAY_ESIGN:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm calling about your {lob} policy with {carrier}. "
-            f"We need your e-signature to avoid an interruption in coverage. "
-            f"{connect}"
-        )
-    if pathway == PATHWAY_ADDITIONAL_INFO:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm calling about your {lob} policy with {carrier}. "
-            f"We need additional information from you. {connect}"
-        )
-    if pathway == PATHWAY_RECOMMENDATIONS:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm calling about your {lob} policy with {carrier} to follow up "
-            f"on recommendations. {connect}"
-        )
-    if pathway == PATHWAY_UNRESPONSIVE:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm reaching out about your policies. {connect}"
-        )
+        return _wrap_live(greeting, body, connect)
+
+    body = MANUAL_WF_BODIES.get(pathway)
+    if body:
+        return _wrap_live(greeting, body, connect)
+
     reason = (csr_instructions or "").strip()
     if reason:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"{reason} {connect}"
-        )
-    return (
-        f"{greeting}, this is Robie from StreetSmart Insurance. "
-        f"Do you have a moment to talk? {connect}"
-    )
+        return _wrap_live(greeting, reason, connect)
+    return _wrap_live(greeting, "Do you have a moment to talk?", connect)
 
 
 def build_outreach_voicemail_script(
@@ -278,67 +314,29 @@ def build_outreach_voicemail_script(
     action_date: Optional[str],
     csr_instructions: Optional[str] = None,
 ) -> str:
-    """Voicemail / busy close: same facts + agency main 732-462-8343. No transfer."""
+    """Voicemail / busy close: same Manual WF facts + 732-462-8343. No transfer."""
     greeting = f"Hi {client_first}" if client_first else "Hello"
     lob = (line_of_business or "insurance").strip() or "insurance"
     carrier = (carrier_name or "your carrier").strip() or "your carrier"
     policy_type = _policy_type_phrase(line_of_business)
     due = action_date or "the due date on your notice"
-    callback = (
-        f"Please call us back at {AGENCY_MAIN_CALLBACK_DISPLAY} — "
-        f"that's {AGENCY_MAIN_CALLBACK_SPOKEN}. Thank you!"
-    )
 
     if pathway == PATHWAY_CANCELLATION:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
+        body = (
             f"I'm calling with an important notice about your {lob} policy with {carrier}. "
             f"Your {policy_type} is set to be cancelled due to an overdue payment. "
-            f"To avoid a lapse in coverage, please make a payment by {due}. "
-            f"{callback}"
+            f"To avoid a lapse in coverage, please make a payment by {due}."
         )
-    if pathway == PATHWAY_AUDIT:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"Your {lob} audit with {carrier} is incomplete. Please finish the audit. "
-            f"{callback}"
-        )
-    if pathway == PATHWAY_RETURNED_MAIL:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"We received returned mail on your {lob} policy with {carrier}. "
-            f"Please update your address. {callback}"
-        )
-    if pathway == PATHWAY_ESIGN:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"We need your e-signature on your {lob} policy with {carrier} "
-            f"to avoid an interruption. {callback}"
-        )
-    if pathway == PATHWAY_ADDITIONAL_INFO:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"We need additional information on your {lob} policy with {carrier}. "
-            f"{callback}"
-        )
-    if pathway == PATHWAY_RECOMMENDATIONS:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"Following up on recommendations for your {lob} policy with {carrier}. "
-            f"{callback}"
-        )
-    if pathway == PATHWAY_UNRESPONSIVE:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"I'm reaching out about your policies. {callback}"
-        )
+        return _wrap_voicemail(greeting, body)
+
+    body = MANUAL_WF_BODIES.get(pathway)
+    if body:
+        return _wrap_voicemail(greeting, body)
+
     reason = (csr_instructions or "").strip()
     if reason:
-        return (
-            f"{greeting}, this is Robie from StreetSmart Insurance. "
-            f"{reason} {callback}"
-        )
+        return _wrap_voicemail(greeting, reason)
     return (
         f"{greeting}, this is Robie from StreetSmart Insurance. "
-        f"{callback}"
+        f"{_callback_sentence()}"
     )

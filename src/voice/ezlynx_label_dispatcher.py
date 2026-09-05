@@ -920,6 +920,10 @@ class EZLynxLabelCallDispatcher:
 
         Warm transfer is the account Assigned Producer DID, not the label
         invoker and not Sales Center producerName.
+
+        Pathway copy comes only from Carlo's Manual WF Google Doc (or the
+        Cancellation Notice PDF). ``renewal_reachout`` requires an explicit
+        CSR phrase — never inferred from the daily renewal pipeline.
         """
         pathway = infer_outreach_pathway(
             combined_text or instructions,
