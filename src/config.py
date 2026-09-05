@@ -85,6 +85,8 @@ class Settings(BaseSettings):
     voice_ai_api_key: Optional[str] = None
     voice_caller_id: str = "+17322986745"
     voice_encrypted_key: Optional[str] = None
+    # Hard call-length cap in seconds (Bland max_duration is minutes; converted at dispatch).
+    voice_max_duration_seconds: int = 180
 
     @property
     def downloads_path(self) -> Path:

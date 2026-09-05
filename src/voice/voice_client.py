@@ -14,6 +14,12 @@ from src.voice.context_hydrator import CallingDossier
 
 logger = logging.getLogger("carrier_voice_client")
 
+DEFAULT_VOICE_MAX_DURATION_SECONDS = 180
+# Bland Send Call API: max_duration is minutes (https://docs.bland.ai/api-v1/post/calls).
+BLAND_MIN_MAX_DURATION_MINUTES = 1
+# Retell create-phone-call agent override: max_call_duration_ms minimum is 60s.
+RETELL_MIN_MAX_DURATION_MS = 60_000
+
 
 class CarrierVoiceClient:
     def __init__(
@@ -33,6 +39,38 @@ class CarrierVoiceClient:
             or getattr(settings, "voice_encrypted_key", None)
             or (self._fetch_encrypted_key() if not self.api_key else None)
         )
+        self.max_duration_seconds = self._resolve_max_duration_seconds()
+
+    @staticmethod
+    def _resolve_max_duration_seconds() -> int:
+        raw = os.getenv("VOICE_MAX_DURATION_SECONDS")
+        if raw is not None and str(raw).strip() != "":
+            try:
+                value = int(raw)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+        configured = getattr(settings, "voice_max_duration_seconds", DEFAULT_VOICE_MAX_DURATION_SECONDS)
+        try:
+            value = int(configured)
+        except (TypeError, ValueError):
+            return DEFAULT_VOICE_MAX_DURATION_SECONDS
+        return value if value > 0 else DEFAULT_VOICE_MAX_DURATION_SECONDS
+
+    @staticmethod
+    def _bland_max_duration_minutes(seconds: int) -> float:
+        """Convert configured seconds into Bland's minute-based max_duration."""
+        minutes = seconds / 60.0
+        if minutes < BLAND_MIN_MAX_DURATION_MINUTES:
+            return float(BLAND_MIN_MAX_DURATION_MINUTES)
+        if minutes == int(minutes):
+            return int(minutes)
+        return minutes
+
+    @staticmethod
+    def _retell_max_call_duration_ms(seconds: int) -> int:
+        return max(RETELL_MIN_MAX_DURATION_MS, int(seconds) * 1000)
 
     @staticmethod
     def _fetch_secret_key() -> Optional[str]:
@@ -172,6 +210,8 @@ CALL OBJECTIVES:
                 f"for {dossier.insured_name}. Please email any updates or documentation to robie@streetsmart.insurance. "
                 "Thank you and have a great day!"
             ),
+            # Bland max_duration is minutes; default 180s → 3. Ends hold/billing at the cap.
+            "max_duration": self._bland_max_duration_minutes(self.max_duration_seconds),
             "metadata": {
                 "policy_number": dossier.policy_number,
                 "insured_name": dossier.insured_name,
@@ -240,6 +280,11 @@ CALL OBJECTIVES:
                 "policy_number": dossier.policy_number,
                 "applicant_id": dossier.applicant_id,
                 "csr_email": dossier.assigned_csr_email,
+            },
+            "agent_override": {
+                "agent": {
+                    "max_call_duration_ms": self._retell_max_call_duration_ms(self.max_duration_seconds),
+                }
             },
         }
         try:
