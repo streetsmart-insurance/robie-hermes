@@ -3,7 +3,7 @@
 **Author / Operator:** Robie (`robie@streetsmart.insurance` / `hello@streetsmart.insurance`)  
 **Project:** Autonomous Manual Renewal Engine for Non-Download Policies  
 **Target Agency Management System:** EZLynx  
-**Last Updated:** September 03, 2026  
+**Last Updated:** September 05, 2026  
 
 ---
 
@@ -107,6 +107,8 @@ On September 03, 2026, 4 active accounts (5 policies) totaling **$93,490.19** in
   Houses email copy signed by Robie with subject reference tags.
 - **Thread Tracker & CC Resolver**: `src/email_outreach/thread_tracker.py`  
   Resolves assigned CSRs and keeps Jake Ferrara on CC.
+- **Underwriter Reply Filer**: `src/email_outreach/uw_reply_filer.py`  
+  Polls **robie@ + hello@ only**, matches `[RENEWAL-REQ-###]` / policy number, threads onto the existing titled renewal card via `find_matching_discussion`, and alerts the assigned CSR + Carlo. Never creates orphan/untitled discussions. Hooked from cadence, the inbox cleaner (additive), and `python -m src.email_outreach.uw_reply_filer`.
 - **Skills Directory**: `.agents/skills/manual-renewals/SKILL.md`  
   The native Antigravity skill governing manual renewal execution.
 
@@ -131,4 +133,9 @@ asyncio.run(poster.post_note('145217363', 'Commercial Auto Renewal', 'Note body.
 
 # 4. Generate daily handoff report and dispatch to team
 PYTHONPATH=. .venv/bin/python3 -m src.reporting.email_handoff --send
+
+# 5. File underwriter replies from robie@ + hello@ onto titled EZLynx cards
+PYTHONPATH=. .venv/bin/python3 -m src.email_outreach.uw_reply_filer --dry-run
+PYTHONPATH=. .venv/bin/python3 -m src.email_outreach.uw_reply_filer
+PYTHONPATH=. .venv/bin/pytest tests/test_uw_reply_filer.py tests/test_ezlynx_discussions.py -v
 ```

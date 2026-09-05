@@ -37,6 +37,7 @@ DISQUALIFIED_DISCUSSION_PATTERNS = [
     "text sent",
     "text received",
     "email sent by automation center",
+    "automation center",
     "submission added",
     "billing and payments",
     "cancellation",
@@ -700,13 +701,18 @@ class EZLynxApiClient:
         policy_number: Optional[str] = None,
         line_of_business: Optional[str] = None,
         carrier_name: Optional[str] = None,
-        use_playwright_fallback: bool = True
+        use_playwright_fallback: bool = True,
+        require_existing_discussion: bool = False,
     ) -> Dict[str, Any]:
         """Posts a note under the designated discussion title for an applicant.
 
         Mandates 'Robie was here' signature.
         Automatically resolves the authentic existing discussion card to thread directly inside it.
         Uses direct API if available, with graceful fallback to Playwright/CDP.
+
+        When ``require_existing_discussion`` is True (underwriter-reply filing),
+        refuses to post if ``find_matching_discussion`` cannot locate an existing
+        titled renewal card — never creates an orphan or untitled discussion.
         """
         # Ensure mandatory policy association header is explicitly in note_text
         if policy_number and not any(k in note_text for k in [f"#{policy_number}", f"Policy: {policy_number}", f"Policy #{policy_number}"]):
@@ -724,14 +730,34 @@ class EZLynxApiClient:
         if "Robie was here" not in note_text:
             note_text = f"{note_text.rstrip()}{ROBIE_SIGNATURE}"
 
-        # Dynamically resolve authentic discussion card title
-        resolved_title = self.resolve_discussion_title(
-            applicant_id=str(applicant_id),
-            discussion_title=discussion_title,
-            policy_number=policy_number,
-            line_of_business=line_of_business,
-            carrier_name=carrier_name
-        )
+        if require_existing_discussion:
+            matched = self.find_matching_discussion(
+                applicant_id=str(applicant_id),
+                policy_number=policy_number,
+                line_of_business=line_of_business,
+                carrier_name=carrier_name,
+            )
+            if not matched or not matched.get("title"):
+                logger.warning(
+                    f"Refusing to post note for applicant {applicant_id} / policy {policy_number}: "
+                    "no existing titled renewal discussion (orphan creation blocked)."
+                )
+                return {
+                    "status": "error",
+                    "error": "no_existing_titled_discussion",
+                    "applicant_id": applicant_id,
+                    "policy_number": policy_number,
+                }
+            resolved_title = matched["title"]
+        else:
+            # Dynamically resolve authentic discussion card title
+            resolved_title = self.resolve_discussion_title(
+                applicant_id=str(applicant_id),
+                discussion_title=discussion_title,
+                policy_number=policy_number,
+                line_of_business=line_of_business,
+                carrier_name=carrier_name
+            )
 
         # 1. Direct Classic REST Note API (Fastest and direct)
         if self.authenticate_classic():

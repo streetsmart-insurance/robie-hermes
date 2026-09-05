@@ -77,7 +77,8 @@ renewal-automation-system/
 │   │   ├── gmail_client.py      # Gmail API sender, thread tracker, & downloader
 │   │   ├── templates.py         # Jinja2 outreach and 5-7d cadence templates
 │   │   ├── intent_classifier.py # Reply classifier (Quote, Info Needed, Decline)
-│   │   └── thread_tracker.py    # Outreach cadence & follow-up scheduler
+│   │   ├── thread_tracker.py    # Outreach cadence & follow-up scheduler
+│   │   └── uw_reply_filer.py    # UW reply → titled EZLynx discussion filing
 │   ├── portals/
 │   │   ├── base_portal.py       # Base carrier crawler interface
 │   │   └── carrier_agents.py    # Playwright crawlers (Travelers, Liberty, etc.)
@@ -141,9 +142,38 @@ Run continuously as a 24-hour background daemon:
 PYTHONPATH=. python3 src/main.py --daemon
 ```
 
+### Underwriter Reply → EZLynx Discussion Filing
+When an underwriter replies to outreach in **`robie@streetsmart.insurance`** or **`hello@streetsmart.insurance`** (never CSR / org-wide inboxes), the filer:
+
+1. Detects `[RENEWAL-REQ-###]` and/or policy number.
+2. Matches the `PolicyRenewal` row (tracking tag, then existing `_matches_any_policy` helper).
+3. Locates the existing titled renewal card via `EZLynxApiClient.find_matching_discussion` (skips Loss Runs, COI, Text Sent, Automation Center, cancellation, etc.).
+4. Posts `EZLynxNoteBuilder.format_reply_received_note` — top line `Policy: #{policy_number} ({LOB} - {carrier})`, ends with `Robie was here`.
+5. Alerts the assigned CSR and Carlo via `notify_csr_of_underwriter_reply` (existing handoff path).
+
+It **will not** create an orphan / untitled discussion if no titled renewal card exists. The inbox cleaner still does not trash legitimate UW replies; filing is additive.
+
+```bash
+# Dry-run (detect + match only; no EZLynx post, no CSR email, no mark-read)
+PYTHONPATH=. python3 -m src.email_outreach.uw_reply_filer --dry-run
+
+# Live filing from robie@ + hello@
+PYTHONPATH=. python3 -m src.email_outreach.uw_reply_filer
+
+# Same path via main CLI
+PYTHONPATH=. python3 -m src.main --file-uw-replies --dry-run
+```
+
+The daily pipeline (`--run-today`) and Robie inbox cleaner also invoke this path so cadence and cleanup stay in sync. Production cron on hermes-poc-01 is unchanged:
+
+`0 9 * * * /opt/renewal-automation-system/scripts/run_daily_renewal_pipeline.sh`
+
+That script already runs `process_incoming_inbox_replies`, which now delegates to this filer.
+
 ### Running Automated Test Suite
 ```bash
 PYTHONPATH=. pytest tests/ -v
+PYTHONPATH=. pytest tests/test_uw_reply_filer.py tests/test_ezlynx_discussions.py -v
 ```
 
 ---

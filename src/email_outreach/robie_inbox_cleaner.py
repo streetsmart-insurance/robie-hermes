@@ -15,6 +15,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from src.email_outreach.gmail_client import GmailRenewalClient
+from src.email_outreach.uw_reply_filer import run_uw_reply_filing
 
 logger = logging.getLogger("robie_cleaner")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -92,6 +93,20 @@ def run_daily_inbox_cleanup_and_report(
             noise_breakdown[label] = 0
 
     logger.info(f"Noise cleanup complete: {total_noise_trashed} messages moved to trash.")
+
+    # 1b. File underwriter replies onto titled EZLynx cards (additive — never trash)
+    filing_result: Dict[str, Any] = {}
+    try:
+        filing_result = run_uw_reply_filing(gmail_client=client, dry_run=dry_run) or {}
+        logger.info(
+            "UW reply filing from cleaner: filed=%s skipped=%s dry_run=%s",
+            filing_result.get("filed"),
+            filing_result.get("skipped"),
+            dry_run,
+        )
+    except Exception as e:
+        logger.warning(f"UW reply filing skipped (cleaner continues; replies are not trashed): {e}")
+        filing_result = {"error": str(e), "filed": 0, "skipped": 0}
 
     # 2. Gather Real & Actionable Messages
     real_messages: List[Dict[str, Any]] = []
@@ -326,7 +341,9 @@ def run_daily_inbox_cleanup_and_report(
         "noise_breakdown": noise_breakdown,
         "real_messages_count": len(real_messages),
         "real_messages": real_messages,
-        "report_sent": report_sent
+        "report_sent": report_sent,
+        "uw_replies_filed": filing_result.get("filed", 0),
+        "uw_replies_skipped": filing_result.get("skipped", 0),
     }
 
 def main():

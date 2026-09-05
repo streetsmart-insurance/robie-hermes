@@ -69,7 +69,9 @@ class EZLynxNoteBuilder:
         summary: str,
         has_attachment: bool = False,
         attachment_name: Optional[str] = None,
-        clean_reply_text: Optional[str] = None
+        clean_reply_text: Optional[str] = None,
+        inbox_source: Optional[str] = None,
+        gmail_message_id: Optional[str] = None,
     ) -> str:
         lob = getattr(policy, "line_of_business", "") or "Commercial"
         cname = getattr(policy, "carrier_name", "") or "Carrier"
@@ -82,6 +84,10 @@ class EZLynxNoteBuilder:
             f"Intent Classification: {intent}",
             f"Summary: {summary}"
         ]
+        if inbox_source:
+            lines.append(f"Inbox: {inbox_source}")
+        if gmail_message_id:
+            lines.append(f"Inbox Message ID: {gmail_message_id}")
         if clean_reply_text:
             lines.append(f'Underwriter Message:\n"{clean_reply_text}"')
         if has_attachment and attachment_name:

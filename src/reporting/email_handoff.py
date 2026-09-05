@@ -156,8 +156,11 @@ def notify_csr_of_underwriter_reply(
         f"StreetSmart Insurance Autonomous System"
     )
 
-    # Per Carlo's directive: No need to CC anymore since notes & docs are saved directly to EZLynx
+    # Instant CSR alert + Carlo (existing handoff path; outbound CSR CC rules stay on outreach).
     cc_list = []
+    carlo_email = "carlo@streetsmart.insurance"
+    if csr_email and csr_email.lower() != carlo_email:
+        cc_list.append(carlo_email)
 
     logger.info(f"Sending immediate underwriter reply notification to {csr_email} for Pol #{policy.policy_number}")
     return client.send_email(

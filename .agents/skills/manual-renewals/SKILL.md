@@ -236,4 +236,8 @@ Integrates with Magellan (`https://app.magellan.insure`) to cross-reference rene
   `PYTHONPATH=. .venv/bin/python3 scripts/generate_and_send_today_handoff.py`
 - **Execute Pytest Suite**:
   `PYTHONPATH=. .venv/bin/pytest tests/`
+- **File underwriter replies (robie@ + hello@ → titled EZLynx cards)**:
+  `PYTHONPATH=. .venv/bin/python3 -m src.email_outreach.uw_reply_filer --dry-run`
+  `PYTHONPATH=. .venv/bin/python3 -m src.email_outreach.uw_reply_filer`
+  `PYTHONPATH=. .venv/bin/pytest tests/test_uw_reply_filer.py tests/test_ezlynx_discussions.py`
 

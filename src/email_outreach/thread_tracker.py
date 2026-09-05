@@ -1,20 +1,18 @@
 """Manages underwriter outreach lifecycle, 5-7 day follow-up cadence, and status updates."""
 
-import re
 import logging
-from pathlib import Path
 from datetime import date, datetime, timedelta
-from typing import List, Tuple, Optional
+from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.database.models import (
-    PolicyRenewal, OutreachThread, AuditNoteLog, DocumentRecord,
+    PolicyRenewal, OutreachThread, AuditNoteLog,
     RenewalStatus, ThreadStatus, ActionType
 )
 from src.email_outreach.gmail_client import GmailRenewalClient
 from src.email_outreach.templates import get_outreach_subject, get_initial_outreach_body, get_followup_body
-from src.email_outreach.intent_classifier import UnderwriterIntentClassifier, EmailClassification
+from src.email_outreach.intent_classifier import UnderwriterIntentClassifier
 from src.ezlynx.note_builder import EZLynxNoteBuilder
 from src.ezlynx.api_client import EZLynxApiClient
 
@@ -385,194 +383,18 @@ class OutreachCadenceManager:
         return followups_sent
 
     def process_incoming_inbox_replies(self, db: Session) -> int:
-        """Polls connected inboxes (Robie + Hello) for replies, classifies them, and updates EZLynx."""
-        # Query active pending policies to match against incoming carrier emails
-        pending_policies = db.query(PolicyRenewal).filter(
-            PolicyRenewal.status.in_([
-                RenewalStatus.PENDING_EVALUATION,
-                RenewalStatus.EMAIL_SENT_AWAITING_REPLY,
-                RenewalStatus.INFO_REQUESTED
-            ])
-        ).all()
-        policy_dicts = [
-            {"id": p.id, "policy_number": p.policy_number, "insured_name": p.insured_name}
-            for p in pending_policies
-        ]
+        """Polls robie@ + hello@ for underwriter replies and files them onto titled EZLynx cards.
 
-        replies = self.gmail.poll_matching_replies(active_policies=policy_dicts)
-        processed_count = 0
+        Delegates to ``uw_reply_filer`` so cadence, cleaner, and the standalone cron
+        share one matching / no-orphan posting path.
+        """
+        from src.email_outreach.uw_reply_filer import file_inbox_replies
 
-        for reply in replies:
-            subject = reply.get("subject", "")
-            policy_id = reply.get("matched_policy_id")
-            inbox_source = reply.get("inbox_source", "inbox")
-
-            if not policy_id:
-                match = re.search(r"\[RENEWAL-REQ-(\d+)\]", subject)
-                if match:
-                    policy_id = int(match.group(1))
-
-            if not policy_id:
-                continue
-
-            pol = db.query(PolicyRenewal).filter(PolicyRenewal.id == policy_id).first()
-            if not pol:
-                continue
-
-            thread = db.query(OutreachThread).filter(OutreachThread.policy_id == policy_id).first()
-            tracking_code = thread.tracking_code if thread else f"[RENEWAL-INBOX-{pol.id}]"
-
-            att_paths = [a["path"] for a in reply.get("attachments", [])]
-            att_names = [a["filename"] for a in reply.get("attachments", [])]
-
-            # Classify underwriter reply intent
-            classification: EmailClassification = self.classifier.classify(
-                subject=subject,
-                body_text=reply.get("body", ""),
-                attachment_filenames=att_names
-            )
-
-            if thread:
-                thread.latest_reply_summary = f"[{inbox_source} | {classification.intent}] {classification.summary}"
-                thread.status = ThreadStatus.REPLIED
-
-            # Handle attachments
-            attached_file_path = None
-            if att_paths:
-                attached_file_path = str(att_paths[0])
-                doc = DocumentRecord(
-                    policy_id=pol.id,
-                    file_name=att_names[0],
-                    file_path=attached_file_path,
-                    source=f"GMAIL_{inbox_source.upper()}"
-                )
-                db.add(doc)
-
-            # Update Policy Status based on classification
-            if classification.intent == "QUOTE_ATTACHED":
-                pol.status = RenewalStatus.QUOTE_RECEIVED
-                if thread:
-                    thread.status = ThreadStatus.RESOLVED
-            elif classification.intent == "INFO_REQUESTED":
-                pol.status = RenewalStatus.INFO_REQUESTED
-            elif classification.intent == "NON_RENEWAL_DECLINED":
-                pol.status = RenewalStatus.NON_RENEWAL_DECLINED
-                if thread:
-                    thread.status = ThreadStatus.RESOLVED
-
-            # Log EZLynx Note
-            note_text = EZLynxNoteBuilder.format_reply_received_note(
-                policy=pol,
-                tracking_code=tracking_code,
-                sender_email=reply.get("sender", ""),
-                intent=classification.intent,
-                summary=classification.summary,
-                has_attachment=bool(att_paths),
-                attachment_name=att_names[0] if att_names else None,
-                clean_reply_text=reply.get("clean_reply_text")
-            )
-            db.add(AuditNoteLog(
-                policy_id=pol.id,
-                applicant_id=pol.applicant_id,
-                discussion_title=pol.discussion_title,
-                action_type=ActionType.UNDERWRITER_REPLIED,
-                note_text=note_text
-            ))
-            note_res = self.ezlynx.add_note_to_discussion(
-                applicant_id=pol.applicant_id,
-                discussion_title=pol.discussion_title,
-                note_text=note_text,
-                policy_number=pol.policy_number,
-                line_of_business=pol.line_of_business,
-                carrier_name=pol.carrier_name
-            )
-            if isinstance(note_res, dict) and isinstance(note_res.get("discussion_title"), str):
-                pol.discussion_title = note_res.get("discussion_title")
-            note_synced = bool(note_res and note_res.get("status") not in ("simulated", "error", None))
-            note_id = note_res.get("note_id") if note_res else None
-
-            task_created = False
-            # Upload document to EZLynx & create task based on intent
-            if attached_file_path:
-                if classification.intent == "QUOTE_ATTACHED":
-                    self.ezlynx.upload_document(
-                        applicant_id=pol.applicant_id,
-                        file_path=Path(attached_file_path),
-                        folder_name="Renewal Offers/Declarations",
-                        policy_number=pol.policy_number,
-                        doc_type="renewal",
-                        label_to_apply="Renewal Offer"
-                    )
-                    task_res = self.ezlynx.create_user_task(
-                        applicant_id=pol.applicant_id,
-                        title=f"Review Renewal Quote: {pol.insured_name} ({pol.carrier_name})",
-                        description=f"Underwriter emailed renewal proposal for Pol #{pol.policy_number}. Document uploaded to Documents > Renewal Offers/Declarations.",
-                        assigned_user=pol.assigned_agent
-                    )
-                    task_created = bool(task_res and task_res.get("status") not in ("simulated", "error", None))
-                elif classification.intent == "LOSS_RUNS_ATTACHED":
-                    self.ezlynx.upload_document(
-                        applicant_id=pol.applicant_id,
-                        file_path=Path(attached_file_path),
-                        folder_name="Loss Runs",
-                        policy_number=pol.policy_number,
-                        doc_type="loss runs",
-                        label_to_apply="Loss Runs"
-                    )
-                    task_res = self.ezlynx.create_user_task(
-                        applicant_id=pol.applicant_id,
-                        title=f"Loss Runs Received: {pol.insured_name} ({pol.carrier_name})",
-                        description=f"Underwriter/carrier provided loss runs for Pol #{pol.policy_number}. Document uploaded to Documents > Loss Runs.",
-                        assigned_user=pol.assigned_agent
-                    )
-                    task_created = bool(task_res and task_res.get("status") not in ("simulated", "error", None))
-                elif classification.intent == "NON_RENEWAL_DECLINED":
-                    self.ezlynx.upload_document(
-                        applicant_id=pol.applicant_id,
-                        file_path=Path(attached_file_path),
-                        folder_name="Cancellations/NonRenewals/Reinstatements",
-                        policy_number=pol.policy_number,
-                        doc_type="non renewal",
-                        label_to_apply="Non Renewal"
-                    )
-                    task_res = self.ezlynx.create_user_task(
-                        applicant_id=pol.applicant_id,
-                        title=f"CRITICAL: Non-Renewal Notice - Re-market {pol.insured_name} ({pol.carrier_name})",
-                        description=f"Carrier issued non-renewal notice for Pol #{pol.policy_number}. Document uploaded to Documents > Cancellations/NonRenewals/Reinstatements.",
-                        assigned_user=pol.assigned_agent
-                    )
-                    task_created = bool(task_res and task_res.get("status") not in ("simulated", "error", None))
-                else:
-                    self.ezlynx.upload_document(
-                        applicant_id=pol.applicant_id,
-                        file_path=Path(attached_file_path),
-                        policy_number=pol.policy_number,
-                        doc_type=getattr(classification, "document_type", "renewal")
-                    )
-
-            # Instantly alert the assigned CSR via email (CC'ing Carlo & Jake)
-            try:
-                from src.reporting.email_handoff import notify_csr_of_underwriter_reply
-                notify_csr_of_underwriter_reply(
-                    policy=pol,
-                    classification=classification,
-                    sender=reply.get("sender", ""),
-                    attachments=reply.get("attachments", []),
-                    client=self.gmail,
-                    note_synced=note_synced,
-                    task_created=task_created,
-                    note_id=note_id
-                )
-            except Exception as e:
-                logger.error(f"Failed to send instant CSR alert for Pol #{pol.policy_number}: {e}")
-
-            # Mark the email message as READ in the originating inbox
-            if reply.get("message_id"):
-                self.gmail.mark_message_read(reply.get("message_id"), inbox_source)
-
-
-            processed_count += 1
-
-        db.commit()
-        return processed_count
+        result = file_inbox_replies(
+            db=db,
+            gmail=self.gmail,
+            ezlynx=self.ezlynx,
+            classifier=self.classifier,
+        )
+        return int(result.get("filed", 0))
 

@@ -104,7 +104,7 @@ def test_note_builder_reply_received_with_clean_text():
         clean_reply_text=clean_text
     )
 
-    assert "Policy: #CCP35165-01 (Commercial - Markel Insurance)" in note
+    assert note.startswith("Policy: #CCP35165-01 (Commercial - Markel Insurance)")
     assert "Underwriter Message:" in note
     assert clean_text in note
-    assert "Robie was here" in note
+    assert note.rstrip().endswith("Robie was here")

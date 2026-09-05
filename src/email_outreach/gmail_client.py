@@ -19,6 +19,33 @@ from src.email_outreach.auth_setup import (
 
 logger = logging.getLogger("gmail_client")
 
+DEFAULT_RENEWAL_POLL_INBOXES = (
+    "robie@streetsmart.insurance",
+    "hello@streetsmart.insurance",
+)
+
+
+def filter_renewal_poll_inboxes(
+    inbox_services: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Restrict Gmail services to robie@ and hello@ only.
+
+    OTP / 2FA may still use Carlo's mailbox via ``otp_interceptor``. Renewal
+    reply polling must never scan CSR or org-wide inboxes.
+    """
+    allowed = {
+        str(e).strip().lower()
+        for e in (getattr(settings, "gmail_poll_inboxes", None) or DEFAULT_RENEWAL_POLL_INBOXES)
+        if e
+    }
+    if not allowed:
+        allowed = set(DEFAULT_RENEWAL_POLL_INBOXES)
+    filtered: Dict[str, Any] = {}
+    for name, svc in (inbox_services or {}).items():
+        if name and str(name).strip().lower() in allowed:
+            filtered[name] = svc
+    return filtered
+
 def extract_clean_reply_text(raw_text: str) -> str:
     """Extracts the genuine reply message from an underwriter, stripping out
     headers, signature blocks, disclaimers, and quoted chain text.
@@ -155,7 +182,9 @@ class GmailRenewalClient:
         2. In Hello inbox: Also scans for proactive carrier renewal / loss run emails matching active policies.
         """
         all_replies = []
-        active_inboxes = self.inbox_services or {"robie@streetsmart.insurance": self.service}
+        active_inboxes = filter_renewal_poll_inboxes(
+            self.inbox_services or {"robie@streetsmart.insurance": self.service}
+        )
 
         if not any(active_inboxes.values()):
             logger.info("[SIMULATION] Dual-inbox poll -> No active Gmail credentials, simulation mode.")

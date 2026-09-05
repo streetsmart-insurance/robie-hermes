@@ -12,7 +12,14 @@ This repository contains the autonomous engine for managing expiring non-downloa
 ## Key Commands
 - Run daily pipeline: `PYTHONPATH=. .venv/bin/python3 -m src.main --run-today`
 - List carrier matrix: `PYTHONPATH=. .venv/bin/python3 -m src.main --list-carriers`
+- File underwriter replies (robie@ + hello@ only) onto titled EZLynx cards:
+  `PYTHONPATH=. .venv/bin/python3 -m src.email_outreach.uw_reply_filer --dry-run`
+  `PYTHONPATH=. .venv/bin/python3 -m src.email_outreach.uw_reply_filer`
+  `PYTHONPATH=. .venv/bin/python3 -m src.main --file-uw-replies --dry-run`
 - Run test suite: `PYTHONPATH=. .venv/bin/pytest tests/`
+- UW-reply filing tests: `PYTHONPATH=. .venv/bin/pytest tests/test_uw_reply_filer.py tests/test_ezlynx_discussions.py -v`
+
+Production cron on hermes-poc-01 is **not** changed: `0 9 * * * /opt/renewal-automation-system/scripts/run_daily_renewal_pipeline.sh` (already calls `process_incoming_inbox_replies`).
 
 ## EZLynx Universal API & Session Operations (For All Agents & Roles)
 The production EZLynx API is fully configured (`ssr_userPROD`) across both Classic REST Services (`services.ezlynx.com`) and Modern OAuth2 Gateway (`app.ezlynx.com`).

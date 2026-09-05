@@ -47,6 +47,11 @@ def parse_args():
     parser.add_argument("--ezlynx-search-applicant", type=str, default=None, metavar="QUERY", help="Search applicant by ID, Name, or Policy Number")
     parser.add_argument("--ezlynx-view-sessions", action="store_true", help="View health and status of EZLynx API & browser sessions")
     parser.add_argument("--ezlynx-quote-session", type=str, default=None, metavar="QUOTE_ID", help="View completed quote results for a rating session")
+    parser.add_argument(
+        "--file-uw-replies",
+        action="store_true",
+        help="Poll robie@ + hello@ for underwriter replies and file them onto titled EZLynx discussion cards",
+    )
     return parser.parse_args()
 
 async def async_main():
@@ -360,6 +365,20 @@ async def async_main():
             console.print("[bold green]✅ Hello Polling Inbox Authenticated! Token saved.[/bold green]")
 
     if args.auth_robie or args.auth_hello or args.auth_gmail:
+        return
+
+    if args.file_uw_replies:
+        from src.email_outreach.uw_reply_filer import run_uw_reply_filing
+
+        console.print(
+            "[bold cyan]Filing underwriter replies from robie@ + hello@ onto titled EZLynx cards...[/bold cyan]"
+        )
+        summary = run_uw_reply_filing(dry_run=args.dry_run)
+        console.print(
+            f"[bold green]filed={summary.get('filed')}[/bold green] "
+            f"skipped={summary.get('skipped')} errors={summary.get('errors')} "
+            f"dry_run={summary.get('dry_run')}"
+        )
         return
 
     orchestrator = DailyRenewalOrchestrator()

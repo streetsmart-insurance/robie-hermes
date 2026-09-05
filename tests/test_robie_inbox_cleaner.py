@@ -4,8 +4,10 @@ from src.email_outreach.robie_inbox_cleaner import run_daily_inbox_cleanup_and_r
 
 class TestRobieInboxCleaner(unittest.TestCase):
 
+    @patch("src.email_outreach.robie_inbox_cleaner.run_uw_reply_filing")
     @patch("src.email_outreach.robie_inbox_cleaner.GmailRenewalClient")
-    def test_cleaner_identifies_noise_and_sends_report(self, mock_client_cls):
+    def test_cleaner_identifies_noise_and_sends_report(self, mock_client_cls, mock_filer):
+        mock_filer.return_value = {"filed": 0, "skipped": 0}
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_service = MagicMock()
@@ -71,6 +73,8 @@ class TestRobieInboxCleaner(unittest.TestCase):
         self.assertEqual(res["real_messages_count"], 1)
         self.assertEqual(res["real_messages"][0]["from"], "underwriter@trinity.com")
         self.assertTrue(res["report_sent"])
+        mock_filer.assert_called_once()
+        self.assertEqual(res.get("uw_replies_filed"), 0)
         mock_client.send_email.assert_called_once()
         args, kwargs = mock_client.send_email.call_args
         self.assertEqual(kwargs["to_email"], "carlo@streetsmart.insurance")
