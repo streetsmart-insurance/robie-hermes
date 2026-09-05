@@ -46,6 +46,8 @@ class SecretsManager:
 
         # 3. Check Google Cloud Secret Manager
         if self.provider in ["gcp", "google", "google_secret_manager", "auto"]:
+            if os.getenv("PYTEST_CURRENT_TEST") and not os.getenv("TEST_ENABLE_GCP_NETWORK"):
+                return None
             gcp_val = self._get_from_gcp_secrets(service_name, key)
             if gcp_val:
                 return gcp_val
