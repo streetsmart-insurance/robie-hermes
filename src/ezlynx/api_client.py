@@ -30,8 +30,8 @@ logger = logging.getLogger("ezlynx_api")
 ROBIE_SIGNATURE = "\n\nRobie was here"
 
 # Classic GET /documentlibrary/list/{applicant}/{page}/{size}/{policyId} returns a
-# paged envelope (TotalRecords + a document array). Production payloads use
-# Documents — not Records / DocumentList — plus PascalCase row fields.
+# paged envelope (TotalRecords + a document array). Live production rows use
+# Description (filename), Id, and PolicyId — not DocumentName / PolicyNumber.
 _DOCUMENT_LIST_KEYS = (
     "Documents",
     "DocumentList",
@@ -62,6 +62,11 @@ _DOCUMENT_WRAPPER_KEYS = (
     "response",
 )
 _DOCUMENT_HINT_KEYS = {
+    "Description",
+    "description",
+    "Id",
+    "PolicyId",
+    "policyId",
     "DocumentName",
     "DocumentID",
     "DocumentId",
@@ -105,8 +110,9 @@ def extract_document_records(payload: Any) -> List[Dict[str, Any]]:
     """Return document row dicts from a Classic / wrapped Document Library payload.
 
     Production list_applicant_documents data looks like:
-      {"TotalRecords": 154, "Documents": [{DocumentID, DocumentName, PolicyNumber, CreatedDate}, ...]}
-    Older/alternate envelopes may use DocumentList, Records, items, or an ASP.NET ``d`` wrapper.
+      {"TotalRecords": 154, "Documents": [{Id, Description, PolicyId, CreatedDate}, ...]}
+    Description is the filename. Older/alternate envelopes may use DocumentName / PolicyNumber,
+    DocumentList, Records, items, or an ASP.NET ``d`` wrapper.
     """
     if isinstance(payload, list):
         if _looks_like_document_rows(payload) or (
@@ -192,28 +198,47 @@ def _format_uploaded_date(value: Any) -> Optional[str]:
     return text[:19].replace("T", " ")
 
 
+def _stringify_policy_id(value: Any) -> Optional[str]:
+    """Return a non-zero PolicyId as text. 0 means unassociated on the Classic API."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if int(value) == 0:
+            return None
+        return str(int(value))
+    text = str(value).strip()
+    if not text or text == "0":
+        return None
+    return text
+
+
 def document_display_fields(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
-    """Normalize a document row to name, id, policy number, and uploaded date."""
+    """Normalize a document row to name, id, policy association, and uploaded date.
+
+    Live Classic documentlibrary/list rows use Description (filename), Id, PolicyId.
+    """
     name = _first_present(
         doc,
         (
+            "Description",
+            "description",
             "DocumentName",
             "FileName",
             "Name",
             "Title",
-            "Description",
             "documentName",
             "fileName",
             "name",
             "title",
-            "description",
         ),
     )
     doc_id = _first_present(
         doc,
-        ("DocumentID", "DocumentId", "Id", "ID", "id", "documentId"),
+        ("Id", "ID", "id", "DocumentID", "DocumentId", "documentId"),
     )
-    policy = _stringify_policy_number(
+    policy_number = _stringify_policy_number(
         _first_present(
             doc,
             (
@@ -229,6 +254,9 @@ def document_display_fields(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
                 "policies",
             ),
         )
+    )
+    policy_id = _stringify_policy_id(
+        _first_present(doc, ("PolicyId", "policyId", "PolicyID", "AssociatedPolicyId"))
     )
     uploaded = _format_uploaded_date(
         _first_present(
@@ -251,7 +279,8 @@ def document_display_fields(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
     return {
         "name": None if name is None else str(name),
         "id": None if doc_id is None else str(doc_id),
-        "policy_number": policy,
+        "policy_number": policy_number,
+        "policy_id": policy_id,
         "uploaded": uploaded,
     }
 
@@ -264,7 +293,9 @@ def format_document_line(doc: Dict[str, Any]) -> str:
         parts.append(f"ID: {fields['id']}")
     if fields["policy_number"]:
         parts.append(f"Policy: {fields['policy_number']}")
-    else:
+    if fields["policy_id"]:
+        parts.append(f"PolicyId: {fields['policy_id']}")
+    if not fields["policy_number"] and not fields["policy_id"]:
         parts.append("Policy: —")
     if fields["uploaded"]:
         parts.append(f"Uploaded: {fields['uploaded']}")
@@ -620,8 +651,9 @@ class EZLynxApiClient:
 
         Success envelope: ``{"status": "success", "data": <raw JSON>}``.
         Production ``data`` is typically
-        ``{"TotalRecords": int, "Documents": [ {DocumentID, DocumentName, PolicyNumber, CreatedDate}, ... ]}``.
-        Use :func:`extract_document_records` to read the row list (do not assume Records/DocumentList).
+        ``{"TotalRecords": int, "Documents": [ {Id, Description, PolicyId, CreatedDate}, ... ]}``.
+        ``Description`` is the filename. Use :func:`extract_document_records` to read the row list
+        (do not assume Records/DocumentList or DocumentName/PolicyNumber).
         """
         if not self.authenticate_classic():
             return {"status": "error", "error": "Unable to authenticate with Classic EZLynx API"}

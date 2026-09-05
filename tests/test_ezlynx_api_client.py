@@ -179,17 +179,30 @@ PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD = {
     "TotalRecords": 154,
     "Documents": [
         {
-            "DocumentID": 881122,
-            "DocumentName": "2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf",
-            "PolicyNumber": "CBB-00113127-02",
+            "Id": 881122,
+            "Description": "2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf",
+            "PolicyId": 99012,
             "CreatedDate": "2026-08-01T14:22:00",
         },
         {
-            "DocumentID": 881123,
-            "DocumentName": "Loss Runs - Hartford.pdf",
-            "PolicyNumber": None,
+            "Id": 881123,
+            "Description": "Loss Runs - Hartford.pdf",
+            "PolicyId": 0,
             "CreatedDate": "/Date(1722513600000)/",
         },
+    ],
+}
+
+# Alternate / older row shape still accepted as a fallback.
+LEGACY_DOCUMENT_NAME_PAYLOAD = {
+    "TotalRecords": 1,
+    "Documents": [
+        {
+            "DocumentID": 44,
+            "DocumentName": "via-documentname.pdf",
+            "PolicyNumber": "R2WC681352",
+            "CreatedDate": "2026-09-01",
+        }
     ],
 }
 
@@ -198,10 +211,14 @@ def test_extract_document_records_uses_documents_key_not_records():
     """Production hermes payload has TotalRecords + Documents; Records/DocumentList are absent."""
     records = extract_document_records(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD)
     assert len(records) == 2
-    assert records[0]["DocumentName"].startswith("2026-27 Renewal Offer")
+    assert records[0]["Description"].startswith("2026-27 Renewal Offer")
+    assert records[0]["Id"] == 881122
+    assert records[0]["PolicyId"] == 99012
     assert document_library_total(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD, records) == 154
     assert "Records" not in PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD
     assert "DocumentList" not in PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD
+    assert "DocumentName" not in records[0]
+    assert "PolicyNumber" not in records[0]
 
 
 def test_extract_document_records_supports_legacy_and_wrapped_envelopes():
@@ -221,17 +238,41 @@ def test_extract_document_records_supports_legacy_and_wrapped_envelopes():
     assert extract_document_records(bare_list)[0]["title"] == "bare.pdf"
 
 
-def test_format_document_line_includes_name_policy_and_date():
+def test_format_document_line_uses_description_id_and_policy_id():
+    """Live API filename is Description; association is PolicyId, not PolicyNumber."""
     line = format_document_line(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD["Documents"][0])
     assert "Name: 2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf" in line
     assert "ID: 881122" in line
-    assert "Policy: CBB-00113127-02" in line
+    assert "PolicyId: 99012" in line
     assert "Uploaded: 2026-08-01" in line
 
     unassociated = format_document_line(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD["Documents"][1])
     assert "Name: Loss Runs - Hartford.pdf" in unassociated
     assert "Policy: —" in unassociated
+    assert "PolicyId:" not in unassociated
     assert "Uploaded: 2024-08-01" in unassociated
+
+
+def test_format_document_line_falls_back_to_document_name_and_policy_number():
+    line = format_document_line(LEGACY_DOCUMENT_NAME_PAYLOAD["Documents"][0])
+    assert "Name: via-documentname.pdf" in line
+    assert "Policy: R2WC681352" in line
+
+
+def test_format_document_line_prefers_description_over_document_name():
+    line = format_document_line(
+        {
+            "Id": 7,
+            "Description": "live-filename.pdf",
+            "DocumentName": "should-not-win.pdf",
+            "PolicyId": 55,
+            "PolicyNumber": "POL-55",
+        }
+    )
+    assert "Name: live-filename.pdf" in line
+    assert "should-not-win.pdf" not in line
+    assert "Policy: POL-55" in line
+    assert "PolicyId: 55" in line
 
 
 @patch("requests.get")
@@ -248,6 +289,6 @@ def test_list_applicant_documents_wraps_classic_payload(mock_get, api_client):
     assert res["status"] == "success"
     assert res["data"]["TotalRecords"] == 154
     docs = extract_document_records(res["data"])
-    assert docs[0]["DocumentName"].endswith(".pdf")
+    assert docs[0]["Description"].endswith(".pdf")
     mock_get.assert_called_once()
     assert "/documentlibrary/list/151445306/1/20/0" in mock_get.call_args[0][0]

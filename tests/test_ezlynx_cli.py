@@ -30,15 +30,15 @@ PRODUCTION_LIKE_RESPONSE = {
         "TotalRecords": 154,
         "Documents": [
             {
-                "DocumentID": 881122,
-                "DocumentName": "2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf",
-                "PolicyNumber": "CBB-00113127-02",
+                "Id": 881122,
+                "Description": "2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf",
+                "PolicyId": 99012,
                 "CreatedDate": "2026-08-01T14:22:00",
             },
             {
-                "DocumentID": 881123,
-                "DocumentName": "Applications",
-                "PolicyNumber": "",
+                "Id": 881123,
+                "Description": "Applications",
+                "PolicyId": 0,
                 "CreatedDate": None,
             },
         ],
@@ -59,7 +59,7 @@ def _run_documents(cli_mod, monkeypatch, payload, extra_args=None):
 
 
 def test_documents_command_lists_filenames_and_policy(cli_mod, monkeypatch, capsys):
-    """Repro: production printed only TotalRecords because it read Records/DocumentList."""
+    """Live Classic rows use Description / Id / PolicyId, not DocumentName / PolicyNumber."""
     _run_documents(cli_mod, monkeypatch, PRODUCTION_LIKE_RESPONSE)
     out = capsys.readouterr().out
     assert "Document Library for Applicant #151445306:" in out
@@ -67,10 +67,11 @@ def test_documents_command_lists_filenames_and_policy(cli_mod, monkeypatch, caps
     assert "Showing 2 on page 1" in out
     assert "2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf" in out
     assert "ID: 881122" in out
-    assert "Policy: CBB-00113127-02" in out
+    assert "PolicyId: 99012" in out
     assert "Uploaded: 2026-08-01" in out
     assert "Name: Applications" in out
     assert "Policy: —" in out
+    assert "PolicyId: 0" not in out
     # Must not stop at the count line the way the old CLI did.
     assert out.count("  • ") == 2
 
@@ -81,8 +82,9 @@ def test_documents_command_json_dumps_full_payload(cli_mod, monkeypatch, capsys)
     parsed = json.loads(out)
     assert parsed["status"] == "success"
     assert parsed["data"]["TotalRecords"] == 154
-    assert parsed["data"]["Documents"][0]["DocumentName"].endswith(".pdf")
-    assert parsed["data"]["Documents"][0]["PolicyNumber"] == "CBB-00113127-02"
+    assert parsed["data"]["Documents"][0]["Description"].endswith(".pdf")
+    assert parsed["data"]["Documents"][0]["PolicyId"] == 99012
+    assert parsed["data"]["Documents"][0]["Id"] == 881122
 
 
 def test_documents_command_legacy_records_key_still_lists(cli_mod, monkeypatch, capsys):
