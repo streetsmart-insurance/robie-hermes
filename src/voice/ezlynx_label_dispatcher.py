@@ -2,7 +2,7 @@
 EZLynx Label & Note Call Dispatcher.
 
 Enables CSRs and Account Managers to trigger autonomous calls directly from EZLynx:
-1. CSR adds a Note or Discussion with label/title 'robie call'.
+1. CSR applies the org label ``Robie Call`` and/or writes that phrase in the note/title.
 2. Note specifies 'Who to call' (phone number/carrier) and 'What to say' (instructions).
 3. Robie parses the instructions, dispatches the call via Bland AI from +1 (732) 298-6745.
 4. When complete, Robie automatically posts the call transcript, recording link, and summary
@@ -16,10 +16,155 @@ from typing import Optional, Dict, Any, List
 from src.ezlynx.api_client import EZLynxApiClient
 from src.voice.voice_client import CarrierVoiceClient
 from src.voice.context_hydrator import CallingDossier
+from src.voice.processed_robie_notes import ProcessedRobieCallStore
 
 logger = logging.getLogger("ezlynx_label_dispatcher")
 
 ROBIE_LABEL_TRIGGERS = ["robie call", "robie_call", "call robie", "robie: call", "[robie call]"]
+
+# Live GetPagedDiscussions page size observed on hermes-poc-01.
+PORTAL_DISCUSSIONS_PAGE_SIZE = 50
+
+# Markers that identify Robie's own acknowledgement / clarification / transcript posts.
+# Do not treat a CSR trigger phrase like "[ROBIE CALL]" as self-authored.
+ROBIE_SELF_BODY_MARKERS = (
+    "[robie autonomous",
+    "robie autonomous",
+    "robie call -",
+    "[robie call initiated",
+    "robie was here",
+    "autonomous call dispatched",
+    "call dispatched",
+    "autonomous carrier phone outreach",
+    "transcript will be posted",
+    "audio recording and transcript",
+    "📞 [robie",
+    "🤖 [robie",
+    "⚠️ [robie",
+)
+
+
+def _text_matches_robie_trigger(text: Optional[str]) -> bool:
+    """True when any Robie Call phrase appears in text (case-insensitive)."""
+    if not text:
+        return False
+    lower = text.lower()
+    return any(trigger in lower for trigger in ROBIE_LABEL_TRIGGERS)
+
+
+def extract_discussion_note_text(discussion: Dict[str, Any]) -> str:
+    """Read the CSR note body from a GetPagedDiscussions card.
+
+    Live portal payload uses ``discussionNote.note``. Older mocks / REST
+    envelopes used ``noteText``. Prefer the live field, then fall back.
+    """
+    note_obj = discussion.get("discussionNote") if isinstance(discussion, dict) else None
+    if not isinstance(note_obj, dict):
+        note_obj = {}
+    for candidate in (note_obj.get("note"), note_obj.get("noteText"), discussion.get("description") if isinstance(discussion, dict) else None):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+        if candidate and not isinstance(candidate, str):
+            return str(candidate)
+    return ""
+
+
+def extract_discussion_note_labels(discussion: Dict[str, Any]) -> List[str]:
+    """Return labelName values from discussionNote.noteLabels (live portal shape)."""
+    note_obj = discussion.get("discussionNote") if isinstance(discussion, dict) else None
+    if not isinstance(note_obj, dict):
+        return []
+    raw_labels = note_obj.get("noteLabels") or []
+    names: List[str] = []
+    if not isinstance(raw_labels, list):
+        return names
+    for label in raw_labels:
+        if isinstance(label, dict):
+            name = label.get("labelName") or ""
+            if name:
+                names.append(str(name))
+        elif isinstance(label, str) and label.strip():
+            names.append(label)
+    return names
+
+
+def discussion_is_robie_call(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
+    """Trigger when an org label or title/note text matches Robie Call phrases.
+
+    CSRs should apply the org label ``Robie Call`` and/or write that phrase in
+    the note. Instruction-style notes without the label or phrase do not fire.
+    """
+    title = ""
+    if isinstance(discussion, dict):
+        title = discussion.get("title") or ""
+    if note_text is None:
+        note_text = extract_discussion_note_text(discussion)
+    if _text_matches_robie_trigger(title) or _text_matches_robie_trigger(note_text):
+        return True
+    for label_name in extract_discussion_note_labels(discussion):
+        if _text_matches_robie_trigger(label_name):
+            return True
+    return False
+
+
+def extract_discussion_note_id(discussion: Dict[str, Any]) -> Optional[str]:
+    """Return discussionNote.noteId when present."""
+    note_obj = discussion.get("discussionNote") if isinstance(discussion, dict) else None
+    if not isinstance(note_obj, dict):
+        return None
+    note_id = note_obj.get("noteId")
+    if note_id is None or str(note_id).strip() == "":
+        return None
+    return str(note_id)
+
+
+def discussion_note_identity(discussion: Dict[str, Any]) -> Optional[str]:
+    """Stable identity: noteId, or discussionId:noteId when both exist."""
+    note_id = extract_discussion_note_id(discussion)
+    if not note_id:
+        return None
+    discussion_id = discussion.get("discussionId") if isinstance(discussion, dict) else None
+    if discussion_id is not None and str(discussion_id).strip() != "":
+        return f"{discussion_id}:{note_id}"
+    return note_id
+
+
+def _note_body_has_robie_self_marker(note_text: Optional[str]) -> bool:
+    """True when the note body looks like a Robie ack/clarification/transcript."""
+    if not note_text:
+        return False
+    lower = note_text.lower()
+    if any(marker in lower for marker in ROBIE_SELF_BODY_MARKERS):
+        return True
+    stripped = lower
+    for trigger in sorted(ROBIE_LABEL_TRIGGERS, key=len, reverse=True):
+        stripped = stripped.replace(trigger, " ")
+    return "[robie" in stripped
+
+
+def latest_activity_is_from_robie(
+    discussion: Dict[str, Any],
+    note_text: Optional[str] = None,
+) -> bool:
+    """Ignore cards whose latest note/activity is already Robie's.
+
+    Checks author name and Robie post markers in the note body only (not title),
+    so a CSR title like ``Robie Call - Follow up`` is still allowed.
+    """
+    note_obj = discussion.get("discussionNote") if isinstance(discussion, dict) else None
+    if not isinstance(note_obj, dict):
+        note_obj = {}
+    last_author = (
+        note_obj.get("createdByName")
+        or note_obj.get("createdBy")
+        or (discussion.get("lastModifiedByName") if isinstance(discussion, dict) else None)
+        or ""
+    )
+    if "robie" in str(last_author).lower():
+        return True
+    if note_text is None:
+        note_text = extract_discussion_note_text(discussion)
+    return _note_body_has_robie_self_marker(note_text)
 
 
 def normalize_phone_e164(raw_phone: Optional[str]) -> Optional[str]:
@@ -55,9 +200,8 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         "instructions": "",
     }
 
-    # Check for trigger tag/keyword
-    lower_text = clean_text.lower()
-    if any(trigger in lower_text for trigger in ROBIE_LABEL_TRIGGERS):
+    # Check for trigger tag/keyword in the note/title text
+    if _text_matches_robie_trigger(clean_text):
         result["is_robie_call"] = True
 
     # 1. Extract Phone Number
@@ -164,9 +308,11 @@ class EZLynxLabelCallDispatcher:
         self,
         ezlynx_client: Optional[EZLynxApiClient] = None,
         voice_client: Optional[CarrierVoiceClient] = None,
+        processed_store: Optional[ProcessedRobieCallStore] = None,
     ):
         self.ezlynx = ezlynx_client or EZLynxApiClient()
         self.voice = voice_client or CarrierVoiceClient()
+        self.processed_store = processed_store or ProcessedRobieCallStore()
 
     def process_applicant_notes_for_calls(
         self,
@@ -179,7 +325,9 @@ class EZLynxLabelCallDispatcher:
         initiates the calls, and posts confirmation or clarification notes back.
         """
         results = []
-        discussions = self.ezlynx.get_applicant_discussions(applicant_id)
+        discussions = self.ezlynx.get_applicant_discussions(
+            applicant_id, page_size=PORTAL_DISCUSSIONS_PAGE_SIZE
+        )
         if not discussions:
             logger.info(f"No discussions found for applicant {applicant_id}")
             return results
@@ -198,18 +346,27 @@ class EZLynxLabelCallDispatcher:
 
         for disc in discussions:
             title = disc.get("title", "")
-            note_obj = disc.get("discussionNote", {})
-            note_text = note_obj.get("noteText", "") or disc.get("description", "")
+            note_text = extract_discussion_note_text(disc)
             combined_text = f"{title}\n{note_text}"
 
             parsed = parse_call_note_instructions(combined_text)
-            if not parsed["is_robie_call"]:
+            if not (discussion_is_robie_call(disc, note_text=note_text) or parsed["is_robie_call"]):
                 continue
 
-            # Guard: Prevent re-triggering if the latest note was already posted by Robie
-            last_author = note_obj.get("createdByName") or disc.get("lastModifiedByName", "")
-            if "robie" in last_author.lower() or "[ROBIE" in note_text:
-                logger.debug(f"Skipping discussion '{title}': latest activity already handled by Robie.")
+            # Guard: never re-trigger on Robie's own latest activity
+            if latest_activity_is_from_robie(disc, note_text=note_text):
+                logger.info(
+                    f"Skipping discussion '{title}': latest activity is already from Robie."
+                )
+                continue
+
+            identity = discussion_note_identity(disc)
+            note_id = extract_discussion_note_id(disc)
+            discussion_id = disc.get("discussionId")
+            if identity and self.processed_store.has(identity):
+                logger.info(
+                    f"Skipping discussion '{title}' noteId={note_id}: already processed ({identity})."
+                )
                 continue
 
             # 1. Resolve Policy Number if missing in note body
@@ -266,19 +423,30 @@ class EZLynxLabelCallDispatcher:
                     f"• Or provide the underwriter direct contact info.\n\n"
                     f"Robie will automatically place the call once the number is provided."
                 )
-                self.ezlynx.add_note_to_discussion(
+                self._post_dispatcher_note(
                     applicant_id=applicant_id,
                     discussion_title=title,
                     note_text=clarification_note,
                     policy_number=policy_num,
                     carrier_name=target_carrier,
                 )
+                if identity:
+                    self.processed_store.mark(
+                        identity,
+                        applicant_id=applicant_id,
+                        discussion_id=discussion_id,
+                        note_id=note_id,
+                        status="CLARIFICATION_NEEDED",
+                        dry_run=dry_run,
+                    )
                 results.append({
                     "applicant_id": applicant_id,
                     "discussion_title": title,
                     "target": target_carrier,
                     "status": "CLARIFICATION_NEEDED",
                     "reason": "MISSING_PHONE_NUMBER",
+                    "note_id": note_id,
+                    "note_identity": identity,
                 })
                 continue
 
@@ -323,13 +491,22 @@ class EZLynxLabelCallDispatcher:
                 f"When the call concludes, full audio recording and transcript will be posted here."
             )
 
-            self.ezlynx.add_note_to_discussion(
+            self._post_dispatcher_note(
                 applicant_id=applicant_id,
                 discussion_title=title,
                 note_text=ack_note,
                 policy_number=policy_num,
                 carrier_name=target_carrier,
             )
+            if identity:
+                self.processed_store.mark(
+                    identity,
+                    applicant_id=applicant_id,
+                    discussion_id=discussion_id,
+                    note_id=note_id,
+                    status=status,
+                    dry_run=dry_run,
+                )
 
             results.append({
                 "applicant_id": applicant_id,
@@ -338,9 +515,29 @@ class EZLynxLabelCallDispatcher:
                 "target": target_carrier,
                 "call_id": call_id,
                 "status": status,
+                "note_id": note_id,
+                "note_identity": identity,
             })
 
         return results
+
+    def _post_dispatcher_note(
+        self,
+        *,
+        applicant_id: str,
+        discussion_title: str,
+        note_text: str,
+        policy_number: Optional[str],
+        carrier_name: Optional[str],
+    ) -> None:
+        """Post an ack/clarification note. Never apply a Robie Call trigger label."""
+        self.ezlynx.add_note_to_discussion(
+            applicant_id=applicant_id,
+            discussion_title=discussion_title,
+            note_text=note_text,
+            policy_number=policy_number,
+            carrier_name=carrier_name,
+        )
 
 
 def main():

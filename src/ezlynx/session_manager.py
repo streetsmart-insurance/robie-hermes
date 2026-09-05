@@ -21,6 +21,22 @@ from src.security.email_2fa_handler import email_2fa_resolver
 
 logger = logging.getLogger("ezlynx_session")
 
+# After password submit, EZLynx shows a 2FA method picker then a code field.
+# Never fill radio inputs named verification* — those are method selectors, not OTP.
+EMAIL_2FA_RADIO_SELECTOR = "#VerificationType_EMAIL-input"
+TWO_FACTOR_NEXT_SELECTOR = "#two-factor-next"
+OTP_CODE_SELECTOR = "#verification-code"
+OTP_CODE_FALLBACK_SELECTORS = (
+    "input[placeholder*='code' i]",
+    "input[placeholder*='passcode' i]",
+    "input#code",
+    "input#otp",
+    "input[name*='code' i]",
+    "input[name*='passcode' i]",
+    "input[name*='otp' i]",
+)
+
+
 class EZLynxSessionManager:
     """Manages authenticated browser sessions and cookies for EZLynx."""
 
@@ -142,6 +158,65 @@ class EZLynxSessionManager:
         finally:
             await page.close()
 
+    async def _complete_email_otp(self, page: Page) -> bool:
+        """Select Email 2FA, then fill #verification-code. No-op if already past 2FA.
+
+        Returns False only when a 2FA challenge is present and cannot be completed.
+        """
+        email_radio = page.locator(EMAIL_2FA_RADIO_SELECTOR).first
+        try:
+            if await email_radio.count() > 0 and await email_radio.is_visible(timeout=3000):
+                logger.info("Selecting Email as EZLynx 2FA method (#VerificationType_EMAIL-input)...")
+                await email_radio.click()
+                next_btn = page.locator(TWO_FACTOR_NEXT_SELECTOR).first
+                if await next_btn.count() > 0 and await next_btn.is_visible(timeout=2000):
+                    await next_btn.click()
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.debug(f"Email 2FA method picker not present or not clickable: {e}")
+
+        otp_elem = page.locator(OTP_CODE_SELECTOR).first
+        otp_found = False
+        try:
+            if await otp_elem.count() > 0 and await otp_elem.is_visible(timeout=4000):
+                otp_found = True
+        except Exception:
+            otp_found = False
+
+        if not otp_found:
+            for sel in OTP_CODE_FALLBACK_SELECTORS:
+                candidate = page.locator(sel).first
+                try:
+                    if await candidate.count() > 0 and await candidate.is_visible(timeout=1500):
+                        otp_elem = candidate
+                        otp_found = True
+                        break
+                except Exception:
+                    continue
+
+        if not otp_found:
+            logger.debug("No EZLynx OTP code field visible; assuming session already past 2FA.")
+            return True
+
+        logger.info("🔐 EZLynx 2FA verification challenge detected!")
+        logger.info("Listening on robie@streetsmart.insurance for incoming 2FA email...")
+        code = await email_2fa_resolver.wait_for_code("EZLynx", timeout_sec=90)
+        if not code:
+            logger.error("Failed to retrieve 2FA code from email.")
+            return False
+
+        logger.info(f"Injecting 2FA OTP code: {code}...")
+        await otp_elem.fill(code)
+        await asyncio.sleep(0.5)
+
+        submit_2fa = page.locator(
+            f"{TWO_FACTOR_NEXT_SELECTOR}, button[type='submit'], "
+            "button:has-text('Verify'), button:has-text('Submit'), button:has-text('Continue')"
+        ).first
+        await submit_2fa.click()
+        await asyncio.sleep(4)
+        return True
+
     async def _perform_login(self, context: BrowserContext) -> bool:
         """Executes the login form entry, 2FA detection, and OTP submission."""
         creds = self.get_credentials()
@@ -174,35 +249,11 @@ class EZLynxSessionManager:
             await asyncio.sleep(0.3)
             await login_btn.click()
 
-            # Wait for response / 2FA screen
+            # Wait for response / 2FA method picker
             await asyncio.sleep(3)
 
-            # Check for 2FA challenge
-            otp_selectors = [
-                "input[placeholder*='code' i]", "input[placeholder*='passcode' i]",
-                "input#code", "input#otp", "input[name*='code' i]",
-                "input[name*='passcode' i]", "input[name*='otp' i]",
-                "input[name*='verification' i]"
-            ]
-
-            for sel in otp_selectors:
-                otp_elem = page.locator(sel).first
-                if await otp_elem.is_visible(timeout=2000):
-                    logger.info("🔐 EZLynx 2FA verification challenge detected!")
-                    logger.info("Listening on robie@streetsmart.insurance for incoming 2FA email...")
-                    code = await email_2fa_resolver.wait_for_code("EZLynx", timeout_sec=90)
-                    if not code:
-                        logger.error("Failed to retrieve 2FA code from email.")
-                        return False
-
-                    logger.info(f"Injecting 2FA OTP code: {code}...")
-                    await otp_elem.fill(code)
-                    await asyncio.sleep(0.5)
-
-                    submit_2fa = page.locator("button[type='submit'], button:has-text('Verify'), button:has-text('Submit'), button:has-text('Continue')").first
-                    await submit_2fa.click()
-                    await asyncio.sleep(4)
-                    break
+            if not await self._complete_email_otp(page):
+                return False
 
             # Confirm navigation to main dashboard
             await page.wait_for_url("**/web/**", timeout=25000)

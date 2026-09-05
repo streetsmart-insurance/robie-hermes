@@ -754,10 +754,13 @@ class EZLynxApiClient:
     # Discussion Discovery & Matching
     # -------------------------------------------------------------------------
 
-    def get_applicant_discussions(self, applicant_id: str, page_size: int = 20) -> List[Dict[str, Any]]:
-        """Fetches active discussions for an applicant from EZLynx.
-        
-        First attempts fast retrieval via portal session cookies; falls back to Playwright CDP context if available.
+    def get_applicant_discussions(self, applicant_id: str, page_size: int = 50) -> List[Dict[str, Any]]:
+        """Fetches active discussions for an applicant from EZLynx portal GetPagedDiscussions.
+
+        Live endpoint (hermes-poc-01):
+        GET /EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize=50&applicantId={id}&applicantContext=true
+
+        Uses authenticated portal session cookies first; falls back to Playwright CDP if available.
         """
         storage_file = Path(settings.ezlynx_storage_state_file) if hasattr(settings, "ezlynx_storage_state_file") else Path("data/ezlynx_storage_state.json")
         if storage_file.exists():
@@ -771,13 +774,26 @@ class EZLynxApiClient:
                         "Accept": "application/json, text/plain, */*",
                         "X-Requested-With": "XMLHttpRequest"
                     }
-                    url = f"https://app.ezlynx.com/EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true"
+                    url = (
+                        "https://app.ezlynx.com/EZLynxPortalAPI/Discussions/GetPagedDiscussions"
+                        f"?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true"
+                    )
                     resp = requests.get(url, cookies=cookies, headers=headers, timeout=8)
                     if resp.status_code == 200:
-                        data = resp.json()
-                        discussions = data.get("discussions", [])
-                        logger.debug(f"Retrieved {len(discussions)} discussions via portal cookie session for applicant {applicant_id}")
-                        return discussions
+                        data = resp.json() if resp.content else {}
+                        discussions = data.get("discussions") if isinstance(data, dict) else None
+                        if isinstance(discussions, list):
+                            logger.info(
+                                f"Retrieved {len(discussions)} discussions via portal cookie session for applicant {applicant_id}"
+                            )
+                            return discussions
+                        logger.warning(
+                            f"GetPagedDiscussions 200 for applicant {applicant_id} missing discussions list; falling back to CDP"
+                        )
+                    else:
+                        logger.warning(
+                            f"GetPagedDiscussions cookie session returned HTTP {resp.status_code} for applicant {applicant_id}; falling back to CDP"
+                        )
             except Exception as e:
                 logger.debug(f"Cookie retrieval of discussions failed: {e}")
 

@@ -1,9 +1,44 @@
 """Unit tests for EZLynx Label and Note Call Dispatcher."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
+
 import pytest
 
-from src.voice.ezlynx_label_dispatcher import parse_call_note_instructions, EZLynxLabelCallDispatcher
+from src.voice.ezlynx_label_dispatcher import (
+    PORTAL_DISCUSSIONS_PAGE_SIZE,
+    discussion_is_robie_call,
+    discussion_note_identity,
+    extract_discussion_note_labels,
+    extract_discussion_note_text,
+    latest_activity_is_from_robie,
+    parse_call_note_instructions,
+    EZLynxLabelCallDispatcher,
+)
+from src.voice.processed_robie_notes import ProcessedRobieCallStore
+
+
+@pytest.fixture
+def processed_store(tmp_path):
+    return ProcessedRobieCallStore(tmp_path / "robie_call_processed_notes.sqlite")
+
+
+def _dispatcher(mock_ezlynx, mock_voice, processed_store):
+    return EZLynxLabelCallDispatcher(
+        ezlynx_client=mock_ezlynx,
+        voice_client=mock_voice,
+        processed_store=processed_store,
+    )
+
+# Live GetPagedDiscussions card from hermes-poc-01 (applicant 26356199 / Buster Brown).
+BUSTER_BROWN_LIVE_CARD = {
+    "title": "Rest",
+    "discussionId": 88001,
+    "discussionNote": {
+        "noteId": 99001,
+        "note": "call carlo at 7329953409 and ask him if the renewal is ready for progressive 123456789 ",
+        "noteLabels": [],
+    },
+}
 
 
 def test_parse_call_note_with_explicit_fields():
@@ -47,7 +82,7 @@ def test_parse_non_robie_note():
     assert parsed["is_robie_call"] is False
 
 
-def test_dispatcher_processes_robie_call():
+def test_dispatcher_processes_robie_call(processed_store):
     mock_ezlynx = MagicMock()
     mock_voice = MagicMock()
 
@@ -68,7 +103,7 @@ def test_dispatcher_processes_robie_call():
     mock_voice.build_call_prompt.return_value = "Test prompt"
     mock_voice.dispatch_call.return_value = {"call_id": "call_12345", "status": "DISPATCHED"}
 
-    dispatcher = EZLynxLabelCallDispatcher(ezlynx_client=mock_ezlynx, voice_client=mock_voice)
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
 
     assert len(results) == 1
@@ -76,9 +111,12 @@ def test_dispatcher_processes_robie_call():
     assert results[0]["phone"] == "+18002386225"
     mock_voice.dispatch_call.assert_called_once()
     mock_ezlynx.add_note_to_discussion.assert_called_once()
+    posted_kwargs = mock_ezlynx.add_note_to_discussion.call_args.kwargs
+    assert posted_kwargs.get("label_to_apply") is None
+    assert posted_kwargs.get("label") is None
 
 
-def test_dispatcher_resolves_phone_from_carrier_directory():
+def test_dispatcher_resolves_phone_from_carrier_directory(processed_store):
     """Tests that Robie auto-resolves phone if user only provided carrier name."""
     mock_ezlynx = MagicMock()
     mock_voice = MagicMock()
@@ -99,7 +137,7 @@ def test_dispatcher_resolves_phone_from_carrier_directory():
     }
     mock_voice.dispatch_call.return_value = {"call_id": "call_hartford_01", "status": "DISPATCHED"}
 
-    dispatcher = EZLynxLabelCallDispatcher(ezlynx_client=mock_ezlynx, voice_client=mock_voice)
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
 
     assert len(results) == 1
@@ -109,7 +147,7 @@ def test_dispatcher_resolves_phone_from_carrier_directory():
     mock_voice.dispatch_call.assert_called_once()
 
 
-def test_dispatcher_posts_clarification_note_when_phone_unknown():
+def test_dispatcher_posts_clarification_note_when_phone_unknown(processed_store):
     """Tests that Robie posts a clarification note via direct API (no Playwright) when phone cannot be resolved."""
     mock_ezlynx = MagicMock()
     mock_voice = MagicMock()
@@ -130,7 +168,7 @@ def test_dispatcher_posts_clarification_note_when_phone_unknown():
     }
     mock_ezlynx.get_applicant_policies.return_value = []
 
-    dispatcher = EZLynxLabelCallDispatcher(ezlynx_client=mock_ezlynx, voice_client=mock_voice)
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
 
     assert len(results) == 1
@@ -144,7 +182,7 @@ def test_dispatcher_posts_clarification_note_when_phone_unknown():
     assert "⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]" in posted_text
 
 
-def test_dispatcher_skips_when_latest_note_is_from_robie():
+def test_dispatcher_skips_when_latest_note_is_from_robie(processed_store):
     """Tests that Robie prevents loops by not re-triggering on its own notes."""
     mock_ezlynx = MagicMock()
     mock_voice = MagicMock()
@@ -160,10 +198,375 @@ def test_dispatcher_skips_when_latest_note_is_from_robie():
         }
     ]
 
-    dispatcher = EZLynxLabelCallDispatcher(ezlynx_client=mock_ezlynx, voice_client=mock_voice)
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
 
     assert len(results) == 0
     mock_voice.dispatch_call.assert_not_called()
     mock_ezlynx.add_note_to_discussion.assert_not_called()
+
+
+def test_extract_note_prefers_live_note_field_over_note_text():
+    """Portal GetPagedDiscussions uses discussionNote.note; noteText is fallback only."""
+    live = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "call carlo at 7329953409",
+            "noteText": "stale noteText should lose",
+            "noteLabels": [],
+        },
+    }
+    assert extract_discussion_note_text(live) == "call carlo at 7329953409"
+
+    fallback = {
+        "title": "Rest",
+        "discussionNote": {"noteText": "Who to call: Travelers", "noteLabels": []},
+    }
+    assert extract_discussion_note_text(fallback) == "Who to call: Travelers"
+
+    empty_note_uses_fallback = {
+        "discussionNote": {"note": "", "noteText": "legacy noteText body"},
+    }
+    assert extract_discussion_note_text(empty_note_uses_fallback) == "legacy noteText body"
+
+
+def test_extract_note_labels_from_discussion_note():
+    labeled = {
+        "discussionNote": {
+            "note": "please call",
+            "noteLabels": [
+                {"labelName": "Robie Call", "organizationLabelId": 11, "applicantNoteId": 22},
+                {"labelName": "CanopyConnect", "organizationLabelId": 12, "applicantNoteId": 22},
+            ],
+        }
+    }
+    assert extract_discussion_note_labels(labeled) == ["Robie Call", "CanopyConnect"]
+    assert extract_discussion_note_labels(BUSTER_BROWN_LIVE_CARD) == []
+    assert extract_discussion_note_labels({"discussionNote": {}}) == []
+    assert extract_discussion_note_labels({"title": "Rest"}) == []
+
+
+def test_discussion_is_robie_call_from_note_labels():
+    """Org label Robie Call triggers even when title/body omit the phrase."""
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "call carlo at 7329953409 and ask him if the renewal is ready for progressive 123456789 ",
+            "noteLabels": [{"labelName": "Robie Call", "organizationLabelId": 1, "applicantNoteId": 2}],
+        },
+    }
+    assert discussion_is_robie_call(card) is True
+
+
+def test_discussion_is_robie_call_from_note_text_field():
+    """Writing 'Robie Call' in the live note body still triggers."""
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "Robie Call — call carlo at 7329953409 and ask about Progressive 123456789",
+            "noteLabels": [],
+        },
+    }
+    assert discussion_is_robie_call(card) is True
+
+
+def test_discussion_is_robie_call_from_note_text_fallback_field():
+    card = {
+        "title": "Activity",
+        "discussionNote": {
+            "noteText": "Please [ROBIE CALL] Hartford about the renewal.",
+            "noteLabels": [],
+        },
+    }
+    assert discussion_is_robie_call(card) is True
+
+
+def test_empty_note_labels_without_phrase_does_not_trigger():
+    """Buster Brown live card: instruction-style note, empty labels, no Robie phrase."""
+    assert discussion_is_robie_call(BUSTER_BROWN_LIVE_CARD) is False
+    parsed = parse_call_note_instructions(
+        f"{BUSTER_BROWN_LIVE_CARD['title']}\n{extract_discussion_note_text(BUSTER_BROWN_LIVE_CARD)}"
+    )
+    assert parsed["is_robie_call"] is False
+
+
+def test_unrelated_org_labels_do_not_trigger():
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "uploaded loss runs",
+            "noteLabels": [
+                {"labelName": "CanopyConnect"},
+                {"labelName": "Audit Result"},
+                {"labelName": "Referral Request"},
+                {"labelName": "Referral Spanish"},
+            ],
+        },
+    }
+    assert discussion_is_robie_call(card) is False
+
+
+def test_dispatcher_triggers_on_note_labels_with_live_note_field(processed_store):
+    """Label-only trigger using the live portal field names (note + noteLabels)."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88002,
+            "title": "Rest",
+            "discussionNote": {
+                "note": "call carlo at 7329953409 and ask him if the renewal is ready for progressive 123456789",
+                "noteLabels": [{"labelName": "Robie Call", "organizationLabelId": 7, "applicantNoteId": 8}],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Buster Brown"},
+    }
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_label_01", "status": "DISPATCHED"}
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_id"] == "call_label_01"
+    assert results[0]["phone"] == "+17329953409"
+    mock_voice.dispatch_call.assert_called_once()
+    mock_ezlynx.get_applicant_discussions.assert_called_once_with(
+        "26356199", page_size=PORTAL_DISCUSSIONS_PAGE_SIZE
+    )
+
+
+def test_dispatcher_triggers_on_note_body_without_labels(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88003,
+            "title": "Rest",
+            "discussionNote": {
+                "note": "robie call\nWho to call: Carlo (732-995-3409)\nWhat to say: Ask if Progressive renewal is ready.",
+                "noteLabels": [],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Buster Brown"},
+    }
+    mock_voice.dispatch_call.return_value = {"call_id": "call_note_01", "status": "DISPATCHED"}
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["phone"] == "+17329953409"
+    mock_voice.dispatch_call.assert_called_once()
+
+
+def test_dispatcher_skips_live_card_with_empty_note_labels(processed_store):
+    """Without the Robie Call label or phrase, the live Buster note must not dispatch."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_ezlynx.get_applicant_discussions.return_value = [BUSTER_BROWN_LIVE_CARD]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Buster Brown"},
+    }
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert results == []
+    mock_voice.dispatch_call.assert_not_called()
+    mock_ezlynx.add_note_to_discussion.assert_not_called()
+
+
+def test_latest_activity_is_from_robie_author_and_markers():
+    ack = {
+        "title": "Robie Call - Follow up",
+        "discussionNote": {
+            "noteId": 1,
+            "createdByName": "Robie AI",
+            "note": "🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]\nRobie has placed an outbound call...",
+        },
+    }
+    assert latest_activity_is_from_robie(ack) is True
+
+    clarification = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]\nPlease reply with a phone number.\n\nRobie was here",
+        },
+    }
+    assert latest_activity_is_from_robie(clarification) is True
+
+    transcript = {
+        "discussionNote": {
+            "note": "Autonomous Carrier Phone Outreach Completed:\n- Audio Recording: https://x\n\nRobie was here",
+        }
+    }
+    assert latest_activity_is_from_robie(transcript) is True
+
+    csr_trigger = {
+        "title": "Robie Call - Follow up with Travelers",
+        "discussionNote": {
+            "createdByName": "Carlo Ferrara",
+            "note": "[ROBIE CALL]\nWho to call: Travelers (800-238-6225)\nWhat to say: Ask for renewal quote.",
+        },
+    }
+    assert latest_activity_is_from_robie(csr_trigger) is False
+
+
+def test_discussion_note_identity_uses_discussion_and_note_id():
+    card = {"discussionId": 88002, "discussionNote": {"noteId": 99002, "note": "hi"}}
+    assert discussion_note_identity(card) == "88002:99002"
+    assert discussion_note_identity({"discussionNote": {"noteId": 5}}) == "5"
+    assert discussion_note_identity({"discussionId": 1, "discussionNote": {"note": "no id"}}) is None
+
+
+def test_same_note_id_scanned_twice_dispatches_once(processed_store):
+    """Dry-run still records processed noteId so cron/reruns cannot loop."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    card = {
+        "discussionId": 77001,
+        "title": "Rest",
+        "discussionNote": {
+            "noteId": 55001,
+            "note": "robie call\nWho to call: Carlo (732-995-3409)\nWhat to say: Ask if Progressive is ready.",
+            "noteLabels": [],
+        },
+    }
+    mock_ezlynx.get_applicant_discussions.return_value = [card]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Buster Brown"},
+    }
+    mock_voice.dispatch_call.return_value = {"call_id": "call_once", "status": "DISPATCHED"}
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    first = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    second = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(first) == 1
+    assert first[0]["note_id"] == "55001"
+    assert first[0]["note_identity"] == "77001:55001"
+    assert second == []
+    mock_voice.dispatch_call.assert_called_once()
+    assert mock_voice.dispatch_call.call_args.kwargs["dry_run"] is True
+    assert processed_store.has("77001:55001") is True
+
+
+def test_latest_robie_ack_is_skipped_even_with_trigger_title(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 77002,
+            "title": "robie call",
+            "discussionNote": {
+                "noteId": 55002,
+                "createdByName": "Robie",
+                "note": "🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]\nCall ID: call_abc\nRobie was here",
+                "noteLabels": [{"labelName": "Robie Call"}],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Acme"},
+    }
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+
+    assert results == []
+    mock_voice.dispatch_call.assert_not_called()
+    mock_ezlynx.add_note_to_discussion.assert_not_called()
+
+
+def test_new_csr_note_id_after_robie_ack_dispatches_once(processed_store):
+    """A newer CSR noteId with Robie Call label may fire once after a prior Robie ack."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.dispatch_call.return_value = {"call_id": "call_new", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Buster Brown"},
+    }
+
+    robie_ack = {
+        "discussionId": 77003,
+        "title": "Rest",
+        "discussionNote": {
+            "noteId": 55010,
+            "createdByName": "Robie AI",
+            "note": "🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]\nRobie was here",
+            "noteLabels": [],
+        },
+    }
+    csr_followup = {
+        "discussionId": 77003,
+        "title": "Rest",
+        "discussionNote": {
+            "noteId": 55011,
+            "createdByName": "Carlo Ferrara",
+            "note": "call carlo at 7329953409 and ask again about Progressive",
+            "noteLabels": [{"labelName": "Robie Call", "organizationLabelId": 7, "applicantNoteId": 55011}],
+        },
+    }
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    mock_ezlynx.get_applicant_discussions.return_value = [robie_ack]
+    assert dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True) == []
+    mock_voice.dispatch_call.assert_not_called()
+
+    mock_ezlynx.get_applicant_discussions.return_value = [csr_followup]
+    first = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    second = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(first) == 1
+    assert first[0]["note_id"] == "55011"
+    assert first[0]["call_id"] == "call_new"
+    assert second == []
+    mock_voice.dispatch_call.assert_called_once()
+    assert processed_store.has("77003:55011") is True
+    assert processed_store.has("77003:55010") is False
+
+
+def test_note_text_trigger_without_label_respects_processed_note_id(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    card = {
+        "discussionId": 77004,
+        "title": "Activity",
+        "discussionNote": {
+            "noteId": 55020,
+            "note": "Robie Call — Who to call: Hartford (800-555-1234)\nWhat to say: Check quote status.",
+            "noteLabels": [],
+        },
+    }
+    mock_ezlynx.get_applicant_discussions.return_value = [card]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Main Street Cafe"},
+    }
+    mock_voice.dispatch_call.return_value = {"call_id": "call_text", "status": "DISPATCHED"}
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    first = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+    second = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+
+    assert len(first) == 1
+    assert first[0]["note_identity"] == "77004:55020"
+    assert second == []
+    mock_voice.dispatch_call.assert_called_once()
+    posted = mock_ezlynx.add_note_to_discussion.call_args.kwargs
+    assert posted.get("label_to_apply") is None
+    assert "ROBIE AUTONOMOUS CALL DISPATCHED" in posted["note_text"]
 

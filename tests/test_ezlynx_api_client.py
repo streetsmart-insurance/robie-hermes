@@ -292,3 +292,52 @@ def test_list_applicant_documents_wraps_classic_payload(mock_get, api_client):
     assert docs[0]["Description"].endswith(".pdf")
     mock_get.assert_called_once()
     assert "/documentlibrary/list/151445306/1/20/0" in mock_get.call_args[0][0]
+
+
+@patch("src.ezlynx.api_client.requests.get")
+def test_get_applicant_discussions_uses_live_portal_endpoint(mock_get, api_client, tmp_path, monkeypatch):
+    """Cookie session must hit GetPagedDiscussions with applicantContext=true and unwrap discussions[]."""
+    state_file = tmp_path / "ezlynx_storage_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "EZSESSION", "value": "portal-cookie", "domain": ".app.ezlynx.com"},
+                ]
+            }
+        )
+    )
+
+    class _Settings:
+        ezlynx_storage_state_file = str(state_file)
+        ezlynx_cdp_endpoint = None
+
+    monkeypatch.setattr("src.ezlynx.api_client.settings", _Settings())
+
+    live_card = {
+        "title": "Rest",
+        "discussionId": 88001,
+        "discussionNote": {
+            "noteId": 99001,
+            "note": "call carlo at 7329953409 and ask him if the renewal is ready for progressive 123456789 ",
+            "noteLabels": [],
+        },
+    }
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b'{"discussions":[]}'
+    mock_resp.json.return_value = {"discussions": [live_card]}
+    mock_get.return_value = mock_resp
+
+    discussions = api_client.get_applicant_discussions("26356199")
+    assert len(discussions) == 1
+    assert discussions[0]["title"] == "Rest"
+    assert discussions[0]["discussionNote"]["note"].startswith("call carlo")
+    assert "noteText" not in discussions[0]["discussionNote"]
+
+    url = mock_get.call_args[0][0]
+    assert "/EZLynxPortalAPI/Discussions/GetPagedDiscussions" in url
+    assert "applicantId=26356199" in url
+    assert "applicantContext=true" in url
+    assert "pageSize=50" in url
+    assert mock_get.call_args.kwargs["cookies"]["EZSESSION"] == "portal-cookie"
