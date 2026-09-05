@@ -751,56 +751,75 @@ class EZLynxApiClient:
         }
 
     # -------------------------------------------------------------------------
-    # Discussion Discovery & Matching
+    # Portal session GETs (cookie storage_state, then Playwright CDP)
     # -------------------------------------------------------------------------
 
-    def get_applicant_discussions(self, applicant_id: str, page_size: int = 50) -> List[Dict[str, Any]]:
-        """Fetches active discussions for an applicant from EZLynx portal GetPagedDiscussions.
+    @staticmethod
+    def _portal_storage_state_path() -> Path:
+        if hasattr(settings, "ezlynx_storage_state_file") and settings.ezlynx_storage_state_file:
+            return Path(settings.ezlynx_storage_state_file)
+        return Path("data/ezlynx_storage_state.json")
 
-        Live endpoint (hermes-poc-01):
-        GET /EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize=50&applicantId={id}&applicantContext=true
+    @staticmethod
+    def _portal_session_cookies(storage_file: Path) -> Dict[str, str]:
+        if not storage_file.exists():
+            return {}
+        try:
+            with open(storage_file) as f:
+                state = json.load(f)
+            return {
+                c["name"]: c["value"]
+                for c in state.get("cookies", [])
+                if "ezlynx.com" in c.get("domain", "")
+            }
+        except Exception as exc:
+            logger.debug("Could not read EZLynx portal storage state: %s", exc)
+            return {}
 
-        Uses authenticated portal session cookies first; falls back to Playwright CDP if available.
+    @staticmethod
+    def _portal_json_headers() -> Dict[str, str]:
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+    def _portal_get_json(self, relative_url: str) -> Optional[Any]:
+        """GET an app.ezlynx.com JSON path using portal cookies, then CDP.
+
+        ``relative_url`` is a path + query (e.g. ``/EZLynxPortalAPI/...?...``).
+        Secrets stay in the local storage-state file / CDP session — never logged.
         """
-        storage_file = Path(settings.ezlynx_storage_state_file) if hasattr(settings, "ezlynx_storage_state_file") else Path("data/ezlynx_storage_state.json")
-        if storage_file.exists():
+        if not relative_url.startswith("/"):
+            relative_url = "/" + relative_url
+        abs_url = f"https://app.ezlynx.com{relative_url}"
+        storage_file = self._portal_storage_state_path()
+        cookies = self._portal_session_cookies(storage_file)
+        if cookies:
             try:
-                with open(storage_file) as f:
-                    state = json.load(f)
-                cookies = {c["name"]: c["value"] for c in state.get("cookies", []) if "ezlynx.com" in c.get("domain", "")}
-                if cookies:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                        "Accept": "application/json, text/plain, */*",
-                        "X-Requested-With": "XMLHttpRequest"
-                    }
-                    url = (
-                        "https://app.ezlynx.com/EZLynxPortalAPI/Discussions/GetPagedDiscussions"
-                        f"?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true"
-                    )
-                    resp = requests.get(url, cookies=cookies, headers=headers, timeout=8)
-                    if resp.status_code == 200:
-                        data = resp.json() if resp.content else {}
-                        discussions = data.get("discussions") if isinstance(data, dict) else None
-                        if isinstance(discussions, list):
-                            logger.info(
-                                f"Retrieved {len(discussions)} discussions via portal cookie session for applicant {applicant_id}"
-                            )
-                            return discussions
-                        logger.warning(
-                            f"GetPagedDiscussions 200 for applicant {applicant_id} missing discussions list; falling back to CDP"
-                        )
-                    else:
-                        logger.warning(
-                            f"GetPagedDiscussions cookie session returned HTTP {resp.status_code} for applicant {applicant_id}; falling back to CDP"
-                        )
-            except Exception as e:
-                logger.debug(f"Cookie retrieval of discussions failed: {e}")
+                resp = requests.get(
+                    abs_url,
+                    cookies=cookies,
+                    headers=self._portal_json_headers(),
+                    timeout=8,
+                )
+                if resp.status_code == 200 and resp.content:
+                    return resp.json()
+                logger.warning(
+                    "Portal GET %s returned HTTP %s; falling back to CDP",
+                    relative_url.split("?", 1)[0],
+                    resp.status_code,
+                )
+            except Exception as exc:
+                logger.debug("Portal cookie GET failed: %s", exc)
 
-        # Browser CDP fallback if active
-        cdp_url = settings.ezlynx_cdp_endpoint or "http://localhost:9222"
+        cdp_url = getattr(settings, "ezlynx_cdp_endpoint", None) or "http://localhost:9222"
         try:
             from playwright.sync_api import sync_playwright
+
             with sync_playwright() as p:
                 browser = p.chromium.connect_over_cdp(cdp_url)
                 ctx = browser.contexts[0]
@@ -814,14 +833,107 @@ class EZLynxApiClient:
                         page = pg
                         break
                 if page:
-                    result = page.evaluate(f'''async () => {{
-                        const r = await fetch('/EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true');
+                    return page.evaluate(
+                        f"""async () => {{
+                        const r = await fetch({relative_url!r});
                         return await r.json();
-                    }}''')
-                    return result.get("discussions", [])
-        except Exception as e:
-            logger.debug(f"CDP discussion lookup failed: {e}")
+                    }}"""
+                    )
+        except Exception as exc:
+            logger.debug("Portal CDP GET failed: %s", exc)
+        return None
 
+    @staticmethod
+    def unwrap_sales_center_opportunities(payload: Any) -> List[Dict[str, Any]]:
+        """Normalize GetOpportunitiesForApplicant JSON to a list of opportunity dicts."""
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("opportunities", "Opportunities"):
+            inner = payload.get(key)
+            if isinstance(inner, list):
+                return [row for row in inner if isinstance(row, dict)]
+        data = payload.get("data") or payload.get("Data")
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        if isinstance(data, dict):
+            nested = data.get("opportunities") or data.get("Opportunities")
+            if isinstance(nested, list):
+                return [row for row in nested if isinstance(row, dict)]
+        return []
+
+    def get_sales_center_opportunities(
+        self,
+        applicant_id: str,
+        include_lead_info: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Sales Center opportunities for an applicant (greeting ``producerName``).
+
+        Live (Buster Brown / 26356199):
+        GET /EZLynxPortalAPI/SalesCenter/Opportunity/GetOpportunitiesForApplicant
+            ?applicantID={id}&includeLeadInfo=true
+        """
+        lead_flag = "true" if include_lead_info else "false"
+        relative = (
+            "/EZLynxPortalAPI/SalesCenter/Opportunity/GetOpportunitiesForApplicant"
+            f"?applicantID={applicant_id}&includeLeadInfo={lead_flag}"
+        )
+        data = self._portal_get_json(relative)
+        opportunities = self.unwrap_sales_center_opportunities(data)
+        if opportunities:
+            logger.info(
+                "Retrieved %s Sales Center opportunities via portal for applicant %s",
+                len(opportunities),
+                applicant_id,
+            )
+        return opportunities
+
+    def get_applicant_sidebar(self, applicant_id: str) -> Optional[Dict[str, Any]]:
+        """Portal sidebar. ``Applicant.Assignment.AssignedTo`` is the full display name.
+
+        Live:
+        GET /applicantportal/ApplicantContext/GetApplicantSidebar?applicantID={id}
+
+        Classic Applicant/v2 ``AssignedTo`` is a username (e.g. Carlo1) and is a
+        different field — do not treat that Classic value as this payload.
+        """
+        relative = (
+            f"/applicantportal/ApplicantContext/GetApplicantSidebar?applicantID={applicant_id}"
+        )
+        data = self._portal_get_json(relative)
+        return data if isinstance(data, dict) else None
+
+    # -------------------------------------------------------------------------
+    # Discussion Discovery & Matching
+    # -------------------------------------------------------------------------
+
+    def get_applicant_discussions(self, applicant_id: str, page_size: int = 50) -> List[Dict[str, Any]]:
+        """Fetches active discussions for an applicant from EZLynx portal GetPagedDiscussions.
+
+        Live endpoint (hermes-poc-01):
+        GET /EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize=50&applicantId={id}&applicantContext=true
+
+        Uses authenticated portal session cookies first; falls back to Playwright CDP if available.
+        """
+        relative = (
+            "/EZLynxPortalAPI/Discussions/GetPagedDiscussions"
+            f"?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true"
+        )
+        data = self._portal_get_json(relative)
+        if isinstance(data, dict):
+            discussions = data.get("discussions")
+            if isinstance(discussions, list):
+                logger.info(
+                    "Retrieved %s discussions via portal session for applicant %s",
+                    len(discussions),
+                    applicant_id,
+                )
+                return discussions
+            logger.warning(
+                "GetPagedDiscussions for applicant %s missing discussions list",
+                applicant_id,
+            )
         return []
 
     def find_matching_discussion(

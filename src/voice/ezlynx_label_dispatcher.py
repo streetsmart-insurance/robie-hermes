@@ -26,6 +26,7 @@ from src.voice.context_hydrator import (
     ContextHydrator,
     extract_client_first_name,
     extract_producer_name,
+    extract_sales_center_producer_name,
     match_policy_record,
     normalize_call_type,
     unwrap_policy_list,
@@ -460,6 +461,20 @@ class EZLynxLabelCallDispatcher:
         # Lazy cache applicant policies to avoid duplicate API calls
         applicant_policies = None
 
+        # Sales Center producerName is the client_followup greeting source.
+        # Commission policy Producer and Classic AssignedTo username are not.
+        sales_opportunities = None
+        sidebar = None
+        try:
+            sales_opportunities = self.ezlynx.get_sales_center_opportunities(applicant_id)
+        except Exception as exc:
+            logger.debug("Sales Center opportunities lookup skipped: %s", exc)
+        if not extract_sales_center_producer_name(sales_opportunities):
+            try:
+                sidebar = self.ezlynx.get_applicant_sidebar(applicant_id)
+            except Exception as exc:
+                logger.debug("Portal sidebar AssignedTo fallback skipped: %s", exc)
+
         for disc in discussions:
             title = disc.get("title", "")
             note_text = extract_discussion_note_text(disc)
@@ -603,7 +618,12 @@ class EZLynxLabelCallDispatcher:
                 applicant_id=applicant_id,
                 custom_instructions=instructions,
                 client_first_name=extract_client_first_name(app_data, insured_name),
-                producer_name=extract_producer_name(matched_policy, app_data),
+                producer_name=extract_producer_name(
+                    matched_policy,
+                    app_data,
+                    sales_opportunities=sales_opportunities,
+                    sidebar=sidebar,
+                ),
                 requestor_name=requestor.get("name"),
                 requestor_email=requestor.get("email"),
                 call_type=call_type,
@@ -613,6 +633,8 @@ class EZLynxLabelCallDispatcher:
                 dossier,
                 applicant=app_data,
                 policy=matched_policy,
+                sales_opportunities=sales_opportunities,
+                sidebar=sidebar,
                 call_type=call_type,
                 requestor_name=requestor.get("name"),
                 requestor_email=requestor.get("email"),

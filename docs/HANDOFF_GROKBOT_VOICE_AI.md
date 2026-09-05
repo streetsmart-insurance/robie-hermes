@@ -93,10 +93,13 @@ Who to call: The Hartford
 What to say: Confirm renewal terms, then connect them to the producer if they ask.
 ```
 
-- **Client path:** Robie greets the insured by EZLynx `FirstName` and mentions the EZLynx **Producer** ("quote {Producer} put together"). If they clearly agree, Bland warm-transfers to the **requestor** — the person who applied the Robie Call label / wrote the note (or the email sender on the inbox path).
+- **Client path (`call_type=client_followup`):** Robie greets the insured by EZLynx `FirstName` and mentions the **Sales Center opportunity `producerName`** ("quote {producerName} put together"). Carlo decision 2026-09-05 (verified on Buster Brown / applicant `26356199`): greeting is Sales Center `producerName`, not account Assigned Producer and not commission policy Producer.
+- **These are three different EZLynx fields:** Assigned Producer (`GetApplicantSidebar` → `Applicant.Assignment.AssignedTo` full name; Classic Applicant/v2 `AssignedTo` is only a username like `Carlo1`) ≠ Sales Producer (`GetOpportunitiesForApplicant` → `opportunities[].producerName`) ≠ commission Producer (`CommissionProducers[].Producer.ProducerName`, e.g. Brittni). CSR is `CsrUserModel.FullName` and is never the greeting source.
+- **Fallback:** only if Sales Center has no `producerName`, optionally use portal `Assignment.AssignedTo` full name. Never invent a name. Never use commission Producer. Never treat Classic `AssignedTo` username as the greeting without resolution.
+- **Warm transfer (unchanged):** Bland warm-transfers to the **requestor** — the Robie Call **label invoker** (note author / email sender), resolved from the voice directory DID. Greeting producer and transfer target are independent.
 - **Carrier path (default):** Existing underwriting follow-up. After a live human is confirmed, Robie can warm-transfer to the same requestor.
-- **Worked example:** Mike Sosa applies the Robie Call label on an account whose Producer is Jake Ferrara. Greeting still says Jake; transfer DID is Mike's RingCentral Direct Number `+17326540947`.
-- Requestor is read from Portal `GetPagedDiscussions` note metadata (`discussionNote.createdByName` / `createdBy` / `userName` / email, then card `lastModifiedByName`). Lookup is by name, alias, or email in `producers[]`. Email or name alone is not enough — the row must have an E.164 `phone` or transfer is skipped. **Never fall back to the EZLynx Producer or another staff DID.**
+- **Worked example:** Mike Sosa applies the Robie Call label on an account whose Sales Center `producerName` is Carlo Ferrara. Greeting says Carlo; transfer DID is Mike's RingCentral Direct Number `+17326540947`.
+- Requestor is read from Portal `GetPagedDiscussions` note metadata (`discussionNote.createdByName` / `createdBy` / `userName` / email, then card `lastModifiedByName`). Lookup is by name, alias, or email in `producers[]`. Email or name alone is not enough — the row must have an E.164 `phone` or transfer is skipped. **Never fall back to the Sales Center producer or another staff DID.**
 - Assigned CSR for EZLynx tasks remains Carlo Ferrara (never Robie).
 
 ---

@@ -22,14 +22,12 @@ CALL_TYPE_CARRIER = "carrier"
 CALL_TYPE_CLIENT_FOLLOWUP = "client_followup"
 TRANSFER_MODE_WARM = "warm"
 
-_PRODUCER_NAME_KEYS = (
-    "Producer",
-    "ProducerName",
-    "AssignedProducer",
-    "producer",
-    "producerName",
-    "assignedProducer",
-    "ProducerFullName",
+# Greeting producer is Sales Center opportunity.producerName — not these
+# Classic / commission keys. Kept only so we can refuse them explicitly in tests.
+_COMMISSION_PRODUCER_KEYS = (
+    "CommissionProducers",
+    "commissionProducers",
+    "CommissionProducer",
 )
 _PRODUCER_EMAIL_KEYS = (
     "ProducerEmail",
@@ -86,27 +84,211 @@ def extract_client_first_name(
     return None
 
 
-def _producer_string_from_value(value: Any) -> Optional[str]:
-    if isinstance(value, dict):
-        for key in ("Name", "FullName", "DisplayName", "name", "fullName"):
-            nested = value.get(key)
-            if isinstance(nested, str) and nested.strip() and "@" not in nested:
-                return nested.strip()
+_OPEN_OPPORTUNITY_STATUSES = {
+    "open",
+    "active",
+    "inprogress",
+    "in_progress",
+    "new",
+    "working",
+    "qualified",
+    "quoted",
+    "proposal",
+    "negotiation",
+}
+_CLOSED_OPPORTUNITY_STATUSES = {
+    "closed",
+    "won",
+    "lost",
+    "inactive",
+    "cancelled",
+    "canceled",
+    "expired",
+    "dead",
+}
+
+
+def _clean_person_name(value: Any) -> Optional[str]:
+    """Strip blanks. Never invent a name. Reject emails."""
+    if not isinstance(value, str):
         return None
-    if isinstance(value, str) and value.strip() and "@" not in value:
-        return value.strip()
+    name = " ".join(value.split())
+    if not name or "@" in name:
+        return None
+    return name
+
+
+def _looks_like_full_display_name(name: str) -> bool:
+    """Portal AssignedTo is 'Carlo Ferrara'. Classic AssignedTo username is 'Carlo1'."""
+    if " " not in name:
+        return False
+    if re.search(r"\d", name):
+        return False
+    return True
+
+
+def unwrap_opportunity_list(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize Sales Center GetOpportunitiesForApplicant JSON to opportunity dicts."""
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    if any(key in payload for key in _COMMISSION_PRODUCER_KEYS):
+        return []
+    for key in ("opportunities", "Opportunities"):
+        inner = payload.get(key)
+        if isinstance(inner, list):
+            return [row for row in inner if isinstance(row, dict)]
+    data = payload.get("data") or payload.get("Data")
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if isinstance(data, dict):
+        nested = data.get("opportunities") or data.get("Opportunities")
+        if isinstance(nested, list):
+            return [row for row in nested if isinstance(row, dict)]
+    # Single opportunity object (has producerName, is not a Classic applicant/policy).
+    if payload.get("producerName") or payload.get("ProducerName"):
+        if payload.get("AssignedTo") or payload.get("CommissionProducers"):
+            return []
+        return [payload]
+    return []
+
+
+def _opportunity_status_token(opp: Dict[str, Any]) -> str:
+    for key in (
+        "status",
+        "Status",
+        "opportunityStatus",
+        "OpportunityStatus",
+        "state",
+        "State",
+        "stage",
+        "Stage",
+    ):
+        val = opp.get(key)
+        if isinstance(val, dict):
+            val = val.get("name") or val.get("Name") or val.get("status") or val.get("Status")
+        if isinstance(val, str) and val.strip():
+            return re.sub(r"[\s-]+", "_", val.strip().lower())
+    return ""
+
+
+def opportunity_is_open(opp: Dict[str, Any]) -> Optional[bool]:
+    """True/False when the payload distinguishes; None if unknown."""
+    for key in ("isOpen", "IsOpen", "isActive", "IsActive"):
+        val = opp.get(key)
+        if isinstance(val, bool):
+            return val
+    for key in ("isClosed", "IsClosed", "closed", "Closed"):
+        val = opp.get(key)
+        if isinstance(val, bool):
+            return not val
+    token = _opportunity_status_token(opp)
+    if not token:
+        return None
+    if token in _CLOSED_OPPORTUNITY_STATUSES or token.startswith("closed"):
+        return False
+    if token in _OPEN_OPPORTUNITY_STATUSES or token.startswith("open"):
+        return True
     return None
 
 
-def extract_producer_name(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Read the EZLynx Producer field from applicant and/or policy objects. No free-text guess."""
+def _opportunity_recency(opp: Dict[str, Any]) -> str:
+    for key in (
+        "lastModifiedDate",
+        "LastModifiedDate",
+        "modifiedDate",
+        "ModifiedDate",
+        "updatedDate",
+        "UpdatedDate",
+        "createdDate",
+        "CreatedDate",
+        "dateCreated",
+        "DateCreated",
+        "opportunityDate",
+        "OpportunityDate",
+    ):
+        val = opp.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def extract_sales_center_producer_name(payload: Any) -> Optional[str]:
+    """Pick opportunity ``producerName`` for the Robie lead-follow-up greeting.
+
+    Prefer an open/active opportunity when the payload distinguishes status;
+    otherwise the most recent, then the first with a non-empty producerName.
+    """
+    named: List[Dict[str, Any]] = []
+    for opp in unwrap_opportunity_list(payload):
+        name = _clean_person_name(opp.get("producerName") or opp.get("ProducerName"))
+        if name:
+            named.append(opp)
+    if not named:
+        return None
+    open_named = [opp for opp in named if opportunity_is_open(opp) is True]
+    pool = open_named or named
+    dated = [opp for opp in pool if _opportunity_recency(opp)]
+    if dated:
+        best = max(dated, key=_opportunity_recency)
+        return _clean_person_name(best.get("producerName") or best.get("ProducerName"))
+    first = pool[0]
+    return _clean_person_name(first.get("producerName") or first.get("ProducerName"))
+
+
+def extract_sidebar_assigned_producer_full_name(sidebar: Any) -> Optional[str]:
+    """Portal ``Applicant.Assignment.AssignedTo`` full name only.
+
+    Fallback when Sales Center has no producerName. Classic Applicant/v2
+    ``AssignedTo`` (username like Carlo1) is not this field and is rejected
+    unless it is already a full display name (first + last, no digits).
+    Never reads ``CsrUserModel`` or ``CommissionProducers``.
+    """
+    if not isinstance(sidebar, dict):
+        return None
+    applicant = sidebar.get("Applicant") or sidebar.get("applicant")
+    blob: Any = applicant if isinstance(applicant, dict) else sidebar
+    assignment = None
+    if isinstance(blob, dict):
+        assignment = blob.get("Assignment") or blob.get("assignment")
+    if not isinstance(assignment, dict):
+        return None
+    raw = assignment.get("AssignedTo") or assignment.get("assignedTo")
+    name = _clean_person_name(raw)
+    if name and _looks_like_full_display_name(name):
+        return name
+    return None
+
+
+def extract_producer_name(
+    *sources: Optional[Dict[str, Any]],
+    sales_opportunities: Any = None,
+    sidebar: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Greeting producer = Sales Center ``producerName``.
+
+    Fallback (only if Sales Center has no producerName): portal sidebar
+    ``Assignment.AssignedTo`` full name. Never commission ``Producer`` /
+    ``CommissionProducers``. Never Classic ``AssignedTo`` username alone.
+    Never ``CsrUserModel``. No free-text guess.
+    """
+    if sales_opportunities is not None:
+        name = extract_sales_center_producer_name(sales_opportunities)
+        if name:
+            return name
     for source in sources:
-        if not isinstance(source, dict):
-            continue
-        for key in _PRODUCER_NAME_KEYS:
-            name = _producer_string_from_value(source.get(key))
-            if name:
-                return name
+        name = extract_sales_center_producer_name(source)
+        if name:
+            return name
+    if sidebar is not None:
+        name = extract_sidebar_assigned_producer_full_name(sidebar)
+        if name:
+            return name
+    for source in sources:
+        name = extract_sidebar_assigned_producer_full_name(source)
+        if name:
+            return name
     return None
 
 
@@ -242,6 +424,8 @@ class ContextHydrator:
         call_type: Optional[str] = None,
         applicant_profile: Optional[Dict[str, Any]] = None,
         policy_profile: Optional[Dict[str, Any]] = None,
+        sales_opportunities: Any = None,
+        sidebar: Optional[Dict[str, Any]] = None,
         enrich_from_ezlynx: bool = False,
     ) -> Optional[CallingDossier]:
         """
@@ -341,6 +525,8 @@ class ContextHydrator:
             dossier,
             applicant=applicant_profile,
             policy=policy_profile,
+            sales_opportunities=sales_opportunities,
+            sidebar=sidebar,
             call_type=call_type,
             requestor_name=requestor_name,
             requestor_email=requestor_email or requester_email,
@@ -354,16 +540,21 @@ class ContextHydrator:
         dossier: CallingDossier,
         applicant: Optional[Dict[str, Any]] = None,
         policy: Optional[Dict[str, Any]] = None,
+        sales_opportunities: Any = None,
+        sidebar: Optional[Dict[str, Any]] = None,
         call_type: Optional[str] = None,
         requestor_name: Optional[str] = None,
         requestor_email: Optional[str] = None,
     ) -> CallingDossier:
-        """Apply EZLynx FirstName + Producer (greeting) and requestor transfer.
+        """Apply EZLynx FirstName + Sales Center producerName (greeting) and requestor transfer.
 
-        Producer comes only from the EZLynx Producer field and is greeting copy
-        ("quote {Producer} put together"). Warm-transfer phone is the Robie Call
-        invoker (note author / email sender). Missing requestor phone skips
-        transfer — never fall back to the Producer or another staff DID.
+        Greeting producer is Sales Center opportunity ``producerName``
+        ("quote {producerName} put together"). Optional fallback is portal
+        sidebar ``Assignment.AssignedTo`` full name — never commission
+        ``Producer``, never Classic ``AssignedTo`` username. Warm-transfer
+        phone is the Robie Call invoker (note author / email sender).
+        Missing requestor phone skips transfer — never fall back to the
+        greeting producer or another staff DID.
         """
         if call_type:
             dossier.call_type = normalize_call_type(call_type)
@@ -376,18 +567,19 @@ class ContextHydrator:
             dossier.client_first_name = extract_client_first_name(
                 applicant, dossier.insured_name
             )
-            if not dossier.producer_name:
-                dossier.producer_name = extract_producer_name(policy, applicant)
+        if not dossier.producer_name:
+            dossier.producer_name = extract_producer_name(
+                policy,
+                applicant,
+                sales_opportunities=sales_opportunities,
+                sidebar=sidebar,
+            )
+        if dossier.producer_name:
             producer_email = extract_producer_email(policy, applicant)
             match = lookup_producer(name=dossier.producer_name, email=producer_email)
             if match:
                 dossier.producer_name = match.get("name") or dossier.producer_name
-                # Greeting-only: do not use this phone for Bland transfer.
-                dossier.producer_phone = None
-        elif dossier.producer_name:
-            match = lookup_producer(name=dossier.producer_name)
-            if match:
-                dossier.producer_name = match.get("name") or dossier.producer_name
+            # Greeting-only: do not use this phone for Bland transfer.
             dossier.producer_phone = None
 
         self._apply_requestor_transfer(dossier)
@@ -435,7 +627,7 @@ class ContextHydrator:
         dossier: CallingDossier,
         ezlynx_client: Optional[Any] = None,
     ) -> CallingDossier:
-        """Fetch applicant/policy from EZLynx and hydrate first name + Producer field."""
+        """Fetch applicant + Sales Center opportunities; hydrate first name + greeting producer."""
         if not dossier.applicant_id:
             return dossier
         try:
@@ -451,8 +643,27 @@ class ContextHydrator:
                     unwrap_policy_list(pol_res), dossier.policy_number
                 )
             except Exception as exc:
-                logger.debug("EZLynx policy lookup for producer skipped: %s", exc)
-            return self.enrich_identity(dossier, applicant=applicant, policy=policy)
+                logger.debug("EZLynx policy lookup skipped: %s", exc)
+            sales_opportunities = None
+            sidebar = None
+            try:
+                sales_opportunities = client.get_sales_center_opportunities(
+                    str(dossier.applicant_id)
+                )
+            except Exception as exc:
+                logger.debug("Sales Center opportunities lookup skipped: %s", exc)
+            if not extract_sales_center_producer_name(sales_opportunities):
+                try:
+                    sidebar = client.get_applicant_sidebar(str(dossier.applicant_id))
+                except Exception as exc:
+                    logger.debug("Portal sidebar AssignedTo fallback skipped: %s", exc)
+            return self.enrich_identity(
+                dossier,
+                applicant=applicant,
+                policy=policy,
+                sales_opportunities=sales_opportunities,
+                sidebar=sidebar,
+            )
         except Exception as exc:
             logger.debug("EZLynx identity enrichment failed gracefully: %s", exc)
             return dossier

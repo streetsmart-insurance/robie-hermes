@@ -249,11 +249,19 @@ def test_dispatcher_client_followup_transfers_to_mike_not_producer(processed_sto
             "FirstName": "Maria",
             "LastName": "Garcia",
             "BusinessName": "Garcia Landscaping LLC",
-            "Producer": "Jake Ferrara",
+            "Producer": "Brittni Example",
+            "AssignedTo": "Carlo1",
             "CellPhone": "732-555-0100",
         },
     }
-    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_applicant_policies.return_value = [
+        {
+            "CommissionProducers": [{"Producer": {"ProducerName": "Brittni Example"}}],
+        }
+    ]
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Jake Ferrara", "status": "Open"}
+    ]
 
     dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
@@ -303,11 +311,14 @@ def test_dispatcher_missing_requestor_phone_does_not_fall_back_to_producer(proce
         "applicant": {
             "FirstName": "Maria",
             "BusinessName": "Garcia Landscaping LLC",
-            "Producer": "Jake Ferrara",
+            "Producer": "Brittni Example",
             "CellPhone": "732-555-0100",
         },
     }
     mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Jake Ferrara", "status": "Open"}
+    ]
 
     dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
@@ -322,6 +333,69 @@ def test_dispatcher_missing_requestor_phone_does_not_fall_back_to_producer(proce
     ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "Warm transfer: not available" in ack
     assert "will not fall back" in ack
+
+
+def test_dispatcher_buster_greeting_is_sales_center_producer_not_commission(processed_store):
+    """Buster Brown 26356199: Sales Center Carlo; commission Brittni ignored; transfer = Mike."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "client prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_buster_01", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88099,
+            "title": "robie call",
+            "discussionNote": {
+                "noteId": 555099,
+                "createdByName": "Mike Sosa",
+                "createdByEmail": "mike@streetsmart.insurance",
+                "note": (
+                    "Call type: client\nWho to call: the insured\n"
+                    "What to say: Review the quote."
+                ),
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "LastName": "Brown",
+            "BusinessName": "Buster Brown",
+            "AssignedTo": "Carlo1",
+            "CsrUserModel": {"FullName": "Carlo Ferrara"},
+            "CellPhone": "732-555-0199",
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = [
+        {
+            "policyNumber": "HOP622388401",
+            "carrierName": "Progressive",
+            "CommissionProducers": [
+                {"Producer": {"ProducerName": "Brittni Example"}}
+            ],
+        }
+    ]
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_followup"
+    assert results[0]["producer_name"] == "Carlo Ferrara"
+    assert results[0]["requestor_name"] == "Mike Sosa"
+    assert results[0]["requestor_phone"] == "+17326540947"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.producer_name == "Carlo Ferrara"
+    assert dossier.client_first_name == "Buster"
+    assert dossier.requestor_phone == "+17326540947"
+    assert dossier.assigned_csr_email == "carlo@streetsmart.insurance"
+    mock_ezlynx.get_sales_center_opportunities.assert_called_once_with("26356199")
+    mock_ezlynx.get_applicant_sidebar.assert_not_called()
 
 
 def test_dispatcher_skips_when_latest_note_is_from_robie(processed_store):

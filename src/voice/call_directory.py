@@ -459,7 +459,7 @@ def lookup_producer(
     """Resolve a StreetSmart staff row by name, alias, or email.
 
     Used for (1) the Robie Call requestor / label invoker transfer target and
-    (2) normalizing the EZLynx Producer display name for greeting copy.
+    (2) normalizing the Sales Center ``producerName`` display name for greeting copy.
     Matching is exact on name/alias/email, then a unique-token fallback.
     Ambiguous last names (Ferrara, Cabrera) return None. Returns None when no
     directory row matches. ``phone`` may be None — callers must not invent one.

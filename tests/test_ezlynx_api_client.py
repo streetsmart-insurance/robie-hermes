@@ -343,6 +343,81 @@ def test_get_applicant_discussions_uses_live_portal_endpoint(mock_get, api_clien
     assert mock_get.call_args.kwargs["cookies"]["EZSESSION"] == "portal-cookie"
 
 
+@patch("src.ezlynx.api_client.requests.get")
+def test_get_sales_center_opportunities_uses_portal_endpoint(mock_get, api_client, tmp_path, monkeypatch):
+    """Cookie session must hit GetOpportunitiesForApplicant and unwrap opportunities[]."""
+    state_file = tmp_path / "ezlynx_storage_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "EZSESSION", "value": "portal-cookie", "domain": ".app.ezlynx.com"},
+                ]
+            }
+        )
+    )
+
+    class _Settings:
+        ezlynx_storage_state_file = str(state_file)
+        ezlynx_cdp_endpoint = None
+
+    monkeypatch.setattr("src.ezlynx.api_client.settings", _Settings())
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b'{"opportunities":[]}'
+    mock_resp.json.return_value = {
+        "opportunities": [
+            {"producerName": "Carlo Ferrara", "status": "Open"},
+        ]
+    }
+    mock_get.return_value = mock_resp
+
+    opps = api_client.get_sales_center_opportunities("26356199")
+    assert len(opps) == 1
+    assert opps[0]["producerName"] == "Carlo Ferrara"
+
+    url = mock_get.call_args[0][0]
+    assert "/EZLynxPortalAPI/SalesCenter/Opportunity/GetOpportunitiesForApplicant" in url
+    assert "applicantID=26356199" in url
+    assert "includeLeadInfo=true" in url
+    assert mock_get.call_args.kwargs["cookies"]["EZSESSION"] == "portal-cookie"
+
+
+@patch("src.ezlynx.api_client.requests.get")
+def test_get_applicant_sidebar_uses_portal_endpoint(mock_get, api_client, tmp_path, monkeypatch):
+    state_file = tmp_path / "ezlynx_storage_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "EZSESSION", "value": "portal-cookie", "domain": ".app.ezlynx.com"},
+                ]
+            }
+        )
+    )
+
+    class _Settings:
+        ezlynx_storage_state_file = str(state_file)
+        ezlynx_cdp_endpoint = None
+
+    monkeypatch.setattr("src.ezlynx.api_client.settings", _Settings())
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"{}"
+    mock_resp.json.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
+    }
+    mock_get.return_value = mock_resp
+
+    sidebar = api_client.get_applicant_sidebar("26356199")
+    assert sidebar["Applicant"]["Assignment"]["AssignedTo"] == "Carlo Ferrara"
+    url = mock_get.call_args[0][0]
+    assert "/applicantportal/ApplicantContext/GetApplicantSidebar" in url
+    assert "applicantID=26356199" in url
+
+
 def test_document_data_uri_uses_audio_and_text_mime(tmp_path):
     mp3 = tmp_path / "call.mp3"
     mp3.write_bytes(b"ID3audio")
