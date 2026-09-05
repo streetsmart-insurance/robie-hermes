@@ -3,7 +3,16 @@
 from unittest.mock import MagicMock, patch
 
 from src.voice.context_hydrator import CallingDossier
-from src.voice.voice_client import CarrierVoiceClient
+from src.voice.voice_client import (
+    AGENCY_MAIN_CALLBACK_DISPLAY,
+    AGENCY_MAIN_CALLBACK_E164,
+    AGENCY_MAIN_CALLBACK_SPOKEN,
+    CarrierVoiceClient,
+)
+
+# Jake's personal/DID — must never be invented as the client_followup callback.
+JAKE_PERSONAL_DID = "+17324812520"
+JAKE_PERSONAL_DISPLAY = "732-481-2520"
 
 
 def _sample_dossier(**overrides) -> CallingDossier:
@@ -23,6 +32,21 @@ def _ok_response(call_id: str = "call_test_123") -> MagicMock:
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"call_id": call_id}
     return mock_resp
+
+
+def _assert_agency_callback_not_jake(text: str) -> None:
+    """Prompt/voicemail must cite agency main 732-462-8343, never Jake's DID."""
+    has_display = AGENCY_MAIN_CALLBACK_DISPLAY in text
+    has_e164 = AGENCY_MAIN_CALLBACK_E164 in text
+    has_spoken = AGENCY_MAIN_CALLBACK_SPOKEN in text.lower()
+    assert has_display or has_e164 or has_spoken, (
+        f"expected agency callback {AGENCY_MAIN_CALLBACK_DISPLAY} "
+        f"(or {AGENCY_MAIN_CALLBACK_E164} / spoken form) in:\n{text}"
+    )
+    assert JAKE_PERSONAL_DID not in text
+    assert JAKE_PERSONAL_DISPLAY not in text
+    assert "481-2520" not in text
+    assert "4812520" not in text
 
 
 @patch("src.voice.voice_client.requests.post")
@@ -88,6 +112,9 @@ def test_bland_payload_includes_warm_transfer_fields(mock_post, monkeypatch):
     assert payload["metadata"]["requestor_name"] == "Mike Sosa"
     assert payload["metadata"]["requestor_phone"] == "+17326540947"
     assert payload["metadata"]["call_type"] == "client_followup"
+    _assert_agency_callback_not_jake(payload["voicemail_message"])
+    _assert_agency_callback_not_jake(payload["task"])
+    assert JAKE_PERSONAL_DID not in payload["voicemail_message"]
 
 
 @patch("src.voice.voice_client.requests.post")
@@ -129,6 +156,64 @@ def test_client_followup_prompt_uses_first_name_and_consent_gated_transfer():
     assert "+17326540947" in prompt
     assert "only transfer if they clearly agree" in prompt.lower()
     assert "transfer" in prompt.lower()
+    _assert_agency_callback_not_jake(prompt)
+
+
+def test_client_followup_voicemail_uses_agency_main_callback_not_jake_did():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Maria",
+        producer_name="Jake Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_followup",
+        transfer_mode="warm",
+    )
+    prompt = client.build_call_prompt(dossier)
+    voicemail = client._voicemail_message(dossier)
+    transfer_block = client._transfer_objective_block(dossier)
+
+    _assert_agency_callback_not_jake(prompt)
+    _assert_agency_callback_not_jake(voicemail)
+    _assert_agency_callback_not_jake(transfer_block)
+    assert "do not transfer" in prompt.lower()
+    assert "voicemail" in prompt.lower()
+    assert AGENCY_MAIN_CALLBACK_DISPLAY in voicemail
+    assert AGENCY_MAIN_CALLBACK_SPOKEN in voicemail
+    assert "reply to your email" not in voicemail.lower()
+    assert "call StreetSmart or reply" not in prompt
+
+
+def test_client_followup_voicemail_callback_without_requestor_phone():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Maria",
+        producer_name="Jake Ferrara",
+        call_type="client_followup",
+    )
+    prompt = client.build_call_prompt(dossier)
+    voicemail = client._voicemail_message(dossier)
+    _assert_agency_callback_not_jake(prompt)
+    _assert_agency_callback_not_jake(voicemail)
+    assert "do not transfer this call" in prompt.lower()
+
+
+def test_client_followup_custom_instructions_may_cite_explicit_number():
+    """Jake's DID is allowed only when a CSR writes it in custom instructions."""
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Maria",
+        producer_name="Jake Ferrara",
+        requestor_name="Carlo Ferrara",
+        requestor_phone="+17324622360",
+        call_type="client_followup",
+        custom_instructions=f"If they ask, they can also reach Jake at {JAKE_PERSONAL_DID}.",
+    )
+    prompt = client.build_call_prompt(dossier)
+    voicemail = client._voicemail_message(dossier)
+    assert AGENCY_MAIN_CALLBACK_DISPLAY in prompt
+    assert JAKE_PERSONAL_DID in prompt
+    _assert_agency_callback_not_jake(voicemail)
 
 
 def test_carrier_prompt_offers_transfer_after_live_human():

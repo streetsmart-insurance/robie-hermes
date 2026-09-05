@@ -18,6 +18,20 @@ from src.voice.context_hydrator import (
 
 logger = logging.getLogger("carrier_voice_client")
 
+# StreetSmart RingCentral office PBX. Carlo decision 2026-09-05: client_followup
+# voicemail / busy / no close uses the agency main, not a producer cell or DID.
+AGENCY_MAIN_CALLBACK_DISPLAY = "732-462-8343"
+AGENCY_MAIN_CALLBACK_E164 = "+17324628343"
+AGENCY_MAIN_CALLBACK_SPOKEN = "seven three two, four six two, eight three four three"
+
+
+def client_followup_callback_close() -> str:
+    """Spoken close / voicemail ask-back for lead follow-up (agency main)."""
+    return (
+        f"Please call StreetSmart back at {AGENCY_MAIN_CALLBACK_DISPLAY} "
+        f'(say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}").'
+    )
+
 
 class CarrierVoiceClient:
     def __init__(
@@ -105,18 +119,26 @@ class CarrierVoiceClient:
     def _transfer_objective_block(self, dossier: CallingDossier) -> str:
         requestor = self._requestor_display(dossier)
         if not dossier.requestor_phone or not dossier.requestor_name:
-            return (
+            no_xfer = (
                 "\nTRANSFER: Do not transfer this call. The person who requested this "
                 "Robie Call has no phone on file in the voice directory. Do not guess "
                 "another producer or fall back to the EZLynx Producer field."
             )
+            if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+                no_xfer += (
+                    f" {client_followup_callback_close()} Do not leave a producer "
+                    "personal or DID number unless it is explicitly written in the CSR instructions."
+                )
+            return no_xfer
         briefing = self.build_transfer_briefing(dossier)
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+            callback = client_followup_callback_close()
             return f"""
 WARM TRANSFER TO REQUESTOR:
 - Destination: {requestor} ({dossier.requestor_phone}) — the person who invoked Robie Call.
 - Only transfer if they clearly agree to speak with {requestor} now.
 - If they say no, are busy, or you reach voicemail, give a short polite close and do not transfer.
+- {callback} Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 - Never transfer to the EZLynx Producer unless that person is also the requestor.
 - When transferring, use the transfer action (say "transfer") and brief {requestor}:
   "{briefing}"
@@ -154,7 +176,7 @@ CALL DETAILS:
 CALL OBJECTIVES:
 1. Greet the client by first name: "Hi {first}, this is Robie from StreetSmart — I'm calling about the quote {producer} put together for you. Are you free to discuss it?"
 2. If they clearly say yes / they are free to talk, transfer them to {requestor} using the transfer action.
-3. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail asking them to call StreetSmart or reply to their email.
+3. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail (or spoken close) asking them to call the agency back at {AGENCY_MAIN_CALLBACK_DISPLAY} (say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}"). Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 4. Never guess a different person. Only connect {requestor}. Do not fall back to the EZLynx Producer.
 {transfer_block}
 """
@@ -278,8 +300,9 @@ CALL OBJECTIVES:
             greeting = f"Hi {first}" if first else "Hello"
             return (
                 f"{greeting}, this is Robie from StreetSmart Insurance calling about the quote "
-                f"{producer} put together for you. Please give us a call back or reply to your "
-                "email when you have a moment. Thank you!"
+                f"{producer} put together for you. Please call us back at "
+                f"{AGENCY_MAIN_CALLBACK_DISPLAY} — that's {AGENCY_MAIN_CALLBACK_SPOKEN}. "
+                "Thank you!"
             )
         return (
             f"Hello, this is Robie from StreetSmart Insurance calling regarding Policy #{dossier.policy_number} "
