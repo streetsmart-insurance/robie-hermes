@@ -373,6 +373,6 @@ def test_lead_followup_still_transfers_to_requestor():
     first = client.build_client_first_sentence(dossier)
     assert fields["transfer_phone_number"] == "+17326540947"
     assert fields["transfer_list"]["requestor"] == "+17326540947"
-    assert "quote Carlo put together" in first
+    assert "quote Carlo Ferrara put together" in first
     assert _DOC_BODIES[PATHWAY_RENEWAL_REACHOUT] not in first
     assert "press 1" not in first.lower()
