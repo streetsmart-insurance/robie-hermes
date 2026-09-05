@@ -25,7 +25,7 @@ The **StreetSmart Autonomous Voice AI Engine** ("Robie Voice") is an automated, 
 
 ## 2. Trigger Methods (How to Invoke Robie)
 
-### Method A: In-App EZLynx `Robie Call` Label / Note (CSR Native Flow)
+### Method A: In-App EZLynx `Robie Call` / `Robie lead follow-up` Label / Note (CSR Native Flow)
 Account Managers and CSRs trigger Robie directly inside EZLynx without leaving the applicant profile.
 
 #### Can the API pull the label?
@@ -33,17 +33,24 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 * **Classic REST API (`services.ezlynx.com`):** The Classic REST API has **no public query endpoint for labels** (only `POST /api/note/v1`, `GET /api/Applicant/v2/{id}`, and `ZapierNoteViewModel.Labels`).
 * **Portal / Web UI (`app.ezlynx.com`):** The Activity / Discussion web UI (`/web/account/{applicant_id}/activity`) uses `/EZLynxPortalAPI/Discussions/GetPagedDiscussions`.
 * **Lean Strategy (Zero-Playwright Priority):**
-  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors the **Discussion Card Title** and **Note Body** for the trigger keyword `Robie Call`. Any note or card titled or prefixed with `Robie Call` is immediately detected and executed!
+  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors **`noteLabels[].labelName`**, the **Discussion Card Title**, and the **Note Body** for `Robie Call` or `Robie lead follow-up` (close variants accepted). Either phrase/label is immediately detected and executed.
 
 #### Triggering in EZLynx:
-1. **Add a Note to any Discussion card** containing the keyword `Robie Call`:
+1. **Carrier call (`Robie Call`, default):** Add a note containing `Robie Call` (or apply that org label):
    ```text
    Robie Call
    Carrier: Utica First (or leave blank to auto-detect from policy)
    Policy: HOP622388401
    What to say: Check if the renewal quote has been released and request the quote packet be emailed to robie@streetsmart.insurance.
    ```
-2. **Auto-Resolution of Phone Numbers (Multi-Tier):**
+   `Robie Call` stays **carrier** unless the note also says `Call type: client` or who-to-call is the insured.
+2. **Client / lead follow-up (`Robie lead follow-up`):** Apply the org label **`Robie lead follow-up`** (or write that phrase in the title/note). Close variants match case-insensitively: `Robie Lead Follow-up`, `robie lead follow up`, `Robie lead followup`. This **forces `call_type=client_followup`** — do **not** write `Call type: client`. Greeting is Sales Center `producerName`; warm transfer is the label invoker; voicemail asks the insured to call **732-462-8343**. If both `Robie Call` and `Robie lead follow-up` appear, lead follow-up wins (client path).
+   ```text
+   Robie lead follow-up
+   Who to call: the insured
+   What to say: Review the quote Carlo put together.
+   ```
+3. **Auto-Resolution of Phone Numbers (Multi-Tier):**
    * **Tier 1 (Explicit Note):** If the CSR includes a phone number (e.g. `Phone: 800-556-5376`), Robie dials it directly.
    * **Tier 2 (Carrier Directory):** If omitted, Robie resolves the carrier from the applicant's policies and looks up the number in `KNOWN_CARRIER_PHONES` (e.g., Utica First `800-556-5376`, TIP National `800-688-8408`, Travelers `800-238-6225`, Hartford `800-555-1234`).
    * **Tier 3 (Applicant / Insured Phone):** If the target is the client/insured or Carlo, Robie pulls the `CellPhone` directly from the applicant profile (`+1 (732) 995-3409`).
@@ -56,7 +63,7 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 
      Robie was here
      ```
-3. **Execution Commands:**
+4. **Execution Commands:**
    * **Process Applicant Notes (Live or Dry-Run):**
      ```bash
      PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id 26356199 --dry-run

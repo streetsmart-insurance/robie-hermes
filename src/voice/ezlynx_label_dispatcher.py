@@ -2,10 +2,13 @@
 EZLynx Label & Note Call Dispatcher.
 
 Enables CSRs and Account Managers to trigger autonomous calls directly from EZLynx:
-1. CSR applies the org label ``Robie Call`` and/or writes that phrase in the note/title.
-2. Note specifies 'Who to call' (phone number/carrier) and 'What to say' (instructions).
-3. Robie parses the instructions, dispatches the call via Bland AI from +1 (732) 298-6745.
-4. When complete, Robie automatically posts the call transcript, recording link, and summary
+1. CSR applies the org label ``Robie Call`` and/or writes that phrase in the note/title
+   (carrier path by default; client only with ``Call type: client`` / who-to-call insured).
+2. Or CSR applies ``Robie lead follow-up`` (and close variants) to force the client
+   follow-up path without requiring ``Call type: client`` in the note body.
+3. Note specifies 'Who to call' (phone number/carrier) and 'What to say' (instructions).
+4. Robie parses the instructions, dispatches the call via Bland AI from +1 (732) 298-6745.
+5. When complete, Robie automatically posts the call transcript, recording link, and summary
    back into the applicant's EZLynx discussion card.
 """
 
@@ -37,6 +40,18 @@ from src.voice.voice_client import CarrierVoiceClient
 logger = logging.getLogger("ezlynx_label_dispatcher")
 
 ROBIE_LABEL_TRIGGERS = ["robie call", "robie_call", "call robie", "robie: call", "[robie call]"]
+# Org label + title/note phrases. Matching is case-insensitive; hyphen / space /
+# underscore variants collapse to the same token (see `_text_matches_lead_followup_trigger`).
+ROBIE_LEAD_FOLLOWUP_TRIGGERS = [
+    "robie lead follow-up",
+    "robie lead follow up",
+    "robie lead followup",
+    "robie_lead_followup",
+    "robie_lead_follow_up",
+    "[robie lead follow-up]",
+    "[robie lead followup]",
+]
+_LEAD_FOLLOWUP_COLLAPSED = "robieleadfollowup"
 CLIENT_WHO_TOKENS = {
     "insured",
     "the insured",
@@ -80,6 +95,26 @@ def _text_matches_robie_trigger(text: Optional[str]) -> bool:
     return any(trigger in lower for trigger in ROBIE_LABEL_TRIGGERS)
 
 
+def _collapse_trigger_text(text: str) -> str:
+    """Lowercase and strip separators so hyphen/space/underscore variants match."""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _text_matches_lead_followup_trigger(text: Optional[str]) -> bool:
+    """True when Robie lead follow-up (or a close variant) appears, case-insensitive."""
+    if not text:
+        return False
+    lower = text.lower()
+    if any(trigger in lower for trigger in ROBIE_LEAD_FOLLOWUP_TRIGGERS):
+        return True
+    return _LEAD_FOLLOWUP_COLLAPSED in _collapse_trigger_text(text)
+
+
+def _text_matches_any_robie_dispatch_trigger(text: Optional[str]) -> bool:
+    """True when Robie Call or Robie lead follow-up should dispatch."""
+    return _text_matches_robie_trigger(text) or _text_matches_lead_followup_trigger(text)
+
+
 def extract_discussion_note_text(discussion: Dict[str, Any]) -> str:
     """Read the CSR note body from a GetPagedDiscussions card.
 
@@ -116,23 +151,47 @@ def extract_discussion_note_labels(discussion: Dict[str, Any]) -> List[str]:
     return names
 
 
-def discussion_is_robie_call(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
-    """Trigger when an org label or title/note text matches Robie Call phrases.
-
-    CSRs should apply the org label ``Robie Call`` and/or write that phrase in
-    the note. Instruction-style notes without the label or phrase do not fire.
-    """
+def _discussion_matches_trigger(
+    discussion: Dict[str, Any],
+    matcher,
+    note_text: Optional[str] = None,
+) -> bool:
+    """True when title, note body, or noteLabels[].labelName match ``matcher``."""
     title = ""
     if isinstance(discussion, dict):
         title = discussion.get("title") or ""
     if note_text is None:
         note_text = extract_discussion_note_text(discussion)
-    if _text_matches_robie_trigger(title) or _text_matches_robie_trigger(note_text):
+    if matcher(title) or matcher(note_text):
         return True
     for label_name in extract_discussion_note_labels(discussion):
-        if _text_matches_robie_trigger(label_name):
+        if matcher(label_name):
             return True
     return False
+
+
+def discussion_is_lead_followup(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
+    """Trigger when an org label or title/note text matches Robie lead follow-up.
+
+    Accepts close variants (``Robie Lead Follow-up``, ``robie lead follow up``,
+    ``Robie lead followup``) case-insensitively. Forces ``client_followup``.
+    """
+    return _discussion_matches_trigger(
+        discussion, _text_matches_lead_followup_trigger, note_text=note_text
+    )
+
+
+def discussion_is_robie_call(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
+    """Trigger when an org label or title/note text matches a Robie dispatch phrase.
+
+    CSRs should apply ``Robie Call`` or ``Robie lead follow-up`` and/or write
+    that phrase in the note. Instruction-style notes without the label or
+    phrase do not fire. Lead follow-up uses the same label/title/note scan as
+    Robie Call and also dispatches.
+    """
+    if _discussion_matches_trigger(discussion, _text_matches_robie_trigger, note_text=note_text):
+        return True
+    return discussion_is_lead_followup(discussion, note_text=note_text)
 
 
 def _requestor_string(value: Any) -> Optional[str]:
@@ -267,7 +326,7 @@ def _note_body_has_robie_self_marker(note_text: Optional[str]) -> bool:
     if any(marker in lower for marker in ROBIE_SELF_BODY_MARKERS):
         return True
     stripped = lower
-    for trigger in sorted(ROBIE_LABEL_TRIGGERS, key=len, reverse=True):
+    for trigger in sorted(ROBIE_LABEL_TRIGGERS + ROBIE_LEAD_FOLLOWUP_TRIGGERS, key=len, reverse=True):
         stripped = stripped.replace(trigger, " ")
     return "[robie" in stripped
 
@@ -331,8 +390,8 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         "call_type": None,
     }
 
-    # Check for trigger tag/keyword in the note/title text
-    if _text_matches_robie_trigger(clean_text):
+    # Check for trigger tag/keyword in the note/title text (either dispatch label)
+    if _text_matches_any_robie_dispatch_trigger(clean_text):
         result["is_robie_call"] = True
 
     # 1. Extract Phone Number
@@ -359,7 +418,9 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
     if pol_match:
         result["policy_number"] = pol_match.group(1).strip()
 
-    # 4. Explicit call-type cue (do not guess beyond this + who-to-call)
+    # 4. Explicit call-type cue (do not guess beyond this + who-to-call).
+    # Robie lead follow-up in the note/title forces client_followup and wins
+    # over ``Call type: carrier`` when both appear.
     type_match = re.search(
         r"call\s*type\s*:\s*(client(?:[\s_-]*follow[\s_-]*up)?|carrier|existing)\b",
         clean_text,
@@ -367,6 +428,8 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
     )
     if type_match:
         result["call_type"] = normalize_call_type(type_match.group(1))
+    if _text_matches_lead_followup_trigger(clean_text):
+        result["call_type"] = CALL_TYPE_CLIENT_FOLLOWUP
 
     # 5. Extract What To Say / Instructions
     say_match = re.search(r"(?:what to say|instructions|say|message|notes|details|tell)[:\s]+([\s\S]+)", clean_text, re.IGNORECASE)
@@ -382,6 +445,8 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         for line in lines:
             line_lower = line.lower()
             if any(t in line_lower for t in ROBIE_LABEL_TRIGGERS):
+                continue
+            if _text_matches_lead_followup_trigger(line):
                 continue
             if line_lower.startswith(("who to call:", "phone:", "contact:", "policy:", "call type:")):
                 continue
@@ -403,8 +468,16 @@ def lookup_known_carrier_phone(carrier_name: Optional[str]) -> Optional[str]:
 def infer_call_type(
     parsed: Dict[str, Any],
     insured_name: Optional[str] = None,
+    lead_followup: bool = False,
 ) -> str:
-    """Use explicit Call type: cue, else infer only from who-to-call if it is the insured."""
+    """Resolve carrier vs client_followup.
+
+    ``Robie lead follow-up`` (label or phrase) always forces client_followup —
+    even when ``Call type: carrier`` is also present. Robie Call alone stays
+    carrier unless the note has ``Call type: client`` or who-to-call insured.
+    """
+    if lead_followup:
+        return CALL_TYPE_CLIENT_FOLLOWUP
     explicit = parsed.get("call_type")
     if explicit in (CALL_TYPE_CLIENT_FOLLOWUP, CALL_TYPE_CARRIER):
         return explicit
@@ -540,7 +613,12 @@ class EZLynxLabelCallDispatcher:
                     self.ezlynx.get_applicant_policies(applicant_id)
                 )
             matched_policy = match_policy_record(applicant_policies or [], policy_num)
-            call_type = infer_call_type(parsed, insured_name=insured_name)
+            lead_followup = discussion_is_lead_followup(disc, note_text=note_text)
+            call_type = infer_call_type(
+                parsed,
+                insured_name=insured_name,
+                lead_followup=lead_followup,
+            )
 
             # 3. Resolve Phone Number from carrier knowledge base / directory if missing
             phone = parsed["phone_number"]

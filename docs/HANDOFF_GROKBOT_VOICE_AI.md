@@ -77,7 +77,17 @@ CSRs and Account Managers can trigger Robie without leaving EZLynx:
    ```
 
 #### Client follow-up vs carrier call + producer warm transfer
-Tag the note explicitly so Robie does not guess:
+**Preferred CSR path for a client/lead call:** apply the org label **`Robie lead follow-up`** (case-insensitive; `Robie Lead Follow-up`, `robie lead follow up`, and `Robie lead followup` also match). That label alone dispatches the same way `Robie Call` does and **forces `call_type=client_followup`**. You do **not** need `Call type: client` in the note body.
+
+```text
+(apply label: Robie lead follow-up)
+Who to call: the insured
+What to say: Review the quote Carlo put together.
+```
+
+Writing the phrase in the discussion title or note body works the same as applying the label.
+
+**`Robie Call` is unchanged** — carrier by default; client only when the note says `Call type: client` or who-to-call is the insured:
 
 ```text
 robie call
@@ -93,14 +103,16 @@ Who to call: The Hartford
 What to say: Confirm renewal terms, then connect them to the producer if they ask.
 ```
 
+- **Both labels on the same note:** `Robie lead follow-up` wins → `client_followup`.
 - **Client path (`call_type=client_followup`):** Robie greets the insured by EZLynx `FirstName` and mentions the **Sales Center opportunity `producerName`** ("quote {producerName} put together"). Carlo decision 2026-09-05 (verified on Buster Brown / applicant `26356199`): greeting is Sales Center `producerName`, not account Assigned Producer and not commission policy Producer. Busy / no / voicemail: do **not** warm-transfer; leave a short polite close asking them to call the agency main **732-462-8343** (RingCentral office PBX), not a producer cell/DID (Carlo voicemail-callback decision).
 - **These are three different EZLynx fields:** Assigned Producer (`GetApplicantSidebar` → `Applicant.Assignment.AssignedTo` full name; Classic Applicant/v2 `AssignedTo` is only a username like `Carlo1`) ≠ Sales Producer (`GetOpportunitiesForApplicant` → `opportunities[].producerName`) ≠ commission Producer (`CommissionProducers[].Producer.ProducerName`, e.g. Brittni). CSR is `CsrUserModel.FullName` and is never the greeting source.
 - **Fallback:** only if Sales Center has no `producerName`, optionally use portal `Assignment.AssignedTo` full name. Never invent a name. Never use commission Producer. Never treat Classic `AssignedTo` username as the greeting without resolution.
-- **Warm transfer (unchanged):** Bland warm-transfers to the **requestor** — the Robie Call **label invoker** (note author / email sender), resolved from the voice directory DID. Greeting producer and transfer target are independent.
-- **Carrier path (default):** Existing underwriting follow-up. After a live human is confirmed, Robie can warm-transfer to the same requestor.
-- **Worked example:** Mike Sosa applies the Robie Call label on an account whose Sales Center `producerName` is Carlo Ferrara. Greeting says Carlo; transfer DID is Mike's RingCentral Direct Number `+17326540947`.
+- **Warm transfer (unchanged):** Bland warm-transfers to the **requestor** — the **label invoker** (note author / email sender), resolved from the voice directory DID. Greeting producer and transfer target are independent.
+- **Carrier path (default for `Robie Call`):** Existing underwriting follow-up. After a live human is confirmed, Robie can warm-transfer to the same requestor.
+- **Worked example:** Mike Sosa applies `Robie lead follow-up` (or `Robie Call` + `Call type: client`) on an account whose Sales Center `producerName` is Carlo Ferrara. Greeting says Carlo; transfer DID is Mike's RingCentral Direct Number `+17326540947`.
 - Requestor is read from Portal `GetPagedDiscussions` note metadata (`discussionNote.createdByName` / `createdBy` / `userName` / email, then card `lastModifiedByName`). Lookup is by name, alias, or email in `producers[]`. Email or name alone is not enough — the row must have an E.164 `phone` or transfer is skipped. **Never fall back to the Sales Center producer or another staff DID.**
 - Assigned CSR for EZLynx tasks remains Carlo Ferrara (never Robie).
+- Creating the `Robie lead follow-up` org label in the live EZLynx UI is orchestration's job; this repo only recognizes the name (and close variants) on `noteLabels[].labelName` or in title/note text.
 
 ---
 

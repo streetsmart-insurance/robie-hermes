@@ -7,6 +7,7 @@ import pytest
 from src.voice.ezlynx_label_dispatcher import (
     PORTAL_DISCUSSIONS_PAGE_SIZE,
     EZLynxLabelCallDispatcher,
+    discussion_is_lead_followup,
     discussion_is_robie_call,
     discussion_note_identity,
     extract_discussion_note_labels,
@@ -15,6 +16,7 @@ from src.voice.ezlynx_label_dispatcher import (
     infer_call_type,
     latest_activity_is_from_robie,
     parse_call_note_instructions,
+    _text_matches_lead_followup_trigger,
 )
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
 
@@ -221,6 +223,159 @@ def test_infer_call_type_from_who_to_call_insured_only():
     assert infer_call_type(carrier, insured_name="Acme LLC") == "carrier"
 
 
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Robie lead follow-up",
+        "Robie Lead Follow-up",
+        "robie lead follow up",
+        "Robie lead followup",
+        "ROBIE LEAD FOLLOW-UP",
+        "[Robie lead follow-up]",
+        "robie_lead_followup",
+    ],
+)
+def test_lead_followup_trigger_variants(phrase):
+    """Close hyphen/space/case variants of the org label must be recognized."""
+    assert _text_matches_lead_followup_trigger(phrase) is True
+    parsed = parse_call_note_instructions(
+        f"{phrase}\nWho to call: Travelers\nWhat to say: Review the quote."
+    )
+    assert parsed["is_robie_call"] is True
+    assert parsed["call_type"] == "client_followup"
+    assert infer_call_type(parsed, insured_name="Acme LLC") == "client_followup"
+
+
+def test_lead_followup_does_not_match_unrelated_robie_text():
+    assert _text_matches_lead_followup_trigger("Robie Call") is False
+    assert _text_matches_lead_followup_trigger("Please do a lead follow-up") is False
+    assert _text_matches_lead_followup_trigger("robie call\nCall type: carrier") is False
+
+
+def test_discussion_is_lead_followup_from_note_labels():
+    """Org label Robie lead follow-up triggers even when title/body omit the phrase."""
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "Please review the quote with the insured.",
+            "noteLabels": [
+                {"labelName": "Robie lead follow-up", "organizationLabelId": 21, "applicantNoteId": 3}
+            ],
+        },
+    }
+    assert discussion_is_lead_followup(card) is True
+    assert discussion_is_robie_call(card) is True
+
+
+@pytest.mark.parametrize(
+    "label_name",
+    [
+        "Robie lead follow-up",
+        "Robie Lead Follow-up",
+        "robie lead follow up",
+        "Robie lead followup",
+    ],
+)
+def test_discussion_is_lead_followup_label_name_variants(label_name):
+    card = {
+        "title": "Activity",
+        "discussionNote": {
+            "note": "ask the client about the quote",
+            "noteLabels": [{"labelName": label_name}],
+        },
+    }
+    assert discussion_is_lead_followup(card) is True
+    assert discussion_is_robie_call(card) is True
+
+
+def test_discussion_is_lead_followup_from_title_and_note():
+    titled = {
+        "title": "Robie lead follow-up - Garcia Landscaping",
+        "discussionNote": {"note": "Review the quote.", "noteLabels": []},
+    }
+    assert discussion_is_lead_followup(titled) is True
+
+    noted = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "Robie lead followup — please call the insured about the quote.",
+            "noteLabels": [],
+        },
+    }
+    assert discussion_is_lead_followup(noted) is True
+    assert discussion_is_robie_call(noted) is True
+
+
+def test_infer_call_type_lead_followup_label_forces_client_without_call_type_cue():
+    """Label-only lead follow-up is client_followup; no Call type: client required."""
+    parsed = parse_call_note_instructions(
+        "Who to call: Travelers\nWhat to say: Review the quote."
+    )
+    assert parsed["call_type"] is None
+    assert infer_call_type(parsed, insured_name="Acme LLC") == "carrier"
+    assert infer_call_type(parsed, insured_name="Acme LLC", lead_followup=True) == "client_followup"
+
+
+def test_infer_call_type_both_labels_prefers_lead_followup():
+    """When Robie Call and Robie lead follow-up both appear, client_followup wins."""
+    parsed = parse_call_note_instructions(
+        "robie call\nCall type: carrier\nWho to call: The Hartford\nWhat to say: Ask for terms."
+    )
+    assert parsed["call_type"] == "carrier"
+    assert infer_call_type(parsed) == "carrier"
+    assert infer_call_type(parsed, lead_followup=True) == "client_followup"
+
+    both_in_text = parse_call_note_instructions(
+        "Robie Call\nRobie lead follow-up\nCall type: carrier\nWho to call: The Hartford\n"
+        "What to say: Ask for terms."
+    )
+    assert both_in_text["is_robie_call"] is True
+    assert both_in_text["call_type"] == "client_followup"
+    assert infer_call_type(both_in_text) == "client_followup"
+
+    both_labels = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "Who to call: The Hartford\nWhat to say: Ask for terms.",
+            "noteLabels": [
+                {"labelName": "Robie Call"},
+                {"labelName": "Robie lead follow-up"},
+            ],
+        },
+    }
+    assert discussion_is_robie_call(both_labels) is True
+    assert discussion_is_lead_followup(both_labels) is True
+    parsed_labels = parse_call_note_instructions(
+        f"{both_labels['title']}\n{extract_discussion_note_text(both_labels)}"
+    )
+    assert infer_call_type(
+        parsed_labels,
+        insured_name="Acme LLC",
+        lead_followup=discussion_is_lead_followup(both_labels),
+    ) == "client_followup"
+
+
+def test_robie_call_alone_stays_carrier_by_default():
+    """Existing Robie Call behavior: carrier unless Call type: client / who-to-call insured."""
+    parsed = parse_call_note_instructions(
+        "robie call\nWho to call: The Hartford\nWhat to say: Ask for terms."
+    )
+    assert parsed["is_robie_call"] is True
+    assert parsed["call_type"] is None
+    assert infer_call_type(parsed, insured_name="Acme LLC") == "carrier"
+    assert infer_call_type(parsed, insured_name="Acme LLC", lead_followup=False) == "carrier"
+
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "Who to call: The Hartford\nWhat to say: Ask for terms.",
+            "noteLabels": [{"labelName": "Robie Call"}],
+        },
+    }
+    assert discussion_is_robie_call(card) is True
+    assert discussion_is_lead_followup(card) is False
+
+
 def test_dispatcher_client_followup_transfers_to_mike_not_producer(processed_store):
     """Mike applies Robie Call; Producer Jake is greeting-only; transfer is Mike's RC DID."""
     mock_ezlynx = MagicMock()
@@ -396,6 +551,105 @@ def test_dispatcher_buster_greeting_is_sales_center_producer_not_commission(proc
     assert dossier.assigned_csr_email == "carlo@streetsmart.insurance"
     mock_ezlynx.get_sales_center_opportunities.assert_called_once_with("26356199")
     mock_ezlynx.get_applicant_sidebar.assert_not_called()
+
+
+def test_dispatcher_lead_followup_label_forces_client_without_call_type(processed_store):
+    """Org label Robie lead follow-up dispatches the client path; no Call type: client needed."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "client prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_lead_01", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88100,
+            "title": "Rest",
+            "discussionNote": {
+                "noteId": 555200,
+                "createdByName": "Mike Sosa",
+                "createdByEmail": "mike@streetsmart.insurance",
+                "note": "Please review the quote with the insured.",
+                "noteLabels": [
+                    {"labelName": "Robie lead follow-up", "organizationLabelId": 21, "applicantNoteId": 555200}
+                ],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Maria",
+            "LastName": "Garcia",
+            "BusinessName": "Garcia Landscaping LLC",
+            "CellPhone": "732-555-0100",
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_followup"
+    assert results[0]["phone"] == "+17325550100"
+    assert results[0]["producer_name"] == "Carlo Ferrara"
+    assert results[0]["requestor_name"] == "Mike Sosa"
+    assert results[0]["requestor_phone"] == "+17326540947"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.call_type == "client_followup"
+    assert dossier.producer_name == "Carlo Ferrara"
+    assert dossier.client_first_name == "Maria"
+    assert dossier.requestor_phone == "+17326540947"
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Call type: client_followup" in ack
+
+
+def test_dispatcher_both_labels_prefers_lead_followup_client_path(processed_store):
+    """Robie Call + Robie lead follow-up on the same note uses client_followup."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_both_01", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88101,
+            "title": "Robie Call - Follow up with Travelers",
+            "discussionNote": {
+                "noteId": 555201,
+                "createdByName": "Mike Sosa",
+                "createdByEmail": "mike@streetsmart.insurance",
+                "note": "Who to call: Travelers\nWhat to say: Ask for terms.",
+                "noteLabels": [
+                    {"labelName": "Robie Call"},
+                    {"labelName": "Robie Lead Follow-up"},
+                ],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Maria",
+            "BusinessName": "Garcia Landscaping LLC",
+            "CellPhone": "732-555-0100",
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_followup"
+    assert results[0]["phone"] == "+17325550100"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.call_type == "client_followup"
 
 
 def test_dispatcher_skips_when_latest_note_is_from_robie(processed_store):
