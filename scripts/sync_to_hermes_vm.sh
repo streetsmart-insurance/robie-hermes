@@ -38,7 +38,7 @@ gcloud compute ssh "${INSTANCE}" \
     echo '🔍 Running EZLynx session check on VM...' && \
     PYTHONPATH=. ./venv/bin/python3 scripts/ezlynx_cli.py sessions && \
     echo '🧪 Running unit test suite on VM...' && \
-    PYTHONPATH=. ./venv/bin/pytest tests/test_ezlynx_discussions.py tests/test_ezlynx_api_client.py
+    PYTHONPATH=. ./venv/bin/pytest tests/test_ezlynx_discussions.py tests/test_ezlynx_api_client.py tests/test_voice_*.py
   "
 
 echo "============================================================"
