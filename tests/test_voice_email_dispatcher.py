@@ -50,6 +50,17 @@ def test_parse_call_command_explicit_client_call_type():
     assert cmd["call_type"] == "client_followup"
 
 
+def test_parse_call_command_explicit_client_outreach_call_type():
+    dispatcher = EmailCallDispatcher()
+    cmd = dispatcher.parse_call_command(
+        sender="carlo@streetsmart.insurance",
+        subject="Call the client for PWC1239278",
+        body="Call type: client outreach\nAsk them to send the missing documents.",
+    )
+    assert cmd is not None
+    assert cmd["call_type"] == "client_outreach"
+
+
 def test_parse_call_command_ignores_unauthorized():
     dispatcher = EmailCallDispatcher()
     cmd = dispatcher.parse_call_command(

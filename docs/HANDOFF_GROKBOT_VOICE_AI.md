@@ -76,6 +76,15 @@ CSRs and Account Managers can trigger Robie without leaving EZLynx:
    PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id <ApplicantID>
    ```
 
+#### Three voice labels (do not mix the prompts)
+There are three dispatch labels. Each forces its own `call_type`:
+
+| Label | `call_type` | Who is dialed | Greeting |
+| :--- | :--- | :--- | :--- |
+| **`Robie Call`** | `carrier` (default) | Carrier desk from the note / directory | Underwriting IVR script |
+| **`Robie lead follow-up`** | `client_followup` | Insured Cell → Home → Business | "quote {Sales Center producerName} put together" |
+| **`Robie client outreach`** | `client_outreach` | Primary applicant, then co-applicant | First name + CSR reason only — **no** producer quote |
+
 #### Client follow-up vs carrier call + producer warm transfer
 **Preferred CSR path for a client/lead call:** apply the org label **`Robie lead follow-up`** (case-insensitive; `Robie Lead Follow-up`, `robie lead follow up`, and `Robie lead followup` also match). That label alone dispatches the same way `Robie Call` does and **forces `call_type=client_followup`**. You do **not** need `Call type: client` in the note body.
 
@@ -113,6 +122,24 @@ What to say: Confirm renewal terms, then connect them to the producer if they as
 - Requestor is read from Portal `GetPagedDiscussions` note metadata (`discussionNote.createdByName` / `createdBy` / `userName` / email, then card `lastModifiedByName`). Lookup is by name, alias, or email in `producers[]`. Email or name alone is not enough — the row must have an E.164 `phone` or transfer is skipped. **Never fall back to the Sales Center producer or another staff DID.**
 - Assigned CSR for EZLynx tasks remains Carlo Ferrara (never Robie).
 - Creating the `Robie lead follow-up` org label in the live EZLynx UI is orchestration's job; this repo only recognizes the name (and close variants) on `noteLabels[].labelName` or in title/note text.
+
+#### Client outreach (cancellations / action-needed) — Carlo 2026-09-05
+**Preferred CSR path when the insured must do something** (cancellation, documents, payment, “please call us back”): apply the org label **`Robie client outreach`**. Close variants match case-insensitively: `robie client outreach`, `robie_client_outreach`, `[robie client outreach]`. The alias **`robie cancellation`** takes the same path. That label alone dispatches like `Robie Call` and **forces `call_type=client_outreach`**. You do **not** write `Call type: client` and you do **not** use the lead-follow-up greeting.
+
+```text
+(apply label: Robie client outreach)
+What to say: Policy is pending cancellation — please call to keep coverage or confirm they want to cancel.
+```
+
+Writing the phrase in the discussion title or note body works the same as applying the label.
+
+- **Dial order (locked):** always primary applicant first, then secondary / co-applicant when both have phones. Phone fields: `CellPhone` → `HomePhone` → `WorkPhone` (Classic Applicant/v2 `BusinessPhone` is the work-line alias; portal sidebar `ContactInfo` is also read). Skip anyone with no valid US E.164 — **never invent numbers**. If primary and secondary share the same number, call once.
+- **Buster Brown (applicant `26356199`):** primary cell `7329953409`; co-applicant currently has no cell — secondary dial is skipped until a phone exists.
+- **Each call:** greet that person by EZLynx first name; convey the CSR `What to say` / free-text reason; on a clear yes, warm-transfer to the **label invoker** (requestor DID from the voice directory — same as lead follow-up); on no / busy / voicemail, polite close and ask them to call the agency main **732-462-8343**. Do not invent Jake’s DID. Do **not** say “the quote {Sales Center producer} put together”.
+- **Both `Robie Call` and `Robie client outreach` on the same note:** client outreach wins → `client_outreach`.
+- **`Robie lead follow-up` is unchanged** — still `client_followup` with the Sales Center producer greeting.
+- Assigned CSR for EZLynx notes/tasks remains Carlo Ferrara. Caller ID `+17322986745`. No Bland `max_duration`.
+- Creating the `Robie client outreach` org label in the live EZLynx UI is Carlo / Admin’s job; this repo only recognizes the name (and close variants / `robie cancellation` alias).
 
 ---
 

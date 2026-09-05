@@ -25,7 +25,7 @@ The **StreetSmart Autonomous Voice AI Engine** ("Robie Voice") is an automated, 
 
 ## 2. Trigger Methods (How to Invoke Robie)
 
-### Method A: In-App EZLynx `Robie Call` / `Robie lead follow-up` Label / Note (CSR Native Flow)
+### Method A: In-App EZLynx `Robie Call` / `Robie lead follow-up` / `Robie client outreach` Label / Note (CSR Native Flow)
 Account Managers and CSRs trigger Robie directly inside EZLynx without leaving the applicant profile.
 
 #### Can the API pull the label?
@@ -33,7 +33,7 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 * **Classic REST API (`services.ezlynx.com`):** The Classic REST API has **no public query endpoint for labels** (only `POST /api/note/v1`, `GET /api/Applicant/v2/{id}`, and `ZapierNoteViewModel.Labels`).
 * **Portal / Web UI (`app.ezlynx.com`):** The Activity / Discussion web UI (`/web/account/{applicant_id}/activity`) uses `/EZLynxPortalAPI/Discussions/GetPagedDiscussions`.
 * **Lean Strategy (Zero-Playwright Priority):**
-  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors **`noteLabels[].labelName`**, the **Discussion Card Title**, and the **Note Body** for `Robie Call` or `Robie lead follow-up` (close variants accepted). Either phrase/label is immediately detected and executed.
+  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors **`noteLabels[].labelName`**, the **Discussion Card Title**, and the **Note Body** for `Robie Call`, `Robie lead follow-up`, or `Robie client outreach` (close variants accepted; `robie cancellation` aliases to client outreach). Any of those phrases/labels is immediately detected and executed.
 
 #### Triggering in EZLynx:
 1. **Carrier call (`Robie Call`, default):** Add a note containing `Robie Call` (or apply that org label):
@@ -50,7 +50,12 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
    Who to call: the insured
    What to say: Review the quote Carlo put together.
    ```
-3. **Auto-Resolution of Phone Numbers (Multi-Tier):**
+3. **Client outreach / cancellations (`Robie client outreach`):** Apply the org label **`Robie client outreach`** (or write that phrase / `robie cancellation` in the title/note). Forces **`call_type=client_outreach`** — a different prompt from lead follow-up (no “quote {Sales Center producer} put together”). Dial order is locked: **primary applicant first, then secondary/co-applicant** when both have E.164 phones (`CellPhone` → `HomePhone` → `WorkPhone`). Skip anyone with no phone; never invent numbers. Same number on both people → one call. Each call greets that person by first name, conveys the CSR `What to say` reason, warm-transfers a clear yes to the **label invoker**, and on no/busy/voicemail asks them to call **732-462-8343**. Buster Brown (`26356199`): primary `7329953409`, co-applicant has no cell — secondary is skipped.
+   ```text
+   Robie client outreach
+   What to say: Policy is pending cancellation — please call to keep coverage or confirm they want to cancel.
+   ```
+4. **Auto-Resolution of Phone Numbers (Multi-Tier):**
    * **Tier 1 (Explicit Note):** If the CSR includes a phone number (e.g. `Phone: 800-556-5376`), Robie dials it directly.
    * **Tier 2 (Carrier Directory):** If omitted, Robie resolves the carrier from the applicant's policies and looks up the number in `KNOWN_CARRIER_PHONES` (e.g., Utica First `800-556-5376`, TIP National `800-688-8408`, Travelers `800-238-6225`, Hartford `800-555-1234`).
    * **Tier 3 (Applicant / Insured Phone):** If the target is the client/insured or Carlo, Robie pulls the `CellPhone` directly from the applicant profile (`+1 (732) 995-3409`).
@@ -63,7 +68,7 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 
      Robie was here
      ```
-4. **Execution Commands:**
+5. **Execution Commands:**
    * **Process Applicant Notes (Live or Dry-Run):**
      ```bash
      PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id 26356199 --dry-run

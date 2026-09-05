@@ -99,7 +99,8 @@ class EmailCallDispatcher:
 
         call_type = None
         type_match = re.search(
-            r"call\s*type\s*:\s*(client(?:[\s_-]*follow[\s_-]*up)?|carrier|existing)\b",
+            r"call\s*type\s*:\s*(client[\s_-]*outreach|outreach|cancellation|"
+            r"client(?:[\s_-]*follow[\s_-]*up)?|carrier|existing)\b",
             full_text,
             re.IGNORECASE,
         )

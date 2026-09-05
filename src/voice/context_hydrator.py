@@ -20,7 +20,29 @@ logger = logging.getLogger("voice_context_hydrator")
 
 CALL_TYPE_CARRIER = "carrier"
 CALL_TYPE_CLIENT_FOLLOWUP = "client_followup"
+CALL_TYPE_CLIENT_OUTREACH = "client_outreach"
 TRANSFER_MODE_WARM = "warm"
+CLIENT_CALL_TYPES = frozenset({CALL_TYPE_CLIENT_FOLLOWUP, CALL_TYPE_CLIENT_OUTREACH})
+
+# Cell → Home → Work. Classic Applicant/v2 uses BusinessPhone as the work line;
+# portal sidebar ContactInfo may use WorkPhone. Never invent a number.
+_CELL_PHONE_KEYS = ("CellPhone", "cellPhone", "Cell", "MobilePhone", "mobilePhone")
+_HOME_PHONE_KEYS = ("HomePhone", "homePhone", "Home")
+_WORK_PHONE_KEYS = (
+    "WorkPhone",
+    "workPhone",
+    "Work",
+    "BusinessPhone",
+    "businessPhone",
+)
+_CONTACT_NEST_KEYS = ("ContactInfo", "contactInfo", "Contact")
+_CO_APPLICANT_KEYS = (
+    "CoApplicant",
+    "coApplicant",
+    "SecondaryApplicant",
+    "secondaryApplicant",
+    "CoApplicantInfo",
+)
 
 # Greeting producer is Sales Center opportunity.producerName — not these
 # Classic / commission keys. Kept only so we can refuse them explicitly in tests.
@@ -52,13 +74,179 @@ _BUSINESS_NAME_RE = re.compile(
 
 
 def normalize_call_type(raw: Optional[str]) -> str:
-    """Map note/email cues onto client_followup | carrier."""
+    """Map note/email cues onto client_outreach | client_followup | carrier.
+
+    ``client_outreach`` / ``outreach`` / ``cancellation`` stay distinct from
+    ``client`` / ``client_followup`` (lead follow-up greeting path).
+    """
     if not raw:
         return CALL_TYPE_CARRIER
     cleaned = re.sub(r"[\s-]+", "_", str(raw).strip().lower())
+    if (
+        "outreach" in cleaned
+        or cleaned in ("cancellation", "client_cancellation")
+        or cleaned.endswith("_cancellation")
+    ):
+        return CALL_TYPE_CLIENT_OUTREACH
     if cleaned.startswith("client"):
         return CALL_TYPE_CLIENT_FOLLOWUP
     return CALL_TYPE_CARRIER
+
+
+def is_client_call_type(call_type: Optional[str]) -> bool:
+    """True for insured-facing Bland paths (lead follow-up or client outreach)."""
+    return call_type in CLIENT_CALL_TYPES
+
+
+def normalize_us_e164(raw_phone: Optional[str]) -> Optional[str]:
+    """US E.164 only (+1XXXXXXXXXX). Returns None instead of inventing a number."""
+    if not raw_phone:
+        return None
+    digits = re.sub(r"\D", "", str(raw_phone))
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    return None
+
+
+def _first_e164_from_mapping(mapping: Dict[str, Any], keys: tuple) -> Optional[str]:
+    for key in keys:
+        phone = normalize_us_e164(mapping.get(key))
+        if phone:
+            return phone
+    return None
+
+
+def _contact_field_dicts(contact: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Person dict plus nested ContactInfo (Classic + portal sidebar)."""
+    if not isinstance(contact, dict):
+        return []
+    sources = [contact]
+    for nest_key in _CONTACT_NEST_KEYS:
+        nested = contact.get(nest_key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+    return sources
+
+
+def extract_contact_phone(contact: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """CellPhone → HomePhone → WorkPhone. Skip if no valid US E.164."""
+    for source in _contact_field_dicts(contact):
+        phone = _first_e164_from_mapping(source, _CELL_PHONE_KEYS)
+        if phone:
+            return phone
+    for source in _contact_field_dicts(contact):
+        phone = _first_e164_from_mapping(source, _HOME_PHONE_KEYS)
+        if phone:
+            return phone
+    for source in _contact_field_dicts(contact):
+        phone = _first_e164_from_mapping(source, _WORK_PHONE_KEYS)
+        if phone:
+            return phone
+    return None
+
+
+def _co_applicant_from_mapping(mapping: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(mapping, dict):
+        return None
+    for key in _CO_APPLICANT_KEYS:
+        value = mapping.get(key)
+        if isinstance(value, dict) and value:
+            return value
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and item:
+                    return item
+    return None
+
+
+def extract_co_applicant(
+    applicant: Optional[Dict[str, Any]] = None,
+    sidebar: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Co-applicant / secondary from Classic Applicant/v2 or portal sidebar."""
+    for mapping in (applicant,):
+        found = _co_applicant_from_mapping(mapping)
+        if found:
+            return found
+        for source in _contact_field_dicts(mapping):
+            found = _co_applicant_from_mapping(source)
+            if found:
+                return found
+    if not isinstance(sidebar, dict):
+        return None
+    sidebar_applicant = sidebar.get("Applicant") if isinstance(sidebar.get("Applicant"), dict) else sidebar
+    for mapping in (sidebar_applicant, sidebar):
+        found = _co_applicant_from_mapping(mapping)
+        if found:
+            return found
+        for source in _contact_field_dicts(mapping):
+            found = _co_applicant_from_mapping(source)
+            if found:
+                return found
+    return None
+
+
+def extract_primary_applicant_contact(
+    applicant: Optional[Dict[str, Any]] = None,
+    sidebar: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Primary person dict: Classic applicant, else sidebar Applicant / ContactInfo."""
+    if isinstance(applicant, dict) and applicant:
+        return applicant
+    if isinstance(sidebar, dict):
+        inner = sidebar.get("Applicant")
+        if isinstance(inner, dict) and inner:
+            return inner
+        for key in _CONTACT_NEST_KEYS:
+            nested = sidebar.get(key)
+            if isinstance(nested, dict) and nested:
+                return nested
+    return None
+
+
+def resolve_client_outreach_targets(
+    applicant: Optional[Dict[str, Any]] = None,
+    sidebar: Optional[Dict[str, Any]] = None,
+    insured_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Primary then secondary dials. Skip missing phones; dedupe shared numbers.
+
+    Never invents E.164 values. Buster Brown (26356199): primary ``7329953409``,
+    co-applicant currently has no cell — secondary is omitted until a phone exists.
+    """
+    targets: List[Dict[str, Any]] = []
+    seen_phones = set()
+
+    primary = extract_primary_applicant_contact(applicant, sidebar)
+    primary_phone = extract_contact_phone(primary)
+    if not primary_phone and isinstance(sidebar, dict):
+        sidebar_applicant = sidebar.get("Applicant") if isinstance(sidebar.get("Applicant"), dict) else sidebar
+        primary_phone = extract_contact_phone(sidebar_applicant)
+    if primary_phone and primary_phone not in seen_phones:
+        seen_phones.add(primary_phone)
+        targets.append(
+            {
+                "role": "primary",
+                "phone": primary_phone,
+                "first_name": extract_client_first_name(primary, insured_name),
+            }
+        )
+
+    secondary = extract_co_applicant(applicant, sidebar)
+    secondary_phone = extract_contact_phone(secondary)
+    if secondary_phone and secondary_phone not in seen_phones:
+        seen_phones.add(secondary_phone)
+        targets.append(
+            {
+                "role": "secondary",
+                "phone": secondary_phone,
+                "first_name": extract_client_first_name(secondary),
+            }
+        )
+
+    return targets
 
 
 def _looks_like_business_name(name: str) -> bool:

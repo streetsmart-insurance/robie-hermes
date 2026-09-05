@@ -6,14 +6,18 @@ from unittest.mock import MagicMock, patch
 from src.voice.context_hydrator import (
     CALL_TYPE_CARRIER,
     CALL_TYPE_CLIENT_FOLLOWUP,
+    CALL_TYPE_CLIENT_OUTREACH,
     TRANSFER_MODE_WARM,
     CallingDossier,
     ContextHydrator,
     extract_client_first_name,
+    extract_co_applicant,
+    extract_contact_phone,
     extract_producer_name,
     extract_sales_center_producer_name,
     extract_sidebar_assigned_producer_full_name,
     normalize_call_type,
+    resolve_client_outreach_targets,
 )
 
 # Live Buster Brown (applicant 26356199) shapes verified 2026-09-05.
@@ -217,9 +221,83 @@ def test_sidebar_assigned_to_full_name_fallback_only():
 def test_normalize_call_type():
     assert normalize_call_type("client") == CALL_TYPE_CLIENT_FOLLOWUP
     assert normalize_call_type("client follow-up") == CALL_TYPE_CLIENT_FOLLOWUP
+    assert normalize_call_type("client_outreach") == CALL_TYPE_CLIENT_OUTREACH
+    assert normalize_call_type("client outreach") == CALL_TYPE_CLIENT_OUTREACH
+    assert normalize_call_type("outreach") == CALL_TYPE_CLIENT_OUTREACH
+    assert normalize_call_type("cancellation") == CALL_TYPE_CLIENT_OUTREACH
     assert normalize_call_type("carrier") == CALL_TYPE_CARRIER
     assert normalize_call_type("existing") == CALL_TYPE_CARRIER
     assert normalize_call_type(None) == CALL_TYPE_CARRIER
+
+
+def test_extract_contact_phone_prefers_cell_then_home_then_work():
+    assert extract_contact_phone({"CellPhone": "7329953409", "HomePhone": "7325550100"}) == "+17329953409"
+    assert extract_contact_phone({"HomePhone": "732-555-0100", "WorkPhone": "7325550199"}) == "+17325550100"
+    assert extract_contact_phone({"WorkPhone": "(732) 555-0199"}) == "+17325550199"
+    assert extract_contact_phone({"BusinessPhone": "7325550199"}) == "+17325550199"
+    assert extract_contact_phone({"ContactInfo": {"CellPhone": "7329953409"}}) == "+17329953409"
+    assert extract_contact_phone({"CellPhone": "12"}) is None
+    assert extract_contact_phone({}) is None
+
+
+def test_resolve_client_outreach_targets_primary_then_secondary():
+    applicant = {
+        "FirstName": "Buster",
+        "LastName": "Brown",
+        "CellPhone": "7329953409",
+        "CoApplicant": {
+            "FirstName": "Jane",
+            "LastName": "Brown",
+            "CellPhone": "732-555-0100",
+        },
+    }
+    targets = resolve_client_outreach_targets(applicant, insured_name="Buster Brown")
+    assert [t["role"] for t in targets] == ["primary", "secondary"]
+    assert [t["phone"] for t in targets] == ["+17329953409", "+17325550100"]
+    assert targets[0]["first_name"] == "Buster"
+    assert targets[1]["first_name"] == "Jane"
+
+
+def test_resolve_client_outreach_targets_skips_secondary_without_phone():
+    """Buster Brown 26356199: primary 7329953409; co-applicant has no cell."""
+    applicant = {
+        "FirstName": "Buster",
+        "CellPhone": "7329953409",
+        "CoApplicant": {"FirstName": "Jane", "LastName": "Brown"},
+    }
+    targets = resolve_client_outreach_targets(applicant, insured_name="Buster Brown")
+    assert len(targets) == 1
+    assert targets[0]["role"] == "primary"
+    assert targets[0]["phone"] == "+17329953409"
+    assert extract_co_applicant(applicant)["FirstName"] == "Jane"
+
+
+def test_resolve_client_outreach_targets_dedupes_shared_number():
+    applicant = {
+        "FirstName": "Buster",
+        "CellPhone": "7329953409",
+        "CoApplicant": {"FirstName": "Jane", "HomePhone": "732-995-3409"},
+    }
+    targets = resolve_client_outreach_targets(applicant)
+    assert len(targets) == 1
+    assert targets[0]["phone"] == "+17329953409"
+    assert targets[0]["role"] == "primary"
+
+
+def test_resolve_client_outreach_targets_reads_sidebar_contactinfo():
+    sidebar = {
+        "Applicant": {
+            "FirstName": "Buster",
+            "ContactInfo": {"CellPhone": "7329953409"},
+            "CoApplicant": {
+                "FirstName": "Pat",
+                "ContactInfo": {"WorkPhone": "7325550111"},
+            },
+        }
+    }
+    targets = resolve_client_outreach_targets(sidebar=sidebar)
+    assert [t["phone"] for t in targets] == ["+17329953409", "+17325550111"]
+    assert targets[1]["first_name"] == "Pat"
 
 
 def test_enrich_identity_transfers_to_requestor_not_producer():

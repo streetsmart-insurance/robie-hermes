@@ -6,9 +6,12 @@ Enables CSRs and Account Managers to trigger autonomous calls directly from EZLy
    (carrier path by default; client only with ``Call type: client`` / who-to-call insured).
 2. Or CSR applies ``Robie lead follow-up`` (and close variants) to force the client
    follow-up path without requiring ``Call type: client`` in the note body.
-3. Note specifies 'Who to call' (phone number/carrier) and 'What to say' (instructions).
-4. Robie parses the instructions, dispatches the call via Bland AI from +1 (732) 298-6745.
-5. When complete, Robie automatically posts the call transcript, recording link, and summary
+3. Or CSR applies ``Robie client outreach`` (and close variants / ``Robie cancellation``)
+   to force ``call_type=client_outreach`` — primary then secondary applicant phones,
+   no Sales Center producer greeting.
+4. Note specifies 'Who to call' (phone number/carrier) and 'What to say' (instructions).
+5. Robie parses the instructions, dispatches the call via Bland AI from +1 (732) 298-6745.
+6. When complete, Robie automatically posts the call transcript, recording link, and summary
    back into the applicant's EZLynx discussion card.
 """
 
@@ -25,13 +28,16 @@ from src.voice.call_directory import (
 from src.voice.context_hydrator import (
     CALL_TYPE_CARRIER,
     CALL_TYPE_CLIENT_FOLLOWUP,
+    CALL_TYPE_CLIENT_OUTREACH,
     CallingDossier,
     ContextHydrator,
     extract_client_first_name,
     extract_producer_name,
     extract_sales_center_producer_name,
+    is_client_call_type,
     match_policy_record,
     normalize_call_type,
+    resolve_client_outreach_targets,
     unwrap_policy_list,
 )
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
@@ -52,6 +58,18 @@ ROBIE_LEAD_FOLLOWUP_TRIGGERS = [
     "[robie lead followup]",
 ]
 _LEAD_FOLLOWUP_COLLAPSED = "robieleadfollowup"
+# Org label + title/note phrases. ``robie cancellation`` is an alias for the
+# same client_outreach path (Carlo 2026-09-05).
+ROBIE_CLIENT_OUTREACH_TRIGGERS = [
+    "robie client outreach",
+    "robie_client_outreach",
+    "[robie client outreach]",
+    "robie cancellation",
+    "robie_cancellation",
+    "[robie cancellation]",
+]
+_CLIENT_OUTREACH_COLLAPSED = "robieclientoutreach"
+_CLIENT_CANCELLATION_COLLAPSED = "robiecancellation"
 CLIENT_WHO_TOKENS = {
     "insured",
     "the insured",
@@ -110,9 +128,27 @@ def _text_matches_lead_followup_trigger(text: Optional[str]) -> bool:
     return _LEAD_FOLLOWUP_COLLAPSED in _collapse_trigger_text(text)
 
 
+def _text_matches_client_outreach_trigger(text: Optional[str]) -> bool:
+    """True when Robie client outreach (or robie cancellation alias) appears."""
+    if not text:
+        return False
+    lower = text.lower()
+    if any(trigger in lower for trigger in ROBIE_CLIENT_OUTREACH_TRIGGERS):
+        return True
+    collapsed = _collapse_trigger_text(text)
+    return (
+        _CLIENT_OUTREACH_COLLAPSED in collapsed
+        or _CLIENT_CANCELLATION_COLLAPSED in collapsed
+    )
+
+
 def _text_matches_any_robie_dispatch_trigger(text: Optional[str]) -> bool:
-    """True when Robie Call or Robie lead follow-up should dispatch."""
-    return _text_matches_robie_trigger(text) or _text_matches_lead_followup_trigger(text)
+    """True when Robie Call, lead follow-up, or client outreach should dispatch."""
+    return (
+        _text_matches_robie_trigger(text)
+        or _text_matches_lead_followup_trigger(text)
+        or _text_matches_client_outreach_trigger(text)
+    )
 
 
 def extract_discussion_note_text(discussion: Dict[str, Any]) -> str:
@@ -181,17 +217,30 @@ def discussion_is_lead_followup(discussion: Dict[str, Any], note_text: Optional[
     )
 
 
+def discussion_is_client_outreach(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
+    """Trigger when an org label or title/note text matches Robie client outreach.
+
+    Accepts close variants (``robie client outreach``, ``robie_client_outreach``,
+    ``[robie client outreach]``) and the alias ``robie cancellation``.
+    Forces ``client_outreach``.
+    """
+    return _discussion_matches_trigger(
+        discussion, _text_matches_client_outreach_trigger, note_text=note_text
+    )
+
+
 def discussion_is_robie_call(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
     """Trigger when an org label or title/note text matches a Robie dispatch phrase.
 
-    CSRs should apply ``Robie Call`` or ``Robie lead follow-up`` and/or write
-    that phrase in the note. Instruction-style notes without the label or
-    phrase do not fire. Lead follow-up uses the same label/title/note scan as
-    Robie Call and also dispatches.
+    CSRs should apply ``Robie Call``, ``Robie lead follow-up``, or
+    ``Robie client outreach`` and/or write that phrase in the note.
+    Instruction-style notes without the label or phrase do not fire.
     """
     if _discussion_matches_trigger(discussion, _text_matches_robie_trigger, note_text=note_text):
         return True
-    return discussion_is_lead_followup(discussion, note_text=note_text)
+    if discussion_is_lead_followup(discussion, note_text=note_text):
+        return True
+    return discussion_is_client_outreach(discussion, note_text=note_text)
 
 
 def _requestor_string(value: Any) -> Optional[str]:
@@ -326,7 +375,11 @@ def _note_body_has_robie_self_marker(note_text: Optional[str]) -> bool:
     if any(marker in lower for marker in ROBIE_SELF_BODY_MARKERS):
         return True
     stripped = lower
-    for trigger in sorted(ROBIE_LABEL_TRIGGERS + ROBIE_LEAD_FOLLOWUP_TRIGGERS, key=len, reverse=True):
+    for trigger in sorted(
+        ROBIE_LABEL_TRIGGERS + ROBIE_LEAD_FOLLOWUP_TRIGGERS + ROBIE_CLIENT_OUTREACH_TRIGGERS,
+        key=len,
+        reverse=True,
+    ):
         stripped = stripped.replace(trigger, " ")
     return "[robie" in stripped
 
@@ -419,10 +472,11 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         result["policy_number"] = pol_match.group(1).strip()
 
     # 4. Explicit call-type cue (do not guess beyond this + who-to-call).
-    # Robie lead follow-up in the note/title forces client_followup and wins
-    # over ``Call type: carrier`` when both appear.
+    # Label phrases win over ``Call type:`` when both appear:
+    # client outreach > lead follow-up > explicit cue.
     type_match = re.search(
-        r"call\s*type\s*:\s*(client(?:[\s_-]*follow[\s_-]*up)?|carrier|existing)\b",
+        r"call\s*type\s*:\s*(client[\s_-]*outreach|outreach|cancellation|"
+        r"client(?:[\s_-]*follow[\s_-]*up)?|carrier|existing)\b",
         clean_text,
         re.IGNORECASE,
     )
@@ -430,6 +484,8 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         result["call_type"] = normalize_call_type(type_match.group(1))
     if _text_matches_lead_followup_trigger(clean_text):
         result["call_type"] = CALL_TYPE_CLIENT_FOLLOWUP
+    if _text_matches_client_outreach_trigger(clean_text):
+        result["call_type"] = CALL_TYPE_CLIENT_OUTREACH
 
     # 5. Extract What To Say / Instructions
     say_match = re.search(r"(?:what to say|instructions|say|message|notes|details|tell)[:\s]+([\s\S]+)", clean_text, re.IGNORECASE)
@@ -447,6 +503,8 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
             if any(t in line_lower for t in ROBIE_LABEL_TRIGGERS):
                 continue
             if _text_matches_lead_followup_trigger(line):
+                continue
+            if _text_matches_client_outreach_trigger(line):
                 continue
             if line_lower.startswith(("who to call:", "phone:", "contact:", "policy:", "call type:")):
                 continue
@@ -469,17 +527,21 @@ def infer_call_type(
     parsed: Dict[str, Any],
     insured_name: Optional[str] = None,
     lead_followup: bool = False,
+    client_outreach: bool = False,
 ) -> str:
-    """Resolve carrier vs client_followup.
+    """Resolve carrier vs client_followup vs client_outreach.
 
-    ``Robie lead follow-up`` (label or phrase) always forces client_followup —
-    even when ``Call type: carrier`` is also present. Robie Call alone stays
-    carrier unless the note has ``Call type: client`` or who-to-call insured.
+    ``Robie client outreach`` (label or phrase, including ``robie cancellation``)
+    always forces ``client_outreach``. ``Robie lead follow-up`` always forces
+    ``client_followup``. Robie Call alone stays carrier unless the note has
+    ``Call type: client`` or who-to-call insured.
     """
+    if client_outreach:
+        return CALL_TYPE_CLIENT_OUTREACH
     if lead_followup:
         return CALL_TYPE_CLIENT_FOLLOWUP
     explicit = parsed.get("call_type")
-    if explicit in (CALL_TYPE_CLIENT_FOLLOWUP, CALL_TYPE_CARRIER):
+    if explicit in (CALL_TYPE_CLIENT_OUTREACH, CALL_TYPE_CLIENT_FOLLOWUP, CALL_TYPE_CARRIER):
         return explicit
     who = (parsed.get("target_name") or "").strip().lower()
     if who in CLIENT_WHO_TOKENS:
@@ -614,11 +676,44 @@ class EZLynxLabelCallDispatcher:
                 )
             matched_policy = match_policy_record(applicant_policies or [], policy_num)
             lead_followup = discussion_is_lead_followup(disc, note_text=note_text)
+            client_outreach = discussion_is_client_outreach(disc, note_text=note_text)
             call_type = infer_call_type(
                 parsed,
                 insured_name=insured_name,
                 lead_followup=lead_followup,
+                client_outreach=client_outreach,
             )
+
+            instructions = parsed["instructions"] or "Inquire regarding policy status and quote release."
+            safe_pol_num = policy_num or "N/A"
+            requestor = extract_discussion_requestor(disc)
+
+            if call_type == CALL_TYPE_CLIENT_OUTREACH:
+                if sidebar is None:
+                    try:
+                        sidebar = self.ezlynx.get_applicant_sidebar(applicant_id)
+                    except Exception as exc:
+                        logger.debug("Portal sidebar ContactInfo lookup skipped: %s", exc)
+                outreach_result = self._dispatch_client_outreach(
+                    applicant_id=applicant_id,
+                    applicant=app_data,
+                    sidebar=sidebar,
+                    matched_policy=matched_policy,
+                    sales_opportunities=sales_opportunities,
+                    insured_name=insured_name,
+                    title=title,
+                    policy_num=policy_num,
+                    safe_pol_num=safe_pol_num,
+                    target_carrier=target_carrier,
+                    instructions=instructions,
+                    requestor=requestor,
+                    identity=identity,
+                    note_id=note_id,
+                    discussion_id=discussion_id,
+                    dry_run=dry_run,
+                )
+                results.append(outreach_result)
+                continue
 
             # 3. Resolve Phone Number from carrier knowledge base / directory if missing
             phone = parsed["phone_number"]
@@ -636,9 +731,6 @@ class EZLynxLabelCallDispatcher:
                 if phone:
                     logger.info(f"Resolved phone {phone} for carrier '{target_carrier}' from directory.")
 
-            instructions = parsed["instructions"] or "Inquire regarding policy status and quote release."
-            safe_pol_num = policy_num or "N/A"
-
             # 4. If phone is STILL missing, post a polite clarification note directly via API (avoiding Playwright)
             if not phone:
                 logger.warning(f"Applicant {applicant_id}: 'robie call' requested for '{target_carrier}', but no phone number found.")
@@ -646,8 +738,8 @@ class EZLynxLabelCallDispatcher:
                     f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
                     f"⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]\n"
                     f"Robie received your request to call regarding this account, but could not determine "
-                    f"the {'client' if call_type == CALL_TYPE_CLIENT_FOLLOWUP else 'carrier'} phone number"
-                    f" for '{target_carrier if call_type != CALL_TYPE_CLIENT_FOLLOWUP else insured_name}'.\n\n"
+                    f"the {'client' if is_client_call_type(call_type) else 'carrier'} phone number"
+                    f" for '{target_carrier if not is_client_call_type(call_type) else insured_name}'.\n\n"
                     f"To trigger this call, please reply to this card with the phone number:\n"
                     f"• Example: \"Phone: 800-555-1234\"\n"
                     f"• Or provide the underwriter / client direct contact info.\n\n"
@@ -686,7 +778,6 @@ class EZLynxLabelCallDispatcher:
                 f"Target: {target_carrier} ({phone}) | Policy: {safe_pol_num}"
             )
 
-            requestor = extract_discussion_requestor(disc)
             dossier = CallingDossier(
                 policy_number=safe_pol_num,
                 insured_name=insured_name,
@@ -742,7 +833,7 @@ class EZLynxLabelCallDispatcher:
                     "EZLynx Producer)."
                 )
             )
-            dest_label = insured_name if call_type == CALL_TYPE_CLIENT_FOLLOWUP else target_carrier
+            dest_label = insured_name if is_client_call_type(call_type) else target_carrier
             # Post immediate acknowledgement note back to EZLynx discussion card
             ack_note = (
                 f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
@@ -789,6 +880,200 @@ class EZLynxLabelCallDispatcher:
             })
 
         return results
+
+    def _dispatch_client_outreach(
+        self,
+        *,
+        applicant_id: str,
+        applicant: Dict[str, Any],
+        sidebar: Optional[Dict[str, Any]],
+        matched_policy: Optional[Dict[str, Any]],
+        sales_opportunities: Any,
+        insured_name: str,
+        title: str,
+        policy_num: Optional[str],
+        safe_pol_num: str,
+        target_carrier: str,
+        instructions: str,
+        requestor: Dict[str, Optional[str]],
+        identity: Optional[str],
+        note_id: Optional[str],
+        discussion_id: Any,
+        dry_run: bool,
+    ) -> Dict[str, Any]:
+        """Place primary then secondary Bland calls; mark the note processed once.
+
+        Doom-loop guard: both dials run in this single pass. The note identity is
+        marked processed only after every attempted dial (or after clarification
+        when no E.164 exists). The watcher cannot double-fire the same noteId.
+        """
+        targets = resolve_client_outreach_targets(
+            applicant, sidebar, insured_name=insured_name
+        )
+        if not targets:
+            logger.warning(
+                "Applicant %s: Robie client outreach requested but no E.164 phone "
+                "on primary or secondary.",
+                applicant_id,
+            )
+            clarification_note = (
+                f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
+                f"⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]\n"
+                f"Robie received your Robie client outreach request, but could not "
+                f"determine an E.164 phone for the primary applicant or co-applicant "
+                f"on '{insured_name}'. Numbers are never invented.\n\n"
+                f"Add a Cell / Home / Work phone on the applicant (or co-applicant) "
+                f"in EZLynx, then apply Robie client outreach again."
+            )
+            self._post_dispatcher_note(
+                applicant_id=applicant_id,
+                discussion_title=title,
+                note_text=clarification_note,
+                policy_number=policy_num,
+                carrier_name=target_carrier,
+            )
+            if identity:
+                self.processed_store.mark(
+                    identity,
+                    applicant_id=applicant_id,
+                    discussion_id=discussion_id,
+                    note_id=note_id,
+                    status="CLARIFICATION_NEEDED",
+                    dry_run=dry_run,
+                )
+            return {
+                "applicant_id": applicant_id,
+                "discussion_title": title,
+                "target": insured_name,
+                "status": "CLARIFICATION_NEEDED",
+                "reason": "MISSING_PHONE_NUMBER",
+                "call_type": CALL_TYPE_CLIENT_OUTREACH,
+                "phones": [],
+                "call_ids": [],
+                "note_id": note_id,
+                "note_identity": identity,
+            }
+
+        dials: List[Dict[str, Any]] = []
+        last_dossier: Optional[CallingDossier] = None
+        for target in targets:
+            role = target["role"]
+            phone = target["phone"]
+            first_name = target.get("first_name")
+            logger.info(
+                "[ROBIE CLIENT OUTREACH] Applicant: %s (%s) | %s %s at %s | Policy: %s",
+                applicant_id,
+                insured_name,
+                role,
+                first_name or "unknown",
+                phone,
+                safe_pol_num,
+            )
+            dossier = CallingDossier(
+                policy_number=safe_pol_num,
+                insured_name=insured_name,
+                carrier_name=insured_name,
+                carrier_phone=phone,
+                line_of_business="Commercial Lines",
+                applicant_id=applicant_id,
+                custom_instructions=instructions,
+                client_first_name=first_name,
+                producer_name=None,
+                requestor_name=requestor.get("name"),
+                requestor_email=requestor.get("email"),
+                call_type=CALL_TYPE_CLIENT_OUTREACH,
+                assigned_csr_email="carlo@streetsmart.insurance",
+            )
+            self.hydrator.enrich_identity(
+                dossier,
+                applicant=applicant if role == "primary" else None,
+                policy=matched_policy,
+                sales_opportunities=None,
+                sidebar=sidebar if role == "primary" else None,
+                call_type=CALL_TYPE_CLIENT_OUTREACH,
+                requestor_name=requestor.get("name"),
+                requestor_email=requestor.get("email"),
+            )
+            if role == "secondary":
+                dossier.client_first_name = first_name
+            dossier.producer_name = None
+            dossier.carrier_phone = phone
+            last_dossier = dossier
+
+            self.voice.build_call_prompt(
+                dossier=dossier,
+                custom_instructions=f"SPECIFIC CSR INSTRUCTIONS: {instructions}",
+            )
+            call_result = self.voice.dispatch_call(dossier=dossier, dry_run=dry_run)
+            dials.append(
+                {
+                    "role": role,
+                    "phone": phone,
+                    "first_name": first_name,
+                    "call_id": call_result.get("call_id", "sim_call_001"),
+                    "status": call_result.get("status", "DISPATCHED"),
+                }
+            )
+
+        transfer_line = (
+            f"Warm transfer: enabled to requestor {last_dossier.requestor_name} at {last_dossier.requestor_phone}."
+            if last_dossier and last_dossier.requestor_phone
+            else (
+                "Warm transfer: not available (requestor / label-invoker phone must be an "
+                "E.164 DID in data/voice_call_directory.json; will not fall back to the "
+                "EZLynx Producer)."
+            )
+        )
+        attempt_lines = "\n".join(
+            f"• {dial['role'].title()} ({dial['first_name'] or 'unknown'}) at {dial['phone']} "
+            f"— Call ID: {dial['call_id']}"
+            for dial in dials
+        )
+        ack_note = (
+            f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
+            f"🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]\n"
+            f"Robie has placed outbound client outreach call(s) in primary→secondary order:\n"
+            f"{attempt_lines}\n"
+            f"Call type: {CALL_TYPE_CLIENT_OUTREACH}\n"
+            f"{transfer_line}\n"
+            f"Caller ID: {self.voice.from_phone or '+1 (732) 298-6745'}\n"
+            f"Instructions: \"{instructions}\"\n\n"
+            f"When the call concludes, full audio recording and transcript will be posted here."
+        )
+        self._post_dispatcher_note(
+            applicant_id=applicant_id,
+            discussion_title=title,
+            note_text=ack_note,
+            policy_number=policy_num,
+            carrier_name=target_carrier,
+        )
+        status = dials[-1]["status"] if dials else "DISPATCHED"
+        if identity:
+            self.processed_store.mark(
+                identity,
+                applicant_id=applicant_id,
+                discussion_id=discussion_id,
+                note_id=note_id,
+                status=status,
+                dry_run=dry_run,
+            )
+        return {
+            "applicant_id": applicant_id,
+            "discussion_title": title,
+            "phone": dials[0]["phone"] if dials else None,
+            "phones": [dial["phone"] for dial in dials],
+            "target": insured_name,
+            "call_id": dials[0]["call_id"] if dials else None,
+            "call_ids": [dial["call_id"] for dial in dials],
+            "dials": dials,
+            "status": status,
+            "call_type": CALL_TYPE_CLIENT_OUTREACH,
+            "producer_name": None,
+            "requestor_name": last_dossier.requestor_name if last_dossier else requestor.get("name"),
+            "requestor_phone": last_dossier.requestor_phone if last_dossier else None,
+            "note_id": note_id,
+            "note_identity": identity,
+        }
 
     def _post_dispatcher_note(
         self,

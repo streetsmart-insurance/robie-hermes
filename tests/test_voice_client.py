@@ -198,6 +198,84 @@ def test_client_followup_voicemail_callback_without_requestor_phone():
     assert "do not transfer this call" in prompt.lower()
 
 
+def test_client_outreach_prompt_greets_first_name_without_sales_producer():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Buster",
+        producer_name="Carlo Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_outreach",
+        transfer_mode="warm",
+        custom_instructions="Policy is pending cancellation — please confirm they want to keep coverage.",
+    )
+    prompt = client.build_call_prompt(dossier)
+    first = client.build_client_first_sentence(dossier)
+    briefing = client.build_transfer_briefing(dossier)
+    assert first.startswith("Hi Buster, this is Robie from StreetSmart")
+    assert "quote" not in first.lower()
+    assert "Carlo Ferrara" not in first
+    assert "put together" not in prompt.lower()
+    assert "Carlo Ferrara" not in prompt
+    assert "client outreach" in prompt.lower()
+    assert "pending cancellation" in prompt
+    assert "Mike Sosa" in prompt
+    assert "+17326540947" in prompt
+    assert "only transfer if they clearly agree" in prompt.lower()
+    assert "Carlo Ferrara" not in briefing
+    assert "put together" not in briefing.lower()
+    _assert_agency_callback_not_jake(prompt)
+
+
+def test_client_outreach_voicemail_uses_agency_main_not_jake_did():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Buster",
+        producer_name="Jake Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_outreach",
+        transfer_mode="warm",
+    )
+    prompt = client.build_call_prompt(dossier)
+    voicemail = client._voicemail_message(dossier)
+    transfer_block = client._transfer_objective_block(dossier)
+    _assert_agency_callback_not_jake(prompt)
+    _assert_agency_callback_not_jake(voicemail)
+    _assert_agency_callback_not_jake(transfer_block)
+    assert AGENCY_MAIN_CALLBACK_DISPLAY in voicemail
+    assert AGENCY_MAIN_CALLBACK_SPOKEN in voicemail
+    assert "put together" not in voicemail.lower()
+    assert JAKE_PERSONAL_DID not in voicemail
+    assert "do not transfer" in prompt.lower()
+
+
+@patch("src.voice.voice_client.requests.post")
+def test_bland_client_outreach_payload_transfers_to_requestor(mock_post):
+    mock_post.return_value = _ok_response()
+    client = CarrierVoiceClient(api_key="test-key", provider="bland_ai")
+    dossier = _sample_dossier(
+        client_first_name="Buster",
+        producer_name="Carlo Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        transfer_mode="warm",
+        call_type="client_outreach",
+    )
+    result = client.dispatch_call(dossier)
+    assert result["success"] is True
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["from"] == "+17322986745"
+    assert "max_duration" not in payload
+    assert payload["transfer_phone_number"] == "+17326540947"
+    assert payload["transfer_list"]["requestor"] == "+17326540947"
+    assert payload["metadata"]["call_type"] == "client_outreach"
+    assert payload["first_sentence"].startswith("Hi Buster")
+    assert "put together" not in payload["first_sentence"].lower()
+    _assert_agency_callback_not_jake(payload["voicemail_message"])
+    _assert_agency_callback_not_jake(payload["task"])
+
+
 def test_client_followup_custom_instructions_may_cite_explicit_number():
     """Jake's DID is allowed only when a CSR writes it in custom instructions."""
     client = CarrierVoiceClient(api_key="test-key")

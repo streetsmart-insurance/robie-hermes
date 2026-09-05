@@ -7,6 +7,7 @@ import pytest
 from src.voice.ezlynx_label_dispatcher import (
     PORTAL_DISCUSSIONS_PAGE_SIZE,
     EZLynxLabelCallDispatcher,
+    discussion_is_client_outreach,
     discussion_is_lead_followup,
     discussion_is_robie_call,
     discussion_note_identity,
@@ -16,6 +17,7 @@ from src.voice.ezlynx_label_dispatcher import (
     infer_call_type,
     latest_activity_is_from_robie,
     parse_call_note_instructions,
+    _text_matches_client_outreach_trigger,
     _text_matches_lead_followup_trigger,
 )
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
@@ -1086,4 +1088,262 @@ def test_extract_discussion_requestor_falls_back_to_last_modified():
 def test_extract_discussion_requestor_skips_robie():
     card = {"discussionNote": {"createdByName": "Robie AI", "note": "ack"}}
     assert extract_discussion_requestor(card) == {"name": None, "email": None}
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "Robie client outreach",
+        "robie client outreach",
+        "robie_client_outreach",
+        "[robie client outreach]",
+        "ROBIE CLIENT OUTREACH",
+        "robie cancellation",
+        "Robie Cancellation",
+        "[robie cancellation]",
+    ],
+)
+def test_client_outreach_trigger_variants(phrase):
+    assert _text_matches_client_outreach_trigger(phrase) is True
+    parsed = parse_call_note_instructions(
+        f"{phrase}\nWhat to say: Policy is pending cancellation."
+    )
+    assert parsed["is_robie_call"] is True
+    assert parsed["call_type"] == "client_outreach"
+    assert infer_call_type(parsed, insured_name="Buster Brown") == "client_outreach"
+
+
+def test_client_outreach_does_not_match_unrelated_robie_text():
+    assert _text_matches_client_outreach_trigger("Robie Call") is False
+    assert _text_matches_client_outreach_trigger("Robie lead follow-up") is False
+    assert _text_matches_client_outreach_trigger("Please do client outreach") is False
+    assert _text_matches_client_outreach_trigger("cancellation notice sent") is False
+
+
+def test_discussion_is_client_outreach_from_note_labels():
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "What to say: Need signed documents.",
+            "noteLabels": [{"labelName": "Robie client outreach", "organizationLabelId": 31}],
+        },
+    }
+    assert discussion_is_client_outreach(card) is True
+    assert discussion_is_robie_call(card) is True
+    assert discussion_is_lead_followup(card) is False
+
+
+def test_infer_call_type_client_outreach_label_forces_outreach():
+    parsed = parse_call_note_instructions(
+        "Who to call: Travelers\nWhat to say: Policy is pending cancellation."
+    )
+    assert parsed["call_type"] is None
+    assert infer_call_type(parsed, insured_name="Acme LLC") == "carrier"
+    assert infer_call_type(parsed, insured_name="Acme LLC", client_outreach=True) == "client_outreach"
+    assert infer_call_type(
+        parsed, insured_name="Acme LLC", lead_followup=True, client_outreach=True
+    ) == "client_outreach"
+
+
+def test_robie_call_and_lead_followup_unchanged_when_outreach_absent():
+    parsed = parse_call_note_instructions(
+        "robie call\nWho to call: The Hartford\nWhat to say: Ask for terms."
+    )
+    assert infer_call_type(parsed, insured_name="Acme LLC") == "carrier"
+    lead = parse_call_note_instructions(
+        "Robie lead follow-up\nWhat to say: Review the quote."
+    )
+    assert infer_call_type(lead) == "client_followup"
+
+
+def _outreach_card(note_id=555300, phone_note="What to say: Pending cancellation — please call us."):
+    return {
+        "discussionId": 88200,
+        "title": "Rest",
+        "discussionNote": {
+            "noteId": note_id,
+            "createdByName": "Mike Sosa",
+            "createdByEmail": "mike@streetsmart.insurance",
+            "note": phone_note,
+            "noteLabels": [{"labelName": "Robie client outreach"}],
+        },
+    }
+
+
+def test_dispatcher_client_outreach_label_forces_client_outreach(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "outreach prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_out_01", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "LastName": "Brown",
+            "BusinessName": "Buster Brown",
+            "CellPhone": "7329953409",
+            "CoApplicant": {"FirstName": "Jane"},
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_outreach"
+    assert results[0]["phones"] == ["+17329953409"]
+    assert results[0]["call_ids"] == ["call_out_01"]
+    assert results[0]["producer_name"] is None
+    assert results[0]["requestor_name"] == "Mike Sosa"
+    assert results[0]["requestor_phone"] == "+17326540947"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.call_type == "client_outreach"
+    assert dossier.client_first_name == "Buster"
+    assert dossier.producer_name is None
+    assert dossier.requestor_phone == "+17326540947"
+    assert dossier.assigned_csr_email == "carlo@streetsmart.insurance"
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Call type: client_outreach" in ack
+    assert "call_out_01" in ack
+    assert "+17329953409" in ack
+    assert "Mike Sosa" in ack
+
+
+def test_dispatcher_client_outreach_primary_and_secondary_two_dials(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.side_effect = [
+        {"call_id": "call_primary", "status": "DISPATCHED"},
+        {"call_id": "call_secondary", "status": "DISPATCHED"},
+    ]
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "BusinessName": "Buster Brown",
+            "CellPhone": "7329953409",
+            "CoApplicant": {"FirstName": "Jane", "CellPhone": "732-555-0100"},
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_outreach"
+    assert results[0]["phones"] == ["+17329953409", "+17325550100"]
+    assert results[0]["call_ids"] == ["call_primary", "call_secondary"]
+    assert mock_voice.dispatch_call.call_count == 2
+    first = mock_voice.dispatch_call.call_args_list[0].kwargs["dossier"]
+    second = mock_voice.dispatch_call.call_args_list[1].kwargs["dossier"]
+    assert first.carrier_phone == "+17329953409"
+    assert first.client_first_name == "Buster"
+    assert first.call_type == "client_outreach"
+    assert first.producer_name is None
+    assert second.carrier_phone == "+17325550100"
+    assert second.client_first_name == "Jane"
+    assert second.call_type == "client_outreach"
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "call_primary" in ack
+    assert "call_secondary" in ack
+    assert "+17329953409" in ack
+    assert "+17325550100" in ack
+    assert "Primary" in ack
+    assert "Secondary" in ack
+    assert processed_store.has("88200:555300") is True
+
+
+def test_dispatcher_client_outreach_missing_secondary_phone_one_dial(processed_store):
+    """Buster Brown: co-applicant has no cell — secondary dial is skipped."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_buster_only", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "BusinessName": "Buster Brown",
+            "CellPhone": "7329953409",
+            "CoApplicant": {"FirstName": "Jane"},
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["phones"] == ["+17329953409"]
+    assert results[0]["call_ids"] == ["call_buster_only"]
+    mock_voice.dispatch_call.assert_called_once()
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.carrier_phone == "+17329953409"
+    assert dossier.client_first_name == "Buster"
+
+
+def test_dispatcher_client_outreach_same_number_dedupe(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_once", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "CellPhone": "7329953409",
+            "CoApplicant": {"FirstName": "Jane", "HomePhone": "732-995-3409"},
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert results[0]["phones"] == ["+17329953409"]
+    assert results[0]["call_ids"] == ["call_once"]
+    mock_voice.dispatch_call.assert_called_once()
+
+
+def test_dispatcher_client_outreach_marks_note_processed_once_after_both_dials(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.side_effect = [
+        {"call_id": "call_a", "status": "DISPATCHED"},
+        {"call_id": "call_b", "status": "DISPATCHED"},
+    ]
+    card = _outreach_card()
+    mock_ezlynx.get_applicant_discussions.return_value = [card]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "CellPhone": "7329953409",
+            "CoApplicant": {"FirstName": "Jane", "CellPhone": "7325550100"},
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    first = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    second = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    assert len(first) == 1
+    assert first[0]["call_ids"] == ["call_a", "call_b"]
+    assert second == []
+    assert mock_voice.dispatch_call.call_count == 2
+    assert processed_store.has("88200:555300") is True
+    mock_ezlynx.add_note_to_discussion.assert_called_once()
 
