@@ -3,10 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from src.voice.context_hydrator import CallingDossier
-from src.voice.voice_client import (
-    DEFAULT_VOICE_MAX_DURATION_SECONDS,
-    CarrierVoiceClient,
-)
+from src.voice.voice_client import CarrierVoiceClient
 
 
 def _sample_dossier(**overrides) -> CallingDossier:
@@ -29,12 +26,9 @@ def _ok_response(call_id: str = "call_test_123") -> MagicMock:
 
 
 @patch("src.voice.voice_client.requests.post")
-def test_bland_payload_includes_default_max_duration(mock_post, monkeypatch):
+def test_bland_payload_omits_max_duration(mock_post, monkeypatch):
+    """Carrier holds must not be cut off by a Bland max_duration cap."""
     monkeypatch.delenv("VOICE_MAX_DURATION_SECONDS", raising=False)
-    monkeypatch.setattr(
-        "src.voice.voice_client.settings",
-        type("S", (), {"voice_max_duration_seconds": 180})(),
-    )
     mock_post.return_value = _ok_response()
     client = CarrierVoiceClient(api_key="test-key", provider="bland_ai")
 
@@ -43,15 +37,17 @@ def test_bland_payload_includes_default_max_duration(mock_post, monkeypatch):
     assert result["success"] is True
     mock_post.assert_called_once()
     payload = mock_post.call_args.kwargs["json"]
-    assert "max_duration" in payload
-    # Bland documents max_duration in minutes; 180 seconds → 3 minutes.
-    assert payload["max_duration"] == 3
-    assert DEFAULT_VOICE_MAX_DURATION_SECONDS == 180
-    assert client.max_duration_seconds == 180
+    assert "max_duration" not in payload
+    assert not hasattr(client, "max_duration_seconds")
+    # Voice features unrelated to duration stay in the send-call payload.
+    assert payload["voicemail_action"] == "leave_message"
+    assert payload["ivr_navigation"] is True
+    assert payload["answered_by_enabled"] is True
+    assert payload["wait_for_greeting"] is True
 
 
 @patch("src.voice.voice_client.requests.post")
-def test_bland_payload_respects_env_max_duration(mock_post, monkeypatch):
+def test_bland_payload_ignores_legacy_max_duration_env(mock_post, monkeypatch):
     monkeypatch.setenv("VOICE_MAX_DURATION_SECONDS", "300")
     mock_post.return_value = _ok_response()
     client = CarrierVoiceClient(api_key="test-key", provider="bland_ai")
@@ -59,17 +55,13 @@ def test_bland_payload_respects_env_max_duration(mock_post, monkeypatch):
     client.dispatch_call(_sample_dossier())
 
     payload = mock_post.call_args.kwargs["json"]
-    assert payload["max_duration"] == 5  # 300 seconds → 5 minutes
-    assert client.max_duration_seconds == 300
+    assert "max_duration" not in payload
+    assert not hasattr(client, "max_duration_seconds")
 
 
 @patch("src.voice.voice_client.requests.post")
-def test_retell_payload_includes_max_call_duration(mock_post, monkeypatch):
+def test_retell_payload_omits_call_duration_override(mock_post, monkeypatch):
     monkeypatch.delenv("VOICE_MAX_DURATION_SECONDS", raising=False)
-    monkeypatch.setattr(
-        "src.voice.voice_client.settings",
-        type("S", (), {"voice_max_duration_seconds": 180})(),
-    )
     mock_post.return_value = _ok_response()
     client = CarrierVoiceClient(api_key="test-key", provider="retell")
 
@@ -77,4 +69,5 @@ def test_retell_payload_includes_max_call_duration(mock_post, monkeypatch):
 
     assert result["success"] is True
     payload = mock_post.call_args.kwargs["json"]
-    assert payload["agent_override"]["agent"]["max_call_duration_ms"] == 180_000
+    assert "agent_override" not in payload
+    assert "max_call_duration_ms" not in payload
