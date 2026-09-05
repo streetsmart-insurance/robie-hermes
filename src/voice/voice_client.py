@@ -15,7 +15,10 @@ from src.voice.context_hydrator import (
     CALL_TYPE_CLIENT_FOLLOWUP,
     CALL_TYPE_CLIENT_OUTREACH,
     CallingDossier,
+    client_account_context_name,
+    client_spoken_greeting,
     is_client_call_type,
+    spoken_client_first_name,
 )
 
 logger = logging.getLogger("carrier_voice_client")
@@ -93,22 +96,40 @@ class CarrierVoiceClient:
     def _producer_display(self, dossier: CallingDossier, fallback: str = "your producer") -> str:
         return dossier.producer_name or fallback
 
+    def _client_briefing_identity(self, dossier: CallingDossier) -> str:
+        """First name only toward the client; business name is account context."""
+        first = spoken_client_first_name(dossier.client_first_name)
+        return first or "the client"
+
     def build_transfer_briefing(self, dossier: CallingDossier) -> str:
-        """Short briefing Bland/Robie should give the requestor before merging."""
+        """Short briefing Bland/Robie should give the requestor before merging.
+
+        Client paths never say a full personal name (``Buster (Buster Brown)``).
+        Business named-insured may appear as account context
+        (``I have Buster on the line about Green Lion Lawn Care``).
+        """
         requestor = self._requestor_display(dossier)
         producer = self._producer_display(dossier, fallback="the producer")
-        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
-            first = dossier.client_first_name or dossier.insured_name
-            return (
-                f"Hi {requestor}, this is Robie from StreetSmart. I have {first} "
-                f"({dossier.insured_name}) on the line about their policy "
-                f"{dossier.policy_number}. Connecting you now."
+        if is_client_call_type(getattr(dossier, "call_type", None)):
+            person = self._client_briefing_identity(dossier)
+            account = client_account_context_name(
+                dossier.insured_name, dossier.client_first_name
             )
-        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
-            first = dossier.client_first_name or dossier.insured_name
+            if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
+                about = f"about {account}, policy" if account else "about their policy"
+                return (
+                    f"Hi {requestor}, this is Robie from StreetSmart. I have {person} "
+                    f"on the line {about} "
+                    f"{dossier.policy_number}. Connecting you now."
+                )
+            about = (
+                f"about {account} — the quote"
+                if account
+                else "about the quote"
+            )
             return (
-                f"Hi {requestor}, this is Robie from StreetSmart. I have {first} "
-                f"({dossier.insured_name}) on the line about the quote {producer} "
+                f"Hi {requestor}, this is Robie from StreetSmart. I have {person} "
+                f"on the line {about} {producer} "
                 f"put together for policy {dossier.policy_number}. Connecting you now."
             )
         return (
@@ -118,8 +139,7 @@ class CarrierVoiceClient:
         )
 
     def build_client_first_sentence(self, dossier: CallingDossier) -> str:
-        first = dossier.client_first_name
-        greeting = f"Hi {first}" if first else "Hi"
+        greeting = client_spoken_greeting(dossier.client_first_name)
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
             return (
                 f"{greeting}, this is Robie from StreetSmart Insurance. "
@@ -179,16 +199,17 @@ WARM TRANSFER TO REQUESTOR:
     def _build_client_followup_prompt(
         self, dossier: CallingDossier, custom_instructions: Optional[str] = None
     ) -> str:
-        first = dossier.client_first_name or "there"
+        greeting = client_spoken_greeting(dossier.client_first_name)
         producer = self._producer_display(dossier)
         requestor = self._requestor_display(dossier)
         custom_instructions_clause = self._custom_instructions_clause(dossier, custom_instructions)
         transfer_block = self._transfer_objective_block(dossier)
+        spoken_first = spoken_client_first_name(dossier.client_first_name) or "unknown"
         return f"""You are Robie, an autonomous operations specialist calling from StreetSmart Insurance.
 
 CALL DETAILS:
 - Call type: client follow-up
-- Client first name: {dossier.client_first_name or 'unknown'}
+- Client first name: {spoken_first}
 - Insured / account: {dossier.insured_name}
 - Policy Number: {dossier.policy_number}
 - Line of Business: {dossier.line_of_business}
@@ -197,7 +218,7 @@ CALL DETAILS:
 - Requestor phone (warm transfer): {dossier.requestor_phone or 'not on file'}{custom_instructions_clause}
 
 CALL OBJECTIVES:
-1. Greet the client by first name: "Hi {first}, this is Robie from StreetSmart — I'm calling about the quote {producer} put together for you. Are you free to discuss it?"
+1. Greet the client by first name only (never full name or LLC): "{greeting}, this is Robie from StreetSmart — I'm calling about the quote {producer} put together for you. Are you free to discuss it?"
 2. If they clearly say yes / they are free to talk, transfer them to {requestor} using the transfer action.
 3. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail (or spoken close) asking them to call the agency back at {AGENCY_MAIN_CALLBACK_DISPLAY} (say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}"). Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 4. Never guess a different person. Only connect {requestor}. Do not fall back to the EZLynx Producer.
@@ -208,15 +229,16 @@ CALL OBJECTIVES:
         self, dossier: CallingDossier, custom_instructions: Optional[str] = None
     ) -> str:
         """Action-needed / cancellation outreach. No Sales Center producer greeting."""
-        first = dossier.client_first_name or "there"
+        greeting = client_spoken_greeting(dossier.client_first_name)
         requestor = self._requestor_display(dossier)
         custom_instructions_clause = self._custom_instructions_clause(dossier, custom_instructions)
         transfer_block = self._transfer_objective_block(dossier)
+        spoken_first = spoken_client_first_name(dossier.client_first_name) or "unknown"
         return f"""You are Robie, an autonomous operations specialist calling from StreetSmart Insurance.
 
 CALL DETAILS:
 - Call type: client outreach
-- Client first name: {dossier.client_first_name or 'unknown'}
+- Client first name: {spoken_first}
 - Insured / account: {dossier.insured_name}
 - Policy Number: {dossier.policy_number}
 - Line of Business: {dossier.line_of_business}
@@ -224,7 +246,7 @@ CALL DETAILS:
 - Requestor phone (warm transfer): {dossier.requestor_phone or 'not on file'}{custom_instructions_clause}
 
 CALL OBJECTIVES:
-1. Greet this person by first name: "Hi {first}, this is Robie from StreetSmart Insurance. Do you have a moment to talk?"
+1. Greet this person by first name only (never full name or LLC): "{greeting}, this is Robie from StreetSmart Insurance. Do you have a moment to talk?"
 2. Convey the CSR instructions / reason for the call (cancellation, documents needed, payment, or other action). Do not mention a Sales Center producer or a quote greeting.
 3. If they clearly say yes / they are free to talk, transfer them to {requestor} using the transfer action.
 4. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail (or spoken close) asking them to call the agency back at {AGENCY_MAIN_CALLBACK_DISPLAY} (say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}"). Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
@@ -346,17 +368,15 @@ CALL OBJECTIVES:
 
     def _voicemail_message(self, dossier: CallingDossier) -> str:
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
-            first = dossier.client_first_name
-            greeting = f"Hi {first}" if first else "Hello"
+            greeting = client_spoken_greeting(dossier.client_first_name, voicemail=True)
             return (
                 f"{greeting}, this is Robie from StreetSmart Insurance. Please call us back at "
                 f"{AGENCY_MAIN_CALLBACK_DISPLAY} — that's {AGENCY_MAIN_CALLBACK_SPOKEN}. "
                 "Thank you!"
             )
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
-            first = dossier.client_first_name
             producer = dossier.producer_name or "your producer"
-            greeting = f"Hi {first}" if first else "Hello"
+            greeting = client_spoken_greeting(dossier.client_first_name, voicemail=True)
             return (
                 f"{greeting}, this is Robie from StreetSmart Insurance calling about the quote "
                 f"{producer} put together for you. Please call us back at "

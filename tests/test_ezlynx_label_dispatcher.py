@@ -1347,3 +1347,79 @@ def test_dispatcher_client_outreach_marks_note_processed_once_after_both_dials(p
     assert processed_store.has("88200:555300") is True
     mock_ezlynx.add_note_to_discussion.assert_called_once()
 
+
+GREEN_LION_COMMERCIAL_APPLICANT = {
+    "ApplicantType": "Commercial",
+    "BusinessName": "Green Lion Lawn Care LLC",
+    "FirstName": "",
+    "LastName": "",
+    "CellPhone": "7325550199",
+    "CommercialDetail": {"ContactFirstName": "Luis", "ContactLastName": "Perez"},
+}
+
+
+def test_dispatcher_commercial_lead_followup_uses_contact_first_name_not_llc(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "client prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_gl_fu", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 89001,
+            "title": "Rest",
+            "discussionNote": {
+                "noteId": 99001,
+                "createdByName": "Mike Sosa",
+                "createdByEmail": "mike@streetsmart.insurance",
+                "note": "What to say: Review the quote.",
+                "noteLabels": [{"labelName": "Robie lead follow-up"}],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": GREEN_LION_COMMERCIAL_APPLICANT,
+    }
+    mock_ezlynx.get_applicant_policies.return_value = [
+        {"policyNumber": "GL-001", "carrierName": "Coterie"}
+    ]
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("21587333", dry_run=True)
+
+    assert results[0]["call_type"] == "client_followup"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.client_first_name == "Luis"
+    assert dossier.insured_name == "Green Lion Lawn Care LLC"
+    assert dossier.client_first_name != "Green"
+
+
+def test_dispatcher_commercial_outreach_uses_contact_first_name_not_llc(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "outreach prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_gl_out", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": GREEN_LION_COMMERCIAL_APPLICANT,
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("21587333", dry_run=True)
+
+    assert results[0]["call_type"] == "client_outreach"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.client_first_name == "Luis"
+    assert dossier.client_first_name != "Green"
+    assert dossier.producer_name is None
+

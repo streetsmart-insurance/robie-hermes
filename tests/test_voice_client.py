@@ -294,6 +294,132 @@ def test_client_followup_custom_instructions_may_cite_explicit_number():
     _assert_agency_callback_not_jake(voicemail)
 
 
+def _assert_client_copy_first_name_only(text: str, first: str, full_name: str) -> None:
+    """Spoken client copy may use first name, never the full personal name."""
+    assert f"Hi {first}" in text or f"Hello {first}" in text or first in text
+    assert full_name not in text
+    assert f"Hi {full_name}" not in text
+    assert f"({full_name})" not in text
+
+
+def test_personal_client_followup_never_uses_full_name_in_spoken_copy():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        insured_name="Buster Brown",
+        client_first_name="Buster",
+        producer_name="Carlo Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_followup",
+        transfer_mode="warm",
+    )
+    first = client.build_client_first_sentence(dossier)
+    voicemail = client._voicemail_message(dossier)
+    prompt = client.build_call_prompt(dossier)
+    briefing = client.build_transfer_briefing(dossier)
+    _assert_client_copy_first_name_only(first, "Buster", "Buster Brown")
+    _assert_client_copy_first_name_only(voicemail, "Buster", "Buster Brown")
+    assert "Hi Buster" in prompt
+    assert "Hi Buster Brown" not in prompt
+    assert "Buster (Buster Brown)" not in briefing
+    assert "(Buster Brown)" not in briefing
+    assert "I have Buster on the line" in briefing
+    assert "Carlo Ferrara" in first
+
+
+def test_personal_client_outreach_never_uses_full_name_in_spoken_copy():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        insured_name="Buster Brown",
+        client_first_name="Buster",
+        producer_name="Carlo Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_outreach",
+        transfer_mode="warm",
+    )
+    first = client.build_client_first_sentence(dossier)
+    voicemail = client._voicemail_message(dossier)
+    prompt = client.build_call_prompt(dossier)
+    briefing = client.build_transfer_briefing(dossier)
+    _assert_client_copy_first_name_only(first, "Buster", "Buster Brown")
+    _assert_client_copy_first_name_only(voicemail, "Buster", "Buster Brown")
+    assert "Hi Buster" in prompt
+    assert "Hi Buster Brown" not in prompt
+    assert "Buster (Buster Brown)" not in briefing
+    assert "(Buster Brown)" not in briefing
+    assert "Carlo Ferrara" not in first
+    assert "put together" not in first.lower()
+
+
+def test_spoken_copy_strips_full_name_if_hydrator_leaks_first_last():
+    """Defense in depth: even a 'Buster Brown' first-name field greets 'Hi Buster'."""
+    client = CarrierVoiceClient(api_key="test-key")
+    for call_type in ("client_followup", "client_outreach"):
+        dossier = _sample_dossier(
+            insured_name="Buster Brown",
+            client_first_name="Buster Brown",
+            producer_name="Carlo Ferrara",
+            call_type=call_type,
+        )
+        first = client.build_client_first_sentence(dossier)
+        voicemail = client._voicemail_message(dossier)
+        prompt = client.build_call_prompt(dossier)
+        assert first.startswith("Hi Buster,")
+        assert "Hi Buster Brown" not in first
+        assert "Hi Buster Brown" not in voicemail
+        assert "Hi Buster Brown" not in prompt
+
+
+def test_commercial_llc_uses_contact_first_name_on_followup_and_outreach():
+    client = CarrierVoiceClient(api_key="test-key")
+    for call_type in ("client_followup", "client_outreach"):
+        dossier = _sample_dossier(
+            insured_name="Green Lion Lawn Care LLC",
+            client_first_name="Luis",
+            producer_name="Carlo Ferrara",
+            requestor_name="Mike Sosa",
+            requestor_phone="+17326540947",
+            call_type=call_type,
+            transfer_mode="warm",
+        )
+        first = client.build_client_first_sentence(dossier)
+        voicemail = client._voicemail_message(dossier)
+        prompt = client.build_call_prompt(dossier)
+        briefing = client.build_transfer_briefing(dossier)
+        assert first.startswith("Hi Luis")
+        assert "Hi Green" not in first
+        assert "Green Lion" not in first
+        assert "Hi Green" not in voicemail
+        assert "Hi Green" not in prompt
+        assert "I have Luis on the line about Green Lion Lawn Care LLC" in briefing
+        assert "Luis (Green Lion" not in briefing
+
+
+def test_commercial_llc_without_contact_uses_generic_hi():
+    client = CarrierVoiceClient(api_key="test-key")
+    for call_type in ("client_followup", "client_outreach"):
+        dossier = _sample_dossier(
+            insured_name="Green Lion Lawn Care LLC",
+            client_first_name=None,
+            producer_name="Carlo Ferrara",
+            requestor_name="Mike Sosa",
+            requestor_phone="+17326540947",
+            call_type=call_type,
+        )
+        first = client.build_client_first_sentence(dossier)
+        voicemail = client._voicemail_message(dossier)
+        prompt = client.build_call_prompt(dossier)
+        briefing = client.build_transfer_briefing(dossier)
+        assert first.startswith("Hi,")
+        assert "Hi Green" not in first
+        assert "Green Lion Lawn Care LLC" not in first
+        assert voicemail.startswith("Hello,")
+        assert "Hi Green" not in voicemail
+        assert "Hi Green" not in prompt
+        assert "I have the client on the line about Green Lion Lawn Care LLC" in briefing
+
+
 def test_carrier_prompt_offers_transfer_after_live_human():
     client = CarrierVoiceClient(api_key="test-key")
     dossier = _sample_dossier(

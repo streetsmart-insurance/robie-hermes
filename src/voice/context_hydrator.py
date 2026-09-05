@@ -66,6 +66,94 @@ _FIRST_NAME_KEYS = (
     "Nickname",
     "nickname",
 )
+# Commercial / contact person first-name keys (Classic Applicant/v2 + sidebar).
+# Prefer these over BusinessName. Zapier commercial search uses
+# "Primary Contact First Name"; live payloads may nest the same idea.
+_COMMERCIAL_FIRST_NAME_KEYS = (
+    "ContactFirstName",
+    "contactFirstName",
+    "PrincipalFirstName",
+    "principalFirstName",
+    "OwnerFirstName",
+    "ownerFirstName",
+    "PrimaryContactFirstName",
+    "primaryContactFirstName",
+    *_FIRST_NAME_KEYS,
+)
+_COMBINED_PERSON_NAME_KEYS = (
+    "ContactName",
+    "contactName",
+    "FullName",
+    "fullName",
+    "DisplayName",
+    "displayName",
+)
+_COMMERCIAL_OBJECT_KEYS = (
+    "CommercialDetail",
+    "commercialDetail",
+    "Commercial",
+    "commercial",
+    "Contact",
+    "contact",
+    "ContactInfo",
+    "contactInfo",
+    "PrimaryContact",
+    "primaryContact",
+    "PrimaryContactInfo",
+    "primaryContactInfo",
+    "Principal",
+    "principal",
+    "PrincipalContact",
+    "principalContact",
+    "Owner",
+    "owner",
+    "OwnerContact",
+    "ownerContact",
+    "NamedInsured",
+    "namedInsured",
+)
+_CONTACT_LIST_KEYS = (
+    "Contacts",
+    "contacts",
+    "ContactList",
+    "contactList",
+    "Principals",
+    "principals",
+    "Owners",
+    "owners",
+)
+_STAFF_SKIP_KEYS = {
+    "Assignment",
+    "assignment",
+    "AssignedTo",
+    "assignedTo",
+    "CsrUserModel",
+    "csrUserModel",
+    "Producer",
+    "producer",
+    "CommissionProducers",
+    "commissionProducers",
+    "AssignedProducer",
+    "assignedProducer",
+    "producerName",
+    "ProducerName",
+}
+_BUSINESS_NAME_KEYS = {
+    "BusinessName",
+    "businessName",
+    "CompanyName",
+    "companyName",
+    "LegalName",
+    "legalName",
+    "DBA",
+    "Dba",
+    "dba",
+    "AccountName",
+    "accountName",
+    "InsuredName",
+    "insuredName",
+}
+_COMMERCIAL_TYPE_RE = re.compile(r"commercial", re.IGNORECASE)
 _BUSINESS_NAME_RE = re.compile(
     r"\b(llc|inc|corp|ltd|lp|plc|dba|company|co|insurance|agency|group|"
     r"services|enterprises|associates|holdings)\b",
@@ -230,7 +318,9 @@ def resolve_client_outreach_targets(
             {
                 "role": "primary",
                 "phone": primary_phone,
-                "first_name": extract_client_first_name(primary, insured_name),
+                "first_name": extract_client_first_name(
+                    primary, insured_name, sidebar=sidebar
+                ),
             }
         )
 
@@ -253,21 +343,211 @@ def _looks_like_business_name(name: str) -> bool:
     return bool(_BUSINESS_NAME_RE.search(name))
 
 
+def spoken_client_first_name(value: Optional[str]) -> Optional[str]:
+    """Speakable first name only. Never a full personal name or LLC token."""
+    return _spoken_first_token(value)
+
+
+def client_spoken_greeting(first_name: Optional[str], *, voicemail: bool = False) -> str:
+    """Client-facing opener: ``Hi {First}`` or generic Hi/Hello — never full name."""
+    first = spoken_client_first_name(first_name)
+    if first:
+        return f"Hi {first}"
+    return "Hello" if voicemail else "Hi"
+
+
+def client_account_context_name(
+    insured_name: Optional[str],
+    first_name: Optional[str] = None,
+) -> Optional[str]:
+    """Business/account name for staff briefing — never a personal full name.
+
+    ``Buster`` + ``Buster Brown`` → omit (do not say "Buster (Buster Brown)").
+    ``Buster`` + ``Green Lion Lawn Care LLC`` → ``Green Lion Lawn Care LLC``.
+    """
+    insured = " ".join(str(insured_name).split()) if insured_name else ""
+    if not insured:
+        return None
+    first = spoken_client_first_name(first_name)
+    if _looks_like_business_name(insured):
+        return insured
+    if first:
+        tokens = insured.split()
+        if insured.lower() == first.lower():
+            return None
+        if len(tokens) >= 2 and tokens[0].lower() == first.lower():
+            return None
+    return None
+
+
+def _spoken_first_token(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())
+    if not cleaned or "@" in cleaned:
+        return None
+    if _looks_like_business_name(cleaned):
+        return None
+    token = cleaned.split()[0].strip(".,")
+    if token and not _looks_like_business_name(token):
+        return token
+    return None
+
+
+def _business_name_from_sources(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in _BUSINESS_NAME_KEYS:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())
+    return None
+
+
+def _is_llc_first_token(token: Optional[str], *business_names: Optional[str]) -> bool:
+    """True when token is only the first word of an LLC / business named insured."""
+    if not token:
+        return False
+    needle = token.lower()
+    for name in business_names:
+        if not name or not _looks_like_business_name(name):
+            continue
+        first = name.strip().split()[0].lower()
+        if first == needle:
+            return True
+    return False
+
+
+def _applicant_type_token(*sources: Optional[Dict[str, Any]]) -> str:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("ApplicantType", "applicantType", "AccountType", "accountType"):
+            val = source.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _is_commercial_account(
+    applicant: Optional[Dict[str, Any]] = None,
+    sidebar: Optional[Dict[str, Any]] = None,
+    insured_name: Optional[str] = None,
+) -> bool:
+    sidebar_applicant = None
+    if isinstance(sidebar, dict):
+        inner = sidebar.get("Applicant") or sidebar.get("applicant")
+        if isinstance(inner, dict):
+            sidebar_applicant = inner
+    sources = (applicant, sidebar_applicant, sidebar)
+    if _COMMERCIAL_TYPE_RE.search(_applicant_type_token(*sources)):
+        return True
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if source.get("CommercialDetail") or source.get("commercialDetail"):
+            return True
+        biz = _business_name_from_sources(source)
+        if biz and _looks_like_business_name(biz):
+            return True
+    if insured_name and _looks_like_business_name(insured_name):
+        return True
+    return False
+
+
+def _is_primary_contact_row(item: Dict[str, Any]) -> bool:
+    for key in (
+        "IsPrimary",
+        "isPrimary",
+        "IsPrimaryContact",
+        "isPrimaryContact",
+        "Primary",
+        "primary",
+    ):
+        if item.get(key) is True:
+            return True
+    return False
+
+
+def _iter_person_dicts(mapping: Optional[Dict[str, Any]], depth: int = 0):
+    """Yield applicant / commercial contact dicts. Skip staff assignment trees."""
+    if not isinstance(mapping, dict) or depth > 5:
+        return
+    yield mapping
+    for key, nested in mapping.items():
+        if key in _STAFF_SKIP_KEYS or key in _BUSINESS_NAME_KEYS:
+            continue
+        if key in _COMMERCIAL_OBJECT_KEYS and isinstance(nested, dict):
+            yield from _iter_person_dicts(nested, depth + 1)
+        elif key in _CONTACT_LIST_KEYS:
+            if isinstance(nested, dict):
+                yield from _iter_person_dicts(nested, depth + 1)
+            elif isinstance(nested, list):
+                rows = [row for row in nested if isinstance(row, dict)]
+                primaries = [row for row in rows if _is_primary_contact_row(row)]
+                others = [row for row in rows if row not in primaries]
+                for row in primaries + others:
+                    yield from _iter_person_dicts(row, depth + 1)
+
+
+def _first_name_from_person_dict(
+    mapping: Dict[str, Any],
+    *rejected_business_names: Optional[str],
+) -> Optional[str]:
+    for key in _COMMERCIAL_FIRST_NAME_KEYS:
+        token = _spoken_first_token(mapping.get(key))
+        if token and not _is_llc_first_token(token, *rejected_business_names):
+            return token
+    for key in _COMBINED_PERSON_NAME_KEYS:
+        token = _spoken_first_token(mapping.get(key))
+        if token and not _is_llc_first_token(token, *rejected_business_names):
+            return token
+    return None
+
+
 def extract_client_first_name(
     applicant: Optional[Dict[str, Any]] = None,
     insured_name: Optional[str] = None,
+    sidebar: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """First name from EZLynx FirstName, then preferred/nickname, then personal display name."""
-    if applicant:
+    """First name for client-facing voice copy.
+
+    Personal: EZLynx ``FirstName`` / preferred / nickname, then personal display
+    name (first token of ``First Last`` only).
+
+    Commercial: never the first token of an LLC / BusinessName. Prefer a real
+    person under CommercialDetail, PrimaryContact, Contacts[], ContactFirstName,
+    PrincipalFirstName, OwnerFirstName, or sidebar contact objects.
+    """
+    sidebar_applicant = None
+    if isinstance(sidebar, dict):
+        inner = sidebar.get("Applicant") or sidebar.get("applicant")
+        if isinstance(inner, dict):
+            sidebar_applicant = inner
+
+    business = _business_name_from_sources(applicant, sidebar_applicant, sidebar)
+    rejected = (business, insured_name)
+
+    sources: List[Optional[Dict[str, Any]]] = [applicant, sidebar_applicant, sidebar]
+    # Personal / preferred keys on the top-level applicant first (existing path).
+    if isinstance(applicant, dict):
         for key in _FIRST_NAME_KEYS:
-            value = applicant.get(key)
-            if isinstance(value, str) and value.strip():
-                token = value.strip().split()[0]
-                if token and not _looks_like_business_name(token):
-                    return token
+            token = _spoken_first_token(applicant.get(key))
+            if token and not _is_llc_first_token(token, *rejected):
+                return token
+
+    for source in sources:
+        for person in _iter_person_dicts(source):
+            token = _first_name_from_person_dict(person, *rejected)
+            if token:
+                return token
+
+    if _is_commercial_account(applicant, sidebar, insured_name):
+        return None
     if insured_name and not _looks_like_business_name(insured_name):
-        token = insured_name.strip().split()[0]
-        if token:
+        token = _spoken_first_token(insured_name)
+        if token and not _is_llc_first_token(token, business):
             return token
     return None
 
@@ -751,9 +1031,9 @@ class ContextHydrator:
         if requestor_email:
             dossier.requestor_email = requestor_email
 
-        if applicant:
+        if applicant or sidebar:
             dossier.client_first_name = extract_client_first_name(
-                applicant, dossier.insured_name
+                applicant, dossier.insured_name, sidebar=sidebar
             )
         if not dossier.producer_name:
             dossier.producer_name = extract_producer_name(
@@ -840,11 +1120,16 @@ class ContextHydrator:
                 )
             except Exception as exc:
                 logger.debug("Sales Center opportunities lookup skipped: %s", exc)
-            if not extract_sales_center_producer_name(sales_opportunities):
+            first_from_applicant = extract_client_first_name(
+                applicant, dossier.insured_name
+            )
+            # Sidebar is needed for AssignedTo producer fallback and for
+            # commercial contact first names (Classic often has only BusinessName).
+            if not extract_sales_center_producer_name(sales_opportunities) or not first_from_applicant:
                 try:
                     sidebar = client.get_applicant_sidebar(str(dossier.applicant_id))
                 except Exception as exc:
-                    logger.debug("Portal sidebar AssignedTo fallback skipped: %s", exc)
+                    logger.debug("Portal sidebar identity lookup skipped: %s", exc)
             return self.enrich_identity(
                 dossier,
                 applicant=applicant,

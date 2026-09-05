@@ -10,6 +10,8 @@ from src.voice.context_hydrator import (
     TRANSFER_MODE_WARM,
     CallingDossier,
     ContextHydrator,
+    client_account_context_name,
+    client_spoken_greeting,
     extract_client_first_name,
     extract_co_applicant,
     extract_contact_phone,
@@ -18,6 +20,7 @@ from src.voice.context_hydrator import (
     extract_sidebar_assigned_producer_full_name,
     normalize_call_type,
     resolve_client_outreach_targets,
+    spoken_client_first_name,
 )
 
 # Live Buster Brown (applicant 26356199) shapes verified 2026-09-05.
@@ -143,6 +146,147 @@ def test_extract_client_first_name_falls_back_to_preferred_then_personal_display
     assert extract_client_first_name({"PreferredName": "Tony"}, "Garcia LLC") == "Tony"
     assert extract_client_first_name({}, "Anthony Rivera") == "Anthony"
     assert extract_client_first_name({}, "Yes We Do LLC") is None
+    assert spoken_client_first_name("Buster Brown") == "Buster"
+    assert spoken_client_first_name("Green Lion Lawn Care LLC") is None
+    assert client_spoken_greeting("Buster Brown") == "Hi Buster"
+    assert client_spoken_greeting(None) == "Hi"
+    assert client_spoken_greeting(None, voicemail=True) == "Hello"
+    assert client_account_context_name("Buster Brown", "Buster") is None
+    assert client_account_context_name("Green Lion Lawn Care LLC", "Buster") == (
+        "Green Lion Lawn Care LLC"
+    )
+
+
+# Commercial shapes investigated for Green Lion Lawn Care LLC (21587333) and
+# Marek PKS (84705043): Classic Applicant/v2 + GetApplicantSidebar. Prefer a
+# nested contact FirstName over BusinessName / first LLC token.
+GREEN_LION_INSURED = "Green Lion Lawn Care LLC"
+GREEN_LION_CLASSIC_CONTACT = {
+    "ApplicantType": "Commercial",
+    "BusinessName": GREEN_LION_INSURED,
+    "FirstName": "",
+    "LastName": "",
+    "CommercialDetail": {
+        "ContactFirstName": "Luis",
+        "ContactLastName": "Perez",
+    },
+}
+GREEN_LION_SIDEBAR_CONTACT = {
+    "Applicant": {
+        "ApplicantType": "Commercial",
+        "BusinessName": GREEN_LION_INSURED,
+        "CommercialDetail": {
+            "PrimaryContact": {"FirstName": "Luis", "LastName": "Perez"},
+        },
+    }
+}
+GREEN_LION_CONTACTS_LIST = {
+    "ApplicantType": "Commercial",
+    "BusinessName": GREEN_LION_INSURED,
+    "Contacts": [
+        {"FirstName": "Luis", "LastName": "Perez", "IsPrimary": True},
+        {"FirstName": "Other", "LastName": "Contact"},
+    ],
+}
+GREEN_LION_NO_CONTACT = {
+    "ApplicantType": "Commercial",
+    "BusinessName": GREEN_LION_INSURED,
+    "FirstName": "",
+    "LastName": "",
+}
+MAREK_PKS_NO_CONTACT = {
+    "ApplicantType": "Commercial",
+    "BusinessName": "Marek PKS",
+    "FirstName": None,
+}
+
+
+def test_extract_client_first_name_commercial_uses_contact_not_llc_token():
+    assert extract_client_first_name(GREEN_LION_CLASSIC_CONTACT, GREEN_LION_INSURED) == "Luis"
+    assert extract_client_first_name(
+        GREEN_LION_NO_CONTACT, GREEN_LION_INSURED, sidebar=GREEN_LION_SIDEBAR_CONTACT
+    ) == "Luis"
+    assert extract_client_first_name(GREEN_LION_CONTACTS_LIST, GREEN_LION_INSURED) == "Luis"
+    assert extract_client_first_name(
+        {"ApplicantType": "Commercial", "PrimaryContactFirstName": "Luis"},
+        GREEN_LION_INSURED,
+    ) == "Luis"
+
+
+def test_extract_client_first_name_commercial_llc_without_contact_is_generic():
+    """Do not greet 'Hi Green' from Green Lion Lawn Care LLC."""
+    assert extract_client_first_name(GREEN_LION_NO_CONTACT, GREEN_LION_INSURED) is None
+    assert extract_client_first_name({}, GREEN_LION_INSURED) is None
+    assert extract_client_first_name(MAREK_PKS_NO_CONTACT, "Marek PKS") is None
+    # FirstName that is only the LLC's first token is rejected.
+    assert extract_client_first_name(
+        {
+            "ApplicantType": "Commercial",
+            "BusinessName": GREEN_LION_INSURED,
+            "FirstName": "Green",
+        },
+        GREEN_LION_INSURED,
+    ) is None
+
+
+def test_enrich_identity_commercial_sidebar_contact_first_name():
+    hydrator = ContextHydrator()
+    dossier = CallingDossier(
+        policy_number="GL-001",
+        insured_name=GREEN_LION_INSURED,
+        carrier_name="Coterie",
+        line_of_business="GL",
+        applicant_id=21587333,
+    )
+    hydrator.enrich_identity(
+        dossier,
+        applicant=GREEN_LION_NO_CONTACT,
+        sidebar=GREEN_LION_SIDEBAR_CONTACT,
+        call_type="client_followup",
+    )
+    assert dossier.client_first_name == "Luis"
+    assert dossier.call_type == CALL_TYPE_CLIENT_FOLLOWUP
+
+    outreach = CallingDossier(
+        policy_number="GL-001",
+        insured_name=GREEN_LION_INSURED,
+        carrier_name="Coterie",
+        line_of_business="GL",
+    )
+    hydrator.enrich_identity(
+        outreach,
+        applicant=GREEN_LION_CLASSIC_CONTACT,
+        call_type="client_outreach",
+    )
+    assert outreach.client_first_name == "Luis"
+    assert outreach.call_type == CALL_TYPE_CLIENT_OUTREACH
+
+
+def test_enrich_identity_from_ezlynx_fetches_sidebar_when_commercial_has_no_first_name():
+    hydrator = ContextHydrator()
+    dossier = CallingDossier(
+        policy_number="GL-001",
+        insured_name=GREEN_LION_INSURED,
+        carrier_name="Coterie",
+        line_of_business="GL",
+        applicant_id=21587333,
+    )
+    client = MagicMock()
+    client.get_applicant.return_value = {
+        "status": "success",
+        "applicant": GREEN_LION_NO_CONTACT,
+    }
+    client.get_applicant_policies.return_value = []
+    client.get_sales_center_opportunities.return_value = [
+        {"producerName": "Carlo Ferrara", "status": "Open"}
+    ]
+    client.get_applicant_sidebar.return_value = GREEN_LION_SIDEBAR_CONTACT
+
+    hydrator.enrich_identity_from_ezlynx(dossier, ezlynx_client=client)
+
+    assert dossier.client_first_name == "Luis"
+    assert dossier.producer_name == "Carlo Ferrara"
+    client.get_applicant_sidebar.assert_called_once_with("21587333")
 
 
 def test_extract_producer_name_uses_sales_center_producer_name():
@@ -298,6 +442,18 @@ def test_resolve_client_outreach_targets_reads_sidebar_contactinfo():
     targets = resolve_client_outreach_targets(sidebar=sidebar)
     assert [t["phone"] for t in targets] == ["+17329953409", "+17325550111"]
     assert targets[1]["first_name"] == "Pat"
+
+
+def test_resolve_client_outreach_targets_commercial_contact_first_name():
+    applicant = {
+        "ApplicantType": "Commercial",
+        "BusinessName": GREEN_LION_INSURED,
+        "CellPhone": "7325550199",
+        "CommercialDetail": {"ContactFirstName": "Luis"},
+    }
+    targets = resolve_client_outreach_targets(applicant, insured_name=GREEN_LION_INSURED)
+    assert targets[0]["first_name"] == "Luis"
+    assert targets[0]["phone"] == "+17325550199"
 
 
 def test_enrich_identity_transfers_to_requestor_not_producer():

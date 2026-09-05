@@ -604,11 +604,15 @@ class EZLynxLabelCallDispatcher:
             sales_opportunities = self.ezlynx.get_sales_center_opportunities(applicant_id)
         except Exception as exc:
             logger.debug("Sales Center opportunities lookup skipped: %s", exc)
-        if not extract_sales_center_producer_name(sales_opportunities):
+        # Sidebar AssignedTo is the producer fallback; CommercialDetail / contacts
+        # supply the client first name when Classic only has BusinessName / LLC.
+        if not extract_sales_center_producer_name(
+            sales_opportunities
+        ) or not extract_client_first_name(app_data, insured_name):
             try:
                 sidebar = self.ezlynx.get_applicant_sidebar(applicant_id)
             except Exception as exc:
-                logger.debug("Portal sidebar AssignedTo fallback skipped: %s", exc)
+                logger.debug("Portal sidebar identity lookup skipped: %s", exc)
 
         for disc in discussions:
             title = disc.get("title", "")
@@ -786,7 +790,9 @@ class EZLynxLabelCallDispatcher:
                 line_of_business="Commercial Lines",
                 applicant_id=applicant_id,
                 custom_instructions=instructions,
-                client_first_name=extract_client_first_name(app_data, insured_name),
+                client_first_name=extract_client_first_name(
+                    app_data, insured_name, sidebar=sidebar
+                ),
                 producer_name=extract_producer_name(
                     matched_policy,
                     app_data,
