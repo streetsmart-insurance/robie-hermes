@@ -28,18 +28,26 @@ The **StreetSmart Autonomous Voice AI Engine** ("Robie Voice") is an automated, 
 ### Method A: In-App EZLynx `Robie Call` Label / Note (CSR Native Flow)
 Account Managers and CSRs trigger Robie directly inside EZLynx without leaving the applicant profile.
 
+#### Can the API pull the label?
+* **Official EZLynx Swagger 2.0 Discovery:** In this session, we pulled the full official EZLynx Swagger specification directly from `https://services.ezlynx.com/ezlynxapi/swagger/docs/v1` (saved in `data/ezlynx_swagger.json`).
+* **Classic REST API (`services.ezlynx.com`):** The Classic REST API has **no public query endpoint for labels** (only `POST /api/note/v1`, `GET /api/Applicant/v2/{id}`, and `ZapierNoteViewModel.Labels`).
+* **Portal / Web UI (`app.ezlynx.com`):** The Activity / Discussion web UI (`/web/account/{applicant_id}/activity`) uses `/EZLynxPortalAPI/Discussions/GetPagedDiscussions`.
+* **Lean Strategy (Zero-Playwright Priority):**
+  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors the **Discussion Card Title** and **Note Body** for the trigger keyword `Robie Call`. Any note or card titled or prefixed with `Robie Call` is immediately detected and executed!
+
+#### Triggering in EZLynx:
 1. **Add a Note to any Discussion card** containing the keyword `Robie Call`:
    ```text
    Robie Call
-   Carrier: The Hartford
-   Policy: PWC1239278
-   What to say: Check if the 2026 renewal quote has been released and request the quote packet be emailed to robie@streetsmart.insurance.
+   Carrier: Utica First (or leave blank to auto-detect from policy)
+   Policy: HOP622388401
+   What to say: Check if the renewal quote has been released and request the quote packet be emailed to robie@streetsmart.insurance.
    ```
-2. **Auto-Resolution of Phone Numbers:**
-   * If the CSR includes a phone number, Robie dials it.
-   * If omitted, Robie resolves the number automatically from the policy record and carrier directory (`KNOWN_CARRIER_PHONES` + `data/carrier_directory.json`).
-3. **Clarification Fallback (Lean Direct API):**
-   * If the carrier is unrecognized and no phone is supplied, Robie immediately posts a note requesting the number:
+2. **Auto-Resolution of Phone Numbers (Multi-Tier):**
+   * **Tier 1 (Explicit Note):** If the CSR includes a phone number (e.g. `Phone: 800-556-5376`), Robie dials it directly.
+   * **Tier 2 (Carrier Directory):** If omitted, Robie resolves the carrier from the applicant's policies and looks up the number in `KNOWN_CARRIER_PHONES` (e.g., Utica First `800-556-5376`, TIP National `800-688-8408`, Travelers `800-238-6225`, Hartford `800-555-1234`).
+   * **Tier 3 (Applicant / Insured Phone):** If the target is the client/insured or Carlo, Robie pulls the `CellPhone` directly from the applicant profile (`+1 (732) 995-3409`).
+   * **Tier 4 (Clarification Fallback - 100% Lean Direct API):** If phone is unknown, Robie posts a clarification note directly into the discussion card without launching any browser sessions:
      ```text
      Policy: #{policy_number} ({lob} - {carrier})
      ⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]
@@ -48,10 +56,24 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 
      Robie was here
      ```
-4. **Execution Command:**
-   ```bash
-   PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id <ApplicantID>
-   ```
+3. **Execution Commands:**
+   * **Process Applicant Notes (Live or Dry-Run):**
+     ```bash
+     PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id 26356199 --dry-run
+     ```
+   * **Direct Test Note with Buster Brown (`26356199`):**
+     ```bash
+     PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher \
+       --test-note "Robie Call: Carrier: Utica First. Policy: HOP622388401. Tell Carlo the test call succeeded." \
+       --applicant-id 26356199 \
+       --dry-run
+     ```
+   * **Live Test Call to Carlo (`+1 732-995-3409`) on Buster Brown Account:**
+     ```bash
+     PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher \
+       --test-note "Robie Call: Contact: Carlo. What to say: Carlo, Robie here testing the Buster Brown dispatcher." \
+       --applicant-id 26356199
+     ```
 
 ---
 

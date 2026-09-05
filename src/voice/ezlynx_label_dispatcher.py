@@ -22,6 +22,20 @@ logger = logging.getLogger("ezlynx_label_dispatcher")
 ROBIE_LABEL_TRIGGERS = ["robie call", "robie_call", "call robie", "robie: call", "[robie call]"]
 
 
+def normalize_phone_e164(raw_phone: Optional[str]) -> Optional[str]:
+    """Normalizes any phone string to E.164 format (+1XXXXXXXXXX)."""
+    if not raw_phone:
+        return None
+    digits = re.sub(r"\D", "", str(raw_phone))
+    if len(digits) == 10:
+        return f"+1{digits}"
+    elif len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+    elif digits:
+        return f"+{digits}"
+    return None
+
+
 def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
     """
     Parses a note written by a CSR in EZLynx containing call instructions.
@@ -58,12 +72,12 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
             result["phone_number"] = f"+{digits}"
 
     # 2. Extract Who To Call (Entity / Carrier / Contact)
-    who_match = re.search(r"(?:who to call|contact|carrier|target)[:\s]+([^;\n\r]+)", clean_text, re.IGNORECASE)
+    who_match = re.search(r"(?:who to call|contact|carrier|target)[:\s]+([^;\n\r\.]+?)(?=\s+(?:policy|phone|what|say|instructions|tell)|[;\n\r\.]|$)", clean_text, re.IGNORECASE)
     if who_match:
         candidate_who = who_match.group(1).strip()
         # Clean out any trailing phone number if captured in same line
         candidate_who = re.sub(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", "", candidate_who).strip()
-        result["target_name"] = candidate_who.strip(" -:,")
+        result["target_name"] = candidate_who.strip(" -:,.")
 
     # 3. Extract Policy Number
     pol_match = re.search(r"(?:policy|pol|policy number|pol#|policy#)[:\s#]+([A-Z0-9\-]{5,})", clean_text, re.IGNORECASE)
@@ -71,7 +85,7 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         result["policy_number"] = pol_match.group(1).strip()
 
     # 4. Extract What To Say / Instructions
-    say_match = re.search(r"(?:what to say|instructions|say|message|notes|details)[:\s]+([\s\S]+)", clean_text, re.IGNORECASE)
+    say_match = re.search(r"(?:what to say|instructions|say|message|notes|details|tell)[:\s]+([\s\S]+)", clean_text, re.IGNORECASE)
     if say_match:
         instructions = say_match.group(1).strip()
         # Remove signature lines if present
@@ -120,6 +134,15 @@ KNOWN_CARRIER_PHONES = {
     "specialty coverage": "+18002422200",
     "new england excess": "+18005484301",
     "markel": "+18004311270",
+    "utica first": "+18005565376",
+    "utica first insurance company": "+18005565376",
+    "tip national": "+18006888408",
+    "tip national llc": "+18006888408",
+    "carlo": "+17329953409",
+    "carlo ferrara": "+17329953409",
+    "buster brown": "+17329953409",
+    "jake": "+17326688161",
+    "jimmy": "+17329954324",
 }
 
 
@@ -349,8 +372,38 @@ def main():
         pol = parsed["policy_number"] or "PWC1239278"
         instructions = parsed["instructions"] or "Inquire regarding renewal quote status."
 
+        # Auto-enrich from EZLynx API if applicant_id is provided
+        insured_name = "Test Insured LLC"
+        applicant_id = args.applicant_id or "26356199"
+        if args.applicant_id:
+            app_res = dispatcher.ezlynx.get_applicant(args.applicant_id)
+            if app_res.get("status") == "success":
+                app_data = app_res.get("applicant", {})
+                insured_name = (
+                    app_data.get("BusinessName")
+                    or f"{app_data.get('FirstName', '')} {app_data.get('LastName', '')}".strip()
+                    or f"Applicant #{args.applicant_id}"
+                )
+                print(f"   [API Enriched Insured Name]: {insured_name}")
+                if not args.phone and not parsed["phone_number"]:
+                    if any(k in carrier.lower() for k in ["insured", "client", "carlo", "buster", "hartford"]):
+                        app_phone = app_data.get("CellPhone") or app_data.get("BusinessPhone")
+                        if app_phone and any(k in carrier.lower() for k in ["insured", "client", "carlo", "buster"]):
+                            phone = normalize_phone_e164(app_phone)
+                            print(f"   [API Enriched Phone from Applicant Profile]: {phone}")
+
+            # If policy was not explicitly in note, resolve from applicant policies
+            if not parsed["policy_number"]:
+                pols = dispatcher.ezlynx.get_applicant_policies(args.applicant_id)
+                if pols and isinstance(pols, list):
+                    pol = pols[0].get("policyNumber") or pols[0].get("PolicyNumber") or pol
+                    carrier = pols[0].get("carrierName") or pols[0].get("CarrierName") or carrier
+                    print(f"   [API Enriched Policy]: {pol} ({carrier})")
+                    if not phone:
+                        phone = lookup_known_carrier_phone(carrier)
+
         print(f"\n2. Resolved Carrier: {carrier}")
-        print(f"3. Resolved Phone: {phone} (Source: {'--phone override' if args.phone else 'Directory/Note'})")
+        print(f"3. Resolved Phone: {phone} (Source: {'--phone override' if args.phone else 'Directory/Profile/Note'})")
         print(f"4. Associated Policy: {pol}")
 
         if not phone:
@@ -359,11 +412,11 @@ def main():
 
         dossier = CallingDossier(
             policy_number=pol,
-            insured_name="Test Insured LLC",
+            insured_name=insured_name,
             carrier_name=carrier,
             carrier_phone=phone,
             line_of_business="Commercial Lines",
-            applicant_id=args.applicant_id or "999999",
+            applicant_id=applicant_id,
             custom_instructions=instructions,
         )
 
@@ -378,6 +431,25 @@ def main():
         print(f"\n6. Dispatching Call ({'DRY RUN - SIMULATED' if args.dry_run else 'LIVE CALL'})...")
         res = dispatcher.voice.dispatch_call(dossier=dossier, dry_run=args.dry_run)
         print("   Result:", res)
+
+        if not args.dry_run and res.get("status") in ("DISPATCHED", "SUCCESS"):
+            call_id = res.get("call_id")
+            dispatcher.ezlynx.add_note_to_discussion(
+                applicant_id=applicant_id,
+                discussion_title=f"Robie Voice AI Outbound | {pol}",
+                note_text=(
+                    f"Policy: #{pol} ({carrier})\n\n"
+                    f"📞 [ROBIE CALL INITIATED]\n"
+                    f"Robie placed an outbound call to {carrier} ({phone}) via Bland AI.\n"
+                    f"• Call ID: {call_id}\n"
+                    f"• Goal / Instructions: {instructions}\n"
+                    f"• Status: Call in progress. Transcript and recording will post upon completion.\n"
+                ),
+                policy_number=pol,
+                carrier_name=carrier,
+            )
+            print(f"   Audit note posted to EZLynx under applicant {applicant_id}.")
+
         print("\n✅ Test completed successfully.")
 
     elif args.applicant_id:
