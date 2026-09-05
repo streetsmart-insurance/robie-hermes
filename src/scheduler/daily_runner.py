@@ -30,6 +30,12 @@ from pathlib import Path
 
 from src.quote_processing.document_parser import QuoteDocumentParser
 from src.voice.email_dispatcher import EmailCallDispatcher
+from src.database.policy_aliases import (
+    association_policy_number,
+    collect_policy_numbers,
+    register_aliases_from_texts,
+    register_policy_alias,
+)
 
 logger = logging.getLogger("daily_orchestrator")
 console = Console()
@@ -111,15 +117,28 @@ class DailyRenewalOrchestrator:
             for pol in portal_policies:
                 pol.status = RenewalStatus.CHECKING_PORTAL
                 crawler = get_carrier_crawler(pol.carrier_name, pol.portal_url)
-                search_res = await crawler.check_renewal_quote(
-                    policy_number=pol.policy_number,
-                    insured_name=pol.insured_name,
-                    download_dir=settings.downloads_path
-                )
+                search_res = None
+                used_number = pol.policy_number
+                for candidate in collect_policy_numbers(pol):
+                    search_res = await crawler.check_renewal_quote(
+                        policy_number=candidate,
+                        insured_name=pol.insured_name,
+                        download_dir=settings.downloads_path
+                    )
+                    if search_res.success:
+                        used_number = candidate
+                        if candidate != pol.policy_number:
+                            register_policy_alias(db, pol, candidate, alias_kind="portal")
+                        break
 
                 if search_res.success and search_res.renewal_ready and search_res.document_path:
                     # Quote found on portal!
                     parsed_data = self.quote_parser.parse_pdf(search_res.document_path)
+                    if parsed_data.policy_number:
+                        register_policy_alias(db, pol, parsed_data.policy_number, alias_kind="renewal_term")
+                    register_aliases_from_texts(
+                        db, pol, [parsed_data.raw_text_snippet], alias_kind="renewal_term"
+                    )
                     pol.renewal_premium = parsed_data.renewal_premium or search_res.extracted_premium or pol.expiring_premium
                     if pol.expiring_premium and pol.renewal_premium:
                         pol.premium_change_pct = ((pol.renewal_premium - pol.expiring_premium) / pol.expiring_premium) * 100
@@ -169,7 +188,7 @@ class DailyRenewalOrchestrator:
                         applicant_id=pol.applicant_id,
                         file_path=search_res.document_path,
                         folder_name="Renewal Offers/Declarations",
-                        policy_number=pol.policy_number,
+                        policy_number=association_policy_number(pol),
                         doc_type="Renewal",
                         label_to_apply="Renewals"
                     )

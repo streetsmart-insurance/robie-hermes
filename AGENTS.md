@@ -21,6 +21,8 @@ This repository contains the autonomous engine for managing expiring non-downloa
 
 Production cron on hermes-poc-01 is **not** changed: `0 9 * * * /opt/renewal-automation-system/scripts/run_daily_renewal_pipeline.sh` (already calls `process_incoming_inbox_replies`).
 
+Policy numbers may change for the renewal term (e.g. Safe Man `R2WC681352` → `R2WC771037`). Matching, UW-reply filing, portal search, and document association accept **either** number via `policy_number_aliases` (`src/database/policy_aliases.py`). Do not fail filing solely because the number flipped.
+
 ## EZLynx Universal API & Session Operations (For All Agents & Roles)
 The production EZLynx API is fully configured (`ssr_userPROD`) across both Classic REST Services (`services.ezlynx.com`) and Modern OAuth2 Gateway (`app.ezlynx.com`).
 **All agent roles and automated tools should prioritize the direct API over slow browser navigation:**

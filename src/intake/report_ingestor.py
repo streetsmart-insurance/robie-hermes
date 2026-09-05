@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.database.models import PolicyRenewal, RenewalStatus, ActionType, AuditNoteLog
+from src.database.policy_aliases import register_policy_alias, sibling_policy_for_intake
 from src.intake.base_source import BaseRenewalSource, RawRenewalItem
 
 logger = logging.getLogger("renewal_intake")
@@ -379,6 +380,22 @@ class ReportIngestor(BaseRenewalSource):
                 PolicyRenewal.policy_number == item.policy_number,
                 PolicyRenewal.expiration_date == item.expiration_date
             ).first()
+
+            if not existing:
+                sibling = sibling_policy_for_intake(
+                    db,
+                    applicant_id=item.applicant_id,
+                    expiration_date=item.expiration_date,
+                    line_of_business=item.line_of_business,
+                    policy_number=item.policy_number,
+                )
+                if sibling:
+                    register_policy_alias(db, sibling, item.policy_number, alias_kind="renewal_term")
+                    logger.info(
+                        f"Term-number flip for {item.insured_name}: "
+                        f"{sibling.policy_number} ↔ {item.policy_number} (aliased, no new row)"
+                    )
+                    continue
 
             if not existing:
                 policy = PolicyRenewal(

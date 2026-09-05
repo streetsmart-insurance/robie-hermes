@@ -152,6 +152,27 @@ def test_find_matching_discussion_filters_out_loss_runs_auxiliary_thread(client)
         assert match["title"] == "Commercial Auto Renewal (2026-2027)"
 
 
+def test_find_matching_discussion_by_renewal_term_alias(client):
+    discussions = [
+        {
+            "discussionId": 11,
+            "title": "Workers Comp Renewal | R2WC771037 Associated Specialty",
+            "noteCount": 3,
+            "discussionNote": {"policyNumber": "R2WC771037"},
+        }
+    ]
+    with patch.object(client, "get_applicant_discussions", return_value=discussions):
+        match = client.find_matching_discussion(
+            applicant_id="199000001",
+            policy_number="R2WC681352",
+            policy_numbers=["R2WC681352", "R2WC771037"],
+            line_of_business="Workers Comp",
+            carrier_name="Associated Specialty",
+        )
+        assert match is not None
+        assert match["discussionId"] == 11
+
+
 DISQUALIFIED_AUX_TITLES = [
     ("Loss Runs request for Insured | POL-1", "loss runs"),
     ("Certificate of Insurance - POL-1", "coi"),

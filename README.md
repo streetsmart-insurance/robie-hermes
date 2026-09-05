@@ -170,6 +170,9 @@ The daily pipeline (`--run-today`) and Robie inbox cleaner also invoke this path
 
 That script already runs `process_incoming_inbox_replies`, which now delegates to this filer.
 
+### Policy number term aliases
+Renewal offers sometimes use a **new** policy number for the next term while `renewals.db` still stores the expiring number. `policy_number_aliases` maps prior ↔ current so UW-reply filing, discussion match, portal search, and document association treat both as the same account. Tests: `pytest tests/test_policy_number_aliases.py tests/test_ezlynx_discussions.py -v`.
+
 ### Running Automated Test Suite
 ```bash
 PYTHONPATH=. pytest tests/ -v

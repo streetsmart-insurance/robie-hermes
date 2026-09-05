@@ -529,12 +529,14 @@ class EZLynxApiClient:
         applicant_id: str,
         policy_number: Optional[str] = None,
         line_of_business: Optional[str] = None,
-        carrier_name: Optional[str] = None
+        carrier_name: Optional[str] = None,
+        policy_numbers: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Finds an authentic existing renewal discussion card matching the policy or carrier.
         
         Matching Priority:
         1. Exact Policy Number match in title or attached policy folder (excluding auxiliary threads like Loss Runs / COI).
+           Accepts the canonical number plus prior-term / renewal-term aliases (``policy_numbers``).
         2. Scored match across Carrier tokens, Line of Business tokens, active team participation, and note counts.
         """
         discussions = self.get_applicant_discussions(applicant_id)
@@ -554,12 +556,22 @@ class EZLynxApiClient:
         if not valid_discussions:
             return None
 
-        # 1. Exact Policy Number match in title or discussionNote
-        if policy_number:
-            pol_clean = re.sub(r"[^a-zA-Z0-9]", "", policy_number).lower()
-            if len(pol_clean) >= 4:
-                policy_matches = []
+        # 1. Exact Policy Number match in title or discussionNote (canonical + aliases)
+        number_candidates: List[str] = []
+        for raw in [policy_number, *(policy_numbers or [])]:
+            if raw and raw not in number_candidates:
+                number_candidates.append(raw)
+
+        if number_candidates:
+            policy_matches = []
+            matched_with = None
+            for candidate in number_candidates:
+                pol_clean = re.sub(r"[^a-zA-Z0-9]", "", candidate).lower()
+                if len(pol_clean) < 4:
+                    continue
                 for d in valid_discussions:
+                    if d in policy_matches:
+                        continue
                     title = d.get("title", "")
                     title_clean = re.sub(r"[^a-zA-Z0-9]", "", title).lower()
                     
@@ -575,18 +587,22 @@ class EZLynxApiClient:
                     
                     if in_title or in_note:
                         policy_matches.append(d)
+                        matched_with = candidate
                 
-                if policy_matches:
-                    # Sort candidates: prefer title containing 'renewal', then higher note count
-                    def _rank(cand):
-                        t = cand.get("title", "").lower()
-                        has_renewal = 100 if "renewal" in t else (50 if "manual" in t else 0)
-                        return has_renewal + cand.get("noteCount", 0)
-                    
-                    policy_matches.sort(key=_rank, reverse=True)
-                    best = policy_matches[0]
-                    logger.info(f"Matched discussion by policy# '{policy_number}': '{best.get('title')}' (ID {best.get('discussionId')})")
-                    return best
+            if policy_matches:
+                # Sort candidates: prefer title containing 'renewal', then higher note count
+                def _rank(cand):
+                    t = cand.get("title", "").lower()
+                    has_renewal = 100 if "renewal" in t else (50 if "manual" in t else 0)
+                    return has_renewal + cand.get("noteCount", 0)
+                
+                policy_matches.sort(key=_rank, reverse=True)
+                best = policy_matches[0]
+                logger.info(
+                    f"Matched discussion by policy# '{matched_with or policy_number}': "
+                    f"'{best.get('title')}' (ID {best.get('discussionId')})"
+                )
+                return best
 
         # 2. Scored Match across Carrier and LOB tokens
         carrier_tokens = [
@@ -637,7 +653,8 @@ class EZLynxApiClient:
         discussion_title: Optional[str] = None,
         policy_number: Optional[str] = None,
         line_of_business: Optional[str] = None,
-        carrier_name: Optional[str] = None
+        carrier_name: Optional[str] = None,
+        policy_numbers: Optional[List[str]] = None,
     ) -> str:
         """Resolves the authentic discussion title to ensure notes thread directly into the right card.
         
@@ -662,12 +679,13 @@ class EZLynxApiClient:
                     return d_title
 
         # 2. If policy_number, LOB, or carrier is provided, attempt to match active card
-        if policy_number or line_of_business or carrier_name:
+        if policy_number or policy_numbers or line_of_business or carrier_name:
             matched = self.find_matching_discussion(
                 applicant_id=applicant_id,
                 policy_number=policy_number,
                 line_of_business=line_of_business,
-                carrier_name=carrier_name
+                carrier_name=carrier_name,
+                policy_numbers=policy_numbers,
             )
             if matched and matched.get("title"):
                 return matched["title"]
@@ -703,6 +721,7 @@ class EZLynxApiClient:
         carrier_name: Optional[str] = None,
         use_playwright_fallback: bool = True,
         require_existing_discussion: bool = False,
+        policy_numbers: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Posts a note under the designated discussion title for an applicant.
 
@@ -736,6 +755,7 @@ class EZLynxApiClient:
                 policy_number=policy_number,
                 line_of_business=line_of_business,
                 carrier_name=carrier_name,
+                policy_numbers=policy_numbers,
             )
             if not matched or not matched.get("title"):
                 logger.warning(
@@ -756,7 +776,8 @@ class EZLynxApiClient:
                 discussion_title=discussion_title,
                 policy_number=policy_number,
                 line_of_business=line_of_business,
-                carrier_name=carrier_name
+                carrier_name=carrier_name,
+                policy_numbers=policy_numbers,
             )
 
         # 1. Direct Classic REST Note API (Fastest and direct)

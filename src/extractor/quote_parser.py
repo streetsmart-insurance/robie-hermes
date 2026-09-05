@@ -32,6 +32,11 @@ class QuoteDocumentParser:
         r"(?:Expiration\s+Date|To)[\s:]*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})"
     ]
 
+    POLICY_NUMBER_PATTERNS = [
+        r"Policy\s*(?:Number|No\.?|#)\s*[:#]?\s*([A-Z0-9][A-Z0-9._/-]*\d[A-Z0-9._/-]{2,40})",
+        r"Pol\s*#\s*[:#]?\s*([A-Z0-9][A-Z0-9._/-]*\d[A-Z0-9._/-]{2,40})",
+    ]
+
     def _parse_date_str(self, s: str) -> Optional[date]:
         for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
             try:
@@ -84,7 +89,15 @@ class QuoteDocumentParser:
         if exp_match:
             exp_date = self._parse_date_str(exp_match.group(1))
 
+        extracted_pol: Optional[str] = None
+        for pattern in self.POLICY_NUMBER_PATTERNS:
+            match = re.search(pattern, full_text, re.IGNORECASE)
+            if match:
+                extracted_pol = match.group(1).strip().rstrip(".,;")
+                break
+
         return ExtractedQuoteData(
+            policy_number=extracted_pol,
             renewal_premium=extracted_prem,
             effective_date=eff_date,
             expiration_date=exp_date,

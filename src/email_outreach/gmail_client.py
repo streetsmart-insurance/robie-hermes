@@ -236,9 +236,15 @@ class GmailRenewalClient:
         """Checks if an email matches any active pending policy number or insured name."""
         search_text = f"{parsed_msg.get('subject', '')} {parsed_msg.get('body', '')} {' '.join(a['filename'] for a in parsed_msg.get('attachments', []))}".lower()
         for pol in active_policies:
-            pol_num = pol.get("policy_number", "").lower().split()[0]  # strip sub-labels like NTL / APD
+            numbers = pol.get("policy_numbers") or [pol.get("policy_number", "")]
+            number_hit = False
+            for raw in numbers:
+                pol_num = (raw or "").lower().split()[0]  # strip sub-labels like NTL / APD
+                if pol_num and len(pol_num) >= 5 and pol_num in search_text:
+                    number_hit = True
+                    break
             insured = pol.get("insured_name", "").lower()
-            if (pol_num and len(pol_num) >= 5 and pol_num in search_text) or (insured and len(insured) > 4 and insured in search_text):
+            if number_hit or (insured and len(insured) > 4 and insured in search_text):
                 # Tag with matched policy ID
                 parsed_msg["matched_policy_id"] = pol.get("id")
                 logger.info(f"Matched proactive carrier email in {parsed_msg.get('inbox_source')} to Policy #{pol.get('policy_number')} ({pol.get('insured_name')})")

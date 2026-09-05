@@ -83,6 +83,9 @@ class PolicyRenewal(Base):
     threads = relationship("OutreachThread", back_populates="policy", cascade="all, delete-orphan")
     notes = relationship("AuditNoteLog", back_populates="policy", cascade="all, delete-orphan")
     documents = relationship("DocumentRecord", back_populates="policy", cascade="all, delete-orphan")
+    number_aliases = relationship(
+        "PolicyNumberAlias", back_populates="policy", cascade="all, delete-orphan"
+    )
 
 class OutreachThread(Base):
     __tablename__ = "outreach_threads"
@@ -145,3 +148,20 @@ class DocumentRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     policy = relationship("PolicyRenewal", back_populates="documents")
+
+
+class PolicyNumberAlias(Base):
+    """Maps a prior-term or renewal-term policy number onto the same PolicyRenewal.
+
+    Carriers often issue a new number for the renewal term (e.g. R2WC681352 → R2WC771037).
+    Matching, filing, portal search, and document association accept either number.
+    """
+    __tablename__ = "policy_number_aliases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    policy_id = Column(Integer, ForeignKey("policy_renewals.id"), nullable=False, index=True)
+    alias_number = Column(String(100), nullable=False, unique=True, index=True)
+    alias_kind = Column(String(40), nullable=False, default="renewal_term")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    policy = relationship("PolicyRenewal", back_populates="number_aliases")

@@ -37,6 +37,14 @@ from src.email_outreach.intent_classifier import (
     EmailClassification,
     UnderwriterIntentClassifier,
 )
+from src.database.policy_aliases import (
+    association_policy_number,
+    collect_policy_numbers,
+    find_policy_by_any_number,
+    harvest_policy_numbers,
+    policy_match_payload,
+    register_aliases_from_texts,
+)
 from src.ezlynx.api_client import EZLynxApiClient
 from src.ezlynx.document_uploader import FOLDER_ROUTING, LABEL_ROUTING
 from src.ezlynx.note_builder import EZLynxNoteBuilder
@@ -82,11 +90,7 @@ def is_fileable_policy(policy: Optional[PolicyRenewal]) -> bool:
 
 
 def _fileable_policy_dicts(policies: Sequence[PolicyRenewal]) -> List[Dict[str, Any]]:
-    return [
-        {"id": p.id, "policy_number": p.policy_number, "insured_name": p.insured_name}
-        for p in policies
-        if is_fileable_policy(p)
-    ]
+    return [policy_match_payload(p) for p in policies if is_fileable_policy(p)]
 
 
 def reply_already_filed(db: Session, policy_id: int, message_id: Optional[str]) -> bool:
@@ -140,6 +144,13 @@ def match_policy_for_reply(
         if is_fileable_policy(pol):
             return pol
 
+    for token in harvest_policy_numbers(subject, body, *(
+        a.get("filename") for a in reply.get("attachments", []) if isinstance(a, dict)
+    )):
+        pol = find_policy_by_any_number(db, token)
+        if is_fileable_policy(pol):
+            return pol
+
     matcher = gmail or GmailRenewalClient(service=None, inbox_services={})
     parsed = dict(reply)
     if matcher._matches_any_policy(parsed, _fileable_policy_dicts(policies)):
@@ -180,6 +191,7 @@ def _upload_attachments_and_maybe_task(
     policy: PolicyRenewal,
     classification: EmailClassification,
     attached_file_path: Optional[str],
+    association_number: Optional[str] = None,
 ) -> bool:
     """Upload via EZLynxApiClient → document_uploader routing; create the existing CSR task."""
     if not attached_file_path:
@@ -191,7 +203,7 @@ def _upload_attachments_and_maybe_task(
         applicant_id=policy.applicant_id,
         file_path=Path(attached_file_path),
         folder_name=folder_name,
-        policy_number=policy.policy_number,
+        policy_number=association_number or policy.policy_number,
         doc_type=doc_type,
         label_to_apply=label_to_apply,
     )
@@ -256,11 +268,25 @@ def file_single_reply(
         )
         return {"status": "skipped", "reason": "already_filed", "message_id": message_id}
 
+    register_aliases_from_texts(
+        db,
+        policy,
+        [
+            subject,
+            reply.get("body"),
+            reply.get("clean_reply_text"),
+            " ".join(a.get("filename", "") for a in reply.get("attachments", [])),
+        ],
+        alias_kind="renewal_term",
+    )
+    known_numbers = collect_policy_numbers(policy)
+
     matched = ezlynx.find_matching_discussion(
         applicant_id=str(policy.applicant_id),
         policy_number=policy.policy_number,
         line_of_business=policy.line_of_business,
         carrier_name=policy.carrier_name,
+        policy_numbers=known_numbers,
     )
     if not matched or not matched.get("title"):
         logger.warning(
@@ -350,6 +376,7 @@ def file_single_reply(
         )
     )
 
+    assoc_number = association_policy_number(policy, matched)
     note_res = ezlynx.add_note_to_discussion(
         applicant_id=policy.applicant_id,
         discussion_title=discussion_title,
@@ -358,6 +385,7 @@ def file_single_reply(
         line_of_business=policy.line_of_business,
         carrier_name=policy.carrier_name,
         require_existing_discussion=True,
+        policy_numbers=known_numbers,
     )
     if isinstance(note_res, dict) and isinstance(note_res.get("discussion_title"), str):
         policy.discussion_title = note_res.get("discussion_title")
@@ -377,7 +405,7 @@ def file_single_reply(
         }
 
     task_created = _upload_attachments_and_maybe_task(
-        ezlynx, policy, classification, attached_file_path
+        ezlynx, policy, classification, attached_file_path, association_number=assoc_number
     )
 
     if alert_csr:
