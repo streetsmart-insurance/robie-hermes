@@ -74,6 +74,9 @@ def merge_call_payload(
         "summary",
         "call_summary",
         "metadata",
+        "warm_transfer_call",
+        "status",
+        "disposition",
     ):
         if _is_blank(merged.get(key)) and not _is_blank(bland.get(key)):
             merged[key] = bland[key]
@@ -83,6 +86,36 @@ def merge_call_payload(
             base_meta.update(merged["metadata"])
         merged["metadata"] = base_meta
     return merged
+
+
+def extract_transfer_outcome(data: Dict[str, Any]) -> Optional[str]:
+    """Return a human line when Bland metadata/webhook exposes a transfer."""
+    wtc = data.get("warm_transfer_call")
+    if isinstance(wtc, dict) and wtc.get("state"):
+        state = str(wtc.get("state")).upper()
+        if state == "MERGED":
+            return "Warm transfer completed (Bland state: MERGED)"
+        return f"Warm transfer attempted (Bland state: {state})"
+
+    status = str(data.get("status") or data.get("queue_status") or "").upper()
+    if status == "TRANSFERRED":
+        return "Call was transferred"
+
+    disposition = data.get("disposition") or ""
+    if "transfer" in str(disposition).lower():
+        return f"Transfer disposition: {disposition}"
+
+    analysis = data.get("analysis")
+    if isinstance(analysis, dict):
+        for key in ("transferred", "transfer_occurred", "warm_transfer"):
+            value = analysis.get(key)
+            if value in (True, "true", "MERGED", "transferred"):
+                return "Transfer recorded in Bland analysis"
+
+    transferred_to = data.get("transferred_to") or data.get("transfer_number")
+    if transferred_to:
+        return f"Transferred to {transferred_to}"
+    return None
 
 
 def truncate_transcript(transcript: str, limit: int = TRANSCRIPT_NOTE_CHAR_LIMIT) -> Tuple[str, bool]:
@@ -104,6 +137,7 @@ def build_completion_note(
     transcript: str,
     recording_uploaded: bool = False,
     transcript_attached: bool = False,
+    transfer_line: str = "",
 ) -> str:
     """Structured EZLynx note: Policy header + Robie self-markers + transcript."""
     excerpt, truncated = truncate_transcript(transcript)
@@ -111,6 +145,7 @@ def build_completion_note(
     attach_line = ""
     if transcript_attached or truncated:
         attach_line = "- Full transcript file: uploaded to EZLynx Documents\n"
+    xfer = f"{transfer_line}\n" if transfer_line else ""
     note = (
         f"Policy: #{policy_number} ({line_of_business} - {carrier_name})\n"
         f"Autonomous Carrier Phone Outreach Completed:\n"
@@ -119,6 +154,7 @@ def build_completion_note(
         f"- Summary: {summary}\n"
         f"- Audio Recording: {recording_url}\n"
         f"- Recording uploaded to EZLynx Documents: {upload_line}\n"
+        f"{xfer}"
         f"{attach_line}"
         f"\nTranscript:\n{excerpt or '(no transcript returned)'}\n"
         f"\nRobie was here"
@@ -348,6 +384,16 @@ def handle_completed_call(
             voice_client=voice_client,
         )
 
+    transfer_outcome = extract_transfer_outcome(merged)
+    metadata = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
+    producer_name = metadata.get("producer_name") or merged.get("producer_name")
+    transfer_line = ""
+    if transfer_outcome:
+        if producer_name:
+            transfer_line = f"- Transfer: {transfer_outcome} to {producer_name}"
+        else:
+            transfer_line = f"- Transfer: {transfer_outcome}"
+
     note_body = build_completion_note(
         policy_number=policy_number,
         line_of_business=lob,
@@ -358,6 +404,7 @@ def handle_completed_call(
         transcript=str(transcript),
         recording_uploaded=bool(upload_info.get("recording_uploaded")),
         transcript_attached=bool(upload_info.get("transcript_uploaded")),
+        transfer_line=transfer_line,
     )
 
     ezlynx_posted = False
@@ -429,4 +476,6 @@ StreetSmart Insurance Operations Engine
         "recording_uploaded": bool(upload_info.get("recording_uploaded")),
         "transcript_uploaded": bool(upload_info.get("transcript_uploaded")),
         "assigned_csr": DEFAULT_ASSIGNED_CSR_NAME,
+        "transfer_occurred": bool(transfer_outcome),
+        "transfer_outcome": transfer_outcome,
     }

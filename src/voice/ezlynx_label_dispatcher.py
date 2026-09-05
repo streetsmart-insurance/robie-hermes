@@ -19,13 +19,35 @@ from src.voice.call_directory import (
     HARDCODED_CARRIER_PHONES,
     lookup_carrier_phone,
 )
-from src.voice.voice_client import CarrierVoiceClient
-from src.voice.context_hydrator import CallingDossier
+from src.voice.context_hydrator import (
+    CALL_TYPE_CARRIER,
+    CALL_TYPE_CLIENT_FOLLOWUP,
+    CallingDossier,
+    ContextHydrator,
+    extract_client_first_name,
+    extract_producer_name,
+    match_policy_record,
+    normalize_call_type,
+    unwrap_policy_list,
+)
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
+from src.voice.voice_client import CarrierVoiceClient
 
 logger = logging.getLogger("ezlynx_label_dispatcher")
 
 ROBIE_LABEL_TRIGGERS = ["robie call", "robie_call", "call robie", "robie: call", "[robie call]"]
+CLIENT_WHO_TOKENS = {
+    "insured",
+    "the insured",
+    "client",
+    "the client",
+    "customer",
+    "the customer",
+    "applicant",
+    "the applicant",
+    "policyholder",
+    "the policyholder",
+}
 
 # Live GetPagedDiscussions page size observed on hermes-poc-01.
 PORTAL_DISCUSSIONS_PAGE_SIZE = 50
@@ -203,6 +225,7 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
         "target_name": None,
         "policy_number": None,
         "instructions": "",
+        "call_type": None,
     }
 
     # Check for trigger tag/keyword in the note/title text
@@ -233,7 +256,16 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
     if pol_match:
         result["policy_number"] = pol_match.group(1).strip()
 
-    # 4. Extract What To Say / Instructions
+    # 4. Explicit call-type cue (do not guess beyond this + who-to-call)
+    type_match = re.search(
+        r"call\s*type\s*:\s*(client(?:[\s_-]*follow[\s_-]*up)?|carrier|existing)\b",
+        clean_text,
+        re.IGNORECASE,
+    )
+    if type_match:
+        result["call_type"] = normalize_call_type(type_match.group(1))
+
+    # 5. Extract What To Say / Instructions
     say_match = re.search(r"(?:what to say|instructions|say|message|notes|details|tell)[:\s]+([\s\S]+)", clean_text, re.IGNORECASE)
     if say_match:
         instructions = say_match.group(1).strip()
@@ -248,7 +280,7 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
             line_lower = line.lower()
             if any(t in line_lower for t in ROBIE_LABEL_TRIGGERS):
                 continue
-            if line_lower.startswith(("who to call:", "phone:", "contact:", "policy:")):
+            if line_lower.startswith(("who to call:", "phone:", "contact:", "policy:", "call type:")):
                 continue
             filtered_lines.append(line)
         result["instructions"] = " ".join(filtered_lines).strip()
@@ -265,6 +297,22 @@ def lookup_known_carrier_phone(carrier_name: Optional[str]) -> Optional[str]:
     return lookup_carrier_phone(carrier_name)
 
 
+def infer_call_type(
+    parsed: Dict[str, Any],
+    insured_name: Optional[str] = None,
+) -> str:
+    """Use explicit Call type: cue, else infer only from who-to-call if it is the insured."""
+    explicit = parsed.get("call_type")
+    if explicit in (CALL_TYPE_CLIENT_FOLLOWUP, CALL_TYPE_CARRIER):
+        return explicit
+    who = (parsed.get("target_name") or "").strip().lower()
+    if who in CLIENT_WHO_TOKENS:
+        return CALL_TYPE_CLIENT_FOLLOWUP
+    if insured_name and who and who in insured_name.lower():
+        return CALL_TYPE_CLIENT_FOLLOWUP
+    return CALL_TYPE_CARRIER
+
+
 class EZLynxLabelCallDispatcher:
     """Dispatches calls based on EZLynx notes/discussions tagged 'robie call'."""
 
@@ -272,10 +320,12 @@ class EZLynxLabelCallDispatcher:
         self,
         ezlynx_client: Optional[EZLynxApiClient] = None,
         voice_client: Optional[CarrierVoiceClient] = None,
+        hydrator: Optional[ContextHydrator] = None,
         processed_store: Optional[ProcessedRobieCallStore] = None,
     ):
         self.ezlynx = ezlynx_client or EZLynxApiClient()
         self.voice = voice_client or CarrierVoiceClient()
+        self.hydrator = hydrator or ContextHydrator()
         self.processed_store = processed_store or ProcessedRobieCallStore()
 
     def process_applicant_notes_for_calls(
@@ -343,8 +393,10 @@ class EZLynxLabelCallDispatcher:
                 else:
                     # Look up active policies on applicant
                     if applicant_policies is None:
-                        applicant_policies = self.ezlynx.get_applicant_policies(applicant_id)
-                    if applicant_policies and isinstance(applicant_policies, list):
+                        applicant_policies = unwrap_policy_list(
+                            self.ezlynx.get_applicant_policies(applicant_id)
+                        )
+                    if applicant_policies:
                         policy_num = applicant_policies[0].get("policyNumber") or applicant_policies[0].get("PolicyNumber")
 
             # 2. Resolve Carrier Name if missing
@@ -352,8 +404,10 @@ class EZLynxLabelCallDispatcher:
             if not target_carrier or target_carrier == "Carrier Representative":
                 # Check policy directory or applicant policies
                 if applicant_policies is None:
-                    applicant_policies = self.ezlynx.get_applicant_policies(applicant_id)
-                if applicant_policies and isinstance(applicant_policies, list):
+                    applicant_policies = unwrap_policy_list(
+                        self.ezlynx.get_applicant_policies(applicant_id)
+                    )
+                if applicant_policies:
                     for pol in applicant_policies:
                         p_num = pol.get("policyNumber") or pol.get("PolicyNumber")
                         if policy_num and p_num == policy_num:
@@ -364,9 +418,25 @@ class EZLynxLabelCallDispatcher:
 
             target_carrier = target_carrier or "Carrier Representative"
 
+            if applicant_policies is None:
+                applicant_policies = unwrap_policy_list(
+                    self.ezlynx.get_applicant_policies(applicant_id)
+                )
+            matched_policy = match_policy_record(applicant_policies or [], policy_num)
+            call_type = infer_call_type(parsed, insured_name=insured_name)
+
             # 3. Resolve Phone Number from carrier knowledge base / directory if missing
             phone = parsed["phone_number"]
-            if not phone:
+            if not phone and call_type == CALL_TYPE_CLIENT_FOLLOWUP:
+                phone = normalize_phone_e164(
+                    app_data.get("CellPhone")
+                    or app_data.get("HomePhone")
+                    or app_data.get("BusinessPhone")
+                    or app_data.get("Phone")
+                )
+                if phone:
+                    logger.info(f"Resolved client phone {phone} from applicant profile.")
+            if not phone and call_type != CALL_TYPE_CLIENT_FOLLOWUP:
                 phone = lookup_known_carrier_phone(target_carrier)
                 if phone:
                     logger.info(f"Resolved phone {phone} for carrier '{target_carrier}' from directory.")
@@ -381,10 +451,11 @@ class EZLynxLabelCallDispatcher:
                     f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
                     f"⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]\n"
                     f"Robie received your request to call regarding this account, but could not determine "
-                    f"the carrier phone number for '{target_carrier}'.\n\n"
+                    f"the {'client' if call_type == CALL_TYPE_CLIENT_FOLLOWUP else 'carrier'} phone number"
+                    f" for '{target_carrier if call_type != CALL_TYPE_CLIENT_FOLLOWUP else insured_name}'.\n\n"
                     f"To trigger this call, please reply to this card with the phone number:\n"
                     f"• Example: \"Phone: 800-555-1234\"\n"
-                    f"• Or provide the underwriter direct contact info.\n\n"
+                    f"• Or provide the underwriter / client direct contact info.\n\n"
                     f"Robie will automatically place the call once the number is provided."
                 )
                 self._post_dispatcher_note(
@@ -409,6 +480,7 @@ class EZLynxLabelCallDispatcher:
                     "target": target_carrier,
                     "status": "CLARIFICATION_NEEDED",
                     "reason": "MISSING_PHONE_NUMBER",
+                    "call_type": call_type,
                     "note_id": note_id,
                     "note_identity": identity,
                 })
@@ -422,12 +494,21 @@ class EZLynxLabelCallDispatcher:
             dossier = CallingDossier(
                 policy_number=safe_pol_num,
                 insured_name=insured_name,
-                carrier_name=target_carrier,
+                carrier_name=target_carrier if call_type != CALL_TYPE_CLIENT_FOLLOWUP else insured_name,
                 carrier_phone=phone,
                 line_of_business="Commercial Lines",
                 applicant_id=applicant_id,
                 custom_instructions=instructions,
+                client_first_name=extract_client_first_name(app_data, insured_name),
+                producer_name=extract_producer_name(matched_policy, app_data),
+                call_type=call_type,
                 assigned_csr_email="carlo@streetsmart.insurance",
+            )
+            self.hydrator.enrich_identity(
+                dossier,
+                applicant=app_data,
+                policy=matched_policy,
+                call_type=call_type,
             )
 
             # Build call prompt
@@ -445,11 +526,22 @@ class EZLynxLabelCallDispatcher:
             call_id = call_result.get("call_id", "sim_call_001")
             status = call_result.get("status", "DISPATCHED")
 
+            transfer_line = (
+                f"Warm transfer: enabled to {dossier.producer_name} at {dossier.producer_phone}."
+                if dossier.producer_phone
+                else (
+                    "Warm transfer: not available (producer phone must be an E.164 number in "
+                    "data/voice_call_directory.json)."
+                )
+            )
+            dest_label = insured_name if call_type == CALL_TYPE_CLIENT_FOLLOWUP else target_carrier
             # Post immediate acknowledgement note back to EZLynx discussion card
             ack_note = (
                 f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
                 f"🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]\n"
-                f"Robie has placed an outbound call to {target_carrier} at {phone}.\n"
+                f"Robie has placed an outbound call to {dest_label} at {phone}.\n"
+                f"Call type: {call_type}\n"
+                f"{transfer_line}\n"
                 f"Caller ID: {self.voice.from_phone or '+1 (732) 298-6745'}\n"
                 f"Call ID: {call_id}\n"
                 f"Instructions: \"{instructions}\"\n\n"
@@ -480,6 +572,9 @@ class EZLynxLabelCallDispatcher:
                 "target": target_carrier,
                 "call_id": call_id,
                 "status": status,
+                "call_type": call_type,
+                "producer_name": dossier.producer_name,
+                "producer_phone": dossier.producer_phone,
                 "note_id": note_id,
                 "note_identity": identity,
             })

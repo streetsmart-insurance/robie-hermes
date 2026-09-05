@@ -27,10 +27,10 @@ data/*.json
 data/**/*.json
 !data/*.example.json
 !data/voice_call_directory.seed.json
+!data/voice_call_directory.example.json
 data/credentials/
 data/coterie_*
 data/google_doc_text.txt
 data/policy_dec_text.txt
 data/renewal_notice_text.txt
 data/archived_postman_uvxjhahb.html
-

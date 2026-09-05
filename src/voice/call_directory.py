@@ -5,6 +5,9 @@ Resolution order for dispatcher lookups:
 2. Committed seed ``data/voice_call_directory.seed.json``
 3. Hardcoded ``KNOWN_CARRIER_PHONES`` / ``HARDCODED_CARRIER_PHONES`` fallback
 
+Producer warm-transfer phones live under the ``producers`` array in the same
+JSON files. Email alone is not enough to transfer — lookup must return E.164.
+
 Scrapers are pluggable. Built-in sources:
 - ``KnownCarrierPhonesSeedSource`` — bootstrap from the hardcoded map / seed file
 - ``EzlynxExtractedDirectorySource`` — phones already extracted into repo JSON
@@ -112,7 +115,7 @@ def _phones_from_payload(payload: Dict[str, Any]) -> Dict[str, str]:
     if not isinstance(raw, dict):
         return phones
     for name, value in raw.items():
-        if name in {"version", "source", "updated_at", "sources", "phones"}:
+        if name in {"version", "source", "updated_at", "sources", "phones", "producers"}:
             continue
         phone = None
         if isinstance(value, str):
@@ -381,6 +384,136 @@ def lookup_carrier_phone(
     """Public lookup used by the Robie Call dispatcher."""
     store = directory or get_default_directory()
     return store.lookup(carrier_name)
+
+
+def _producers_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = payload.get("producers") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [p for p in raw if isinstance(p, dict)]
+
+
+def load_voice_call_directory(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load runtime store, then committed seed (phones + producers)."""
+    if path is not None:
+        loaded = _load_json(path)
+        if loaded:
+            return loaded
+    live = _load_json(RUNTIME_DIRECTORY_PATH)
+    if live:
+        return live
+    return _load_json(SEED_DIRECTORY_PATH)
+
+
+def list_producers(directory: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    if directory is not None:
+        found = _producers_from_payload(directory)
+        if found:
+            return found
+    runtime = _producers_from_payload(_load_json(RUNTIME_DIRECTORY_PATH))
+    if runtime:
+        return runtime
+    seeded = _producers_from_payload(_load_json(SEED_DIRECTORY_PATH))
+    if seeded:
+        return seeded
+    # Last resort: StreetSmart producers already in the hardcoded phone map.
+    return [
+        {"name": "Jake Ferrara", "email": "jake@streetsmart.insurance", "phone": "+17326688161", "aliases": ["Jake", "Ferrara, Jake"]},
+        {"name": "Carlo Ferrara", "email": "carlo@streetsmart.insurance", "phone": "+17329953409", "aliases": ["Carlo", "Buster Brown", "Ferrara, Carlo"]},
+        {"name": "Jimmy", "phone": "+17329954324", "aliases": ["Jimmy"]},
+    ]
+
+
+def _normalize_person_key(value: str) -> str:
+    cleaned = re.sub(r"[.,]", " ", value.lower())
+    parts = [p for p in cleaned.split() if p]
+    if 1 < len(parts) <= 4:
+        return " ".join(sorted(parts))
+    return " ".join(parts)
+
+
+def _producer_keys(entry: Dict[str, Any]) -> List[str]:
+    keys: List[str] = []
+    for raw in [entry.get("name"), entry.get("email"), *(entry.get("aliases") or [])]:
+        if not raw:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        keys.append(_normalize_person_key(text))
+        if "@" in text:
+            keys.append(text.lower())
+    return keys
+
+
+def lookup_producer(
+    name: Optional[str] = None,
+    email: Optional[str] = None,
+    directory: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a StreetSmart producer to display name + optional E.164 phone.
+
+    Matching uses the EZLynx Producer field (name) and/or email against the
+    voice directory. Returns None when no directory row matches.
+    """
+    producers = list_producers(directory)
+    if not producers:
+        return None
+
+    candidates: List[str] = []
+    if name and str(name).strip():
+        candidates.append(_normalize_person_key(str(name).strip()))
+    if email and str(email).strip():
+        candidates.append(str(email).strip().lower())
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return None
+
+    exact_hits: List[Dict[str, Any]] = []
+    for entry in producers:
+        keys = _producer_keys(entry)
+        if any(c in keys for c in candidates):
+            exact_hits.append(entry)
+
+    chosen = exact_hits[0] if len(exact_hits) == 1 else None
+    if chosen is None and exact_hits:
+        return None
+
+    if chosen is None:
+        token_hits: List[Dict[str, Any]] = []
+        tokens = set()
+        for raw in (name, email):
+            if raw:
+                tokens.update(p for p in re.sub(r"[.,@]", " ", str(raw).lower()).split() if p)
+        for entry in producers:
+            keys = set(_producer_keys(entry))
+            key_tokens = set()
+            for key in keys:
+                key_tokens.update(key.split())
+            distinctive = {t for t in tokens if t not in {"insurance", "streetsmart", "com", "ferrara"}}
+            if distinctive and distinctive & key_tokens:
+                token_hits.append(entry)
+        unique = []
+        seen = set()
+        for hit in token_hits:
+            mark = (hit.get("name") or "").lower()
+            if mark in seen:
+                continue
+            seen.add(mark)
+            unique.append(hit)
+        if len(unique) == 1:
+            chosen = unique[0]
+
+    if chosen is None:
+        return None
+
+    phone = normalize_phone_e164(chosen.get("phone"))
+    return {
+        "name": chosen.get("name") or name,
+        "email": chosen.get("email") or email,
+        "phone": phone,
+        "aliases": list(chosen.get("aliases") or []),
+    }
 
 
 def refresh_voice_call_directory(

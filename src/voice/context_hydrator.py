@@ -14,8 +14,150 @@ from typing import Optional, Dict, Any, List
 from src.config import BASE_DIR, settings
 from src.database.models import PolicyRenewal
 from src.database.session import SessionLocal
+from src.voice.call_directory import lookup_producer
 
 logger = logging.getLogger("voice_context_hydrator")
+
+CALL_TYPE_CARRIER = "carrier"
+CALL_TYPE_CLIENT_FOLLOWUP = "client_followup"
+TRANSFER_MODE_WARM = "warm"
+
+_PRODUCER_NAME_KEYS = (
+    "Producer",
+    "ProducerName",
+    "AssignedProducer",
+    "producer",
+    "producerName",
+    "assignedProducer",
+    "ProducerFullName",
+)
+_PRODUCER_EMAIL_KEYS = (
+    "ProducerEmail",
+    "producerEmail",
+    "ProducerMail",
+)
+_FIRST_NAME_KEYS = (
+    "FirstName",
+    "firstName",
+    "PreferredName",
+    "PreferredFirstName",
+    "preferredName",
+    "NickName",
+    "Nickname",
+    "nickname",
+)
+_BUSINESS_NAME_RE = re.compile(
+    r"\b(llc|inc|corp|ltd|lp|plc|dba|company|co|insurance|agency|group|"
+    r"services|enterprises|associates|holdings)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_call_type(raw: Optional[str]) -> str:
+    """Map note/email cues onto client_followup | carrier."""
+    if not raw:
+        return CALL_TYPE_CARRIER
+    cleaned = re.sub(r"[\s-]+", "_", str(raw).strip().lower())
+    if cleaned.startswith("client"):
+        return CALL_TYPE_CLIENT_FOLLOWUP
+    return CALL_TYPE_CARRIER
+
+
+def _looks_like_business_name(name: str) -> bool:
+    return bool(_BUSINESS_NAME_RE.search(name))
+
+
+def extract_client_first_name(
+    applicant: Optional[Dict[str, Any]] = None,
+    insured_name: Optional[str] = None,
+) -> Optional[str]:
+    """First name from EZLynx FirstName, then preferred/nickname, then personal display name."""
+    if applicant:
+        for key in _FIRST_NAME_KEYS:
+            value = applicant.get(key)
+            if isinstance(value, str) and value.strip():
+                token = value.strip().split()[0]
+                if token and not _looks_like_business_name(token):
+                    return token
+    if insured_name and not _looks_like_business_name(insured_name):
+        token = insured_name.strip().split()[0]
+        if token:
+            return token
+    return None
+
+
+def _producer_string_from_value(value: Any) -> Optional[str]:
+    if isinstance(value, dict):
+        for key in ("Name", "FullName", "DisplayName", "name", "fullName"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip() and "@" not in nested:
+                return nested.strip()
+        return None
+    if isinstance(value, str) and value.strip() and "@" not in value:
+        return value.strip()
+    return None
+
+
+def extract_producer_name(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Read the EZLynx Producer field from applicant and/or policy objects. No free-text guess."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in _PRODUCER_NAME_KEYS:
+            name = _producer_string_from_value(source.get(key))
+            if name:
+                return name
+    return None
+
+
+def extract_producer_email(*sources: Optional[Dict[str, Any]]) -> Optional[str]:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in _PRODUCER_EMAIL_KEYS:
+            value = source.get(key)
+            if isinstance(value, str) and "@" in value:
+                return value.strip()
+        producer = source.get("Producer") or source.get("producer")
+        if isinstance(producer, str) and "@" in producer:
+            return producer.strip()
+        if isinstance(producer, dict):
+            for key in ("Email", "email", "EMail"):
+                value = producer.get(key)
+                if isinstance(value, str) and "@" in value:
+                    return value.strip()
+    return None
+
+
+def unwrap_policy_list(policies_res: Any) -> List[Dict[str, Any]]:
+    if isinstance(policies_res, list):
+        return [p for p in policies_res if isinstance(p, dict)]
+    if isinstance(policies_res, dict):
+        for key in ("policies", "Policies", "data"):
+            inner = policies_res.get(key)
+            if isinstance(inner, list):
+                return [p for p in inner if isinstance(p, dict)]
+            if isinstance(inner, dict):
+                nested = inner.get("policies") or inner.get("Policies")
+                if isinstance(nested, list):
+                    return [p for p in nested if isinstance(p, dict)]
+    return []
+
+
+def match_policy_record(
+    policies: List[Dict[str, Any]], policy_number: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    if not policies:
+        return None
+    if not policy_number:
+        return policies[0]
+    needle = str(policy_number).strip().upper()
+    for pol in policies:
+        for key in ("policyNumber", "PolicyNumber", "PolicyNum"):
+            value = pol.get(key)
+            if value and needle in str(value).upper():
+                return pol
+    return policies[0]
 
 
 @dataclass
@@ -33,6 +175,11 @@ class CallingDossier:
     assigned_csr_email: Optional[str] = None
     custom_instructions: Optional[str] = None
     ivr_instructions: Optional[str] = None
+    client_first_name: Optional[str] = None
+    producer_name: Optional[str] = None
+    producer_phone: Optional[str] = None
+    call_type: str = CALL_TYPE_CARRIER
+    transfer_mode: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,6 +196,11 @@ class CallingDossier:
             "assigned_csr_email": self.assigned_csr_email,
             "custom_instructions": self.custom_instructions,
             "ivr_instructions": self.ivr_instructions,
+            "client_first_name": self.client_first_name,
+            "producer_name": self.producer_name,
+            "producer_phone": self.producer_phone,
+            "call_type": self.call_type,
+            "transfer_mode": self.transfer_mode,
         }
 
 
@@ -79,6 +231,10 @@ class ContextHydrator:
         phone_override: Optional[str] = None,
         instructions: Optional[str] = None,
         requester_email: Optional[str] = None,
+        call_type: Optional[str] = None,
+        applicant_profile: Optional[Dict[str, Any]] = None,
+        policy_profile: Optional[Dict[str, Any]] = None,
+        enrich_from_ezlynx: bool = False,
     ) -> Optional[CallingDossier]:
         """
         Hydrates a full CallingDossier given partial input (policy number or applicant name).
@@ -103,6 +259,9 @@ class ContextHydrator:
                     .filter(PolicyRenewal.insured_name.ilike(f"%{clean_name}%"))
                     .first()
                 )
+        except Exception as exc:
+            logger.debug("renewals.db lookup skipped: %s", exc)
+            pol_record = None
         finally:
             db.close()
 
@@ -152,7 +311,7 @@ class ContextHydrator:
         resolved_agency_code = carrier_info.get("agency_code")
         ivr_notes = carrier_info.get("ivr_instructions")
 
-        return CallingDossier(
+        dossier = CallingDossier(
             policy_number=pol_num,
             insured_name=insured,
             carrier_name=carrier,
@@ -166,7 +325,76 @@ class ContextHydrator:
             assigned_csr_email=csr_email,
             custom_instructions=instructions,
             ivr_instructions=ivr_notes,
+            call_type=normalize_call_type(call_type),
         )
+        self.enrich_identity(
+            dossier,
+            applicant=applicant_profile,
+            policy=policy_profile,
+            call_type=call_type,
+        )
+        if enrich_from_ezlynx:
+            self.enrich_identity_from_ezlynx(dossier)
+        return dossier
+
+    def enrich_identity(
+        self,
+        dossier: CallingDossier,
+        applicant: Optional[Dict[str, Any]] = None,
+        policy: Optional[Dict[str, Any]] = None,
+        call_type: Optional[str] = None,
+    ) -> CallingDossier:
+        """Apply EZLynx FirstName + Producer field, then directory phone lookup."""
+        if call_type:
+            dossier.call_type = normalize_call_type(call_type)
+        if applicant:
+            dossier.client_first_name = extract_client_first_name(
+                applicant, dossier.insured_name
+            )
+            if not dossier.producer_name:
+                dossier.producer_name = extract_producer_name(policy, applicant)
+            producer_email = extract_producer_email(policy, applicant)
+            match = lookup_producer(name=dossier.producer_name, email=producer_email)
+            if match:
+                dossier.producer_name = match.get("name") or dossier.producer_name
+                dossier.producer_phone = match.get("phone")
+        elif dossier.producer_name and not dossier.producer_phone:
+            match = lookup_producer(name=dossier.producer_name)
+            if match:
+                dossier.producer_name = match.get("name") or dossier.producer_name
+                dossier.producer_phone = match.get("phone")
+        if dossier.producer_phone:
+            dossier.transfer_mode = TRANSFER_MODE_WARM
+        else:
+            dossier.transfer_mode = None
+        return dossier
+
+    def enrich_identity_from_ezlynx(
+        self,
+        dossier: CallingDossier,
+        ezlynx_client: Optional[Any] = None,
+    ) -> CallingDossier:
+        """Fetch applicant/policy from EZLynx and hydrate first name + Producer field."""
+        if not dossier.applicant_id:
+            return dossier
+        try:
+            from src.ezlynx.api_client import EZLynxApiClient
+
+            client = ezlynx_client or EZLynxApiClient()
+            app_res = client.get_applicant(str(dossier.applicant_id))
+            applicant = app_res.get("applicant") if app_res.get("status") == "success" else None
+            policy = None
+            try:
+                pol_res = client.get_applicant_policies(str(dossier.applicant_id))
+                policy = match_policy_record(
+                    unwrap_policy_list(pol_res), dossier.policy_number
+                )
+            except Exception as exc:
+                logger.debug("EZLynx policy lookup for producer skipped: %s", exc)
+            return self.enrich_identity(dossier, applicant=applicant, policy=policy)
+        except Exception as exc:
+            logger.debug("EZLynx identity enrichment failed gracefully: %s", exc)
+            return dossier
 
     def _resolve_carrier_contact(self, carrier_name: str) -> Dict[str, Any]:
         """Looks up carrier contact info across carrier_directory.json and ezlynx_full_extracted_directory.json."""

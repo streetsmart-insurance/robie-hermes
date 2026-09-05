@@ -37,5 +37,42 @@
     "buster brown": "+17329953409",
     "jake": "+17326688161",
     "jimmy": "+17329954324"
-  }
+  },
+  "producers": [
+    {
+      "name": "Jake Ferrara",
+      "email": "jake@streetsmart.insurance",
+      "phone": "+17326688161",
+      "aliases": ["Jake", "Ferrara, Jake"]
+    },
+    {
+      "name": "Carlo Ferrara",
+      "email": "carlo@streetsmart.insurance",
+      "phone": "+17329953409",
+      "aliases": ["Carlo", "Buster Brown", "Ferrara, Carlo"]
+    },
+    {
+      "name": "Jimmy",
+      "phone": "+17329954324",
+      "aliases": ["Jimmy"]
+    },
+    {
+      "name": "Eimy Ramos",
+      "email": "eimy@streetsmart.insurance",
+      "phone": null,
+      "aliases": ["Eimy", "Ramos, Eimy"]
+    },
+    {
+      "name": "Sandy Santana",
+      "email": "sandy@streetsmart.insurance",
+      "phone": null,
+      "aliases": ["Sandy", "Santana, Sandy", "Sandy Mara"]
+    },
+    {
+      "name": "Nicole",
+      "email": "nicole@streetsmart.insurance",
+      "phone": null,
+      "aliases": ["Nicole"]
+    }
+  ]
 }

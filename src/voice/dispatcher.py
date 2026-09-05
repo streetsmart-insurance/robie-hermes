@@ -70,6 +70,11 @@ class VoiceCallDispatcher:
             return _failure_result(error="HYDRATE_FAILED", policy=policy_number)
 
         try:
+            self.hydrator.enrich_identity_from_ezlynx(dossier)
+        except Exception as exc:
+            logger.debug("Producer/first-name enrichment skipped for %s: %s", policy_number, exc)
+
+        try:
             result = self.voice.dispatch_call(dossier=dossier, dry_run=dry_run)
         except Exception as exc:
             logger.error("Dispatch failed for %s: %s", policy_number, exc)

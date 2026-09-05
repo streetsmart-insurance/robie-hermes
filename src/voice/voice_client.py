@@ -10,7 +10,11 @@ import requests
 from typing import Optional, Dict, Any
 
 from src.config import settings
-from src.voice.context_hydrator import CallingDossier
+from src.voice.call_directory import normalize_phone_e164
+from src.voice.context_hydrator import (
+    CALL_TYPE_CLIENT_FOLLOWUP,
+    CallingDossier,
+)
 
 logger = logging.getLogger("carrier_voice_client")
 
@@ -54,6 +58,97 @@ class CarrierVoiceClient:
 
     def build_call_prompt(self, dossier: CallingDossier, custom_instructions: Optional[str] = None) -> str:
         """Constructs conversational instructions for the Voice AI model."""
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+            return self._build_client_followup_prompt(dossier, custom_instructions)
+        return self._build_carrier_prompt(dossier, custom_instructions)
+
+    def build_transfer_briefing(self, dossier: CallingDossier) -> str:
+        """Short briefing Bland/Robie should give the producer before merging."""
+        producer = dossier.producer_name or "the producer"
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+            first = dossier.client_first_name or dossier.insured_name
+            return (
+                f"Hi {producer}, this is Robie from StreetSmart. I have {first} "
+                f"({dossier.insured_name}) on the line about the quote you put together "
+                f"for policy {dossier.policy_number}. Connecting you now."
+            )
+        return (
+            f"Hi {producer}, this is Robie from StreetSmart. I have "
+            f"{dossier.carrier_name} on the line regarding {dossier.insured_name}, "
+            f"policy {dossier.policy_number}. Connecting you now."
+        )
+
+    def build_client_first_sentence(self, dossier: CallingDossier) -> str:
+        first = dossier.client_first_name
+        producer = dossier.producer_name or "your producer"
+        greeting = f"Hi {first}" if first else "Hi"
+        return (
+            f"{greeting}, this is Robie from StreetSmart — I'm calling about the quote "
+            f"{producer} put together for you. Are you free to discuss it?"
+        )
+
+    def _custom_instructions_clause(
+        self, dossier: CallingDossier, custom_instructions: Optional[str]
+    ) -> str:
+        ci = custom_instructions or dossier.custom_instructions
+        if ci:
+            return f"\nSpecific CSR instructions to convey: {ci}"
+        return ""
+
+    def _transfer_objective_block(self, dossier: CallingDossier) -> str:
+        if not dossier.producer_phone or not dossier.producer_name:
+            return (
+                "\nTRANSFER: Do not transfer this call. No producer phone is on file "
+                "in the voice directory."
+            )
+        briefing = self.build_transfer_briefing(dossier)
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+            return f"""
+WARM TRANSFER TO PRODUCER:
+- Destination: {dossier.producer_name} ({dossier.producer_phone}).
+- Only transfer if they clearly agree to speak with {dossier.producer_name} now.
+- If they say no, are busy, or you reach voicemail, give a short polite close and do not transfer.
+- When transferring, use the transfer action (say "transfer") and brief {dossier.producer_name}:
+  "{briefing}"
+"""
+        return f"""
+WARM TRANSFER TO PRODUCER:
+- Destination: {dossier.producer_name} ({dossier.producer_phone}).
+- After a live human at the carrier is confirmed as the right desk, offer to connect them with {dossier.producer_name}, or transfer immediately if they ask for the producer / the person who requested this call.
+- Do not transfer until you have confirmed you reached the correct desk (or they asked for the producer).
+- When transferring, use the transfer action (say "transfer") and brief {dossier.producer_name}:
+  "{briefing}"
+"""
+
+    def _build_client_followup_prompt(
+        self, dossier: CallingDossier, custom_instructions: Optional[str] = None
+    ) -> str:
+        first = dossier.client_first_name or "there"
+        producer = dossier.producer_name or "your producer"
+        custom_instructions_clause = self._custom_instructions_clause(dossier, custom_instructions)
+        transfer_block = self._transfer_objective_block(dossier)
+        return f"""You are Robie, an autonomous operations specialist calling from StreetSmart Insurance.
+
+CALL DETAILS:
+- Call type: client follow-up
+- Client first name: {dossier.client_first_name or 'unknown'}
+- Insured / account: {dossier.insured_name}
+- Policy Number: {dossier.policy_number}
+- Line of Business: {dossier.line_of_business}
+- Producer: {producer}
+- Producer phone (warm transfer): {dossier.producer_phone or 'not on file'}{custom_instructions_clause}
+
+CALL OBJECTIVES:
+1. Greet the client by first name: "Hi {first}, this is Robie from StreetSmart — I'm calling about the quote {producer} put together for you. Are you free to discuss it?"
+2. If they clearly say yes / they are free to talk, transfer them to {producer} using the transfer action.
+3. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail asking them to call StreetSmart or reply to their email.
+4. Never guess a different producer. Only connect {producer}.
+{transfer_block}
+"""
+
+    def _build_carrier_prompt(
+        self, dossier: CallingDossier, custom_instructions: Optional[str] = None
+    ) -> str:
         agency_code_clause = (
             f"Our agency producer code with your company is {dossier.agency_code}."
             if dossier.agency_code
@@ -64,12 +159,10 @@ class CarrierVoiceClient:
         if dossier.ivr_instructions:
             ivr_clause = f"\nPhone menu / IVR guidance: {dossier.ivr_instructions}"
 
-        ci = custom_instructions or dossier.custom_instructions
-        custom_instructions_clause = ""
-        if ci:
-            custom_instructions_clause = f"\nSpecific CSR instructions to convey: {ci}"
+        custom_instructions_clause = self._custom_instructions_clause(dossier, custom_instructions)
+        transfer_block = self._transfer_objective_block(dossier)
 
-        prompt = f"""You are Robie, an autonomous operations and renewal specialist calling from StreetSmart Insurance.
+        return f"""You are Robie, an autonomous operations and renewal specialist calling from StreetSmart Insurance.
 
 CALL DETAILS:
 - Target Carrier: {dossier.carrier_name}
@@ -77,6 +170,7 @@ CALL DETAILS:
 - Insured Legal Name: {dossier.insured_name}
 - Line of Business: {dossier.line_of_business}
 - Expiration Date: {dossier.expiration_date or 'Upcoming'}
+- Requesting producer: {dossier.producer_name or 'StreetSmart producer'}
 - Agency Reference: {agency_code_clause}{ivr_clause}{custom_instructions_clause}
 
 CALL OBJECTIVES:
@@ -92,9 +186,10 @@ CALL OBJECTIVES:
 5. If terms are not yet released:
    - Inquire what is needed to issue terms (e.g. loss runs, renewal application, payroll verification).
    - Ask for the underwriter's direct email or estimated completion date.
-6. Record the representative's first name, conclude the call politely, and wish them a great day.
+6. After the live human is confirmed as the right desk, offer to connect them with {dossier.producer_name or 'the requesting producer'}, or transfer if they ask for the producer.
+7. Record the representative's first name, conclude the call politely, and wish them a great day.
+{transfer_block}
 """
-        return prompt
 
     def dispatch_call(
         self,
@@ -122,7 +217,7 @@ CALL OBJECTIVES:
                 f"[SIMULATION] Outbound carrier call triggered for {dossier.policy_number} "
                 f"({dossier.carrier_name} at {dossier.carrier_phone})"
             )
-            return {
+            simulated = {
                 "success": True,
                 "mode": "SIMULATION",
                 "call_id": f"sim_call_{dossier.policy_number.replace(' ', '_')}_001",
@@ -132,7 +227,14 @@ CALL OBJECTIVES:
                 "policy_number": dossier.policy_number,
                 "insured_name": dossier.insured_name,
                 "prompt": prompt,
+                "call_type": getattr(dossier, "call_type", None),
+                "producer_name": dossier.producer_name,
+                "producer_phone": dossier.producer_phone,
+                "transfer_mode": dossier.transfer_mode,
+                "client_first_name": dossier.client_first_name,
             }
+            simulated.update(self.build_bland_transfer_fields(dossier))
+            return simulated
 
         # Live Bland AI Integration
         if self.provider == "bland_ai":
@@ -140,6 +242,57 @@ CALL OBJECTIVES:
 
         # Live Retell AI Integration
         return self._dispatch_retell(dossier, prompt, webhook_url)
+
+    def build_bland_transfer_fields(self, dossier: CallingDossier) -> Dict[str, Any]:
+        """Bland send-call transfer_phone_number / transfer_list for producer warm transfer."""
+        producer_phone = normalize_phone_e164(dossier.producer_phone)
+        if not producer_phone:
+            return {}
+        return {
+            "transfer_phone_number": producer_phone,
+            "transfer_list": {
+                "default": producer_phone,
+                "producer": producer_phone,
+            },
+        }
+
+    def _voicemail_message(self, dossier: CallingDossier) -> str:
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+            first = dossier.client_first_name
+            producer = dossier.producer_name or "your producer"
+            greeting = f"Hi {first}" if first else "Hello"
+            return (
+                f"{greeting}, this is Robie from StreetSmart Insurance calling about the quote "
+                f"{producer} put together for you. Please give us a call back or reply to your "
+                "email when you have a moment. Thank you!"
+            )
+        return (
+            f"Hello, this is Robie from StreetSmart Insurance calling regarding Policy #{dossier.policy_number} "
+            f"for {dossier.insured_name}. Please email any updates or documentation to robie@streetsmart.insurance. "
+            "Thank you and have a great day!"
+        )
+
+    def _first_sentence(self, dossier: CallingDossier) -> str:
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
+            return self.build_client_first_sentence(dossier)
+        return (
+            f"Hello! My name is Robie calling from StreetSmart Insurance regarding "
+            f"policy number {dossier.policy_number}."
+        )
+
+    def _bland_metadata(self, dossier: CallingDossier) -> Dict[str, Any]:
+        return {
+            "policy_number": dossier.policy_number,
+            "insured_name": dossier.insured_name,
+            "carrier_name": dossier.carrier_name,
+            "applicant_id": dossier.applicant_id,
+            "assigned_csr_email": dossier.assigned_csr_email,
+            "call_type": getattr(dossier, "call_type", None),
+            "client_first_name": dossier.client_first_name,
+            "producer_name": dossier.producer_name,
+            "producer_phone": dossier.producer_phone,
+            "transfer_mode": dossier.transfer_mode,
+        }
 
     def _dispatch_bland_ai(
         self, dossier: CallingDossier, prompt: str, webhook_url: Optional[str]
@@ -165,21 +318,14 @@ CALL OBJECTIVES:
             "answered_by_enabled": True,
             "wait_for_greeting": True,
             "ivr_navigation": True,
-            "first_sentence": f"Hello! My name is Robie calling from StreetSmart Insurance regarding policy number {dossier.policy_number}.",
+            "first_sentence": self._first_sentence(dossier),
             "voicemail_action": "leave_message",
-            "voicemail_message": (
-                f"Hello, this is Robie from StreetSmart Insurance calling regarding Policy #{dossier.policy_number} "
-                f"for {dossier.insured_name}. Please email any updates or documentation to robie@streetsmart.insurance. "
-                "Thank you and have a great day!"
-            ),
-            "metadata": {
-                "policy_number": dossier.policy_number,
-                "insured_name": dossier.insured_name,
-                "carrier_name": dossier.carrier_name,
-                "applicant_id": dossier.applicant_id,
-                "assigned_csr_email": dossier.assigned_csr_email,
-            },
+            "voicemail_message": self._voicemail_message(dossier),
+            "metadata": self._bland_metadata(dossier),
         }
+        payload.update(self.build_bland_transfer_fields(dossier))
+        if payload.get("transfer_phone_number"):
+            payload["webhook_events"] = ["post_transfer_transcript"]
         if self.from_phone:
             payload["from"] = self.from_phone
 

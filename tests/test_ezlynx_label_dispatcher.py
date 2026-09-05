@@ -6,13 +6,14 @@ import pytest
 
 from src.voice.ezlynx_label_dispatcher import (
     PORTAL_DISCUSSIONS_PAGE_SIZE,
+    EZLynxLabelCallDispatcher,
     discussion_is_robie_call,
     discussion_note_identity,
     extract_discussion_note_labels,
     extract_discussion_note_text,
+    infer_call_type,
     latest_activity_is_from_robie,
     parse_call_note_instructions,
-    EZLynxLabelCallDispatcher,
 )
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
 
@@ -180,6 +181,92 @@ def test_dispatcher_posts_clarification_note_when_phone_unknown(processed_store)
     mock_ezlynx.add_note_to_discussion.assert_called_once()
     posted_text = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]" in posted_text
+
+
+def test_parse_call_type_client_and_carrier_cues():
+    client_note = """
+    robie call
+    Call type: client
+    Who to call: the insured
+    What to say: Review the quote.
+    """
+    parsed = parse_call_note_instructions(client_note)
+    assert parsed["call_type"] == "client_followup"
+    assert infer_call_type(parsed, insured_name="Garcia Landscaping LLC") == "client_followup"
+
+    carrier_note = """
+    robie call
+    Call type: carrier
+    Who to call: The Hartford
+    What to say: Ask for terms.
+    """
+    parsed_carrier = parse_call_note_instructions(carrier_note)
+    assert parsed_carrier["call_type"] == "carrier"
+    assert infer_call_type(parsed_carrier) == "carrier"
+
+
+def test_infer_call_type_from_who_to_call_insured_only():
+    parsed = parse_call_note_instructions(
+        "robie call\nWho to call: the insured\nWhat to say: Follow up on the quote."
+    )
+    assert infer_call_type(parsed, insured_name="Acme LLC") == "client_followup"
+    named = parse_call_note_instructions(
+        "robie call\nWho to call: Acme LLC\nWhat to say: Follow up on the quote."
+    )
+    assert infer_call_type(named, insured_name="Acme LLC") == "client_followup"
+    carrier = parse_call_note_instructions(
+        "robie call\nWho to call: Travelers\nWhat to say: Ask for terms."
+    )
+    assert infer_call_type(carrier, insured_name="Acme LLC") == "carrier"
+
+
+def test_dispatcher_client_followup_hydrates_producer_and_first_name(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "client prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_client_01", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 777,
+            "title": "robie call",
+            "discussionNote": {
+                "noteId": 555001,
+                "noteText": (
+                    "Call type: client\nWho to call: the insured\n"
+                    "What to say: Review the quote Jake put together."
+                ),
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Maria",
+            "LastName": "Garcia",
+            "BusinessName": "Garcia Landscaping LLC",
+            "Producer": "Jake Ferrara",
+            "CellPhone": "732-555-0100",
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_followup"
+    assert results[0]["phone"] == "+17325550100"
+    assert results[0]["producer_name"] == "Jake Ferrara"
+    assert results[0]["producer_phone"] == "+17326688161"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.client_first_name == "Maria"
+    assert dossier.call_type == "client_followup"
+    assert dossier.producer_phone == "+17326688161"
+    assert dossier.assigned_csr_email == "carlo@streetsmart.insurance"
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Warm transfer: enabled" in ack
+    assert "Jake Ferrara" in ack
 
 
 def test_dispatcher_skips_when_latest_note_is_from_robie(processed_store):

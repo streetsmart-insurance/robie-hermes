@@ -9,11 +9,18 @@ import json
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict, Any
+from typing import Any, Dict
 
-from src.voice.call_completion import handle_completed_call
+from src.voice.call_completion import extract_transfer_outcome, handle_completed_call
 
 logger = logging.getLogger("voice_webhook_server")
+
+__all__ = [
+    "VoiceWebhookRequestHandler",
+    "extract_transfer_outcome",
+    "handle_completed_call",
+    "run_webhook_server",
+]
 
 
 class VoiceWebhookRequestHandler(BaseHTTPRequestHandler):

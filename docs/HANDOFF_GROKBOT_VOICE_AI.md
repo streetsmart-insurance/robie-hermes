@@ -76,6 +76,28 @@ CSRs and Account Managers can trigger Robie without leaving EZLynx:
    PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id <ApplicantID>
    ```
 
+#### Client follow-up vs carrier call + producer warm transfer
+Tag the note explicitly so Robie does not guess:
+
+```text
+robie call
+Call type: client
+Who to call: the insured
+What to say: Review the quote Jake put together.
+```
+
+```text
+robie call
+Call type: carrier
+Who to call: The Hartford
+What to say: Confirm renewal terms, then connect them to the producer if they ask.
+```
+
+- **Client path:** Robie greets the insured by EZLynx `FirstName` and mentions the Producer. If they clearly agree, Bland warm-transfers to that producer's E.164 phone.
+- **Carrier path (default):** Existing underwriting follow-up. After a live human is confirmed, Robie can warm-transfer to the same Producer / requestor.
+- Producer name comes from the EZLynx **Producer** field (not a free-text guess). Phone is looked up in `data/voice_call_directory.json`. Email alone is not enough — add an E.164 `phone` for that producer or transfer is skipped.
+- Assigned CSR for EZLynx tasks remains Carlo Ferrara (never Robie).
+
 ---
 
 ### Method C: Via Command Line (Direct Terminal Execution)

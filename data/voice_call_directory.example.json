@@ -1,0 +1,10 @@
+{
+  "producers": [
+    {
+      "name": "Sample Producer",
+      "email": "producer@streetsmart.insurance",
+      "phone": "+15555550199",
+      "aliases": ["Sample"]
+    }
+  ]
+}

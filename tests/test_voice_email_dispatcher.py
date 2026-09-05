@@ -36,6 +36,18 @@ def test_parse_call_command_with_phone_override():
     assert cmd["policy_number"] == "PWC1239278"
     assert cmd["phone_override"] == "866-513-5650"
     assert "payroll audit" in cmd["body"]
+    assert cmd.get("call_type") is None
+
+
+def test_parse_call_command_explicit_client_call_type():
+    dispatcher = EmailCallDispatcher()
+    cmd = dispatcher.parse_call_command(
+        sender="jake@streetsmart.insurance",
+        subject="Call the client for PWC1239278",
+        body="Call type: client\nPlease call the insured and review the quote.",
+    )
+    assert cmd is not None
+    assert cmd["call_type"] == "client_followup"
 
 
 def test_parse_call_command_ignores_unauthorized():

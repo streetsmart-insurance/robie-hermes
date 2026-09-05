@@ -7,7 +7,9 @@ from src.voice.call_directory import (
     StreetSmartDirectoryHook,
     VoiceCallDirectory,
     lookup_carrier_phone,
+    lookup_producer,
     main as directory_main,
+    normalize_phone_e164,
 )
 
 
@@ -111,3 +113,70 @@ def test_directory_cli_dry_run_does_not_write(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "dry_run" in out
     assert "hartford" in out.lower() or '"count": 1' in out
+
+
+SAMPLE_PRODUCERS = {
+    "producers": [
+        {
+            "name": "Jake Ferrara",
+            "email": "jake@streetsmart.insurance",
+            "phone": "+17326688161",
+            "aliases": ["Jake", "Ferrara, Jake"],
+        },
+        {
+            "name": "Carlo Ferrara",
+            "email": "carlo@streetsmart.insurance",
+            "phone": "732-995-3409",
+            "aliases": ["Carlo", "Buster Brown"],
+        },
+        {
+            "name": "Eimy Ramos",
+            "email": "eimy@streetsmart.insurance",
+            "phone": None,
+            "aliases": ["Eimy"],
+        },
+    ]
+}
+
+
+def test_normalize_phone_e164():
+    assert normalize_phone_e164("732-668-8161") == "+17326688161"
+    assert normalize_phone_e164("(732) 995-3409") == "+17329953409"
+    assert normalize_phone_e164("+17329953409") == "+17329953409"
+    assert normalize_phone_e164(None) is None
+
+
+def test_lookup_producer_by_ezlynx_name_and_alias():
+    jake = lookup_producer(name="Jake Ferrara", directory=SAMPLE_PRODUCERS)
+    assert jake["name"] == "Jake Ferrara"
+    assert jake["phone"] == "+17326688161"
+
+    inverted = lookup_producer(name="Ferrara, Jake", directory=SAMPLE_PRODUCERS)
+    assert inverted["phone"] == "+17326688161"
+
+    carlo = lookup_producer(name="Carlo", directory=SAMPLE_PRODUCERS)
+    assert carlo["name"] == "Carlo Ferrara"
+    assert carlo["phone"] == "+17329953409"
+
+
+def test_lookup_producer_by_email_without_phone_cannot_transfer():
+    eimy = lookup_producer(email="eimy@streetsmart.insurance", directory=SAMPLE_PRODUCERS)
+    assert eimy["name"] == "Eimy Ramos"
+    assert eimy["phone"] is None
+
+
+def test_lookup_producer_refuses_ambiguous_last_name():
+    assert lookup_producer(name="Ferrara", directory=SAMPLE_PRODUCERS) is None
+
+
+def test_lookup_unknown_producer_is_none():
+    assert lookup_producer(name="Not A Producer", directory=SAMPLE_PRODUCERS) is None
+
+
+def test_seeded_directory_includes_jake_and_carlo():
+    jake = lookup_producer(name="Jake Ferrara")
+    carlo = lookup_producer(email="carlo@streetsmart.insurance")
+    assert jake is not None
+    assert jake["phone"] == "+17326688161"
+    assert carlo is not None
+    assert carlo["phone"] == "+17329953409"
