@@ -93,6 +93,47 @@ def parse_call_note_instructions(note_text: str) -> Dict[str, Any]:
     return result
 
 
+KNOWN_CARRIER_PHONES = {
+    "the hartford": "+18005551234",
+    "hartford": "+18005551234",
+    "travelers": "+18002386225",
+    "coterie": "+18555673421",
+    "coterie insurance": "+18555673421",
+    "progressive": "+18008765581",
+    "tapco": "+18003345579",
+    "tapco underwriters": "+18003345579",
+    "chubb": "+18002524670",
+    "chubb group": "+18002524670",
+    "amtrust": "+18775287878",
+    "cna": "+18002622000",
+    "cna surety": "+18002622000",
+    "liberty mutual": "+18003440197",
+    "employers": "+18886826671",
+    "guard": "+18006732265",
+    "berkshire hathaway guard": "+18006732265",
+    "bhhc": "+18884958949",
+    "berkshire hathaway": "+18884958949",
+    "rps": "+18665958405",
+    "risk placement services": "+18665958405",
+    "amwins": "+18002213824",
+    "jimcor": "+18006440333",
+    "specialty coverage": "+18002422200",
+    "new england excess": "+18005484301",
+    "markel": "+18004311270",
+}
+
+
+def lookup_known_carrier_phone(carrier_name: Optional[str]) -> Optional[str]:
+    """Resolves carrier phone number from known directory or hydrator."""
+    if not carrier_name:
+        return None
+    clean_name = carrier_name.lower().strip()
+    for key, phone in KNOWN_CARRIER_PHONES.items():
+        if key in clean_name or clean_name in key:
+            return phone
+    return None
+
+
 class EZLynxLabelCallDispatcher:
     """Dispatches calls based on EZLynx notes/discussions tagged 'robie call'."""
 
@@ -111,7 +152,8 @@ class EZLynxLabelCallDispatcher:
     ) -> List[Dict[str, Any]]:
         """
         Fetches discussions/notes for an applicant, scans for 'robie call' instructions,
-        initiates the calls, and posts confirmation back.
+        resolves missing carrier phone numbers from policy or carrier directory,
+        initiates the calls, and posts confirmation or clarification notes back.
         """
         results = []
         discussions = self.ezlynx.get_applicant_discussions(applicant_id)
@@ -128,6 +170,9 @@ class EZLynxLabelCallDispatcher:
             or f"Applicant #{applicant_id}"
         )
 
+        # Lazy cache applicant policies to avoid duplicate API calls
+        applicant_policies = None
+
         for disc in discussions:
             title = disc.get("title", "")
             note_obj = disc.get("discussionNote", {})
@@ -138,22 +183,89 @@ class EZLynxLabelCallDispatcher:
             if not parsed["is_robie_call"]:
                 continue
 
-            phone = parsed["phone_number"]
-            if not phone:
-                logger.warning(f"Applicant {applicant_id}: 'robie call' found but no phone number specified.")
+            # Guard: Prevent re-triggering if the latest note was already posted by Robie
+            last_author = note_obj.get("createdByName") or disc.get("lastModifiedByName", "")
+            if "robie" in last_author.lower() or "[ROBIE" in note_text:
+                logger.debug(f"Skipping discussion '{title}': latest activity already handled by Robie.")
                 continue
 
-            target_carrier = parsed["target_name"] or "Carrier Representative"
-            policy_num = parsed["policy_number"] or "N/A"
+            # 1. Resolve Policy Number if missing in note body
+            policy_num = parsed["policy_number"]
+            if not policy_num:
+                # Attempt to extract from discussion title (e.g. "... | PWC1239278 Associated Specialty")
+                pol_in_title = re.search(r"\|\s*([A-Z0-9\-]{5,})\b", title, re.IGNORECASE)
+                if pol_in_title:
+                    policy_num = pol_in_title.group(1).strip()
+                else:
+                    # Look up active policies on applicant
+                    if applicant_policies is None:
+                        applicant_policies = self.ezlynx.get_applicant_policies(applicant_id)
+                    if applicant_policies and isinstance(applicant_policies, list):
+                        policy_num = applicant_policies[0].get("policyNumber") or applicant_policies[0].get("PolicyNumber")
+
+            # 2. Resolve Carrier Name if missing
+            target_carrier = parsed["target_name"]
+            if not target_carrier or target_carrier == "Carrier Representative":
+                # Check policy directory or applicant policies
+                if applicant_policies is None:
+                    applicant_policies = self.ezlynx.get_applicant_policies(applicant_id)
+                if applicant_policies and isinstance(applicant_policies, list):
+                    for pol in applicant_policies:
+                        p_num = pol.get("policyNumber") or pol.get("PolicyNumber")
+                        if policy_num and p_num == policy_num:
+                            target_carrier = pol.get("carrierName") or pol.get("CarrierName") or pol.get("companyName")
+                            break
+                    if not target_carrier and applicant_policies:
+                        target_carrier = applicant_policies[0].get("carrierName") or applicant_policies[0].get("CarrierName")
+
+            target_carrier = target_carrier or "Carrier Representative"
+
+            # 3. Resolve Phone Number from carrier knowledge base / directory if missing
+            phone = parsed["phone_number"]
+            if not phone:
+                phone = lookup_known_carrier_phone(target_carrier)
+                if phone:
+                    logger.info(f"Resolved phone {phone} for carrier '{target_carrier}' from directory.")
+
             instructions = parsed["instructions"] or "Inquire regarding policy status and quote release."
+            safe_pol_num = policy_num or "N/A"
+
+            # 4. If phone is STILL missing, post a polite clarification note directly via API (avoiding Playwright)
+            if not phone:
+                logger.warning(f"Applicant {applicant_id}: 'robie call' requested for '{target_carrier}', but no phone number found.")
+                clarification_note = (
+                    f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
+                    f"⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]\n"
+                    f"Robie received your request to call regarding this account, but could not determine "
+                    f"the carrier phone number for '{target_carrier}'.\n\n"
+                    f"To trigger this call, please reply to this card with the phone number:\n"
+                    f"• Example: \"Phone: 800-555-1234\"\n"
+                    f"• Or provide the underwriter direct contact info.\n\n"
+                    f"Robie will automatically place the call once the number is provided."
+                )
+                self.ezlynx.add_note_to_discussion(
+                    applicant_id=applicant_id,
+                    discussion_title=title,
+                    note_text=clarification_note,
+                    policy_number=policy_num,
+                    carrier_name=target_carrier,
+                )
+                results.append({
+                    "applicant_id": applicant_id,
+                    "discussion_title": title,
+                    "target": target_carrier,
+                    "status": "CLARIFICATION_NEEDED",
+                    "reason": "MISSING_PHONE_NUMBER",
+                })
+                continue
 
             logger.info(
                 f"[ROBIE CALL DETECTED] Applicant: {applicant_id} ({insured_name}) | "
-                f"Target: {target_carrier} ({phone}) | Policy: {policy_num}"
+                f"Target: {target_carrier} ({phone}) | Policy: {safe_pol_num}"
             )
 
             dossier = CallingDossier(
-                policy_number=policy_num,
+                policy_number=safe_pol_num,
                 insured_name=insured_name,
                 carrier_name=target_carrier,
                 carrier_phone=phone,
@@ -179,7 +291,7 @@ class EZLynxLabelCallDispatcher:
 
             # Post immediate acknowledgement note back to EZLynx discussion card
             ack_note = (
-                f"Policy: #{policy_num} ({target_carrier})\n\n"
+                f"Policy: #{safe_pol_num} ({target_carrier})\n\n"
                 f"🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]\n"
                 f"Robie has placed an outbound call to {target_carrier} at {phone}.\n"
                 f"Caller ID: {self.voice.from_phone or '+1 (732) 298-6745'}\n"
@@ -192,7 +304,7 @@ class EZLynxLabelCallDispatcher:
                 applicant_id=applicant_id,
                 discussion_title=title,
                 note_text=ack_note,
-                policy_number=policy_num if policy_num != "N/A" else None,
+                policy_number=policy_num,
                 carrier_name=target_carrier,
             )
 
