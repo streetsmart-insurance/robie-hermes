@@ -31,7 +31,7 @@ class CarrierVoiceClient:
         try:
             from src.security.secrets_manager import SecretsManager
             sm = SecretsManager()
-            return sm.get_secret("carrier-voice-api-key")
+            return sm.get_credential("carrier_voice", "api_key")
         except Exception:
             return None
 
