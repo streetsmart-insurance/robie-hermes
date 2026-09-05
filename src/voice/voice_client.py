@@ -164,6 +164,13 @@ CALL OBJECTIVES:
             "answered_by_enabled": True,
             "wait_for_greeting": True,
             "ivr_navigation": True,
+            "first_sentence": f"Hello! My name is Robie calling from StreetSmart Insurance regarding policy number {dossier.policy_number}.",
+            "voicemail_action": "leave_message",
+            "voicemail_message": (
+                f"Hello, this is Robie from StreetSmart Insurance calling regarding Policy #{dossier.policy_number} "
+                f"for {dossier.insured_name}. Please email any updates or documentation to robie@streetsmart.insurance. "
+                "Thank you and have a great day!"
+            ),
             "metadata": {
                 "policy_number": dossier.policy_number,
                 "insured_name": dossier.insured_name,
