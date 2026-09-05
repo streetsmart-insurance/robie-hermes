@@ -55,7 +55,30 @@ Carlo or Jake can trigger a call from their phone or laptop simply by emailing `
 
 ---
 
-### Method B: Via Command Line (Direct Terminal Execution)
+### Method B: Via EZLynx 'robie call' Note / Label (In-App CSR Trigger)
+CSRs and Account Managers can trigger Robie without leaving EZLynx:
+1. Open the **Applicant** in EZLynx.
+2. In the Discussion card or Add Note, include `robie call`:
+   ```text
+   robie call
+   Carrier: The Hartford
+   Policy: PWC1239278
+   What to say: Check if renewal terms are released and ask for quoted premium.
+   ```
+   *(Note: Phone number is optional! If omitted, Robie auto-resolves the carrier phone from the agency directory and policy file).*
+3. **Execution & Intelligence:**
+   - **Auto-Phone Resolution:** If no phone is provided, Robie pulls the carrier from the policy or directory (`Hartford`, `Travelers`, `Coterie`, `Progressive`, `AmTrust`, `Chubb`, etc.).
+   - **Lean Direct API Clarification:** If the carrier phone cannot be found, Robie does NOT touch heavy Playwright tasks—it posts a clean clarification note directly into the card via REST API requesting the number:
+     > `⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]`
+   - **Instant Dialing:** Robie dials via Bland AI from `+1 (732) 298-6745` and posts audio + transcript back to the card.
+4. **Trigger / Scan Command:**
+   ```bash
+   PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id <ApplicantID>
+   ```
+
+---
+
+### Method C: Via Command Line (Direct Terminal Execution)
 To test or dispatch calls instantly from the terminal or scripts:
 
 #### 1. Quick Dry-Run Simulation (No Real Phone Call Placed, $0 Cost):
