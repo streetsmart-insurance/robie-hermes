@@ -5,11 +5,12 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
 class EmailClassification(BaseModel):
-    intent: str  # QUOTE_ATTACHED, INFO_REQUESTED, NON_RENEWAL_DECLINED, ACKNOWLEDGED, UNKNOWN
+    intent: str  # QUOTE_ATTACHED, LOSS_RUNS_ATTACHED, INFO_REQUESTED, NON_RENEWAL_DECLINED, ACKNOWLEDGED, UNKNOWN
     confidence: float
     summary: str
     action_needed: str
     has_quote_attachment: bool = False
+    document_type: str = "renewal"  # renewal, loss runs, non renewal, application
     requested_items: List[str] = []
 
 class UnderwriterIntentClassifier:
@@ -41,8 +42,11 @@ class UnderwriterIntentClassifier:
 
     DECLINE_KEYWORDS = [
         r"declined? to renew",
+        r"renewal declined",
         r"unable to offer",
+        r"notice of non-?renewal",
         r"non-?renewal notice",
+        r"non-?renewal",
         r"cannot write",
         r"market restriction",
         r"will not be renewing"
@@ -63,21 +67,39 @@ class UnderwriterIntentClassifier:
         body_text: str,
         attachment_filenames: List[str]
     ) -> EmailClassification:
+        clean_text = f"{subject or ''} {body_text or ''}".lower()
         clean_body = (body_text or "").lower()
         has_pdf = any(f.lower().endswith(".pdf") for f in attachment_filenames)
 
         # 1. Check for Decline / Non-Renewal (Highest Priority)
         for kw in self.DECLINE_KEYWORDS:
-            if re.search(kw, clean_body):
+            if re.search(kw, clean_text):
                 return EmailClassification(
                     intent="NON_RENEWAL_DECLINED",
                     confidence=0.95,
                     summary="Carrier is declining to renew or issuing non-renewal notice.",
                     action_needed="CRITICAL: Re-market policy immediately to secondary carriers.",
-                    has_quote_attachment=False
+                    has_quote_attachment=False,
+                    document_type="non renewal"
                 )
 
-        # 2. Check for Information / Exposure Requests
+        # 2. Check for Loss Runs Attached
+        loss_run_att = any(
+            bool(re.search(r"loss[\s_-]?runs?|loss[\s_-]?history|claims?[\s_-]?history", f.lower()))
+            for f in attachment_filenames
+        )
+        loss_run_body = bool(re.search(r"attached (?:are|is) (?:the )?loss runs?|please find (?:attached )?loss runs?|prior loss history attached", clean_text))
+        if loss_run_att or (has_pdf and loss_run_body):
+            return EmailClassification(
+                intent="LOSS_RUNS_ATTACHED",
+                confidence=0.95,
+                summary="Loss runs document received from underwriter/carrier.",
+                action_needed="Upload loss runs PDF to EZLynx Loss Runs folder and notify CSR.",
+                has_quote_attachment=False,
+                document_type="loss runs"
+            )
+
+        # 3. Check for Information / Exposure Requests
         matched_items = []
         for kw in self.INFO_KEYWORDS:
             m = re.findall(kw, clean_body)
@@ -91,17 +113,19 @@ class UnderwriterIntentClassifier:
                 summary=f"Underwriter requested additional information: {', '.join(set(matched_items))}",
                 action_needed="Notify Account Manager to supply requested documentation.",
                 has_quote_attachment=has_pdf,
+                document_type="application" if any("app" in item for item in matched_items) else "renewal",
                 requested_items=list(set(matched_items))
             )
 
-        # 3. Check for Quote Attached or Provided
+        # 4. Check for Quote Attached or Provided
         if has_pdf:
             return EmailClassification(
                 intent="QUOTE_ATTACHED",
                 confidence=0.95,
                 summary="Renewal quote proposal PDF received from underwriter.",
                 action_needed="Parse quote PDF, upload to EZLynx, and notify Account Manager.",
-                has_quote_attachment=True
+                has_quote_attachment=True,
+                document_type="renewal"
             )
 
         for kw in self.QUOTE_KEYWORDS:

@@ -12,6 +12,7 @@ class RawRenewalItem(BaseModel):
     carrier_name: str
     line_of_business: str = "Homeowners"
     discussion_title: str = "Manual Homeowners Renewal"
+    source: str = "Manual"
     expiration_date: date
     effective_date: Optional[date] = None
     expiring_premium: Optional[float] = None

@@ -19,10 +19,10 @@ def get_initial_outreach_body(
     expiring_premium: Optional[float] = None,
     assigned_agent: Optional[str] = None,
     agency_name: str = "StreetSmart Insurance",
-    ask_portal: bool = False
+    ask_portal: bool = False,
+    sender_name: str = "Robie"
 ) -> str:
     greeting = f"Hello {underwriter_name};" if underwriter_name else "Hello;"
-    agent_sig = assigned_agent or "Renewals Department"
     prem_str = f"${expiring_premium:,.2f}" if expiring_premium else None
 
     lines = [
@@ -54,7 +54,7 @@ def get_initial_outreach_body(
         "",
         "Thank you,",
         "",
-        agent_sig,
+        sender_name,
         agency_name
     ])
 
@@ -68,10 +68,10 @@ def get_followup_body(
     expiration_date: date,
     days_to_expiration: int,
     assigned_agent: Optional[str] = None,
-    agency_name: str = "StreetSmart Insurance"
+    agency_name: str = "StreetSmart Insurance",
+    sender_name: str = "Robie"
 ) -> str:
     greeting = f"Hello {underwriter_name};" if underwriter_name else "Hello;"
-    agent_sig = assigned_agent or "Renewals Department"
 
     if followup_number == 1:
         return f"""{greeting}
@@ -86,7 +86,7 @@ Should you have any questions please feel free to email me back.
 
 Thank you,
 
-{agent_sig}
+{sender_name}
 {agency_name}
 """
     elif followup_number == 2:
@@ -102,7 +102,7 @@ Should you have any questions please feel free to email me back.
 
 Thank you,
 
-{agent_sig}
+{sender_name}
 {agency_name}
 """
     else:
@@ -116,6 +116,6 @@ Should you have any questions please feel free to email me back.
 
 Thank you,
 
-{agent_sig}
+{sender_name}
 {agency_name}
 """

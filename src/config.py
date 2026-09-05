@@ -15,11 +15,13 @@ class Settings(BaseSettings):
     )
 
     # 1. Renewal Window & Cadence
-    renewal_window_min_days: int = 30
-    renewal_window_max_days: int = 50
+    renewal_window_min_days: int = 25
+    renewal_window_max_days: int = 45
     followup_cadence_min_days: int = 5
     followup_cadence_max_days: int = 7
     max_followups: int = 3
+    csr_escalation_threshold_days: int = 25
+    intake_email_subject_keywords: list = ["EZLynx Scheduled Report", "Renewal Queue", "Manual Renewal"]
 
     # 2. Gmail API Outreach & Dual-Inbox Polling Settings
     gmail_outreach_email: str = "robie@streetsmart.insurance"
@@ -31,15 +33,43 @@ class Settings(BaseSettings):
     gmail_token_base64: Optional[str] = None
 
     # 3. EZLynx Settings
+    ezlynx_env: str = "PROD"  # PROD or UAT
     ezlynx_base_url: str = "https://app.ezlynx.com"
     ezlynx_api_base_url: str = "https://api.ezlynx.com"
     ezlynx_client_id: str = "street_smart_api"
     ezlynx_client_secret: str = ""
+    ezlynx_integration_group_id: str = "159"
+    ezlynx_app_secret: str = ""
     ezlynx_agency_id: str = ""
+    ezlynx_agency_org_id: str = "36748"
     ezlynx_username: str = ""
     ezlynx_password: str = ""
     ezlynx_user_data_dir: str = "~/.ezlynx_chrome_profile"
     ezlynx_cdp_endpoint: Optional[str] = None
+
+    @property
+    def ezlynx_connect_token_url(self) -> str:
+        if self.ezlynx_env.upper() == "UAT":
+            return "https://app.uatezlynx.com/auth/connect/token"
+        return "https://app.ezlynx.com/auth/connect/token"
+
+    @property
+    def ezlynx_services_url(self) -> str:
+        if self.ezlynx_env.upper() == "UAT":
+            return "https://services.uatezlynx.com/ezlynxapi/api"
+        return "https://services.ezlynx.com/ezlynxapi/api"
+
+    @property
+    def ezlynx_policy_api_url(self) -> str:
+        if self.ezlynx_env.upper() == "UAT":
+            return "https://app.uatezlynx.com/PolicyApi"
+        return "https://app.ezlynx.com/PolicyApi"
+
+    @property
+    def ezlynx_discussion_api_url(self) -> str:
+        if self.ezlynx_env.upper() == "UAT":
+            return "https://app.uatezlynx.com/DiscussionApi"
+        return "https://app.ezlynx.com/DiscussionApi"
 
     # 4. Playwright Headless & Automation
     playwright_headless: bool = True

@@ -100,16 +100,48 @@ class EZLynxReportDownloader:
                 except Exception:
                     pass
 
-            # 4. Ensure Source Column is Enabled in Manage Columns
-            col_picker = await page.query_selector("button:has-text('Manage Columns'), div:has-text('Manage Columns')")
+            # 3b. Ensure Current Policy Status is filtered to 'Active' only
+            logger.info("[Robie Exporter] Setting Current Policy Status to 'Active' only...")
+            status_dropdown = await page.query_selector("div:has-text('Current Policy Status'), select#ddlCurrentPolicyStatus, div[id*='CurrentPolicyStatus']")
+            if status_dropdown:
+                try:
+                    await status_dropdown.click()
+                    await page.wait_for_timeout(500)
+                    for val in ["Inactive", "Unknown"]:
+                        chk = await page.query_selector(f"input[type='checkbox'][value*='{val}'], label:has-text('{val}') input")
+                        if chk and await chk.is_checked():
+                            await chk.uncheck()
+                    active_chk = await page.query_selector("input[type='checkbox'][value*='Active'], label:has-text('Active') input")
+                    if active_chk and not await active_chk.is_checked():
+                        await active_chk.check()
+                    await page.keyboard.press("Escape")
+                except Exception as e:
+                    logger.debug(f"Could not adjust policy status dropdown: {e}")
+
+            # 4. Ensure Source Column is Enabled in Manage Columns to focus ONLY on Manual
+            logger.info("[Robie Exporter] Ensuring 'Source' column is selected in Manage Columns...")
+            col_picker = await page.query_selector("button:has-text('Manage Columns'), div:has-text('Manage Columns'), td:has-text('Manage Columns')")
             if col_picker:
                 await col_picker.click()
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(600)
                 source_chk = await page.query_selector("input[type='checkbox'][value*='Source'], label:has-text('Source') input")
+                if not source_chk:
+                    labels = await page.query_selector_all("label, span, td")
+                    for lbl in labels:
+                        txt = (await lbl.inner_text() or "").strip()
+                        if txt.lower() == "source":
+                            await lbl.scroll_into_view_if_needed()
+                            source_chk = await lbl.query_selector("input[type='checkbox']")
+                            if not source_chk:
+                                parent = await lbl.evaluate_handle("el => el.closest('tr, li, div')")
+                                if parent:
+                                    source_chk = await parent.query_selector("input[type='checkbox']")
+                            break
                 if source_chk:
-                    is_checked = await source_chk.is_checked()
-                    if not is_checked:
+                    await source_chk.scroll_into_view_if_needed()
+                    if not await source_chk.is_checked():
                         await source_chk.check()
+                        logger.info("[Robie Exporter] 'Source' column successfully checked.")
                 # Close dropdown
                 await page.keyboard.press("Escape")
 

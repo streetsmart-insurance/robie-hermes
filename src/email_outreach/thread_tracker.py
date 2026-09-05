@@ -34,16 +34,24 @@ CSR_EMAIL_DIRECTORY = {
     "Illanes, Andrea": "andrea@streetsmart.insurance",
     "Andrea Illanes": "andrea@streetsmart.insurance",
     "Santana, Sandy": "sandy@streetsmart.insurance",
+    "Sandy Santana": "sandy@streetsmart.insurance",
     "Sandy Mara": "sandy@streetsmart.insurance",
     "Cimei, Taylor": "taylor@streetsmart.insurance",
     "Taylor Cimei": "taylor@streetsmart.insurance",
     "Valladarez, Angie": "angie@streetsmart.insurance",
     "Angie Valladarez": "angie@streetsmart.insurance",
+    "Ramos, Eimy": "eimy@streetsmart.insurance",
+    "Eimy Ramos": "eimy@streetsmart.insurance",
+    "Perdomo, Lenin": "lenin@streetsmart.insurance",
+    "Gabriela": "gabrielac@streetsmart.insurance",
+    "Gabriela C": "gabrielac@streetsmart.insurance",
+    "Ashley": "ashley@streetsmart.insurance",
 }
 
 def resolve_outreach_cc_list(assigned_agent: Optional[str], always_cc_jake: bool = True) -> List[str]:
-    """Builds CC recipient list including the assigned CSR and Jake Ferrara."""
+    """Builds CC recipient list ensuring the assigned CSR (or fallback) and Jake Ferrara are ALWAYS CC'd."""
     cc_recipients = []
+    csr_email = None
     if assigned_agent:
         csr_email = CSR_EMAIL_DIRECTORY.get(assigned_agent.strip())
         if not csr_email:
@@ -56,8 +64,13 @@ def resolve_outreach_cc_list(assigned_agent: Optional[str], always_cc_jake: bool
                         break
                 if csr_email:
                     break
-        if csr_email and csr_email not in cc_recipients:
-            cc_recipients.append(csr_email)
+    
+    # If CSR could not be resolved, fallback to sandy@streetsmart.insurance to guarantee CSR coverage
+    if not csr_email:
+        csr_email = "sandy@streetsmart.insurance"
+
+    if csr_email and csr_email not in cc_recipients:
+        cc_recipients.append(csr_email)
 
     if always_cc_jake and "jake@streetsmart.insurance" not in cc_recipients:
         cc_recipients.append("jake@streetsmart.insurance")
@@ -93,11 +106,61 @@ class OutreachCadenceManager:
 
         curr_date = current_date or date.today()
         policies_to_email = db.query(PolicyRenewal).filter(
-            PolicyRenewal.status.in_([RenewalStatus.PENDING_EVALUATION, RenewalStatus.OUTREACH_PENDING])
+            PolicyRenewal.status.in_([RenewalStatus.PENDING_EVALUATION, RenewalStatus.OUTREACH_PENDING]),
+            PolicyRenewal.status != RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+            (PolicyRenewal.source == "Manual") | (PolicyRenewal.source == None),
+            PolicyRenewal.applicant_id != "169788491"
         ).all()
 
         sent_count = 0
         for pol in policies_to_email:
+            days_to_exp = (pol.expiration_date - curr_date).days
+
+            # 1. Skip if outside renewal window (> 45 days)
+            if days_to_exp > settings.renewal_window_max_days:
+                logger.debug(f"Skipping {pol.policy_number}: {days_to_exp} days to expiration (window max: {settings.renewal_window_max_days})")
+                continue
+
+            # 2. If already <= 25 days with no prior outreach, escalate immediately to CSR
+            if days_to_exp <= settings.csr_escalation_threshold_days:
+                pol.status = RenewalStatus.ESCALATED_MANUAL
+                esc_note = (
+                    f"⚠️ === [CSR ESCALATION - URGENT RENEWAL REVIEW] ===\n"
+                    f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Policy #: {pol.policy_number}\n"
+                    f"Named Insured: {pol.insured_name}\n"
+                    f"Carrier / MGA: {pol.carrier_name}\n"
+                    f"Expiration Date: {pol.expiration_date} ({days_to_exp} days remaining)\n"
+                    f"Assigned CSR: {pol.assigned_agent}\n"
+                    f"Reason: Policy is {days_to_exp} days prior to expiration (threshold: {settings.csr_escalation_threshold_days} days) with no renewal terms.\n"
+                    f"Action Required: High-priority CSR follow-up with carrier underwriter / portal.\n\n"
+                    f"Robie was here"
+                )
+                db.add(AuditNoteLog(
+                    policy_id=pol.id,
+                    applicant_id=pol.applicant_id,
+                    discussion_title=pol.discussion_title,
+                    action_type=ActionType.STATUS_CHANGE,
+                    note_text=esc_note
+                ))
+                res = self.ezlynx.add_note_to_discussion(
+                    applicant_id=pol.applicant_id,
+                    discussion_title=pol.discussion_title,
+                    note_text=esc_note,
+                    policy_number=pol.policy_number,
+                    line_of_business=pol.line_of_business,
+                    carrier_name=pol.carrier_name
+                )
+                if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                    pol.discussion_title = res.get("discussion_title")
+                self.ezlynx.create_user_task(
+                    applicant_id=pol.applicant_id,
+                    title=f"URGENT: Renewal Review for {pol.insured_name} ({days_to_exp} Days Remaining)",
+                    description=f"Policy #{pol.policy_number} is {days_to_exp} days from expiration ({pol.expiration_date}). Assigned to {pol.assigned_agent}.",
+                    assigned_user=pol.assigned_agent
+                )
+                continue
+
             carrier_conf = CarrierRoutingMatrix.get_carrier_config(pol.carrier_name)
             target_email = pol.underwriter_email or carrier_conf.get("underwriter_email")
             
@@ -186,12 +249,16 @@ class OutreachCadenceManager:
                 note_text=note_text
             )
             db.add(note_log)
-            self.ezlynx.add_note_to_discussion(
+            res = self.ezlynx.add_note_to_discussion(
                 applicant_id=pol.applicant_id,
                 discussion_title=pol.discussion_title,
                 note_text=note_text,
-                policy_number=pol.policy_number
+                policy_number=pol.policy_number,
+                line_of_business=pol.line_of_business,
+                carrier_name=pol.carrier_name
             )
+            if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                pol.discussion_title = res.get("discussion_title")
 
             sent_count += 1
 
@@ -210,19 +277,26 @@ class OutreachCadenceManager:
         followups_sent = 0
         for thread in due_threads:
             pol = thread.policy
+            days_to_exp = (pol.expiration_date - curr_date).days
             next_count = thread.followup_count + 1
 
-            if next_count > settings.max_followups:
-                # Exceeded max follow-ups -> Escalate to human
+            if next_count > settings.max_followups or days_to_exp <= settings.csr_escalation_threshold_days:
+                # Exceeded max follow-ups (3) OR reached 25 days before expiration -> Escalate to CSR in EZLynx
                 thread.status = ThreadStatus.EXHAUSTED
                 pol.status = RenewalStatus.ESCALATED_MANUAL
 
                 esc_note = (
-                    f"⚠️ === [MAX UNDERWRITER FOLLOW-UPS EXCEEDED] ===\n"
+                    f"⚠️ === [CSR ESCALATION - URGENT RENEWAL REVIEW] ===\n"
                     f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"Carrier: {pol.carrier_name} | Underwriter: {pol.underwriter_email}\n"
-                    f"Outreach attempts: {settings.max_followups} follow-ups sent with no reply.\n"
-                    f"Action Required: Account Manager direct phone call / manual escalation."
+                    f"Policy #: {pol.policy_number}\n"
+                    f"Named Insured: {pol.insured_name}\n"
+                    f"Carrier / MGA: {pol.carrier_name} | Underwriter: {pol.underwriter_email}\n"
+                    f"Expiration Date: {pol.expiration_date} ({days_to_exp} days remaining)\n"
+                    f"Assigned CSR: {pol.assigned_agent}\n"
+                    f"Outreach Attempts: {thread.followup_count} email follow-ups sent with no reply.\n"
+                    f"Reason: No renewal quote received by {days_to_exp} days prior to expiration (threshold: {settings.csr_escalation_threshold_days} days).\n"
+                    f"Action Required: High-priority CSR follow-up with carrier underwriter / portal.\n\n"
+                    f"Robie was here"
                 )
                 db.add(AuditNoteLog(
                     policy_id=pol.id,
@@ -231,16 +305,21 @@ class OutreachCadenceManager:
                     action_type=ActionType.STATUS_CHANGE,
                     note_text=esc_note
                 ))
-                self.ezlynx.add_note_to_discussion(
+                res = self.ezlynx.add_note_to_discussion(
                     applicant_id=pol.applicant_id,
                     discussion_title=pol.discussion_title,
                     note_text=esc_note,
-                    policy_number=pol.policy_number
+                    policy_number=pol.policy_number,
+                    line_of_business=pol.line_of_business,
+                    carrier_name=pol.carrier_name
                 )
+                if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                    pol.discussion_title = res.get("discussion_title")
                 self.ezlynx.create_user_task(
                     applicant_id=pol.applicant_id,
-                    title=f"URGENT: Call Underwriter for {pol.insured_name} Renewal",
-                    description=f"Automated email follow-ups ({settings.max_followups} attempts) received no response for Pol #{pol.policy_number}."
+                    title=f"URGENT: Review / Call Carrier for {pol.insured_name} Renewal",
+                    description=f"Automated email follow-ups ({thread.followup_count} attempts) received no response for Pol #{pol.policy_number} ({days_to_exp} days remaining).",
+                    assigned_user=pol.assigned_agent
                 )
                 continue
 
@@ -290,12 +369,16 @@ class OutreachCadenceManager:
                 action_type=ActionType.FOLLOWUP_EMAIL_SENT,
                 note_text=note_text
             ))
-            self.ezlynx.add_note_to_discussion(
+            res = self.ezlynx.add_note_to_discussion(
                 applicant_id=pol.applicant_id,
                 discussion_title=pol.discussion_title,
                 note_text=note_text,
-                policy_number=pol.policy_number
+                policy_number=pol.policy_number,
+                line_of_business=pol.line_of_business,
+                carrier_name=pol.carrier_name
             )
+            if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                pol.discussion_title = res.get("discussion_title")
             followups_sent += 1
 
         db.commit()
@@ -380,12 +463,13 @@ class OutreachCadenceManager:
             # Log EZLynx Note
             note_text = EZLynxNoteBuilder.format_reply_received_note(
                 policy=pol,
-                tracking_code=thread.tracking_code,
+                tracking_code=tracking_code,
                 sender_email=reply.get("sender", ""),
                 intent=classification.intent,
                 summary=classification.summary,
                 has_attachment=bool(att_paths),
-                attachment_name=att_names[0] if att_names else None
+                attachment_name=att_names[0] if att_names else None,
+                clean_reply_text=reply.get("clean_reply_text")
             )
             db.add(AuditNoteLog(
                 policy_id=pol.id,
@@ -394,28 +478,101 @@ class OutreachCadenceManager:
                 action_type=ActionType.UNDERWRITER_REPLIED,
                 note_text=note_text
             ))
-            self.ezlynx.add_note_to_discussion(
+            note_res = self.ezlynx.add_note_to_discussion(
                 applicant_id=pol.applicant_id,
                 discussion_title=pol.discussion_title,
                 note_text=note_text,
-                policy_number=pol.policy_number
+                policy_number=pol.policy_number,
+                line_of_business=pol.line_of_business,
+                carrier_name=pol.carrier_name
             )
+            if isinstance(note_res, dict) and isinstance(note_res.get("discussion_title"), str):
+                pol.discussion_title = note_res.get("discussion_title")
+            note_synced = bool(note_res and note_res.get("status") not in ("simulated", "error", None))
+            note_id = note_res.get("note_id") if note_res else None
 
-            # If quote attached, upload to EZLynx & create review task
-            if attached_file_path and classification.intent == "QUOTE_ATTACHED":
-                self.ezlynx.upload_document(
-                    applicant_id=pol.applicant_id,
-                    file_path=Path(attached_file_path),
-                    folder_name="Renewals"
+            task_created = False
+            # Upload document to EZLynx & create task based on intent
+            if attached_file_path:
+                if classification.intent == "QUOTE_ATTACHED":
+                    self.ezlynx.upload_document(
+                        applicant_id=pol.applicant_id,
+                        file_path=Path(attached_file_path),
+                        folder_name="Renewal Offers/Declarations",
+                        policy_number=pol.policy_number,
+                        doc_type="renewal",
+                        label_to_apply="Renewal Offer"
+                    )
+                    task_res = self.ezlynx.create_user_task(
+                        applicant_id=pol.applicant_id,
+                        title=f"Review Renewal Quote: {pol.insured_name} ({pol.carrier_name})",
+                        description=f"Underwriter emailed renewal proposal for Pol #{pol.policy_number}. Document uploaded to Documents > Renewal Offers/Declarations.",
+                        assigned_user=pol.assigned_agent
+                    )
+                    task_created = bool(task_res and task_res.get("status") not in ("simulated", "error", None))
+                elif classification.intent == "LOSS_RUNS_ATTACHED":
+                    self.ezlynx.upload_document(
+                        applicant_id=pol.applicant_id,
+                        file_path=Path(attached_file_path),
+                        folder_name="Loss Runs",
+                        policy_number=pol.policy_number,
+                        doc_type="loss runs",
+                        label_to_apply="Loss Runs"
+                    )
+                    task_res = self.ezlynx.create_user_task(
+                        applicant_id=pol.applicant_id,
+                        title=f"Loss Runs Received: {pol.insured_name} ({pol.carrier_name})",
+                        description=f"Underwriter/carrier provided loss runs for Pol #{pol.policy_number}. Document uploaded to Documents > Loss Runs.",
+                        assigned_user=pol.assigned_agent
+                    )
+                    task_created = bool(task_res and task_res.get("status") not in ("simulated", "error", None))
+                elif classification.intent == "NON_RENEWAL_DECLINED":
+                    self.ezlynx.upload_document(
+                        applicant_id=pol.applicant_id,
+                        file_path=Path(attached_file_path),
+                        folder_name="Cancellations/NonRenewals/Reinstatements",
+                        policy_number=pol.policy_number,
+                        doc_type="non renewal",
+                        label_to_apply="Non Renewal"
+                    )
+                    task_res = self.ezlynx.create_user_task(
+                        applicant_id=pol.applicant_id,
+                        title=f"CRITICAL: Non-Renewal Notice - Re-market {pol.insured_name} ({pol.carrier_name})",
+                        description=f"Carrier issued non-renewal notice for Pol #{pol.policy_number}. Document uploaded to Documents > Cancellations/NonRenewals/Reinstatements.",
+                        assigned_user=pol.assigned_agent
+                    )
+                    task_created = bool(task_res and task_res.get("status") not in ("simulated", "error", None))
+                else:
+                    self.ezlynx.upload_document(
+                        applicant_id=pol.applicant_id,
+                        file_path=Path(attached_file_path),
+                        policy_number=pol.policy_number,
+                        doc_type=getattr(classification, "document_type", "renewal")
+                    )
+
+            # Instantly alert the assigned CSR via email (CC'ing Carlo & Jake)
+            try:
+                from src.reporting.email_handoff import notify_csr_of_underwriter_reply
+                notify_csr_of_underwriter_reply(
+                    policy=pol,
+                    classification=classification,
+                    sender=reply.get("sender", ""),
+                    attachments=reply.get("attachments", []),
+                    client=self.gmail,
+                    note_synced=note_synced,
+                    task_created=task_created,
+                    note_id=note_id
                 )
-                self.ezlynx.create_user_task(
-                    applicant_id=pol.applicant_id,
-                    title=f"Review Renewal Quote: {pol.insured_name} ({pol.carrier_name})",
-                    description=f"Underwriter emailed renewal proposal for Pol #{pol.policy_number}. Document uploaded to EZLynx.",
-                    assigned_user=pol.assigned_agent
-                )
+            except Exception as e:
+                logger.error(f"Failed to send instant CSR alert for Pol #{pol.policy_number}: {e}")
+
+            # Mark the email message as READ in the originating inbox
+            if reply.get("message_id"):
+                self.gmail.mark_message_read(reply.get("message_id"), inbox_source)
+
 
             processed_count += 1
 
         db.commit()
         return processed_count
+

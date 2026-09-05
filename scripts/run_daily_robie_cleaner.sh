@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -e
+cd /opt/renewal-automation-system
+mkdir -p /opt/renewal-automation-system/logs
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+LOGFILE="/opt/renewal-automation-system/logs/robie_cleaner_${TIMESTAMP}.log"
+
+echo "=== Starting Robie Daily Mailbox Audit & Cleanup at ${TIMESTAMP} ===" >> "$LOGFILE"
+send_failure_alert() {
+    local exit_code=$?
+    echo "❌ CRITICAL: Robie Mailbox Cleaner crashed with exit code ${exit_code} at $(date +"%Y-%m-%d %H:%M:%S")" >> "$LOGFILE"
+
+    PYTHONPATH=. /opt/renewal-automation-system/venv/bin/python3 -c "
+from src.email_outreach.gmail_client import GmailRenewalClient
+try:
+    with open('${LOGFILE}', 'r') as f:
+        lines = f.readlines()
+    tail = ''.join(lines[-40:])
+    client = GmailRenewalClient()
+    client.send_email(
+        to=['carlo@streetsmart.insurance'],
+        subject='🚨 ALERT: Robie Daily Mailbox Cleaner Failed on VM',
+        body_text=f'Robie Mailbox Cleaner encountered a fatal error on hermes-poc-01 with exit code ${exit_code}.\n\nLog tail (last 40 lines):\n----------------------------------------\n{tail}\n----------------------------------------\nLog file on server: ${LOGFILE}'
+    )
+    print('Dispatched failure alert email.')
+except Exception as e:
+    print(f'Failed to dispatch failure alert: {e}')
+" >> "$LOGFILE" 2>&1 || true
+}
+
+trap send_failure_alert ERR
+
+PYTHONPATH=. /opt/renewal-automation-system/venv/bin/python3 -m src.email_outreach.robie_inbox_cleaner --recipient carlo@streetsmart.insurance >> "$LOGFILE" 2>&1
+echo "=== Robie Daily Mailbox Audit Finished at $(date +"%Y-%m-%d_%H-%M-%S") ===" >> "$LOGFILE"

@@ -23,7 +23,7 @@ class Email2FACodeResolver:
         r"(?:verification|security|confirmation|passcode|one-time|login)\s*(?:code|passcode)?\s*(?:is|:)?\s*([0-9]{4,8})\b",
         r"\b([0-9]{6})\b",
         r"\b([0-9]{4})\b",
-        r"\b([A-Z0-9]{6})\b"
+        r"\b(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6}\b"
     ]
 
     def __init__(self, inbox_services: Optional[Dict[str, Any]] = None):
@@ -36,9 +36,23 @@ class Email2FACodeResolver:
         poll_interval_sec: int = 3
     ) -> Optional[str]:
         """Polls connected inboxes every few seconds until a 2FA verification code is found."""
-        start_time = time.time()
         logger.info(f"[2FA Resolver] Waiting for 2FA email from '{service_name}' (timeout: {timeout_sec}s)...")
+        try:
+            from src.email_outreach.otp_interceptor import otp_interceptor
+            query = f"{service_name} (code OR verification OR security OR passcode OR 'one-time' OR OTP)"
+            res = otp_interceptor.wait_for_otp(
+                query=query,
+                max_wait_seconds=timeout_sec,
+                poll_interval=poll_interval_sec
+            )
+            if res and res.code:
+                logger.info(f"[2FA Resolver] ✅ Successfully extracted 2FA code '{res.code}' from '{res.inbox}' for '{service_name}'!")
+                return res.code
+        except Exception as e:
+            logger.warning(f"[2FA Resolver] Error in otp_interceptor fallback: {e}")
 
+        # Fallback to local check
+        start_time = time.time()
         while time.time() - start_time < timeout_sec:
             code = self.check_latest_2fa_code(service_name)
             if code:

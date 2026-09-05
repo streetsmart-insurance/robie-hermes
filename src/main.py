@@ -3,6 +3,7 @@
 import sys
 import argparse
 import asyncio
+import time
 import logging
 from datetime import datetime, date, timedelta
 from rich.console import Console
@@ -22,6 +23,7 @@ console = Console()
 def parse_args():
     parser = argparse.ArgumentParser(description="Autonomous Daily Manual Renewal Engine for EZLynx")
     parser.add_argument("--run-today", action="store_true", help="Execute daily renewal check for today")
+    parser.add_argument("--send-report", action="store_true", help="Email the comprehensive daily handoff report to team leads")
     parser.add_argument("--date", type=str, default=None, help="Execute for specific date (YYYY-MM-DD)")
     parser.add_argument("--daemon", action="store_true", help="Run in daemon mode (executes daily at 07:00 AM)")
     parser.add_argument("--dry-run", action="store_true", help="Run without sending live emails or API calls")
@@ -41,6 +43,10 @@ def parse_args():
     parser.add_argument("--service", type=str, default=None, help="Service/Carrier name (e.g. 'EZLynx', 'Coterie', 'The Hartford')")
     parser.add_argument("--username", type=str, default=None, help="Username / Email for login")
     parser.add_argument("--password", type=str, default=None, help="Password for login")
+    parser.add_argument("--ezlynx-test-auth", action="store_true", help="Test live authentication against EZLynx Classic & OAuth2 APIs")
+    parser.add_argument("--ezlynx-search-applicant", type=str, default=None, metavar="QUERY", help="Search applicant by ID, Name, or Policy Number")
+    parser.add_argument("--ezlynx-view-sessions", action="store_true", help="View health and status of EZLynx API & browser sessions")
+    parser.add_argument("--ezlynx-quote-session", type=str, default=None, metavar="QUOTE_ID", help="View completed quote results for a rating session")
     return parser.parse_args()
 
 async def async_main():
@@ -117,62 +123,200 @@ async def async_main():
 
         db.close()
         return
-        from src.database.session import SessionLocal
-        from src.database.models import PolicyRenewal, RenewalStatus, DocumentRecord, AuditNoteLog, ActionType
-        from src.portals.carrier_agents import get_carrier_crawler
-        from src.ezlynx.note_builder import EZLynxNoteBuilder
+    if args.ezlynx_test_auth:
         from src.ezlynx.api_client import EZLynxApiClient
-        from src.extractor.quote_parser import QuoteDocumentParser
-        from src.config import settings
+        client = EZLynxApiClient()
+        console.print("\n[bold cyan]🔐 Testing EZLynx API Live Connectivity...[/bold cyan]\n")
 
-        db = SessionLocal()
-        ezlynx = EZLynxApiClient()
-        parser = QuoteDocumentParser()
+        # 1. Classic API
+        t0 = time.time()
+        classic_ok = client.authenticate_classic(force_refresh=True)
+        classic_latency = int((time.time() - t0) * 1000)
 
-        target_carriers = ["Coterie", "The Hartford", "TAPCO Underwriters Inc.", "TAPCO"]
-        policies = db.query(PolicyRenewal).filter(
-            PolicyRenewal.carrier_name.in_(target_carriers),
-            PolicyRenewal.policy_number != "13WECAN7A7K"
-        ).all()
+        # 2. Modern OAuth2 Gateway
+        t0 = time.time()
+        oauth_ok = client.authenticate_oauth(force_refresh=True)
+        oauth_latency = int((time.time() - t0) * 1000)
 
-        console.print(f"[bold cyan]🔍 Executing Portal Automated Crawls for {len(policies)} policies (Coterie, The Hartford, TAPCO)...[/bold cyan]\n")
-        table = Table(title="🌐 Carrier Portal Execution Results", show_header=True, header_style="bold magenta")
-        table.add_column("Carrier", style="bold cyan")
-        table.add_column("Policy #", style="green")
-        table.add_column("Insured Name", style="white")
-        table.add_column("Status / Outcome", style="bold yellow")
+        table = Table(title="EZLynx Dual-Subsystem API Status", show_header=True, header_style="bold magenta")
+        table.add_column("Subsystem", style="bold cyan")
+        table.add_column("Endpoint", style="white")
+        table.add_column("Account / Client", style="yellow")
+        table.add_column("Latency", justify="right", style="green")
+        table.add_column("Status", justify="center", style="bold")
 
-        for pol in policies:
-            crawler = get_carrier_crawler(pol.carrier_name, pol.portal_url or "https://agent.portal")
-            res = await crawler.check_renewal_quote(
-                policy_number=pol.policy_number,
-                insured_name=pol.insured_name,
-                download_dir=settings.downloads_path
+        table.add_row(
+            "Classic Web Services",
+            client.services_url,
+            client.username,
+            f"{classic_latency}ms",
+            "[bold green]✅ Authenticated (EZToken)[/bold green]" if classic_ok else "[bold red]❌ Failed[/bold red]"
+        )
+        table.add_row(
+            "Modern OAuth2 Gateway",
+            client.connect_token_url,
+            client.client_id,
+            f"{oauth_latency}ms",
+            "[bold green]✅ Authenticated (Bearer)[/bold green]" if oauth_ok else "[bold red]❌ Failed[/bold red]"
+        )
+        console.print(table)
+        if oauth_ok:
+            console.print(f"[dim]Authorized Scopes: {', '.join(client._oauth_scopes)}[/dim]\n")
+        return
+
+    if args.ezlynx_search_applicant:
+        from src.ezlynx.api_client import EZLynxApiClient
+        client = EZLynxApiClient()
+        query = args.ezlynx_search_applicant
+        console.print(f"\n[bold cyan]🔍 Searching EZLynx Applicants for query:[/bold cyan] '[yellow]{query}[/yellow]'...\n")
+
+        matches = client.search_applicants(query)
+        if not matches:
+            console.print(f"[bold red]No matching applicant found for '{query}'.[/bold red]\n")
+            return
+
+        table = Table(title=f"EZLynx Applicant Search Results ({len(matches)} match{'es' if len(matches) > 1 else ''})", show_header=True, header_style="bold magenta")
+        table.add_column("Applicant ID", style="bold cyan")
+        table.add_column("Name / Business", style="bold white")
+        table.add_column("Type", style="yellow")
+        table.add_column("Assigned Agent", style="green")
+        table.add_column("Email", style="blue")
+        table.add_column("Phone", style="magenta")
+        table.add_column("Address", style="dim")
+
+        for m in matches:
+            addr_obj = m.get("address") or {}
+            addr_str = f"{addr_obj.get('AddressLine1', '')}, {addr_obj.get('City', '')} {addr_obj.get('State', '')}".strip(" ,") if isinstance(addr_obj, dict) else str(addr_obj)
+            table.add_row(
+                str(m.get("applicant_id")),
+                str(m.get("name") or "N/A"),
+                str(m.get("type") or "N/A"),
+                str(m.get("assigned_to") or "N/A"),
+                str(m.get("email") or "N/A"),
+                str(m.get("phone") or "N/A"),
+                addr_str or "N/A"
             )
+        console.print(table)
 
-            status_desc = "✅ Quote Downloaded" if res.renewal_ready else "⏳ Checked - Offer Pending"
-            if not res.success:
-                status_desc = f"⚠️ {res.status_message}"
+        # If single match or queried by ID, also display active policies!
+        target_id = matches[0].get("applicant_id")
+        if target_id and str(target_id).isdigit():
+            pol_res = client.get_applicant_policies(str(target_id))
+            policies = pol_res.get("policies", [])
+            if policies:
+                pol_table = Table(title=f"📋 Active Policies for Applicant #{target_id} ({len(policies)} policies)", show_header=True, header_style="bold cyan")
+                pol_table.add_column("Policy #", style="bold green")
+                pol_table.add_column("Line of Business", style="yellow")
+                pol_table.add_column("Carrier / Company", style="white")
+                pol_table.add_column("Effective", style="dim")
+                pol_table.add_column("Expiration", style="bold red")
 
-            table.add_row(pol.carrier_name, pol.policy_number, pol.insured_name, f"{status_desc}\n[dim]{res.status_message}[/dim]")
+                for p in policies:
+                    eff = str(p.get("EffectiveDate", ""))[:10]
+                    exp = str(p.get("ExpirationDate", ""))[:10]
+                    pol_table.add_row(
+                        str(p.get("PolicyNumber") or "N/A"),
+                        str(p.get("LOB") or "N/A"),
+                        str(p.get("Company") or p.get("Carrier") or "N/A"),
+                        eff,
+                        exp
+                    )
+                console.print(pol_table)
+        return
 
-            if res.renewal_ready and res.document_path:
-                pol.status = RenewalStatus.READY_FOR_AGENT_REVIEW
-                pol.renewal_premium = res.extracted_premium or pol.expiring_premium
-                
-                # Upload doc & log note
-                ezlynx.upload_document(pol.applicant_id, res.document_path, "Renewals")
-                note_text = EZLynxNoteBuilder.format_portal_check_note(pol, success=True, details=res.status_message, downloaded_file=res.document_path.name)
-                ezlynx.add_note_to_discussion(pol.applicant_id, pol.discussion_title, note_text, pol.policy_number)
-                ezlynx.create_user_task(
-                    applicant_id=pol.applicant_id,
-                    title=f"Review Renewal Quote: {pol.insured_name} ({pol.carrier_name})",
-                    description=f"Renewal quote downloaded from {pol.carrier_name} portal.\nPolicy #{pol.policy_number}\nDocument: {res.document_path.name}",
-                    assigned_user=pol.assigned_agent
-                )
+    if args.ezlynx_view_sessions:
+        from src.ezlynx.api_client import EZLynxApiClient
+        client = EZLynxApiClient()
+        console.print("\n[bold cyan]🔍 Checking Health and State of All EZLynx Sessions...[/bold cyan]\n")
 
-        db.commit()
-        db.close()
+        overview = client.get_session_overview()
+
+        # 1. API Sessions Table
+        api_table = Table(title="🌐 EZLynx API Subsystem Sessions", show_header=True, header_style="bold magenta")
+        api_table.add_column("Session Layer", style="bold cyan")
+        api_table.add_column("Configured", style="yellow")
+        api_table.add_column("Active / Auth", style="bold green")
+        api_table.add_column("Identity / Account", style="white")
+        api_table.add_column("Details", style="dim")
+
+        classic = overview["classic_api"]
+        api_table.add_row(
+            "Classic REST API",
+            "✅ Yes" if classic["configured"] else "❌ No",
+            "[bold green]✅ Connected[/bold green]" if classic["authenticated"] else "[bold red]❌ Offline[/bold red]",
+            classic["username"],
+            "Token cached in memory" if classic["token_cached"] else "No active token"
+        )
+
+        oauth = overview["oauth_gateway"]
+        api_table.add_row(
+            "OAuth2 Gateway",
+            "✅ Yes" if oauth["configured"] else "❌ No",
+            "[bold green]✅ Connected[/bold green]" if oauth["authenticated"] else "[bold red]❌ Offline[/bold red]",
+            oauth["client_id"],
+            f"Scopes: {', '.join(oauth['scopes'])} (Expires in {oauth['token_expires_in_seconds']}s)"
+        )
+        console.print(api_table)
+
+        # 2. Browser Automation Session Table
+        br = overview["browser_session"]
+        br_table = Table(title="🖥️  EZLynx Browser Automation Session State", show_header=True, header_style="bold cyan")
+        br_table.add_column("Component", style="bold cyan")
+        br_table.add_column("Status", style="bold")
+        br_table.add_column("Path / Endpoint", style="white")
+        br_table.add_column("Details", style="dim")
+
+        br_table.add_row(
+            "Storage State JSON",
+            "[bold green]✅ Present[/bold green]" if br["exists"] else "[yellow]⚠️ Missing (Fresh login needed)[/yellow]",
+            br["storage_state_file"],
+            f"{br['cookie_count']} cookies stored (Last modified: {br['last_modified'] or 'Never'})"
+        )
+        br_table.add_row(
+            "Chrome CDP Remote Port",
+            "[bold green]✅ Active[/bold green]" if br["cdp_connected"] else "[dim yellow]⏳ Inactive / Disconnected[/dim yellow]",
+            br["cdp_endpoint"],
+            "Ready for non-eviction automation" if br["cdp_connected"] else "Start Chrome with --remote-debugging-port=9222"
+        )
+        console.print(br_table)
+        return
+
+    if args.ezlynx_quote_session:
+        from src.ezlynx.api_client import EZLynxApiClient
+        client = EZLynxApiClient()
+        quote_id = args.ezlynx_quote_session
+        console.print(f"\n[bold cyan]📑 Fetching Completed Rating Quote Session for ID:[/bold cyan] '[yellow]{quote_id}[/yellow]'...\n")
+        res = client.get_completed_quote(quote_id)
+        if res.get("status") != "success":
+            console.print(f"[bold red]Failed to retrieve quote session: {res.get('error')}[/bold red]\n")
+            return
+
+        qd = res.get("quote_data", {})
+        console.print(f"[bold green]Applicant ID:[/bold green] {qd.get('ApplicantId')} | [bold green]Rating State:[/bold green] {qd.get('RatingState')}")
+        results = qd.get("QuoteResults", [])
+        if not results:
+            console.print("[yellow]No individual carrier quote results found in this session.[/yellow]\n")
+            return
+
+        table = Table(title=f"Comparative Rating Results ({len(results)} carriers)", show_header=True, header_style="bold magenta")
+        table.add_column("Carrier Name", style="bold cyan")
+        table.add_column("LOB", style="yellow")
+        table.add_column("Status", style="bold")
+        table.add_column("Premium", justify="right", style="bold green")
+        table.add_column("Term", justify="center", style="white")
+        table.add_column("Description", style="dim")
+
+        for r in results:
+            prem = f"${r.get('Premium', 0):,.2f}" if r.get('Premium') is not None else "N/A"
+            st_color = "green" if r.get("Status") == "Succeeded" else "yellow"
+            table.add_row(
+                str(r.get("CarrierName") or "N/A"),
+                str(r.get("LOB") or "N/A"),
+                f"[{st_color}]{r.get('Status')}[/{st_color}]",
+                prem,
+                str(r.get("PremiumTerm") or "12") + " mos",
+                str(r.get("Description") or "")
+            )
         console.print(table)
         return
 
@@ -224,18 +368,19 @@ async def async_main():
     if args.date:
         ref_date = datetime.strptime(args.date, "%Y-%m-%d").date()
 
+    send_report = args.send_report or args.daemon
     if args.daemon:
         console.print("[bold green]Starting Renewal Automation in Daily Daemon Mode...[/bold green]")
         while True:
             try:
-                results = await orchestrator.run_daily_cycle(date.today())
+                results = await orchestrator.run_daily_cycle(date.today(), send_report_email=True)
                 orchestrator.print_summary_dashboard(results)
             except Exception as e:
                 logger.error(f"Error in daemon cycle: {e}")
             # Sleep 24 hours (86400s)
             await asyncio.sleep(86400)
     else:
-        results = await orchestrator.run_daily_cycle(ref_date)
+        results = await orchestrator.run_daily_cycle(ref_date, send_report_email=send_report)
         orchestrator.print_summary_dashboard(results)
 
 def cli_main():

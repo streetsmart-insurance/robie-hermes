@@ -2,8 +2,34 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/downloads/*.pdf
-data/screenshots/*.png
 *.egg-info/
 .DS_Store
 .env
+.env.*
+
+# Local databases and client data
+*.db
+*.sqlite
+*.sqlite3
+data/renewals.db
+data/manual_renewals.db
+
+# Downloads and attachments (contain client PII & policy docs)
+data/downloads/
+data/input_reports/
+data/screenshots/
+data/ivans/
+reports/
+*.png
+
+# Session states, tokens, and credentials
+data/*.json
+data/**/*.json
+!data/*.example.json
+data/credentials/
+data/coterie_*
+data/google_doc_text.txt
+data/policy_dec_text.txt
+data/renewal_notice_text.txt
+data/archived_postman_uvxjhahb.html
+

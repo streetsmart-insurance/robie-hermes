@@ -54,22 +54,28 @@ class SecretsManager:
 
     def get_login_pair(self, service_name: str) -> Dict[str, Optional[str]]:
         """Retrieves username and password pair for carrier/service logins."""
-        # Check structured JSON blob in Keychain first
+        username = self.get_credential(service_name, "username")
+        password = self.get_credential(service_name, "password")
+
+        if username and password:
+            return {"username": username, "password": password}
+
+        # Check structured JSON blob in Keychain fallback
         if keyring:
             try:
                 blob = keyring.get_password("StreetSmartInsurance", f"{service_name}_login")
                 if blob:
                     data = json.loads(blob)
                     return {
-                        "username": data.get("username"),
-                        "password": data.get("password")
+                        "username": username or data.get("username"),
+                        "password": password or data.get("password")
                     }
             except Exception:
                 pass
 
         return {
-            "username": self.get_credential(service_name, "username"),
-            "password": self.get_credential(service_name, "password")
+            "username": username,
+            "password": password
         }
 
     def save_to_macos_keychain(self, service_name: str, username: str, password: str) -> bool:
@@ -148,29 +154,106 @@ class SecretsManager:
         """Fetch secret from Google Cloud Secret Manager."""
         if not secretmanager:
             return None
-        try:
-            proj = self.gcp_project_id or os.getenv("GCP_PROJECT_ID")
-            if not proj:
-                return None
-            client = secretmanager.SecretManagerServiceClient()
-            
-            # 1. Try insurance_coterie_password
-            secret_id = f"insurance_{service_name.lower().replace(' ', '_').replace('-', '_')}_{field.lower()}"
-            name = f"projects/{proj}/secrets/{secret_id}/versions/latest"
-            try:
-                response = client.access_secret_version(request={"name": name})
-                return response.payload.data.decode("UTF-8").strip()
-            except Exception:
-                pass
+        projects_to_try = [
+            p for p in [
+                "workspace-inbox-tracker",
+                "streetsmart-hermes-poc",
+                self.gcp_project_id,
+                os.getenv("GCP_PROJECT_ID"),
+            ] if p
+        ]
+        # Remove duplicates while preserving order
+        seen = set()
+        projects = [x for x in projects_to_try if not (x in seen or seen.add(x))]
 
-            # 2. Try coterie_password
-            alt_secret_id = f"{service_name.lower().replace(' ', '_').replace('-', '_')}_{field.lower()}"
-            alt_name = f"projects/{proj}/secrets/{alt_secret_id}/versions/latest"
-            response = client.access_secret_version(request={"name": alt_name})
-            return response.payload.data.decode("UTF-8").strip()
+        client = secretmanager.SecretManagerServiceClient()
+        svc_norm = service_name.lower().replace(" ", "").replace("-", "").replace("_", "")
+        svc_snake = service_name.lower().replace(" ", "_").replace("-", "_")
+        svc_kebab = service_name.lower().replace(" ", "-").replace("_", "-")
+        fld_norm = field.lower()
+
+        # Prioritized candidate names
+        candidates = [
+            f"{svc_snake}_{fld_norm}",
+            f"{svc_kebab}-{fld_norm}",
+            f"{svc_norm}_{fld_norm}",
+            f"{svc_norm}-{fld_norm}",
+            f"insurance_{svc_snake}_{fld_norm}",
+            f"insurance_{svc_norm}_{fld_norm}",
+            f"{svc_norm}-agent-login",
+            f"{svc_norm}_agent_login",
+            f"{svc_norm.upper()}_{fld_norm.upper()}",
+            f"{service_name.lower()}_{fld_norm}"
+        ]
+
+        for proj in projects:
+            for sec_id in candidates:
+                try:
+                    # 1. Try latest
+                    name = f"projects/{proj}/secrets/{sec_id}/versions/latest"
+                    resp = client.access_secret_version(request={"name": name})
+                    raw_val = resp.payload.data.decode("UTF-8").strip()
+                    
+                    # If the secret contains multi-line key-value pairs (e.g. username: ..., password: ...)
+                    if "\n" in raw_val and ":" in raw_val:
+                        for line in raw_val.splitlines():
+                            if line.lower().startswith(f"{fld_norm}:"):
+                                return line.split(":", 1)[1].strip()
+                    return raw_val
+                except Exception:
+                    # If latest fails, inspect enabled versions
+                    try:
+                        parent = f"projects/{proj}/secrets/{sec_id}"
+                        for v in client.list_secret_versions(request={"parent": parent}):
+                            if v.state == secretmanager.SecretVersion.State.ENABLED:
+                                resp = client.access_secret_version(request={"name": v.name})
+                                raw_val = resp.payload.data.decode("UTF-8").strip()
+                                if "\n" in raw_val and ":" in raw_val:
+                                    for line in raw_val.splitlines():
+                                        if line.lower().startswith(f"{fld_norm}:"):
+                                            return line.split(":", 1)[1].strip()
+                                return raw_val
+                    except Exception:
+                        pass
+        return None
+
+    def set_secret(self, secret_id: str, secret_value: str, project_id: str = "workspace-inbox-tracker") -> bool:
+        """Creates or updates a secret version in Google Cloud Secret Manager."""
+        if not secretmanager:
+            logger.error("google-cloud-secret-manager not available")
+            return False
+        try:
+            client = secretmanager.SecretManagerServiceClient()
+            parent = f"projects/{project_id}"
+            secret_path = f"{parent}/secrets/{secret_id}"
+
+            # Check if secret exists, create if not
+            try:
+                client.get_secret(request={"name": secret_path})
+            except Exception:
+                client.create_secret(
+                    request={
+                        "parent": parent,
+                        "secret_id": secret_id,
+                        "secret": {
+                            "replication": {"automatic": {}},
+                        },
+                    }
+                )
+
+            # Add new version
+            payload = secret_value.encode("UTF-8")
+            client.add_secret_version(
+                request={
+                    "parent": secret_path,
+                    "payload": {"data": payload},
+                }
+            )
+            logger.info(f"Successfully stored secret '{secret_id}' in GCP project {project_id}")
+            return True
         except Exception as e:
-            logger.debug(f"GCP Secret Manager lookup failed for {service_name}/{field}: {e}")
-            return None
+            logger.error(f"Failed to set secret '{secret_id}' in GCP {project_id}: {e}")
+            return False
 
 # Global Singleton
 secrets_mgr = SecretsManager()

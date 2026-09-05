@@ -1,0 +1,14 @@
+{
+  "Sample Carrier Insurance": {
+    "channel": "PORTAL",
+    "portal_url": "https://carrier.example.com",
+    "underwriter_email": "underwriting@carrier.example.com",
+    "notes": "Sample portal instructions and notes."
+  },
+  "Sample Email MGA": {
+    "channel": "EMAIL",
+    "portal_url": "https://mga.example.com",
+    "underwriter_email": "renewals@mga.example.com",
+    "notes": "Direct underwriter email outreach."
+  }
+}

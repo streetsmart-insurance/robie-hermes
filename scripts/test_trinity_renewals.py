@@ -27,16 +27,27 @@ from src.email_outreach.thread_tracker import OutreachCadenceManager
 
 console = Console()
 
-def get_carrier_renewals(db, carrier_name="Trinity Underwriters"):
-    return db.query(PolicyRenewal).filter(
+def get_carrier_renewals(db, carrier_name="Trinity Underwriters", active_only=True, manual_only=True):
+    q = db.query(PolicyRenewal).filter(
         PolicyRenewal.carrier_name.ilike(f"%{carrier_name}%")
-    ).order_by(PolicyRenewal.expiration_date.asc()).all()
+    )
+    if active_only:
+        q = q.filter(
+            PolicyRenewal.status != RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+            PolicyRenewal.applicant_id != "169788491"
+        )
+    if manual_only:
+        q = q.filter(
+            (PolicyRenewal.source == "Manual") | (PolicyRenewal.source == None)
+        )
+    return q.order_by(PolicyRenewal.expiration_date.asc()).all()
 
 def print_policies_table(policies, carrier_title="Trinity Underwriters"):
     table = Table(title=f"🏢 {carrier_title} - Expiring Manual Renewals ({len(policies)} Policies)", show_header=True, header_style="bold magenta")
     table.add_column("ID", justify="center", style="dim")
     table.add_column("Policy #", style="bold cyan")
     table.add_column("Named Insured", style="white")
+    table.add_column("Source", style="bold green")
     table.add_column("LOB", style="yellow")
     table.add_column("Exp. Date", style="bold red")
     table.add_column("Exp. Prem", justify="right", style="green")
@@ -50,6 +61,7 @@ def print_policies_table(policies, carrier_title="Trinity Underwriters"):
             str(p.id),
             p.policy_number,
             p.insured_name,
+            p.source or "Manual",
             p.line_of_business or "Auto",
             str(p.expiration_date),
             f"${p.expiring_premium:,.2f}" if p.expiring_premium else "N/A",

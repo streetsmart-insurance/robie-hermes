@@ -75,3 +75,18 @@ class CarrierRoutingMatrix:
         cls.save_directory(data)
         logger.info(f"Updated carrier directory for: {carrier_name} -> {entry}")
         return entry
+
+    @classmethod
+    def get_portal_logins_needed(cls, db=None) -> list:
+        """Returns list of carriers that operate via portal and may need credentials."""
+        data = cls.load_directory()
+        needed = []
+        for cname, conf in data.items():
+            if conf.get("channel") == "PORTAL":
+                needed.append({
+                    "carrier": cname,
+                    "portal_url": conf.get("portal_url", "https://"),
+                    "policy_count": 1,
+                    "lob": conf.get("notes", "Commercial Lines")
+                })
+        return needed

@@ -19,6 +19,47 @@ from src.email_outreach.auth_setup import (
 
 logger = logging.getLogger("gmail_client")
 
+def extract_clean_reply_text(raw_text: str) -> str:
+    """Extracts the genuine reply message from an underwriter, stripping out
+    headers, signature blocks, disclaimers, and quoted chain text.
+    """
+    if not raw_text:
+        return ""
+    import re
+    # Normalize line breaks
+    text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 1. Cut off standard forward/reply chain markers
+    markers = [
+        r"-----Original Message-----",
+        r"----- Forwarded Message -----",
+        r"From:.*Sent:.*To:",
+        r"On\s+.*wrote:\s*$",
+        r"________________________________",
+    ]
+    for m in markers:
+        parts = re.split(m, text, flags=re.IGNORECASE | re.MULTILINE)
+        if len(parts) > 1:
+            text = parts[0]
+
+    # 2. Cut off standard signature blocks, footers, and disclaimers
+    sig_patterns = [
+        r"\n\s*--\s*\n.*",
+        r"\n\s*(?:Best regards|Regards|Sincerely|Thank you|Thanks|Warm regards|Cheers),?\s*\n.*",
+        r"\n\s*[A-Z][a-z]+ [A-Z][a-z]+\s*\n\s*(?:Director|President|VP|Underwriting|Strategic|Commercial|Account|Manager|Customer).*?",
+        r"\n\s*(?:PHONE:|Direct:|Fax:|Email:|Cell:|Tel:).*?",
+        r"\n\s*CONFIDENTIALITY NOTICE:?.*",
+        r"\n\s*This (?:email|message|communication) (?:and any files|is intended).*",
+        r"\n\s*Notice: This communication.*",
+        r"\n\s*Markel – Loss Run Reports.*",
+    ]
+    for sp in sig_patterns:
+        text = re.split(sp, text, flags=re.IGNORECASE | re.DOTALL)[0]
+
+    # 3. Clean lines, remove quoted lines starting with '>'
+    lines = [l.strip() for l in text.split("\n") if l.strip() and not l.strip().startswith(">")]
+    return " ".join(lines)
+
 class GmailRenewalClient:
     """Manages email sending from Robie, and reply polling across Robie and Hello inboxes."""
 
@@ -27,10 +68,15 @@ class GmailRenewalClient:
         service: Optional[Resource] = None,
         inbox_services: Optional[Dict[str, Resource]] = None
     ):
-        self.service = service or get_robie_gmail_service()
+        # Hard safety: Never auto-connect to live Gmail during automated pytest test execution
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            self.service = service
+            self.inbox_services = inbox_services or {}
+        else:
+            self.service = service or get_robie_gmail_service()
+            self.inbox_services = inbox_services or get_all_active_inbox_services()
         self.outreach_email = settings.gmail_outreach_email
         self.downloads_dir = settings.downloads_path
-        self.inbox_services = inbox_services or get_all_active_inbox_services()
 
     def is_authenticated(self) -> bool:
         return self.service is not None
@@ -44,10 +90,12 @@ class GmailRenewalClient:
         in_reply_to: Optional[str] = None,
         references: Optional[str] = None,
         attachment_paths: Optional[List[Path]] = None,
-        cc: Optional[List[str]] = None
+        cc: Optional[List[str]] = None,
+        html_body: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Sends an email from Robie (robie@streetsmart.insurance) with threading headers and optional CC."""
-        if not self.is_authenticated():
+        """Sends an email from Robie (robie@streetsmart.insurance) with threading headers, optional CC, and HTML support."""
+        # Hard safety check: Prevent accidental real email sends during testing
+        if os.getenv("PYTEST_CURRENT_TEST") or not self.is_authenticated() or "example.com" in to_email.lower():
             cc_info = f" | CC: {', '.join(cc)}" if cc else ""
             logger.info(
                 f"[SIMULATION] Gmail API Send (From: {self.outreach_email}) -> To: {to_email}{cc_info} | Subject: '{subject}' | Thread: {thread_id or 'New'}"
@@ -59,7 +107,7 @@ class GmailRenewalClient:
                 "labelIds": ["SENT"]
             }
 
-        message = MIMEMultipart()
+        message = MIMEMultipart("alternative" if html_body else "mixed")
         message["to"] = to_email
         message["from"] = self.outreach_email
         message["subject"] = subject
@@ -72,6 +120,8 @@ class GmailRenewalClient:
             message["References"] = references
 
         message.attach(MIMEText(body_text, "plain"))
+        if html_body:
+            message.attach(MIMEText(html_body, "html"))
 
         if attachment_paths:
             for p in attachment_paths:
@@ -127,12 +177,12 @@ class GmailRenewalClient:
             except Exception as e:
                 logger.error(f"Error querying {inbox_name} for tracking code: {e}")
 
-            # Query 2: Proactive Carrier Renewals in Hello inbox
+            # Query 2: Proactive Carrier Renewals & Notices in Hello inbox
             if "hello" in inbox_name.lower() and active_policies:
                 try:
                     res = svc.users().messages().list(
                         userId="me",
-                        q="in:inbox (renewal OR 'loss run' OR 'loss runs' OR quote OR 'upcoming renewal') has:attachment"
+                        q="in:inbox (renewal OR 'loss run' OR 'loss runs' OR quote OR 'upcoming renewal' OR 'non-renewal' OR nonrenewal OR decline)"
                     ).execute()
                     for m in res.get("messages", []):
                         parsed = self._fetch_and_parse_msg(svc, m["id"], inbox_name)
@@ -157,9 +207,9 @@ class GmailRenewalClient:
         """Checks if an email matches any active pending policy number or insured name."""
         search_text = f"{parsed_msg.get('subject', '')} {parsed_msg.get('body', '')} {' '.join(a['filename'] for a in parsed_msg.get('attachments', []))}".lower()
         for pol in active_policies:
-            pol_num = pol.get("policy_number", "").lower()
+            pol_num = pol.get("policy_number", "").lower().split()[0]  # strip sub-labels like NTL / APD
             insured = pol.get("insured_name", "").lower()
-            if (pol_num and pol_num in search_text) or (insured and len(insured) > 4 and insured in search_text):
+            if (pol_num and len(pol_num) >= 5 and pol_num in search_text) or (insured and len(insured) > 4 and insured in search_text):
                 # Tag with matched policy ID
                 parsed_msg["matched_policy_id"] = pol.get("id")
                 logger.info(f"Matched proactive carrier email in {parsed_msg.get('inbox_source')} to Policy #{pol.get('policy_number')} ({pol.get('insured_name')})")
@@ -178,25 +228,49 @@ class GmailRenewalClient:
             return None
 
         subject = headers.get("subject", "")
+
+        # Filter out automatic bounce-backs / out-of-office / server notifications
+        sub_lower = subject.strip().lower()
+        if any(sub_lower.startswith(prefix) for prefix in [
+            "automatic reply:", "auto:", "auto reply:", "out of office:", "undeliverable:",
+            "delivery status notification", "failure notice", "undelivered mail"
+        ]):
+            logger.debug(f"Ignoring automated auto-reply: {subject} from {sender}")
+            return None
+
+        # Recursive extraction of text parts and attachments
         body_text = ""
+        text_html = ""
         attachments = []
 
-        parts = payload.get("parts", [payload])
-        for part in parts:
-            mime_type = part.get("mimeType", "")
-            filename = part.get("filename", "")
-            body = part.get("body", {})
+        def _walk_parts(p: Dict[str, Any]):
+            nonlocal body_text, text_html
+            m_type = p.get("mimeType", "")
+            f_name = p.get("filename", "")
+            p_body = p.get("body", {})
 
-            if mime_type == "text/plain" and "data" in body:
-                body_text += base64.urlsafe_b64decode(body["data"]).decode("utf-8", errors="ignore")
-            elif mime_type == "text/html" and not body_text and "data" in body:
-                body_text += base64.urlsafe_b64decode(body["data"]).decode("utf-8", errors="ignore")
-
-            if filename and "attachmentId" in body:
-                att_id = body["attachmentId"]
-                saved_path = self._download_attachment(svc, msg_id, att_id, filename)
+            if f_name and "attachmentId" in p_body:
+                att_id = p_body["attachmentId"]
+                saved_path = self._download_attachment(svc, msg_id, att_id, f_name)
                 if saved_path:
-                    attachments.append({"filename": filename, "path": saved_path})
+                    attachments.append({"filename": f_name, "path": saved_path})
+
+            if m_type == "text/plain" and "data" in p_body and not body_text:
+                body_text = base64.urlsafe_b64decode(p_body["data"]).decode("utf-8", errors="ignore")
+            elif m_type == "text/html" and "data" in p_body and not text_html:
+                text_html = base64.urlsafe_b64decode(p_body["data"]).decode("utf-8", errors="ignore")
+
+            for subpart in p.get("parts", []):
+                _walk_parts(subpart)
+
+        _walk_parts(payload)
+
+        # Fallback to stripped HTML text if plain text was missing
+        if not body_text and text_html:
+            import re
+            body_text = re.sub(r"<[^>]+>", " ", text_html)
+
+        clean_text = extract_clean_reply_text(body_text)
 
         return {
             "message_id": msg_id,
@@ -205,6 +279,7 @@ class GmailRenewalClient:
             "sender": sender,
             "subject": subject,
             "body": body_text,
+            "clean_reply_text": clean_text,
             "attachments": attachments,
             "date": headers.get("date")
         }
@@ -226,3 +301,80 @@ class GmailRenewalClient:
         except Exception as e:
             logger.error(f"Error downloading attachment {filename}: {e}")
             return None
+
+    def mark_message_read(self, message_id: str, inbox_name: Optional[str] = None) -> bool:
+        """Removes the UNREAD label from a message in the designated or default inbox."""
+        svc = self.inbox_services.get(inbox_name) if inbox_name else self.service
+        if not svc:
+            svc = self.service
+        if not svc:
+            if os.getenv("PYTEST_CURRENT_TEST"):
+                logger.info(f"[SIMULATION] Mark message {message_id} as read")
+                return True
+            logger.warning(f"No Gmail service available to mark message {message_id} as read.")
+            return False
+
+        try:
+            svc.users().messages().modify(
+                userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}
+            ).execute()
+            logger.info(f"Marked message {message_id} as READ.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mark message {message_id} as READ: {e}")
+            return False
+
+    def batch_mark_read(self, message_ids: List[str], inbox_name: Optional[str] = None) -> int:
+        """Batch removes the UNREAD label from a list of message IDs."""
+        if not message_ids:
+            return 0
+
+        svc = self.inbox_services.get(inbox_name) if inbox_name else self.service
+        if not svc:
+            svc = self.service
+        if not svc:
+            if os.getenv("PYTEST_CURRENT_TEST"):
+                logger.info(f"[SIMULATION] Batch mark {len(message_ids)} messages as read")
+                return len(message_ids)
+            logger.warning("No Gmail service available for batch mark read.")
+            return 0
+
+        marked = 0
+        # Process in chunks of 50 via batchModify if available, or sequential
+        try:
+            for i in range(0, len(message_ids), 50):
+                chunk = message_ids[i:i+50]
+                svc.users().messages().batchModify(
+                    userId="me",
+                    body={"ids": chunk, "removeLabelIds": ["UNREAD"]}
+                ).execute()
+                marked += len(chunk)
+            logger.info(f"Batch marked {marked} messages as READ.")
+            return marked
+        except Exception as e:
+            logger.warning(f"batchModify failed ({e}); falling back to individual modify...")
+            for mid in message_ids:
+                if self.mark_message_read(mid, inbox_name):
+                    marked += 1
+            return marked
+
+    def trash_message(self, message_id: str, inbox_name: Optional[str] = None) -> bool:
+        """Moves a message to trash."""
+        svc = self.inbox_services.get(inbox_name) if inbox_name else self.service
+        if not svc:
+            svc = self.service
+        if not svc:
+            if os.getenv("PYTEST_CURRENT_TEST"):
+                logger.info(f"[SIMULATION] Trash message {message_id}")
+                return True
+            logger.warning(f"No Gmail service available to trash message {message_id}.")
+            return False
+
+        try:
+            svc.users().messages().trash(userId="me", id=message_id).execute()
+            logger.info(f"Trashed message {message_id}.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to trash message {message_id}: {e}")
+            return False
+

@@ -39,3 +39,26 @@ def test_intent_acknowledged():
         attachment_filenames=[]
     )
     assert res.intent == "ACKNOWLEDGED"
+
+def test_intent_sneed_non_renewal_notice():
+    classifier = UnderwriterIntentClassifier()
+    res = classifier.classify(
+        subject="NOTICE OF NON-RENEWAL, Client:  Le Shawn Sneed",
+        body_text="Notice of Non-renewal Le Shawn Sneed Jake Ferrara, this email provides notification of important document(s) regarding Non-Trucking Liability Policy CUS062900594. Reason for Non-renewal: Renewal Declined. NON-RENEWAL DATE: 10/20/2026.",
+        attachment_filenames=["EmailSig_Logo.png"]
+    )
+    assert res.intent == "NON_RENEWAL_DECLINED"
+    assert "declining to renew" in res.summary.lower()
+    assert res.document_type == "non renewal"
+
+def test_intent_loss_runs_attached():
+    classifier = UnderwriterIntentClassifier()
+    res = classifier.classify(
+        subject="Re: Loss Runs request for ABC TRANSPIRATION LLC | 02TRM066190-01",
+        body_text="Please find the attached 5-year currently valued loss runs for ABC TRANSPIRATION LLC.",
+        attachment_filenames=["02TRM066190-01_Loss_Runs.pdf"]
+    )
+    assert res.intent == "LOSS_RUNS_ATTACHED"
+    assert res.document_type == "loss runs"
+    assert "loss runs" in res.summary.lower()
+

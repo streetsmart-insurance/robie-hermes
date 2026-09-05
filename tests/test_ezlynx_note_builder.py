@@ -43,9 +43,10 @@ def test_note_builder_outreach_and_followup():
         next_followup_date=date(2026, 9, 8)
     )
 
-    assert "=== [INITIAL RENEWAL OUTREACH SENT] ===" in note_init
+    assert "Emailed uw@libertymutual.com at Liberty Mutual." in note_init
     assert "[RENEWAL-REQ-101]" in note_init
-    assert "2026-09-08" in note_init
+    assert "Robie was here" in note_init
+    assert "09/08/2026" in note_init
 
     note_followup = EZLynxNoteBuilder.format_outreach_email_note(
         policy=policy,
@@ -57,8 +58,9 @@ def test_note_builder_outreach_and_followup():
         next_followup_date=date(2026, 9, 15)
     )
 
-    assert "=== [OUTREACH FOLLOW-UP #2 SENT] ===" in note_followup
-    assert "2026-09-15" in note_followup
+    assert "follow-up #2 email to uw@libertymutual.com" in note_followup
+    assert "Robie was here" in note_followup
+    assert "09/15/2026" in note_followup
 
 def test_note_builder_csr_escalation():
     policy = PolicyRenewal(
@@ -80,3 +82,29 @@ def test_note_builder_csr_escalation():
     assert "GL-8831" in note_esc
     assert "Ferrara, Jake" in note_esc
     assert "23 days remaining" in note_esc
+
+def test_note_builder_reply_received_with_clean_text():
+    policy = PolicyRenewal(
+        policy_number="CCP35165-01",
+        insured_name="Kodomo Education Services LLC",
+        carrier_name="Markel Insurance",
+        line_of_business="Commercial",
+        expiration_date=date(2026, 10, 1)
+    )
+
+    clean_text = "Greetings, Please find attached the Loss Run Report that you requested."
+    note = EZLynxNoteBuilder.format_reply_received_note(
+        policy=policy,
+        tracking_code="REQ-12345",
+        sender_email="lossruns@markel.com",
+        intent="QUOTE_ATTACHED",
+        summary="Markel sent 5-year loss run report",
+        has_attachment=True,
+        attachment_name="CCP35165.pdf",
+        clean_reply_text=clean_text
+    )
+
+    assert "Policy: #CCP35165-01 (Commercial - Markel Insurance)" in note
+    assert "Underwriter Message:" in note
+    assert clean_text in note
+    assert "Robie was here" in note

@@ -17,6 +17,8 @@ from src.config import settings
 logger = logging.getLogger("gmail_auth")
 
 SCOPES = [
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send"
 ]
@@ -121,6 +123,18 @@ def get_hello_gmail_service() -> Optional[Resource]:
         return build("gmail", "v1", credentials=creds)
     return None
 
+def get_carlo_gmail_service() -> Optional[Resource]:
+    """Builds and returns Gmail service for Carlo (admin & fallback OTP receiver)."""
+    sa_creds = get_service_account_credentials("carlo@streetsmart.insurance")
+    if sa_creds:
+        try:
+            svc = build("gmail", "v1", credentials=sa_creds)
+            svc.users().getProfile(userId="me").execute()
+            return svc
+        except Exception:
+            pass
+    return None
+
 def get_all_active_inbox_services() -> Dict[str, Resource]:
     """Returns a mapping of {inbox_email: service} for all connected inboxes."""
     services = {}
@@ -132,14 +146,19 @@ def get_all_active_inbox_services() -> Dict[str, Resource]:
     if hello_svc:
         services["hello@streetsmart.insurance"] = hello_svc
 
+    carlo_svc = get_carlo_gmail_service()
+    if carlo_svc:
+        services["carlo@streetsmart.insurance"] = carlo_svc
+
     return services
 
 # Default service & credentials for backward compatibility
 def get_gmail_service() -> Optional[Resource]:
-    return get_robie_gmail_service() or get_hello_gmail_service()
+    return get_robie_gmail_service() or get_hello_gmail_service() or get_carlo_gmail_service()
 
 def get_gmail_credentials() -> Optional[Credentials]:
     token_path = Path(settings.gmail_token_file)
     if not token_path.exists() and Path("data/credentials/token.json").exists():
         token_path = Path("data/credentials/token.json")
     return get_credentials_for_token_file(token_path)
+

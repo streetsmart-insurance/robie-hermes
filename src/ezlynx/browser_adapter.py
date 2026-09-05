@@ -50,39 +50,59 @@ class EZLynxBrowserAdapter:
         if not self.page:
             await self.initialize()
 
-        logger.info(f"[EZLynx UI] Navigating to Applicant {applicant_id}...")
-        applicant_url = f"{self.base_url}/applicants/{applicant_id}"
+        logger.info(f"[EZLynx UI] Navigating to Applicant {applicant_id} Activity...")
+        applicant_url = f"{self.base_url}/web/account/{applicant_id}/activity"
         await self.page.goto(applicant_url, wait_until="networkidle")
-        await self.page.wait_for_timeout(2000)
+        await self.page.wait_for_timeout(3000)
 
-        # Click Activity / Discussion tab
-        act_tab = await self.page.query_selector("a:has-text('Activity'), button:has-text('Discussions')")
-        if act_tab:
-            await act_tab.click()
+        # 1. Search for existing discussion/task (e.g. 'Commercial Auto Renewal')
+        search_terms = [discussion_title, "Commercial Auto Renewal", "Manual Commercial Renewal"]
+        
+        # Look for wrench button in discussion card matching title
+        added = await self.page.evaluate("""(terms) => {
+            const divs = Array.from(document.querySelectorAll('.activity-div, .activity-item, mat-card'));
+            for (const term of terms) {
+                const target = divs.find(el => el.textContent.toLowerCase().includes(term.toLowerCase()));
+                if (target) {
+                    const wrench = target.querySelector('button[title*="Edit this task"], button[title*="Edit"], button:has(mat-icon:has-text("build"))');
+                    if (wrench) {
+                        wrench.click();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""", search_terms)
+
+        if added:
             await self.page.wait_for_timeout(1500)
+            # Find textarea in drawer
+            note_area = await self.page.query_selector("textarea.note, textarea[placeholder*='Task note'], textarea[placeholder*='note']")
+            if note_area:
+                await note_area.fill(note_text)
+                await self.page.wait_for_timeout(500)
+                # Click Save button in drawer
+                save_btn = await self.page.query_selector("button[type='submit']:has-text('Save'), button.mat-primary[type='submit']")
+                if save_btn:
+                    await save_btn.click()
+                    await self.page.wait_for_timeout(2000)
+                    logger.info(f"[EZLynx UI] Note added via wrench icon for Applicant {applicant_id}")
+                    return True
 
-        # Click Add Note
-        add_btn = await self.page.query_selector("button:has-text('Add Note'), button:has-text('New Note'), a.btn-add-note")
-        if add_btn:
-            await add_btn.click()
-            await self.page.wait_for_timeout(1000)
-
-            # Fill title & body
-            title_input = await self.page.query_selector("input[placeholder*='Title'], input#txtTitle, select#discussionType")
-            if title_input:
-                await title_input.fill(discussion_title)
-
-            body_input = await self.page.query_selector("textarea[placeholder*='note'], div[contenteditable='true']")
-            if body_input:
-                await body_input.fill(note_text)
-
-            # Save note
-            save_btn = await self.page.query_selector("button:has-text('Save'), button:has-text('Post')")
-            if save_btn:
-                await save_btn.click()
-                await self.page.wait_for_timeout(1500)
-                logger.info(f"[EZLynx UI] Note added under '{discussion_title}' for Applicant {applicant_id}")
-                return True
+        # Fallback: Top 'Add Note' or 'Add new note' button
+        fallback_btn = await self.page.query_selector("button:has-text('Add new note'), button:has-text('Add Note')")
+        if fallback_btn:
+            await fallback_btn.click()
+            await self.page.wait_for_timeout(1500)
+            note_area = await self.page.query_selector("textarea[placeholder*='note'], textarea.note")
+            if note_area:
+                await note_area.fill(note_text)
+                save_btn = await self.page.query_selector("button:has-text('Save'), button[type='submit']")
+                if save_btn:
+                    await save_btn.click()
+                    await self.page.wait_for_timeout(2000)
+                    logger.info(f"[EZLynx UI] Note added via global drawer for Applicant {applicant_id}")
+                    return True
 
         logger.warning(f"[EZLynx UI] Could not find note form elements on page for {applicant_id}")
         return False

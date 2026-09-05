@@ -21,9 +21,13 @@ def test_db():
     yield session
     session.close()
 
+from unittest.mock import MagicMock
+
 def test_outreach_initial_and_cadence_calculation(test_db):
+    mock_gmail = MagicMock()
+    mock_gmail.send_email.return_value = {"id": "mock_test_123", "threadId": "mock_th_123"}
     cadence_mgr = OutreachCadenceManager(
-        gmail_client=GmailRenewalClient(service=None),
+        gmail_client=mock_gmail,
         ezlynx_api=EZLynxApiClient()
     )
     today = date(2026, 9, 1)  # Tuesday
@@ -61,7 +65,7 @@ def test_outreach_initial_and_cadence_calculation(test_db):
 
 def test_dual_inbox_reply_and_policy_matching(test_db):
     cadence_mgr = OutreachCadenceManager(
-        gmail_client=GmailRenewalClient(service=None),
+        gmail_client=MagicMock(),
         ezlynx_api=EZLynxApiClient()
     )
     today = date(2026, 9, 1)

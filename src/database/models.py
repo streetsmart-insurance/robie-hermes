@@ -22,10 +22,14 @@ class RenewalStatus(str, enum.Enum):
     QUOTE_RECEIVED = "QUOTE_RECEIVED"
     INFO_REQUESTED = "INFO_REQUESTED"
     NON_RENEWAL_DECLINED = "NON_RENEWAL_DECLINED"
+    NON_RENEWAL_CONFIRMED_DOCS_UPLOADED = "NON_RENEWAL_CONFIRMED_DOCS_UPLOADED"
     UPLOADED_TO_EZLYNX = "UPLOADED_TO_EZLYNX"
     READY_FOR_AGENT_REVIEW = "READY_FOR_AGENT_REVIEW"
     ESCALATED_MANUAL = "ESCALATED_MANUAL"
     COMPLETED = "COMPLETED"
+    EXCLUDED_INACTIVE_ACCOUNT = "EXCLUDED_INACTIVE_ACCOUNT"
+    EXCLUDED_TEST_ACCOUNT = "EXCLUDED_TEST_ACCOUNT"
+    RENEWAL_OFFER_RECEIVED = "RENEWAL_OFFER_RECEIVED"
 
 class ThreadStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
@@ -43,6 +47,7 @@ class ActionType(str, enum.Enum):
     EZLYNX_NOTE_ADDED = "EZLYNX_NOTE_ADDED"
     EZLYNX_TASK_CREATED = "EZLYNX_TASK_CREATED"
     STATUS_CHANGE = "STATUS_CHANGE"
+    OUTREACH_SENT = "outreach_sent"
 
 class PolicyRenewal(Base):
     __tablename__ = "policy_renewals"
@@ -67,6 +72,7 @@ class PolicyRenewal(Base):
     assigned_agent = Column(String(150), nullable=True)
     
     status = Column(Enum(RenewalStatus), default=RenewalStatus.PENDING_EVALUATION, nullable=False, index=True)
+    source = Column(String(50), default="Manual", nullable=True, index=True)
     portal_supported = Column(Boolean, default=False)
     portal_url = Column(String(255), nullable=True)
     

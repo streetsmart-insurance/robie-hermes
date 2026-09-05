@@ -23,6 +23,13 @@ from src.ezlynx.note_builder import EZLynxNoteBuilder
 from src.ezlynx.api_client import EZLynxApiClient
 from src.ezlynx.report_downloader import EZLynxReportDownloader
 from src.extractor.quote_parser import QuoteDocumentParser
+from src.portals.carrier_routing import CarrierRoutingMatrix
+from src.reporting.daily_handoff import DailyHandoffReporter
+from src.reporting.email_handoff import send_daily_handoff_email
+from pathlib import Path
+
+from src.quote_processing.document_parser import QuoteDocumentParser
+from src.voice.email_dispatcher import EmailCallDispatcher
 
 logger = logging.getLogger("daily_orchestrator")
 console = Console()
@@ -43,13 +50,28 @@ class DailyRenewalOrchestrator:
             classifier=self.classifier
         )
         self.quote_parser = QuoteDocumentParser()
+        self.email_call_dispatcher = EmailCallDispatcher(
+            gmail_client=self.gmail
+        )
 
-    async def run_daily_cycle(self, reference_date: Optional[date] = None) -> Dict[str, Any]:
+    async def run_daily_cycle(
+        self,
+        reference_date: Optional[date] = None,
+        send_report_email: bool = False
+    ) -> Dict[str, Any]:
         """Executes the full end-to-end daily renewal automation run."""
         ref_date = reference_date or date.today()
         logger.info(f"=== Starting Daily Renewal Cycle for Date: {ref_date} ===")
 
-        # 0. If Robie's EZLynx credentials are provided, auto-export report 28 headlessly
+        # 0a. Check robie@streetsmart.insurance inbox for scheduled EZLynx / Applied renewal reports
+        try:
+            downloaded_reports = self.ingestor.poll_email_reports(gmail_client=self.cadence_mgr.gmail)
+            if downloaded_reports:
+                logger.info(f"Downloaded {len(downloaded_reports)} fresh scheduled report(s) from Robie's inbox.")
+        except Exception as e:
+            logger.warning(f"Could not poll scheduled email reports: {e}")
+
+        # 0b. If Robie's EZLynx credentials are provided, auto-export report 28 headlessly
         if settings.ezlynx_username and settings.ezlynx_password:
             try:
                 await self.downloader.download_policy_expiration_report(ref_date, days_ahead=settings.renewal_window_max_days)
@@ -81,6 +103,8 @@ class DailyRenewalOrchestrator:
             # Step 2: Carrier Portal Check
             portal_policies = db.query(PolicyRenewal).filter(
                 PolicyRenewal.status == RenewalStatus.PENDING_EVALUATION,
+                PolicyRenewal.status != RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+                (PolicyRenewal.source == "Manual") | (PolicyRenewal.source == None),
                 PolicyRenewal.portal_supported == True
             ).all()
 
@@ -129,18 +153,25 @@ class DailyRenewalOrchestrator:
                         action_type=ActionType.PORTAL_CHECK,
                         note_text=portal_note
                     ))
-                    self.ezlynx.add_note_to_discussion(
+                    res = self.ezlynx.add_note_to_discussion(
                         applicant_id=pol.applicant_id,
                         discussion_title=pol.discussion_title,
                         note_text=portal_note,
-                        policy_number=pol.policy_number
+                        policy_number=pol.policy_number,
+                        line_of_business=pol.line_of_business,
+                        carrier_name=pol.carrier_name
                     )
+                    if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                        pol.discussion_title = res.get("discussion_title")
 
                     # Upload doc to EZLynx & create review task
                     self.ezlynx.upload_document(
                         applicant_id=pol.applicant_id,
                         file_path=search_res.document_path,
-                        folder_name="Renewals"
+                        folder_name="Renewal Offers/Declarations",
+                        policy_number=pol.policy_number,
+                        doc_type="Renewal",
+                        label_to_apply="Renewals"
                     )
                     task_note = EZLynxNoteBuilder.format_quote_ready_task_note(
                         policy=pol,
@@ -169,12 +200,16 @@ class DailyRenewalOrchestrator:
                         action_type=ActionType.PORTAL_CHECK,
                         note_text=portal_note
                     ))
-                    self.ezlynx.add_note_to_discussion(
+                    res = self.ezlynx.add_note_to_discussion(
                         applicant_id=pol.applicant_id,
                         discussion_title=pol.discussion_title,
                         note_text=portal_note,
-                        policy_number=pol.policy_number
+                        policy_number=pol.policy_number,
+                        line_of_business=pol.line_of_business,
+                        carrier_name=pol.carrier_name
                     )
+                    if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                        pol.discussion_title = res.get("discussion_title")
 
             db.commit()
 
@@ -190,6 +225,15 @@ class DailyRenewalOrchestrator:
             replies = self.cadence_mgr.process_incoming_inbox_replies(db)
             results["inbox_replies_processed"] = replies
 
+            # Step 5b: Inbound CSR Carrier Call Commands ("Email Robie to Call")
+            try:
+                calls_dispatched = self.email_call_dispatcher.process_inbound_call_requests(dry_run=False)
+                results["carrier_calls_dispatched"] = len(calls_dispatched)
+                if calls_dispatched:
+                    logger.info(f"Dispatched {len(calls_dispatched)} autonomous carrier call request(s).")
+            except Exception as e:
+                logger.warning(f"Could not process inbound carrier call commands: {e}")
+
             # Step 6: 20-25 Day CSR Escalation Check
             # If no renewal quote received by day 20-25, assign task to CSR in existing discussion title
             pending_escalation = db.query(PolicyRenewal).filter(
@@ -200,6 +244,8 @@ class DailyRenewalOrchestrator:
                     RenewalStatus.FOLLOWUP_SENT,
                     RenewalStatus.INFO_REQUESTED
                 ]),
+                PolicyRenewal.status != RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+                (PolicyRenewal.source == "Manual") | (PolicyRenewal.source == None),
                 PolicyRenewal.expiration_date <= (ref_date + timedelta(days=25))
             ).all()
 
@@ -223,12 +269,16 @@ class DailyRenewalOrchestrator:
                     note_text=note_text
                 ))
 
-                self.ezlynx.add_note_to_discussion(
+                res = self.ezlynx.add_note_to_discussion(
                     applicant_id=pol.applicant_id,
                     discussion_title=pol.discussion_title,
                     note_text=note_text,
-                    policy_number=pol.policy_number
+                    policy_number=pol.policy_number,
+                    line_of_business=pol.line_of_business,
+                    carrier_name=pol.carrier_name
                 )
+                if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                    pol.discussion_title = res.get("discussion_title")
 
                 self.ezlynx.create_user_task(
                     applicant_id=pol.applicant_id,
@@ -243,6 +293,125 @@ class DailyRenewalOrchestrator:
             # Count total notes logged
             total_notes = db.query(AuditNoteLog).count()
             results["notes_logged_to_ezlynx"] = total_notes
+
+            # Step 7: Build Rolling 50-Day Renewal Pipeline & Daily Handoff Report
+            rolling_policies = db.query(PolicyRenewal).filter(
+                PolicyRenewal.status != RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+                PolicyRenewal.status != RenewalStatus.EXCLUDED_TEST_ACCOUNT,
+                (PolicyRenewal.source == "Manual") | (PolicyRenewal.source == None),
+                PolicyRenewal.expiration_date >= ref_date,
+                PolicyRenewal.expiration_date <= (ref_date + timedelta(days=settings.renewal_window_max_days))
+            ).order_by(PolicyRenewal.expiration_date.asc()).all()
+
+            rolling_records = []
+            for p in rolling_policies:
+                days_to_exp = (p.expiration_date - ref_date).days if p.expiration_date else None
+
+                doc_info = "Awaiting terms"
+                if p.documents:
+                    latest_doc = p.documents[-1]
+                    doc_folder = "Renewal Offers"
+                    if "loss" in latest_doc.file_name.lower():
+                        doc_folder = "Loss Runs"
+                    elif "non" in latest_doc.file_name.lower() or "cancel" in latest_doc.file_name.lower():
+                        doc_folder = "Cancellations"
+                    doc_info = f"`{latest_doc.file_name}` ({doc_folder})"
+
+                if p.status == RenewalStatus.READY_FOR_AGENT_REVIEW:
+                    next_act = "AM to review renewal quote & present to client"
+                elif p.status == RenewalStatus.ESCALATED_MANUAL:
+                    next_act = "URGENT: AM direct outreach (<=25d to exp)"
+                elif p.status == RenewalStatus.NON_RENEWAL_DECLINED:
+                    next_act = "CRITICAL: Re-market to secondary carriers"
+                elif p.status == RenewalStatus.INFO_REQUESTED:
+                    next_act = "AM to provide requested underwriting items"
+                elif p.status == RenewalStatus.FOLLOWUP_SENT:
+                    next_act = "Cadence follow-up sent; awaiting reply"
+                elif p.status == RenewalStatus.EMAIL_SENT_AWAITING_REPLY:
+                    next_act = "Initial outreach sent; awaiting reply"
+                elif p.status == RenewalStatus.PENDING_EVALUATION:
+                    next_act = "Queued for portal crawl / outreach"
+                else:
+                    next_act = "In automated cadence"
+
+                rolling_records.append({
+                    "applicant_id": p.applicant_id,
+                    "insured_name": p.insured_name,
+                    "policy_number": p.policy_number,
+                    "carrier_name": p.carrier_name,
+                    "line_of_business": p.line_of_business or "Commercial",
+                    "expiration_date": str(p.expiration_date),
+                    "days_to_exp": days_to_exp,
+                    "expiring_premium": p.expiring_premium,
+                    "renewal_premium": p.renewal_premium,
+                    "delta_pct": p.premium_change_pct,
+                    "channel": "PORTAL" if p.portal_supported else "EMAIL",
+                    "status": p.status.value if hasattr(p.status, "value") else str(p.status),
+                    "doc_info": doc_info,
+                    "assigned_csr": p.assigned_agent or "Unassigned",
+                    "next_action": next_act
+                })
+
+            # Processed active accounts today
+            active_processed_today = [
+                r for r in rolling_records
+                if r["status"] in (
+                    RenewalStatus.READY_FOR_AGENT_REVIEW.value,
+                    RenewalStatus.QUOTE_RECEIVED.value,
+                    RenewalStatus.EMAIL_SENT_AWAITING_REPLY.value,
+                    RenewalStatus.FOLLOWUP_SENT.value,
+                    RenewalStatus.ESCALATED_MANUAL.value,
+                    RenewalStatus.NON_RENEWAL_DECLINED.value,
+                    RenewalStatus.INFO_REQUESTED.value
+                )
+            ]
+
+            # Inactive excluded accounts
+            excluded_inactive = [
+                {
+                    "applicant_id": p.applicant_id,
+                    "insured_name": p.insured_name,
+                    "policy_number": p.policy_number,
+                    "carrier_name": p.carrier_name,
+                    "cancel_date": str(p.expiration_date),
+                    "reason": "Cancelled / Inactive policy status in EZLynx"
+                }
+                for p in db.query(PolicyRenewal).filter(
+                    PolicyRenewal.status.in_([
+                        RenewalStatus.EXCLUDED_INACTIVE_ACCOUNT,
+                        RenewalStatus.EXCLUDED_TEST_ACCOUNT
+                    ])
+                ).all()
+            ]
+
+            # Portal logins needed
+            portal_logins_needed = CarrierRoutingMatrix.get_portal_logins_needed(db)
+
+            reports_dir = Path("reports")
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            report_file = reports_dir / f"renewal_daily_handoff_{ref_date.isoformat()}.md"
+            report_md = DailyHandoffReporter.generate_report_markdown(
+                report_date=ref_date,
+                active_processed=active_processed_today,
+                excluded_inactive=excluded_inactive,
+                portal_logins_needed=portal_logins_needed,
+                rolling_pipeline=rolling_records,
+                output_filepath=str(report_file)
+            )
+            results["report_path"] = str(report_file)
+            results["rolling_pipeline_count"] = len(rolling_records)
+
+            if send_report_email:
+                try:
+                    logger.info("Dispatching Daily Handoff Email Report to leadership team...")
+                    email_res = send_daily_handoff_email(report_markdown=report_md, report_date=ref_date)
+                    results["report_emailed"] = True
+                    results["email_delivery"] = email_res
+                    logger.info(f"Daily Handoff Email successfully sent to team leads: {email_res}")
+                except Exception as mail_err:
+                    logger.error(f"Failed to dispatch daily handoff email report: {mail_err}")
+                    results["report_emailed"] = False
+                    results["email_error"] = str(mail_err)
 
         finally:
             db.close()

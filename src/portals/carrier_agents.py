@@ -74,39 +74,74 @@ class CoteriePortalCrawler(BaseCarrierPortalCrawler):
                 status_message="Coterie Portal accessible. Credentials pending in Keychain/GCP for automated document retrieval."
             )
 
+        profile_dir = Path.home() / ".coterie_chrome_profile"
+        auth_state_file = Path("data/coterie_auth_state.json")
+
         async with async_playwright() as p:
             try:
-                browser = await p.chromium.launch(headless=self.headless, args=["--no-sandbox"])
-                context = await browser.new_context(accept_downloads=True)
-                page = await context.new_page()
+                browser = await p.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=self.headless,
+                    accept_downloads=True,
+                    viewport={"width": 1440, "height": 900},
+                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"]
+                )
+                page = browser.pages[0] if browser.pages else await browser.new_page()
 
-                # 1. Login
-                await page.goto(f"{self.base_url}/login", timeout=settings.playwright_browser_timeout_ms, wait_until="domcontentloaded")
-                await page.wait_for_selector("input[type='email'], input[name='email']", timeout=10000)
-                await page.fill("input[type='email'], input[name='email']", username)
-                await page.fill("input[type='password'], input[name='password']", password)
-                await page.click("button[type='submit'], button:has-text('Log In'), button:has-text('Sign In')")
-                await page.wait_for_timeout(3000)
+                # 1. Try direct navigation to policy documents
+                target_url = f"https://dashboard-v2.coterieinsurance.com/policies/{policy_number}?tab=documents"
+                logger.info(f"[Coterie Portal] Navigating to {target_url}...")
+                await page.goto(target_url, timeout=settings.playwright_browser_timeout_ms, wait_until="domcontentloaded")
+                await page.wait_for_timeout(4000)
 
-                # 2FA Check & Auto-OTP from Email
-                await handle_portal_2fa_if_present(page, "Coterie")
+                # 2. Check if redirected to login
+                if "login" in page.url.lower():
+                    logger.warning("[Coterie Portal] Session expired or not authenticated. Re-auth required.")
+                    await browser.close()
+                    return PortalSearchResult(
+                        success=False,
+                        policy_found=False,
+                        renewal_ready=False,
+                        status_message="Coterie session expired. MFA re-authentication required."
+                    )
 
-                # 2. Search Policy
-                search_input = await page.query_selector("input[placeholder*='Search'], input[type='search']")
-                if search_input:
-                    await search_input.fill(policy_number)
-                    await page.keyboard.press("Enter")
-                    await page.wait_for_timeout(3000)
+                # 3. Dismiss cookie banner if present
+                accept_btn = page.locator("button:has-text('Accept All')")
+                if await accept_btn.count() > 0:
+                    try:
+                        await accept_btn.first.click()
+                        await page.wait_for_timeout(1000)
+                    except Exception:
+                        pass
 
-                # 3. Check for Renewal Document
-                renewal_elem = await page.query_selector("a:has-text('Renewal'), button:has-text('Renewal Quote'), tr:has-text('Renewal')")
-                if renewal_elem:
+                # 4. Check for Renewal Reminders or Policy Documents
+                doc_rows = page.locator("text=.pdf")
+                count = await doc_rows.count()
+
+                if count > 0:
+                    # Prefer Renewal Reminder PDF over base package
+                    selected_row = None
+                    selected_name = "renewal.pdf"
+
+                    for i in range(count):
+                        row = doc_rows.nth(i)
+                        name = (await row.inner_text()).strip()
+                        if "renewal" in name.lower():
+                            selected_row = row
+                            selected_name = name
+                            break
+
+                    if not selected_row:
+                        selected_row = doc_rows.first
+                        selected_name = (await selected_row.inner_text()).strip()
+
+                    dest = download_dir / f"Coterie_{policy_number}_{selected_name}"
                     async with page.expect_download(timeout=15000) as download_info:
-                        await renewal_elem.click()
+                        await selected_row.click()
                     download = await download_info.value
-                    dest = download_dir / f"Coterie_{policy_number}_renewal.pdf"
                     await download.save_as(str(dest))
                     await browser.close()
+
                     return PortalSearchResult(
                         success=True,
                         policy_found=True,
@@ -137,7 +172,7 @@ class HartfordPortalCrawler(BaseCarrierPortalCrawler):
     def __init__(self, headless: bool = True):
         super().__init__(
             carrier_name="The Hartford",
-            base_url="https://ebusiness.thehartford.com",
+            base_url="https://ebc.thehartford.com",
             headless=headless
         )
 
@@ -164,7 +199,10 @@ class HartfordPortalCrawler(BaseCarrierPortalCrawler):
 
         async with async_playwright() as p:
             try:
-                browser = await p.chromium.launch(headless=self.headless, args=["--no-sandbox"])
+                browser = await p.chromium.launch(
+                    headless=self.headless,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
+                )
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
 
@@ -254,7 +292,10 @@ class TapcoPortalCrawler(BaseCarrierPortalCrawler):
 
         async with async_playwright() as p:
             try:
-                browser = await p.chromium.launch(headless=self.headless, args=["--no-sandbox"])
+                browser = await p.chromium.launch(
+                    headless=self.headless,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
+                )
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
 
