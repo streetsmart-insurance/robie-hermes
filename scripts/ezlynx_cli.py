@@ -21,7 +21,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.ezlynx.api_client import EZLynxApiClient
+from src.ezlynx.api_client import (
+    EZLynxApiClient,
+    document_library_total,
+    extract_document_records,
+    format_document_line,
+)
 
 
 def main():
@@ -140,16 +145,17 @@ def main():
             print(json.dumps(res, indent=2))
         else:
             if res.get("status") == "success":
-                docs = res.get("data", [])
+                payload = res.get("data")
+                records = extract_document_records(payload)
+                total = document_library_total(payload, records)
                 print(f"Document Library for Applicant #{args.applicant_id}:")
-                if isinstance(docs, list):
-                    for d in docs:
-                        print(f"  • ID: {d.get('DocumentID')} | Name: {d.get('DocumentName')} | Date: {d.get('CreatedDate')}")
-                elif isinstance(docs, dict):
-                    records = docs.get("Records", []) or docs.get("DocumentList", [])
-                    print(f"  Total records: {docs.get('TotalRecords', len(records))}")
-                    for d in records:
-                        print(f"  • ID: {d.get('DocumentID') or d.get('Id')} | Name: {d.get('DocumentName') or d.get('Name')}")
+                print(f"  Total records: {total}")
+                if records:
+                    print(f"  Showing {len(records)} on page {args.page} (size {args.size}):")
+                    for doc in records:
+                        print(format_document_line(doc))
+                else:
+                    print("  (no documents returned on this page)")
             else:
                 print(f"Error listing documents: {res.get('error')}", file=sys.stderr)
                 sys.exit(1)

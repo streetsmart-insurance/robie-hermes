@@ -3,7 +3,13 @@
 import json
 from unittest.mock import patch, MagicMock
 import pytest
-from src.ezlynx.api_client import EZLynxApiClient, ROBIE_SIGNATURE
+from src.ezlynx.api_client import (
+    EZLynxApiClient,
+    ROBIE_SIGNATURE,
+    document_library_total,
+    extract_document_records,
+    format_document_line,
+)
 
 
 @pytest.fixture
@@ -167,3 +173,81 @@ def test_session_overview_structure(api_client):
         assert overview["oauth_gateway"]["authenticated"] is True
         assert "browser_session" in overview
         assert "cdp_endpoint" in overview["browser_session"]
+
+
+PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD = {
+    "TotalRecords": 154,
+    "Documents": [
+        {
+            "DocumentID": 881122,
+            "DocumentName": "2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf",
+            "PolicyNumber": "CBB-00113127-02",
+            "CreatedDate": "2026-08-01T14:22:00",
+        },
+        {
+            "DocumentID": 881123,
+            "DocumentName": "Loss Runs - Hartford.pdf",
+            "PolicyNumber": None,
+            "CreatedDate": "/Date(1722513600000)/",
+        },
+    ],
+}
+
+
+def test_extract_document_records_uses_documents_key_not_records():
+    """Production hermes payload has TotalRecords + Documents; Records/DocumentList are absent."""
+    records = extract_document_records(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD)
+    assert len(records) == 2
+    assert records[0]["DocumentName"].startswith("2026-27 Renewal Offer")
+    assert document_library_total(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD, records) == 154
+    assert "Records" not in PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD
+    assert "DocumentList" not in PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD
+
+
+def test_extract_document_records_supports_legacy_and_wrapped_envelopes():
+    legacy = {
+        "TotalRecords": 1,
+        "DocumentList": [{"Id": 9, "Name": "legacy.pdf", "PolicyNumber": "POL-9"}],
+    }
+    assert extract_document_records(legacy)[0]["Name"] == "legacy.pdf"
+
+    records_key = {"Records": [{"DocumentID": 3, "FileName": "via-records.pdf"}]}
+    assert extract_document_records(records_key)[0]["FileName"] == "via-records.pdf"
+
+    wrapped = {"d": {"TotalRecords": 2, "Documents": [{"documentName": "nested.pdf"}]}}
+    assert extract_document_records(wrapped)[0]["documentName"] == "nested.pdf"
+
+    bare_list = [{"title": "bare.pdf"}]
+    assert extract_document_records(bare_list)[0]["title"] == "bare.pdf"
+
+
+def test_format_document_line_includes_name_policy_and_date():
+    line = format_document_line(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD["Documents"][0])
+    assert "Name: 2026-27 Renewal Offer - Coterie CBB-00113127-02.pdf" in line
+    assert "ID: 881122" in line
+    assert "Policy: CBB-00113127-02" in line
+    assert "Uploaded: 2026-08-01" in line
+
+    unassociated = format_document_line(PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD["Documents"][1])
+    assert "Name: Loss Runs - Hartford.pdf" in unassociated
+    assert "Policy: —" in unassociated
+    assert "Uploaded: 2024-08-01" in unassociated
+
+
+@patch("requests.get")
+def test_list_applicant_documents_wraps_classic_payload(mock_get, api_client):
+    api_client._classic_token = "valid_token"
+    api_client._classic_token_time = 9999999999.0
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = PRODUCTION_DOCUMENT_LIBRARY_PAYLOAD
+    mock_get.return_value = mock_resp
+
+    res = api_client.list_applicant_documents("151445306", page_index=1, page_size=20)
+    assert res["status"] == "success"
+    assert res["data"]["TotalRecords"] == 154
+    docs = extract_document_records(res["data"])
+    assert docs[0]["DocumentName"].endswith(".pdf")
+    mock_get.assert_called_once()
+    assert "/documentlibrary/list/151445306/1/20/0" in mock_get.call_args[0][0]

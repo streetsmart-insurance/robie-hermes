@@ -29,6 +29,248 @@ logger = logging.getLogger("ezlynx_api")
 
 ROBIE_SIGNATURE = "\n\nRobie was here"
 
+# Classic GET /documentlibrary/list/{applicant}/{page}/{size}/{policyId} returns a
+# paged envelope (TotalRecords + a document array). Production payloads use
+# Documents — not Records / DocumentList — plus PascalCase row fields.
+_DOCUMENT_LIST_KEYS = (
+    "Documents",
+    "DocumentList",
+    "DocumentDetails",
+    "DocumentLibraryList",
+    "FileList",
+    "Files",
+    "Records",
+    "Items",
+    "Results",
+    "documents",
+    "documentList",
+    "documentDetails",
+    "records",
+    "items",
+    "results",
+    "files",
+)
+_DOCUMENT_WRAPPER_KEYS = (
+    "Data",
+    "data",
+    "Result",
+    "result",
+    "d",
+    "Value",
+    "value",
+    "Response",
+    "response",
+)
+_DOCUMENT_HINT_KEYS = {
+    "DocumentName",
+    "DocumentID",
+    "DocumentId",
+    "FileName",
+    "fileName",
+    "documentName",
+    "documentId",
+    "PolicyNumber",
+    "policyNumber",
+    "CreatedDate",
+    "createdDate",
+    "UploadedDate",
+    "AssociatedPolicyNumber",
+}
+
+
+def _first_present(obj: Dict[str, Any], keys: tuple) -> Any:
+    for key in keys:
+        if key not in obj:
+            continue
+        value = obj[key]
+        if value is None or value == "":
+            continue
+        return value
+    return None
+
+
+def _looks_like_document_rows(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    if not all(isinstance(item, dict) for item in value):
+        return False
+    sample_keys = set(value[0].keys())
+    if sample_keys & _DOCUMENT_HINT_KEYS:
+        return True
+    lowered = {str(k).lower() for k in sample_keys}
+    return bool(lowered & {"name", "title", "filename", "id", "documentid"})
+
+
+def extract_document_records(payload: Any) -> List[Dict[str, Any]]:
+    """Return document row dicts from a Classic / wrapped Document Library payload.
+
+    Production list_applicant_documents data looks like:
+      {"TotalRecords": 154, "Documents": [{DocumentID, DocumentName, PolicyNumber, CreatedDate}, ...]}
+    Older/alternate envelopes may use DocumentList, Records, items, or an ASP.NET ``d`` wrapper.
+    """
+    if isinstance(payload, list):
+        if _looks_like_document_rows(payload) or (
+            payload and all(isinstance(item, dict) for item in payload)
+        ):
+            return payload
+        collected: List[Dict[str, Any]] = []
+        for item in payload:
+            collected.extend(extract_document_records(item))
+        return collected
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in _DOCUMENT_LIST_KEYS:
+        value = payload.get(key)
+        if _looks_like_document_rows(value):
+            return value
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            return value
+
+    for key in _DOCUMENT_WRAPPER_KEYS:
+        nested = payload.get(key)
+        if nested is payload:
+            continue
+        if isinstance(nested, (dict, list)):
+            found = extract_document_records(nested)
+            if found:
+                return found
+
+    for value in payload.values():
+        if isinstance(value, (dict, list)):
+            found = extract_document_records(value)
+            if found:
+                return found
+    return []
+
+
+def document_library_total(payload: Any, records: Optional[List[Dict[str, Any]]] = None) -> int:
+    """Best-effort total from TotalRecords (or similar), falling back to the extracted page."""
+    if isinstance(payload, dict):
+        for key in ("TotalRecords", "totalRecords", "Total", "total", "Count", "count"):
+            value = payload.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+    if records is not None:
+        return len(records)
+    if isinstance(payload, list):
+        return len(payload)
+    return 0
+
+
+def _stringify_policy_number(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, dict):
+        nested = _first_present(
+            value,
+            ("PolicyNumber", "policyNumber", "Number", "number", "Name", "name"),
+        )
+        return _stringify_policy_number(nested)
+    if isinstance(value, list) and value:
+        return _stringify_policy_number(value[0])
+    text = str(value).strip()
+    return text or None
+
+
+def _format_uploaded_date(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 1e12:
+            timestamp /= 1000.0
+        return time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+    text = str(value).strip()
+    ms_match = re.search(r"/Date\((-?\d+)", text)
+    if ms_match:
+        timestamp = int(ms_match.group(1)) / 1000.0
+        return time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+    return text[:19].replace("T", " ")
+
+
+def document_display_fields(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """Normalize a document row to name, id, policy number, and uploaded date."""
+    name = _first_present(
+        doc,
+        (
+            "DocumentName",
+            "FileName",
+            "Name",
+            "Title",
+            "Description",
+            "documentName",
+            "fileName",
+            "name",
+            "title",
+            "description",
+        ),
+    )
+    doc_id = _first_present(
+        doc,
+        ("DocumentID", "DocumentId", "Id", "ID", "id", "documentId"),
+    )
+    policy = _stringify_policy_number(
+        _first_present(
+            doc,
+            (
+                "PolicyNumber",
+                "AssociatedPolicyNumber",
+                "PolicyNum",
+                "policyNumber",
+                "associatedPolicyNumber",
+                "AssociatedPolicy",
+                "Policy",
+                "AssociatedPolicies",
+                "Policies",
+                "policies",
+            ),
+        )
+    )
+    uploaded = _format_uploaded_date(
+        _first_present(
+            doc,
+            (
+                "CreatedDate",
+                "UploadedDate",
+                "UploadDate",
+                "DateCreated",
+                "CreatedOn",
+                "ModifiedDate",
+                "createdDate",
+                "uploadedDate",
+                "createdOn",
+                "modifiedDate",
+                "Date",
+            ),
+        )
+    )
+    return {
+        "name": None if name is None else str(name),
+        "id": None if doc_id is None else str(doc_id),
+        "policy_number": policy,
+        "uploaded": uploaded,
+    }
+
+
+def format_document_line(doc: Dict[str, Any]) -> str:
+    """Human-readable one-line listing for ezlynx_cli documents."""
+    fields = document_display_fields(doc)
+    parts = [f"Name: {fields['name'] or 'Untitled'}"]
+    if fields["id"]:
+        parts.append(f"ID: {fields['id']}")
+    if fields["policy_number"]:
+        parts.append(f"Policy: {fields['policy_number']}")
+    else:
+        parts.append("Policy: —")
+    if fields["uploaded"]:
+        parts.append(f"Uploaded: {fields['uploaded']}")
+    return "  • " + " | ".join(parts)
+
+
 DISQUALIFIED_DISCUSSION_PATTERNS = [
     "loss runs",
     "loss run",
@@ -370,6 +612,11 @@ class EZLynxApiClient:
         """Lists documents in an applicant's Document Library.
 
         Endpoint: GET /ezlynxapi/api/documentlibrary/list/{applicant_id}/{pageIndex}/{pageSize}/{policyId}
+
+        Success envelope: ``{"status": "success", "data": <raw JSON>}``.
+        Production ``data`` is typically
+        ``{"TotalRecords": int, "Documents": [ {DocumentID, DocumentName, PolicyNumber, CreatedDate}, ... ]}``.
+        Use :func:`extract_document_records` to read the row list (do not assume Records/DocumentList).
         """
         if not self.authenticate_classic():
             return {"status": "error", "error": "Unable to authenticate with Classic EZLynx API"}
