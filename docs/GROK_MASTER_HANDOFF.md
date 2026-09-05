@@ -50,7 +50,7 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
    Who to call: the insured
    What to say: Review the quote Carlo put together.
    ```
-3. **Client outreach / cancellations (`Robie client outreach`):** Apply the org label **`Robie client outreach`** (or write that phrase / `robie cancellation` in the title/note). Forces **`call_type=client_outreach`** — a different prompt from lead follow-up (no “quote {Sales Center producer} put together”). Dial order is locked: **primary applicant first, then secondary/co-applicant** when both have E.164 phones (`CellPhone` → `HomePhone` → `WorkPhone`). Skip anyone with no phone; never invent numbers. Same number on both people → one call. Each call greets that person by **first name only** (same commercial-contact sources; generic Hi/Hello if none), conveys the CSR `What to say` reason, warm-transfers a clear yes to the **label invoker**, and on no/busy/voicemail asks them to call **732-462-8343**. Buster Brown (`26356199`): primary `7329953409`, co-applicant has no cell — secondary is skipped.
+3. **Client outreach / cancellations (`Robie client outreach`):** Apply the org label **`Robie client outreach`** (or write that phrase / `robie cancellation` in the title/note). Forces **`call_type=client_outreach`** — a different prompt from lead follow-up (no “quote {Sales Center producer} put together”). Dial order is locked: **primary applicant first, then secondary/co-applicant** when both have E.164 phones (`CellPhone` → `HomePhone` → `WorkPhone`). Skip anyone with no phone; never invent numbers. Same number on both people → one call. Each call greets that person by **first name only** (same commercial-contact sources; generic Hi/Hello if none). On a clear yes, warm-transfer to the **account Assigned Producer** (`GetApplicantSidebar` → `Applicant.Assignment.AssignedTo`, `lookup_producer` DID) — **not** Sales Center `producerName`, **not** the label invoker. Missing Assigned Producer DID skips transfer; voicemail still asks them to call **732-462-8343**. Splice-replacement conversational pathways (no press-1): `cancellation` (default for cancel/non-pay / `robie cancellation`), `audit`, `returned_mail`, `esign`, `additional_info`, `recommendations`, `unresponsive`, else CSR What to say. Sales Center / winback / birthday / marketing Splice WFs are not ported. Buster Brown (`26356199`): primary `7329953409`, co-applicant has no cell — secondary is skipped.
    ```text
    Robie client outreach
    What to say: Policy is pending cancellation — please call to keep coverage or confirm they want to cancel.
@@ -197,8 +197,10 @@ To start the post-call webhook listener on Hermes:
 PYTHONPATH=. .venv/bin/python3 -m src.voice.webhook_server --port 8088
 ```
 
+### Manual renewal carrier voice cadence (Carlo 2026-09-05)
+Email or portal first. After **two** unsuccessful channel attempts with no renewal in hand, the daily pipeline places **exactly one** outbound carrier Robie Call (`src/voice/renewal_cadence.py`). Stops when a renewal PDF / UW reply / in-hand status is present. Never auto-dials the client. Never invents a carrier phone. Sacred cron `0 9 * * *` on hermes-poc-01 is unchanged.
+
 ### Running Test Suite:
 ```bash
 PYTHONPATH=. .venv/bin/pytest tests/ -v
-# Output: 107 passed, 0 failed (100% green)
 ```

@@ -169,3 +169,47 @@ class EZLynxNoteBuilder:
         lines.append("\nRobie was here")
         return "\n".join(lines)
 
+    @staticmethod
+    def format_carrier_voice_cadence_note(
+        policy: PolicyRenewal,
+        phone: str,
+        call_id: Optional[str] = None,
+        status: str = "DISPATCHED",
+        attempts: int = 2,
+    ) -> str:
+        lob = getattr(policy, "line_of_business", "") or "Commercial"
+        cname = getattr(policy, "carrier_name", "") or "Carrier"
+        lines = [
+            f"Policy: #{policy.policy_number} ({lob} - {cname})",
+            "",
+            "🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]",
+            f"Email/portal follow-up budget exhausted ({attempts} unsuccessful checks). "
+            f"Robie placed one outbound carrier Robie Call to {cname} at {phone}.",
+            "Call type: carrier",
+            f"Call ID: {call_id or 'n/a'}",
+            f"Status: {status}",
+            "No additional carrier calls will be placed for this policy/term. "
+            "Client outreach is not part of this cadence.",
+            "",
+            "Robie was here",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_carrier_voice_phone_needed_note(policy: PolicyRenewal) -> str:
+        lob = getattr(policy, "line_of_business", "") or "Commercial"
+        cname = getattr(policy, "carrier_name", "") or "Carrier"
+        lines = [
+            f"Policy: #{policy.policy_number} ({lob} - {cname})",
+            "",
+            "⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]",
+            "Two email/portal attempts received no renewal. Robie would place one "
+            "carrier Robie Call, but no E.164 underwriter/carrier phone is on file. "
+            "Numbers are never invented.",
+            "",
+            'Reply with "Phone: (xxx) xxx-xxxx" to trigger the call.',
+            "",
+            "Robie was here",
+        ]
+        return "\n".join(lines)
+

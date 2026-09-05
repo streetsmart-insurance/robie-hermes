@@ -202,9 +202,11 @@ def test_client_outreach_prompt_greets_first_name_without_sales_producer():
     client = CarrierVoiceClient(api_key="test-key")
     dossier = _sample_dossier(
         client_first_name="Buster",
-        producer_name="Carlo Ferrara",
+        producer_name="Jake Ferrara",
         requestor_name="Mike Sosa",
         requestor_phone="+17326540947",
+        assigned_producer_name="Carlo Ferrara",
+        assigned_producer_phone="+17324622360",
         call_type="client_outreach",
         transfer_mode="warm",
         custom_instructions="Policy is pending cancellation — please confirm they want to keep coverage.",
@@ -215,14 +217,14 @@ def test_client_outreach_prompt_greets_first_name_without_sales_producer():
     assert first.startswith("Hi Buster, this is Robie from StreetSmart")
     assert "quote" not in first.lower()
     assert "Carlo Ferrara" not in first
+    assert "Jake Ferrara" not in first
     assert "put together" not in prompt.lower()
-    assert "Carlo Ferrara" not in prompt
     assert "client outreach" in prompt.lower()
-    assert "pending cancellation" in prompt
-    assert "Mike Sosa" in prompt
-    assert "+17326540947" in prompt
+    assert "pending cancellation" in prompt or "cancelled" in first.lower()
+    assert "connect you to Carlo now" in first
+    assert "+17324622360" in prompt
     assert "only transfer if they clearly agree" in prompt.lower()
-    assert "Carlo Ferrara" not in briefing
+    assert "Jake Ferrara" not in briefing
     assert "put together" not in briefing.lower()
     _assert_agency_callback_not_jake(prompt)
 
@@ -251,14 +253,16 @@ def test_client_outreach_voicemail_uses_agency_main_not_jake_did():
 
 
 @patch("src.voice.voice_client.requests.post")
-def test_bland_client_outreach_payload_transfers_to_requestor(mock_post):
+def test_bland_client_outreach_payload_transfers_to_assigned_producer(mock_post):
     mock_post.return_value = _ok_response()
     client = CarrierVoiceClient(api_key="test-key", provider="bland_ai")
     dossier = _sample_dossier(
         client_first_name="Buster",
-        producer_name="Carlo Ferrara",
+        producer_name="Jake Ferrara",
         requestor_name="Mike Sosa",
         requestor_phone="+17326540947",
+        assigned_producer_name="Carlo Ferrara",
+        assigned_producer_phone="+17324622360",
         transfer_mode="warm",
         call_type="client_outreach",
     )
@@ -267,8 +271,9 @@ def test_bland_client_outreach_payload_transfers_to_requestor(mock_post):
     payload = mock_post.call_args.kwargs["json"]
     assert payload["from"] == "+17322986745"
     assert "max_duration" not in payload
-    assert payload["transfer_phone_number"] == "+17326540947"
-    assert payload["transfer_list"]["requestor"] == "+17326540947"
+    assert payload["transfer_phone_number"] == "+17324622360"
+    assert payload["transfer_list"]["assigned_producer"] == "+17324622360"
+    assert "requestor" not in payload["transfer_list"]
     assert payload["metadata"]["call_type"] == "client_outreach"
     assert payload["first_sentence"].startswith("Hi Buster")
     assert "put together" not in payload["first_sentence"].lower()

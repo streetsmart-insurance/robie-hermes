@@ -1189,8 +1189,11 @@ def test_dispatcher_client_outreach_label_forces_client_outreach(processed_store
     }
     mock_ezlynx.get_applicant_policies.return_value = []
     mock_ezlynx.get_sales_center_opportunities.return_value = [
-        {"producerName": "Carlo Ferrara", "status": "Open"}
+        {"producerName": "Jake Ferrara", "status": "Open"}
     ]
+    mock_ezlynx.get_applicant_sidebar.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
+    }
 
     dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
@@ -1200,19 +1203,20 @@ def test_dispatcher_client_outreach_label_forces_client_outreach(processed_store
     assert results[0]["phones"] == ["+17329953409"]
     assert results[0]["call_ids"] == ["call_out_01"]
     assert results[0]["producer_name"] is None
-    assert results[0]["requestor_name"] == "Mike Sosa"
-    assert results[0]["requestor_phone"] == "+17326540947"
+    assert results[0]["assigned_producer_name"] == "Carlo Ferrara"
+    assert results[0]["assigned_producer_phone"] == "+17324622360"
     dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
     assert dossier.call_type == "client_outreach"
     assert dossier.client_first_name == "Buster"
     assert dossier.producer_name is None
-    assert dossier.requestor_phone == "+17326540947"
+    assert dossier.assigned_producer_phone == "+17324622360"
     assert dossier.assigned_csr_email == "carlo@streetsmart.insurance"
     ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "Call type: client_outreach" in ack
     assert "call_out_01" in ack
     assert "+17329953409" in ack
-    assert "Mike Sosa" in ack
+    assert "Carlo Ferrara" in ack
+    assert "Jake Ferrara" not in ack
 
 
 def test_dispatcher_client_outreach_primary_and_secondary_two_dials(processed_store):
@@ -1234,6 +1238,9 @@ def test_dispatcher_client_outreach_primary_and_secondary_two_dials(processed_st
         },
     }
     mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_applicant_sidebar.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
+    }
 
     dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
     results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
@@ -1422,4 +1429,79 @@ def test_dispatcher_commercial_outreach_uses_contact_first_name_not_llc(processe
     assert dossier.client_first_name == "Luis"
     assert dossier.client_first_name != "Green"
     assert dossier.producer_name is None
+
+
+def test_dispatcher_client_outreach_transfers_to_assigned_producer_not_requestor_or_sales(
+    processed_store,
+):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_xfer", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Buster",
+            "LastName": "Brown",
+            "CellPhone": "7329953409",
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_sales_center_opportunities.return_value = [
+        {"producerName": "Jake Ferrara", "status": "Open"}
+    ]
+    mock_ezlynx.get_applicant_sidebar.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
+    }
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.assigned_producer_name == "Carlo Ferrara"
+    assert dossier.assigned_producer_phone == "+17324622360"
+    assert dossier.producer_name is None
+    assert results[0]["assigned_producer_phone"] == "+17324622360"
+    assert results[0]["assigned_producer_phone"] != "+17326540947"
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Assigned Producer Carlo Ferrara" in ack
+    assert "Jake Ferrara" not in ack
+
+
+def test_dispatcher_client_outreach_skips_transfer_when_assigned_producer_has_no_did(
+    processed_store, monkeypatch
+):
+    def _no_did(**kwargs):
+        return {
+            "name": kwargs.get("name") or "Pat Producer",
+            "email": None,
+            "phone": None,
+            "aliases": [],
+        }
+
+    monkeypatch.setattr("src.voice.context_hydrator.lookup_producer", _no_did)
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_nodid", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [_outreach_card()]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"FirstName": "Buster", "CellPhone": "7329953409"},
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_applicant_sidebar.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Pat Producer"}}
+    }
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.assigned_producer_phone is None
+    assert dossier.transfer_mode is None
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Warm transfer: not available" in ack
+    assert results[0]["phones"] == ["+17329953409"]
 

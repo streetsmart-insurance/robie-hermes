@@ -240,6 +240,22 @@ class DailyRenewalOrchestrator:
             followups = self.cadence_mgr.process_due_followups(db, ref_date)
             results["followups_sent"] = followups
 
+            # Step 4b: After 2 unsuccessful email/portal attempts, one carrier Robie Call.
+            # Stops when the renewal is in hand. Never auto-dials the client.
+            try:
+                from src.voice.renewal_cadence import process_carrier_voice_cadence
+
+                cadence_voice = process_carrier_voice_cadence(db, dry_run=False)
+                results["carrier_voice_cadence"] = cadence_voice
+                dispatched = cadence_voice.get("dispatched") or []
+                if dispatched:
+                    logger.info(
+                        "Carrier voice cadence: %s outcome(s) after 2-miss budget.",
+                        len(dispatched),
+                    )
+            except Exception as e:
+                logger.warning("Could not run carrier voice cadence: %s", e)
+
             # Step 5: Gmail Inbox Poller & Reply Processing
             replies = self.cadence_mgr.process_incoming_inbox_replies(db)
             results["inbox_replies_processed"] = replies

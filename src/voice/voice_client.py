@@ -20,6 +20,14 @@ from src.voice.context_hydrator import (
     is_client_call_type,
     spoken_client_first_name,
 )
+from src.voice.outreach_pathways import (
+    PATHWAY_GENERIC,
+    assigned_producer_first_name,
+    build_outreach_live_script,
+    build_outreach_voicemail_script,
+    extract_action_date,
+    infer_outreach_pathway,
+)
 
 logger = logging.getLogger("carrier_voice_client")
 
@@ -96,6 +104,24 @@ class CarrierVoiceClient:
     def _producer_display(self, dossier: CallingDossier, fallback: str = "your producer") -> str:
         return dossier.producer_name or fallback
 
+    def _assigned_producer_display(self, dossier: CallingDossier) -> str:
+        return dossier.assigned_producer_name or "the assigned producer"
+
+    def _assigned_producer_first(self, dossier: CallingDossier) -> Optional[str]:
+        return assigned_producer_first_name(dossier.assigned_producer_name)
+
+    def _outreach_pathway(self, dossier: CallingDossier) -> str:
+        return getattr(dossier, "outreach_pathway", None) or infer_outreach_pathway(
+            dossier.custom_instructions
+        ) or PATHWAY_GENERIC
+
+    def _outreach_transfer_phone(self, dossier: CallingDossier) -> Optional[str]:
+        """Assigned Producer DID only. Never requestor. Never Sales Center."""
+        return normalize_phone_e164(getattr(dossier, "assigned_producer_phone", None))
+
+    def _followup_transfer_phone(self, dossier: CallingDossier) -> Optional[str]:
+        return normalize_phone_e164(dossier.requestor_phone)
+
     def _client_briefing_identity(self, dossier: CallingDossier) -> str:
         """First name only toward the client; business name is account context."""
         first = spoken_client_first_name(dossier.client_first_name)
@@ -116,9 +142,10 @@ class CarrierVoiceClient:
                 dossier.insured_name, dossier.client_first_name
             )
             if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
+                producer = self._assigned_producer_display(dossier)
                 about = f"about {account}, policy" if account else "about their policy"
                 return (
-                    f"Hi {requestor}, this is Robie from StreetSmart. I have {person} "
+                    f"Hi {producer}, this is Robie from StreetSmart. I have {person} "
                     f"on the line {about} "
                     f"{dossier.policy_number}. Connecting you now."
                 )
@@ -139,12 +166,19 @@ class CarrierVoiceClient:
         )
 
     def build_client_first_sentence(self, dossier: CallingDossier) -> str:
-        greeting = client_spoken_greeting(dossier.client_first_name)
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
-            return (
-                f"{greeting}, this is Robie from StreetSmart Insurance. "
-                "Do you have a moment to talk?"
+            return build_outreach_live_script(
+                pathway=self._outreach_pathway(dossier),
+                client_first=spoken_client_first_name(dossier.client_first_name),
+                line_of_business=dossier.line_of_business,
+                carrier_name=dossier.carrier_name if dossier.carrier_name != dossier.insured_name else None,
+                producer_first=self._assigned_producer_first(dossier),
+                action_date=extract_action_date(
+                    dossier.custom_instructions, dossier.expiration_date
+                ),
+                csr_instructions=dossier.custom_instructions,
             )
+        greeting = client_spoken_greeting(dossier.client_first_name)
         producer = dossier.producer_name or "your producer"
         return (
             f"{greeting}, this is Robie from StreetSmart — I'm calling about the quote "
@@ -160,6 +194,8 @@ class CarrierVoiceClient:
         return ""
 
     def _transfer_objective_block(self, dossier: CallingDossier) -> str:
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
+            return self._outreach_transfer_objective_block(dossier)
         requestor = self._requestor_display(dossier)
         if not dossier.requestor_phone or not dossier.requestor_name:
             no_xfer = (
@@ -196,6 +232,32 @@ WARM TRANSFER TO REQUESTOR:
   "{briefing}"
 """
 
+    def _outreach_transfer_objective_block(self, dossier: CallingDossier) -> str:
+        producer = self._assigned_producer_display(dossier)
+        producer_first = self._assigned_producer_first(dossier) or producer
+        phone = self._outreach_transfer_phone(dossier)
+        callback = client_followup_callback_close()
+        if not phone or not dossier.assigned_producer_name:
+            return (
+                "\nTRANSFER: Do not transfer this call. The account Assigned Producer "
+                "has no E.164 DID in the voice directory. Do not guess another "
+                "producer, do not transfer to the label invoker / requestor, and do "
+                f"not fall back to the Sales Center producer. {callback} Do not leave "
+                "a producer personal or DID number unless it is explicitly written "
+                "in the CSR instructions."
+            )
+        briefing = self.build_transfer_briefing(dossier)
+        return f"""
+WARM TRANSFER TO ASSIGNED PRODUCER:
+- Destination: {producer} ({phone}) — account Assigned Producer (GetApplicantSidebar Assignment.AssignedTo), not the label invoker and not Sales Center producerName.
+- Only transfer if they clearly agree to speak with {producer_first} now.
+- If they say no, are busy, or you reach voicemail, give a short polite close and do not transfer.
+- {callback} Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
+- Never transfer to the label invoker / requestor. Never fall back to Sales Center producerName or another staff DID.
+- When transferring, use the transfer action (say "transfer") and brief {producer}:
+  "{briefing}"
+"""
+
     def _build_client_followup_prompt(
         self, dossier: CallingDossier, custom_instructions: Optional[str] = None
     ) -> str:
@@ -228,29 +290,34 @@ CALL OBJECTIVES:
     def _build_client_outreach_prompt(
         self, dossier: CallingDossier, custom_instructions: Optional[str] = None
     ) -> str:
-        """Action-needed / cancellation outreach. No Sales Center producer greeting."""
-        greeting = client_spoken_greeting(dossier.client_first_name)
-        requestor = self._requestor_display(dossier)
+        """Action-needed / cancellation outreach. Assigned Producer transfer."""
+        spoken_first = spoken_client_first_name(dossier.client_first_name) or "unknown"
+        producer = self._assigned_producer_display(dossier)
+        producer_first = self._assigned_producer_first(dossier) or "your producer"
+        pathway = self._outreach_pathway(dossier)
+        live_script = self.build_client_first_sentence(dossier)
         custom_instructions_clause = self._custom_instructions_clause(dossier, custom_instructions)
         transfer_block = self._transfer_objective_block(dossier)
-        spoken_first = spoken_client_first_name(dossier.client_first_name) or "unknown"
+        transfer_phone = self._outreach_transfer_phone(dossier) or "not on file"
         return f"""You are Robie, an autonomous operations specialist calling from StreetSmart Insurance.
 
 CALL DETAILS:
 - Call type: client outreach
+- Outreach pathway: {pathway}
 - Client first name: {spoken_first}
 - Insured / account: {dossier.insured_name}
 - Policy Number: {dossier.policy_number}
 - Line of Business: {dossier.line_of_business}
-- Requestor / label invoker (warm transfer): {requestor}
-- Requestor phone (warm transfer): {dossier.requestor_phone or 'not on file'}{custom_instructions_clause}
+- Assigned Producer (warm transfer): {producer}
+- Assigned Producer phone (warm transfer): {transfer_phone}
+- Label invoker is NOT the transfer target.{custom_instructions_clause}
 
 CALL OBJECTIVES:
-1. Greet this person by first name only (never full name or LLC): "{greeting}, this is Robie from StreetSmart Insurance. Do you have a moment to talk?"
-2. Convey the CSR instructions / reason for the call (cancellation, documents needed, payment, or other action). Do not mention a Sales Center producer or a quote greeting.
-3. If they clearly say yes / they are free to talk, transfer them to {requestor} using the transfer action.
+1. Greet this person by first name only (never full name or LLC). Spoken script: "{live_script}"
+2. Use the Splice-replacement conversational pathway ({pathway}). Do not mention a Sales Center producer or a quote greeting. Do not use press-1 / press-2 / IVR menus.
+3. If they clearly say yes / they want to be connected, transfer them to Assigned Producer {producer_first} using the transfer action.
 4. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail (or spoken close) asking them to call the agency back at {AGENCY_MAIN_CALLBACK_DISPLAY} (say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}"). Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
-5. Never guess a different person. Only connect {requestor}. Do not fall back to the EZLynx Producer.
+5. Never guess a different person. Only connect the Assigned Producer. Do not transfer to the label invoker / requestor. Do not fall back to Sales Center producerName.
 {transfer_block}
 """
 
@@ -354,8 +421,23 @@ CALL OBJECTIVES:
         return self._dispatch_retell(dossier, prompt, webhook_url)
 
     def build_bland_transfer_fields(self, dossier: CallingDossier) -> Dict[str, Any]:
-        """Bland send-call transfer fields for the Robie Call requestor (label invoker)."""
-        requestor_phone = normalize_phone_e164(dossier.requestor_phone)
+        """Bland send-call transfer fields.
+
+        ``client_outreach`` → Assigned Producer DID only.
+        ``client_followup`` / ``carrier`` → label invoker (requestor) DID.
+        """
+        if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
+            phone = self._outreach_transfer_phone(dossier)
+            if not phone:
+                return {}
+            return {
+                "transfer_phone_number": phone,
+                "transfer_list": {
+                    "default": phone,
+                    "assigned_producer": phone,
+                },
+            }
+        requestor_phone = self._followup_transfer_phone(dossier)
         if not requestor_phone:
             return {}
         return {
@@ -368,11 +450,15 @@ CALL OBJECTIVES:
 
     def _voicemail_message(self, dossier: CallingDossier) -> str:
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_OUTREACH:
-            greeting = client_spoken_greeting(dossier.client_first_name, voicemail=True)
-            return (
-                f"{greeting}, this is Robie from StreetSmart Insurance. Please call us back at "
-                f"{AGENCY_MAIN_CALLBACK_DISPLAY} — that's {AGENCY_MAIN_CALLBACK_SPOKEN}. "
-                "Thank you!"
+            return build_outreach_voicemail_script(
+                pathway=self._outreach_pathway(dossier),
+                client_first=spoken_client_first_name(dossier.client_first_name),
+                line_of_business=dossier.line_of_business,
+                carrier_name=dossier.carrier_name if dossier.carrier_name != dossier.insured_name else None,
+                action_date=extract_action_date(
+                    dossier.custom_instructions, dossier.expiration_date
+                ),
+                csr_instructions=dossier.custom_instructions,
             )
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
             producer = dossier.producer_name or "your producer"
@@ -409,6 +495,9 @@ CALL OBJECTIVES:
             "producer_name": dossier.producer_name,
             "requestor_name": dossier.requestor_name,
             "requestor_phone": dossier.requestor_phone,
+            "assigned_producer_name": getattr(dossier, "assigned_producer_name", None),
+            "assigned_producer_phone": getattr(dossier, "assigned_producer_phone", None),
+            "outreach_pathway": getattr(dossier, "outreach_pathway", None),
             "transfer_mode": dossier.transfer_mode,
         }
 

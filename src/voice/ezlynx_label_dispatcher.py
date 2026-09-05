@@ -40,6 +40,7 @@ from src.voice.context_hydrator import (
     resolve_client_outreach_targets,
     unwrap_policy_list,
 )
+from src.voice.outreach_pathways import infer_outreach_pathway
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
 from src.voice.voice_client import CarrierVoiceClient
 
@@ -715,6 +716,8 @@ class EZLynxLabelCallDispatcher:
                     note_id=note_id,
                     discussion_id=discussion_id,
                     dry_run=dry_run,
+                    labels=extract_discussion_note_labels(disc),
+                    combined_text=combined_text,
                 )
                 results.append(outreach_result)
                 continue
@@ -906,13 +909,22 @@ class EZLynxLabelCallDispatcher:
         note_id: Optional[str],
         discussion_id: Any,
         dry_run: bool,
+        labels: Optional[List[str]] = None,
+        combined_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Place primary then secondary Bland calls; mark the note processed once.
 
         Doom-loop guard: both dials run in this single pass. The note identity is
         marked processed only after every attempted dial (or after clarification
         when no E.164 exists). The watcher cannot double-fire the same noteId.
+
+        Warm transfer is the account Assigned Producer DID, not the label
+        invoker and not Sales Center producerName.
         """
+        pathway = infer_outreach_pathway(
+            combined_text or instructions,
+            labels=labels,
+        )
         targets = resolve_client_outreach_targets(
             applicant, sidebar, insured_name=insured_name
         )
@@ -978,9 +990,14 @@ class EZLynxLabelCallDispatcher:
             dossier = CallingDossier(
                 policy_number=safe_pol_num,
                 insured_name=insured_name,
-                carrier_name=insured_name,
+                carrier_name=target_carrier,
                 carrier_phone=phone,
-                line_of_business="Commercial Lines",
+                line_of_business=(
+                    (matched_policy or {}).get("lobName")
+                    or (matched_policy or {}).get("LOB")
+                    or (matched_policy or {}).get("lineOfBusiness")
+                    or "Commercial Lines"
+                ),
                 applicant_id=applicant_id,
                 custom_instructions=instructions,
                 client_first_name=first_name,
@@ -988,6 +1005,7 @@ class EZLynxLabelCallDispatcher:
                 requestor_name=requestor.get("name"),
                 requestor_email=requestor.get("email"),
                 call_type=CALL_TYPE_CLIENT_OUTREACH,
+                outreach_pathway=pathway,
                 assigned_csr_email="carlo@streetsmart.insurance",
             )
             self.hydrator.enrich_identity(
@@ -995,7 +1013,7 @@ class EZLynxLabelCallDispatcher:
                 applicant=applicant if role == "primary" else None,
                 policy=matched_policy,
                 sales_opportunities=None,
-                sidebar=sidebar if role == "primary" else None,
+                sidebar=sidebar,
                 call_type=CALL_TYPE_CLIENT_OUTREACH,
                 requestor_name=requestor.get("name"),
                 requestor_email=requestor.get("email"),
@@ -1004,6 +1022,7 @@ class EZLynxLabelCallDispatcher:
                 dossier.client_first_name = first_name
             dossier.producer_name = None
             dossier.carrier_phone = phone
+            dossier.outreach_pathway = pathway
             last_dossier = dossier
 
             self.voice.build_call_prompt(
@@ -1022,12 +1041,13 @@ class EZLynxLabelCallDispatcher:
             )
 
         transfer_line = (
-            f"Warm transfer: enabled to requestor {last_dossier.requestor_name} at {last_dossier.requestor_phone}."
-            if last_dossier and last_dossier.requestor_phone
+            f"Warm transfer: enabled to Assigned Producer {last_dossier.assigned_producer_name} "
+            f"at {last_dossier.assigned_producer_phone}."
+            if last_dossier and last_dossier.assigned_producer_phone
             else (
-                "Warm transfer: not available (requestor / label-invoker phone must be an "
+                "Warm transfer: not available (account Assigned Producer must have an "
                 "E.164 DID in data/voice_call_directory.json; will not fall back to the "
-                "EZLynx Producer)."
+                "label invoker or Sales Center producer)."
             )
         )
         attempt_lines = "\n".join(
@@ -1041,6 +1061,7 @@ class EZLynxLabelCallDispatcher:
             f"Robie has placed outbound client outreach call(s) in primary→secondary order:\n"
             f"{attempt_lines}\n"
             f"Call type: {CALL_TYPE_CLIENT_OUTREACH}\n"
+            f"Outreach pathway: {pathway}\n"
             f"{transfer_line}\n"
             f"Caller ID: {self.voice.from_phone or '+1 (732) 298-6745'}\n"
             f"Instructions: \"{instructions}\"\n\n"
@@ -1074,7 +1095,10 @@ class EZLynxLabelCallDispatcher:
             "dials": dials,
             "status": status,
             "call_type": CALL_TYPE_CLIENT_OUTREACH,
+            "outreach_pathway": pathway,
             "producer_name": None,
+            "assigned_producer_name": last_dossier.assigned_producer_name if last_dossier else None,
+            "assigned_producer_phone": last_dossier.assigned_producer_phone if last_dossier else None,
             "requestor_name": last_dossier.requestor_name if last_dossier else requestor.get("name"),
             "requestor_phone": last_dossier.requestor_phone if last_dossier else None,
             "note_id": note_id,

@@ -853,6 +853,9 @@ class CallingDossier:
     requestor_name: Optional[str] = None
     requestor_email: Optional[str] = None
     requestor_phone: Optional[str] = None
+    assigned_producer_name: Optional[str] = None
+    assigned_producer_phone: Optional[str] = None
+    outreach_pathway: Optional[str] = None
     call_type: str = CALL_TYPE_CARRIER
     transfer_mode: Optional[str] = None
 
@@ -877,6 +880,9 @@ class CallingDossier:
             "requestor_name": self.requestor_name,
             "requestor_email": self.requestor_email,
             "requestor_phone": self.requestor_phone,
+            "assigned_producer_name": self.assigned_producer_name,
+            "assigned_producer_phone": self.assigned_producer_phone,
+            "outreach_pathway": self.outreach_pathway,
             "call_type": self.call_type,
             "transfer_mode": self.transfer_mode,
         }
@@ -1036,15 +1042,22 @@ class ContextHydrator:
         requestor_name: Optional[str] = None,
         requestor_email: Optional[str] = None,
     ) -> CallingDossier:
-        """Apply EZLynx FirstName + Sales Center producerName (greeting) and requestor transfer.
+        """Apply EZLynx FirstName + greeting producer and transfer target.
 
         Greeting producer is Sales Center opportunity ``producerName``
         ("quote {producerName} put together"). Optional fallback is portal
         sidebar ``Assignment.AssignedTo`` full name — never commission
-        ``Producer``, never Classic ``AssignedTo`` username. Warm-transfer
-        phone is the Robie Call invoker (note author / email sender).
-        Missing requestor phone skips transfer — never fall back to the
-        greeting producer or another staff DID.
+        ``Producer``, never Classic ``AssignedTo`` username.
+
+        Warm-transfer:
+        - ``client_followup`` / ``carrier``: Robie Call invoker (note author /
+          email sender). Missing requestor phone skips transfer — never fall
+          back to the greeting producer or another staff DID.
+        - ``client_outreach``: account Assigned Producer
+          (``GetApplicantSidebar`` → ``Applicant.Assignment.AssignedTo``)
+          resolved via ``lookup_producer``. Never Sales Center
+          ``producerName``. Never the label invoker. Missing DID skips
+          transfer — no staff fallback.
         """
         if call_type:
             dossier.call_type = normalize_call_type(call_type)
@@ -1072,7 +1085,60 @@ class ContextHydrator:
             # Greeting-only: do not use this phone for Bland transfer.
             dossier.producer_phone = None
 
+        if dossier.call_type == CALL_TYPE_CLIENT_OUTREACH:
+            # Client outreach transfers to account Assigned Producer, never
+            # Sales Center producerName and never the label invoker.
+            dossier.producer_name = None
+            dossier.producer_phone = None
+            self._apply_assigned_producer_transfer(dossier, sidebar=sidebar)
+            return dossier
+
         self._apply_requestor_transfer(dossier)
+        return dossier
+
+    def _apply_assigned_producer_transfer(
+        self,
+        dossier: CallingDossier,
+        sidebar: Optional[Dict[str, Any]] = None,
+    ) -> CallingDossier:
+        """Warm-transfer client_outreach to Assigned Producer DID only.
+
+        Source: portal ``GetApplicantSidebar`` → ``Applicant.Assignment.AssignedTo``
+        full name, resolved via ``lookup_producer`` / RingCentral DID. Never
+        Sales Center ``producerName``. Never the label invoker. Missing DID
+        skips transfer — no staff fallback.
+        """
+        assigned = extract_sidebar_assigned_producer_full_name(sidebar)
+        dossier.assigned_producer_name = assigned
+        dossier.assigned_producer_phone = None
+        if not assigned:
+            logger.info(
+                "Applicant %s has no Assigned Producer full name on sidebar; "
+                "skipping client_outreach warm transfer.",
+                dossier.applicant_id,
+            )
+            dossier.transfer_mode = None
+            return dossier
+        match = lookup_producer(name=assigned)
+        if not match:
+            logger.info(
+                "Assigned Producer %s is not in the voice directory; "
+                "skipping client_outreach warm transfer.",
+                assigned,
+            )
+            dossier.transfer_mode = None
+            return dossier
+        dossier.assigned_producer_name = match.get("name") or assigned
+        phone = match.get("phone")
+        if not phone:
+            logger.info(
+                "Assigned Producer %s has no E.164 DID; skipping transfer.",
+                dossier.assigned_producer_name,
+            )
+            dossier.transfer_mode = None
+            return dossier
+        dossier.assigned_producer_phone = phone
+        dossier.transfer_mode = TRANSFER_MODE_WARM
         return dossier
 
     def _apply_requestor_transfer(self, dossier: CallingDossier) -> CallingDossier:
@@ -1145,9 +1211,14 @@ class ContextHydrator:
             first_from_applicant = extract_client_first_name(
                 applicant, dossier.insured_name
             )
-            # Sidebar is needed for AssignedTo producer fallback and for
-            # commercial contact first names (Classic often has only BusinessName).
-            if not extract_sales_center_producer_name(sales_opportunities) or not first_from_applicant:
+            # Sidebar is needed for AssignedTo producer fallback, commercial
+            # contact first names, and client_outreach Assigned Producer transfer.
+            need_sidebar = (
+                not extract_sales_center_producer_name(sales_opportunities)
+                or not first_from_applicant
+                or dossier.call_type == CALL_TYPE_CLIENT_OUTREACH
+            )
+            if need_sidebar:
                 try:
                     sidebar = client.get_applicant_sidebar(str(dossier.applicant_id))
                 except Exception as exc:

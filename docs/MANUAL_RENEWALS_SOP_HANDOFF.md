@@ -25,6 +25,10 @@ graph TD
     H --> I[Capture Verification Screenshot]
     I --> J[Compile Daily Handoff Report with Hyperlinks]
     J --> K[Email Report to Carlo, Jake, Gabriela, Sandy, Ashley]
+    F --> L{2 unsuccessful attempts?}
+    E --> L
+    L -->|Yes and no renewal in hand| M[One carrier Robie Call]
+    L -->|Renewal obtained| N[STOP — no client dial]
 ```
 
 ---
@@ -107,6 +111,8 @@ On September 03, 2026, 4 active accounts (5 policies) totaling **$93,490.19** in
   Houses email copy signed by Robie with subject reference tags.
 - **Thread Tracker & CC Resolver**: `src/email_outreach/thread_tracker.py`  
   Resolves assigned CSRs and keeps Jake Ferrara on CC.
+- **Carrier Voice Cadence**: `src/voice/renewal_cadence.py`  
+  After two unsuccessful email/portal attempts with no renewal in hand, places exactly one outbound carrier Robie Call. Stops when the renewal PDF / UW reply / in-hand status is present. Never auto-dials the client. Never invents a carrier phone.
 - **Underwriter Reply Filer**: `src/email_outreach/uw_reply_filer.py`  
   Polls **robie@ + hello@ only**, matches `[RENEWAL-REQ-###]` / policy number, threads onto the existing titled renewal card via `find_matching_discussion`, and alerts the assigned CSR + Carlo. Never creates orphan/untitled discussions. Hooked from cadence, the inbox cleaner (additive), and `python -m src.email_outreach.uw_reply_filer`.
 - **Skills Directory**: `.agents/skills/manual-renewals/SKILL.md`  

@@ -39,16 +39,17 @@ Outbound email outreach is conducted using Google Workspace Gmail APIs.
 
 ### Outreach Cadence & Timing Rules:
 1. **Outreach Window (Day 45 to Day 25)**: Initial outreach begins at Day 45 prior to policy expiration. Policies expiring in > 45 days remain in the upcoming queue.
-2. **Follow-Up Frequency**: Up to 3 follow-up emails spaced 5–7 business days apart.
-3. **25-Day Auto-Escalation to CSR**: If no renewal quote is received by **Day 25** prior to expiration (or if 3 follow-ups are exhausted), the engine automatically:
+2. **Follow-Up Frequency**: Check back **no more than twice** (email and/or portal). After **two** unsuccessful attempts with no renewal in hand, place **exactly one** outbound carrier **Robie Call** (`call_type=carrier`) via `src/voice/renewal_cadence.py` / existing `CarrierVoiceClient`. Same style as today’s email `Call Carrier:` path. Never invent a carrier phone; if no E.164 underwriter/carrier number, post an EZLynx note ending with `Robie was here` and skip the dial.
+3. **Stop when the renewal lands**: If a renewal PDF is filed, the UW reply filer matched, or pipeline status says we have the dec/offer → **STOP**. No more carrier calls. Do **not** auto-dial the client on a successful or in-progress manual renewal.
+4. **25-Day Auto-Escalation to CSR**: If no renewal quote is received by **Day 25** prior to expiration (or if email follow-ups are exhausted), the engine automatically:
    - Sets status to `RenewalStatus.ESCALATED_MANUAL`.
    - Posts a high-priority audit note to the EZLynx discussion card ending with `Robie was here`.
    - Creates a high-priority EZLynx task assigned to the CSR for direct underwriter/phone escalation.
-4. **Instant CSR Reply Alerts**: When an underwriter replies or sends terms, the engine:
+5. **Instant CSR Reply Alerts**: When an underwriter replies or sends terms, the engine:
    - Immediately dispatches a high-priority email alert to the assigned CSR (CC'ing `carlo@streetsmart.insurance` and `jake@streetsmart.insurance`).
    - Logs the underwriter response note to the EZLynx discussion card.
    - Uploads attached quote PDFs to the EZLynx Documents tab and creates a review task.
-5. **Sender Identity**: All outbound outreach and cadence follow-ups **MUST be sent from `robie@streetsmart.insurance` and signed by Robie**, NEVER the assigned CSR.
+6. **Sender Identity**: All outbound outreach and cadence follow-ups **MUST be sent from `robie@streetsmart.insurance` and signed by Robie**, NEVER the assigned CSR.
    ```text
    Should you have any questions please feel free to email me back.
 
@@ -57,8 +58,8 @@ Outbound email outreach is conducted using Google Workspace Gmail APIs.
    Robie
    StreetSmart Insurance
    ```
-6. **Mandatory CSR CC Guarantee**: Outbound emails MUST ALWAYS CC the assigned CSR (resolved via `CSR_EMAIL_DIRECTORY` with fallback to `sandy@streetsmart.insurance` if unmapped) and `jake@streetsmart.insurance`.
-7. **Subject Line Tracking Tag**: Every thread must include a unique tracking reference tag formatted as `[RENEWAL-REQ-###]`.
+7. **Mandatory CSR CC Guarantee**: Outbound emails MUST ALWAYS CC the assigned CSR (resolved via `CSR_EMAIL_DIRECTORY` with fallback to `sandy@streetsmart.insurance` if unmapped) and `jake@streetsmart.insurance`.
+8. **Subject Line Tracking Tag**: Every thread must include a unique tracking reference tag formatted as `[RENEWAL-REQ-###]`.
 
 ---
 

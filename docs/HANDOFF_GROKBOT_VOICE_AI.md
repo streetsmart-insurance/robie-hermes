@@ -135,11 +135,30 @@ Writing the phrase in the discussion title or note body works the same as applyi
 
 - **Dial order (locked):** always primary applicant first, then secondary / co-applicant when both have phones. Phone fields: `CellPhone` → `HomePhone` → `WorkPhone` (Classic Applicant/v2 `BusinessPhone` is the work-line alias; portal sidebar `ContactInfo` is also read). Skip anyone with no valid US E.164 — **never invent numbers**. If primary and secondary share the same number, call once.
 - **Buster Brown (applicant `26356199`):** primary cell `7329953409`; co-applicant currently has no cell — secondary dial is skipped until a phone exists.
-- **Each call:** greet that person by **first name only** (same commercial-contact sources as lead follow-up; generic Hi/Hello if none — never “Hi Green Lion…”); convey the CSR `What to say` / free-text reason; on a clear yes, warm-transfer to the **label invoker** (requestor DID from the voice directory — same as lead follow-up); on no / busy / voicemail, polite close and ask them to call the agency main **732-462-8343**. Do not invent Jake’s DID. Do **not** say “the quote {Sales Center producer} put together”.
+- **Each call:** greet that person by **first name only** (same commercial-contact sources as lead follow-up; generic Hi/Hello if none — never “Hi Green Lion…”). On a clear yes, warm-transfer to the **account Assigned Producer** (`GetApplicantSidebar` → `Applicant.Assignment.AssignedTo` full name, resolved via `lookup_producer` / RingCentral DID). **Not** Sales Center `producerName`. **Not** the label invoker. If Assigned Producer has no E.164 DID, skip transfer (voicemail still asks them to call **732-462-8343**). Never fall back to Sales Center producer or another staff DID. Do **not** say “the quote {Sales Center producer} put together”.
+- **Splice-replacement conversational pathways** (no press-1 / press-2 / Splice toll-free / opt-out IVR), inferred from CSR `What to say` / note body / alias:
+  - `cancellation` / `robie cancellation` → Cancellation Notice (default when the reason looks like cancel/non-pay): “Hi {first}, this is Robie from StreetSmart Insurance. I'm calling with an important notice about your {LOB} policy with {carrier}. Your {policy type} is set to be cancelled due to an overdue payment. To avoid a lapse in coverage, please make a payment by {date}. If you want, I can connect you to {Assigned Producer first name} now.” VM: same facts + “Please call us back at 732-462-8343.”
+  - `audit` → audit incomplete, please finish the audit.
+  - `returned_mail` → returned mail, update address.
+  - `esign` → e-signature needed to avoid interruption.
+  - `additional_info` → we need additional information.
+  - `recommendations` → follow up on recommendations.
+  - `unresponsive` → reaching out about your policies.
+  - fallback → existing generic outreach (CSR What to say).
+- Sales Center / winback / birthday / marketing Splice workflows are **not** ported. Lead follow-up already covers quote follow-up.
 - **Both `Robie Call` and `Robie client outreach` on the same note:** client outreach wins → `client_outreach`.
-- **`Robie lead follow-up` is unchanged** — still `client_followup` with the Sales Center producer greeting.
+- **`Robie lead follow-up` is unchanged** — still `client_followup` with the Sales Center `producerName` greeting and transfer to the **label invoker**.
 - Assigned CSR for EZLynx notes/tasks remains Carlo Ferrara. Caller ID `+17322986745`. No Bland `max_duration`.
 - Creating the `Robie client outreach` org label in the live EZLynx UI is Carlo / Admin’s job; this repo only recognizes the name (and close variants / `robie cancellation` alias).
+
+#### Manual renewal WF — one carrier Robie Call after two misses (Carlo 2026-09-05)
+Daily pipeline (`src/voice/renewal_cadence.py`, hooked from `DailyRenewalOrchestrator` after email follow-ups):
+1. Email or portal first (existing channels).
+2. After **two** unsuccessful email/portal attempts with no renewal in hand, enqueue **exactly one** outbound Robie Call (`call_type=carrier`) to the carrier/underwriter. Same style as today’s email `Call Carrier:` / Robie Call path. Reuses `CarrierVoiceClient` — no second Bland stack.
+3. If the renewal is obtained (renewal PDF filed, UW reply filer matched, or pipeline status says we have the dec/offer) → **STOP**. No more carrier calls. Do **not** auto-dial the client.
+- Guards: skip if a carrier voice call was already placed for this policy/term; never invent a carrier phone; if no E.164 underwriter/carrier number, post an EZLynx note (`Robie was here`) and skip the dial.
+- Client outreach is **not** part of this sprinkle.
+- Production cron `0 9 * * *` on hermes-poc-01 is unchanged.
 
 ---
 
@@ -213,6 +232,8 @@ PYTHONPATH=. .venv/bin/python3 -m src.voice.dispatcher \
 
 * `src/voice/voice_client.py`: Bland AI API caller, prompt engineering, and guardrails.
 * `src/voice/context_hydrator.py`: Resolves policy metadata, carrier phone, and CSR email from EZLynx.
+* `src/voice/outreach_pathways.py`: Splice-replacement conversational pathways for client outreach.
+* `src/voice/renewal_cadence.py`: After 2 email/portal misses, one carrier Robie Call; stop when renewal lands.
 * `src/voice/webhook_server.py`: Receives call completion payloads and writes notes to EZLynx API.
 * `src/voice/email_dispatcher.py`: Parses incoming email triggers from Carlo and Jake.
 * `src/voice/dispatcher.py`: CLI interface for testing and automated cron runs.
