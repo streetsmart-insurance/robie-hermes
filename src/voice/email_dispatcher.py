@@ -159,17 +159,26 @@ class EmailCallDispatcher:
 
             logger.info(f"Detected incoming call instruction from {sender}: {subject}")
 
-            # Hydrate complete CallingDossier
+            # Hydrate complete CallingDossier. Email sender is the requestor
+            # (warm-transfer target), not the EZLynx Producer field.
+            sender_email = self._extract_clean_email(sender)
             dossier: Optional[CallingDossier] = self.hydrator.hydrate(
                 policy_number=cmd.get("policy_number"),
                 applicant_name=cmd.get("applicant_name"),
                 phone_override=cmd.get("phone_override"),
                 instructions=cmd.get("instructions"),
-                requester_email=self._extract_clean_email(sender),
+                requester_email=sender_email,
+                requestor_name=self._extract_sender_name(sender),
+                requestor_email=sender_email,
                 call_type=cmd.get("call_type"),
             )
             if dossier:
                 self.hydrator.enrich_identity_from_ezlynx(dossier)
+                self.hydrator.enrich_identity(
+                    dossier,
+                    requestor_name=dossier.requestor_name,
+                    requestor_email=dossier.requestor_email,
+                )
 
             if not dossier:
                 logger.warning(f"Could not hydrate policy context for request: {cmd}")
@@ -273,3 +282,14 @@ StreetSmart Insurance Operations Engine
     def _extract_clean_email(raw_sender: str) -> str:
         match = re.search(r"<([^>]+)>", raw_sender)
         return match.group(1).strip() if match else raw_sender.strip()
+
+    @staticmethod
+    def _extract_sender_name(raw_sender: str) -> Optional[str]:
+        """Parse 'Mike Sosa <mike@streetsmart.insurance>' display name."""
+        match = re.match(r"^\s*\"?([^\"<]+?)\"?\s*<", raw_sender or "")
+        if not match:
+            return None
+        name = match.group(1).strip()
+        if name and "@" not in name:
+            return name
+        return None

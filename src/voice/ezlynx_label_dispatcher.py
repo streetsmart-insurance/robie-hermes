@@ -134,6 +134,108 @@ def discussion_is_robie_call(discussion: Dict[str, Any], note_text: Optional[str
     return False
 
 
+def _requestor_string(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _requestor_from_user_object(node: Any) -> Dict[str, Optional[str]]:
+    """Pull name/email from a createdBy / user object or scalar."""
+    result: Dict[str, Optional[str]] = {"name": None, "email": None}
+    if isinstance(node, dict):
+        for key in (
+            "createdByName",
+            "Name",
+            "FullName",
+            "DisplayName",
+            "name",
+            "fullName",
+            "displayName",
+            "userName",
+            "UserName",
+            "userFullName",
+        ):
+            name = _requestor_string(node.get(key))
+            if name and "@" not in name:
+                result["name"] = name
+                break
+        for key in ("createdByEmail", "Email", "email", "EMail", "userEmail", "UserEmail"):
+            email = _requestor_string(node.get(key))
+            if email and "@" in email:
+                result["email"] = email
+                break
+        return result
+    text = _requestor_string(node)
+    if not text:
+        return result
+    if "@" in text:
+        result["email"] = text
+    else:
+        result["name"] = text
+    return result
+
+
+def extract_discussion_requestor(discussion: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """Resolve the Robie Call invoker from Portal GetPagedDiscussions metadata.
+
+    Verified in-repo fields (fixtures + ``latest_activity_is_from_robie``):
+    - ``discussionNote.createdByName`` (primary author on live-shaped cards)
+    - ``discussionNote.createdBy`` (string or user object)
+    - ``discussion.lastModifiedByName`` (card-level fallback)
+
+    Also accepted if Portal adds them on ``discussionNote``:
+    ``userName``, ``createdByEmail``, ``userEmail``, ``email``.
+    """
+    name: Optional[str] = None
+    email: Optional[str] = None
+    note_obj = discussion.get("discussionNote") if isinstance(discussion, dict) else None
+    if not isinstance(note_obj, dict):
+        note_obj = {}
+
+    for source in (note_obj, note_obj.get("createdBy"), note_obj.get("user"), note_obj.get("author")):
+        parsed = _requestor_from_user_object(source) if source is not note_obj else {
+            "name": (
+                _requestor_string(note_obj.get("createdByName"))
+                or _requestor_string(note_obj.get("userName"))
+                or _requestor_string(note_obj.get("createdByUserName"))
+                or _requestor_string(note_obj.get("authorName"))
+            ),
+            "email": (
+                _requestor_string(note_obj.get("createdByEmail"))
+                or _requestor_string(note_obj.get("userEmail"))
+                or _requestor_string(note_obj.get("email"))
+                or _requestor_string(note_obj.get("authorEmail"))
+            ),
+        }
+        if parsed.get("name") and not name:
+            name = parsed["name"]
+        if parsed.get("email") and not email:
+            email = parsed["email"]
+
+    if not name or not email:
+        card_parsed = _requestor_from_user_object(
+            {
+                "name": (
+                    (discussion.get("createdByName") if isinstance(discussion, dict) else None)
+                    or (discussion.get("lastModifiedByName") if isinstance(discussion, dict) else None)
+                ),
+                "email": (
+                    (discussion.get("createdByEmail") if isinstance(discussion, dict) else None)
+                    or (discussion.get("lastModifiedByEmail") if isinstance(discussion, dict) else None)
+                ),
+            }
+        )
+        name = name or card_parsed.get("name")
+        email = email or card_parsed.get("email")
+
+    if name and "robie" in name.lower():
+        return {"name": None, "email": None}
+    if email and str(email).lower().startswith("robie@"):
+        return {"name": None, "email": None}
+    return {"name": name, "email": email}
+
+
 def extract_discussion_note_id(discussion: Dict[str, Any]) -> Optional[str]:
     """Return discussionNote.noteId when present."""
     note_obj = discussion.get("discussionNote") if isinstance(discussion, dict) else None
@@ -491,6 +593,7 @@ class EZLynxLabelCallDispatcher:
                 f"Target: {target_carrier} ({phone}) | Policy: {safe_pol_num}"
             )
 
+            requestor = extract_discussion_requestor(disc)
             dossier = CallingDossier(
                 policy_number=safe_pol_num,
                 insured_name=insured_name,
@@ -501,6 +604,8 @@ class EZLynxLabelCallDispatcher:
                 custom_instructions=instructions,
                 client_first_name=extract_client_first_name(app_data, insured_name),
                 producer_name=extract_producer_name(matched_policy, app_data),
+                requestor_name=requestor.get("name"),
+                requestor_email=requestor.get("email"),
                 call_type=call_type,
                 assigned_csr_email="carlo@streetsmart.insurance",
             )
@@ -509,6 +614,8 @@ class EZLynxLabelCallDispatcher:
                 applicant=app_data,
                 policy=matched_policy,
                 call_type=call_type,
+                requestor_name=requestor.get("name"),
+                requestor_email=requestor.get("email"),
             )
 
             # Build call prompt
@@ -527,11 +634,12 @@ class EZLynxLabelCallDispatcher:
             status = call_result.get("status", "DISPATCHED")
 
             transfer_line = (
-                f"Warm transfer: enabled to {dossier.producer_name} at {dossier.producer_phone}."
-                if dossier.producer_phone
+                f"Warm transfer: enabled to requestor {dossier.requestor_name} at {dossier.requestor_phone}."
+                if dossier.requestor_phone
                 else (
-                    "Warm transfer: not available (producer phone must be an E.164 number in "
-                    "data/voice_call_directory.json)."
+                    "Warm transfer: not available (requestor / label-invoker phone must be an "
+                    "E.164 DID in data/voice_call_directory.json; will not fall back to the "
+                    "EZLynx Producer)."
                 )
             )
             dest_label = insured_name if call_type == CALL_TYPE_CLIENT_FOLLOWUP else target_carrier
@@ -574,7 +682,8 @@ class EZLynxLabelCallDispatcher:
                 "status": status,
                 "call_type": call_type,
                 "producer_name": dossier.producer_name,
-                "producer_phone": dossier.producer_phone,
+                "requestor_name": dossier.requestor_name,
+                "requestor_phone": dossier.requestor_phone,
                 "note_id": note_id,
                 "note_identity": identity,
             })

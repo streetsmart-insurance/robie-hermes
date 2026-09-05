@@ -93,9 +93,10 @@ Who to call: The Hartford
 What to say: Confirm renewal terms, then connect them to the producer if they ask.
 ```
 
-- **Client path:** Robie greets the insured by EZLynx `FirstName` and mentions the Producer. If they clearly agree, Bland warm-transfers to that producer's E.164 phone.
-- **Carrier path (default):** Existing underwriting follow-up. After a live human is confirmed, Robie can warm-transfer to the same Producer / requestor.
-- Producer name comes from the EZLynx **Producer** field (not a free-text guess). Phone is looked up in `data/voice_call_directory.json`. Email alone is not enough — add an E.164 `phone` for that producer or transfer is skipped.
+- **Client path:** Robie greets the insured by EZLynx `FirstName` and mentions the EZLynx **Producer** ("quote {Producer} put together"). If they clearly agree, Bland warm-transfers to the **requestor** — the person who applied the Robie Call label / wrote the note (or the email sender on the inbox path).
+- **Carrier path (default):** Existing underwriting follow-up. After a live human is confirmed, Robie can warm-transfer to the same requestor.
+- **Worked example:** Mike Sosa applies the Robie Call label on an account whose Producer is Jake Ferrara. Greeting still says Jake; transfer DID is Mike's RingCentral Direct Number `+17326540947`.
+- Requestor is read from Portal `GetPagedDiscussions` note metadata (`discussionNote.createdByName` / `createdBy` / `userName` / email, then card `lastModifiedByName`). Lookup is by name, alias, or email in `producers[]`. Email or name alone is not enough — the row must have an E.164 `phone` or transfer is skipped. **Never fall back to the EZLynx Producer or another staff DID.**
 - Assigned CSR for EZLynx tasks remains Carlo Ferrara (never Robie).
 
 ---

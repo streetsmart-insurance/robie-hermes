@@ -14,7 +14,7 @@ from typing import Optional, Dict, Any, List
 from src.config import BASE_DIR, settings
 from src.database.models import PolicyRenewal
 from src.database.session import SessionLocal
-from src.voice.call_directory import lookup_producer
+from src.voice.call_directory import lookup_producer, lookup_requestor
 
 logger = logging.getLogger("voice_context_hydrator")
 
@@ -178,6 +178,9 @@ class CallingDossier:
     client_first_name: Optional[str] = None
     producer_name: Optional[str] = None
     producer_phone: Optional[str] = None
+    requestor_name: Optional[str] = None
+    requestor_email: Optional[str] = None
+    requestor_phone: Optional[str] = None
     call_type: str = CALL_TYPE_CARRIER
     transfer_mode: Optional[str] = None
 
@@ -199,6 +202,9 @@ class CallingDossier:
             "client_first_name": self.client_first_name,
             "producer_name": self.producer_name,
             "producer_phone": self.producer_phone,
+            "requestor_name": self.requestor_name,
+            "requestor_email": self.requestor_email,
+            "requestor_phone": self.requestor_phone,
             "call_type": self.call_type,
             "transfer_mode": self.transfer_mode,
         }
@@ -231,6 +237,8 @@ class ContextHydrator:
         phone_override: Optional[str] = None,
         instructions: Optional[str] = None,
         requester_email: Optional[str] = None,
+        requestor_name: Optional[str] = None,
+        requestor_email: Optional[str] = None,
         call_type: Optional[str] = None,
         applicant_profile: Optional[Dict[str, Any]] = None,
         policy_profile: Optional[Dict[str, Any]] = None,
@@ -326,12 +334,16 @@ class ContextHydrator:
             custom_instructions=instructions,
             ivr_instructions=ivr_notes,
             call_type=normalize_call_type(call_type),
+            requestor_name=requestor_name,
+            requestor_email=requestor_email or requester_email,
         )
         self.enrich_identity(
             dossier,
             applicant=applicant_profile,
             policy=policy_profile,
             call_type=call_type,
+            requestor_name=requestor_name,
+            requestor_email=requestor_email or requester_email,
         )
         if enrich_from_ezlynx:
             self.enrich_identity_from_ezlynx(dossier)
@@ -343,10 +355,23 @@ class ContextHydrator:
         applicant: Optional[Dict[str, Any]] = None,
         policy: Optional[Dict[str, Any]] = None,
         call_type: Optional[str] = None,
+        requestor_name: Optional[str] = None,
+        requestor_email: Optional[str] = None,
     ) -> CallingDossier:
-        """Apply EZLynx FirstName + Producer field, then directory phone lookup."""
+        """Apply EZLynx FirstName + Producer (greeting) and requestor transfer.
+
+        Producer comes only from the EZLynx Producer field and is greeting copy
+        ("quote {Producer} put together"). Warm-transfer phone is the Robie Call
+        invoker (note author / email sender). Missing requestor phone skips
+        transfer — never fall back to the Producer or another staff DID.
+        """
         if call_type:
             dossier.call_type = normalize_call_type(call_type)
+        if requestor_name:
+            dossier.requestor_name = requestor_name
+        if requestor_email:
+            dossier.requestor_email = requestor_email
+
         if applicant:
             dossier.client_first_name = extract_client_first_name(
                 applicant, dossier.insured_name
@@ -357,16 +382,52 @@ class ContextHydrator:
             match = lookup_producer(name=dossier.producer_name, email=producer_email)
             if match:
                 dossier.producer_name = match.get("name") or dossier.producer_name
-                dossier.producer_phone = match.get("phone")
-        elif dossier.producer_name and not dossier.producer_phone:
+                # Greeting-only: do not use this phone for Bland transfer.
+                dossier.producer_phone = None
+        elif dossier.producer_name:
             match = lookup_producer(name=dossier.producer_name)
             if match:
                 dossier.producer_name = match.get("name") or dossier.producer_name
-                dossier.producer_phone = match.get("phone")
-        if dossier.producer_phone:
-            dossier.transfer_mode = TRANSFER_MODE_WARM
-        else:
+            dossier.producer_phone = None
+
+        self._apply_requestor_transfer(dossier)
+        return dossier
+
+    def _apply_requestor_transfer(self, dossier: CallingDossier) -> CallingDossier:
+        """Look up the label invoker / email sender. No Producer fallback."""
+        name = dossier.requestor_name
+        email = dossier.requestor_email
+        if not name and not email:
+            dossier.requestor_phone = None
             dossier.transfer_mode = None
+            return dossier
+        if name and "robie" in str(name).lower():
+            dossier.requestor_phone = None
+            dossier.transfer_mode = None
+            return dossier
+        match = lookup_requestor(name=name, email=email)
+        if not match:
+            logger.info(
+                "Requestor %s <%s> is not in the voice directory; skipping warm transfer.",
+                name,
+                email,
+            )
+            dossier.requestor_phone = None
+            dossier.transfer_mode = None
+            return dossier
+        dossier.requestor_name = match.get("name") or dossier.requestor_name
+        dossier.requestor_email = match.get("email") or dossier.requestor_email
+        phone = match.get("phone")
+        if not phone:
+            logger.info(
+                "Requestor %s has no E.164 DID in the voice directory; skipping warm transfer.",
+                dossier.requestor_name,
+            )
+            dossier.requestor_phone = None
+            dossier.transfer_mode = None
+            return dossier
+        dossier.requestor_phone = phone
+        dossier.transfer_mode = TRANSFER_MODE_WARM
         return dossier
 
     def enrich_identity_from_ezlynx(

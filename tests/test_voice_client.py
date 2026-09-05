@@ -66,7 +66,8 @@ def test_bland_payload_includes_warm_transfer_fields(mock_post, monkeypatch):
     dossier = _sample_dossier(
         client_first_name="Maria",
         producer_name="Jake Ferrara",
-        producer_phone="+17326688161",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
         transfer_mode="warm",
         call_type="client_followup",
     )
@@ -77,22 +78,29 @@ def test_bland_payload_includes_warm_transfer_fields(mock_post, monkeypatch):
     payload = mock_post.call_args.kwargs["json"]
     assert payload["from"] == "+17322986745"
     assert "max_duration" not in payload
-    assert payload["transfer_phone_number"] == "+17326688161"
-    assert payload["transfer_list"]["default"] == "+17326688161"
-    assert payload["transfer_list"]["producer"] == "+17326688161"
+    assert payload["transfer_phone_number"] == "+17326540947"
+    assert payload["transfer_list"]["default"] == "+17326540947"
+    assert payload["transfer_list"]["requestor"] == "+17326540947"
     assert payload["webhook_events"] == ["post_transfer_transcript"]
     assert payload["first_sentence"].startswith("Hi Maria, this is Robie from StreetSmart")
     assert "Jake Ferrara" in payload["first_sentence"]
     assert payload["metadata"]["producer_name"] == "Jake Ferrara"
+    assert payload["metadata"]["requestor_name"] == "Mike Sosa"
+    assert payload["metadata"]["requestor_phone"] == "+17326540947"
     assert payload["metadata"]["call_type"] == "client_followup"
 
 
 @patch("src.voice.voice_client.requests.post")
-def test_bland_payload_omits_transfer_without_producer_phone(mock_post):
+def test_bland_payload_omits_transfer_without_requestor_phone(mock_post):
     mock_post.return_value = _ok_response()
     client = CarrierVoiceClient(api_key="test-key", provider="bland_ai")
 
-    client.dispatch_call(_sample_dossier())
+    client.dispatch_call(
+        _sample_dossier(
+            producer_name="Jake Ferrara",
+            producer_phone="+17324812520",
+        )
+    )
 
     payload = mock_post.call_args.kwargs["json"]
     assert "transfer_phone_number" not in payload
@@ -105,7 +113,8 @@ def test_client_followup_prompt_uses_first_name_and_consent_gated_transfer():
     dossier = _sample_dossier(
         client_first_name="Maria",
         producer_name="Jake Ferrara",
-        producer_phone="+17326688161",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
         call_type="client_followup",
         transfer_mode="warm",
     )
@@ -116,6 +125,8 @@ def test_client_followup_prompt_uses_first_name_and_consent_gated_transfer():
     assert "Are you free to discuss it?" in first
     assert "Hi Maria" in prompt
     assert "Jake Ferrara" in prompt
+    assert "Mike Sosa" in prompt
+    assert "+17326540947" in prompt
     assert "only transfer if they clearly agree" in prompt.lower()
     assert "transfer" in prompt.lower()
 
@@ -123,14 +134,16 @@ def test_client_followup_prompt_uses_first_name_and_consent_gated_transfer():
 def test_carrier_prompt_offers_transfer_after_live_human():
     client = CarrierVoiceClient(api_key="test-key")
     dossier = _sample_dossier(
-        producer_name="Carlo Ferrara",
-        producer_phone="+17329953409",
+        producer_name="Jake Ferrara",
+        requestor_name="Carlo Ferrara",
+        requestor_phone="+17324622360",
         call_type="carrier",
         transfer_mode="warm",
     )
     prompt = client.build_call_prompt(dossier)
     briefing = client.build_transfer_briefing(dossier)
     assert "Carlo Ferrara" in prompt
+    assert "Jake Ferrara" in prompt
     assert "live human" in prompt.lower()
     assert "transfer" in prompt.lower()
     assert "Carlo Ferrara" in briefing

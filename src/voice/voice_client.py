@@ -62,18 +62,25 @@ class CarrierVoiceClient:
             return self._build_client_followup_prompt(dossier, custom_instructions)
         return self._build_carrier_prompt(dossier, custom_instructions)
 
+    def _requestor_display(self, dossier: CallingDossier) -> str:
+        return dossier.requestor_name or "the requestor"
+
+    def _producer_display(self, dossier: CallingDossier, fallback: str = "your producer") -> str:
+        return dossier.producer_name or fallback
+
     def build_transfer_briefing(self, dossier: CallingDossier) -> str:
-        """Short briefing Bland/Robie should give the producer before merging."""
-        producer = dossier.producer_name or "the producer"
+        """Short briefing Bland/Robie should give the requestor before merging."""
+        requestor = self._requestor_display(dossier)
+        producer = self._producer_display(dossier, fallback="the producer")
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
             first = dossier.client_first_name or dossier.insured_name
             return (
-                f"Hi {producer}, this is Robie from StreetSmart. I have {first} "
-                f"({dossier.insured_name}) on the line about the quote you put together "
-                f"for policy {dossier.policy_number}. Connecting you now."
+                f"Hi {requestor}, this is Robie from StreetSmart. I have {first} "
+                f"({dossier.insured_name}) on the line about the quote {producer} "
+                f"put together for policy {dossier.policy_number}. Connecting you now."
             )
         return (
-            f"Hi {producer}, this is Robie from StreetSmart. I have "
+            f"Hi {requestor}, this is Robie from StreetSmart. I have "
             f"{dossier.carrier_name} on the line regarding {dossier.insured_name}, "
             f"policy {dossier.policy_number}. Connecting you now."
         )
@@ -96,27 +103,31 @@ class CarrierVoiceClient:
         return ""
 
     def _transfer_objective_block(self, dossier: CallingDossier) -> str:
-        if not dossier.producer_phone or not dossier.producer_name:
+        requestor = self._requestor_display(dossier)
+        if not dossier.requestor_phone or not dossier.requestor_name:
             return (
-                "\nTRANSFER: Do not transfer this call. No producer phone is on file "
-                "in the voice directory."
+                "\nTRANSFER: Do not transfer this call. The person who requested this "
+                "Robie Call has no phone on file in the voice directory. Do not guess "
+                "another producer or fall back to the EZLynx Producer field."
             )
         briefing = self.build_transfer_briefing(dossier)
         if getattr(dossier, "call_type", None) == CALL_TYPE_CLIENT_FOLLOWUP:
             return f"""
-WARM TRANSFER TO PRODUCER:
-- Destination: {dossier.producer_name} ({dossier.producer_phone}).
-- Only transfer if they clearly agree to speak with {dossier.producer_name} now.
+WARM TRANSFER TO REQUESTOR:
+- Destination: {requestor} ({dossier.requestor_phone}) — the person who invoked Robie Call.
+- Only transfer if they clearly agree to speak with {requestor} now.
 - If they say no, are busy, or you reach voicemail, give a short polite close and do not transfer.
-- When transferring, use the transfer action (say "transfer") and brief {dossier.producer_name}:
+- Never transfer to the EZLynx Producer unless that person is also the requestor.
+- When transferring, use the transfer action (say "transfer") and brief {requestor}:
   "{briefing}"
 """
         return f"""
-WARM TRANSFER TO PRODUCER:
-- Destination: {dossier.producer_name} ({dossier.producer_phone}).
-- After a live human at the carrier is confirmed as the right desk, offer to connect them with {dossier.producer_name}, or transfer immediately if they ask for the producer / the person who requested this call.
-- Do not transfer until you have confirmed you reached the correct desk (or they asked for the producer).
-- When transferring, use the transfer action (say "transfer") and brief {dossier.producer_name}:
+WARM TRANSFER TO REQUESTOR:
+- Destination: {requestor} ({dossier.requestor_phone}) — the person who invoked Robie Call.
+- After a live human at the carrier is confirmed as the right desk, offer to connect them with {requestor}, or transfer immediately if they ask for the person who requested this call.
+- Do not transfer until you have confirmed you reached the correct desk (or they asked for the requestor).
+- Never transfer to the EZLynx Producer unless that person is also the requestor.
+- When transferring, use the transfer action (say "transfer") and brief {requestor}:
   "{briefing}"
 """
 
@@ -124,7 +135,8 @@ WARM TRANSFER TO PRODUCER:
         self, dossier: CallingDossier, custom_instructions: Optional[str] = None
     ) -> str:
         first = dossier.client_first_name or "there"
-        producer = dossier.producer_name or "your producer"
+        producer = self._producer_display(dossier)
+        requestor = self._requestor_display(dossier)
         custom_instructions_clause = self._custom_instructions_clause(dossier, custom_instructions)
         transfer_block = self._transfer_objective_block(dossier)
         return f"""You are Robie, an autonomous operations specialist calling from StreetSmart Insurance.
@@ -135,14 +147,15 @@ CALL DETAILS:
 - Insured / account: {dossier.insured_name}
 - Policy Number: {dossier.policy_number}
 - Line of Business: {dossier.line_of_business}
-- Producer: {producer}
-- Producer phone (warm transfer): {dossier.producer_phone or 'not on file'}{custom_instructions_clause}
+- Producer (greeting only): {producer}
+- Requestor / label invoker (warm transfer): {requestor}
+- Requestor phone (warm transfer): {dossier.requestor_phone or 'not on file'}{custom_instructions_clause}
 
 CALL OBJECTIVES:
 1. Greet the client by first name: "Hi {first}, this is Robie from StreetSmart — I'm calling about the quote {producer} put together for you. Are you free to discuss it?"
-2. If they clearly say yes / they are free to talk, transfer them to {producer} using the transfer action.
+2. If they clearly say yes / they are free to talk, transfer them to {requestor} using the transfer action.
 3. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail asking them to call StreetSmart or reply to their email.
-4. Never guess a different producer. Only connect {producer}.
+4. Never guess a different person. Only connect {requestor}. Do not fall back to the EZLynx Producer.
 {transfer_block}
 """
 
@@ -170,7 +183,8 @@ CALL DETAILS:
 - Insured Legal Name: {dossier.insured_name}
 - Line of Business: {dossier.line_of_business}
 - Expiration Date: {dossier.expiration_date or 'Upcoming'}
-- Requesting producer: {dossier.producer_name or 'StreetSmart producer'}
+- Requesting staff (label invoker): {dossier.requestor_name or 'StreetSmart requestor'}
+- Producer (greeting / quote attribution only): {dossier.producer_name or 'StreetSmart producer'}
 - Agency Reference: {agency_code_clause}{ivr_clause}{custom_instructions_clause}
 
 CALL OBJECTIVES:
@@ -186,7 +200,7 @@ CALL OBJECTIVES:
 5. If terms are not yet released:
    - Inquire what is needed to issue terms (e.g. loss runs, renewal application, payroll verification).
    - Ask for the underwriter's direct email or estimated completion date.
-6. After the live human is confirmed as the right desk, offer to connect them with {dossier.producer_name or 'the requesting producer'}, or transfer if they ask for the producer.
+6. After the live human is confirmed as the right desk, offer to connect them with {dossier.requestor_name or 'the person who requested this call'}, or transfer if they ask for the requestor.
 7. Record the representative's first name, conclude the call politely, and wish them a great day.
 {transfer_block}
 """
@@ -229,7 +243,8 @@ CALL OBJECTIVES:
                 "prompt": prompt,
                 "call_type": getattr(dossier, "call_type", None),
                 "producer_name": dossier.producer_name,
-                "producer_phone": dossier.producer_phone,
+                "requestor_name": dossier.requestor_name,
+                "requestor_phone": dossier.requestor_phone,
                 "transfer_mode": dossier.transfer_mode,
                 "client_first_name": dossier.client_first_name,
             }
@@ -244,15 +259,15 @@ CALL OBJECTIVES:
         return self._dispatch_retell(dossier, prompt, webhook_url)
 
     def build_bland_transfer_fields(self, dossier: CallingDossier) -> Dict[str, Any]:
-        """Bland send-call transfer_phone_number / transfer_list for producer warm transfer."""
-        producer_phone = normalize_phone_e164(dossier.producer_phone)
-        if not producer_phone:
+        """Bland send-call transfer fields for the Robie Call requestor (label invoker)."""
+        requestor_phone = normalize_phone_e164(dossier.requestor_phone)
+        if not requestor_phone:
             return {}
         return {
-            "transfer_phone_number": producer_phone,
+            "transfer_phone_number": requestor_phone,
             "transfer_list": {
-                "default": producer_phone,
-                "producer": producer_phone,
+                "default": requestor_phone,
+                "requestor": requestor_phone,
             },
         }
 
@@ -290,7 +305,8 @@ CALL OBJECTIVES:
             "call_type": getattr(dossier, "call_type", None),
             "client_first_name": dossier.client_first_name,
             "producer_name": dossier.producer_name,
-            "producer_phone": dossier.producer_phone,
+            "requestor_name": dossier.requestor_name,
+            "requestor_phone": dossier.requestor_phone,
             "transfer_mode": dossier.transfer_mode,
         }
 

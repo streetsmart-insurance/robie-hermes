@@ -5,8 +5,12 @@ Resolution order for dispatcher lookups:
 2. Committed seed ``data/voice_call_directory.seed.json``
 3. Hardcoded ``KNOWN_CARRIER_PHONES`` / ``HARDCODED_CARRIER_PHONES`` fallback
 
-Producer warm-transfer phones live under the ``producers`` array in the same
-JSON files. Email alone is not enough to transfer — lookup must return E.164.
+Staff / requestor warm-transfer phones live under the ``producers`` array in
+the same JSON files (RingCentral Direct Number DIDs). The EZLynx Producer
+field is greeting copy only — transfer looks up the Robie Call invoker
+(note author / email sender) by name, alias, or email. Email alone is not
+enough to transfer — lookup must return E.164. If the requestor has no
+phone, skip transfer (do not fall back to another producer).
 
 Scrapers are pluggable. Built-in sources:
 - ``KnownCarrierPhonesSeedSource`` — bootstrap from the hardcoded map / seed file
@@ -416,10 +420,11 @@ def list_producers(directory: Optional[Dict[str, Any]] = None) -> List[Dict[str,
     seeded = _producers_from_payload(_load_json(SEED_DIRECTORY_PATH))
     if seeded:
         return seeded
-    # Last resort: StreetSmart producers already in the hardcoded phone map.
+    # Last resort: RC DIDs for principals + Jimmy personal cell (not in RC export).
     return [
-        {"name": "Jake Ferrara", "email": "jake@streetsmart.insurance", "phone": "+17326688161", "aliases": ["Jake", "Ferrara, Jake"]},
-        {"name": "Carlo Ferrara", "email": "carlo@streetsmart.insurance", "phone": "+17329953409", "aliases": ["Carlo", "Buster Brown", "Ferrara, Carlo"]},
+        {"name": "Jake Ferrara", "email": "jake@streetsmart.insurance", "phone": "+17324812520", "aliases": ["Jake", "Ferrara, Jake"]},
+        {"name": "Carlo Ferrara", "email": "carlo@streetsmart.insurance", "phone": "+17324622360", "aliases": ["Carlo", "Buster Brown", "Ferrara, Carlo"]},
+        {"name": "Mike Sosa", "email": "mike@streetsmart.insurance", "phone": "+17326540947", "aliases": ["Mike", "Sosa, Mike"]},
         {"name": "Jimmy", "phone": "+17329954324", "aliases": ["Jimmy"]},
     ]
 
@@ -451,10 +456,13 @@ def lookup_producer(
     email: Optional[str] = None,
     directory: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Resolve a StreetSmart producer to display name + optional E.164 phone.
+    """Resolve a StreetSmart staff row by name, alias, or email.
 
-    Matching uses the EZLynx Producer field (name) and/or email against the
-    voice directory. Returns None when no directory row matches.
+    Used for (1) the Robie Call requestor / label invoker transfer target and
+    (2) normalizing the EZLynx Producer display name for greeting copy.
+    Matching is exact on name/alias/email, then a unique-token fallback.
+    Ambiguous last names (Ferrara, Cabrera) return None. Returns None when no
+    directory row matches. ``phone`` may be None — callers must not invent one.
     """
     producers = list_producers(directory)
     if not producers:
@@ -490,7 +498,11 @@ def lookup_producer(
             key_tokens = set()
             for key in keys:
                 key_tokens.update(key.split())
-            distinctive = {t for t in tokens if t not in {"insurance", "streetsmart", "com", "ferrara"}}
+            distinctive = {
+                t
+                for t in tokens
+                if t not in {"insurance", "streetsmart", "com", "ferrara", "cabrera", "aguilar"}
+            }
             if distinctive and distinctive & key_tokens:
                 token_hits.append(entry)
         unique = []
@@ -514,6 +526,19 @@ def lookup_producer(
         "phone": phone,
         "aliases": list(chosen.get("aliases") or []),
     }
+
+
+def lookup_requestor(
+    name: Optional[str] = None,
+    email: Optional[str] = None,
+    directory: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the Robie Call invoker (note author / email sender) for transfer.
+
+    Same directory match as ``lookup_producer``. Callers must skip transfer when
+    the returned phone is missing — never fall back to the EZLynx Producer.
+    """
+    return lookup_producer(name=name, email=email, directory=directory)
 
 
 def refresh_voice_call_directory(

@@ -60,6 +60,13 @@ def test_parse_call_command_ignores_unauthorized():
     assert cmd is None
 
 
+def test_extract_sender_name_from_display_header():
+    dispatcher = EmailCallDispatcher()
+    assert dispatcher._extract_sender_name("Mike Sosa <mike@streetsmart.insurance>") == "Mike Sosa"
+    assert dispatcher._extract_sender_name('"Jake Ferrara" <jake@streetsmart.insurance>') == "Jake Ferrara"
+    assert dispatcher._extract_sender_name("mike@streetsmart.insurance") is None
+
+
 def test_parse_call_command_ignores_non_call_emails():
     dispatcher = EmailCallDispatcher()
     cmd = dispatcher.parse_call_command(

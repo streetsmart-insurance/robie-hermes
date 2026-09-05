@@ -73,6 +73,8 @@ class VoiceCallDispatcher:
             self.hydrator.enrich_identity_from_ezlynx(dossier)
         except Exception as exc:
             logger.debug("Producer/first-name enrichment skipped for %s: %s", policy_number, exc)
+        # CLI dispatch has no label invoker; warm transfer stays off unless a
+        # requestor was already set (HITL-safe — do not use EZLynx Producer).
 
         try:
             result = self.voice.dispatch_call(dossier=dossier, dry_run=dry_run)

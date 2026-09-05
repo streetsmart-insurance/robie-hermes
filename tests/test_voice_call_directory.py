@@ -8,6 +8,7 @@ from src.voice.call_directory import (
     VoiceCallDirectory,
     lookup_carrier_phone,
     lookup_producer,
+    lookup_requestor,
     main as directory_main,
     normalize_phone_e164,
 )
@@ -173,10 +174,27 @@ def test_lookup_unknown_producer_is_none():
     assert lookup_producer(name="Not A Producer", directory=SAMPLE_PRODUCERS) is None
 
 
-def test_seeded_directory_includes_jake_and_carlo():
+def test_seeded_directory_uses_ringcentral_dids_and_keeps_phones_map_tests():
     jake = lookup_producer(name="Jake Ferrara")
     carlo = lookup_producer(email="carlo@streetsmart.insurance")
+    mike = lookup_requestor(name="Mike Sosa")
+    mike_email = lookup_requestor(email="mike@streetsmart.insurance")
+    jimmy = lookup_producer(name="Jimmy")
     assert jake is not None
-    assert jake["phone"] == "+17326688161"
+    assert jake["phone"] == "+17324812520"
     assert carlo is not None
-    assert carlo["phone"] == "+17329953409"
+    assert carlo["phone"] == "+17324622360"
+    assert mike is not None
+    assert mike["phone"] == "+17326540947"
+    assert mike_email["phone"] == "+17326540947"
+    assert jimmy["phone"] == "+17329954324"
+    # Dial-test aliases stay on the phones map (Carlo cell), not producers[].
+    assert lookup_carrier_phone("buster brown") == "+17329953409"
+    assert lookup_carrier_phone("carlo ferrara") == "+17329953409"
+    assert lookup_carrier_phone("jake") == "+17326688161"
+
+
+def test_lookup_requestor_does_not_return_unrelated_producer():
+    assert lookup_requestor(name="Not On Staff") is None
+    assert lookup_requestor(name="Ferrara") is None
+    assert lookup_requestor(name="Cabrera") is None

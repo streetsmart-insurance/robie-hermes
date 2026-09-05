@@ -11,6 +11,7 @@ from src.voice.ezlynx_label_dispatcher import (
     discussion_note_identity,
     extract_discussion_note_labels,
     extract_discussion_note_text,
+    extract_discussion_requestor,
     infer_call_type,
     latest_activity_is_from_robie,
     parse_call_note_instructions,
@@ -220,7 +221,8 @@ def test_infer_call_type_from_who_to_call_insured_only():
     assert infer_call_type(carrier, insured_name="Acme LLC") == "carrier"
 
 
-def test_dispatcher_client_followup_hydrates_producer_and_first_name(processed_store):
+def test_dispatcher_client_followup_transfers_to_mike_not_producer(processed_store):
+    """Mike applies Robie Call; Producer Jake is greeting-only; transfer is Mike's RC DID."""
     mock_ezlynx = MagicMock()
     mock_voice = MagicMock()
     mock_voice.from_phone = "+17322986745"
@@ -232,6 +234,8 @@ def test_dispatcher_client_followup_hydrates_producer_and_first_name(processed_s
             "title": "robie call",
             "discussionNote": {
                 "noteId": 555001,
+                "createdByName": "Mike Sosa",
+                "createdByEmail": "mike@streetsmart.insurance",
                 "noteText": (
                     "Call type: client\nWho to call: the insured\n"
                     "What to say: Review the quote Jake put together."
@@ -258,15 +262,66 @@ def test_dispatcher_client_followup_hydrates_producer_and_first_name(processed_s
     assert results[0]["call_type"] == "client_followup"
     assert results[0]["phone"] == "+17325550100"
     assert results[0]["producer_name"] == "Jake Ferrara"
-    assert results[0]["producer_phone"] == "+17326688161"
+    assert results[0]["requestor_name"] == "Mike Sosa"
+    assert results[0]["requestor_phone"] == "+17326540947"
     dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
     assert dossier.client_first_name == "Maria"
     assert dossier.call_type == "client_followup"
-    assert dossier.producer_phone == "+17326688161"
+    assert dossier.producer_name == "Jake Ferrara"
+    assert dossier.requestor_phone == "+17326540947"
     assert dossier.assigned_csr_email == "carlo@streetsmart.insurance"
     ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "Warm transfer: enabled" in ack
-    assert "Jake Ferrara" in ack
+    assert "Mike Sosa" in ack
+    assert "+17326540947" in ack
+    first = mock_voice.build_call_prompt.call_args.kwargs["dossier"]
+    assert first.producer_name == "Jake Ferrara"
+
+
+def test_dispatcher_missing_requestor_phone_does_not_fall_back_to_producer(processed_store):
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.build_call_prompt.return_value = "client prompt"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_client_02", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 778,
+            "title": "robie call",
+            "discussionNote": {
+                "noteId": 555002,
+                "createdByName": "Pat Nobody",
+                "noteText": (
+                    "Call type: client\nWho to call: the insured\n"
+                    "What to say: Review the quote."
+                ),
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {
+            "FirstName": "Maria",
+            "BusinessName": "Garcia Landscaping LLC",
+            "Producer": "Jake Ferrara",
+            "CellPhone": "732-555-0100",
+        },
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("123456", dry_run=True)
+
+    assert len(results) == 1
+    assert results[0]["producer_name"] == "Jake Ferrara"
+    assert results[0]["requestor_phone"] is None
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.producer_name == "Jake Ferrara"
+    assert dossier.requestor_phone is None
+    assert dossier.transfer_mode is None
+    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Warm transfer: not available" in ack
+    assert "will not fall back" in ack
 
 
 def test_dispatcher_skips_when_latest_note_is_from_robie(processed_store):
@@ -656,4 +711,51 @@ def test_note_text_trigger_without_label_respects_processed_note_id(processed_st
     posted = mock_ezlynx.add_note_to_discussion.call_args.kwargs
     assert posted.get("label_to_apply") is None
     assert "ROBIE AUTONOMOUS CALL DISPATCHED" in posted["note_text"]
+
+
+def test_extract_discussion_requestor_from_created_by_name():
+    card = {
+        "discussionNote": {
+            "createdByName": "Mike Sosa",
+            "note": "robie call",
+        }
+    }
+    assert extract_discussion_requestor(card) == {"name": "Mike Sosa", "email": None}
+
+
+def test_extract_discussion_requestor_from_created_by_object_and_email():
+    card = {
+        "discussionNote": {
+            "createdBy": {
+                "name": "Mike Sosa",
+                "email": "mike@streetsmart.insurance",
+            },
+            "note": "robie call",
+        }
+    }
+    assert extract_discussion_requestor(card) == {
+        "name": "Mike Sosa",
+        "email": "mike@streetsmart.insurance",
+    }
+
+
+def test_extract_discussion_requestor_from_user_name_fields():
+    card = {
+        "discussionNote": {
+            "userName": "Mike Sosa",
+            "userEmail": "mike@streetsmart.insurance",
+        }
+    }
+    assert extract_discussion_requestor(card)["name"] == "Mike Sosa"
+    assert extract_discussion_requestor(card)["email"] == "mike@streetsmart.insurance"
+
+
+def test_extract_discussion_requestor_falls_back_to_last_modified():
+    card = {"lastModifiedByName": "Mike Sosa", "discussionNote": {"note": "robie call"}}
+    assert extract_discussion_requestor(card)["name"] == "Mike Sosa"
+
+
+def test_extract_discussion_requestor_skips_robie():
+    card = {"discussionNote": {"createdByName": "Robie AI", "note": "ack"}}
+    assert extract_discussion_requestor(card) == {"name": None, "email": None}
 

@@ -123,7 +123,8 @@ def test_normalize_call_type():
     assert normalize_call_type(None) == CALL_TYPE_CARRIER
 
 
-def test_enrich_identity_sets_producer_phone_and_warm_transfer():
+def test_enrich_identity_transfers_to_requestor_not_producer():
+    """Mike invokes Robie Call; Producer Jake is greeting-only."""
     hydrator = ContextHydrator()
     dossier = CallingDossier(
         policy_number="PWC1239278",
@@ -135,15 +136,19 @@ def test_enrich_identity_sets_producer_phone_and_warm_transfer():
         dossier,
         applicant={"FirstName": "Maria", "Producer": "Jake Ferrara"},
         call_type="client",
+        requestor_name="Mike Sosa",
+        requestor_email="mike@streetsmart.insurance",
     )
     assert dossier.client_first_name == "Maria"
     assert dossier.producer_name == "Jake Ferrara"
-    assert dossier.producer_phone == "+17326688161"
+    assert dossier.requestor_name == "Mike Sosa"
+    assert dossier.requestor_phone == "+17326540947"
+    assert dossier.producer_phone is None
     assert dossier.call_type == CALL_TYPE_CLIENT_FOLLOWUP
     assert dossier.transfer_mode == TRANSFER_MODE_WARM
 
 
-def test_enrich_identity_without_directory_phone_skips_transfer():
+def test_enrich_identity_missing_requestor_phone_does_not_fall_back_to_producer():
     hydrator = ContextHydrator()
     dossier = CallingDossier(
         policy_number="X1",
@@ -153,8 +158,28 @@ def test_enrich_identity_without_directory_phone_skips_transfer():
     )
     hydrator.enrich_identity(
         dossier,
-        applicant={"FirstName": "Pat", "Producer": "Eimy Ramos"},
+        applicant={"FirstName": "Pat", "Producer": "Jake Ferrara"},
+        requestor_name="Pat Nobody",
+        requestor_email="pat.nobody@streetsmart.insurance",
     )
-    assert dossier.producer_name == "Eimy Ramos"
+    assert dossier.producer_name == "Jake Ferrara"
+    assert dossier.requestor_phone is None
+    assert dossier.transfer_mode is None
     assert dossier.producer_phone is None
+
+
+def test_enrich_identity_without_requestor_skips_transfer():
+    hydrator = ContextHydrator()
+    dossier = CallingDossier(
+        policy_number="X1",
+        insured_name="Acme LLC",
+        carrier_name="Hartford",
+        line_of_business="GL",
+    )
+    hydrator.enrich_identity(
+        dossier,
+        applicant={"FirstName": "Pat", "Producer": "Jake Ferrara"},
+    )
+    assert dossier.producer_name == "Jake Ferrara"
+    assert dossier.requestor_phone is None
     assert dossier.transfer_mode is None

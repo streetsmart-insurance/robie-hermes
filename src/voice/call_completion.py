@@ -386,11 +386,16 @@ def handle_completed_call(
 
     transfer_outcome = extract_transfer_outcome(merged)
     metadata = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
-    producer_name = metadata.get("producer_name") or merged.get("producer_name")
+    transfer_to = (
+        metadata.get("requestor_name")
+        or merged.get("requestor_name")
+        or metadata.get("producer_name")
+        or merged.get("producer_name")
+    )
     transfer_line = ""
     if transfer_outcome:
-        if producer_name:
-            transfer_line = f"- Transfer: {transfer_outcome} to {producer_name}"
+        if transfer_to:
+            transfer_line = f"- Transfer: {transfer_outcome} to {transfer_to}"
         else:
             transfer_line = f"- Transfer: {transfer_outcome}"
 
