@@ -76,14 +76,38 @@ CSRs and Account Managers can trigger Robie without leaving EZLynx:
    PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id <ApplicantID>
    ```
 
-#### Three voice labels (do not mix the prompts)
-There are three dispatch labels. Each forces its own `call_type`:
+#### Three voice `call_type`s (do not mix the prompts)
+There are three dispatch `call_type`s. Pathway WF labels all use `client_outreach`:
 
 | Label | `call_type` | Who is dialed | Greeting |
 | :--- | :--- | :--- | :--- |
 | **`Robie Call`** | `carrier` (default) | Carrier desk from the note / directory | Underwriting IVR script |
 | **`Robie lead follow-up`** | `client_followup` | Insured Cell → Home → Business | "quote {Sales Center producerName} put together" |
-| **`Robie client outreach`** | `client_outreach` | Primary applicant, then co-applicant | First name + CSR reason only — **no** producer quote |
+| **`Robie client outreach`** (and pathway WF labels below) | `client_outreach` | Primary applicant, then co-applicant | First name + CSR reason only — **no** producer quote |
+
+#### EZLynx Admin org labels (Carlo creates these names)
+Create these **exact names** in EZLynx org Admin so CSRs can click them like Splice WFs. This repo matches `noteLabels[].labelName` only — **do not invent label IDs**. Close variants also match (spaces / hyphens / underscores, optional `robie ` prefix, brackets).
+
+| Admin label name | `call_type` | Pathway |
+| :--- | :--- | :--- |
+| **`Robie client outreach`** | `client_outreach` | `generic` (CSR What to say) unless the note body matches a pathway |
+| **`Robie cancellation`** | `client_outreach` | `cancellation` |
+| **`Robie audit`** | `client_outreach` | `audit` |
+| **`Robie returned mail`** | `client_outreach` | `returned_mail` |
+| **`Robie e-sign`** | `client_outreach` | `esign` |
+| **`Robie esign`** | `client_outreach` | `esign` |
+| **`Robie additional info`** | `client_outreach` | `additional_info` |
+| **`Robie recommendations`** | `client_outreach` | `recommendations` |
+| **`Robie unresponsive`** | `client_outreach` | `unresponsive` |
+| **`Robie renewal reach-out`** | `client_outreach` | `renewal_reachout` |
+| **`Robie renewal reachout`** | `client_outreach` | `renewal_reachout` |
+
+Do **not** create Birthday, winback, Sales Center, new customer, Additional Policy, Applicant Created, Welcome, Reinstatement, Policy Renewed, or Upcoming Renewal/Expiration as Robie dispatch labels.
+
+**Winner when more than one dispatch label is on the same note** (existing rules — do not invert):
+1. Any client-outreach trigger (including a pathway WF label) → `client_outreach`
+2. Else `Robie lead follow-up` → `client_followup` (requestor transfer unchanged)
+3. Else `Robie Call` → `carrier` (unless `Call type: client` / who-to-call insured)
 
 #### Client follow-up vs carrier call + producer warm transfer
 **Preferred CSR path for a client/lead call:** apply the org label **`Robie lead follow-up`** (case-insensitive; `Robie Lead Follow-up`, `robie lead follow up`, and `Robie lead followup` also match). That label alone dispatches the same way `Robie Call` does and **forces `call_type=client_followup`**. You do **not** need `Call type: client` in the note body.
@@ -124,7 +148,7 @@ What to say: Confirm renewal terms, then connect them to the producer if they as
 - Creating the `Robie lead follow-up` org label in the live EZLynx UI is orchestration's job; this repo only recognizes the name (and close variants) on `noteLabels[].labelName` or in title/note text.
 
 #### Client outreach (cancellations / action-needed) — Carlo 2026-09-05
-**Preferred CSR path when the insured must do something** (cancellation, documents, payment, “please call us back”): apply the org label **`Robie client outreach`**. Close variants match case-insensitively: `robie client outreach`, `robie_client_outreach`, `[robie client outreach]`. The alias **`robie cancellation`** takes the same path. That label alone dispatches like `Robie Call` and **forces `call_type=client_outreach`**. You do **not** write `Call type: client` and you do **not** use the lead-follow-up greeting.
+**Preferred CSR path when the insured must do something** (cancellation, documents, payment, “please call us back”): apply **`Robie client outreach`** or the matching pathway WF label from the Admin list (`Robie audit`, `Robie cancellation`, …). Close variants match case-insensitively: spaces / hyphens / underscores, optional `robie ` prefix on the label, brackets. A standalone **`Robie audit`** (label only) dispatches — the CSR does not also need `Robie client outreach`. That label alone dispatches like `Robie Call` and **forces `call_type=client_outreach`**. You do **not** write `Call type: client` and you do **not** use the lead-follow-up greeting. Pathway is inferred from the **same** label; `Robie client outreach` stays generic unless the note body matches a pathway.
 
 ```text
 (apply label: Robie client outreach)
@@ -147,10 +171,12 @@ Writing the phrase in the discussion title or note body works the same as applyi
   - `cancellation` / `robie cancellation` → Cancellation Notice PDF (not in that doc body): overdue payment, policy set to be cancelled, pay by {date} to avoid lapse. Default when the note looks like cancel/non-pay.
   - fallback → existing generic outreach (CSR What to say).
 - **Not ported:** Birthday, Additional Policy, Applicant Created, New Customer/Welcome, Policy Reinstatement, Policy Renewed, Upcoming Renewal/Expiration EZLynx automations, Winback, Sales Center New/Contacted/Quoted/Won. Sales Center Reviewed Status (“quote we released a few days ago”) is already **Robie lead follow-up** — leave that path alone.
-- **Both `Robie Call` and `Robie client outreach` on the same note:** client outreach wins → `client_outreach`.
-- **`Robie lead follow-up` is unchanged** — still `client_followup` with the Sales Center `producerName` greeting and transfer to the **label invoker**.
+- **Both `Robie Call` and `Robie client outreach` (or any pathway WF label) on the same note:** client outreach wins → `client_outreach`.
+- **Both `Robie lead follow-up` and an outreach pathway label on the same note:** client outreach wins → `client_outreach` (existing `infer_call_type` order: outreach, then lead, then Robie Call/carrier). Do not invert this.
+- **`Robie lead follow-up` is unchanged** when no outreach label is present — still `client_followup` with the Sales Center `producerName` greeting and transfer to the **label invoker**.
+- **`Robie Call` is unchanged** — stays `carrier` unless `Call type: client` / who-to-call insured. A carrier note that merely mentions “audit” does **not** dispatch client outreach.
 - Assigned CSR for EZLynx notes/tasks remains Carlo Ferrara. Caller ID `+17322986745`. No Bland `max_duration`.
-- Creating the `Robie client outreach` org label in the live EZLynx UI is Carlo / Admin’s job; this repo only recognizes the name (and close variants / `robie cancellation` alias).
+- Creating the Admin org label **names** in the live EZLynx UI is Carlo / Admin’s job; this repo only recognizes the names (and close variants). Do not invent `organizationLabelId` values.
 
 #### Manual renewal WF — one carrier Robie Call after N=2 (Carlo 2026-09-05)
 Live insertion is the give-up branch of `OutreachCadenceManager.process_due_followups` in `src/email_outreach/thread_tracker.py` (the path that today sets `ThreadStatus.EXHAUSTED` + `ESCALATED_MANUAL` + CSR task “URGENT: Review / Call Carrier…”). Helper: `src/voice/renewal_cadence.py`. **Not** a parallel daily-runner scan, cron, or Bland stack.

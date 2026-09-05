@@ -6,9 +6,16 @@ Enables CSRs and Account Managers to trigger autonomous calls directly from EZLy
    (carrier path by default; client only with ``Call type: client`` / who-to-call insured).
 2. Or CSR applies ``Robie lead follow-up`` (and close variants) to force the client
    follow-up path without requiring ``Call type: client`` in the note body.
-3. Or CSR applies ``Robie client outreach`` (and close variants / ``Robie cancellation``)
-   to force ``call_type=client_outreach`` — primary then secondary applicant phones,
-   no Sales Center producer greeting.
+3. Or CSR applies ``Robie client outreach`` or a pathway WF label
+   (``Robie cancellation``, ``Robie audit``, ``Robie returned mail``,
+   ``Robie e-sign`` / ``Robie esign``, ``Robie additional info``,
+   ``Robie recommendations``, ``Robie unresponsive``,
+   ``Robie renewal reach-out`` / ``Robie renewal reachout`` — close
+   variants: spaces / hyphens / underscores, optional ``robie `` prefix,
+   brackets) to force ``call_type=client_outreach`` — primary then
+   secondary applicant phones, no Sales Center producer greeting.
+   Pathway is inferred from the same label (``Robie client outreach``
+   stays generic unless the note body matches a pathway).
 4. Note specifies 'Who to call' (phone number/carrier) and 'What to say' (instructions).
 5. Robie parses the instructions, dispatches the call via Bland AI from +1 (732) 298-6745.
 6. When complete, Robie automatically posts the call transcript, recording link, and summary
@@ -40,7 +47,13 @@ from src.voice.context_hydrator import (
     resolve_client_outreach_targets,
     unwrap_policy_list,
 )
-from src.voice.outreach_pathways import infer_outreach_pathway
+from src.voice.outreach_pathways import (
+    EZLYNX_ADMIN_OUTREACH_LABELS,
+    infer_outreach_pathway,
+    is_client_outreach_dispatch_label,
+    strip_client_outreach_trigger_phrases,
+    text_has_client_outreach_trigger,
+)
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
 from src.voice.voice_client import CarrierVoiceClient
 
@@ -59,18 +72,25 @@ ROBIE_LEAD_FOLLOWUP_TRIGGERS = [
     "[robie lead followup]",
 ]
 _LEAD_FOLLOWUP_COLLAPSED = "robieleadfollowup"
-# Org label + title/note phrases. ``robie cancellation`` is an alias for the
-# same client_outreach path (Carlo 2026-09-05).
-ROBIE_CLIENT_OUTREACH_TRIGGERS = [
-    "robie client outreach",
-    "robie_client_outreach",
-    "[robie client outreach]",
-    "robie cancellation",
-    "robie_cancellation",
-    "[robie cancellation]",
-]
-_CLIENT_OUTREACH_COLLAPSED = "robieclientoutreach"
-_CLIENT_CANCELLATION_COLLAPSED = "robiecancellation"
+
+
+def _build_client_outreach_trigger_phrases() -> List[str]:
+    """Admin names plus space / hyphen / underscore / bracket close variants."""
+    phrases: List[str] = []
+    seen = set()
+    for name in EZLYNX_ADMIN_OUTREACH_LABELS:
+        lower = name.lower()
+        for candidate in (lower, lower.replace(" ", "_"), lower.replace(" ", "-"), f"[{lower}]"):
+            if candidate not in seen:
+                seen.add(candidate)
+                phrases.append(candidate)
+    return phrases
+
+
+# Org label + title/note phrases. Pathway WF labels (``Robie audit``, …)
+# dispatch the same client_outreach path as ``Robie client outreach``.
+# ``robie cancellation`` remains the cancellation alias (Carlo 2026-09-05).
+ROBIE_CLIENT_OUTREACH_TRIGGERS = _build_client_outreach_trigger_phrases()
 CLIENT_WHO_TOKENS = {
     "insured",
     "the insured",
@@ -129,18 +149,19 @@ def _text_matches_lead_followup_trigger(text: Optional[str]) -> bool:
     return _LEAD_FOLLOWUP_COLLAPSED in _collapse_trigger_text(text)
 
 
-def _text_matches_client_outreach_trigger(text: Optional[str]) -> bool:
-    """True when Robie client outreach (or robie cancellation alias) appears."""
-    if not text:
-        return False
-    lower = text.lower()
-    if any(trigger in lower for trigger in ROBIE_CLIENT_OUTREACH_TRIGGERS):
-        return True
-    collapsed = _collapse_trigger_text(text)
-    return (
-        _CLIENT_OUTREACH_COLLAPSED in collapsed
-        or _CLIENT_CANCELLATION_COLLAPSED in collapsed
-    )
+def _text_matches_client_outreach_trigger(
+    text: Optional[str], *, whole_value: bool = False
+) -> bool:
+    """True when a client-outreach dispatch phrase or org label appears.
+
+    Free text (title / note body) requires the ``robie `` prefix so a
+    carrier note that mentions ``audit`` does not dispatch. Standalone
+    org labels accept the optional ``robie `` prefix (``audit`` ==
+    ``Robie audit``) plus space / hyphen / underscore / bracket variants.
+    """
+    if whole_value:
+        return is_client_outreach_dispatch_label(text)
+    return text_has_client_outreach_trigger(text)
 
 
 def _text_matches_any_robie_dispatch_trigger(text: Optional[str]) -> bool:
@@ -219,22 +240,37 @@ def discussion_is_lead_followup(discussion: Dict[str, Any], note_text: Optional[
 
 
 def discussion_is_client_outreach(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
-    """Trigger when an org label or title/note text matches Robie client outreach.
+    """Trigger when an org label or title/note text matches client outreach.
 
-    Accepts close variants (``robie client outreach``, ``robie_client_outreach``,
-    ``[robie client outreach]``) and the alias ``robie cancellation``.
+    Accepts ``Robie client outreach``, pathway WF labels (``Robie audit``,
+    ``Robie cancellation``, ``Robie returned mail``, ``Robie e-sign`` /
+    ``Robie esign``, ``Robie additional info``, ``Robie recommendations``,
+    ``Robie unresponsive``, ``Robie renewal reach-out`` /
+    ``Robie renewal reachout``), and close variants (spaces / hyphens /
+    underscores, optional ``robie `` prefix on labels, brackets).
     Forces ``client_outreach``.
     """
-    return _discussion_matches_trigger(
-        discussion, _text_matches_client_outreach_trigger, note_text=note_text
-    )
+    title = ""
+    if isinstance(discussion, dict):
+        title = discussion.get("title") or ""
+    if note_text is None:
+        note_text = extract_discussion_note_text(discussion)
+    if _text_matches_client_outreach_trigger(title) or _text_matches_client_outreach_trigger(
+        note_text
+    ):
+        return True
+    for label_name in extract_discussion_note_labels(discussion):
+        if _text_matches_client_outreach_trigger(label_name, whole_value=True):
+            return True
+    return False
 
 
 def discussion_is_robie_call(discussion: Dict[str, Any], note_text: Optional[str] = None) -> bool:
     """Trigger when an org label or title/note text matches a Robie dispatch phrase.
 
-    CSRs should apply ``Robie Call``, ``Robie lead follow-up``, or
-    ``Robie client outreach`` and/or write that phrase in the note.
+    CSRs should apply ``Robie Call``, ``Robie lead follow-up``,
+    ``Robie client outreach``, or a pathway WF label (``Robie audit``, …)
+    and/or write that phrase in the note.
     Instruction-style notes without the label or phrase do not fire.
     """
     if _discussion_matches_trigger(discussion, _text_matches_robie_trigger, note_text=note_text):
@@ -375,7 +411,7 @@ def _note_body_has_robie_self_marker(note_text: Optional[str]) -> bool:
     lower = note_text.lower()
     if any(marker in lower for marker in ROBIE_SELF_BODY_MARKERS):
         return True
-    stripped = lower
+    stripped = strip_client_outreach_trigger_phrases(lower)
     for trigger in sorted(
         ROBIE_LABEL_TRIGGERS + ROBIE_LEAD_FOLLOWUP_TRIGGERS + ROBIE_CLIENT_OUTREACH_TRIGGERS,
         key=len,
@@ -532,10 +568,16 @@ def infer_call_type(
 ) -> str:
     """Resolve carrier vs client_followup vs client_outreach.
 
-    ``Robie client outreach`` (label or phrase, including ``robie cancellation``)
-    always forces ``client_outreach``. ``Robie lead follow-up`` always forces
+    Any client-outreach trigger (``Robie client outreach`` or a pathway WF
+    label such as ``Robie audit`` / ``robie cancellation``) always forces
+    ``client_outreach``. ``Robie lead follow-up`` always forces
     ``client_followup``. Robie Call alone stays carrier unless the note has
     ``Call type: client`` or who-to-call insured.
+
+    Winner when multiple dispatch labels appear on the same note (do not
+    change): client_outreach beats lead_followup beats Robie Call/carrier.
+    ``Robie lead follow-up`` is otherwise unchanged (client_followup +
+    requestor transfer).
     """
     if client_outreach:
         return CALL_TYPE_CLIENT_OUTREACH

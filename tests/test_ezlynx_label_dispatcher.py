@@ -20,6 +20,11 @@ from src.voice.ezlynx_label_dispatcher import (
     _text_matches_client_outreach_trigger,
     _text_matches_lead_followup_trigger,
 )
+from src.voice.outreach_pathways import (
+    EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS,
+    EZLYNX_ADMIN_OUTREACH_LABELS,
+    infer_outreach_pathway,
+)
 from src.voice.processed_robie_notes import ProcessedRobieCallStore
 
 
@@ -1101,12 +1106,25 @@ def test_extract_discussion_requestor_skips_robie():
         "robie cancellation",
         "Robie Cancellation",
         "[robie cancellation]",
+        "Robie audit",
+        "robie_audit",
+        "[robie audit]",
+        "Robie returned mail",
+        "robie-returned-mail",
+        "Robie e-sign",
+        "Robie esign",
+        "robie_esign",
+        "Robie additional info",
+        "Robie recommendations",
+        "Robie unresponsive",
+        "Robie renewal reach-out",
+        "Robie renewal reachout",
     ],
 )
 def test_client_outreach_trigger_variants(phrase):
     assert _text_matches_client_outreach_trigger(phrase) is True
     parsed = parse_call_note_instructions(
-        f"{phrase}\nWhat to say: Policy is pending cancellation."
+        f"{phrase}\nWhat to say: Please call the client about this account."
     )
     assert parsed["is_robie_call"] is True
     assert parsed["call_type"] == "client_outreach"
@@ -1118,6 +1136,12 @@ def test_client_outreach_does_not_match_unrelated_robie_text():
     assert _text_matches_client_outreach_trigger("Robie lead follow-up") is False
     assert _text_matches_client_outreach_trigger("Please do client outreach") is False
     assert _text_matches_client_outreach_trigger("cancellation notice sent") is False
+    assert _text_matches_client_outreach_trigger("Please finish the audit") is False
+    assert _text_matches_client_outreach_trigger("Birthday") is False
+    assert _text_matches_client_outreach_trigger("Winback") is False
+    assert _text_matches_client_outreach_trigger("Sales Center New") is False
+    assert _text_matches_client_outreach_trigger("new customer welcome") is False
+    assert _text_matches_client_outreach_trigger("Robie audited the file") is False
 
 
 def test_discussion_is_client_outreach_from_note_labels():
@@ -1131,6 +1155,148 @@ def test_discussion_is_client_outreach_from_note_labels():
     assert discussion_is_client_outreach(card) is True
     assert discussion_is_robie_call(card) is True
     assert discussion_is_lead_followup(card) is False
+
+
+# Generic CSR copy with no Manual WF keywords — pathway must come from the label.
+_GENERIC_OUTREACH_NOTE = "What to say: Please call the client about this account."
+
+
+@pytest.mark.parametrize("label_name,pathway", EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS)
+def test_admin_outreach_label_dispatches_client_outreach_and_pathway(label_name, pathway):
+    """Each Admin org label name dispatches client_outreach and infers its pathway."""
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": _GENERIC_OUTREACH_NOTE,
+            "noteLabels": [{"labelName": label_name}],
+        },
+    }
+    assert discussion_is_client_outreach(card) is True
+    assert discussion_is_robie_call(card) is True
+    assert discussion_is_lead_followup(card) is False
+    assert infer_outreach_pathway(_GENERIC_OUTREACH_NOTE, labels=[label_name]) == pathway
+    parsed = parse_call_note_instructions(_GENERIC_OUTREACH_NOTE)
+    assert infer_call_type(parsed, client_outreach=True) == "client_outreach"
+
+
+@pytest.mark.parametrize(
+    "label_name,pathway",
+    [
+        ("audit", "audit"),
+        ("Robie_audit", "audit"),
+        ("[Robie audit]", "audit"),
+        ("returned mail", "returned_mail"),
+        ("robie-returned-mail", "returned_mail"),
+        ("e-sign", "esign"),
+        ("esign", "esign"),
+        ("[robie esign]", "esign"),
+        ("additional info", "additional_info"),
+        ("recommendations", "recommendations"),
+        ("unresponsive", "unresponsive"),
+        ("renewal reach-out", "renewal_reachout"),
+        ("renewal reachout", "renewal_reachout"),
+        ("cancellation", "cancellation"),
+        ("[robie cancellation]", "cancellation"),
+        ("client outreach", "generic"),
+    ],
+)
+def test_outreach_label_close_variants_optional_prefix_and_separators(label_name, pathway):
+    """Spaces/hyphens/underscores, optional robie prefix, and brackets match."""
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": _GENERIC_OUTREACH_NOTE,
+            "noteLabels": [{"labelName": label_name}],
+        },
+    }
+    assert discussion_is_client_outreach(card) is True
+    assert infer_outreach_pathway(_GENERIC_OUTREACH_NOTE, labels=[label_name]) == pathway
+
+
+def test_standalone_robie_audit_label_dispatches_without_phrase_in_note():
+    """Regression: Robie audit on noteLabels must dispatch even with no body keyword."""
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": _GENERIC_OUTREACH_NOTE,
+            "noteLabels": [{"labelName": "Robie audit"}],
+        },
+    }
+    assert discussion_is_client_outreach(card) is True
+    assert infer_outreach_pathway(_GENERIC_OUTREACH_NOTE, labels=["Robie audit"]) == "audit"
+
+
+def test_bare_pathway_words_in_note_do_not_dispatch_without_label():
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "Please finish the audit and send returned mail notes.",
+            "noteLabels": [],
+        },
+    }
+    assert discussion_is_client_outreach(card) is False
+    assert discussion_is_robie_call(card) is False
+
+
+def test_not_ported_labels_do_not_dispatch_client_outreach():
+    for label_name in (
+        "Birthday",
+        "Winback",
+        "Sales Center New",
+        "New Customer",
+        "Robie Call",
+        "Robie lead follow-up",
+    ):
+        card = {
+            "title": "Rest",
+            "discussionNote": {
+                "note": _GENERIC_OUTREACH_NOTE,
+                "noteLabels": [{"labelName": label_name}],
+            },
+        }
+        assert discussion_is_client_outreach(card) is False, label_name
+
+
+def test_client_outreach_label_defers_pathway_to_note_body():
+    assert (
+        infer_outreach_pathway("Please finish the audit", labels=["Robie client outreach"])
+        == "audit"
+    )
+    assert infer_outreach_pathway(_GENERIC_OUTREACH_NOTE, labels=["Robie client outreach"]) == "generic"
+
+
+def test_lead_followup_and_outreach_pathway_label_keeps_outreach_winner():
+    """Existing winner: any client_outreach trigger beats lead follow-up.
+
+    Do not invert this. Robie lead follow-up stays client_followup + requestor
+    transfer when no outreach pathway label is present.
+    """
+    parsed = parse_call_note_instructions(
+        "Robie lead follow-up\nRobie audit\nWhat to say: Review the quote."
+    )
+    assert parsed["call_type"] == "client_outreach"
+    assert infer_call_type(parsed, lead_followup=True, client_outreach=True) == "client_outreach"
+
+    card = {
+        "title": "Rest",
+        "discussionNote": {
+            "note": "What to say: Review the quote.",
+            "noteLabels": [
+                {"labelName": "Robie lead follow-up"},
+                {"labelName": "Robie audit"},
+            ],
+        },
+    }
+    assert discussion_is_lead_followup(card) is True
+    assert discussion_is_client_outreach(card) is True
+    assert (
+        infer_call_type(
+            parse_call_note_instructions("What to say: Review the quote."),
+            lead_followup=True,
+            client_outreach=True,
+        )
+        == "client_outreach"
+    )
 
 
 def test_infer_call_type_client_outreach_label_forces_outreach():
@@ -1156,7 +1322,12 @@ def test_robie_call_and_lead_followup_unchanged_when_outreach_absent():
     assert infer_call_type(lead) == "client_followup"
 
 
-def _outreach_card(note_id=555300, phone_note="What to say: Pending cancellation — please call us."):
+def _outreach_card(
+    note_id=555300,
+    phone_note="What to say: Pending cancellation — please call us.",
+    label="Robie client outreach",
+):
+    labels = [{"labelName": label}] if label else []
     return {
         "discussionId": 88200,
         "title": "Rest",
@@ -1165,7 +1336,7 @@ def _outreach_card(note_id=555300, phone_note="What to say: Pending cancellation
             "createdByName": "Mike Sosa",
             "createdByEmail": "mike@streetsmart.insurance",
             "note": phone_note,
-            "noteLabels": [{"labelName": "Robie client outreach"}],
+            "noteLabels": labels,
         },
     }
 
@@ -1508,12 +1679,12 @@ def test_dispatcher_client_outreach_skips_transfer_when_assigned_producer_has_no
     assert results[0]["phones"] == ["+17329953409"]
 
 
-def _outreach_mocks(mock_voice, processed_store, note_text, note_id=555400):
+def _outreach_mocks(mock_voice, processed_store, note_text, note_id=555400, label="Robie client outreach"):
     mock_ezlynx = MagicMock()
     mock_voice.from_phone = "+17322986745"
     mock_voice.dispatch_call.return_value = {"call_id": "call_path", "status": "DISPATCHED"}
     mock_ezlynx.get_applicant_discussions.return_value = [
-        _outreach_card(note_id=note_id, phone_note=note_text)
+        _outreach_card(note_id=note_id, phone_note=note_text, label=label)
     ]
     mock_ezlynx.get_applicant.return_value = {
         "status": "success",
@@ -1558,4 +1729,103 @@ def test_dispatcher_renewal_reachout_only_when_csr_labels_it(processed_store):
     pipeline_results = pipeline.process_applicant_notes_for_calls("26356199", dry_run=True)
     assert pipeline_results[0]["outreach_pathway"] == "generic"
     assert pipeline_results[0]["outreach_pathway"] != "renewal_reachout"
+
+
+def test_admin_outreach_label_names_match_pathway_table():
+    assert [name for name, _ in EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS] == list(
+        EZLYNX_ADMIN_OUTREACH_LABELS
+    )
+
+
+@pytest.mark.parametrize("label_name,pathway", EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS)
+def test_dispatcher_admin_label_triggers_outreach_and_pathway(processed_store, label_name, pathway):
+    """Each Admin label name alone (generic note body) dispatches + correct pathway."""
+    mock_voice = MagicMock()
+    dispatcher = _outreach_mocks(
+        mock_voice,
+        processed_store,
+        _GENERIC_OUTREACH_NOTE,
+        note_id=555500 + abs(hash(label_name)) % 10000,
+        label=label_name,
+    )
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    assert len(results) == 1
+    assert results[0]["call_type"] == "client_outreach"
+    assert results[0]["outreach_pathway"] == pathway
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.call_type == "client_outreach"
+    assert dossier.outreach_pathway == pathway
+
+
+def test_dispatcher_robie_call_stays_carrier_when_note_mentions_audit(processed_store):
+    """Robie Call remains carrier; a payroll-audit sentence is not client_outreach."""
+    mock_ezlynx = MagicMock()
+    mock_voice = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_carrier_audit", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88300,
+            "title": "Rest",
+            "discussionNote": {
+                "noteId": 555600,
+                "createdByName": "Mike Sosa",
+                "note": (
+                    "Robie Call\nWho to call: The Hartford (800-555-1234)\n"
+                    "What to say: Checking on the final payroll audit for the expiring term."
+                ),
+                "noteLabels": [{"labelName": "Robie Call"}],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"BusinessName": "Acme LLC", "FirstName": "Pat"},
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    assert len(results) == 1
+    assert results[0]["call_type"] == "carrier"
+    assert "outreach_pathway" not in results[0] or results[0].get("outreach_pathway") in (None, "")
+
+
+def test_dispatcher_lead_and_audit_label_keeps_outreach_winner(processed_store):
+    mock_voice = MagicMock()
+    mock_ezlynx = MagicMock()
+    mock_voice.from_phone = "+17322986745"
+    mock_voice.dispatch_call.return_value = {"call_id": "call_both", "status": "DISPATCHED"}
+    mock_ezlynx.get_applicant_discussions.return_value = [
+        {
+            "discussionId": 88400,
+            "title": "Rest",
+            "discussionNote": {
+                "noteId": 555700,
+                "createdByName": "Mike Sosa",
+                "createdByEmail": "mike@streetsmart.insurance",
+                "note": "What to say: Review the quote.",
+                "noteLabels": [
+                    {"labelName": "Robie lead follow-up"},
+                    {"labelName": "Robie audit"},
+                ],
+            },
+        }
+    ]
+    mock_ezlynx.get_applicant.return_value = {
+        "status": "success",
+        "applicant": {"FirstName": "Buster", "CellPhone": "7329953409"},
+    }
+    mock_ezlynx.get_applicant_policies.return_value = []
+    mock_ezlynx.get_applicant_sidebar.return_value = {
+        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
+    }
+    dispatcher = _dispatcher(mock_ezlynx, mock_voice, processed_store)
+    results = dispatcher.process_applicant_notes_for_calls("26356199", dry_run=True)
+    assert results[0]["call_type"] == "client_outreach"
+    assert results[0]["outreach_pathway"] == "audit"
+    dossier = mock_voice.dispatch_call.call_args.kwargs["dossier"]
+    assert dossier.call_type == "client_outreach"
+    assert dossier.outreach_pathway == "audit"
+    assert dossier.producer_name is None
 

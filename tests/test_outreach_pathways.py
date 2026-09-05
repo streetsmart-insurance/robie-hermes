@@ -1,7 +1,10 @@
 """Splice-replacement client outreach pathway copy and transfer rules."""
 
+import pytest
+
 from src.voice.context_hydrator import CallingDossier, ContextHydrator
 from src.voice.outreach_pathways import (
+    EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS,
     MANUAL_WF_BODIES,
     PATHWAY_ADDITIONAL_INFO,
     PATHWAY_AUDIT,
@@ -16,6 +19,9 @@ from src.voice.outreach_pathways import (
     build_outreach_live_script,
     build_outreach_voicemail_script,
     infer_outreach_pathway,
+    is_client_outreach_dispatch_label,
+    pathway_forced_by_outreach_label,
+    text_has_client_outreach_trigger,
 )
 from src.voice.voice_client import (
     AGENCY_MAIN_CALLBACK_DISPLAY,
@@ -101,6 +107,47 @@ def test_infer_outreach_pathway_from_alias_and_copy():
     assert infer_outreach_pathway("Follow up on recommendations") == PATHWAY_RECOMMENDATIONS
     assert infer_outreach_pathway("Reaching out — client unresponsive") == PATHWAY_UNRESPONSIVE
     assert infer_outreach_pathway("Touch base about the account.") == PATHWAY_GENERIC
+
+
+_GENERIC_BODY = "Please call the client about this account."
+
+
+@pytest.mark.parametrize("label_name,pathway", EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS)
+def test_infer_pathway_from_each_admin_org_label(label_name, pathway):
+    assert is_client_outreach_dispatch_label(label_name) is True
+    assert infer_outreach_pathway(_GENERIC_BODY, labels=[label_name]) == pathway
+    if pathway == PATHWAY_GENERIC:
+        assert pathway_forced_by_outreach_label(label_name) is None
+    else:
+        assert pathway_forced_by_outreach_label(label_name) == pathway
+
+
+def test_robie_client_outreach_label_defers_to_note_body():
+    assert pathway_forced_by_outreach_label("Robie client outreach") is None
+    assert infer_outreach_pathway(_GENERIC_BODY, labels=["Robie client outreach"]) == PATHWAY_GENERIC
+    assert (
+        infer_outreach_pathway("Please finish the audit", labels=["Robie client outreach"])
+        == PATHWAY_AUDIT
+    )
+
+
+def test_specific_pathway_label_wins_over_conflicting_note_body():
+    assert (
+        infer_outreach_pathway(
+            "Policy is pending cancellation — overdue payment",
+            labels=["Robie audit"],
+        )
+        == PATHWAY_AUDIT
+    )
+
+
+def test_text_trigger_requires_robie_prefix():
+    assert text_has_client_outreach_trigger("Robie audit") is True
+    assert text_has_client_outreach_trigger("Please finish the audit") is False
+    assert is_client_outreach_dispatch_label("audit") is True
+    assert is_client_outreach_dispatch_label("Birthday") is False
+    assert is_client_outreach_dispatch_label("Robie Call") is False
+    assert is_client_outreach_dispatch_label("Robie lead follow-up") is False
 
 
 def test_manual_wf_bodies_match_carlo_google_doc():

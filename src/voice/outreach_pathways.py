@@ -83,6 +83,87 @@ MANUAL_WF_BODIES = {
     ),
 }
 
+# Exact EZLynx org label names for Carlo / Admin to create (names only —
+# this repo never invents organizationLabelId values). CSRs click these
+# like Splice WFs. Close variants (spaces / hyphens / underscores,
+# optional ``robie `` prefix, brackets) also dispatch.
+EZLYNX_ADMIN_OUTREACH_LABELS = (
+    "Robie client outreach",
+    "Robie cancellation",
+    "Robie audit",
+    "Robie returned mail",
+    "Robie e-sign",
+    "Robie esign",
+    "Robie additional info",
+    "Robie recommendations",
+    "Robie unresponsive",
+    "Robie renewal reach-out",
+    "Robie renewal reachout",
+)
+
+# Expected pathway when the CSR clicks that Admin name and the note body
+# does not itself name a different Manual WF. ``Robie client outreach``
+# stays generic (CSR What to say) unless the body matches a pathway.
+EZLYNX_ADMIN_OUTREACH_LABEL_PATHWAYS = (
+    ("Robie client outreach", PATHWAY_GENERIC),
+    ("Robie cancellation", PATHWAY_CANCELLATION),
+    ("Robie audit", PATHWAY_AUDIT),
+    ("Robie returned mail", PATHWAY_RETURNED_MAIL),
+    ("Robie e-sign", PATHWAY_ESIGN),
+    ("Robie esign", PATHWAY_ESIGN),
+    ("Robie additional info", PATHWAY_ADDITIONAL_INFO),
+    ("Robie recommendations", PATHWAY_RECOMMENDATIONS),
+    ("Robie unresponsive", PATHWAY_UNRESPONSIVE),
+    ("Robie renewal reach-out", PATHWAY_RENEWAL_REACHOUT),
+    ("Robie renewal reachout", PATHWAY_RENEWAL_REACHOUT),
+)
+
+# Whole-label collapsed slugs. Optional ``robie`` prefix is stripped
+# before lookup so a standalone label ``audit`` still dispatches.
+_OUTREACH_DISPATCH_SLUGS = frozenset(
+    {
+        "clientoutreach",
+        "cancellation",
+        "audit",
+        "returnedmail",
+        "esign",
+        "additionalinfo",
+        "recommendations",
+        "unresponsive",
+        "renewalreachout",
+    }
+)
+
+# Specific WF labels force a pathway. ``clientoutreach`` is omitted so
+# that label defers to note-body inference (generic unless the body matches).
+_SLUG_TO_FORCED_PATHWAY = {
+    "cancellation": PATHWAY_CANCELLATION,
+    "audit": PATHWAY_AUDIT,
+    "returnedmail": PATHWAY_RETURNED_MAIL,
+    "esign": PATHWAY_ESIGN,
+    "additionalinfo": PATHWAY_ADDITIONAL_INFO,
+    "recommendations": PATHWAY_RECOMMENDATIONS,
+    "unresponsive": PATHWAY_UNRESPONSIVE,
+    "renewalreachout": PATHWAY_RENEWAL_REACHOUT,
+}
+
+# Free-text / title phrases require the ``robie `` prefix so a carrier
+# note that mentions "payroll audit" does not dispatch client outreach.
+_ROBIE_OUTREACH_PHRASE_RE = re.compile(
+    r"\[?\s*robie[\s_\-]+(?P<token>"
+    r"client[\s_\-]+outreach|"
+    r"cancellation|"
+    r"audit|"
+    r"returned[\s_\-]+mail|"
+    r"e[\s_\-]?sign|"
+    r"additional[\s_\-]+info|"
+    r"recommendations|"
+    r"unresponsive|"
+    r"renewal[\s_\-]*reach[\s_\-]*out"
+    r")\b\s*\]?",
+    re.IGNORECASE,
+)
+
 # Alias / label tokens that force the Cancellation Notice pathway.
 _CANCELLATION_ALIAS_COLLAPSED = (
     "robiecancellation",
@@ -183,6 +264,75 @@ def _collapse(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
+def _slug_from_collapsed_label(collapsed: str) -> Optional[str]:
+    """Return the dispatch slug for a whole label (optional ``robie`` prefix)."""
+    if collapsed.startswith("robie"):
+        collapsed = collapsed[len("robie") :]
+    if collapsed in _OUTREACH_DISPATCH_SLUGS:
+        return collapsed
+    return None
+
+
+def is_client_outreach_dispatch_label(label_name: Optional[str]) -> bool:
+    """True when a standalone org label should dispatch ``client_outreach``.
+
+    Matches the Admin names and close variants: spaces / hyphens / underscores,
+    optional ``robie `` prefix, brackets. Does not match Birthday, winback,
+    Sales Center, new customer, or ``Robie Call`` / ``Robie lead follow-up``.
+    """
+    if not label_name:
+        return False
+    return _slug_from_collapsed_label(_collapse(label_name)) is not None
+
+
+def text_has_client_outreach_trigger(text: Optional[str]) -> bool:
+    """True when title/note text contains a ``robie ``-prefixed outreach phrase.
+
+    Bare pathway words (``audit``, ``cancellation``) in a sentence do not
+    dispatch — that would hijack carrier ``Robie Call`` notes. Whole-string
+    collapsed equality still accepts ``robieaudit`` / ``[robie_audit]``.
+    """
+    if not text:
+        return False
+    if _ROBIE_OUTREACH_PHRASE_RE.search(text):
+        return True
+    collapsed = _collapse(text)
+    return collapsed.startswith("robie") and collapsed[len("robie") :] in _OUTREACH_DISPATCH_SLUGS
+
+
+def strip_client_outreach_trigger_phrases(text: str) -> str:
+    """Remove robie-prefixed outreach phrases so they are not self-markers."""
+    return _ROBIE_OUTREACH_PHRASE_RE.sub(" ", text)
+
+
+def pathway_forced_by_outreach_label(label_name: Optional[str]) -> Optional[str]:
+    """Pathway forced by a specific WF label, or None to defer to note body.
+
+    ``Robie client outreach`` / ``client outreach`` return None (generic unless
+    the note body matches a pathway). Unknown labels return None.
+    """
+    if not label_name:
+        return None
+    slug = _slug_from_collapsed_label(_collapse(label_name))
+    if not slug:
+        return None
+    return _SLUG_TO_FORCED_PATHWAY.get(slug)
+
+
+def _forced_pathway_from_robie_phrases(text: Optional[str]) -> Optional[str]:
+    """First specific ``Robie <pathway>`` phrase in free text, if any."""
+    if not text:
+        return None
+    for match in _ROBIE_OUTREACH_PHRASE_RE.finditer(text):
+        forced = _SLUG_TO_FORCED_PATHWAY.get(_collapse(match.group("token")))
+        if forced:
+            return forced
+    collapsed = _collapse(text)
+    if collapsed.startswith("robie"):
+        return _SLUG_TO_FORCED_PATHWAY.get(collapsed[len("robie") :])
+    return None
+
+
 def infer_outreach_pathway(
     text: Optional[str] = None,
     labels: Optional[Iterable[str]] = None,
@@ -190,12 +340,33 @@ def infer_outreach_pathway(
 ) -> str:
     """Resolve a Splice-replacement pathway from CSR copy / labels / alias.
 
+    Specific org labels (``Robie audit``, ``Robie cancellation``, …) win over
+    note-body heuristics so a clicked WF label is the pathway. ``Robie client
+    outreach`` does not force a pathway — the note body is inferred, else
+    ``generic`` (CSR What to say).
+
     ``robie cancellation`` / cancel / non-pay → Cancellation Notice (default
     when the reason looks like cancel). ``renewal_reachout`` fires only when
     the CSR explicitly labels/notes that phrase — never from generic
     "renewal" copy or the manual renewal pipeline. Otherwise the matching
     Manual WF, or ``generic`` (CSR What to say).
     """
+    if labels:
+        for label in labels:
+            forced = pathway_forced_by_outreach_label(str(label) if label else None)
+            if forced:
+                return forced
+    if alias:
+        forced = pathway_forced_by_outreach_label(alias)
+        if forced:
+            return forced
+        forced = _forced_pathway_from_robie_phrases(alias)
+        if forced:
+            return forced
+    forced = _forced_pathway_from_robie_phrases(text)
+    if forced:
+        return forced
+
     parts = [text or "", alias or ""]
     if labels:
         parts.extend(str(label) for label in labels if label)
