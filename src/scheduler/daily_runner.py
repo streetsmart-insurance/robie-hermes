@@ -236,30 +236,12 @@ class DailyRenewalOrchestrator:
             init_sent = self.cadence_mgr.process_pending_outreach(db, ref_date)
             results["initial_emails_sent"] = init_sent
 
-            # Step 4: 5-7 Day Follow-Up Cadence (quiet checks — no autodial)
+            # Step 4: 5-7 Day Follow-Up Cadence (quiet checks — no autodial).
+            # After N=2 failed checks the give-up branch in process_due_followups
+            # places exactly one carrier Robie Call via VoiceCallDispatcher.
+            # Not a parallel scan. Step 5b stays CSR Email-Robie-to-Call only.
             followups = self.cadence_mgr.process_due_followups(db, ref_date)
             results["followups_sent"] = followups
-
-            # After Step 4's existing 5–7d follow-up budget (2 quiet checks)
-            # with no renewal in hand: exactly one carrier Robie Call via the
-            # existing CarrierVoiceClient. Not a parallel stack. Never a
-            # default client autodial. Step 5b below stays CSR
-            # "Email Robie to Call" only. Step 6 stays non-autodial.
-            try:
-                from src.voice.renewal_cadence import process_carrier_voice_cadence
-
-                cadence_voice = process_carrier_voice_cadence(
-                    db, dry_run=False, reference_date=ref_date
-                )
-                results["carrier_voice_cadence"] = cadence_voice
-                dispatched = cadence_voice.get("dispatched") or []
-                if dispatched:
-                    logger.info(
-                        "Carrier voice cadence: %s outcome(s) after 2 quiet 5-7d checks.",
-                        len(dispatched),
-                    )
-            except Exception as e:
-                logger.warning("Could not run carrier voice cadence: %s", e)
 
             # Step 5: Gmail Inbox Poller & Reply Processing
             replies = self.cadence_mgr.process_incoming_inbox_replies(db)

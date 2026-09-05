@@ -1,7 +1,7 @@
 """Database session initialization and connection management."""
 
 from pathlib import Path
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, scoped_session
 from src.config import settings
 from src.database.models import Base
@@ -22,6 +22,29 @@ SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bi
 def init_db():
     """Initializes schema and tables."""
     Base.metadata.create_all(bind=engine)
+    _ensure_carrier_voice_attempted_column()
+
+
+def _ensure_carrier_voice_attempted_column() -> None:
+    """Add carrier_voice_attempted on existing SQLite files (create_all won't)."""
+    if not settings.database_url.startswith("sqlite"):
+        return
+    try:
+        inspector = inspect(engine)
+        if "policy_renewals" not in inspector.get_table_names():
+            return
+        cols = {col["name"] for col in inspector.get_columns("policy_renewals")}
+        if "carrier_voice_attempted" in cols:
+            return
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE policy_renewals "
+                    "ADD COLUMN carrier_voice_attempted BOOLEAN DEFAULT 0 NOT NULL"
+                )
+            )
+    except Exception:
+        return
 
 def get_db():
     """Context manager or generator for database session."""

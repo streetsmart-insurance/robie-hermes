@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     followup_cadence_min_days: int = 5
     followup_cadence_max_days: int = 7
     max_followups: int = 3
+    # Voice trigger: N failed 5–7d checks after the initial email, then one
+    # carrier Robie Call. Email escalate still uses max_followups / 25d.
+    carrier_voice_after_followups: int = 2
     csr_escalation_threshold_days: int = 25
     intake_email_subject_keywords: list = ["EZLynx Scheduled Report", "Renewal Queue", "Manual Renewal"]
 

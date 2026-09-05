@@ -19,7 +19,11 @@ import logging
 import sys
 from typing import Any, Dict, List, Optional
 
-from src.voice.context_hydrator import CallingDossier, ContextHydrator
+from src.voice.context_hydrator import (
+    CALL_TYPE_CARRIER,
+    CallingDossier,
+    ContextHydrator,
+)
 from src.voice.voice_client import CarrierVoiceClient
 
 logger = logging.getLogger("voice_dispatcher")
@@ -42,6 +46,7 @@ class VoiceCallDispatcher:
         phone: Optional[str] = None,
         instructions: Optional[str] = None,
         dry_run: bool = False,
+        call_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Hydrate policy context, then dispatch (or simulate) the carrier call."""
         if not policy_number or not str(policy_number).strip():
@@ -56,6 +61,7 @@ class VoiceCallDispatcher:
                 policy_number=policy_number.strip(),
                 phone_override=phone,
                 instructions=instructions,
+                call_type=call_type or CALL_TYPE_CARRIER,
             )
         except Exception as exc:
             logger.error("Hydrate failed for %s: %s", policy_number, exc)

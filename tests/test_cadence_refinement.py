@@ -174,7 +174,11 @@ def test_process_due_followups_max_and_escalation(mock_db):
     mock_gmail = MagicMock()
     mock_ezlynx = MagicMock()
 
-    tracker = OutreachCadenceManager(gmail_client=mock_gmail, ezlynx_api=mock_ezlynx)
+    tracker = OutreachCadenceManager(
+        gmail_client=mock_gmail,
+        ezlynx_api=mock_ezlynx,
+        voice_dispatcher=MagicMock(),
+    )
     followups_sent = tracker.process_due_followups(mock_db, current_date=today)
 
     assert followups_sent == 0 # Both escalated, none sent as ordinary follow-up

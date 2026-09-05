@@ -152,15 +152,13 @@ Writing the phrase in the discussion title or note body works the same as applyi
 - Assigned CSR for EZLynx notes/tasks remains Carlo Ferrara. Caller ID `+17322986745`. No Bland `max_duration`.
 - Creating the `Robie client outreach` org label in the live EZLynx UI is Carlo / Admin’s job; this repo only recognizes the name (and close variants / `robie cancellation` alias).
 
-#### Manual renewal WF — one carrier Robie Call after two quiet 5–7d checks (Carlo 2026-09-05)
-Live insertion is `src/scheduler/daily_runner.py` `DailyRenewalOrchestrator.run_daily_cycle` — after Step 4 (`process_due_followups`), before Step 5b. Helper: `src/voice/renewal_cadence.py`. **Not** a parallel cron, orchestrator, or Bland stack.
-1. Steps 2–4 (portal + UW email + 5–7d follow-up) stay **non-autodial**.
-2. After the existing 5–7d follow-up budget (**2 quiet checks**) with no renewal in hand, enqueue **exactly one** outbound Robie Call (`call_type=carrier`) via existing `CarrierVoiceClient`. Same style as today’s email `Call Carrier:` path.
-3. If the renewal is obtained (renewal PDF filed, UW reply filer matched, or pipeline status says we have the dec/offer) → **STOP**. No more carrier calls. Do **not** auto-dial the client.
-- Step 5b (`email_call_dispatcher.process_inbound_call_requests`) stays CSR **Email Robie to Call** only. **No default client-call Step 5c.**
-- Step 6 (20–25d CSR escalation, “contact underwriter directly”) stays **non-autodial**.
-- Client outbound is label-driven `client_outreach` only.
-- Guards: skip if a carrier voice call was already placed for this policy/term; never invent a carrier phone; if no E.164 underwriter/carrier number, post an EZLynx note (`Robie was here`) and skip the dial.
+#### Manual renewal WF — one carrier Robie Call after N=2 (Carlo 2026-09-05)
+Live insertion is the give-up branch of `OutreachCadenceManager.process_due_followups` in `src/email_outreach/thread_tracker.py` (the path that today sets `ThreadStatus.EXHAUSTED` + `ESCALATED_MANUAL` + CSR task “URGENT: Review / Call Carrier…”). Helper: `src/voice/renewal_cadence.py`. **Not** a parallel daily-runner scan, cron, or Bland stack.
+1. Follow up no more than **twice** after the initial UW email (`settings.carrier_voice_after_followups = 2`). Then exactly one `VoiceCallDispatcher().dispatch(policy_number=...)` (`src/voice/dispatcher.py` → `CarrierVoiceClient.dispatch_call`, `call_type=carrier`). Do **not** post a Robie Call EZLynx label (avoids watcher loops).
+2. Stop / skip if renewal is already in hand: `QUOTE_RECEIVED` or `READY_FOR_AGENT_REVIEW`, `ThreadStatus.RESOLVED`, or a renewal `DocumentRecord`. Do not treat unused `FOLLOWUP_SENT` as a signal.
+3. After the one voice attempt, set `carrier_voice_attempted` so it never re-fires. CSR escalate (`max_followups=3` / 25d / Step 6) may still happen later. No client autodial from this cadence.
+- Portal is only tried while `PENDING_EVALUATION` (no multi-day portal retry). PORTAL-only carriers with no UW email: do not invent email attempts; skip voice unless a carrier phone exists in the directory.
+- Step 5b stays CSR **Email Robie to Call** only. **No default client-call Step 5c.**
 - Production cron `0 9 * * *` on hermes-poc-01 is unchanged.
 
 ---

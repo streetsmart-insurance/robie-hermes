@@ -1,9 +1,10 @@
-"""Lock the carrier Robie Call to the live daily_runner insertion point."""
+"""Lock the carrier Robie Call to process_due_followups — no second path."""
 
 from pathlib import Path
 
 
 RUNNER = Path("src/scheduler/daily_runner.py").read_text()
+TRACKER = Path("src/email_outreach/thread_tracker.py").read_text()
 
 
 def _cycle_body() -> str:
@@ -12,23 +13,23 @@ def _cycle_body() -> str:
     return RUNNER[start:end]
 
 
-def test_voice_hook_sits_after_step4_followups_before_step5b_and_step6():
+def test_no_parallel_daily_runner_voice_scan():
     body = _cycle_body()
-    i4 = body.index("process_due_followups")
-    i_voice = body.index("process_carrier_voice_cadence")
-    i5b = body.index("process_inbound_call_requests")
-    i6 = body.index("20-25 Day CSR Escalation")
-    assert i4 < i_voice < i5b < i6
-
-
-def test_no_parallel_client_call_step_5c():
-    body = _cycle_body()
+    assert "process_carrier_voice_cadence" not in body
+    assert "process_due_followups" in body
+    assert "process_inbound_call_requests" in body
     assert "Step 5c:" not in body
     assert "client_outreach" not in body
-    assert "process_inbound_call_requests" in body
     assert "contact underwriter directly" in body
 
 
-def test_sacred_daily_cycle_still_owns_the_hook():
-    assert "from src.voice.renewal_cadence import process_carrier_voice_cadence" in RUNNER
-    assert "reference_date=ref_date" in RUNNER
+def test_voice_hook_is_the_followup_giveup_branch():
+    assert "def process_due_followups" in TRACKER
+    assert "_place_one_carrier_voice" in TRACKER
+    assert "place_one_carrier_voice" in TRACKER
+    assert "VoiceCallDispatcher" in TRACKER or "place_one_carrier_voice" in TRACKER
+    assert "URGENT: Review / Call Carrier" in TRACKER
+    assert "carrier_voice_after_followups" in TRACKER
+    i_voice = TRACKER.index("_place_one_carrier_voice")
+    i_escalate = TRACKER.index("URGENT: Review / Call Carrier")
+    assert i_voice < i_escalate

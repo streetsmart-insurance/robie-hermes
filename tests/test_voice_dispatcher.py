@@ -85,6 +85,7 @@ def test_dispatch_hydrates_and_calls_voice_client_dry_run():
         policy_number="PWC1239278",
         phone_override="800-555-0199",
         instructions="Ask if payroll audit was accepted",
+        call_type="carrier",
     )
     voice.dispatch_call.assert_called_once_with(dossier=dossier, dry_run=True)
     assert result["success"] is True
@@ -182,6 +183,7 @@ def test_main_dry_run_success_prints_json_summary(capsys):
         policy_number="PWC1239278",
         phone_override="+17329953409",
         instructions="Testing voice agent response. Ask for Buster Brown.",
+        call_type="carrier",
     )
     voice.dispatch_call.assert_called_once_with(dossier=dossier, dry_run=True)
     assert "SUCCESS" in captured.out

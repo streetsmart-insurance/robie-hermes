@@ -1,4 +1,4 @@
-"""Unit tests for the manual-renewal carrier voice cadence hook."""
+"""Carrier Robie Call from process_due_followups give-up (N=2), not a second path."""
 
 from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock
@@ -7,9 +7,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from src.config import settings
 from src.database.models import (
-    ActionType,
-    AuditNoteLog,
     Base,
     DocumentRecord,
     OutreachThread,
@@ -17,14 +16,12 @@ from src.database.models import (
     RenewalStatus,
     ThreadStatus,
 )
-from src.voice.processed_robie_notes import ProcessedRobieCallStore
+from src.email_outreach.thread_tracker import OutreachCadenceManager
 from src.voice.renewal_cadence import (
-    QUIET_FOLLOWUP_BUDGET,
-    RenewalCarrierVoiceCadence,
-    carrier_voice_already_placed,
-    count_quiet_followup_checks,
-    in_late_csr_escalation_window,
-    renewal_already_obtained,
+    CARRIER_VOICE_AFTER_FOLLOWUPS,
+    carrier_voice_already_attempted,
+    place_one_carrier_voice,
+    renewal_obtained_before_voice,
 )
 
 
@@ -36,11 +33,6 @@ def test_db():
     session = Session()
     yield session
     session.close()
-
-
-@pytest.fixture
-def processed_store(tmp_path):
-    return ProcessedRobieCallStore(tmp_path / "robie_call_processed_notes.sqlite")
 
 
 def _policy(**overrides) -> PolicyRenewal:
@@ -55,274 +47,263 @@ def _policy(**overrides) -> PolicyRenewal:
         status=RenewalStatus.EMAIL_SENT_AWAITING_REPLY,
         discussion_title="Manual Workers Compensation Renewal",
         assigned_agent="Carlo Ferrara",
+        underwriter_email="uw@thehartford.com",
+        carrier_voice_attempted=False,
     )
     data.update(overrides)
     return PolicyRenewal(**data)
 
 
-def _add_attempt(db, policy, action, text="Attempt"):
-    db.add(
-        AuditNoteLog(
-            policy_id=policy.id,
-            applicant_id=policy.applicant_id,
-            discussion_title=policy.discussion_title,
-            action_type=action,
-            note_text=text,
+def _thread(policy, followup_count, **overrides) -> OutreachThread:
+    today = date(2026, 9, 5)
+    data = dict(
+        policy_id=policy.id,
+        tracking_code=f"RENEWAL-REQ-{policy.id or 1}",
+        gmail_thread_id="th_1",
+        last_message_id="msg_1",
+        recipient_email="uw@thehartford.com",
+        subject_line="[RENEWAL-REQ-1] Test",
+        initial_sent_at=datetime(2026, 8, 20),
+        followup_count=followup_count,
+        next_followup_due=today - timedelta(days=1),
+        status=ThreadStatus.ACTIVE,
+    )
+    data.update(overrides)
+    return OutreachThread(**data)
+
+
+def _tracker(voice=None):
+    mock_voice = voice if voice is not None else MagicMock()
+    mock_voice.dispatch.return_value = {
+        "success": True,
+        "call_id": "sim_carrier_001",
+        "status": "DISPATCHED_SIMULATED",
+    }
+    return OutreachCadenceManager(
+        gmail_client=MagicMock(
+            send_email=MagicMock(return_value={"id": "msg_f", "threadId": "th_1"})
+        ),
+        ezlynx_api=MagicMock(),
+        voice_dispatcher=mock_voice,
+    ), mock_voice
+
+
+def test_n_is_two_failed_checks_after_initial():
+    assert CARRIER_VOICE_AFTER_FOLLOWUPS == 2
+    assert settings.carrier_voice_after_followups == 2
+    assert settings.max_followups == 3
+
+
+def test_renewal_obtained_only_uses_specified_signals():
+    assert renewal_obtained_before_voice(
+        _policy(status=RenewalStatus.QUOTE_RECEIVED)
+    )
+    assert renewal_obtained_before_voice(
+        _policy(status=RenewalStatus.READY_FOR_AGENT_REVIEW)
+    )
+    # Unused enum is never a signal.
+    assert not renewal_obtained_before_voice(
+        _policy(status=RenewalStatus.FOLLOWUP_SENT)
+    )
+    thread = OutreachThread(
+        policy_id=1,
+        tracking_code="x",
+        recipient_email="a@b.c",
+        subject_line="s",
+        status=ThreadStatus.RESOLVED,
+    )
+    assert renewal_obtained_before_voice(_policy(), thread)
+    with_doc = _policy()
+    with_doc.documents = [
+        DocumentRecord(
+            policy_id=1,
+            file_name="renewal.pdf",
+            file_path="/tmp/renewal.pdf",
+            source="UNDERWRITER_EMAIL",
         )
+    ]
+    assert renewal_obtained_before_voice(with_doc)
+    assert not renewal_obtained_before_voice(
+        _policy(status=RenewalStatus.EMAIL_SENT_AWAITING_REPLY)
     )
 
 
-def test_cadence_does_not_fire_when_renewal_already_obtained(test_db, processed_store):
-    policy = _policy(status=RenewalStatus.QUOTE_RECEIVED, renewal_premium=1200.0)
+def test_giveup_after_two_followups_places_one_carrier_voice(test_db):
+    policy = _policy()
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT, "Emailed UW")
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
+    test_db.add(_thread(policy, followup_count=2))
+    test_db.commit()
+    test_db.refresh(policy)
+
+    tracker, mock_voice = _tracker()
+    sent = tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+
+    assert sent == 0
+    mock_voice.dispatch.assert_called_once()
+    kwargs = mock_voice.dispatch.call_args.kwargs
+    assert kwargs["policy_number"] == policy.policy_number
+    assert kwargs["call_type"] == "carrier"
+    assert policy.carrier_voice_attempted is True
+    assert policy.status == RenewalStatus.EMAIL_SENT_AWAITING_REPLY
+    assert carrier_voice_already_attempted(policy) is True
+
+
+def test_giveup_voice_never_refires(test_db):
+    policy = _policy(carrier_voice_attempted=True)
+    test_db.add(policy)
+    test_db.commit()
+    test_db.add(_thread(policy, followup_count=2))
     test_db.commit()
 
-    mock_voice = MagicMock()
-    mock_ezlynx = MagicMock()
-    cadence = RenewalCarrierVoiceCadence(
-        ezlynx_client=mock_ezlynx,
-        voice_client=mock_voice,
-        processed_store=processed_store,
+    tracker, mock_voice = _tracker()
+    tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+    mock_voice.dispatch.assert_not_called()
+
+
+def test_skip_voice_when_quote_received(test_db):
+    policy = _policy(status=RenewalStatus.QUOTE_RECEIVED)
+    test_db.add(policy)
+    test_db.commit()
+    # Due-followups query requires EMAIL_SENT_AWAITING_REPLY, so call helper.
+    result = place_one_carrier_voice(
+        policy,
+        thread=_thread(policy, followup_count=2),
+        dispatcher=MagicMock(),
+        ezlynx_client=MagicMock(),
+        db=test_db,
+        dry_run=True,
     )
-    result = cadence.process_policy(policy, db=test_db, dry_run=True)
-
-    assert renewal_already_obtained(policy) is True
     assert result["status"] == "SKIPPED_RENEWAL_OBTAINED"
-    mock_voice.dispatch_call.assert_not_called()
 
 
-def test_cadence_does_not_fire_when_uw_reply_or_pdf_already_filed(test_db, processed_store):
-    policy = _policy(status=RenewalStatus.EMAIL_SENT_AWAITING_REPLY)
+def test_skip_voice_when_document_filed(test_db):
+    policy = _policy()
     test_db.add(policy)
     test_db.commit()
     test_db.add(
         DocumentRecord(
             policy_id=policy.id,
-            file_name="2026-27 Renewal Offer - Hartford UB.pdf",
+            file_name="2026-27 Renewal Offer.pdf",
             file_path="/tmp/renewal.pdf",
             source="UNDERWRITER_EMAIL",
         )
     )
-    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT)
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT)
     test_db.commit()
     test_db.refresh(policy)
 
-    cadence = RenewalCarrierVoiceCadence(
+    mock_voice = MagicMock()
+    result = place_one_carrier_voice(
+        policy,
+        dispatcher=mock_voice,
         ezlynx_client=MagicMock(),
-        voice_client=MagicMock(),
-        processed_store=processed_store,
+        db=test_db,
+        dry_run=True,
     )
-    result = cadence.process_policy(policy, db=test_db, dry_run=True)
     assert result["status"] == "SKIPPED_RENEWAL_OBTAINED"
+    mock_voice.dispatch.assert_not_called()
 
 
-def test_cadence_does_not_fire_on_same_day_portal_and_initial_email(test_db, processed_store):
-    """Steps 2–3 are not the 5–7d follow-up budget. No autodial that day."""
+def test_first_two_followups_do_not_autodial(test_db):
     policy = _policy()
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.PORTAL_CHECK, "⏳ PORTAL CHECKED - NOT YET RELEASED")
-    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT, "Emailed UW")
+    test_db.add(_thread(policy, followup_count=1))
     test_db.commit()
-    test_db.refresh(policy)
 
-    assert count_quiet_followup_checks(policy) == 0
-    mock_voice = MagicMock()
-    cadence = RenewalCarrierVoiceCadence(
-        ezlynx_client=MagicMock(),
-        voice_client=mock_voice,
-        processed_store=processed_store,
-    )
-    result = cadence.process_policy(policy, db=test_db, dry_run=True)
-    assert result["status"] == "SKIPPED_UNDER_BUDGET"
-    mock_voice.dispatch_call.assert_not_called()
+    tracker, mock_voice = _tracker()
+    sent = tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+    assert sent == 1
+    mock_voice.dispatch.assert_not_called()
+    assert policy.carrier_voice_attempted is False
 
 
-def test_cadence_fires_once_after_two_quiet_followups(test_db, processed_store):
+def test_escalate_at_25d_without_n2_does_not_voice(test_db):
+    policy = _policy(expiration_date=date(2026, 9, 5) + timedelta(days=24))
+    test_db.add(policy)
+    test_db.commit()
+    test_db.add(_thread(policy, followup_count=1))
+    test_db.commit()
+
+    tracker, mock_voice = _tracker()
+    sent = tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+    assert sent == 0
+    assert policy.status == RenewalStatus.ESCALATED_MANUAL
+    mock_voice.dispatch.assert_not_called()
+
+
+def test_max_followups_escalate_still_fires_voice_once(test_db):
     policy = _policy()
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.INITIAL_EMAIL_SENT, "Emailed UW")
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
+    test_db.add(_thread(policy, followup_count=3))
     test_db.commit()
-    test_db.refresh(policy)
 
-    assert count_quiet_followup_checks(policy) == QUIET_FOLLOWUP_BUDGET
+    tracker, mock_voice = _tracker()
+    tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+    mock_voice.dispatch.assert_called_once()
+    assert policy.status == RenewalStatus.ESCALATED_MANUAL
+    assert policy.carrier_voice_attempted is True
 
-    mock_voice = MagicMock()
-    mock_voice.dispatch_call.return_value = {
-        "success": True,
-        "call_id": "sim_carrier_001",
-        "status": "DISPATCHED_SIMULATED",
-    }
-    mock_ezlynx = MagicMock()
-    mock_hydrator = MagicMock()
-    dossier = MagicMock()
-    dossier.carrier_phone = "+18005551234"
-    mock_hydrator.hydrate.return_value = dossier
 
-    cadence = RenewalCarrierVoiceCadence(
-        ezlynx_client=mock_ezlynx,
-        voice_client=mock_voice,
-        hydrator=mock_hydrator,
-        processed_store=processed_store,
+def test_skip_voice_without_directory_phone_does_not_invent_email(test_db, monkeypatch):
+    monkeypatch.setattr(
+        "src.voice.renewal_cadence.lookup_carrier_phone", lambda *_a, **_k: None
     )
-    first = cadence.process_policy(
-        policy, db=test_db, dry_run=True, reference_date=date(2026, 9, 5)
-    )
-    second = cadence.process_policy(
-        policy, db=test_db, dry_run=True, reference_date=date(2026, 9, 5)
-    )
-
-    assert first["status"] == "DISPATCHED_SIMULATED"
-    assert first["call_id"] == "sim_carrier_001"
-    assert first["attempts"] == 2
-    assert first["call_type"] == "carrier"
-    mock_voice.dispatch_call.assert_called_once()
-    dossier_arg = mock_voice.dispatch_call.call_args.kwargs["dossier"]
-    assert dossier_arg.call_type == "carrier"
-    assert second["status"] == "SKIPPED_ALREADY_CALLED"
-    ack = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
-    assert "Robie was here" in ack
-    assert "Call type: carrier" in ack
-    assert "client_outreach" not in ack
-    assert "renewal_reachout" not in ack
-    assert "Policy: #" in ack
-
-
-def test_cadence_skips_under_two_attempts(test_db, processed_store):
-    policy = _policy()
-    test_db.add(policy)
-    test_db.commit()
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
-    test_db.commit()
-    test_db.refresh(policy)
-
-    mock_voice = MagicMock()
-    cadence = RenewalCarrierVoiceCadence(
-        ezlynx_client=MagicMock(),
-        voice_client=mock_voice,
-        processed_store=processed_store,
-    )
-    result = cadence.process_policy(policy, db=test_db, dry_run=True)
-    assert result["status"] == "SKIPPED_UNDER_BUDGET"
-    assert result["attempts"] == 1
-    mock_voice.dispatch_call.assert_not_called()
-
-
-def test_cadence_posts_note_and_skips_when_no_carrier_phone(test_db, processed_store):
     policy = _policy(carrier_name="Unknown Boutique MGA With No Phone")
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
-    test_db.commit()
-    test_db.refresh(policy)
-
     mock_voice = MagicMock()
     mock_ezlynx = MagicMock()
-    mock_hydrator = MagicMock()
-    mock_hydrator.hydrate.return_value = None
-
-    cadence = RenewalCarrierVoiceCadence(
+    result = place_one_carrier_voice(
+        policy,
+        dispatcher=mock_voice,
         ezlynx_client=mock_ezlynx,
-        voice_client=mock_voice,
-        hydrator=mock_hydrator,
-        processed_store=processed_store,
+        db=test_db,
+        dry_run=True,
     )
-    result = cadence.process_policy(policy, db=test_db, dry_run=True)
-
     assert result["status"] == "CLARIFICATION_NEEDED"
-    assert result["reason"] == "MISSING_CARRIER_PHONE"
-    mock_voice.dispatch_call.assert_not_called()
+    mock_voice.dispatch.assert_not_called()
+    assert policy.carrier_voice_attempted is True
     note = mock_ezlynx.add_note_to_discussion.call_args[1]["note_text"]
     assert "PHONE NUMBER NEEDED" in note
     assert "never invented" in note.lower()
     assert "Robie was here" in note
+    assert "Robie Call" not in note or "label" not in note.lower()
 
 
-def test_cadence_does_not_count_portal_or_initial_email_as_quiet_checks():
+def test_voice_uses_dispatcher_not_ezlynx_label(test_db):
     policy = _policy()
-    policy.notes = [
-        AuditNoteLog(
-            policy_id=1,
-            applicant_id="1",
-            discussion_title="t",
-            action_type=ActionType.PORTAL_CHECK,
-            note_text="Status: ✅ RENEWAL QUOTE RETRIEVED",
-        ),
-        AuditNoteLog(
-            policy_id=1,
-            applicant_id="1",
-            discussion_title="t",
-            action_type=ActionType.INITIAL_EMAIL_SENT,
-            note_text="Emailed UW",
-        ),
-    ]
-    assert count_quiet_followup_checks(policy) == 0
-    assert carrier_voice_already_placed(policy) is False
-
-
-def test_cadence_counts_thread_followups_when_notes_missing():
-    policy = _policy()
-    policy.notes = []
-    policy.threads = [
-        OutreachThread(
-            policy_id=1,
-            tracking_code="RENEWAL-REQ-1",
-            recipient_email="uw@example.com",
-            subject_line="test",
-            initial_sent_at=datetime(2026, 9, 1),
-            followup_count=2,
-            status=ThreadStatus.ACTIVE,
-        )
-    ]
-    assert count_quiet_followup_checks(policy) == 2
-
-
-def test_cadence_skips_escalated_manual_non_autodial(test_db, processed_store):
-    policy = _policy(status=RenewalStatus.ESCALATED_MANUAL)
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
+    test_db.add(_thread(policy, followup_count=2))
     test_db.commit()
-    test_db.refresh(policy)
 
-    mock_voice = MagicMock()
-    cadence = RenewalCarrierVoiceCadence(
-        ezlynx_client=MagicMock(),
-        voice_client=mock_voice,
-        processed_store=processed_store,
+    tracker, mock_voice = _tracker()
+    tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+    ack = tracker.ezlynx.add_note_to_discussion.call_args[1]["note_text"]
+    assert "Call type: carrier" in ack
+    assert "client_outreach" not in ack
+    assert "Robie was here" in ack
+    # Must not apply a Robie Call org label (watcher loop).
+    assert "noteLabels" not in str(tracker.ezlynx.add_note_to_discussion.call_args)
+
+
+def test_portal_only_without_uw_email_does_not_invent_followup_thread(test_db):
+    policy = _policy(
+        carrier_name="Coterie",
+        underwriter_email=None,
+        status=RenewalStatus.PENDING_EVALUATION,
+        portal_supported=True,
     )
-    result = cadence.process_policy(policy, db=test_db, dry_run=True)
-    assert result["status"] == "SKIPPED_NOT_WAITING"
-    mock_voice.dispatch_call.assert_not_called()
-
-
-def test_cadence_skips_late_25d_csr_window(test_db, processed_store):
-    policy = _policy(expiration_date=date(2026, 9, 5) + timedelta(days=22))
     test_db.add(policy)
     test_db.commit()
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #1")
-    _add_attempt(test_db, policy, ActionType.FOLLOWUP_EMAIL_SENT, "Follow-up #2")
-    test_db.commit()
-    test_db.refresh(policy)
 
-    assert in_late_csr_escalation_window(policy, date(2026, 9, 5)) is True
-    mock_voice = MagicMock()
-    cadence = RenewalCarrierVoiceCadence(
-        ezlynx_client=MagicMock(),
-        voice_client=mock_voice,
-        processed_store=processed_store,
-    )
-    result = cadence.process_policy(
-        policy, db=test_db, dry_run=True, reference_date=date(2026, 9, 5)
-    )
-    assert result["status"] == "SKIPPED_LATE_CSR_ESCALATION"
-    mock_voice.dispatch_call.assert_not_called()
+    tracker, mock_voice = _tracker()
+    sent = tracker.process_pending_outreach(test_db, current_date=date(2026, 9, 5))
+    assert sent == 0
+    assert test_db.query(OutreachThread).count() == 0
+    followups = tracker.process_due_followups(test_db, current_date=date(2026, 9, 5))
+    assert followups == 0
+    mock_voice.dispatch.assert_not_called()
+    assert policy.carrier_voice_attempted is False
