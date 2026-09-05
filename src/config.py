@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     input_reports_dir: str = str(BASE_DIR / "data" / "input_reports")
     log_level: str = "INFO"
 
+    # 6. Autonomous Carrier Voice Calling
+    voice_ai_api_key: Optional[str] = None
+    voice_caller_id: str = "+17324628343"
+    voice_encrypted_key: Optional[str] = None
+
     @property
     def downloads_path(self) -> Path:
         p = Path(self.downloads_dir)

@@ -38,9 +38,19 @@ class EZLynxSessionManager:
         self.cdp_url = cdp_url or settings.ezlynx_cdp_endpoint
 
     def get_credentials(self) -> Dict[str, str]:
-        """Retrieves EZLynx credentials from SecretsManager (GCP/Keychain), settings, or environment."""
-        username = secrets_mgr.get_credential("ezlynx", "username") or settings.ezlynx_username or "SSRobie"
-        password = secrets_mgr.get_credential("ezlynx", "password") or settings.ezlynx_password or ""
+        """Retrieves EZLynx portal credentials from GCP/Keychain or environment."""
+        username = (
+            os.getenv("EZLYNX_PORTAL_USERNAME")
+            or secrets_mgr.get_credential("ezlynx_portal", "username")
+            or secrets_mgr._get_from_gcp_secrets("ezlynx", "username")
+            or "SSRobie"
+        )
+        password = (
+            os.getenv("EZLYNX_PORTAL_PASSWORD")
+            or secrets_mgr.get_credential("ezlynx_portal", "password")
+            or secrets_mgr._get_from_gcp_secrets("ezlynx", "password")
+            or ""
+        )
         return {"username": username, "password": password}
 
     async def get_authenticated_context(

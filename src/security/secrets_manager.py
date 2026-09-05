@@ -171,10 +171,12 @@ class SecretsManager:
         svc_snake = service_name.lower().replace(" ", "_").replace("-", "_")
         svc_kebab = service_name.lower().replace(" ", "-").replace("_", "-")
         fld_norm = field.lower()
+        fld_kebab = field.lower().replace("_", "-")
 
         # Prioritized candidate names
         candidates = [
             f"{svc_snake}_{fld_norm}",
+            f"{svc_kebab}-{fld_kebab}",
             f"{svc_kebab}-{fld_norm}",
             f"{svc_norm}_{fld_norm}",
             f"{svc_norm}-{fld_norm}",

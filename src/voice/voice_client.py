@@ -21,10 +21,18 @@ class CarrierVoiceClient:
         api_key: Optional[str] = None,
         provider: str = "bland_ai",  # 'bland_ai' or 'retell'
         from_phone_number: Optional[str] = None,
+        encrypted_key: Optional[str] = None,
     ):
         self.provider = provider.lower()
-        self.api_key = api_key or os.getenv("VOICE_AI_API_KEY") or self._fetch_secret_key()
-        self.from_phone = from_phone_number or os.getenv("VOICE_CALLER_ID", "+17326558600")
+        self.api_key = api_key or os.getenv("VOICE_AI_API_KEY") or getattr(settings, "voice_ai_api_key", None) or self._fetch_secret_key()
+        self.from_phone = from_phone_number or os.getenv("VOICE_CALLER_ID") or getattr(settings, "voice_caller_id", "+17324628343")
+        self.encrypted_key = (
+            encrypted_key
+            or os.getenv("VOICE_ENCRYPTED_KEY")
+            or os.getenv("BLAND_ENCRYPTED_KEY")
+            or getattr(settings, "voice_encrypted_key", None)
+            or self._fetch_encrypted_key()
+        )
 
     @staticmethod
     def _fetch_secret_key() -> Optional[str]:
@@ -32,6 +40,15 @@ class CarrierVoiceClient:
             from src.security.secrets_manager import SecretsManager
             sm = SecretsManager()
             return sm.get_credential("carrier_voice", "api_key")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fetch_encrypted_key() -> Optional[str]:
+        try:
+            from src.security.secrets_manager import SecretsManager
+            sm = SecretsManager()
+            return sm.get_credential("carrier_voice", "encrypted_key")
         except Exception:
             return None
 
@@ -131,6 +148,9 @@ CALL OBJECTIVES:
             "Authorization": self.api_key,
             "Content-Type": "application/json",
         }
+        if self.encrypted_key:
+            headers["encrypted_key"] = self.encrypted_key
+
         clean_phone = dossier.carrier_phone
         if not clean_phone.startswith("+"):
             clean_phone = f"+1{clean_phone.replace('-', '').replace(' ', '')}"
@@ -144,7 +164,6 @@ CALL OBJECTIVES:
             "answered_by_enabled": True,
             "wait_for_greeting": True,
             "ivr_navigation": True,
-            "from": self.from_phone,
             "metadata": {
                 "policy_number": dossier.policy_number,
                 "insured_name": dossier.insured_name,
@@ -153,12 +172,22 @@ CALL OBJECTIVES:
                 "assigned_csr_email": dossier.assigned_csr_email,
             },
         }
+        if self.from_phone:
+            payload["from"] = self.from_phone
+
         if webhook_url:
             payload["webhook"] = webhook_url
 
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=15)
             data = resp.json()
+            # If from number failed due to ownership, retry once without 'from'
+            if resp.status_code in [400, 422] and "from" in payload:
+                logger.warning(f"Bland AI rejected 'from' number ({self.from_phone}). Retrying with default pool...")
+                payload.pop("from", None)
+                resp = requests.post(url, json=payload, headers=headers, timeout=15)
+                data = resp.json()
+
             if resp.status_code in [200, 201]:
                 return {
                     "success": True,
