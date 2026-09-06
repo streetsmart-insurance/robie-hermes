@@ -1,6 +1,6 @@
 ---
 name: "ezlynx-policy-change-confirmation"
-description: "Review StreetSmart Insurance EZLynx open policy change requests, obtain missing carrier endorsements or declarations, verify the issued change against the original request, confirm or correct the EZLynx transaction, document exceptions, and close only completed confirmation tasks. Use for Policy Change Request OPEN reports, endorsement follow-up, post-change audits, carrier document retrieval, or policy-change confirmation queues."
+description: "Review StreetSmart Insurance EZLynx open policy change requests across all Lines of Business (Auto, GL, BOP, WC, Excess, Personal), obtain missing carrier endorsements or declarations, verify the issued change against the original request, confirm or correct the EZLynx transaction, document exceptions, and close only completed confirmation tasks. Use for Policy Change Request OPEN reports, endorsement follow-up, post-change audits, carrier document retrieval, or policy-change confirmation queues."
 ---
 
 # EZLynx Policy Change Confirmation
@@ -20,6 +20,58 @@ Use the existing policy-change task and corresponding discussion as the permanen
 - Add every research step, carrier action, comparison result, correction, wait state, escalation, and completion result to the applicable discussion.
 - End every EZLynx note with the exact separate line `ROBIE was here`.
 - Leave the task open when documents, evidence, corrections, or approvals remain outstanding.
+
+## Lines of Business (LOB) Reference Architecture & Video SOPs
+
+Manual renewals and policy changes span multiple Lines of Business with distinct rating schedules, carrier portals, and validation rules. Detailed reference guides and video training catalogs are modularized in the `references/` directory:
+
+1. **Commercial Automobile**: [references/lobs/commercial_auto.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_auto.md)  
+   - Vehicle additions/deletions (17-digit VIN decode, garaging zip, comp/coll deductibles).
+   - Driver additions/exclusions (DOB, license #, state, MVR checks, signed exclusion forms).
+   - Auto ID cards generation and carrier schedules (Progressive FAO, Selective eSelect).
+
+2. **Commercial General Liability**: [references/lobs/commercial_general_liability.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_general_liability.md)  
+   - Additional Insured forms (`CG 20 10`, `CG 20 37`), Primary & Non-Contributory, Waiver of Subrogation (`CG 24 04`).
+   - Exposure basis adjustments (payroll vs. gross receipts) and classification codes.
+   - Carrier rules: Coterie direct portal, RT Specialty Interstate MGA vs. QuickHome.
+
+3. **Business Owners Policy & Commercial Package**: [references/lobs/commercial_package_bop.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_package_bop.md)  
+   - Building and Business Personal Property (BPP) limits, co-insurance clauses.
+   - Mortgagee clauses, Lender's Loss Payable (`CP 12 18`), protective safeguards.
+   - Franklin Mutual (FMI), Selective, Guard, Utica First.
+
+4. **Workers' Compensation**: [references/lobs/workers_compensation.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/workers_compensation.md)  
+   - Officer/partner inclusion & exclusion forms (NJ WC-106, NY C-105.21), payroll caps.
+   - Remuneration adjustments, NCCI class codes, statutory waivers of subrogation (`WC 00 03 13`).
+   - AmTrust Online, Berkshire Hathaway Guard, The Hartford.
+
+5. **Commercial Umbrella & Excess Liability**: [references/lobs/commercial_umbrella_excess.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_umbrella_excess.md)  
+   - Schedule of Underlying insurance synchronization (GL, Auto, Employer's Liability).
+   - Excess limit changes ($1M to $10M), MGA binding authority thresholds (JIMCOR / Markel).
+
+6. **Personal Lines (Homeowners, Personal Auto, Dwelling Fire)**: [references/lobs/personal_lines.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/personal_lines.md)  
+   - Mortgage refinances/escrow, dwelling Coverage A, personal auto drivers/vehicles.
+   - **QuickHome Routing Rule**: AllRisks / RT Specialty QuickHome is strictly Personal Lines.
+
+7. **Commercial Inland Marine**: [references/lobs/commercial_inland_marine.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_inland_marine.md)  
+   - Contractor's Equipment Floatters, 5-Year Replacement Cost rule vs ACV, serial numbers, loss payees, small tools floater.
+
+8. **Errors & Omissions (E&O)**: [references/lobs/commercial_errors_and_omissions.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_errors_and_omissions.md)  
+   - Strict LOB selection ("Errors and Omissions" NOT Professional Liability), defense costs inside/outside, retroactive date preservation.
+
+9. **Garage & Dealers Policy**: [references/lobs/commercial_garage_and_dealers.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_garage_and_dealers.md)  
+   - Operations split (Auto Service vs Dealership), Symbols 29 & 30, Garagekeepers legal liability, mandatory driver listing.
+
+10. **Video Walkthroughs & Training Catalog**: [references/video_walkthroughs.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/video_walkthroughs.md)  
+    - Step-by-step video recordings (Loom, Google Drive) demonstrating manual portal entries and EZLynx transactions for edge cases.
+
+11. **Carrier & Wholesaler Routing Directory SOP**: [references/carrier_directory_sop.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/carrier_directory_sop.md)  
+    - Authoritative routing addresses, portal links, and endorsement follow-up schedules.
+
+12. **Automated Verification Pipeline**: `scripts/policy_change_verification_pipeline.py`  
+    - CLI execution engine for automated three-way verification and confirmation reporting.
+
+---
 
 ## R&D boundary
 
@@ -48,17 +100,27 @@ Build a requested-change packet from the client's request, signed form, email, c
 
 If the request is ambiguous or unsupported, set `request_unclear` and route it to the CSR before judging the carrier-issued change.
 
-### Obtain carrier evidence
+### Obtain carrier evidence & Hand-off Protocol
 
-1. Check the account's policy-change folder and carrier eDocs for an issued endorsement, revised declarations, schedule, confirmation, invoice, or premium notice.
+1. Check the account's policy-change folder, declarations folder, and carrier eDocs for an issued endorsement, revised declarations, schedule, confirmation, invoice, or premium notice.
 2. Confirm the document belongs to the correct insured, policy, effective date, and change.
-   - **Gotcha — check the policy's own Named Insured field, not just the account-level Linked Applicants sidebar.** The account Overview's "Linked Applicants" list shows entities associated with the account in general (portfolio/holding LLCs, affiliated companies), and a carrier document's insured name can look like it doesn't match anything on that list. That is not proof of a real mismatch. Before flagging a discrepancy, open the specific policy's **Summary tab** and check the **"Named Insured As Listed On The Policy"** field — that is the authoritative name for this policy and it can legitimately differ from (or simply not appear on) the account-level linked-applicants sidebar while still being an exact match. Only treat it as a real mismatch, confirm with the carrier which entity/account the document applies to, and log it under Exceptions if the name still doesn't match after checking that specific field.
-3. If missing, read the live carrier Directory **Document Download** entry.
-4. If the method is **Website** or **Download**, retrieve the issued documents from the specified portal.
-5. If the method is **Email**, return to the applicant/account **Overview**, select the email icon in the upper-right, and choose the built-in template whose name starts with **Policy Change**. Use the recipient authorized by the Directory entry.
-6. Before sending, verify the exact template name, recipient, policy, subject, merge fields, requested change, and attachments. Do not substitute a free-form email when the matching built-in workflow template exists.
-7. If Directory instructions are missing or unclear, set `directory_incomplete`; do not guess.
-8. If the carrier has not issued the change, set `waiting_for_carrier`, add evidence and a follow-up date, and leave the task open.
+   - **Check policy Named Insured**: Open the specific policy's **Summary tab** and check the **"Named Insured As Listed On The Policy"** field — this is the authoritative name and can differ from the account-level linked-applicants sidebar.
+3. **If carrier documents are missing**:
+   - Route and delegate this account to the dedicated **`carrier-policy-document-retrieval`** skill (`.agents/skills/carrier-policy-document-retrieval/SKILL.md`).
+   - The retrieval skill executes the tri-channel hunting pipeline:
+     1. **Carrier Portals & IVANS eDocs**: Direct download (e.g., FAO, eSelect, Coterie, Geico, AmTrust).
+     2. **EZLynx Carrier Email Follow-Up**: Using official template `Policy Change Request Change Request Follow up Email Templates (Carrier)` (strict carrier-only routing; never client; personal vs commercial routing rules).
+     3. **Autonomous Voice AI Phone System**: Outbound call via `scripts/carrier_policy_change_caller.py` (Bland AI `+17322986745`) to carrier endorsement/servicing desks when written follow-ups are overdue (>3 business days) or carrier services by phone.
+   - Leave the task open in state `waiting_for_carrier` or `carrier_followup_dispatched`.
+4. **When documents are retrieved and filed**:
+   - Status transitions to `ready_for_confirmation`.
+   - Proceed immediately to **Document control** and **Three-way verification** below.
+
+### Internal Email & Reporting Standards
+
+When delivering audit reports, queue briefings, or handoffs to leadership and team leads:
+- **Visual Formatting**: Emails must be clean, elegant, and visually appealing. Use styled HTML with modern card layouts, rounded borders, clear status badges (green for Matched, amber for Pending), formatted tables with shaded headers, and generous whitespace. Avoid raw markdown or plain text dumps.
+- **Transparency**: Include concrete stats, policy numbers, verified fields, actions taken, and specific next steps.
 
 ### Document control
 
@@ -72,9 +134,7 @@ For every received document:
 
 ### Three-way verification
 
-Compare the original request, carrier-issued evidence, and EZLynx record field by field.
-
-Check every applicable:
+Compare the original request, carrier-issued evidence, and EZLynx record field by field:
 
 - Named insured, additional insured, mortgagee, loss payee, lienholder, or other interest.
 - Driver, vehicle, VIN, garaging, use, symbols, limits, deductibles, and effective date.
@@ -145,27 +205,3 @@ Close the task only when:
 - The confirmation report and all actions are in the corresponding discussion.
 
 The Quality Controller is the only role permitted to close the task.
-
-## Queue Execution Walkthrough
-
-Here's what happens, step by step, when this skill runs on a real (non-test) queue:
-
-1. **Pull the queue.** Run the EZLynx "Policy Change Request OPEN" report and confirm it's showing every open status, nothing already completed or closed.
-
-2. **Open each item.** For every row: open the account, its policy-change task, and the discussion thread. Pull the applicant, policy number, line of business, carrier, requested effective date, assigned CSR/producer, request date, task due date, and current owner. Read the whole discussion and every attachment before touching anything.
-
-3. **Reconstruct what was actually asked for.** From the client's request, signed form, email, call note, or internal instruction, build a clean record of: the effective date requested, whether it's an add/delete/replace/modify, exactly what's affected (driver, vehicle, location, coverage, limit, endorsement, etc.), the requested values, any premium/billing expectation, and what evidence or signatures are required. If this can't be pinned down, the item gets flagged `request_unclear` and goes back to the CSR — it doesn't move forward until it's resolved.
-
-4. **Get the carrier's evidence.** Check the account's document folder and carrier eDocs for the issued endorsement, revised declarations, or confirmation. If it's not there, the skill goes to the carrier's live Directory entry to see how that carrier delivers documents — a portal download, or email using EZLynx's built-in "Policy Change" template if that's the approved channel. It never guesses a portal or invents a recipient. If the carrier hasn't issued anything yet, the item is flagged `waiting_for_carrier` and stays open with a follow-up date.
-
-5. **File the document properly.** Any document that does come in gets saved to the right folder, renamed to the agency's naming convention, labeled correctly (Endorsement, Change Request Form, Signed Change Form, etc.), linked to the correct policy, and opened once to confirm it's readable and matches on term, policy number, and insured.
-
-6. **Run the three-way match.** This is the core of the skill: the original request, the carrier's issued document, and what's actually keyed in EZLynx get compared field by field — named insured, drivers/vehicles, locations, coverages, limits, deductibles, endorsement/form numbers, premium impact, effective dates, all of it. "The carrier processed it" is explicitly not treated as proof it matches what was asked for.
-
-7. **Confirm or flag the EZLynx transaction.** If EZLynx matches the carrier document, it gets confirmed. If EZLynx is wrong or missing something, that's `ezlynx_correction_required` and stays open for a human to fix and re-check. If the carrier itself issued the wrong thing, that's `carrier_correction_required` and goes back to the carrier. If everything matches but it creates a coverage problem, that routes to the CSR/producer as `coverage_review_required`.
-
-8. **Write the confirmation report.** A structured note goes into the task discussion — timestamped, listing what was requested, what the carrier issued, what's recorded in EZLynx, what matched, what didn't (or "None found" only after an actual field-by-field check), the documents filed, and the result code — always ending with `ROBIE was here`.
-
-9. **Close only when everything's actually done.** The task only closes when the request was clear, carrier docs are in and filed, the issued change matches (or has an approved documented exception), EZLynx matches, premium impact is accounted for, and any coverage concern is resolved. Only the Quality Controller role closes it.
-
-One thing worth flagging again: the skill has a built-in R&D boundary — during any test/dev run it stays read-only (research and drafted notes only) and stops before sending an external email, submitting to a portal, mutating a policy, writing a discussion note, or closing a task, unless you've explicitly said to go ahead with that specific action. That's exactly the line we ran into during yesterday's test with the Robie sandbox account.
