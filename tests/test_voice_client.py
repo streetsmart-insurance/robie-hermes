@@ -3,11 +3,14 @@
 from unittest.mock import MagicMock, patch
 
 from src.voice.context_hydrator import CallingDossier
+from src.voice.outreach_pathways import CANCELLATION_GENERIC_BODY, PATHWAY_CANCELLATION
 from src.voice.voice_client import (
     AGENCY_MAIN_CALLBACK_DISPLAY,
     AGENCY_MAIN_CALLBACK_E164,
     AGENCY_MAIN_CALLBACK_SPOKEN,
+    WARM_TRANSFER_CLIENT_HANDOFF_LINE,
     CarrierVoiceClient,
+    warm_transfer_timing_rules,
 )
 
 # Jake's personal/DID — must never be invented as the client_followup callback.
@@ -482,3 +485,133 @@ def test_get_call_fetches_bland_details(mock_get):
 def test_get_call_skips_without_api_key():
     client = CarrierVoiceClient(api_key=None, provider="bland_ai")
     assert client.get_call("call_abc") == {}
+
+
+def _assert_warm_transfer_finish_sentence_wording(text: str) -> None:
+    """Every warm-transfer path: finish the handoff line, then transfer promptly."""
+    lower = text.lower()
+    assert WARM_TRANSFER_CLIENT_HANDOFF_LINE in text
+    assert "please wait 10 to 15 seconds in silence" in lower
+    assert "as it connects" in lower
+    assert "finish every word" in lower
+    assert "use the transfer action" in lower or "using the transfer action" in lower
+    assert "never fire the transfer action while still speaking" in lower
+    assert "wait silently" not in lower
+    assert "after the pause" not in lower
+    assert "after that pause" not in lower
+    handoff = WARM_TRANSFER_CLIENT_HANDOFF_LINE.lower()
+    assert "transfer" not in handoff
+    assert "do not insert a separate silent hold" in lower or (
+        "silent hold" in lower and "timed wait" in lower
+    )
+
+
+def test_warm_transfer_timing_rules_finish_sentence_then_transfer_promptly():
+    rules = warm_transfer_timing_rules()
+    _assert_warm_transfer_finish_sentence_wording(rules)
+    assert "transfer action" in rules.lower()
+    assert "promptly" in rules.lower()
+    assert "connecting you now" not in rules.lower()
+    assert "transfer" not in WARM_TRANSFER_CLIENT_HANDOFF_LINE.lower()
+    assert "Please wait 10 to 15 seconds in silence as it connects." in (
+        WARM_TRANSFER_CLIENT_HANDOFF_LINE
+    )
+
+
+def test_client_followup_prompt_instructs_finish_handoff_before_transfer():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Maria",
+        producer_name="Jake Ferrara",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_followup",
+        transfer_mode="warm",
+    )
+    prompt = client.build_call_prompt(dossier)
+    transfer_block = client._transfer_objective_block(dossier)
+    briefing = client.build_transfer_briefing(dossier)
+    _assert_warm_transfer_finish_sentence_wording(prompt)
+    _assert_warm_transfer_finish_sentence_wording(transfer_block)
+    assert "Mike Sosa" in prompt
+    assert "Connecting you now." in briefing
+    assert briefing not in prompt.split("WARM TRANSFER TIMING")[0]
+    assert "spoken only to Mike Sosa after they answer" in prompt
+    assert "max_duration" not in prompt
+
+
+def test_client_outreach_prompt_instructs_finish_handoff_before_transfer():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        client_first_name="Buster",
+        assigned_producer_name="Carlo Ferrara",
+        assigned_producer_phone="+17324622360",
+        requestor_name="Mike Sosa",
+        requestor_phone="+17326540947",
+        call_type="client_outreach",
+        transfer_mode="warm",
+    )
+    prompt = client.build_call_prompt(dossier)
+    transfer_block = client._transfer_objective_block(dossier)
+    briefing = client.build_transfer_briefing(dossier)
+    _assert_warm_transfer_finish_sentence_wording(prompt)
+    _assert_warm_transfer_finish_sentence_wording(transfer_block)
+    assert "Assigned Producer" in prompt
+    assert "Carlo Ferrara" in prompt
+    assert "Connecting you now." in briefing
+    assert "spoken only to Carlo Ferrara after they answer" in prompt
+    assert "+17324622360" in prompt
+    assert "Mike Sosa" not in transfer_block or "NOT the transfer target" in prompt
+
+
+def test_carrier_prompt_instructs_finish_handoff_before_transfer():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        requestor_name="Carlo Ferrara",
+        requestor_phone="+17324622360",
+        call_type="carrier",
+        transfer_mode="warm",
+    )
+    prompt = client.build_call_prompt(dossier)
+    transfer_block = client._transfer_objective_block(dossier)
+    briefing = client.build_transfer_briefing(dossier)
+    _assert_warm_transfer_finish_sentence_wording(prompt)
+    _assert_warm_transfer_finish_sentence_wording(transfer_block)
+    assert "Carlo Ferrara" in prompt
+    assert "Connecting you now." in briefing
+    assert "spoken only to Carlo Ferrara after they answer" in prompt
+    assert "live human" in prompt.lower()
+
+
+def test_voice_client_cancellation_is_generic_when_hydrate_is_stubbed():
+    client = CarrierVoiceClient(api_key="test-key")
+    dossier = _sample_dossier(
+        policy_number="TEST-STUB",
+        insured_name="Buster Brown",
+        carrier_name="Unknown Carrier",
+        line_of_business="Commercial",
+        client_first_name="Buster",
+        assigned_producer_name="Carlo Ferrara",
+        assigned_producer_phone="+17324622360",
+        call_type="client_outreach",
+        outreach_pathway=PATHWAY_CANCELLATION,
+        transfer_mode="warm",
+        carrier_phone="+17329953409",
+    )
+    first = client.build_client_first_sentence(dossier)
+    voicemail = client._voicemail_message(dossier)
+    prompt = client.build_call_prompt(dossier)
+    assert CANCELLATION_GENERIC_BODY in first
+    assert CANCELLATION_GENERIC_BODY in voicemail
+    assert "Unknown Carrier" not in first
+    assert "Unknown Carrier" not in voicemail
+    assert "Commercial policy" not in first
+    assert first.startswith("Hi Buster, this is Robie from StreetSmart Insurance.")
+    assert "connect you to Carlo now" in first
+    for spoken in (first, voicemail):
+        lower = spoken.lower()
+        assert "overdue" not in lower
+        assert "make a payment" not in lower
+        assert "payment due" not in lower
+        assert "non-pay" not in lower
+    _assert_warm_transfer_finish_sentence_wording(prompt)

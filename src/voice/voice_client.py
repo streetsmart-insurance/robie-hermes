@@ -38,6 +38,45 @@ AGENCY_MAIN_CALLBACK_DISPLAY = "732-462-8343"
 AGENCY_MAIN_CALLBACK_E164 = "+17324628343"
 AGENCY_MAIN_CALLBACK_SPOKEN = "seven three two, four six two, eight three four three"
 
+# Bland send-call fires the transfer action as soon as the model says
+# "transfer" / "transferring" (https://docs.bland.ai/api-v1/post/calls).
+# Speak a complete client-facing handoff that uses "connect" (never
+# "transfer") so the callee hears the whole line, including that they
+# should wait 10 to 15 seconds in silence while it connects. Then fire
+# the action promptly. The 10–15 seconds is spoken to the caller — not
+# a model-enforced wait timer before the action.
+WARM_TRANSFER_CLIENT_HANDOFF_LINE = (
+    "Please stay on the line while I connect you. "
+    "Please wait 10 to 15 seconds in silence as it connects."
+)
+
+
+def warm_transfer_timing_rules() -> str:
+    """Prompt rule: finish the spoken handoff sentence, then transfer promptly."""
+    return (
+        "WARM TRANSFER TIMING (mandatory on every warm transfer): "
+        f'First speak this complete handoff to the person on this call: '
+        f'"{WARM_TRANSFER_CLIENT_HANDOFF_LINE}" '
+        "Finish every word of that handoff before using the transfer action. "
+        "Do not cut yourself off mid-sentence. Do not say the words \"transfer\" "
+        "or \"transferring\" in the handoff — those words fire the Bland "
+        "transfer action immediately and the callee barely hears the line. "
+        "After the handoff is fully spoken, use the transfer action promptly "
+        '(say "transfer"). Never fire the transfer action while still speaking. '
+        "The 10 to 15 seconds is what you tell the caller to expect while it "
+        "connects. Do not insert a separate silent hold or timed wait for "
+        "yourself before using the transfer action."
+    )
+
+
+def _warm_transfer_action_clause(destination: str) -> str:
+    """Call-objective line: finish the spoken handoff, then transfer promptly."""
+    return (
+        f"speak the full handoff line (\"{WARM_TRANSFER_CLIENT_HANDOFF_LINE}\"), "
+        f"finish every word of that handoff, then transfer them to {destination} "
+        "using the transfer action"
+    )
+
 
 def client_followup_callback_close() -> str:
     """Spoken close / voicemail ask-back for insured-facing calls (agency main)."""
@@ -130,6 +169,10 @@ class CarrierVoiceClient:
     def build_transfer_briefing(self, dossier: CallingDossier) -> str:
         """Short briefing Bland/Robie should give the requestor before merging.
 
+        Spoken only to the destination (requestor / Assigned Producer) after
+        they answer the proxy call — never to the client. ``Connecting you now``
+        here is staff-side merge language, not the client handoff line.
+
         Client paths never say a full personal name (``Buster (Buster Brown)``).
         Business named-insured may appear as account context
         (``I have Buster on the line about Green Lion Lawn Care``).
@@ -210,6 +253,7 @@ class CarrierVoiceClient:
                 )
             return no_xfer
         briefing = self.build_transfer_briefing(dossier)
+        timing = warm_transfer_timing_rules()
         if is_client_call_type(getattr(dossier, "call_type", None)):
             callback = client_followup_callback_close()
             return f"""
@@ -219,8 +263,10 @@ WARM TRANSFER TO REQUESTOR:
 - If they say no, are busy, or you reach voicemail, give a short polite close and do not transfer.
 - {callback} Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 - Never transfer to the EZLynx Producer unless that person is also the requestor.
-- When transferring, use the transfer action (say "transfer") and brief {requestor}:
+- {timing}
+- After the handoff sentence is fully spoken, use the transfer action promptly (say "transfer") and brief {requestor}:
   "{briefing}"
+- The briefing above is spoken only to {requestor} after they answer — never to the person already on this call.
 """
         return f"""
 WARM TRANSFER TO REQUESTOR:
@@ -228,8 +274,10 @@ WARM TRANSFER TO REQUESTOR:
 - After a live human at the carrier is confirmed as the right desk, offer to connect them with {requestor}, or transfer immediately if they ask for the person who requested this call.
 - Do not transfer until you have confirmed you reached the correct desk (or they asked for the requestor).
 - Never transfer to the EZLynx Producer unless that person is also the requestor.
-- When transferring, use the transfer action (say "transfer") and brief {requestor}:
+- {timing}
+- After the handoff sentence is fully spoken, use the transfer action promptly (say "transfer") and brief {requestor}:
   "{briefing}"
+- The briefing above is spoken only to {requestor} after they answer — never to the person already on this call.
 """
 
     def _outreach_transfer_objective_block(self, dossier: CallingDossier) -> str:
@@ -247,6 +295,7 @@ WARM TRANSFER TO REQUESTOR:
                 "in the CSR instructions."
             )
         briefing = self.build_transfer_briefing(dossier)
+        timing = warm_transfer_timing_rules()
         return f"""
 WARM TRANSFER TO ASSIGNED PRODUCER:
 - Destination: {producer} ({phone}) — account Assigned Producer (GetApplicantSidebar Assignment.AssignedTo), not the label invoker and not Sales Center producerName.
@@ -254,8 +303,10 @@ WARM TRANSFER TO ASSIGNED PRODUCER:
 - If they say no, are busy, or you reach voicemail, give a short polite close and do not transfer.
 - {callback} Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 - Never transfer to the label invoker / requestor. Never fall back to Sales Center producerName or another staff DID.
-- When transferring, use the transfer action (say "transfer") and brief {producer}:
+- {timing}
+- After the handoff sentence is fully spoken, use the transfer action promptly (say "transfer") and brief {producer}:
   "{briefing}"
+- The briefing above is spoken only to {producer} after they answer — never to the person already on this call.
 """
 
     def _build_client_followup_prompt(
@@ -281,7 +332,7 @@ CALL DETAILS:
 
 CALL OBJECTIVES:
 1. Greet the client by first name only (never full name or LLC): "{greeting}, this is Robie from StreetSmart — I'm calling about the quote {producer} put together for you. Are you free to discuss it?"
-2. If they clearly say yes / they are free to talk, transfer them to {requestor} using the transfer action.
+2. If they clearly say yes / they are free to talk, {_warm_transfer_action_clause(requestor)}.
 3. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail (or spoken close) asking them to call the agency back at {AGENCY_MAIN_CALLBACK_DISPLAY} (say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}"). Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 4. Never guess a different person. Only connect {requestor}. Do not fall back to the EZLynx Producer.
 {transfer_block}
@@ -315,7 +366,7 @@ CALL DETAILS:
 CALL OBJECTIVES:
 1. Greet this person by first name only (never full name or LLC). Spoken script: "{live_script}"
 2. Use the Splice-replacement conversational pathway ({pathway}). Do not mention a Sales Center producer or a quote greeting. Do not use press-1 / press-2 / IVR menus.
-3. If they clearly say yes / they want to be connected, transfer them to Assigned Producer {producer_first} using the transfer action.
+3. If they clearly say yes / they want to be connected, {_warm_transfer_action_clause(f"Assigned Producer {producer_first}")}.
 4. If they say no, are busy, or you reach voicemail, give a short polite close. Do not transfer. Leave a brief voicemail (or spoken close) asking them to call the agency back at {AGENCY_MAIN_CALLBACK_DISPLAY} (say it naturally: "{AGENCY_MAIN_CALLBACK_SPOKEN}"). Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 5. Never guess a different person. Only connect the Assigned Producer. Do not transfer to the label invoker / requestor. Do not fall back to Sales Center producerName.
 {transfer_block}
@@ -362,7 +413,7 @@ CALL OBJECTIVES:
 5. If terms are not yet released:
    - Inquire what is needed to issue terms (e.g. loss runs, renewal application, payroll verification).
    - Ask for the underwriter's direct email or estimated completion date.
-6. After the live human is confirmed as the right desk, offer to connect them with {dossier.requestor_name or 'the person who requested this call'}, or transfer if they ask for the requestor.
+6. After the live human is confirmed as the right desk, offer to connect them with {dossier.requestor_name or 'the person who requested this call'}, or transfer if they ask for the requestor. When they agree, {_warm_transfer_action_clause(dossier.requestor_name or 'the person who requested this call')}.
 7. Record the representative's first name, conclude the call politely, and wish them a great day.
 {transfer_block}
 """

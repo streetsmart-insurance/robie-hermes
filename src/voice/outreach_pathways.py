@@ -55,6 +55,10 @@ OUTREACH_PATHWAYS = (
 
 # Exact body sentences from the Google Doc Manual WFs/Scripts tab.
 # Cancellation Notice is the separate Splice PDF (not in that doc body).
+# Proposed Doc add (do not auto-sync): generic cancel body below matches the
+# account-level Manual WF shape (Audit / Recommendations / Returned Mail).
+# Runtime stays here in build_outreach_* when hydrate LOB/carrier are missing
+# or placeholder.
 MANUAL_WF_BODIES = {
     PATHWAY_AUDIT: (
         "It appears that an audit for your account is currently incomplete. "
@@ -410,13 +414,127 @@ def extract_action_date(
     return text or None
 
 
-def _policy_type_phrase(line_of_business: Optional[str]) -> str:
-    lob = (line_of_business or "").strip()
-    if not lob:
-        return "policy"
-    if re.search(r"\bpolicy\b", lob, re.IGNORECASE):
-        return lob
-    return f"{lob} policy"
+# Hydrate stubs / spoken placeholders. Bare "Commercial" is the hydrator
+# fallback when no real LOB is on file — "Commercial Auto" stays speakable.
+_PLACEHOLDER_CARRIERS = frozenset(
+    {
+        "unknown",
+        "unknown carrier",
+        "your carrier",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "-",
+        "--",
+    }
+)
+_PLACEHOLDER_LOBS = frozenset(
+    {
+        "commercial",
+        "insurance",
+        "unknown",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "-",
+        "--",
+    }
+)
+
+# Proposed Google Doc Manual WF / Cancellation body (not in the Doc today).
+# Same account-level shape as Audit / Returned Mail — no LOB, carrier, or
+# payment/non-pay language unless the CSR What to say explicitly includes it.
+CANCELLATION_GENERIC_BODY = (
+    "We are following up on a cancellation notice for your account. "
+    "Please contact our office as soon as possible."
+)
+CANCELLATION_CONTACT_CLAUSE = "Please contact our office as soon as possible."
+_PAYMENT_LANGUAGE_RE = re.compile(
+    r"\b(?:"
+    r"non[-\s]?pay|"
+    r"overdue(?:\s+payment)?|"
+    r"make\s+a\s+payment|"
+    r"payment\s+due|"
+    r"past\s+due|"
+    r"payment"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _normalized_spoken_token(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).lower()
+
+
+def is_placeholder_carrier(carrier_name: Optional[str]) -> bool:
+    """True when carrier is missing or a hydrate stub (never speak it)."""
+    cleaned = _normalized_spoken_token(carrier_name)
+    return not cleaned or cleaned in _PLACEHOLDER_CARRIERS
+
+
+def is_placeholder_lob(line_of_business: Optional[str]) -> bool:
+    """True when LOB is missing or a generic hydrate stub (never speak it).
+
+    Bare ``Commercial`` is a stub. ``Commercial Auto`` / ``Commercial Package``
+    are real lines and stay speakable.
+    """
+    cleaned = _normalized_spoken_token(line_of_business)
+    return not cleaned or cleaned in _PLACEHOLDER_LOBS
+
+
+def csr_instructions_include_payment(csr_instructions: Optional[str]) -> bool:
+    """True when CSR What to say explicitly mentions payment / non-pay."""
+    return bool(_PAYMENT_LANGUAGE_RE.search(csr_instructions or ""))
+
+
+def _cancellation_csr_payment_clause(csr_instructions: Optional[str]) -> str:
+    """Append CSR payment facts only when the CSR wrote them. Never invent."""
+    text = (csr_instructions or "").strip()
+    if text and csr_instructions_include_payment(text):
+        return f" {text}"
+    return ""
+
+
+def _cancellation_body(
+    line_of_business: Optional[str],
+    carrier_name: Optional[str],
+    csr_instructions: Optional[str] = None,
+) -> str:
+    """Cancellation spoken body. Soften when LOB/carrier look unknown.
+
+    Default copy is an account-level cancellation notice. No non-pay / overdue
+    / make-a-payment language unless CSR What to say explicitly includes it.
+    """
+    lob_ok = not is_placeholder_lob(line_of_business)
+    carrier_ok = not is_placeholder_carrier(carrier_name)
+    payment = _cancellation_csr_payment_clause(csr_instructions)
+    if lob_ok and carrier_ok:
+        lob = line_of_business.strip()
+        carrier = carrier_name.strip()
+        return (
+            f"I'm calling with an important notice about your {lob} policy with {carrier}. "
+            f"We received a cancellation notice for your account. "
+            f"{CANCELLATION_CONTACT_CLAUSE}{payment}"
+        )
+    if lob_ok:
+        lob = line_of_business.strip()
+        return (
+            f"I'm calling with an important notice about your {lob} policy. "
+            f"We received a cancellation notice for your account. "
+            f"{CANCELLATION_CONTACT_CLAUSE}{payment}"
+        )
+    if carrier_ok:
+        carrier = carrier_name.strip()
+        return (
+            f"I'm calling with an important notice about your policy with {carrier}. "
+            f"We received a cancellation notice for your account. "
+            f"{CANCELLATION_CONTACT_CLAUSE}{payment}"
+        )
+    if payment:
+        return f"{CANCELLATION_GENERIC_BODY}{payment}"
+    return CANCELLATION_GENERIC_BODY
 
 
 def _connect_offer(producer_first: Optional[str]) -> str:
@@ -452,17 +570,11 @@ def build_outreach_live_script(
 ) -> str:
     """Conversational live opener using Carlo's Manual WF body (or Cancellation PDF)."""
     greeting = f"Hi {client_first}" if client_first else "Hi"
-    lob = (line_of_business or "insurance").strip() or "insurance"
-    carrier = (carrier_name or "your carrier").strip() or "your carrier"
-    policy_type = _policy_type_phrase(line_of_business)
-    due = action_date or "the due date on your notice"
     connect = _connect_offer(producer_first)
 
     if pathway == PATHWAY_CANCELLATION:
-        body = (
-            f"I'm calling with an important notice about your {lob} policy with {carrier}. "
-            f"Your {policy_type} is set to be cancelled due to an overdue payment. "
-            f"To avoid a lapse in coverage, please make a payment by {due}."
+        body = _cancellation_body(
+            line_of_business, carrier_name, csr_instructions=csr_instructions
         )
         return _wrap_live(greeting, body, connect)
 
@@ -487,16 +599,10 @@ def build_outreach_voicemail_script(
 ) -> str:
     """Voicemail / busy close: same Manual WF facts + 732-462-8343. No transfer."""
     greeting = f"Hi {client_first}" if client_first else "Hello"
-    lob = (line_of_business or "insurance").strip() or "insurance"
-    carrier = (carrier_name or "your carrier").strip() or "your carrier"
-    policy_type = _policy_type_phrase(line_of_business)
-    due = action_date or "the due date on your notice"
 
     if pathway == PATHWAY_CANCELLATION:
-        body = (
-            f"I'm calling with an important notice about your {lob} policy with {carrier}. "
-            f"Your {policy_type} is set to be cancelled due to an overdue payment. "
-            f"To avoid a lapse in coverage, please make a payment by {due}."
+        body = _cancellation_body(
+            line_of_business, carrier_name, csr_instructions=csr_instructions
         )
         return _wrap_voicemail(greeting, body)
 
