@@ -487,27 +487,31 @@ def test_get_call_skips_without_api_key():
     assert client.get_call("call_abc") == {}
 
 
-def _assert_warm_transfer_pause_wording(text: str) -> None:
-    """Every warm-transfer prompt path: finish the line, wait 10-15s, then transfer."""
+def _assert_warm_transfer_finish_sentence_wording(text: str) -> None:
+    """Every warm-transfer path: finish the handoff line, then transfer promptly."""
     lower = text.lower()
     assert WARM_TRANSFER_CLIENT_HANDOFF_LINE in text
-    assert "10" in text and "15" in text
-    assert "after that pause" in lower or "after the pause" in lower
+    assert "finish every word" in lower
     assert "use the transfer action" in lower or "using the transfer action" in lower
     assert "never fire the transfer action while still speaking" in lower
-    assert "wait silently" in lower or "wait about 10-15 seconds" in lower
+    assert "wait silently" not in lower
+    assert "after the pause" not in lower
+    assert "after that pause" not in lower
+    assert "10-15" not in text
+    assert "10 to 15" not in lower
+    assert "silent hold" in lower  # forbidden in the rule text
+    assert "do not insert a silent hold" in lower or "timed wait" in lower
 
 
-def test_warm_transfer_timing_rules_finish_then_pause_then_action():
+def test_warm_transfer_timing_rules_finish_sentence_then_transfer_promptly():
     rules = warm_transfer_timing_rules()
-    assert WARM_TRANSFER_CLIENT_HANDOFF_LINE in rules
-    assert "10" in rules and "15" in rules
+    _assert_warm_transfer_finish_sentence_wording(rules)
     assert "transfer action" in rules.lower()
-    assert "connecting you now" in rules.lower()
-    assert "never fire the transfer action while still speaking" in rules.lower()
+    assert "promptly" in rules.lower()
+    assert "connecting you now" not in rules.lower()
 
 
-def test_client_followup_prompt_instructs_handoff_pause_before_transfer():
+def test_client_followup_prompt_instructs_finish_handoff_before_transfer():
     client = CarrierVoiceClient(api_key="test-key")
     dossier = _sample_dossier(
         client_first_name="Maria",
@@ -520,8 +524,8 @@ def test_client_followup_prompt_instructs_handoff_pause_before_transfer():
     prompt = client.build_call_prompt(dossier)
     transfer_block = client._transfer_objective_block(dossier)
     briefing = client.build_transfer_briefing(dossier)
-    _assert_warm_transfer_pause_wording(prompt)
-    _assert_warm_transfer_pause_wording(transfer_block)
+    _assert_warm_transfer_finish_sentence_wording(prompt)
+    _assert_warm_transfer_finish_sentence_wording(transfer_block)
     assert "Mike Sosa" in prompt
     assert "Connecting you now." in briefing
     assert briefing not in prompt.split("WARM TRANSFER TIMING")[0]
@@ -529,7 +533,7 @@ def test_client_followup_prompt_instructs_handoff_pause_before_transfer():
     assert "max_duration" not in prompt
 
 
-def test_client_outreach_prompt_instructs_handoff_pause_before_transfer():
+def test_client_outreach_prompt_instructs_finish_handoff_before_transfer():
     client = CarrierVoiceClient(api_key="test-key")
     dossier = _sample_dossier(
         client_first_name="Buster",
@@ -543,8 +547,8 @@ def test_client_outreach_prompt_instructs_handoff_pause_before_transfer():
     prompt = client.build_call_prompt(dossier)
     transfer_block = client._transfer_objective_block(dossier)
     briefing = client.build_transfer_briefing(dossier)
-    _assert_warm_transfer_pause_wording(prompt)
-    _assert_warm_transfer_pause_wording(transfer_block)
+    _assert_warm_transfer_finish_sentence_wording(prompt)
+    _assert_warm_transfer_finish_sentence_wording(transfer_block)
     assert "Assigned Producer" in prompt
     assert "Carlo Ferrara" in prompt
     assert "Connecting you now." in briefing
@@ -553,7 +557,7 @@ def test_client_outreach_prompt_instructs_handoff_pause_before_transfer():
     assert "Mike Sosa" not in transfer_block or "NOT the transfer target" in prompt
 
 
-def test_carrier_prompt_instructs_handoff_pause_before_transfer():
+def test_carrier_prompt_instructs_finish_handoff_before_transfer():
     client = CarrierVoiceClient(api_key="test-key")
     dossier = _sample_dossier(
         requestor_name="Carlo Ferrara",
@@ -564,8 +568,8 @@ def test_carrier_prompt_instructs_handoff_pause_before_transfer():
     prompt = client.build_call_prompt(dossier)
     transfer_block = client._transfer_objective_block(dossier)
     briefing = client.build_transfer_briefing(dossier)
-    _assert_warm_transfer_pause_wording(prompt)
-    _assert_warm_transfer_pause_wording(transfer_block)
+    _assert_warm_transfer_finish_sentence_wording(prompt)
+    _assert_warm_transfer_finish_sentence_wording(transfer_block)
     assert "Carlo Ferrara" in prompt
     assert "Connecting you now." in briefing
     assert "spoken only to Carlo Ferrara after they answer" in prompt
@@ -597,4 +601,10 @@ def test_voice_client_cancellation_is_generic_when_hydrate_is_stubbed():
     assert "Commercial policy" not in first
     assert first.startswith("Hi Buster, this is Robie from StreetSmart Insurance.")
     assert "connect you to Carlo now" in first
-    _assert_warm_transfer_pause_wording(prompt)
+    for spoken in (first, voicemail):
+        lower = spoken.lower()
+        assert "overdue" not in lower
+        assert "make a payment" not in lower
+        assert "payment due" not in lower
+        assert "non-pay" not in lower
+    _assert_warm_transfer_finish_sentence_wording(prompt)

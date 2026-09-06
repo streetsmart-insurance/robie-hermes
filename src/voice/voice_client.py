@@ -40,40 +40,34 @@ AGENCY_MAIN_CALLBACK_SPOKEN = "seven three two, four six two, eight three four t
 
 # Bland send-call fires the transfer action as soon as the model says
 # "transfer" / "transferring" (https://docs.bland.ai/api-v1/post/calls).
-# There is no send-call wait-before-transfer field used in this repo
-# (wait_for_greeting is start-of-call only). Speak a complete handoff
-# line that avoids those trigger words, pause ~10-15s, THEN invoke the
-# action. Client-facing copy stays close to Splice "please stay on the line".
+# Speak a complete client-facing handoff line that avoids those trigger
+# words so the callee hears the whole sentence, then fire the action
+# promptly. Do not instruct a timed silent hold.
 WARM_TRANSFER_CLIENT_HANDOFF_LINE = "Please stay on the line while I connect you."
-WARM_TRANSFER_PAUSE_SECONDS_MIN = 10
-WARM_TRANSFER_PAUSE_SECONDS_MAX = 15
 
 
 def warm_transfer_timing_rules() -> str:
-    """Prompt rule: finish the spoken handoff, pause, then fire transfer."""
+    """Prompt rule: finish the spoken handoff sentence, then transfer promptly."""
     return (
         "WARM TRANSFER TIMING (mandatory on every warm transfer): "
-        f'First speak this complete sentence to the person on this call, then stop: '
+        f'First speak this complete sentence to the person on this call: '
         f'"{WARM_TRANSFER_CLIENT_HANDOFF_LINE}" '
-        "Finish every word of that sentence before doing anything else. "
-        "Do not cut yourself off. Do not say the words \"transfer\" or "
-        "\"transferring\" or \"Connecting you now\" in that sentence — those "
-        "words fire the Bland transfer action immediately and the callee "
-        "barely hears the line. "
-        f"After the sentence is fully spoken, wait silently for about "
-        f"{WARM_TRANSFER_PAUSE_SECONDS_MIN} to {WARM_TRANSFER_PAUSE_SECONDS_MAX} "
-        "seconds (quiet hold is fine). Do not invoke any action during this wait. "
-        "Only after that pause, use the transfer action (say \"transfer\"). "
-        "Never fire the transfer action while still speaking."
+        "Finish every word of that sentence before using the transfer action. "
+        "Do not cut yourself off mid-sentence. Do not say the words \"transfer\" "
+        "or \"transferring\" in the handoff sentence — those words fire the Bland "
+        "transfer action immediately and the callee barely hears the line. "
+        "After the sentence is fully spoken, use the transfer action promptly "
+        '(say "transfer"). Never fire the transfer action while still speaking. '
+        "Do not insert a silent hold or timed wait before transferring."
     )
 
 
 def _warm_transfer_action_clause(destination: str) -> str:
-    """Call-objective line: spoken handoff → pause → transfer action."""
+    """Call-objective line: finish the spoken handoff, then transfer promptly."""
     return (
         f"speak the full handoff line (\"{WARM_TRANSFER_CLIENT_HANDOFF_LINE}\"), "
-        f"wait about {WARM_TRANSFER_PAUSE_SECONDS_MIN}-{WARM_TRANSFER_PAUSE_SECONDS_MAX} "
-        f"seconds, then transfer them to {destination} using the transfer action"
+        f"finish every word of that sentence, then transfer them to {destination} "
+        "using the transfer action"
     )
 
 
@@ -263,7 +257,7 @@ WARM TRANSFER TO REQUESTOR:
 - {callback} Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 - Never transfer to the EZLynx Producer unless that person is also the requestor.
 - {timing}
-- After the pause, use the transfer action (say "transfer") and brief {requestor}:
+- After the handoff sentence is fully spoken, use the transfer action promptly (say "transfer") and brief {requestor}:
   "{briefing}"
 - The briefing above is spoken only to {requestor} after they answer — never to the person already on this call.
 """
@@ -274,7 +268,7 @@ WARM TRANSFER TO REQUESTOR:
 - Do not transfer until you have confirmed you reached the correct desk (or they asked for the requestor).
 - Never transfer to the EZLynx Producer unless that person is also the requestor.
 - {timing}
-- After the pause, use the transfer action (say "transfer") and brief {requestor}:
+- After the handoff sentence is fully spoken, use the transfer action promptly (say "transfer") and brief {requestor}:
   "{briefing}"
 - The briefing above is spoken only to {requestor} after they answer — never to the person already on this call.
 """
@@ -303,7 +297,7 @@ WARM TRANSFER TO ASSIGNED PRODUCER:
 - {callback} Do not leave a producer personal or DID number unless it is explicitly written in the CSR instructions.
 - Never transfer to the label invoker / requestor. Never fall back to Sales Center producerName or another staff DID.
 - {timing}
-- After the pause, use the transfer action (say "transfer") and brief {producer}:
+- After the handoff sentence is fully spoken, use the transfer action promptly (say "transfer") and brief {producer}:
   "{briefing}"
 - The briefing above is spoken only to {producer} after they answer — never to the person already on this call.
 """

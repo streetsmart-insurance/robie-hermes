@@ -444,11 +444,23 @@ _PLACEHOLDER_LOBS = frozenset(
 )
 
 # Proposed Google Doc Manual WF / Cancellation body (not in the Doc today).
-# Same account-level shape as Audit / Recommendations — no LOB or carrier.
+# Same account-level shape as Audit / Returned Mail — no LOB, carrier, or
+# payment/non-pay language unless the CSR What to say explicitly includes it.
 CANCELLATION_GENERIC_BODY = (
     "We are following up on a cancellation notice for your account. "
-    "Your policy is set to be cancelled due to an overdue payment. "
-    "To avoid a lapse in coverage, please make a payment as soon as possible."
+    "Please contact our office as soon as possible."
+)
+CANCELLATION_CONTACT_CLAUSE = "Please contact our office as soon as possible."
+_PAYMENT_LANGUAGE_RE = re.compile(
+    r"\b(?:"
+    r"non[-\s]?pay|"
+    r"overdue(?:\s+payment)?|"
+    r"make\s+a\s+payment|"
+    r"payment\s+due|"
+    r"past\s+due|"
+    r"payment"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -472,61 +484,56 @@ def is_placeholder_lob(line_of_business: Optional[str]) -> bool:
     return not cleaned or cleaned in _PLACEHOLDER_LOBS
 
 
-def _policy_type_phrase(line_of_business: Optional[str]) -> str:
-    lob = (line_of_business or "").strip()
-    if not lob or is_placeholder_lob(lob):
-        return "policy"
-    if re.search(r"\bpolicy\b", lob, re.IGNORECASE):
-        return lob
-    return f"{lob} policy"
+def csr_instructions_include_payment(csr_instructions: Optional[str]) -> bool:
+    """True when CSR What to say explicitly mentions payment / non-pay."""
+    return bool(_PAYMENT_LANGUAGE_RE.search(csr_instructions or ""))
 
 
-def _cancellation_due_clause(action_date: Optional[str]) -> str:
-    due = (action_date or "").strip()
-    if due:
-        return f"To avoid a lapse in coverage, please make a payment by {due}."
-    return "To avoid a lapse in coverage, please make a payment as soon as possible."
+def _cancellation_csr_payment_clause(csr_instructions: Optional[str]) -> str:
+    """Append CSR payment facts only when the CSR wrote them. Never invent."""
+    text = (csr_instructions or "").strip()
+    if text and csr_instructions_include_payment(text):
+        return f" {text}"
+    return ""
 
 
 def _cancellation_body(
     line_of_business: Optional[str],
     carrier_name: Optional[str],
-    action_date: Optional[str],
+    csr_instructions: Optional[str] = None,
 ) -> str:
-    """Cancellation spoken body. Soften when LOB/carrier look unknown."""
+    """Cancellation spoken body. Soften when LOB/carrier look unknown.
+
+    Default copy is an account-level cancellation notice. No non-pay / overdue
+    / make-a-payment language unless CSR What to say explicitly includes it.
+    """
     lob_ok = not is_placeholder_lob(line_of_business)
     carrier_ok = not is_placeholder_carrier(carrier_name)
-    due_clause = _cancellation_due_clause(action_date)
+    payment = _cancellation_csr_payment_clause(csr_instructions)
     if lob_ok and carrier_ok:
         lob = line_of_business.strip()
         carrier = carrier_name.strip()
-        policy_type = _policy_type_phrase(line_of_business)
         return (
             f"I'm calling with an important notice about your {lob} policy with {carrier}. "
-            f"Your {policy_type} is set to be cancelled due to an overdue payment. "
-            f"{due_clause}"
+            f"We received a cancellation notice for your account. "
+            f"{CANCELLATION_CONTACT_CLAUSE}{payment}"
         )
     if lob_ok:
         lob = line_of_business.strip()
-        policy_type = _policy_type_phrase(line_of_business)
         return (
             f"I'm calling with an important notice about your {lob} policy. "
-            f"Your {policy_type} is set to be cancelled due to an overdue payment. "
-            f"{due_clause}"
+            f"We received a cancellation notice for your account. "
+            f"{CANCELLATION_CONTACT_CLAUSE}{payment}"
         )
     if carrier_ok:
         carrier = carrier_name.strip()
         return (
             f"I'm calling with an important notice about your policy with {carrier}. "
-            f"Your policy is set to be cancelled due to an overdue payment. "
-            f"{due_clause}"
+            f"We received a cancellation notice for your account. "
+            f"{CANCELLATION_CONTACT_CLAUSE}{payment}"
         )
-    if (action_date or "").strip():
-        return (
-            "We are following up on a cancellation notice for your account. "
-            "Your policy is set to be cancelled due to an overdue payment. "
-            f"{due_clause}"
-        )
+    if payment:
+        return f"{CANCELLATION_GENERIC_BODY}{payment}"
     return CANCELLATION_GENERIC_BODY
 
 
@@ -566,7 +573,9 @@ def build_outreach_live_script(
     connect = _connect_offer(producer_first)
 
     if pathway == PATHWAY_CANCELLATION:
-        body = _cancellation_body(line_of_business, carrier_name, action_date)
+        body = _cancellation_body(
+            line_of_business, carrier_name, csr_instructions=csr_instructions
+        )
         return _wrap_live(greeting, body, connect)
 
     body = MANUAL_WF_BODIES.get(pathway)
@@ -592,7 +601,9 @@ def build_outreach_voicemail_script(
     greeting = f"Hi {client_first}" if client_first else "Hello"
 
     if pathway == PATHWAY_CANCELLATION:
-        body = _cancellation_body(line_of_business, carrier_name, action_date)
+        body = _cancellation_body(
+            line_of_business, carrier_name, csr_instructions=csr_instructions
+        )
         return _wrap_voicemail(greeting, body)
 
     body = MANUAL_WF_BODIES.get(pathway)

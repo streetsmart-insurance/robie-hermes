@@ -81,6 +81,23 @@ _IVR_FORBIDDEN = (
     "1 800",
 )
 
+_DEFAULT_CANCEL_PAYMENT_FORBIDDEN = (
+    "non-pay",
+    "nonpay",
+    "non pay",
+    "overdue",
+    "make a payment",
+    "payment due",
+    "a payment",
+    "past due",
+)
+
+
+def _assert_no_default_payment_language(text: str) -> None:
+    lower = text.lower()
+    for token in _DEFAULT_CANCEL_PAYMENT_FORBIDDEN:
+        assert token not in lower, f"{token!r} leaked into default cancel copy:\n{text}"
+
 
 def _assert_conversational_wrap(live: str, vm: str, body: str) -> None:
     assert live.startswith("Hi Buster, this is Robie from StreetSmart Insurance.")
@@ -249,9 +266,11 @@ def test_cancellation_pathway_copy_uses_first_name_only_and_agency_main():
     )
     assert live.startswith("Hi Buster, this is Robie from StreetSmart Insurance.")
     assert "Buster Brown" not in live
-    assert "overdue payment" in live
-    assert "09/15/2026" in live
     assert "Homeowners policy with Progressive" in live
+    assert "cancellation notice" in live
+    assert "contact our office" in live
+    _assert_no_default_payment_language(live)
+    _assert_no_default_payment_language(vm)
     assert "connect you to Carlo now" in live
     assert AGENCY_MAIN_CALLBACK_DISPLAY in vm
     assert AGENCY_MAIN_CALLBACK_SPOKEN in vm
@@ -298,6 +317,7 @@ def test_cancellation_script_is_generic_when_lob_or_carrier_is_placeholder(lob, 
         assert "insurance policy with" not in spoken
         assert "Buster Brown" not in spoken
         assert "press 1" not in spoken.lower()
+        _assert_no_default_payment_language(spoken)
     assert live.startswith("Hi Buster, this is Robie from StreetSmart Insurance.")
     assert "connect you to Carlo now" in live
     assert AGENCY_MAIN_CALLBACK_DISPLAY in vm
@@ -322,7 +342,10 @@ def test_cancellation_script_keeps_real_lob_and_carrier():
     assert "Commercial Auto policy with The Hartford" in live
     assert "Commercial Auto policy with The Hartford" in vm
     assert CANCELLATION_GENERIC_BODY not in live
-    assert "10/01/2026" in live
+    assert "cancellation notice" in live
+    _assert_no_default_payment_language(live)
+    _assert_no_default_payment_language(vm)
+    assert "10/01/2026" not in live
 
 
 def test_cancellation_script_includes_only_the_clean_policy_fact():
@@ -349,6 +372,34 @@ def test_cancellation_script_includes_only_the_clean_policy_fact():
     assert "Commercial policy" not in carrier_only
     assert CANCELLATION_GENERIC_BODY not in lob_only
     assert CANCELLATION_GENERIC_BODY not in carrier_only
+    _assert_no_default_payment_language(lob_only)
+    _assert_no_default_payment_language(carrier_only)
+
+
+def test_cancellation_includes_payment_only_when_csr_what_to_say_does():
+    note = "Policy is pending cancellation — payment due by 09/15/2026."
+    with_csr = build_outreach_live_script(
+        pathway=PATHWAY_CANCELLATION,
+        client_first="Buster",
+        line_of_business="Homeowners",
+        carrier_name="Progressive",
+        producer_first="Carlo",
+        action_date="09/15/2026",
+        csr_instructions=note,
+    )
+    without_csr = build_outreach_live_script(
+        pathway=PATHWAY_CANCELLATION,
+        client_first="Buster",
+        line_of_business="Homeowners",
+        carrier_name="Progressive",
+        producer_first="Carlo",
+        action_date="09/15/2026",
+    )
+    assert note in with_csr
+    assert "payment due" in with_csr
+    assert "Homeowners policy with Progressive" in with_csr
+    assert note not in without_csr
+    _assert_no_default_payment_language(without_csr)
 
 
 def test_placeholder_lob_and_carrier_helpers():
@@ -402,8 +453,12 @@ def test_voice_client_cancellation_pathway_and_assigned_producer_transfer():
     assert "Mike Sosa" not in prompt or "NOT the transfer target" in prompt
     assert "label invoker is not the transfer target" in prompt.lower()
     assert "Please stay on the line while I connect you." in prompt
-    assert "10" in prompt and "15" in prompt
-    assert "after the pause" in prompt.lower()
+    assert "finish every word" in prompt.lower()
+    assert "payment due by 09/15/2026" in first
+    assert "do not insert a silent hold" in prompt.lower()
+    assert "10-15" not in prompt
+    assert "wait silently" not in prompt.lower()
+    assert "after the pause" not in prompt.lower()
 
 
 def test_voice_client_audit_pathway_uses_exact_manual_wf_body():
