@@ -491,16 +491,19 @@ def _assert_warm_transfer_finish_sentence_wording(text: str) -> None:
     """Every warm-transfer path: finish the handoff line, then transfer promptly."""
     lower = text.lower()
     assert WARM_TRANSFER_CLIENT_HANDOFF_LINE in text
+    assert "please wait 10 to 15 seconds in silence" in lower
+    assert "as it connects" in lower
     assert "finish every word" in lower
     assert "use the transfer action" in lower or "using the transfer action" in lower
     assert "never fire the transfer action while still speaking" in lower
     assert "wait silently" not in lower
     assert "after the pause" not in lower
     assert "after that pause" not in lower
-    assert "10-15" not in text
-    assert "10 to 15" not in lower
-    assert "silent hold" in lower  # forbidden in the rule text
-    assert "do not insert a silent hold" in lower or "timed wait" in lower
+    handoff = WARM_TRANSFER_CLIENT_HANDOFF_LINE.lower()
+    assert "transfer" not in handoff
+    assert "do not insert a separate silent hold" in lower or (
+        "silent hold" in lower and "timed wait" in lower
+    )
 
 
 def test_warm_transfer_timing_rules_finish_sentence_then_transfer_promptly():
@@ -509,6 +512,10 @@ def test_warm_transfer_timing_rules_finish_sentence_then_transfer_promptly():
     assert "transfer action" in rules.lower()
     assert "promptly" in rules.lower()
     assert "connecting you now" not in rules.lower()
+    assert "transfer" not in WARM_TRANSFER_CLIENT_HANDOFF_LINE.lower()
+    assert "Please wait 10 to 15 seconds in silence as it connects." in (
+        WARM_TRANSFER_CLIENT_HANDOFF_LINE
+    )
 
 
 def test_client_followup_prompt_instructs_finish_handoff_before_transfer():

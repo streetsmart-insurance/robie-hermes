@@ -453,10 +453,10 @@ def test_voice_client_cancellation_pathway_and_assigned_producer_transfer():
     assert "Mike Sosa" not in prompt or "NOT the transfer target" in prompt
     assert "label invoker is not the transfer target" in prompt.lower()
     assert "Please stay on the line while I connect you." in prompt
+    assert "Please wait 10 to 15 seconds in silence as it connects." in prompt
     assert "finish every word" in prompt.lower()
     assert "payment due by 09/15/2026" in first
-    assert "do not insert a silent hold" in prompt.lower()
-    assert "10-15" not in prompt
+    assert "do not insert a separate silent hold" in prompt.lower()
     assert "wait silently" not in prompt.lower()
     assert "after the pause" not in prompt.lower()
 

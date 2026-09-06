@@ -40,25 +40,32 @@ AGENCY_MAIN_CALLBACK_SPOKEN = "seven three two, four six two, eight three four t
 
 # Bland send-call fires the transfer action as soon as the model says
 # "transfer" / "transferring" (https://docs.bland.ai/api-v1/post/calls).
-# Speak a complete client-facing handoff line that avoids those trigger
-# words so the callee hears the whole sentence, then fire the action
-# promptly. Do not instruct a timed silent hold.
-WARM_TRANSFER_CLIENT_HANDOFF_LINE = "Please stay on the line while I connect you."
+# Speak a complete client-facing handoff that uses "connect" (never
+# "transfer") so the callee hears the whole line, including that they
+# should wait 10 to 15 seconds in silence while it connects. Then fire
+# the action promptly. The 10–15 seconds is spoken to the caller — not
+# a model-enforced wait timer before the action.
+WARM_TRANSFER_CLIENT_HANDOFF_LINE = (
+    "Please stay on the line while I connect you. "
+    "Please wait 10 to 15 seconds in silence as it connects."
+)
 
 
 def warm_transfer_timing_rules() -> str:
     """Prompt rule: finish the spoken handoff sentence, then transfer promptly."""
     return (
         "WARM TRANSFER TIMING (mandatory on every warm transfer): "
-        f'First speak this complete sentence to the person on this call: '
+        f'First speak this complete handoff to the person on this call: '
         f'"{WARM_TRANSFER_CLIENT_HANDOFF_LINE}" '
-        "Finish every word of that sentence before using the transfer action. "
+        "Finish every word of that handoff before using the transfer action. "
         "Do not cut yourself off mid-sentence. Do not say the words \"transfer\" "
-        "or \"transferring\" in the handoff sentence — those words fire the Bland "
+        "or \"transferring\" in the handoff — those words fire the Bland "
         "transfer action immediately and the callee barely hears the line. "
-        "After the sentence is fully spoken, use the transfer action promptly "
+        "After the handoff is fully spoken, use the transfer action promptly "
         '(say "transfer"). Never fire the transfer action while still speaking. '
-        "Do not insert a silent hold or timed wait before transferring."
+        "The 10 to 15 seconds is what you tell the caller to expect while it "
+        "connects. Do not insert a separate silent hold or timed wait for "
+        "yourself before using the transfer action."
     )
 
 
@@ -66,7 +73,7 @@ def _warm_transfer_action_clause(destination: str) -> str:
     """Call-objective line: finish the spoken handoff, then transfer promptly."""
     return (
         f"speak the full handoff line (\"{WARM_TRANSFER_CLIENT_HANDOFF_LINE}\"), "
-        f"finish every word of that sentence, then transfer them to {destination} "
+        f"finish every word of that handoff, then transfer them to {destination} "
         "using the transfer action"
     )
 
