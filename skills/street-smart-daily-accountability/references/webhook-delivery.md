@@ -2,7 +2,7 @@
 
 ## Authorization and content boundary
 
-Carlo approved one incoming Google Chat webhook for the daily team-lead report on 2026-09-01. Use it only from Test and only after the complete report package and recipient preflight succeed.
+Carlo approved one incoming Google Chat webhook for the daily team-lead report on 2026-09-01. Use it from Production only after the exact immutable release has passed Test, Carlo has approved that release and recurring delivery, and the complete report package and recipient preflight succeed.
 
 The Chat message may contain:
 

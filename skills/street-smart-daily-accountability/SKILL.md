@@ -1,11 +1,11 @@
 ---
 name: street-smart-daily-accountability
-description: Run StreetSmart Insurance's prior-business-day accountability audit, create department reports and a visual dashboard, reconcile calls/tasks/policy changes/COIs/Sales Center, and deliver the approved Test digest. Use for daily accountability runs, team-lead reporting, callback audits, overdue-work analysis, or the 9 AM digest.
+description: Run StreetSmart Insurance's prior-business-day accountability audit, create department reports and a visual dashboard, reconcile calls/tasks/policy changes/COIs/Sales Center, and deliver the approved digest through the gated Test-to-Production release. Use for daily accountability runs, team-lead reporting, callback audits, overdue-work analysis, or the 9 AM digest.
 ---
 
 # StreetSmart Daily Accountability
 
-Produce an evidence-backed internal management package for the previous business day. Use Test only unless Carlo separately authorizes Production.
+Produce an evidence-backed internal management package for the previous business day. Production requires Carlo's authorization plus the repository's immutable Test-to-Production promotion workflow; never patch a live server directly.
 
 Read [references/report-contract.md](references/report-contract.md) before collecting data or sending a report.
 Read [references/google-doc-output.md](references/google-doc-output.md) before creating or validating the Google Doc.
@@ -30,6 +30,7 @@ Within every agency and department tab, group the readable findings in this orde
 
 - Use EZLynx Reports 5.0 exports, never legacy reports.
 - Report Monday–Friday, 9:00 AM–5:00 PM America/New_York. Monday uses Friday.
+- Accept RingCentral's generic email subject `Scheduled Reports from RingCentral` only when an attachment is explicitly labeled `Yesterday Calls`. Collect Queues, Users, and Calls XLSX attachments as one evidence bundle. Validate the date embedded in call rows or filters against the requested prior business day; never accept the newest weekend message merely because it arrived most recently.
 - Deduplicate Activity Detail history on Task ID and retain the newest evidence row.
 - Use the active AppSheet employee roster for team membership. Preserve EZLynx Department separately as the workstream.
 - Separate RingCentral parent calls from routing legs. Zero pickups do not prove a missed offer.
@@ -43,6 +44,7 @@ Within every agency and department tab, group the readable findings in this orde
 - Put all explicit `HOLD_REVIEW` and `QUEUE_WAIT_REVIEW` records above 120 seconds at the top of Phone & Queue Service before the queue scorecard and remaining call detail.
 - For every hold/wait exception retain caller, phone, parent session ID, leg timestamp, queue, destination/answering employee, exact measured seconds, source field, callback disposition, and EZLynx account link. If ownership exists only at parent-call level, label the owner `UNVERIFIED`.
 - Use Sales Center Assigned Producer. Do not present the producer on the customer account as the Sales Center owner.
+- Collect Submission Center through the approved read-only persistent-browser audit when Reports 5.0 offers no scheduled attachment. Preserve its All Submissions, agency, 100-row, Status-order, first-closed-row, live-red-state, day-31, link, and count-reconciliation assertions. A login/reset page is `UNVERIFIED`, never zero pending submissions.
 - Keep full client names and phone numbers in the authorized internal report.
 - Include all source rows in dedicated workbook tabs for Activity Detail, overdue Activity history, Sales Center, and RingCentral, plus complete nonblank policy-change and COI tracker rows. Do not reduce the Excel deliverable to exception-only summaries.
 - Build the Google Doc with native tabs for Agency Overview, Personal Lines, Commercial Lines, Trucking & Transportation, Operations, Executive & Unverified, Calls & Queues, Policy Changes & COIs, Sales Center — All, Overdue Tasks — All, Submissions & Magellan, and Validation & Sources.
@@ -56,7 +58,7 @@ Within every agency and department tab, group the readable findings in this orde
 
 Sending is authorized only by the current user request or an active scheduled automation that names the exact recipients. Before every send, verify each mailbox against the approved active roster and Test Gmail profile. One inactive, missing, or unverified requested recipient blocks the send and produces a clear exception report.
 
-Do not read employee email bodies. Use Gmail metadata for approved employees and restrict Gmail readonly content access to the reporting mailbox. Google Chat delivery is approved only for the configured team-lead incoming webhook, only from Test, and only for the concise link-only digest defined in the webhook reference.
+Do not read employee email bodies. Use Gmail metadata for approved employees and restrict Gmail readonly content access to the reporting mailbox. Google Chat delivery is approved only for the configured team-lead incoming webhook and only for the concise link-only digest defined in the webhook reference after the same release and recipient gates pass.
 
 Deliver the package by link after the all-recipient preflight passes. The email must link the pageless Google Doc, comprehensive Google Sheet/workbook, visual dashboard, runbook, and packaged skill. Ask Jake and the team leads to scrutinize the findings and return corrections or remarks.
 

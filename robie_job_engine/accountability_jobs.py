@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .accountability_cli import main as build_report
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -36,6 +37,14 @@ SOURCE_FLAGS = {
     "monthly_kpis_json": "--monthly-kpis-json",
     "churn_json": "--churn-json",
 }
+
+
+def _previous_business_day(value: datetime) -> date:
+    eastern = value.astimezone(ZoneInfo("America/New_York")).date()
+    candidate = eastern - timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
 
 
 def _checksum(path: Path) -> str:
@@ -78,12 +87,19 @@ class AccountabilityReportWorker:
             )
         try:
             manifest = _manifest(manifest_path)
+            reports_5 = dict((manifest.get("collection") or {}).get("ezlynx_reports_5") or {})
+            if reports_5:
+                from .ezlynx_reports_5 import validate_reports_5_config
+
+                validate_reports_5_config(reports_5)
             output_dir = Path(str(manifest.get("output_dir") or manifest_path.parent / "reports")).expanduser().resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             run_at = datetime.now(timezone.utc)
+            report_date = _previous_business_day(run_at) if mode == "daily" else None
             output = output_dir / f"streetsmart-{mode}-{run_at:%Y%m%dT%H%M%SZ}.md"
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
             sources = dict(manifest.get("sources") or {})
+            sources["trackers"] = dict(sources.get("trackers") or {})
             collection = dict(manifest.get("collection") or {})
             google_sheets = dict(manifest.get("google_sheets") or {})
             if google_sheets.get("enabled"):
@@ -101,6 +117,27 @@ class AccountabilityReportWorker:
                     roles_path = output_dir / f"employee-roles-{run_at:%Y%m%dT%H%M%SZ}.json"
                     roles_path.write_text(json.dumps(roles, indent=2, default=str), encoding="utf-8")
                     sources["roles_json"] = str(roles_path)
+            google_sheet_trackers = dict(manifest.get("google_sheet_trackers") or {})
+            if google_sheet_trackers.get("enabled"):
+                from .google_sheets_accountability import collect_allowlisted_tables, write_allowlisted_table_csv
+
+                for tracker_key, raw_tracker in sorted(dict(google_sheet_trackers.get("trackers") or {}).items()):
+                    tracker = dict(raw_tracker or {})
+                    snapshot = collect_allowlisted_tables(
+                        {
+                            "spreadsheet_id": tracker.get("spreadsheet_id"),
+                            "tables": {
+                                tracker_key: {
+                                    "range": tracker.get("range"),
+                                    "allowed_columns": tracker.get("allowed_columns"),
+                                }
+                            },
+                        },
+                        as_of=run_at,
+                    )
+                    tracker_path = output_dir / f"google-sheet-{tracker_key}-{run_at:%Y%m%dT%H%M%SZ}.csv"
+                    write_allowlisted_table_csv(snapshot, tracker_key, tracker_path)
+                    sources["trackers"][tracker_key] = str(tracker_path)
             ringcentral_email = dict(collection.get("ringcentral_email") or {})
             if ringcentral_email.get("enabled"):
                 from .ringcentral_email_sync import collect_scheduled_ringcentral_report
@@ -130,7 +167,8 @@ class AccountabilityReportWorker:
                     required_queues=required_queues,
                     required_queue_members=required_queue_members,
                     required_sheets=configured_sheets.get(mode),
-                    max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
+                    max_age_hours=int(ringcentral_email.get("max_age_hours") or (96 if mode == "daily" else 36)),
+                    target_date=report_date,
                 ))
             submission_center = dict(collection.get("ezlynx_submission_center") or {})
             if mode == "weekly" and submission_center.get("enabled"):
@@ -174,16 +212,36 @@ class AccountabilityReportWorker:
                 if value:
                     arguments.extend([flag, str(Path(str(value)).expanduser().resolve())])
             if mode in {"daily", "weekly"} and not sources.get("email_json"):
-                from .gmail_accountability import collect_agency_summary
+                from .gmail_accountability import (
+                    approved_mailboxes_from_role_registry,
+                    collect_agency_summary,
+                )
 
-                gmail_snapshot = collect_agency_summary(environment=os.environ)
+                gmail_config = dict(collection.get("gmail_accountability") or {})
+                approved_users = None
+                if gmail_config.get("enabled"):
+                    role_source = Path(str(sources.get("roles_json") or "")).expanduser()
+                    if not role_source.is_file():
+                        raise RuntimeError(
+                            "Gmail accountability requires a current approved active employee roster"
+                        )
+                    approved_users = approved_mailboxes_from_role_registry(
+                        _manifest(role_source),
+                        approved_domain=str(
+                            gmail_config.get("approved_domain") or "streetsmart.insurance"
+                        ),
+                    )
+                gmail_snapshot = collect_agency_summary(
+                    environment=os.environ,
+                    approved_users=approved_users,
+                )
                 gmail_path = output_dir / f"gmail-{run_at:%Y%m%dT%H%M%SZ}.json"
                 gmail_path.write_text(json.dumps(gmail_snapshot, indent=2, default=str), encoding="utf-8")
                 arguments.extend(["--email-json", str(gmail_path)])
             sales_untouched_days = (manifest.get("rules") or {}).get("sales_untouched_days")
             if sales_untouched_days is not None:
                 arguments.extend(["--sales-untouched-days", str(max(1, int(sales_untouched_days)))])
-            for key, value in sorted(((manifest.get("sources") or {}).get("trackers") or {}).items()):
+            for key, value in sorted(dict(sources.get("trackers") or {}).items()):
                 arguments.extend(["--tracker", f"{key}={Path(str(value)).expanduser().resolve()}"])
             appsheet = dict(manifest.get("appsheet") or {})
             if mode == "weekly" and appsheet.get("enabled"):

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from robie_job_engine.accountability_jobs import AccountabilityReportWorker
+from robie_job_engine.accountability_jobs import AccountabilityReportWorker, _previous_business_day
 from robie_job_engine.accountability_schedule import install_accountability_schedules
 from robie_job_engine.models import WorkerResult
 from robie_job_engine.operations import OperationsStore
@@ -38,6 +38,13 @@ def test_schedule_installer_creates_three_verified_schedules(tmp_path: Path):
     reread = OperationsStore(str(db), artifact_root=str(tmp_path / "artifacts")).list_recurring_jobs()
     assert len(reread) == 3
     assert all(item["enabled"] == 1 for item in reread)
+    daily = next(item for item in reread if item["action_type"] == "accountability.daily")
+    assert daily["cron_spec"] == "0 9 * * 1-5"
+    assert daily["parameters"]["reporting_period"] == "previous_business_day"
+
+
+def test_previous_business_day_uses_friday_for_monday():
+    assert _previous_business_day(datetime(2026, 9, 7, 13, tzinfo=timezone.utc)).isoformat() == "2026-09-04"
 
 
 def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_path: Path):
@@ -131,3 +138,54 @@ def test_weekly_worker_collects_fresh_read_only_submission_snapshot_without_emai
     snapshot_path = Path(arguments[arguments.index("--submissions-json") + 1])
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot["open_over_30_count"] == 1
+
+
+def test_daily_worker_uses_every_approved_roster_mailbox_for_gmail_metadata(tmp_path: Path):
+    roles = tmp_path / "roles.json"
+    roles.write_text(json.dumps({
+        "source_status": "available",
+        "employees": {
+            "Alex Example": {"role": "CSR", "email": "alex@streetsmart.insurance"},
+            "Blair Example": {"role": "Producer", "email": "blair@streetsmart.insurance"},
+        },
+    }), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "output_dir": str(tmp_path / "reports"),
+        "sources": {"roles_json": str(roles)},
+        "rules": {"require_complete_evidence": False},
+        "collection": {"gmail_accountability": {
+            "enabled": True,
+            "approved_domain": "streetsmart.insurance",
+        }},
+        "delivery": {"enabled": False},
+    }), encoding="utf-8")
+
+    observed = {
+        "source_status": "available",
+        "scope": "https://www.googleapis.com/auth/gmail.metadata",
+        "body_access": False,
+        "by_employee": {},
+    }
+
+    def fake_build(arguments):
+        output = Path(arguments[arguments.index("--output") + 1])
+        output.write_text("accountability report\n", encoding="utf-8")
+        return 0
+
+    with patch(
+        "robie_job_engine.gmail_accountability.collect_agency_summary",
+        return_value=observed,
+    ) as collect, patch(
+        "robie_job_engine.accountability_jobs.build_report", side_effect=fake_build
+    ):
+        result = AccountabilityReportWorker().perform(
+            {"action_type": "accountability.daily", "payload": {"manifest_path": str(manifest)}},
+            idempotency_key="daily-gmail-roster",
+        )
+
+    assert result.succeeded
+    assert collect.call_args.kwargs["approved_users"] == (
+        "alex@streetsmart.insurance",
+        "blair@streetsmart.insurance",
+    )

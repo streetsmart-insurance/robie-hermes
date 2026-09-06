@@ -4,11 +4,12 @@
 
 - Weekdays at 9:00 AM America/New_York.
 - Activity date is the previous business day; Monday uses Friday.
-- Manual/Test collection remains the default until the cloud release is approved.
+- Production collection is permitted only from the exact immutable release that passed Test and received Carlo's approval. Never direct-edit the live VM.
 
 ## Sources
 
 - RingCentral calls and queue analytics for Personal Lines, Commercial, Trucking, and lead queues.
+- RingCentral subscription email subject is `Scheduled Reports from RingCentral`; the saved report/attachment label is `Yesterday Calls`. Combine its Queues, Users, and Calls workbooks and require the requested report date inside the evidence.
 - Magellan sentiment and call detail.
 - EZLynx Reports 5.0 Activity Detail, Change Request Detail, Sales Center Detail, Submission Center, and relevant account Activity discussions.
 - Existing policy-change and COI Google Sheets trackers.
@@ -70,4 +71,4 @@ All requested recipients must pass in the same preflight. If one fails, send not
 - Send the approved report package by email after recipient preflight. Carlo approved the team-lead Google Chat webhook on 2026-09-01. Send only the reporting date, a concise review checklist, and secured Drive links; do not post raw client-identifying row data in chat. Retrieve the webhook from a runtime secret source and never embed it in the skill, report, scheduler prompt, logs, or ZIP.
 - The comprehensive workbook includes every row from each collected source and passes a formula-error scan plus a rendered visual check of every tab.
 - Human approves exact subject, body, recipients, and attachments during Test.
-- Production remains disabled. Google Chat is enabled only for the approved Test team-lead webhook and only after the report package is complete.
+- Production delivery is enabled only after the immutable-release promotion, recipient preflight, and complete-source gates pass. Google Chat uses only the approved team-lead webhook and only after the report package is complete.
