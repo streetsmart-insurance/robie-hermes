@@ -147,6 +147,23 @@ def test_select_firmed_quote_prefers_firmed_filename():
     assert picked["Id"] == 675732963
 
 
+def test_extract_premium_from_pdf_prefers_policy_total_over_coverage_a(tmp_path: Path):
+    """Benli Hyundai dec: Coverage A $1,116 vs Policy Total $1,348."""
+    body = (
+        b"HYUNDAI HOMEOWNERS DECLARATIONS\n"
+        b"Named Insured: Hanim Benli\n"
+        b"Policy Number: HONJ2025100027-26\n"
+        b"COVERAGE SECTION I\n"
+        b"Coverage A - Dwelling    Limit $250,000    Annual Premium $1,116.00\n"
+        b"Coverage B - Other Structures              Annual Premium $112.00\n"
+        b"Policy Total Premium                       $1,348.00\n"
+        b"Total Annual Premium                       $1,348.00\n"
+    )
+    real = tmp_path / "benli_hyundai.pdf"
+    real.write_bytes(_authentic_pdf_bytes(body))
+    assert extract_premium_from_pdf(real) == Decimal("1348.00")
+
+
 def test_extract_premium_from_pdf_does_not_invent(tmp_path: Path):
     empty = tmp_path / "no-prem.pdf"
     empty.write_bytes(_authentic_pdf_bytes(b"no money fields here"))

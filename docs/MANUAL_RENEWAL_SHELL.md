@@ -50,7 +50,7 @@ The job, in **one** connected Chrome session:
 5. Notes (LOB-agnostic). Prefer the existing titled discussion that matches the LOB renewal workflow for **that** LOB — `{LOB} Renewal` (e.g. `Homeowners Renewal`, `Commercial Auto Renewal`, `Workers Compensation Renewal`, `BOP Renewal`) and close variants such as `{LOB} Renewal Offer`. **Only** create/use `Manual {LOB} Renewal` and `Renewal Update {LOB}` when no matching existing LOB renewal discussion exists. Never untitled. Never Email Automation / Automation Center (Paulette HO note `1123385828`). Every note ends with `Robie was here`. Before COMPLETE, verify `discussionId` + exact title on the card(s) actually used.
 6. **COMPLETE gate** (docs-only is **not** done). All required:
    - Firmed PDF is a **true** renewal offer / declaration / firmed quote (not Application / Bound Quote), uploaded with label **Renewal Offer** into the **Renewal Offer** folder
-   - PDF/extract premium matches keyed shell premium (PR 25 extract or `--pdf-premium`; do not invent)
+   - PDF/extract premium matches keyed shell premium (PR 25 extract or `--pdf-premium`; do not invent). **Premium = Policy Total / Total Annual / Grand Total from the PDF — never a Coverage A / Dwelling (or other single coverage-line) premium when a higher Policy Total exists.** If keyed RWL ≠ Policy Total (small tolerance), do not COMPLETE; surface the mismatch.
    - Exactly **one** pending RWL (`bound=false`)
    - Verified note on the existing `{LOB} Renewal` card **or**, if none exists, verified notes on both `Manual {LOB} Renewal` and `Renewal Update {LOB}`
    - `bound=false`
@@ -68,6 +68,7 @@ Once the EZLynx document id is known (e.g. `675732963` — `Fagone - J&J Home Qu
 - Accept only a real PDF (`%PDF` magic + **≥10KB** / 10240 bytes). On 0-byte / invalid: **one** retry with the corrected URL, then **HITL / Antigravity grab**.
 - **Do not** burn 20 minutes on Preview / RadPdf page images + OCR.
 - Premium extract runs from that PDF only. If the PDF has no premium, **stop** — do not invent one.
+- **Policy Total rule:** key and COMPLETE on the labeled Policy Total / Total Annual Premium / Grand Total (largest clearly labeled total). Do not take the first `$` under Coverage Section I / Coverage A / Dwelling when a Policy Total is on the page (Benli HONJ2025100027-26 Hyundai: Coverage A $1,116 ≠ Policy Total $1,348).
 
 ```bash
 PYTHONPATH=. python3 scripts/run_manual_renewal.py --env test --dry-run \

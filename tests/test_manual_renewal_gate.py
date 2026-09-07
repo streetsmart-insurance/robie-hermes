@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from src.extractor.quote_parser import extract_policy_total_premium
 from src.ezlynx.manual_renewal_gate import (
     DOC_KIND_APPLICATION,
     DOC_KIND_BOUND_QUOTE,
@@ -187,10 +188,63 @@ def test_done_checklist_blocks_email_automation_misfire():
     assert "automation_discussion" in result.missing
 
 
+BENLI_HYUNDAI_DEC_TEXT = (
+    "HYUNDAI HOMEOWNERS DECLARATIONS\n"
+    "Named Insured: Hanim Benli\n"
+    "Policy Number: HONJ2025100027-26\n"
+    "COVERAGE SECTION I\n"
+    "Coverage A - Dwelling    Limit $250,000    Annual Premium $1,116.00\n"
+    "Policy Total Premium                       $1,348.00\n"
+    "Total Annual Premium                       $1,348.00\n"
+)
+
+
 def test_done_checklist_partial_on_premium_mismatch_or_wrong_rwl_count():
     mismatch = evaluate_done_checklist(_complete_evidence(pdf_premium=Decimal("10.00")))
     assert mismatch.status == STATUS_PARTIAL
     assert "premium_match" in mismatch.missing
+    assert "Policy Total" in " ".join(mismatch.reasons)
+
+    two_rwl = evaluate_done_checklist(_complete_evidence(pending_rwl_count=2))
+    assert two_rwl.status == STATUS_PARTIAL
+    assert "exactly_one_pending_rwl" in two_rwl.missing
+
+    bound = evaluate_done_checklist(_complete_evidence(bound=True))
+    assert bound.status == STATUS_BLOCKED
+    assert "bind_must_be_false" in bound.missing
+
+
+def test_done_checklist_rejects_coverage_a_when_pdf_policy_total_differs():
+    """Benli: keyed/stored $1,116 (Coverage A) must not COMPLETE vs Policy Total $1,348."""
+    assert extract_policy_total_premium(BENLI_HYUNDAI_DEC_TEXT) == Decimal("1348.00")
+    result = evaluate_done_checklist(
+        _complete_evidence(
+            pdf_premium=Decimal("1116.00"),
+            keyed_premium=Decimal("1116.00"),
+            firmed_pdf_text=BENLI_HYUNDAI_DEC_TEXT,
+        )
+    )
+    assert result.status == STATUS_PARTIAL
+    assert result.complete is False
+    assert "premium_match" in result.missing
+    reasons = " ".join(result.reasons)
+    assert "1,116.00" in reasons
+    assert "1,348.00" in reasons
+    assert "Policy Total" in reasons
+    assert result.status != STATUS_COMPLETE
+
+
+def test_done_checklist_complete_when_keyed_matches_policy_total():
+    result = evaluate_done_checklist(
+        _complete_evidence(
+            pdf_premium=Decimal("1116.00"),
+            keyed_premium=Decimal("1348.00"),
+            firmed_pdf_text=BENLI_HYUNDAI_DEC_TEXT,
+        )
+    )
+    assert result.status == STATUS_COMPLETE
+    assert result.complete is True
+
 
     two_rwl = evaluate_done_checklist(_complete_evidence(pending_rwl_count=2))
     assert two_rwl.status == STATUS_PARTIAL
