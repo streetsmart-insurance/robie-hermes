@@ -289,18 +289,17 @@ def file_single_reply(
         policy_numbers=known_numbers,
     )
     if not matched or not matched.get("title"):
-        logger.warning(
+        logger.info(
             f"No existing titled renewal discussion for applicant {policy.applicant_id} "
-            f"/ Pol #{policy.policy_number}; refusing orphan card creation."
+            f"/ Pol #{policy.policy_number}; defaulting to 'Email recieved by Robie'."
         )
-        return {
-            "status": "skipped",
-            "reason": "no_existing_titled_discussion",
-            "message_id": message_id,
-            "policy_number": policy.policy_number,
-        }
-
-    discussion_title = matched["title"]
+        discussion_title = "Email recieved by Robie"
+        require_existing = False
+        honor_explicit = True
+    else:
+        discussion_title = matched["title"]
+        require_existing = True
+        honor_explicit = False
     thread = db.query(OutreachThread).filter(OutreachThread.policy_id == policy.id).first()
     tracking_code = thread.tracking_code if thread else f"RENEWAL-REQ-{policy.id}"
 
@@ -384,7 +383,8 @@ def file_single_reply(
         policy_number=policy.policy_number,
         line_of_business=policy.line_of_business,
         carrier_name=policy.carrier_name,
-        require_existing_discussion=True,
+        require_existing_discussion=require_existing,
+        honor_explicit_title=honor_explicit,
         policy_numbers=known_numbers,
     )
     if isinstance(note_res, dict) and isinstance(note_res.get("discussion_title"), str):
