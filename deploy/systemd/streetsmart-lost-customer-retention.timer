@@ -1,0 +1,13 @@
+[Unit]
+Description=Run StreetSmart lost-customer retention review monthly
+
+[Timer]
+OnCalendar=*-*-05 08:00:00 America/New_York
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=streetsmart-lost-customer-retention.service
+
+[Install]
+WantedBy=timers.target
+

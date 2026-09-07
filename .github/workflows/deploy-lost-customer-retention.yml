@@ -1,0 +1,60 @@
+name: Deploy monthly lost-customer retention workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: inspect, deploy, dry-run, or backfill-send
+        required: true
+        type: choice
+        options: [inspect, deploy, dry-run, backfill-send]
+      confirmation:
+        description: Type APPROVE_LOST_CUSTOMER_RETENTION_PRODUCTION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: robie-lost-customer-retention-production
+  cancel-in-progress: false
+
+jobs:
+  production:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'APPROVE_LOST_CUSTOMER_RETENTION_PRODUCTION'
+    environment: Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      VM: hermes-poc-01
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - name: Inspect existing cloud jobs
+        run: |
+          gcloud compute ssh "${VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='set -e; test "$(hostname -s)" = hermes-poc-01; systemctl list-timers --all --no-pager | grep -Ei "lost.customer|retention" || true; systemctl status streetsmart-lost-customer-retention.timer --no-pager || true; test ! -e /etc/systemd/system/monthly-lost-customer-retention-review.timer || { echo DUPLICATE_LOCAL_STYLE_TIMER; exit 3; }'
+      - name: Deploy exact dedicated files
+        if: inputs.operation == 'deploy'
+        run: |
+          stage="/var/tmp/lost-customer-retention-${GITHUB_SHA}"
+          gcloud compute ssh "${VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command="mkdir -p '${stage}'"
+          gcloud compute scp --recurse --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap robie_job_engine/lost_customer_retention.py scripts/run_lost_customer_retention.py scripts/install-lost-customer-retention-production.sh deploy/systemd/streetsmart-lost-customer-retention.service deploy/systemd/streetsmart-lost-customer-retention.timer deploy/accountability/lost-customer-retention-config.example.json "${VM}:${stage}/"
+          gcloud compute ssh "${VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command="set -e; sudo install -o root -g root -m 0644 '${stage}/lost_customer_retention.py' /opt/streetsmart-hermes/releases/current/robie_job_engine/lost_customer_retention.py; sudo install -o root -g root -m 0755 '${stage}/run_lost_customer_retention.py' /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py; sudo install -o root -g root -m 0755 '${stage}/install-lost-customer-retention-production.sh' /opt/streetsmart-hermes/releases/current/scripts/install-lost-customer-retention-production.sh; sudo install -o root -g root -m 0644 '${stage}/streetsmart-lost-customer-retention.service' /opt/streetsmart-hermes/releases/current/deploy/systemd/streetsmart-lost-customer-retention.service; sudo install -o root -g root -m 0644 '${stage}/streetsmart-lost-customer-retention.timer' /opt/streetsmart-hermes/releases/current/deploy/systemd/streetsmart-lost-customer-retention.timer; sudo install -o root -g root -m 0644 '${stage}/lost-customer-retention-config.example.json' /opt/streetsmart-hermes/releases/current/deploy/accountability/lost-customer-retention-config.example.json; sudo bash /opt/streetsmart-hermes/releases/current/scripts/install-lost-customer-retention-production.sh"
+      - name: Run non-destructive validation
+        if: inputs.operation == 'dry-run'
+        run: |
+          gcloud compute ssh "${VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='sudo -u streetsmart-hermes env PYTHONPATH=/opt/streetsmart-hermes/releases/current ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="$(sudo sed -n "s/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p" /etc/streetsmart-hermes/robie-accountability.env | tail -1)" /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py --dry-run'
+      - name: Run authorized one-time backfill send
+        if: inputs.operation == 'backfill-send'
+        run: |
+          gcloud compute ssh "${VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='sudo systemctl start streetsmart-lost-customer-retention.service; sudo systemctl status streetsmart-lost-customer-retention.service --no-pager; sudo cat /opt/streetsmart-hermes/lost-customer-retention/state.json'
