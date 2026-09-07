@@ -101,8 +101,10 @@ changing the team-delivery gate:
 - RingCentral `Yesterday Calls`: active, Excel, Queues/Users/Calls, Robie
   recipient, daily at 6:00 AM.
 - RingCentral `Robie last week calls`: active, Excel, Queues/Users/Calls,
-  Robie recipient, Monday at 6:00 AM. This is the post-weekend fallback source;
-  the ingest gate must still select the exact requested business date.
+  Robie recipient, daily at 6:00 AM. This is the post-weekend and post-holiday
+  fallback source; daily delivery is necessary because a Monday-only delivery
+  cannot supply Friday evidence to a Tuesday run after a Monday holiday. The
+  ingest gate must still select the exact requested business date.
 - EZLynx `Robie - EZLynx Activities`: Activity Detail look 546, XLSX, weekdays
   at 6:00 AM, Robie recipient, all results.
 - EZLynx `Robie - EZLynx Overdue Tasks`: Activity Detail look 546, XLSX,
