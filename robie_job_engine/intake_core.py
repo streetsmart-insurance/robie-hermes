@@ -151,7 +151,11 @@ class IntakeWorker:
         self.api = api
         self.archive = archive
 
-    def perform(self, source: SourceItem, identifiers: Identifiers, *, assignee_id: str, due_at: str) -> WorkerResult:
+    def assignment_for(self, applicant, policy, assignee_id, request_type):
+        return assignee_id, ""
+
+    def perform(self, source: SourceItem, identifiers: Identifiers, *, assignee_id: str = "", due_at: str,
+                request_type: str = "") -> WorkerResult:
         action = "intake." + self.process
         detail: dict[str, Any] = {}
         try:
@@ -160,12 +164,13 @@ class IntakeWorker:
                 raise IntakeHold("Source belongs to a different intake system")
             artifact = self.archive.preserve(source)
             detail = {"source_artifact": str(artifact), "source_key": source.key, "manual_upload_pending": True}
-            if not assignee_id.strip():
-                raise IntakeHold("A configured Phase 1 assignee ID is required")
             if datetime.fromisoformat(due_at.replace("Z", "+00:00")).tzinfo is None:
                 raise IntakeHold("Task due time requires a timezone")
             applicant, policy = resolve_match(identifiers, self.api.lookup_candidates(identifiers))
             require_allowed_ezlynx_write_applicant(applicant)
+            assignee_id, routing_note = self.assignment_for(applicant, policy, assignee_id, request_type)
+            if not assignee_id.strip():
+                raise IntakeHold("A configured Phase 1 assignee ID is required")
             assignees = self.api.lookup_assignee(assignee_id).checked()
             if len(assignees) != 1 or assignees[0].get("user_id") != assignee_id or assignees[0].get("active") is not True:
                 raise IntakeHold("Assignee is missing, ambiguous or inactive")
@@ -176,6 +181,7 @@ class IntakeWorker:
                 "source_url": source.source_url, "process": self.process,
                 "title": self.title, "manual_upload_required": True,
                 "description": (
+                    routing_note +
                     f"Source: {source.source_url}\nReceived: {source.received_at}\n"
                     f"Original file: {source.filename}\nSource key: {source.key}\n"
                     "MANUAL UPLOAD REQUIRED: retrieve the preserved original, upload it to this "

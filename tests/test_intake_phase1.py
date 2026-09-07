@@ -35,6 +35,9 @@ class FakeApi:
 
     def lookup_candidates(self, identifiers): return self.candidates
     def lookup_assignee(self, user_id): return self.assignees
+    def lookup_hello_owner(self, applicant, policy, request_type):
+        return read(dict(applicant_id=applicant, policy_id=policy, user_id='test-reviewer',
+                         role='originating_producer' if request_type == 'new_business' else 'applicable_csr'))
     def find_source_tasks(self, key): return read(*[v for v in self.tasks.values() if v['source_key'] == key])
     def find_related_work(self, *args): return self.related
     def create_task_once(self, task):
@@ -66,6 +69,8 @@ class IntakePhase1Tests(unittest.TestCase):
         self.due = '2026-09-08T10:00:00-04:00'
 
     def run_worker(self, worker=CertificatesIntake, **kwargs):
+        if worker is HelloIntake:
+            kwargs.setdefault('request_type', 'new_business')
         return worker(self.api, self.archive).perform(
             kwargs.pop('source', self.source), kwargs.pop('identifiers', self.ids),
             assignee_id=kwargs.pop('assignee_id', 'test-reviewer'), due_at=kwargs.pop('due_at', self.due), **kwargs)
@@ -123,7 +128,8 @@ class IntakePhase1Tests(unittest.TestCase):
         for cls in (CertificatesIntake, HelloIntake):
             result = cls(self.api, self.archive).run_selected(
                 gmail, mailbox='intake@example.test', message_id=cls.process,
-                identifiers=self.ids, assignee_id='test-reviewer', due_at=self.due)
+                identifiers=self.ids, assignee_id='test-reviewer', due_at=self.due,
+                **({'request_type': 'new_business'} if cls is HelloIntake else {}))
             self.assertTrue(result.succeeded, result.error)
             self.assertEqual(result.destination['process'], cls.process)
 

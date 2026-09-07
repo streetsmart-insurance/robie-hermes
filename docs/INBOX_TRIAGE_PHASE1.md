@@ -1,5 +1,10 @@
 # Phase 1 inbox triage — Test implementation and integration handoff
 
+**Hello update:** Carlo's later separate handoff moves human-confirmed
+Producer/CSR routing into Phase 1 for Hello. See [HELLO_INTAKE_HANDOFF.md](HELLO_INTAKE_HANDOFF.md)
+for the superseding Hello contract; Phase 2 still owns automatic classification.
+The original explicit-assignee plan below continues to apply to the other flows.
+
 This candidate contains three separate Python builds and their shared intake
 contracts. It is not connected to the live EZLynx API, not registered in the
 production Job Engine, and not an installed inbox automation. No live task has
