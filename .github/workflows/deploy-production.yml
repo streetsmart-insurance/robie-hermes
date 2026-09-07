@@ -210,7 +210,8 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
       - name: Inspect for existing lost-customer jobs
         run: |
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='set -e; test "$(hostname -s)" = hermes-poc-01; systemctl list-timers --all --no-pager | grep -Ei "lost.customer|retention" || true; systemctl status streetsmart-lost-customer-retention.timer --no-pager || true; test ! -e /etc/systemd/system/monthly-lost-customer-retention-review.timer || { echo DUPLICATE_LOCAL_STYLE_TIMER; exit 3; }'
+          echo "vm_service_accounts=$(gcloud compute instances describe "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(serviceAccounts.email)' | tr '\n' ',')"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='set -e; test "$(hostname -s)" = hermes-poc-01; systemctl list-timers --all --no-pager | grep -Ei "lost.customer|retention" || true; systemctl status streetsmart-lost-customer-retention.timer --no-pager || true; systemctl show streetsmart-lost-customer-retention.timer -p Unit -p NextElapseUSecRealtime -p LastTriggerUSec --no-pager || true; systemctl show streetsmart-lost-customer-retention.service -p ExecStart -p User -p Group -p WorkingDirectory --no-pager || true; test ! -e /etc/systemd/system/monthly-lost-customer-retention-review.timer || { echo DUPLICATE_LOCAL_STYLE_TIMER; exit 3; }'
       - name: Install dedicated lost-customer service and timer
         if: inputs.lost_customer_operation == 'deploy'
         run: |
