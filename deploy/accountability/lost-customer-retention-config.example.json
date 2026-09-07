@@ -1,0 +1,13 @@
+{
+  "spreadsheet_id": "1Lo1NTbURH3tKoBvQXelT432uo1A-_DkGiR5E5faiEXA",
+  "sender": "robie@streetsmart.insurance",
+  "state_path": "/opt/streetsmart-hermes/lost-customer-retention/state.json",
+  "recipients": {
+    "commercial": "sandy@streetsmart.insurance",
+    "personal": "ashley@streetsmart.insurance",
+    "trucking": "gabrielac@streetsmart.insurance",
+    "carlo": "carlo@streetsmart.insurance",
+    "jake": "jake@streetsmart.insurance"
+  }
+}
+
