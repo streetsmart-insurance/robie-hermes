@@ -169,8 +169,9 @@ def collect_magellan_snapshot(
             first_id = page.locator(ROW_SELECTOR).first.get_attribute("data-testid")
             page.locator("li.ant-pagination-next button, li.ant-pagination-next a").click()
             page.wait_for_function(
-                "([selector, prior]) => document.querySelector(selector)?.getAttribute('data-testid') !== prior",
-                [ROW_SELECTOR, first_id],
+                "([selector, prior]) => { const row = document.querySelector(selector); "
+                "return row !== null && row.getAttribute('data-testid') !== prior; }",
+                arg=[ROW_SELECTOR, first_id],
             )
         if not older_boundary and _next_enabled(page):
             raise RuntimeError("Magellan pagination limit reached before the target-date boundary")

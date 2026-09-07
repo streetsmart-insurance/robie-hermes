@@ -89,31 +89,34 @@ def parse_overdue_activity_detail(
     roster = {_key(name): dept for name, dept in (employee_departments or {}).items()}
     candidates: dict[str, tuple[datetime, int, Mapping[str, Any]]] = {}
     for row_number, row in enumerate(_rows(source), start=2):
-        status = _value(row, "Task Status", "Status")
-        if status.casefold() not in {"open", "overdue", "past due"}:
-            continue
         due_at = parse_datetime(_value(row, "Task Due Date", "Due Date", "Date Due"))
-        if due_at is None or due_at.date() >= as_of:
-            continue
         task_id = _value(row, "Task ID")
         if not task_id:
             task_id = "fallback:" + "|".join((
                 _value(row, "Applicant ID"),
                 _value(row, "Task Assigned To", "Assigned To"),
-                due_at.date().isoformat(),
+                due_at.date().isoformat() if due_at else "",
                 _value(row, "Task Created Date", "Created Date"),
             ))
         evidence_at = (
-            parse_datetime(_value(row, "Created Date", "Task Last Modified Date"))
-            or parse_datetime(_value(row, "Task Last Modified Date"))
+            parse_datetime(_value(row, "Task Last Modified Date", "Modified Date"))
+            or parse_datetime(_value(row, "Created Date"))
             or datetime.min.replace(tzinfo=timezone.utc)
         )
         prior = candidates.get(task_id)
-        if prior is None or evidence_at > prior[0]:
+        note_at = parse_datetime(_value(row, "Created Date")) or datetime.min.replace(tzinfo=timezone.utc)
+        prior_note_at = (parse_datetime(_value(prior[2], "Created Date")) if prior else None) or datetime.min.replace(tzinfo=timezone.utc)
+        if prior is None or (evidence_at, note_at) > (prior[0], prior_note_at):
             candidates[task_id] = (evidence_at, row_number, row)
 
     tasks: list[OverdueTask] = []
     for task_id, (_, row_number, row) in candidates.items():
+        # Resolve the latest task state before eligibility. Otherwise an older
+        # open row survives a closure, reschedule, or removal of the due date.
+        status = _value(row, "Task Status", "Status")
+        due_at = parse_datetime(_value(row, "Task Due Date", "Due Date", "Date Due"))
+        if status.casefold() not in {"open", "overdue", "past due"} or due_at is None or due_at.date() >= as_of:
+            continue
         owner = _value(row, "Task Assigned To", "Assigned To", "CSR", "Producer") or "Unassigned"
         report_department = _value(row, "Department")
         roster_department = roster.get(_key(owner), "")
@@ -126,7 +129,6 @@ def parse_overdue_activity_detail(
         else:
             department = "UNVERIFIED"
             evidence = "UNVERIFIED"
-        due_at = parse_datetime(_value(row, "Task Due Date", "Due Date", "Date Due"))
         created_at = parse_datetime(_value(row, "Task Created Date", "Task Created", "Date Created"))
         modified_at = parse_datetime(_value(row, "Task Last Modified Date", "Modified Date"))
         tasks.append(OverdueTask(

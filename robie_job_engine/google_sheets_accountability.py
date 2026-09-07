@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+from .business_calendar import previous_business_day
+
 
 SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
@@ -20,25 +22,16 @@ def _sheets_client() -> Any:
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
-def previous_business_day(value: date) -> date:
-    """Return the prior Monday-Friday date used by the morning report."""
-
-    candidate = value - timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate -= timedelta(days=1)
-    return candidate
-
-
-def previous_business_week_tab(value: date) -> str:
+def previous_business_week_tab(value: date, *, holiday_calendar: str | None = None) -> str:
     """Return Sandeep's Monday-Sunday tab label for the prior business day."""
 
-    target = previous_business_day(value)
+    target = previous_business_day(value, holiday_calendar=holiday_calendar)
     monday = target - timedelta(days=target.weekday())
     sunday = monday + timedelta(days=6)
     return f"{monday.month}/{monday.day}-{sunday.month}/{sunday.day}"
 
 
-def _resolved_range(value: str, *, as_of: datetime | None = None) -> str:
+def _resolved_range(value: str, *, as_of: datetime | None = None, holiday_calendar: str | None = None) -> str:
     """Resolve narrow date tokens without allowing a broad spreadsheet scan."""
 
     observed = as_of or datetime.now(ZoneInfo("America/New_York"))
@@ -48,7 +41,7 @@ def _resolved_range(value: str, *, as_of: datetime | None = None) -> str:
     return (
         value.replace("{month}", local.strftime("%B"))
         .replace("{year}", local.strftime("%Y"))
-        .replace("{previous_business_week}", previous_business_week_tab(local.date()))
+        .replace("{previous_business_week}", previous_business_week_tab(local.date(), holiday_calendar=holiday_calendar))
     )
 
 
@@ -57,6 +50,7 @@ def collect_allowlisted_tables(
     *,
     service: Any | None = None,
     as_of: datetime | None = None,
+    holiday_calendar: str | None = None,
 ) -> dict[str, Any]:
     spreadsheet_id = str(config.get("spreadsheet_id") or "").strip()
     tables = dict(config.get("tables") or {})
@@ -66,7 +60,7 @@ def collect_allowlisted_tables(
     output: dict[str, Any] = {}
     for label, raw in sorted(tables.items()):
         table = dict(raw or {})
-        range_name = _resolved_range(str(table.get("range") or "").strip(), as_of=as_of)
+        range_name = _resolved_range(str(table.get("range") or "").strip(), as_of=as_of, holiday_calendar=holiday_calendar)
         allowed = [str(item).strip() for item in table.get("allowed_columns", []) if str(item).strip()]
         if not range_name or not allowed:
             output[str(label)] = {"source_status": "missing range or allowed_columns", "rows": []}

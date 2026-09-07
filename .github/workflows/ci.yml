@@ -41,6 +41,10 @@ jobs:
             tests/test_ringcentral_email_sync.py \
             tests/test_accountability_cli.py \
             tests/test_accountability_jobs.py \
+            tests/test_business_calendar.py \
+            tests/test_department_accountability.py \
+            tests/test_google_sheets_accountability.py \
+            tests/test_magellan_collection.py \
             tests/test_accountability_dashboard.py \
             tests/test_accountability_connections.py \
             tests/test_scheduled_report_email_sync.py \
