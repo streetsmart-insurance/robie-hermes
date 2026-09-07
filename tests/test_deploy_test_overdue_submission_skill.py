@@ -21,6 +21,10 @@ def test_workflow_uses_short_lived_test_identity_and_exact_hash():
     assert "id-token: write" in content
     assert "robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com" in content
     assert 'TEST_VM: hermes-test-01' in content
+    assert 'SSH_KEY: ${{ runner.temp }}/hermes-test-skill' in content
+    assert 'for attempt in 1 2 3' in content
+    assert '--ssh-key-file="${SSH_KEY}"' in content
+    assert 'bounded Test IAP connection failed' in content
     assert "sha256sum" in content
     assert "Production deployment:" in content
     assert "false" in content
