@@ -610,6 +610,18 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         self.assertEqual(final["status"], JobStatus.UNVERIFIED)
 
     def test_chat_policy_setup_claim_without_evidence_is_not_success(self):
+        # This request now gets held for a human at intake time, before
+        # Hermes/cua-driver ever runs -- see request_routing's
+        # unbounded-EZLynx-write check and tests/test_unbounded_ezlynx_write_hold.py.
+        # That's a strictly earlier interception of the same failure this
+        # test guards against: previously the job was allowed to run, claim
+        # success, and only get corrected to FAILED after the fact via the
+        # PLAYWRIGHT_SILENT guard below. Now it never gets far enough to make
+        # the false claim in the first place. The core guarantee this test
+        # protects -- a policy-setup claim without evidence is never reported
+        # as success -- still holds; it's asserted at NEEDS_CLARIFICATION
+        # instead of FAILED. test_unbound_policy_success_claim_is_not_reported
+        # (below) still exercises the PLAYWRIGHT_SILENT guard directly.
         job_id = open_chat_job(
             str(self.store.path),
             "spaces/s/messages/policy-setup",
@@ -621,11 +633,10 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
             job_id,
             "I set up the policy. The work is done.",
         )
-        self.assertIn("FAILED", response)
+        self.assertIn("NEEDS_CLARIFICATION", response)
         self.assertNotIn("— COMPLETE", response)
         self.assertNotIn("I set up the policy", response)
-        self.assertIn("PLAYWRIGHT_SILENT", self.store.get_job(job_id)["last_error"])
-        self.assertEqual(self.store.get_job(job_id)["status"], JobStatus.FAILED)
+        self.assertEqual(self.store.get_job(job_id)["status"], JobStatus.NEEDS_CLARIFICATION)
 
     def test_unbound_policy_success_claim_is_not_reported(self):
         response = guard_chat_response(
