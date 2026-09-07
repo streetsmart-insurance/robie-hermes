@@ -16,7 +16,6 @@ from google.oauth2.credentials import Credentials
 
 # Add robie_job_engine to path
 sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
-sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
 from robie_job_engine.email_guard import run_guarded_email_task
 from robie_job_engine.ascend_workflow import AscendWorkflowManager
 
