@@ -4,6 +4,7 @@ from robie_job_engine.center_audits import (
     audit_sales_records,
     audit_retention_records,
     audit_submission_records,
+    enrich_sales_last_touches,
     parse_retention_csv,
     parse_sales_csv,
     parse_submission_csv,
@@ -73,6 +74,23 @@ def test_sales_audit_flags_open_producer_opportunity_without_recent_touch():
     assert findings[0].producer == "Alexis Martinez"
     assert findings[0].days_since_touch == 10
     assert "threshold 5" in findings[0].reasons[0]
+
+
+def test_sales_center_assigned_producer_and_lead_source_are_authoritative():
+    records = parse_sales_csv(
+        "Applicant ID,Account Name,Assigned Producer,Producer,Lead Channel,Department,Opportunity Status,Opportunity Created Date\n"
+        "A-1,Example Risk,Sales Owner,Account Producer,Referral,Personal Lines,Quoting,08/01/2026\n"
+    )
+    assert records[0].producer == "Sales Owner"
+    assert records[0].lead_source == "Referral"
+    assert records[0].department == "Personal Lines"
+
+    enriched = enrich_sales_last_touches(
+        records,
+        "Applicant ID,Created Date,Note\nA-1,08/29/2026 4:00 PM,Producer called client\n",
+    )
+    assert enriched[0].last_activity_at.date().isoformat() == "2026-08-29"
+    assert "Applicant ID" in enriched[0].last_touch_evidence
 
 
 def test_vague_note_is_a_signal_not_a_keyword_only_rule():

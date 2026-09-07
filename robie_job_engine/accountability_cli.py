@@ -9,7 +9,14 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
+from .accountability_evidence import (
+    audit_task_details,
+    parse_activity_evidence,
+    reconcile_service_calls,
+    resolution_dicts,
+)
 from .center_audits import (
     audit_sales_records,
     audit_retention_records,
@@ -49,9 +56,9 @@ def _parse_timestamp(value: str) -> Optional[datetime]:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         pass
-    for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S"):
+    for fmt in ("%a %m/%d/%Y %I:%M %p", "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(value, fmt).replace(tzinfo=ZoneInfo("America/New_York"))
         except ValueError:
             continue
     return None
@@ -74,33 +81,48 @@ def _duration_seconds(value: str) -> int:
     return 0
 
 
-def _call_from_row(row: dict[str, Any], row_number: int) -> tuple[RingCentralCall | None, str | None]:
-    timestamp = _parse_timestamp(_first(row, "Call Start Time", "Start Time", "StartTime", "Date/Time", "Time"))
+def _call_from_row(
+    row: dict[str, Any],
+    row_number: int,
+    *,
+    inherited: Optional[dict[str, str]] = None,
+    parent_call_id: str = "",
+) -> tuple[RingCentralCall | None, str | None]:
+    inherited = inherited or {}
+    timestamp_text = _first(row, "Call Start Time", "Start Time", "StartTime", "Date/Time")
+    if not timestamp_text:
+        row_date = _first(row, "Date") or inherited.get("date", "")
+        row_time = _first(row, "Time") or inherited.get("time", "")
+        timestamp_text = f"{row_date} {row_time}".strip()
+    timestamp = _parse_timestamp(timestamp_text)
     if timestamp is None:
         return None, f"row {row_number}: missing or invalid timestamp"
-    direction = _first(row, "Direction", "Call Direction")
+    direction = _first(row, "Direction", "Call Direction") or inherited.get("direction", "")
     employee = _first(row, "Employee", "User", "Name", "Extension Name", "Answered By")
     if not employee:
         employee = _first(row, "To Name") if direction.casefold().startswith("in") else _first(row, "From Name")
-    result = _first(row, "Result", "Action", "Call Result", "Disposition")
+    result = _first(row, "Action Result", "Result", "Action", "Call Result", "Disposition")
     answered_by = _first(row, "Answered By", "Connected To", "Forwarded To")
     if not answered_by and direction.casefold().startswith("in") and any(
         token in result.casefold() for token in ("connect", "answer", "success")
     ):
         answered_by = _first(row, "To Name")
     data = {
-        "call_id": _first(row, "Call ID", "Session ID", "Session Id", "ID") or f"ringcentral-row-{row_number}",
+        "call_id": _first(row, "Call ID", "Session ID", "Session Id", "ID") or parent_call_id or f"ringcentral-row-{row_number}",
         "direction": direction,
-        "from_number": _first(row, "From", "From Number", "Caller ID"),
-        "to_number": _first(row, "To", "To Number", "Dialed Number"),
+        "from_number": _first(row, "From", "From Number", "Caller ID") or inherited.get("from", ""),
+        "to_number": _first(row, "To", "To Number", "Dialed Number") or inherited.get("to", ""),
         "result": result,
         "duration_seconds": _duration_seconds(_first(row, "Call Length", "Duration", "Duration Seconds", "Talk Time")),
+        "handle_seconds": _duration_seconds(_first(row, "Handle Time", "Talk Time")),
+        "duration_source": "Call Length",
         "start_time": timestamp,
         "extension": _first(row, "Extension", "Extension ID"),
         "employee_name": employee,
         "queue_name": _first(row, "Queue", "Queue Name", "Call Queue", "Called Queue"),
         "answered_by": answered_by,
-        "queue_wait_seconds": _duration_seconds(_first(row, "Queue Wait Time", "Wait Time", "Hold Time")),
+        "queue_wait_seconds": _duration_seconds(_first(row, "Queue Wait Time", "Time to Answer", "Wait Time")),
+        "hold_seconds": _duration_seconds(_first(row, "Hold Time", "Hold Duration", "On Hold Time")),
     }
     return RingCentralCall.from_dict(data), None
 
@@ -109,8 +131,21 @@ def _calls_from_rows(rows: list[dict[str, Any]]) -> tuple[list[RingCentralCall],
     calls: list[RingCentralCall] = []
     errors: list[str] = []
     seen: set[tuple[Any, ...]] = set()
+    parent_sequence = 0
+    inherited: dict[str, str] = {}
+    parent_call_id = ""
     for row_number, row in enumerate(rows, start=2):
-        call, error = _call_from_row(row, row_number)
+        if _first(row, "Type"):
+            parent_sequence += 1
+            parent_call_id = _first(row, "Call ID", "Session ID", "Session Id", "ID") or f"ringcentral-parent-{parent_sequence}"
+            inherited = {
+                "direction": _first(row, "Direction", "Call Direction"),
+                "from": _first(row, "From", "From Number", "Caller ID"),
+                "to": _first(row, "To", "To Number", "Dialed Number"),
+                "date": _first(row, "Date"),
+                "time": _first(row, "Time"),
+            }
+        call, error = _call_from_row(row, row_number, inherited=inherited, parent_call_id=parent_call_id)
         if error:
             errors.append(error)
             continue
@@ -119,6 +154,7 @@ def _calls_from_rows(rows: list[dict[str, Any]]) -> tuple[list[RingCentralCall],
             call.call_id, call.direction, call.from_number, call.to_number,
             call.result, call.duration_seconds, call.start_time.isoformat(),
             call.extension, call.employee_name, call.queue_name, call.answered_by,
+            call.handle_seconds, call.hold_seconds, call.queue_wait_seconds,
         )
         if fingerprint in seen:
             continue
@@ -142,12 +178,17 @@ def load_ringcentral_source(
     if path.suffix.casefold() == ".csv":
         calls, errors = load_ringcentral_csv(path)
         errors.append("legacy CSV lacks current-user/current-queue coverage proof")
-        return calls, errors, {"format": "csv", "coverage_verified": False}
+        return calls, errors, {"format": "csv", "coverage_verified": False, "call_columns": []}
     if path.suffix.casefold() == ".xlsx":
         workbook = read_workbook(path, required_sheets=("Calls",))
         calls, errors = _calls_from_rows(workbook["tables"]["Calls"]["rows"])
         errors.append("direct XLSX lacks a checksum-bound collection manifest and coverage proof")
-        return calls, errors, {"format": "xlsx", "coverage_verified": False, "workbooks": [workbook]}
+        return calls, errors, {
+            "format": "xlsx",
+            "coverage_verified": False,
+            "workbooks": [workbook],
+            "call_columns": workbook["tables"]["Calls"]["columns"],
+        }
     if path.suffix.casefold() != ".json":
         raise ValueError("RingCentral evidence must be CSV, XLSX, or a collector JSON manifest")
     evidence = load_evidence_manifest(path, expected_kind=expected_kind, as_of=as_of)
@@ -173,6 +214,11 @@ def load_ringcentral_source(
         "queue_rows": queue_rows,
         "user_rows": user_rows,
         "attachment_sha256": [item["sha256"] for item in evidence["attachments"]],
+        "call_columns": sorted({
+            column
+            for workbook in evidence["workbooks"]
+            for column in (((workbook.get("tables") or {}).get("Calls") or {}).get("columns") or [])
+        }),
     }
 
 
@@ -296,13 +342,48 @@ def _call_report(
     tasks = EZLynxProductivityParser.parse_tasks_csv(tasks_path) if tasks_path and tasks_path.exists() else None
     activities = EZLynxProductivityParser.parse_activities_csv(activities_path) if activities_path and activities_path.exists() else None
     audit = ProductivityAuditor().generate_audit(calls, tasks=tasks, activities=activities, reference_time=as_of)
+    activity_evidence = (
+        parse_activity_evidence(activities_path)
+        if activities_path and activities_path.exists()
+        else []
+    )
+    service_resolutions = resolution_dicts(reconcile_service_calls(
+        calls,
+        as_of=as_of,
+        activity_events=activity_evidence,
+    ))
+    legacy_incidents = {
+        str(item.get("call_id") or ""): item
+        for item in audit.get("incidents", [])
+    }
     reports = audit.get("employee_reports", {})
     employee_rows: list[dict[str, Any]] = []
     rep_stats: dict[str, dict[str, Any]] = {}
     for employee, report in reports.items():
         inbound_total = report.get("inbound_total", 0)
         answer_rate = round(report.get("inbound_answered", 0) / inbound_total * 100, 1) if inbound_total else None
-        unreturned = report.get("missed_calls_orphaned", 0)
+        unreturned = sum(
+            item.get("status") == "UNRESOLVED"
+            and str(item.get("assigned_employee") or "").casefold() == employee.casefold()
+            for item in service_resolutions
+        )
+        employee_calls = [call for call in calls if call.employee_name.casefold() == employee.casefold()]
+        direct_inbound_handle = sum(
+            call.handle_seconds for call in employee_calls
+            if call.direction == "Inbound" and not call.queue_name and call.result == "Call connected"
+        )
+        queue_inbound_handle = sum(
+            call.handle_seconds for call in employee_calls
+            if call.direction == "Inbound" and call.queue_name and call.result == "Call connected"
+        )
+        connected_outbound = sum(
+            call.duration_seconds for call in employee_calls
+            if call.direction == "Outbound" and call.result == "Call connected"
+        )
+        measured_calls = sum(
+            call.result == "Call connected" for call in employee_calls
+        )
+        total_measured = direct_inbound_handle + queue_inbound_handle + connected_outbound
         employee_rows.append({
             "employee": employee,
             "calls_presented": inbound_total,
@@ -310,6 +391,11 @@ def _call_report(
             "missed_or_voicemail": report.get("inbound_missed", 0) + report.get("inbound_voicemails", 0),
             "unreturned": unreturned,
             "outbound": report.get("outbound_total", 0),
+            "direct_inbound_handle_seconds": direct_inbound_handle,
+            "queue_inbound_handle_seconds": queue_inbound_handle,
+            "outbound_connected_seconds": connected_outbound,
+            "total_measured_connected_seconds": total_measured,
+            "average_measured_connected_seconds": round(total_measured / measured_calls) if measured_calls else 0,
             "status": report.get("score_status", "UNVERIFIED"),
         })
         rep_stats[employee] = {
@@ -328,34 +414,76 @@ def _call_report(
     if evidence.get("queue_rows"):
         queue_rows, queue_errors = _queue_export_rows(evidence["queue_rows"], calls)
         row_errors.extend(queue_errors)
+    for item in service_resolutions:
+        legacy = legacy_incidents.get(str(item.get("incident_id") or ""), {})
+        risk = magellan_by_phone.get(str(legacy.get("caller_phone") or "")) or {}
+        item["magellan_sentiment"] = risk.get("sentiment")
+        item["magellan_tags"] = risk.get("tags", [])
+    unresolved = [item for item in service_resolutions if item.get("status") == "UNRESOLVED"]
+    hold_wait_exceptions = [
+        {
+            "kind": kind,
+            "call_id": call.call_id,
+            "caller_phone": call.from_number,
+            "timestamp": call.start_time.isoformat(),
+            "queue": call.queue_name,
+            "employee": call.answered_by or call.employee_name or "UNVERIFIED",
+            "measured_seconds": seconds,
+            "source_field": source_field,
+        }
+        for call in calls
+        for kind, seconds, source_field in (
+            ("HOLD_REVIEW", call.hold_seconds, "Hold Time/Hold Duration"),
+            ("QUEUE_WAIT_REVIEW", call.queue_wait_seconds, "Queue Wait Time/Time to Answer"),
+        )
+        if seconds > 120
+    ]
+    call_columns = set(evidence.get("call_columns") or [])
     call_data = {
         "source_status": "available" if calls and not row_errors else ("empty export" if not calls else f"partial: {len(row_errors)} evidence error(s)"),
         "answer_rate": "NOT EVALUABLE" if not total_inbound else f"{round(total_answered / total_inbound * 100, 1)}%",
-        "unreturned_total": sum(item["unreturned"] for item in employee_rows),
+        "unreturned_total": len(unresolved),
         "employee_rows": employee_rows,
         "queue_rows": queue_rows,
         "rep_stats": rep_stats,
+        "service_reconciliation": service_resolutions,
+        "hold_wait_exceptions": hold_wait_exceptions,
+        "duration_validation": {
+            "inbound_measure": "Handle Time",
+            "outbound_measure": "connected Call Length",
+            "hold_field_available": bool(call_columns.intersection({"Hold Time", "Hold Duration", "On Hold Time"})),
+            "queue_wait_field_available": bool(call_columns.intersection({"Queue Wait Time", "Time to Answer", "Wait Time"})),
+            "rule": "Hold and queue wait are explicit fields and are never inferred from Call Length minus Handle Time",
+        },
         "unreturned_calls": [
             {
                 "name": "Caller",
-                "phone": item.get("caller_phone", ""),
-                "rep": item.get("employee_name", "Queue"),
+                "phone": item.get("caller_phone_masked", ""),
+                "rep": item.get("assigned_employee", "Queue"),
                 "time": item.get("missed_at", ""),
-                "call_id": item.get("call_id", ""),
-                "magellan_sentiment": (magellan_by_phone.get(item.get("caller_phone", "")) or {}).get("sentiment"),
-                "magellan_tags": (magellan_by_phone.get(item.get("caller_phone", "")) or {}).get("tags", []),
+                "call_id": item.get("incident_id", ""),
+                "queue": item.get("queue", ""),
+                "magellan_sentiment": item.get("magellan_sentiment"),
+                "magellan_tags": item.get("magellan_tags", []),
             }
-            for item in audit.get("incidents", [])
-            if item.get("status") == "ORPHANED_ALERT"
+            for item in unresolved
         ],
         "row_errors": row_errors,
         "evidence_format": evidence.get("format"),
         "coverage_verified": evidence.get("coverage_verified", False),
         "attachment_sha256": evidence.get("attachment_sha256", []),
     }
+    task_details = (
+        audit_task_details(tasks_path, as_of=as_of.date())
+        if tasks_path and tasks_path.exists()
+        else {}
+    )
     task_data = {
         "source_status": "available" if tasks is not None else "not supplied",
-        "total_overdue": sum(task.overdue for task in tasks or []),
+        "total_overdue": task_details.get("overdue_total", sum(task.overdue for task in tasks or [])),
+        "open_total": task_details.get("open_total"),
+        "records_reviewed": task_details.get("records_reviewed"),
+        "exceptions": task_details.get("exceptions", []),
         "overdue_by_rep": {task.employee_name: task.overdue for task in tasks or []},
     }
     return call_data, task_data
@@ -419,7 +547,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         magellan_data=magellan_data,
     ) if roles_data.get("employees") else []
     if args.mode == "daily":
-        report = suite.build_daily_report(call_data, task_data, magellan_data, sales_data, role_rows)
+        report = suite.build_daily_report(
+            call_data,
+            task_data,
+            magellan_data,
+            sales_data,
+            role_rows,
+            _json(args.email_json),
+        )
     elif args.mode == "weekly":
         retention = _json(args.retention_summary_json)
         if args.retention and args.retention.exists():

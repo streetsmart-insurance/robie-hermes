@@ -2,8 +2,8 @@
 
 ## Schedule
 
-- Weekdays at 9:00 AM America/New_York.
-- Activity date is the previous business day; Monday uses Friday.
+- Start weekdays at 6:25 AM America/New_York.
+- Activity date is the previous business day, limited to 9:00 AM–5:00 PM America/New_York; Monday uses Friday.
 - Production collection is permitted only from the exact immutable release that passed Test and received Carlo's approval. Never direct-edit the live VM.
 
 ## Sources

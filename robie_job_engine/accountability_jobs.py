@@ -207,6 +207,22 @@ class AccountabilityReportWorker:
                     encoding="utf-8",
                 )
                 sources["submissions_json"] = str(submission_path)
+            magellan = dict(collection.get("magellan") or {})
+            if mode == "daily" and magellan.get("enabled"):
+                if report_date is None:
+                    raise RuntimeError("Magellan daily collection requires a resolved report date")
+                from .magellan_collection import collect_magellan_snapshot
+
+                magellan_path = output_dir / f"magellan-{report_date.isoformat()}-{run_at:%Y%m%dT%H%M%SZ}.json"
+                sources["magellan_json"] = str(
+                    collect_magellan_snapshot(
+                        target_date=report_date,
+                        output_path=magellan_path,
+                        cdp_url=str(magellan.get("cdp_url") or "http://127.0.0.1:9223"),
+                        project=str(magellan.get("project") or "streetsmart-hermes-poc"),
+                        max_pages=max(1, int(magellan.get("max_pages") or 40)),
+                    )
+                )
             for key, flag in SOURCE_FLAGS.items():
                 value = sources.get(key)
                 if value:

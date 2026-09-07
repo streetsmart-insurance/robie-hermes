@@ -39,7 +39,7 @@ def test_schedule_installer_creates_three_verified_schedules(tmp_path: Path):
     assert len(reread) == 3
     assert all(item["enabled"] == 1 for item in reread)
     daily = next(item for item in reread if item["action_type"] == "accountability.daily")
-    assert daily["cron_spec"] == "0 9 * * 1-5"
+    assert daily["cron_spec"] == "25 6 * * 1-5"
     assert daily["parameters"]["reporting_period"] == "previous_business_day"
 
 

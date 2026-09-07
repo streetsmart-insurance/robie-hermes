@@ -57,6 +57,11 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         key: {"configured": True, "available": Path(str(value)).expanduser().is_file(), "path": str(value)}
         for key, value in trackers.items()
     }
+    magellan_collection = dict(((manifest.get("collection") or {}).get("magellan") or {}))
+    magellan_browser = _env_ready(
+        environment,
+        ("ROBIE_MAGELLAN_USERNAME_SECRET", "ROBIE_MAGELLAN_PASSWORD_SECRET"),
+    )
     connections = {
         "ringcentral": {
             "ready": ringcentral_export["available"] or ringcentral_api or ringcentral_email_ready,
@@ -94,8 +99,10 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
             "email_sender_configured": bool(delivery.get("email_sender")),
         },
         "magellan": {
-            "ready": file_state("magellan_json")["available"],
+            "ready": file_state("magellan_json")["available"] or bool(magellan_collection.get("enabled") and magellan_browser),
             "summary_export": file_state("magellan_json"),
+            "live_collection_configured": bool(magellan_collection.get("enabled") and magellan_browser),
+            "browser_secret_references_configured": magellan_browser,
         },
         "trackers": {
             "ready": bool(tracker_states) and all(item["available"] for item in tracker_states.values()),

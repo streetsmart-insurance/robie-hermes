@@ -1,6 +1,6 @@
 ---
 name: street-smart-daily-accountability
-description: Run StreetSmart Insurance's prior-business-day accountability audit, create department reports and a visual dashboard, reconcile calls/tasks/policy changes/COIs/Sales Center, and deliver the approved digest through the gated Test-to-Production release. Use for daily accountability runs, team-lead reporting, callback audits, overdue-work analysis, or the 9 AM digest.
+description: Run StreetSmart Insurance's prior-business-day accountability audit, create department reports and a visual dashboard, reconcile calls/tasks/policy changes/COIs/Sales Center, and deliver the approved digest through the gated Test-to-Production release. Use for daily accountability runs, team-lead reporting, callback audits, overdue-work analysis, or the 6:25 AM digest.
 ---
 
 # StreetSmart Daily Accountability
@@ -29,7 +29,7 @@ Within every agency and department tab, group the readable findings in this orde
 ## Evidence rules
 
 - Use EZLynx Reports 5.0 exports, never legacy reports.
-- Report Monday–Friday, 9:00 AM–5:00 PM America/New_York. Monday uses Friday.
+- Start the automated run Monday–Friday at 6:25 AM America/New_York. Report only the prior business day's 9:00 AM–5:00 PM America/New_York activity; Monday uses Friday.
 - Accept RingCentral's generic email subject `Scheduled Reports from RingCentral` only when an attachment is explicitly labeled `Yesterday Calls`. Collect Queues, Users, and Calls XLSX attachments as one evidence bundle. Validate the date embedded in call rows or filters against the requested prior business day; never accept the newest weekend message merely because it arrived most recently.
 - Deduplicate Activity Detail history on Task ID and retain the newest evidence row.
 - Use the active AppSheet employee roster for team membership. Preserve EZLynx Department separately as the workstream.
@@ -45,6 +45,7 @@ Within every agency and department tab, group the readable findings in this orde
 - For every hold/wait exception retain caller, phone, parent session ID, leg timestamp, queue, destination/answering employee, exact measured seconds, source field, callback disposition, and EZLynx account link. If ownership exists only at parent-call level, label the owner `UNVERIFIED`.
 - Use Sales Center Assigned Producer. Do not present the producer on the customer account as the Sales Center owner.
 - Collect Submission Center through the approved read-only persistent-browser audit when Reports 5.0 offers no scheduled attachment. Preserve its All Submissions, agency, 100-row, Status-order, first-closed-row, live-red-state, day-31, link, and count-reconciliation assertions. A login/reset page is `UNVERIFIED`, never zero pending submissions.
+- Collect Magellan through its own persistent Chrome profile and CDP port, never the EZLynx profile or Carlo's daily browser. Retrieve `magellan-username` and `magellan-password` from Secret Manager, verify the authenticated dashboard, collect only the requested prior-business-day call metadata/sentiment/tags, and exclude transcripts. Expired authentication, an unverified target-date boundary, or incomplete pagination is `UNVERIFIED`, never zero sad calls.
 - Keep full client names and phone numbers in the authorized internal report.
 - Include all source rows in dedicated workbook tabs for Activity Detail, overdue Activity history, Sales Center, and RingCentral, plus complete nonblank policy-change and COI tracker rows. Do not reduce the Excel deliverable to exception-only summaries.
 - Build the Google Doc with native tabs for Agency Overview, Personal Lines, Commercial Lines, Trucking & Transportation, Operations, Executive & Unverified, Calls & Queues, Policy Changes & COIs, Sales Center — All, Overdue Tasks — All, Submissions & Magellan, and Validation & Sources.
@@ -69,6 +70,7 @@ After the email delivery succeeds, send the same reporting date and secured Driv
 - `robie_job_engine/department_accountability.py`: unique overdue tasks and department offender rankings.
 - `robie_job_engine/center_audits.py`: Sales Center assignment, lead source, aging, and Activity joins.
 - `robie_job_engine/operational_trackers.py`: original tracker request dates and age.
+- `robie_job_engine/magellan_collection.py`: read-only, target-dated Magellan sentiment collection through the dedicated persistent browser.
 - `scripts/export_daily_accountability_details.py`: evidence CSV generation.
 
 Stop and report the exact blocker when a source export, active-roster match, mailbox proof, or dashboard/export reconciliation fails. Never turn incomplete evidence into an employee finding.

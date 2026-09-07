@@ -65,7 +65,20 @@ TRACKER_DEFINITIONS: dict[str, TrackerDefinition] = {
     "policy_changes": TrackerDefinition("policy_changes", "Policy Change Request Tracker", "Service", "daily", ("Owner", "Assigned To", "Account Manager", "CSR", "Producer", "Agent"), ("Status",), ("Request Date", "Created Date", "Date Submitted"), ("Due Date", "Effective Date"), ("Notes", "Remarks", "Description"), ("Account Name", "Insured", "Client Name"), 7, "Which policy changes have exceeded seven days, who is blocking them, and who owns the next action?"),
     "referrals": TrackerDefinition("referrals", "Referrals Report - Last Week", "Sales", "weekly", ("Producer", "Assigned Agent"), ("Opportunity Status", "Opportunity Status Category"), ("Opportunity Created Date",), ("X - Date",), ("Notes",), ("Account Name",), 7, "Which referrals need follow-up, and who generated wins?"),
     "missed_calls": TrackerDefinition("missed_calls", "Missed Calls Report 2026", "All departments", "daily", ("Employee", "Rep", "Assigned To", "Queue"), ("Callback Status", "Status"), ("Missed Date", "Call Date", "Date"), ("Callback Due", "Due Date"), ("Notes", "Callback Note"), ("Caller", "Phone Number", "Client"), 1, "Were clients called back within SLA?"),
-    "coi_endorsements": TrackerDefinition("coi_endorsements", "2026 Pending COIs/Endorsements", "Service", "daily", ("Owner", "Assigned To", "Account Manager", "CSR", "Producer"), ("Status",), ("Request Date", "Created Date"), ("Due Date", "Needed By"), ("Notes", "Remarks"), ("Account Name", "Insured", "Client"), 1, "Which certificates or endorsements are late or blocked, and what does EZLynx show?"),
+    "coi_endorsements": TrackerDefinition(
+        "coi_endorsements",
+        "2026 Pending COIs/Endorsements",
+        "Service",
+        "daily",
+        ("Owner", "Assigned To", "Account Manager", "CSR", "Producer", "Agent assigned to the task."),
+        ("Status",),
+        ("Request Date", "Created Date", "Date COI was Requested", "Date"),
+        ("Due Date", "Needed By"),
+        ("Notes", "Remarks", "Requirements/Endo"),
+        ("Account Name", "Insured", "Client", "Profile"),
+        1,
+        "Which certificates or endorsements are late or blocked, and what does EZLynx show?",
+    ),
     "expirations": TrackerDefinition("expirations", "Expiration Report", "Retention", "weekly", ("Agent", "Owner", "Account Manager", "CSR", "Producer"), ("Status", "Renewal Status"), ("Created Date",), ("Renewal Date", "Expiration Date"), ("Remarks", "Notes", "Last Outreach"), ("File Name/URL", "Account Name", "Insured"), 14, "Which upcoming renewals lack documented producer/CSR outreach and a next step in EZLynx?"),
     "voicemail_email": TrackerDefinition("voicemail_email", "StreetSmart Voicemail/Email Tracker", "All departments", "weekly", ("Names Members", "Names (39) Members", "Employee", "Name"), ("Status",), ("Report Date",), ("Due Date",), ("Notes",), ("Email", "Employee", "Name"), 7, "Who has an unresolved weekly voicemail/email workload?"),
     "case_studies": TrackerDefinition("case_studies", "Case Studies", "All departments", "monthly", ("Owner", "Producer", "Account Manager"), ("Status",), ("Date", "Created Date"), ("Due Date",), ("Summary", "Notes", "Case Study"), ("Account Name", "Client"), 30, "Which verified wins or saved renewals can be shared with the team?"),
@@ -81,6 +94,7 @@ class TrackerException:
     account: str
     owner: str
     status: str
+    opened_date: Optional[str]
     age_days: Optional[int]
     due_date: Optional[str]
     severity: str
@@ -151,6 +165,7 @@ def audit_tracker_csv(
                 account=_value(row, definition.account_columns) or "Unknown employee/email",
                 owner=_value(row, definition.owner_columns) or "Unassigned",
                 status="Weekly count",
+                opened_date=report_date.isoformat(),
                 age_days=max(0, (as_of - report_date).days),
                 due_date=None,
                 severity="medium" if raw_count.isdigit() else "unknown",
@@ -169,7 +184,7 @@ def audit_tracker_csv(
         owner = _value(row, definition.owner_columns) or "Unassigned"
         ezlynx_reference = _value(
             row,
-            ("EZLynx Account ID", "EZLynx URL", "Applicant ID", "Account ID", "File Name/URL"),
+            ("EZLynx Account ID", "EZLynx URL", "Applicant ID", "Account ID", "File Name/URL", "Link"),
         ) or "UNVERIFIED"
         reasons: list[str] = []
         if due and due < as_of:
@@ -199,6 +214,7 @@ def audit_tracker_csv(
             account=_value(row, definition.account_columns) or "Unknown account/item",
             owner=owner,
             status=status,
+            opened_date=opened.isoformat() if opened else None,
             age_days=age_days,
             due_date=due.isoformat() if due else None,
             severity=severity,
