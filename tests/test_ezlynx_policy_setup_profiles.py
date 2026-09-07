@@ -33,7 +33,11 @@ def test_manifest_has_exact_testing_profiles_and_write_lock():
     assert catalog["required_checkpoints"] == list(REQUIRED_CHECKPOINTS)
     assert len(catalog["profiles"]) == 12
     assert {item["state"] for item in catalog["profiles"]} == {"Testing"}
-    assert not any(item["consequential_writes_enabled"] for item in catalog["profiles"])
+    enabled = [
+        item["id"] for item in catalog["profiles"]
+        if item["consequential_writes_enabled"]
+    ]
+    assert enabled == ["homeowners"]
 
 
 def test_repository_and_deploy_skill_packages_are_exact_mirrors():
@@ -50,7 +54,7 @@ def test_duplicate_identity_is_stable_and_uses_all_business_keys():
     assert duplicate_key(request) != duplicate_key({**request, "policy_number": "TEST-0002"})
 
 
-def test_ready_preflight_still_does_not_authorize_writes():
+def test_ready_preflight_authorizes_only_exact_synthetic_homeowners_test_save():
     result = preflight_policy_setup(
         _base(
             lob="Homeowners",
@@ -58,11 +62,41 @@ def test_ready_preflight_still_does_not_authorize_writes():
             coverages={"A": "sanitized"},
             deductibles={"all_peril": "sanitized"},
             replacement_cost_basis="Replacement Cost",
+            environment="TEST",
+            premium="$1.00",
+            synthetic_fixture=True,
+            save_authorized=True,
         )
     )
     assert result.status == READY
     assert result.duplicate_key
-    assert result.consequential_writes_enabled is False
+    assert result.consequential_writes_enabled is True
+
+
+def test_homeowners_write_scope_fails_closed_outside_exact_test_contract():
+    base = _base(
+        lob="Homeowners",
+        property_location="SANITIZED LOCATION",
+        coverages={"A": "sanitized"},
+        deductibles={"all_peril": "sanitized"},
+        replacement_cost_basis="Replacement Cost",
+        environment="TEST",
+        premium="1.00",
+        synthetic_fixture=True,
+        save_authorized=True,
+    )
+    mutations = (
+        {"environment": "PRODUCTION"},
+        {"applicant_id": "220250094"},
+        {"policy_number": "REAL-HO-0001"},
+        {"premium": "1796.00"},
+        {"synthetic_fixture": False},
+        {"save_authorized": False},
+    )
+    for mutation in mutations:
+        result = preflight_policy_setup({**base, **mutation})
+        assert result.status == NEEDS_CLARIFICATION
+        assert result.consequential_writes_enabled is False
 
 
 def test_unresolved_rules_fail_closed():

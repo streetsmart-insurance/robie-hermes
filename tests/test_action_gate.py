@@ -188,16 +188,16 @@ class ActionGateTests(unittest.TestCase):
                     consumed = dispatch_operational_chat(
                         db, job_id, hermes=lambda: hermes.append("hermes")
                     )
-            store = JobStore(db)
-            job = store.get_job(job_id)
-            self.assertEqual(job["status"], JobStatus.FAILED.value)
-            self.assertIn("ASCEND_UNAVAILABLE", job["last_error"])
-            self.assertNotIn("PLAYWRIGHT_BLOCKED", job["last_error"])
-            self.assertFalse(is_action_gate_refusal(job))
-            self.assertTrue(consumed)
-            self.assertEqual(hermes, [])
-            self.assertIsNone(RecordingStore(db).latest(job_id))
-            self.assertFalse(has_clean_test_pass(CREATE_PROGRAM_ACTION))
+                store = JobStore(db)
+                job = store.get_job(job_id)
+                self.assertEqual(job["status"], JobStatus.FAILED.value)
+                self.assertIn("ASCEND_UNAVAILABLE", job["last_error"])
+                self.assertNotIn("PLAYWRIGHT_BLOCKED", job["last_error"])
+                self.assertFalse(is_action_gate_refusal(job))
+                self.assertTrue(consumed)
+                self.assertEqual(hermes, [])
+                self.assertIsNone(RecordingStore(db).latest(job_id))
+                self.assertFalse(has_clean_test_pass(CREATE_PROGRAM_ACTION))
 
     def test_test_env_fails_closed_when_ascend_is_excluded(self):
         with durable_temporary_directory() as tmp:
@@ -205,16 +205,18 @@ class ActionGateTests(unittest.TestCase):
             with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
                 job_id = open_chat_job(
                     db,
-                    "spaces/s/messages/test-allow",
+                    "spaces/s/messages/807f8920-shaped",
                     CHAT_SHAPED_ASCEND,
                     requested_by="Carlo Ferrara",
-                    conversation_id="spaces/action-gate-test",
+                    conversation_id="spaces/action-gate",
                 )
-            job = JobStore(db).get_job(job_id)
-            self.assertEqual(job["action_type"], "hermes.unavailable")
+                consumed = dispatch_operational_chat(db, job_id)
+            store = JobStore(db)
+            job = store.get_job(job_id)
             self.assertEqual(job["status"], JobStatus.FAILED.value)
             self.assertIn("ASCEND_UNAVAILABLE", job["last_error"])
             self.assertFalse(is_action_gate_refusal(job))
+            self.assertTrue(consumed)
 
     def test_recorded_clean_test_pass_unblocks_production_n1(self):
         with durable_temporary_directory() as tmp:
@@ -239,27 +241,17 @@ class ActionGateTests(unittest.TestCase):
                 self.assertIsNone(reason)
 
     def test_leftover_production_ids_cannot_retry_around_the_gate(self):
-        leftover = hold_reason_for_job(
-            {
-                "id": "807f8920-aaaa-bbbb",
-                "action_type": "hermes.google_chat_task",
-                "payload": {"text": "RETRY"},
-            },
-            env="PRODUCTION",
-        )
-        self.assertIsNotNone(leftover)
-        self.assertIn("807f8920", leftover or "")
-        self.assertIn(REFUSAL_TOKEN, leftover or "")
-        other = hold_reason_for_job(
-            {
-                "id": "38c0fa79",
-                "action_type": "hermes.google_chat_task",
-                "payload": {"text": CHAT_SHAPED_ASCEND},
-            },
-            env="PRODUCTION",
-        )
-        self.assertIsNotNone(other)
-        self.assertIn("38c0fa79", other or "")
+        for job_id in ("807f8920-legacy", "38c0fa79-legacy"):
+            reason = hold_reason_for_job(
+                {
+                    "id": job_id,
+                    "action_type": "hermes.google_chat_task",
+                    "payload": {"text": CHAT_SHAPED_ASCEND},
+                },
+                env="PRODUCTION",
+            )
+            self.assertIsNotNone(reason)
+            self.assertIn("Carlo will not RETRY", reason or "")
 
     def test_engine_refuses_before_worker_and_api_request(self):
         calls = {"n": 0}
@@ -271,17 +263,20 @@ class ActionGateTests(unittest.TestCase):
 
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
+            passes = Path(tmp) / "passes"
+            passes.mkdir()
             store = JobStore(db)
             job = store.create_job(
                 "hermes.google_chat_task",
                 {"text": CHAT_SHAPED_ASCEND, "worker": "hermes-cua"},
             )
-            with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
-                engine = JobEngine(store, {"hermes-cua": Worker()}, {})
-                final = engine.run(job["id"])
-                pw = refuse_playwright_start(
-                    'page.goto("https://dashboard.useascend.com/create/new")'
-                )
+            with patch("robie_job_engine.action_gate.PASSES_DIR", passes):
+                with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+                    engine = JobEngine(store, {"hermes-cua": Worker()}, {})
+                    final = engine.run(job["id"])
+                    pw = refuse_playwright_start(
+                        'page.goto("https://dashboard.useascend.com/create/new")'
+                    )
             self.assertEqual(final["status"], JobStatus.FAILED.value)
             self.assertIn(REFUSAL_TOKEN, final["last_error"])
             self.assertEqual(calls["n"], 0)
@@ -292,13 +287,16 @@ class ActionGateTests(unittest.TestCase):
     def test_apply_action_gate_is_the_one_place_chat_must_pass(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
+            passes = Path(tmp) / "passes"
+            passes.mkdir()
             store = JobStore(db)
             job = store.create_job(
                 "hermes.google_chat_task",
                 {"text": CHAT_SHAPED_ASCEND},
             )
-            with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
-                refused = apply_action_gate(store, job)
+            with patch("robie_job_engine.action_gate.PASSES_DIR", passes):
+                with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+                    refused = apply_action_gate(store, job)
             self.assertIsNotNone(refused)
             self.assertEqual(refused["status"], JobStatus.FAILED.value)
             self.assertTrue(is_action_gate_refusal(refused))
