@@ -28,7 +28,7 @@ jobs:
       TEST_VM: hermes-test-01
       SKILL_NAME: ezlynx-overdue-submission-reports
       STAGING_DIR: /var/tmp/robie-test-skill/${{ github.sha }}
-      SSH_KEY: ${{ runner.temp }}/hermes-test-skill
+      SSH_KEY: /tmp/hermes-test-skill
     steps:
       - name: Check out protected main
         uses: actions/checkout@v4
