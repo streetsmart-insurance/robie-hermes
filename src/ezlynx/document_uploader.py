@@ -186,6 +186,25 @@ class EZLynxDocumentUploader:
             return {"success": False, "error": f"File not found: {file_path}"}
 
         norm_doc_type = doc_type.strip().lower()
+        from src.ezlynx.manual_renewal_gate import (
+            classify_renewal_document,
+            is_application_or_bound_quote_document,
+            peek_pdf_text,
+        )
+
+        detected_kind = classify_renewal_document(
+            name=file_path.name if file_path else None,
+            text=peek_pdf_text(file_path),
+            kind=norm_doc_type if norm_doc_type in {"application", "bound_quote"} else None,
+        )
+        if is_application_or_bound_quote_document(
+            name=file_path.name, kind=detected_kind
+        ) and norm_doc_type in {"renewal", "quote"}:
+            logger.warning(
+                "Refusing Renewal Offer classification for Application/Bound Quote PDF: %s",
+                file_path.name,
+            )
+            norm_doc_type = "application"
 
         # Renewal PDFs: label + Documents folder named Renewal Offer (create if missing).
         # Never leave a renewal offer only under a bare policy-number folder.

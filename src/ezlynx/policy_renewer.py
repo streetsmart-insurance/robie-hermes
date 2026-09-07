@@ -213,6 +213,8 @@ class RenewalJobResult:
     document_label: Optional[str] = None
     document_folder: Optional[str] = None
     document_folder_created: bool = False
+    document_kind: Optional[str] = None
+    document_name: Optional[str] = None
     document_skipped_reason: Optional[str] = None
     note_skipped_reason: Optional[str] = None
     renew_button: Optional[str] = None
@@ -1062,7 +1064,9 @@ class ManualPolicyRenewer:
         if spec.upload_path:
             actions.append(
                 f"Upload {spec.upload_path} if >= {MIN_AUTHENTIC_PDF_BYTES} bytes "
-                "with label Renewal Offer into the Renewal Offer folder (create folder if missing)"
+                "only when it is a true renewal offer / declaration / firmed quote "
+                "(label + folder Renewal Offer). Application / Bound Quote prints "
+                "are staged as application artifacts — never COMPLETE as Renewal Offer."
             )
         actions.append(
             "Post note on existing '{LOB} Renewal' if present "
@@ -1116,6 +1120,29 @@ class ManualPolicyRenewer:
 
         result.firmed_quote_path = str(path)
         result.firmed_quote_document_id = normalize_ezlynx_download_id(doc_id)
+        from src.ezlynx.manual_renewal_gate import (
+            DOC_KIND_RENEWAL_OFFER,
+            classify_renewal_document,
+            is_application_or_bound_quote_document,
+            peek_pdf_text,
+        )
+
+        result.document_name = result.document_name or Path(path).name
+        result.document_kind = classify_renewal_document(
+            name=result.document_name,
+            text=peek_pdf_text(path),
+            kind=result.document_kind,
+        )
+        if is_application_or_bound_quote_document(
+            name=result.document_name, kind=result.document_kind
+        ):
+            msg = (
+                "HITL: portal PDF is Application / Bound Quote, not a Renewal Offer. "
+                "Stage as application artifact; do not COMPLETE as Renewal Offer filed."
+            )
+            result.document_skipped_reason = result.document_skipped_reason or "application_not_renewal_offer"
+            result.planned_actions.append(msg)
+            logger.warning("%s (%s)", msg, result.document_name)
         extracted = extract_premium_from_pdf(path)
         if extracted is not None:
             if spec.premium is None:
@@ -1184,6 +1211,8 @@ class ManualPolicyRenewer:
             firmed_pdf_uploaded=bool(result.document_uploaded),
             firmed_pdf_label=result.document_label,
             firmed_pdf_folder=result.document_folder,
+            firmed_pdf_kind=result.document_kind,
+            firmed_pdf_name=result.document_name,
             pdf_premium=spec.pdf_extracted_premium,
             keyed_premium=spec.premium if spec.premium is not None else spec.full_term_premium,
             pending_rwl_count=len(result.pending_shells or []),
@@ -1283,19 +1312,49 @@ class ManualPolicyRenewer:
             result.document_uploaded = False
             logger.warning("Skipping stub PDF %s (%s bytes)", path, path.stat().st_size)
             return
+        from src.ezlynx.manual_renewal_gate import (
+            DOC_KIND_RENEWAL_OFFER,
+            RENEWAL_OFFER_FOLDER,
+            classify_renewal_document,
+            is_application_or_bound_quote_document,
+            peek_pdf_text,
+        )
+
+        result.document_name = path.name
+        result.document_kind = classify_renewal_document(
+            name=path.name,
+            text=peek_pdf_text(path),
+            kind=result.document_kind,
+        )
+        as_application = is_application_or_bound_quote_document(
+            name=path.name, kind=result.document_kind
+        )
         if spec.dry_run:
-            result.planned_actions.append(f"Would upload {path.name}")
+            if as_application:
+                result.planned_actions.append(
+                    f"Would stage {path.name} as application artifact (not Renewal Offer); "
+                    "HITL for a true offer / declaration / firmed quote"
+                )
+            else:
+                result.planned_actions.append(f"Would upload {path.name} as Renewal Offer")
             return
 
         docs_url = f"https://app.ezlynx.com/web/account/{spec.applicant_id}/documents"
         await page.goto(docs_url, wait_until="domcontentloaded", timeout=45000)
         await page.wait_for_timeout(2500)
-        from src.ezlynx.document_uploader import ensure_renewal_offer_folder
-        from src.ezlynx.manual_renewal_gate import RENEWAL_OFFER_FOLDER
+        from src.ezlynx.document_uploader import enter_document_folder, ensure_renewal_offer_folder
 
-        folder_info = await ensure_renewal_offer_folder(page)
-        result.document_folder = folder_info.get("folder") or RENEWAL_OFFER_FOLDER
-        result.document_folder_created = bool(folder_info.get("created"))
+        if as_application:
+            entered = await enter_document_folder(page, "Renewal Applications")
+            if not entered:
+                entered = await enter_document_folder(page, "Applications")
+            result.document_folder = "Renewal Applications" if entered else "Applications"
+            result.document_kind = result.document_kind or "application"
+        else:
+            folder_info = await ensure_renewal_offer_folder(page)
+            result.document_folder = folder_info.get("folder") or RENEWAL_OFFER_FOLDER
+            result.document_folder_created = bool(folder_info.get("created"))
+            result.document_kind = result.document_kind or DOC_KIND_RENEWAL_OFFER
         add_btn = page.locator("#add-action")
         await add_btn.wait_for(state="visible", timeout=15000)
         await add_btn.click()
@@ -1313,9 +1372,18 @@ class ManualPolicyRenewer:
             result.error = "Upload dialog iframe could not be located"
             return
         await frame.locator("input[type=file]").set_input_files([str(path.resolve())])
+        target_name = (
+            f"{spec.policy_number} Renewal Application.pdf"
+            if as_application and spec.policy_number
+            else f"{spec.policy_number} Renewal Offer.pdf"
+            if spec.policy_number
+            else path.name
+        )
+        want_label = "Application" if as_application else "Renewal Offer"
         name_input = frame.locator("#file-desc-0")
-        if await name_input.count() > 0 and spec.policy_number:
-            await name_input.fill(f"{spec.policy_number} Renewal Offer.pdf")
+        if await name_input.count() > 0:
+            await name_input.fill(target_name)
+        result.document_name = target_name
         if spec.policy_number:
             policy_select = frame.locator("#selected-policyor-application-0")
             if await policy_select.count() > 0:
@@ -1331,16 +1399,16 @@ class ManualPolicyRenewer:
             )
             if await label_filter.count() > 0:
                 await label_filter.first.click(force=True)
-                await label_filter.first.fill("Renewal Offer")
+                await label_filter.first.fill(want_label)
                 await page.wait_for_timeout(400)
                 mat_opt = frame.locator(
-                    "mat-option:has-text('Renewal Offer'), .mat-mdc-option:has-text('Renewal Offer')"
+                    f"mat-option:has-text('{want_label}'), .mat-mdc-option:has-text('{want_label}')"
                 )
                 if await mat_opt.count() > 0:
                     await mat_opt.first.click()
-                    applied_label = "Renewal Offer"
+                    applied_label = want_label
         except Exception as label_err:
-            logger.warning("Could not apply Renewal Offer label: %s", label_err)
+            logger.warning("Could not apply %s label: %s", want_label, label_err)
         await frame.locator("button:has-text('Upload')").first.click()
         await page.wait_for_timeout(4000)
         result.document_uploaded = True

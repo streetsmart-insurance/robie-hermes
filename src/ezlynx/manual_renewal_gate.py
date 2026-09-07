@@ -10,13 +10,15 @@ Note targeting (LOB-agnostic, Benli HO 2026-09-07):
    Automation Center. Every note still ends with ``Robie was here``.
 
 Docs-only is not COMPLETE. Renewal Offer PDFs need the **Renewal Offer**
-label and the Documents folder named **Renewal Offer**.
+label and the Documents folder named **Renewal Offer**. Application /
+Bound Quote / Renewal Application prints are never a Renewal Offer.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from src.ezlynx.api_client import DISQUALIFIED_DISCUSSION_PATTERNS
@@ -26,6 +28,36 @@ RENEWAL_OFFER_FOLDER = "Renewal Offer"
 STATUS_COMPLETE = "COMPLETE"
 STATUS_PARTIAL = "PARTIAL"
 STATUS_BLOCKED = "BLOCKED"
+
+DOC_KIND_RENEWAL_OFFER = "renewal_offer"
+DOC_KIND_APPLICATION = "application"
+DOC_KIND_BOUND_QUOTE = "bound_quote"
+DOC_KIND_UNKNOWN = "unknown"
+
+# Bound Quote / Application prints (Benli HO QHONJ2026080215) are not offers.
+_APPLICATION_DOC_HINTS = (
+    "bound quote application",
+    "bound quote",
+    "renewal application",
+    "quote application",
+    "application print",
+    "application for insurance",
+    "acord application",
+)
+# True offer / dec / firmed quote — required for COMPLETE as Renewal Offer filed.
+_RENEWAL_OFFER_DOC_HINTS = (
+    "renewal offer",
+    "renewal declaration",
+    "declarations page",
+    "declaration of insurance",
+    "renewal dec",
+    "quote proposal (firmed)",
+    "firmed quote",
+    "firmed proposal",
+    "renewal quote",
+)
+# Portal quote/application numbers like QHONJ2026080215 (not the policy HONJ…).
+_BOUND_QUOTE_NUMBER_RE = re.compile(r"\bq[a-z]{2,8}\d{6,}\b", re.I)
 
 # Canonical Documents-tab folder plus accepted existing aliases.
 RENEWAL_OFFER_FOLDER_ALIASES = (
@@ -237,6 +269,81 @@ def resolve_renewal_offer_folder(
     if not create_if_missing:
         raise ValueError(f"Missing Documents folder '{RENEWAL_OFFER_FOLDER}'")
     return FolderResolveResult(folder=RENEWAL_OFFER_FOLDER, created=True, action="create")
+
+
+def _doc_haystack(*parts: Optional[str]) -> str:
+    return " ".join(re.sub(r"\s+", " ", (p or "").strip()) for p in parts if p).strip()
+
+
+def classify_renewal_document(
+    *,
+    name: Optional[str] = None,
+    text: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> str:
+    """Classify a portal/library PDF. Application / Bound Quote never wins as offer.
+
+    Filename labels like ``HONJ… Renewal Offer.pdf`` are not enough when the
+    print is a Bound Quote Application (Benli ``QHONJ2026080215``).
+    """
+    explicit = (kind or "").strip().lower().replace(" ", "_")
+    hay = _norm_title(_doc_haystack(name, text, kind))
+    if any(hint in hay for hint in _APPLICATION_DOC_HINTS) or _BOUND_QUOTE_NUMBER_RE.search(hay):
+        if "bound quote" in hay or _BOUND_QUOTE_NUMBER_RE.search(hay):
+            return DOC_KIND_BOUND_QUOTE
+        return DOC_KIND_APPLICATION
+    if explicit in {DOC_KIND_APPLICATION, DOC_KIND_BOUND_QUOTE}:
+        return explicit
+    if explicit == DOC_KIND_RENEWAL_OFFER:
+        return DOC_KIND_RENEWAL_OFFER
+    if any(hint in hay for hint in _RENEWAL_OFFER_DOC_HINTS):
+        return DOC_KIND_RENEWAL_OFFER
+    if explicit == DOC_KIND_UNKNOWN:
+        return DOC_KIND_UNKNOWN
+    return DOC_KIND_UNKNOWN
+
+
+def is_true_renewal_offer_document(
+    *,
+    name: Optional[str] = None,
+    text: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> bool:
+    return classify_renewal_document(name=name, text=text, kind=kind) == DOC_KIND_RENEWAL_OFFER
+
+
+def is_application_or_bound_quote_document(
+    *,
+    name: Optional[str] = None,
+    text: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> bool:
+    return classify_renewal_document(name=name, text=text, kind=kind) in {
+        DOC_KIND_APPLICATION,
+        DOC_KIND_BOUND_QUOTE,
+    }
+
+
+def peek_pdf_text(path: Optional[Any], *, limit: int = 4000) -> str:
+    """Best-effort first-page text for classification. Never invents content."""
+    if path is None:
+        return ""
+    try:
+        pdf_path = Path(path)
+    except TypeError:
+        return ""
+    if not pdf_path.is_file():
+        return ""
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(pdf_path))
+        chunks: List[str] = []
+        for page in reader.pages[:2]:
+            chunks.append(page.extract_text() or "")
+        return " ".join(chunks)[:limit]
+    except Exception:
+        return ""
 
 
 def is_untitled_discussion_title(title: Optional[str]) -> bool:
@@ -533,6 +640,9 @@ class DoneChecklistEvidence:
     firmed_pdf_uploaded: bool = False
     firmed_pdf_label: Optional[str] = None
     firmed_pdf_folder: Optional[str] = None
+    firmed_pdf_kind: Optional[str] = None
+    firmed_pdf_name: Optional[str] = None
+    firmed_pdf_text: Optional[str] = None
     pdf_premium: Optional[Any] = None
     keyed_premium: Optional[Any] = None
     pending_rwl_count: int = 0
@@ -593,6 +703,18 @@ def evaluate_done_checklist(evidence: DoneChecklistEvidence) -> DoneChecklistRes
     if not is_renewal_offer_folder(evidence.firmed_pdf_folder):
         missing.append("renewal_offer_folder")
         reasons.append(f"document must be in the '{RENEWAL_OFFER_FOLDER}' folder")
+
+    classified = classify_renewal_document(
+        name=evidence.firmed_pdf_name,
+        text=evidence.firmed_pdf_text,
+        kind=evidence.firmed_pdf_kind,
+    )
+    if classified != DOC_KIND_RENEWAL_OFFER:
+        missing.append("true_renewal_offer_pdf")
+        reasons.append(
+            "Application / Bound Quote / Renewal Application is not a Renewal Offer; "
+            "HITL for a true offer, declaration, or firmed renewal quote"
+        )
 
     if not _premiums_match(evidence.pdf_premium, evidence.keyed_premium):
         missing.append("premium_match")

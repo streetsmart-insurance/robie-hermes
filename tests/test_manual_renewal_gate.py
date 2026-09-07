@@ -5,15 +5,21 @@ from decimal import Decimal
 import pytest
 
 from src.ezlynx.manual_renewal_gate import (
+    DOC_KIND_APPLICATION,
+    DOC_KIND_BOUND_QUOTE,
+    DOC_KIND_RENEWAL_OFFER,
     RENEWAL_OFFER_FOLDER,
     STATUS_BLOCKED,
     STATUS_COMPLETE,
     STATUS_PARTIAL,
     DoneChecklistEvidence,
     activity_card_matches_exact_title,
+    classify_renewal_document,
     evaluate_done_checklist,
     find_exact_titled_discussion,
+    is_application_or_bound_quote_document,
     is_automation_discussion_title,
+    is_true_renewal_offer_document,
     manual_lob_renewal_title,
     renewal_update_lob_title,
     resolve_existing_lob_renewal_discussion,
@@ -55,6 +61,8 @@ def _complete_evidence(**overrides) -> DoneChecklistEvidence:
         firmed_pdf_uploaded=True,
         firmed_pdf_label="Renewal Offer",
         firmed_pdf_folder="Renewal Offer",
+        firmed_pdf_kind="renewal_offer",
+        firmed_pdf_name="HONJ2025100027 Renewal Offer.pdf",
         pdf_premium=Decimal("1842.00"),
         keyed_premium=Decimal("1842.00"),
         pending_rwl_count=1,
@@ -376,6 +384,64 @@ def test_resolve_renewal_offer_folder_creates_when_only_policy_number_folder():
     assert matched.action == "matched"
     assert matched.created is False
     assert matched.folder == "Renewal Offer"
+
+
+@pytest.mark.parametrize(
+    "name,text,expected",
+    [
+        (
+            "QHONJ2026080215 Bound Quote Application.pdf",
+            "Bound Quote Application",
+            DOC_KIND_BOUND_QUOTE,
+        ),
+        (
+            "HONJ2025100027 Renewal Offer.pdf",
+            "Renewal Application QHONJ2026080215 Bound Quote print",
+            DOC_KIND_BOUND_QUOTE,
+        ),
+        (
+            "Insured Renewal Application.pdf",
+            "ACORD Application for Insurance",
+            DOC_KIND_APPLICATION,
+        ),
+        (
+            "HONJ2025100027 Renewal Offer.pdf",
+            "Homeowners Renewal Offer / Declaration",
+            DOC_KIND_RENEWAL_OFFER,
+        ),
+        (
+            "Fagone - J&J Home Quote Proposal (Firmed).pdf",
+            None,
+            DOC_KIND_RENEWAL_OFFER,
+        ),
+    ],
+)
+def test_classify_rejects_application_and_bound_quote_as_renewal_offer(name, text, expected):
+    kind = classify_renewal_document(name=name, text=text)
+    assert kind == expected
+    if expected == DOC_KIND_RENEWAL_OFFER:
+        assert is_true_renewal_offer_document(name=name, text=text) is True
+        assert is_application_or_bound_quote_document(name=name, text=text) is False
+    else:
+        assert is_true_renewal_offer_document(name=name, text=text) is False
+        assert is_application_or_bound_quote_document(name=name, text=text) is True
+
+
+def test_done_checklist_rejects_bound_quote_labeled_renewal_offer():
+    """Benli: label said Renewal Offer but print was Bound Quote QHONJ2026080215."""
+    result = evaluate_done_checklist(
+        _complete_evidence(
+            firmed_pdf_label="Renewal Offer",
+            firmed_pdf_folder="Renewal Offer",
+            firmed_pdf_kind=None,
+            firmed_pdf_name="HONJ2025100027 Renewal Offer.pdf",
+            firmed_pdf_text="Bound Quote Application QHONJ2026080215",
+        )
+    )
+    assert result.status == STATUS_PARTIAL
+    assert result.complete is False
+    assert "true_renewal_offer_pdf" in result.missing
+    assert result.status != STATUS_COMPLETE
 
 
 def test_renewer_apply_done_checklist_does_not_override_login_blocked():
