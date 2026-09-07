@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 from robie_job_engine.reporting_suite import TaskAgingAuditor, ReportingSuite
 
@@ -63,6 +65,15 @@ def test_reporting_suite_generation():
     assert "Example Cleaning LLC" in monthly
     assert "UNVERIFIED claim" in monthly
     assert "DATA LIMITATIONS" in monthly
+
+
+def test_daily_report_displays_explicit_prior_business_date():
+    report = ReportingSuite().build_daily_report(
+        {"source_status": "available", "unreturned_calls": [], "rep_stats": {}},
+        {"source_status": "available", "overdue_by_rep": {}},
+        report_date=date(2026, 9, 4),
+    )
+    assert "Date: Friday, September 04, 2026" in report
 
 
 def test_weekly_report_never_invents_missing_sources():
