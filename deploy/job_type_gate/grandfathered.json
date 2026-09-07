@@ -16,12 +16,14 @@
     "hermes.google_chat_task",
     "hermes.plain_english",
     "hermes.needs_clarification",
-    "ezlynx.commercial_auto"
+    "ezlynx.commercial_auto",
+    "ascend.create_program"
   ],
   "skills": [
     "ezlynx-commercial-auto-from-quote",
     "ezlynx-gemini-fallback",
     "robie-playwright-browser",
-    "ezlynx-session-login"
+    "ezlynx-session-login",
+    "ascend-api-create-program"
   ]
 }

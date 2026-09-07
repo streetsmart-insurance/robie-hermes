@@ -400,8 +400,8 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
             due_days_out=1,
         )
 
-        # Verify Google Chat alert dispatched
-        mock_chat.assert_called_once()
+        # Verify Google Chat alert is NOT dispatched for accounting issues per directive
+        mock_chat.assert_not_called()
 
     def test_endorsement_extractor(self) -> None:
         from robie_job_engine.quote_extractor import EndorsementExtractor

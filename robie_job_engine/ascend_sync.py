@@ -601,9 +601,10 @@ class AscendEZLynxSyncManager:
                 )
 
                 # 3. Create high-priority task assigned to CSR or Producer
-                task_title = f"🚨 CANCELLATION NOTICE: {event.policy_number} - {event.carrier_name} - Due: {event.due_date_text}"
+                task_title = f"🚨 CSR ACTION REQUIRED: Cancellation Notice - {event.policy_number} - {event.carrier_name} - Due: {event.due_date_text}"
                 task_desc = (
                     f"Ascend cancellation notice received for {event.insured_name} (Policy #{event.policy_number}).\n"
+                    f"Assigned CSR / Producer: {assigned_rep}\n"
                     f"Cancellation Effective Date: {event.cancellation_effective_date}\n"
                     f"Plain Text Due Date / Effective Date: {event.due_date_text}\n"
                     f"Return Pure Premium: {event.unearned_premium_text}\n"
@@ -1044,7 +1045,8 @@ class AscendEZLynxSyncManager:
                         discrepancy_details=details,
                         ascend_reference_url=f"https://app.useascend.com/payouts/{payout_id}",
                     )
-
+                    # Discrepancy escalation:
+                    # High priority EZLynx Task assigned to Accounting (no Google Chat alert per user directive)
                     self.poster.create_task(
                         applicant_id="0",
                         title=f"⚠️ ACCOUNTING AUDIT: {status.upper()} Supplier Payout to {owner_name} ({amount_text})",
@@ -1052,16 +1054,12 @@ class AscendEZLynxSyncManager:
                         assigned_user=accounting_assignee,
                         due_days_out=1,
                     )
-
-                    chat_msg = (
-                        f"⚠️ *ACCOUNTING ATTENTION REQUIRED: {status.upper()} Supplier Remittance*\n"
-                        f"• Wholesaler: *{owner_name}*\n"
-                        f"• Amount: *{amount_text}*\n"
-                        f"• Status: *{status.upper()}*\n"
-                        f"• Ascend Payout ID: `{payout_id}`\n"
-                        f"• Task assigned to Accounting team in EZLynx."
+                    logger.info(
+                        "Dispatched Accounting audit task in EZLynx for %s supplier payout %s to %s",
+                        status.upper(),
+                        payout_id,
+                        owner_name,
                     )
-                    send_google_chat_alert(chat_msg)
 
                     self.store.record_synced_event(
                         event_id=event_id,
