@@ -1,0 +1,26 @@
+[Unit]
+Description=StreetSmart verified prior-business-day accountability report
+After=network-online.target robie-ezlynx-browser.service robie-magellan-browser.service
+Wants=network-online.target robie-ezlynx-browser.service robie-magellan-browser.service
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_ENV=Production
+Environment=ROBIE_BROWSER_CDP_URL=http://127.0.0.1:9222
+EnvironmentFile=/etc/streetsmart-hermes/robie-accountability.env
+EnvironmentFile=/etc/streetsmart-hermes/robie-ezlynx.env
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_accountability_job.py daily
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/accountability /opt/streetsmart-hermes/robie-job-engine/data
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

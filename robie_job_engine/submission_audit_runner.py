@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from datetime import date, datetime
 import json
 import re
 import sys
 from typing import Any
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -17,6 +20,15 @@ from .ezlynx_auth_evidence import authenticated_app_evidence
 CDP_URL = "http://127.0.0.1:9222"
 SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
 CLOSED = {"Closed - Not Sold", "Closed - Bound"}
+RED_OVERDUE_COLOR = "rgb(211, 47, 47)"
+DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d")
+REQUIRED_HEADERS = {
+    "applicant": "Applicant",
+    "assigned_producer": "Assigned Producer",
+    "status": "Status",
+    "quote_due_date": "Quote Due Date",
+    "effective_date": "Effective Date",
+}
 
 
 def _matching_page(browser) -> Page:
@@ -298,147 +310,136 @@ def _pager_total(page: Page) -> int:
     return int(match.group(1).replace(",", ""))
 
 
-def _normalized_header(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
-
-
-def _required_columns(headers: list[str]) -> dict[str, int]:
-    normalized = {_normalized_header(value): index for index, value in enumerate(headers)}
-    aliases = {
-        "title": ("submissiontitle", "submission", "title"),
-        "applicant": ("applicant", "applicantname", "accountname", "insured"),
-        "assigned_producer": ("assignedproducer",),
-        "status": ("status", "submissionstatus"),
-        "quote_due_date": ("quoteduedate", "quotedue"),
-        "effective_date": ("effectivedate",),
-    }
-    result: dict[str, int] = {}
-    for key, choices in aliases.items():
-        index = next((normalized[value] for value in choices if value in normalized), None)
-        if index is None:
-            raise RuntimeError(f"PLAYWRIGHT_BLOCKED: required Submission Center column missing: {key}")
-        result[key] = index
-    return result
-
-
-def _red_overdue_evidence(cell: Locator) -> bool:
-    evidence = cell.evaluate(
-        """el => ({
-          color: getComputedStyle(el).color || '',
-          className: String(el.className || ''),
-          html: String(el.innerHTML || '').slice(0, 500)
-        })"""
-    )
-    tokens = f"{evidence.get('className', '')} {evidence.get('html', '')}".casefold()
-    if re.search(r"\b(overdue|past-due|warn|error|red)\b", tokens):
-        return True
-    match = re.search(r"rgba?\((\d+),\s*(\d+),\s*(\d+)", str(evidence.get("color") or ""))
-    if not match:
-        return False
-    red, green, blue = (int(value) for value in match.groups())
-    return red >= 150 and red >= green * 1.25 and red >= blue * 1.25
-
-
-def _extract_open_rows(page: Page) -> list[dict[str, Any]]:
-    positions = _required_columns(_headers(page))
-    output: list[dict[str, Any]] = []
-    rows = page.locator("mat-row")
-    for index in range(rows.count()):
-        row = rows.nth(index)
-        cells = row.locator("mat-cell")
-        if cells.count() <= max(positions.values()):
-            raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center row has missing cells")
-        status = cells.nth(positions["status"]).inner_text().strip()
-        if status in CLOSED:
-            continue
-        link = row.locator("a[href]")
-        href = link.first.get_attribute("href") if link.count() else ""
-        if not href:
-            raise RuntimeError("PLAYWRIGHT_BLOCKED: open submission has no direct link")
-        output.append({
-            "Submission Title": cells.nth(positions["title"]).inner_text().strip(),
-            "Submission URL": urljoin(SUBMISSION_URL, href),
-            "Applicant": cells.nth(positions["applicant"]).inner_text().strip(),
-            "Assigned Producer": cells.nth(positions["assigned_producer"]).inner_text().strip(),
-            "Status": status,
-            "Quote Due Date": cells.nth(positions["quote_due_date"]).inner_text().strip(),
-            "Effective Date": cells.nth(positions["effective_date"]).inner_text().strip(),
-            "Overdue": "Red" if _red_overdue_evidence(cells.nth(positions["quote_due_date"])) else "No",
-        })
-    return output
-
-
 def _pager_range(page: Page) -> tuple[int, int, int]:
-    label = page.locator(".mat-paginator-range-label, .mat-mdc-paginator-range-label").first.inner_text()
-    match = re.search(r"([\d,]+)\s*[\-–—]\s*([\d,]+)\s+of\s+([\d,]+)", label, re.I)
+    text = page.locator(
+        ".mat-paginator-range-label, .mat-mdc-paginator-range-label"
+    ).first.inner_text()
+    match = re.search(r"([\d,]+)\s*[\-–—]\s*([\d,]+)\s+of\s+([\d,]+)", text, re.I)
     if not match:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: live pager range not found")
     return tuple(int(value.replace(",", "")) for value in match.groups())
 
 
-def _next_page(page: Page) -> bool:
-    button = page.get_by_role("button", name=re.compile(r"next page", re.I))
+def _header_positions(headers: list[str]) -> dict[str, int]:
+    normalized = {" ".join(value.split()).casefold(): index for index, value in enumerate(headers)}
+    positions: dict[str, int] = {}
+    for key, label in REQUIRED_HEADERS.items():
+        index = normalized.get(label.casefold())
+        if index is None:
+            raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {label} header not found")
+        positions[key] = index
+    return positions
+
+
+def _parse_visible_date(value: str) -> date | None:
+    cleaned = " ".join(value.split())
+    for pattern in DATE_FORMATS:
+        try:
+            return datetime.strptime(cleaned, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _direct_submission_url(page: Page, row: Locator) -> str:
+    links = row.locator("a[href]")
+    matches: list[str] = []
+    for index in range(links.count()):
+        href = str(links.nth(index).get_attribute("href") or "").strip()
+        if href and "submission" in href.casefold():
+            matches.append(urljoin(page.url, href))
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else ""
+
+
+def _read_submission_row(
+    page: Page,
+    row: Locator,
+    positions: dict[str, int],
+    *,
+    run_date: date,
+    page_number: int,
+    row_number: int,
+) -> dict[str, Any]:
+    cells = row.locator("mat-cell")
+    if cells.count() <= max(positions.values()):
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center row is missing required cells")
+
+    def value(key: str) -> str:
+        return " ".join(cells.nth(positions[key]).inner_text().split())
+
+    quote_cell = cells.nth(positions["quote_due_date"])
+    quote_due_date = _parse_visible_date(value("quote_due_date"))
+    effective_date = _parse_visible_date(value("effective_date"))
+    cell_class = str(quote_cell.get_attribute("class") or "")
+    computed_color = str(
+        quote_cell.evaluate("element => getComputedStyle(element).color") or ""
+    ).strip()
+    overdue_class = bool(re.search(r"(?:^|\s)[^\s]*overdue[^\s]*(?:\s|$)", cell_class, re.I))
+    red_overdue = overdue_class and computed_color == RED_OVERDUE_COLOR
+    age_days = (run_date - quote_due_date).days if quote_due_date else None
+    direct_url = _direct_submission_url(page, row)
+    reasons: list[str] = []
+    if quote_due_date is None:
+        reasons.append("Quote Due Date was not a supported visible date")
+    elif age_days is not None and age_days <= 30:
+        reasons.append(f"Quote Due Date was {age_days} day(s) old; day 31 qualifies")
+    if not overdue_class:
+        reasons.append("Quote Due Date cell lacked the live overdue class")
+    elif computed_color != RED_OVERDUE_COLOR:
+        reasons.append(f"Quote Due Date overdue class rendered unexpected color {computed_color or 'missing'}")
+    if not direct_url:
+        reasons.append("unique direct submission link was not available")
+    qualifies = bool(
+        quote_due_date
+        and age_days is not None
+        and age_days > 30
+        and red_overdue
+        and direct_url
+    )
+    return {
+        "applicant": value("applicant"),
+        "assigned_producer": value("assigned_producer") or "Unassigned",
+        "status": value("status"),
+        "quote_due_date": quote_due_date.isoformat() if quote_due_date else value("quote_due_date"),
+        "effective_date": effective_date.isoformat() if effective_date else value("effective_date"),
+        "age_days": age_days,
+        "submission_url": direct_url,
+        "red_state_evidence": {
+            "overdue_class": overdue_class,
+            "computed_color": computed_color,
+            "expected_color": RED_OVERDUE_COLOR,
+        },
+        "source_page": page_number,
+        "source_row": row_number,
+        "qualifies": qualifies,
+        "exclusion_reasons": reasons,
+    }
+
+
+def _advance_page(page: Page, previous_start: int) -> None:
+    button = page.get_by_role("button", name=re.compile(r"Next page", re.I))
     if not button.count():
-        button = page.locator("button.mat-paginator-navigation-next, button.mat-mdc-paginator-navigation-next")
+        button = page.locator(
+            ".mat-paginator-navigation-next, .mat-mdc-paginator-navigation-next"
+        )
     if not button.count():
         raise RuntimeError("PLAYWRIGHT_BLOCKED: next-page control not found")
-    if button.first.is_disabled() or button.first.get_attribute("aria-disabled") == "true":
-        return False
-    before = page.locator(".mat-paginator-range-label, .mat-mdc-paginator-range-label").first.inner_text()
-    button.first.click()
+    next_button = button.first
+    if (
+        next_button.get_attribute("disabled") is not None
+        or next_button.get_attribute("aria-disabled") == "true"
+    ):
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: non-closed group exceeded the available live pages")
+    next_button.click()
     try:
         page.wait_for_function(
-            "before => { const label=document.querySelector('.mat-paginator-range-label,.mat-mdc-paginator-range-label'); return label && label.innerText !== before; }",
-            arg=before,
+            "previous => { const label=document.querySelector('.mat-paginator-range-label, .mat-mdc-paginator-range-label'); const match=label && label.textContent.match(/([\\d,]+)\\s*[\\-–—]/); return match && Number(match[1].replace(/,/g, '')) > previous; }",
+            arg=previous_start,
             timeout=15_000,
         )
     except PlaywrightTimeoutError as exc:
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not advance") from exc
-    return True
-
-
-def weekly_report_audit(*, fresh: bool) -> dict[str, Any]:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(CDP_URL, timeout=15_000)
-        page = _matching_page(browser)
-        page.set_default_timeout(15_000)
-        if fresh:
-            page.reload(wait_until="domcontentloaded")
-        if not _authenticated(page):
-            raise PermissionError("NEEDS_AUTH")
-        _select_single(page, "Time frame", "All Submissions")
-        _set_agency_scope(page)
-        _set_page_size(page)
-        _set_agency_scope(page)
-        _verify_page_size_result(page)
-        records: list[dict[str, Any]] = []
-        seen_pages: set[tuple[int, int, int]] = set()
-        rows_inspected = 0
-        while True:
-            current = _pager_range(page)
-            if current in seen_pages:
-                raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator repeated a results page")
-            seen_pages.add(current)
-            rows_inspected += page.locator("mat-row").count()
-            records.extend(_extract_open_rows(page))
-            if not _next_page(page):
-                break
-        total = next(iter(seen_pages))[2] if seen_pages else 0
-        if rows_inspected != total:
-            raise RuntimeError(f"PLAYWRIGHT_BLOCKED: inspected {rows_inspected} rows but pager reported {total}")
-        unique = {item["Submission URL"]: item for item in records}
-        return {
-            "read_only": True,
-            "scope_time_frame": "All Submissions",
-            "scope_assigned_producer": "Streetsmart Insurance",
-            "scope_my_submissions": False,
-            "all_pages_inspected": True,
-            "pages_inspected": len(seen_pages),
-            "rows_inspected": rows_inspected,
-            "pager_total": total,
-            "open_records": list(unique.values()),
-            "open_records_deduplicated": len(unique),
-        }
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: next Submission Center page did not load") from exc
 
 
 def audit(*, fresh: bool) -> dict[str, Any]:
@@ -460,34 +461,93 @@ def audit(*, fresh: bool) -> dict[str, Any]:
         _set_page_size(page)
         _set_agency_scope(page)
         _verify_page_size_result(page)
-        status_index, statuses = _normalize_status_sort(page)
-        rows = page.locator("mat-row")
-        if rows.count() != 100:
-            raise RuntimeError(f"PLAYWRIGHT_BLOCKED: expected 100 mat-row elements, saw {rows.count()}")
-        first_closed_index = next((i for i, value in enumerate(statuses) if value in CLOSED), None)
-        inspected = len(statuses) if first_closed_index is None else first_closed_index + 1
-        if first_closed_index is None:
-            raise RuntimeError("PLAYWRIGHT_BLOCKED: first closed row was not reached on the 100-row page")
-        non_closed = statuses[:first_closed_index]
-        if not non_closed:
+        _normalize_status_sort(page)
+        run_date = datetime.now(ZoneInfo("America/New_York")).date()
+        positions = _header_positions(_headers(page))
+        qualifying: list[dict[str, Any]] = []
+        dispositions: list[dict[str, Any]] = []
+        non_closed_statuses: list[str] = []
+        pages_reviewed = 0
+        rows_inspected = 0
+        non_closed_inspected = 0
+        first_page_row_count = page.locator("mat-row").count()
+        first_closed_page: int | None = None
+        first_closed_index: int | None = None
+        first_closed_status = ""
+
+        while first_closed_page is None:
+            pages_reviewed += 1
+            start, _, _ = _pager_range(page)
+            rows = page.locator("mat-row")
+            statuses = _row_statuses(page, positions["status"])
+            if not statuses:
+                raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center page rendered no statuses")
+            for index, status in enumerate(statuses):
+                rows_inspected += 1
+                if status in CLOSED:
+                    first_closed_page = pages_reviewed
+                    first_closed_index = index
+                    first_closed_status = status
+                    break
+                non_closed_inspected += 1
+                non_closed_statuses.append(status)
+                record = _read_submission_row(
+                    page,
+                    rows.nth(index),
+                    positions,
+                    run_date=run_date,
+                    page_number=pages_reviewed,
+                    row_number=index + 1,
+                )
+                if record["qualifies"]:
+                    qualifying.append({key: value for key, value in record.items() if key not in {"qualifies", "exclusion_reasons"}})
+                elif (
+                    record.get("age_days") is None
+                    or int(record.get("age_days") or 0) > 30
+                    or record["red_state_evidence"]["overdue_class"]
+                ):
+                    # Preserve only evidence needed to explain an old/red/ambiguous
+                    # candidate. Do not retain every current non-closed applicant.
+                    dispositions.append(record)
+            if first_closed_page is None:
+                _advance_page(page, start)
+
+        if not non_closed_statuses:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: no visible non-closed first row")
+        qualifying = list({item["submission_url"]: item for item in qualifying}.values())
+        producer_counts = Counter(item["assigned_producer"] for item in qualifying)
+        status_counts = Counter(item["status"] for item in qualifying)
         return {
             "read_only": True,
+            "source_status": "available",
             "scope_time_frame": "All Submissions",
             "scope_assigned_producer": "Streetsmart Insurance",
             "scope_my_submissions": False,
-            "mat_row_count": rows.count(),
+            "run_date": run_date.isoformat(),
+            "qualifying_due_date_on_or_before": date.fromordinal(run_date.toordinal() - 31).isoformat(),
+            "day_31_qualifies": True,
+            "mat_row_count": first_page_row_count,
             "pager_total_present": True,
             "pager_total": _pager_total(page),
             "status_aria_sort": "ascending",
-            "first_row_non_closed": statuses[0] not in CLOSED,
-            "first_row_status": statuses[0],
+            "first_row_non_closed": non_closed_statuses[0] not in CLOSED,
+            "first_row_status": non_closed_statuses[0],
             "first_closed_row_inspected": True,
             "first_closed_row_index": first_closed_index,
-            "first_closed_row_status": statuses[first_closed_index],
-            "rows_inspected_through_boundary": inspected,
-            "distinct_non_closed_statuses": sorted(set(non_closed)),
+            "first_closed_row_page": first_closed_page,
+            "first_closed_row_status": first_closed_status,
+            "pages_reviewed": pages_reviewed,
+            "rows_inspected_through_boundary": rows_inspected,
+            "non_closed_rows_inspected": non_closed_inspected,
+            "distinct_non_closed_statuses": sorted(set(non_closed_statuses)),
             "headers_present": bool(_headers(page)),
+            "open_over_30_count": len(qualifying),
+            "qualifying_records": qualifying,
+            "counts_by_producer": dict(sorted(producer_counts.items())),
+            "counts_by_status": dict(sorted(status_counts.items())),
+            "candidate_dispositions": dispositions,
+            "emails_sent": 0,
+            "email_delivery_enabled": False,
         }
 
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from robie_job_engine.accountability_cli import main
@@ -88,3 +89,72 @@ def test_daily_cli_without_ringcentral_fails_closed(capsys):
     output = capsys.readouterr().out
     assert "UNVERIFIED — RingCentral evidence is unavailable." in output
     assert "All client voicemails and missed calls resolved!" not in output
+
+
+def test_daily_cli_uses_explicit_audited_business_date(capsys):
+    assert main([
+        "daily",
+        "--as-of", "2026-09-08T10:25:00+00:00",
+        "--report-date", "2026-09-04",
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "Date: Friday, September 04, 2026" in output
+
+
+def test_daily_cli_includes_policy_coi_tracker_and_submission_center(tmp_path: Path, capsys):
+    tracker = tmp_path / "policy_changes.csv"
+    tracker.write_text(
+        "Account Name,Change Request Created Date,Assigned Producer,Request Status\n"
+        "Example Account,08/01/2026,Alex Example,Open\n",
+        encoding="utf-8",
+    )
+    submissions = tmp_path / "submissions.json"
+    submissions.write_text(json.dumps({
+        "source_status": "available",
+        "first_closed_row_inspected": True,
+        "qualifying_records": [{
+            "applicant": "Example Risk",
+            "assigned_producer": "Blair Example",
+            "age_days": 35,
+            "status": "Quoting",
+            "source_page": 1,
+            "source_row": 2,
+        }],
+    }), encoding="utf-8")
+    assert main([
+        "daily", "--as-of", "2026-09-08T10:25:00+00:00",
+        "--report-date", "2026-09-04",
+        "--submissions-json", str(submissions),
+        "--tracker", f"policy_changes={tracker}",
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "DAILY POLICY CHANGES, COIS & SERVICE TRACKERS" in output
+    assert "Example Account" in output
+    assert "DAILY SUBMISSION CENTER EXCEPTIONS" in output
+    assert "Example Risk" in output
+
+
+def test_weekly_cli_accepts_fresh_live_submission_audit_json(tmp_path: Path, capsys):
+    submissions = tmp_path / "submissions.json"
+    submissions.write_text(json.dumps({
+        "source_status": "available",
+        "first_closed_row_inspected": True,
+        "open_over_30_count": 1,
+        "qualifying_records": [{
+            "applicant": "Example LLC",
+            "assigned_producer": "Alex Example",
+            "status": "Submitted",
+            "age_days": 31,
+            "submission_url": "https://app.ezlynx.com/web/submission-center/example",
+            "source_page": 1,
+            "source_row": 2,
+        }],
+    }), encoding="utf-8")
+    assert main([
+        "weekly",
+        "--as-of", "2026-08-31T17:00:00-04:00",
+        "--submissions-json", str(submissions),
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "Open Submissions Over 30 Days: 1" in output
+    assert "Example LLC — Alex Example" in output

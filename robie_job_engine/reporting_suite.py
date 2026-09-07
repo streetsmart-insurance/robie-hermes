@@ -5,7 +5,7 @@ with Habitual Task Postponement / Snooze Detection.
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -98,11 +98,15 @@ class ReportingSuite:
         magellan_data: Optional[Dict[str, Any]] = None,
         sales_data: Optional[Dict[str, Any]] = None,
         role_rows: Optional[List[Dict[str, Any]]] = None,
+        email_data: Optional[Dict[str, Any]] = None,
+        report_date: Optional[date] = None,
+        submission_data: Optional[Dict[str, Any]] = None,
+        tracker_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Daily: Phones + Overdue Tasks + Unreturned Calls SLA."""
         lines = [
             "📋 *STREETSMART DAILY SERVICE & PHONE WATCHDOG*",
-            f"📅 Date: {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}",
+            f"📅 Date: {(report_date or datetime.now(timezone.utc).date()).strftime('%A, %B %d, %Y')}",
             "",
             "🚨 *CRITICAL UNRETURNED CALLS (>30m SLA)*",
         ]
@@ -119,6 +123,73 @@ class ReportingSuite:
                 tags = u.get("magellan_tags") or []
                 risk = f" | Magellan: {sentiment} ({', '.join(tags)})" if sentiment else ""
                 lines.append(f"   {i}. 🔴 *{u.get('name', 'Client')}* ({u.get('phone')}) — Left on {u.get('rep', 'Queue')} at {u.get('time')}{risk}")
+
+        service_rows = call_data.get("service_reconciliation", [])
+        if service_rows:
+            lines.extend([
+                "",
+                "🔎 *DAILY CROSS-CHANNEL SERVICE RESOLUTION*",
+                "Parent call is counted once; routing legs are supporting evidence, not separate failures.",
+            ])
+            for item in service_rows[:30]:
+                mode = "automated text only; no human response evidenced" if item.get("automated_text_detected") and item.get("status") != "RESOLVED" else item.get("evidence_source", "UNVERIFIED")
+                lines.append(
+                    f"• {item.get('account_name', 'UNVERIFIED')} | {item.get('caller_phone_masked', 'masked')} | "
+                    f"{item.get('account_type', 'UNVERIFIED')}/{item.get('account_status', 'UNVERIFIED')} | "
+                    f"business hours: {item.get('business_hours_flag', 'UNVERIFIED')} | "
+                    f"{item.get('final_classification', 'UNVERIFIED')} — "
+                    f"{item.get('resolution', 'UNVERIFIED')} | destination: {item.get('failed_destination', 'UNVERIFIED')} | "
+                    f"producer: {item.get('assigned_producer', 'UNVERIFIED')} | CSR: {item.get('assigned_csr', 'UNVERIFIED')} | "
+                    f"resolved by: {item.get('resolved_by') or 'none evidenced'} | {mode} | parent {item.get('parent_call_id', '?')}"
+                )
+
+        task_exceptions = task_data.get("exceptions", [])
+        if task_exceptions:
+            lines.extend(["", "🗂️ *DETAILED OVERDUE EZLYNX TASKS*"])
+            for item in task_exceptions[:30]:
+                lines.append(
+                    f"• {item.get('account_name', 'Unknown account')} — {item.get('owner', 'Unassigned')} | "
+                    f"{item.get('title', 'Untitled task')} | due {item.get('due_date') or 'UNVERIFIED'} | "
+                    f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
+                )
+
+        magellan_data = magellan_data or {"source_status": "not supplied"}
+        sad_calls = (
+            magellan_data.get("sad_calls")
+            or magellan_data.get("at_risk_call_details")
+            or []
+        )
+        if sad_calls:
+            lines.extend([
+                "",
+                "😟 *MAGELLAN SAD / AT-RISK CUSTOMER CALLS*",
+                "Each call stays separate from the callback verdict until RingCentral and EZLynx evidence agree.",
+            ])
+            for item in sad_calls[:50]:
+                tags = ", ".join(item.get("tags") or []) or "no tags supplied"
+                lines.append(
+                    f"• {item.get('account_name') or 'UNVERIFIED ACCOUNT'} | "
+                    f"{item.get('caller_phone_masked') or 'masked'} | {item.get('occurred_at') or 'time UNVERIFIED'} | "
+                    f"{tags} | answered by: {item.get('answered_by') or 'UNVERIFIED'} | "
+                    f"producer: {item.get('assigned_producer') or 'UNVERIFIED'} | "
+                    f"CSR: {item.get('assigned_csr') or 'UNVERIFIED'} | "
+                    f"callback status: {item.get('callback_status') or 'UNVERIFIED'}"
+                )
+
+        email_data = email_data or {"source_status": "not supplied"}
+        mailbox_rows = email_data.get("by_employee", {})
+        if mailbox_rows:
+            lines.extend([
+                "",
+                "✉️ *EMAIL RESPONSE METADATA (NO MESSAGE CONTENT)*",
+                "| Authorized mailbox | Awaiting employee | >24h stalled | Awaiting customer |",
+                "| :--- | ---: | ---: | ---: |",
+            ])
+            for mailbox, facts in sorted(mailbox_rows.items()):
+                lines.append(
+                    f"| {mailbox} | {facts.get('awaiting_employee', 'UNVERIFIED')} | "
+                    f"{facts.get('stalled_threads', 'UNVERIFIED')} | {facts.get('awaiting_customer', 'UNVERIFIED')} |"
+                )
 
         lines.extend([
             "",
@@ -153,7 +224,6 @@ class ReportingSuite:
                 lines.append(f"• {row['queue']} pickups — {pickups}")
                 lines.append(f"• {row['queue']} missed/refused member legs — {missed}")
 
-        magellan_data = magellan_data or {"source_status": "not supplied"}
         sales_data = sales_data or {"source_status": "not supplied"}
         role_rows = role_rows or []
         sales_exceptions = sales_data.get("exceptions", [])
@@ -164,6 +234,28 @@ class ReportingSuite:
                     f"• {item.get('account_name', 'Unknown account')} — {item.get('producer', 'Unassigned')} | "
                     f"{item.get('stage', 'Unknown')} | last touch {item.get('days_since_touch', 'unknown')}d ago | "
                     f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
+                )
+        tracker_data = tracker_data or {"source_status": "not supplied"}
+        tracker_exceptions = tracker_data.get("exceptions", [])
+        if tracker_exceptions:
+            lines.extend(["", "🧭 *DAILY POLICY CHANGES, COIS & SERVICE TRACKERS*"])
+            for item in tracker_exceptions[:50]:
+                lines.append(
+                    f"• {item.get('account', 'Unknown item')} — {item.get('owner', 'Unassigned')} | "
+                    f"{item.get('tracker_name', 'Tracker')} | {item.get('status', 'Unknown')} | "
+                    f"blocker: {item.get('blocker_party', 'unclear')} | "
+                    f"next: {item.get('next_action', 'Review EZLynx')} | "
+                    f"source row {item.get('source_row_number', '?')}"
+                )
+        submission_data = submission_data or {"source_status": "not supplied"}
+        submission_exceptions = submission_data.get("exceptions", [])
+        if submission_exceptions:
+            lines.extend(["", "📨 *DAILY SUBMISSION CENTER EXCEPTIONS (>30 DAYS OPEN)*"])
+            for item in submission_exceptions[:50]:
+                lines.append(
+                    f"• {item.get('account_name', 'Unknown account')} — "
+                    f"{item.get('owner', 'Unassigned')} | open {item.get('age_days', 'unknown')}d | "
+                    f"{item.get('status', 'Unknown')} | source row {item.get('source_row_number', '?')}"
                 )
         if role_rows:
             lines.extend(["", "🧩 *TODAY'S WORK ↔ ROLE RESPONSIBILITIES*"])
@@ -177,6 +269,9 @@ class ReportingSuite:
                 _source_warning("EZLynx Tasks", task_data),
                 _source_warning("Magellan", magellan_data),
                 _source_warning("EZLynx Sales Center", sales_data),
+                _source_warning("Gmail metadata", email_data),
+                _source_warning("EZLynx Submission Center", submission_data),
+                _source_warning("Policy Change / COI trackers", tracker_data),
             )
             if warning
         ]
@@ -268,6 +363,27 @@ class ReportingSuite:
                     f"• *{row['queue']}* — {row['answered']}/{row['offered']} answered "
                     f"({row['answer_rate']}); abandoned/VM {row['abandoned_or_voicemail']}; pickups: {pickups}; "
                     f"missed/refused member legs: {missed}"
+                )
+
+        service_rows = call_data.get("service_reconciliation", [])
+        if service_rows:
+            counts: Dict[str, int] = defaultdict(int)
+            for item in service_rows:
+                counts[str(item.get("final_classification") or item.get("resolution") or "UNVERIFIED")] += 1
+            lines.extend(["", "🔎 *WEEKLY CROSS-CHANNEL RESOLUTION OUTCOMES*"])
+            lines.extend(f"• {label}: {count}" for label, count in sorted(counts.items()))
+            redials = [item for item in service_rows if item.get("caller_had_to_redial")]
+            if redials:
+                lines.append(f"• Caller had to redial and later reached the agency: {len(redials)}")
+
+        task_exceptions = task_data.get("exceptions", [])
+        if task_exceptions:
+            lines.extend(["", "🗂️ *OVERDUE EZLYNX TASK EXCEPTIONS*"])
+            for item in task_exceptions[:30]:
+                lines.append(
+                    f"• {item.get('account_name', 'Unknown account')} — {item.get('owner', 'Unassigned')} | "
+                    f"{item.get('title', 'Untitled task')} | due {item.get('due_date') or 'UNVERIFIED'} | "
+                    f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
                 )
 
         if role_rows:
@@ -387,6 +503,16 @@ class ReportingSuite:
             grade_line,
             f"• Total Calls Processed: {_display_metric(monthly_kpis, 'total_calls')}",
             f"• Active Policies Serviced: {_display_metric(monthly_kpis, 'policies_serviced')}",
+            f"• Verified True No-Response Cases: {_display_metric(monthly_kpis, 'true_no_response_count')}",
+            f"• Clients Who Had to Redial: {_display_metric(monthly_kpis, 'client_redial_count')}",
+            f"• Verified Non-Call Responses: {_display_metric(monthly_kpis, 'non_call_response_count')}",
+            f"• Email Threads >24h Awaiting Employee: {_display_metric(monthly_kpis, 'email_stalled_threads')}",
+            f"• Overdue EZLynx Tasks: {_display_metric(monthly_kpis, 'overdue_task_count')}",
+            f"• Open Policy Change Exceptions: {_display_metric(monthly_kpis, 'policy_change_exception_count')}",
+            f"• Open COI/Endorsement Exceptions: {_display_metric(monthly_kpis, 'coi_exception_count')}",
+            f"• Open Audit Exceptions: {_display_metric(monthly_kpis, 'audit_exception_count')}",
+            f"• Open Submissions Over 30 Days: {_display_metric(monthly_kpis, 'submission_over_30_count')}",
+            f"• Magellan At-Risk Calls: {_display_metric(monthly_kpis, 'magellan_at_risk_calls')}",
             f"• Sales Opportunities With No Recent Touch: {_display_metric(sales_data, 'inactive_opportunity_count')}",
             f"• Confirmed Churn / Cancellation Cases Supplied: {len(churn_autopsies)}",
             "",

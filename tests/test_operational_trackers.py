@@ -18,6 +18,7 @@ Completed LLC,Geico,08/20/2026,08/25/2026,Completed,Policy downloaded,Commercial
     )
     assert len(findings) == 1
     assert findings[0].account == "The Gutter Elite LLC"
+    assert findings[0].opened_date == "2026-07-01"
     assert findings[0].owner == "Taylor Cimei"
     assert findings[0].source_row_number == 2
     assert "open for 60 days" in " ".join(findings[0].reasons)
@@ -72,6 +73,7 @@ Example LLC,08/20/2026,Pending Carrier,Underwriter reviewing request,Example CSR
     )
     assert len(findings) == 1
     assert findings[0].blocker_party == "carrier"
+    assert findings[0].opened_date == "2026-08-20"
     assert findings[0].notification_target == "Example CSR"
     assert findings[0].ezlynx_reference == "A-123"
     assert "carrier response" in findings[0].next_action

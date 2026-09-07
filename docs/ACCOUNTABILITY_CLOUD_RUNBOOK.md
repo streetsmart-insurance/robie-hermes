@@ -31,7 +31,8 @@ minimum runtime environment references.
 Choose one:
 
 1. Schedule Detailed Call Log and queue reports to
-   `robie@streetsmart.insurance`; the cloud Gmail identity downloads the CSVs.
+   `robie@streetsmart.insurance`; the cloud Gmail identity downloads bounded
+   CSV or macro-free XLSX attachments and checksum-binds the evidence.
 2. Configure a read-only RingCentral application with client ID, client secret,
    and JWT stored in Secret Manager.
 
@@ -39,17 +40,44 @@ Required evidence includes call/session ID, every call leg, direction,
 from/to, extension/queue, result, start time, duration, queue/hold time, and
 connected outbound callbacks.
 
-### EZLynx
+### EZLynx Five / Reports 5.0
 
 The current cloud path uses the canonical authenticated browser profile and
-Secret Manager references already used for session refresh. Test must prove
-exports for Tasks, Activities, Sales Center, Retention Center, and Submission
-Center. A failed or stale export produces `UNVERIFIED`, never a favorable score.
-Sales Center open opportunities are grouped by producer and flagged when the
-export shows no touch beyond `rules.sales_untouched_days` (five days by
-default). The exception preserves opportunity, stage, last-touch age, note
-quality, and source row. Submission Center flags non-terminal submissions open
-more than 30 days.
+Secret Manager references already used for session refresh. The weekly job can
+collect Submission Center evidence directly when
+`collection.ezlynx_submission_center.enabled` is true. That collector is
+read-only: it sets All Submissions / Streetsmart Insurance, uses 100 rows,
+verifies Status ascending with a non-closed first row, follows every page until
+the first closed record, and requires both the live `overdue` class and
+`rgb(211, 47, 47)` before applying the day-31 rule. It captures direct links and
+groups qualifying records by assigned producer. Cached rows and capped exports
+are never completeness proof.
+
+Tasks, Activities, Policy Changes, COIs, Sales and Retention must come from
+verified EZLynx Five / Reports 5.0 mappings. The legacy
+`EZLynxReportPortal/SavedReports` catalog is not an automatic fallback. The
+connection manifest pins `version=5.0`, keeps legacy fallback false and fails
+closed while any required mapping is unverified. Verified mappings currently
+include Activity `Activity Summary` (#25979) and `Activity Detail` (#546),
+Policy Transaction `Policy Change Request Summary` (#25997) and `Change Request
+Detail` (#492), Sales `Sales Performance Dashboard` (#25985) and `Sales Center
+Detail` (#3469), and Retention `Renewal Summary` (#25991), `Premium Change Detail
+(EZLynx Data)` (#3688), and `Renewal Detail` (#494). COIs use `Activity Detail`
+(#546) with `Activity Labels Activity Labels contains Certificate of Insurance`,
+then reconcile the result to the direct account Activity link in the COI tracker.
+Audits use `Activity Detail` (#546) with the same field containing `Audit`, plus
+`Policy Transaction Detail` (#489) and the latest account Activity discussion.
+
+A failed browser read or stale export produces `UNVERIFIED`, never a favorable
+or adverse employee result. Sales open opportunities are grouped by producer
+and flagged when Reports 5.0 shows no touch beyond
+`rules.sales_untouched_days` (five days by default). The exception preserves
+opportunity, stage, last-touch age, note quality, and source row. Submission
+Center remains a separately verified live-center collector and flags only non-terminal records whose
+live red Quote Due Date is more than 30 calendar days old. Producer cleanup
+emails are a separate gate: the collector records
+`email_delivery_enabled=false`, and no employee email may be sent without
+current recipient verification and an immediate user confirmation.
 
 EZLynx is the account-level source of truth. RingCentral, Gmail, Magellan, and
 department trackers are external evidence to reconcile to the EZLynx account,
@@ -77,11 +105,23 @@ and age; it does not publish message bodies. Shared inboxes, spam, bulk mail,
 auto-replies, internal-only threads, PTO, and approved delegations need written
 exclusion rules.
 
-The cloud implementation uses keyless IAM signing for the delegated service
-account and requests only `https://www.googleapis.com/auth/gmail.metadata`.
-Set `ACCOUNTABILITY_GMAIL_USERS` to an explicit mailbox allowlist. The output
-contains per-mailbox counts, reply ownership, ages, and hashed evidence IDs;
-it does not contain bodies or subjects.
+Google Workspace Admin has granted the StreetSmart Hermes domain-wide
+delegation client `gmail.metadata`, `gmail.readonly`, and `gmail.send`.
+Authorization is not runtime proof. Before enabling the collector,
+`hermes-test-01` must impersonate every approved active employee mailbox from
+the approved employee roster and read back the exact delegated profile. Any
+missing roster email, non-StreetSmart email, profile mismatch, or mailbox
+failure stops the Test run.
+
+The employee collector requests only
+`https://www.googleapis.com/auth/gmail.metadata`. Its allowlist is derived from
+the active employee role registry; `ACCOUNTABILITY_GMAIL_USERS` is a
+compatibility fallback, not the agency-wide source of truth. Output contains
+per-mailbox counts, reply ownership, ages, and hashed evidence IDs; it does not
+contain message bodies or subjects. `gmail.readonly` is reserved for
+`robie@streetsmart.insurance` and scheduled report attachments. Although
+`gmail.send` is authorized, email and Google Chat delivery remain disabled
+until Carlo approves the exact digest and recipients.
 
 ### AppSheet
 
@@ -133,6 +173,12 @@ presented as top performance.
 Share only the required spreadsheets with the cloud service identity. The
 connection manifest maps every tracker key to a normalized export path. Each
 finding keeps its tracker name and source row.
+The COI source is spreadsheet `1LXer2SjkQGvj1dsaRGmFnkB_hGBQeJolagw1oFbycZY`.
+Its collector resolves `{month}!A:H` in Eastern time and persists only Date,
+Date COI was Requested, Profile, Link, Requirements/Endo, assigned agent,
+Status, and Date Completed. The tracker remains authoritative for the worklist;
+the direct EZLynx account Activity page is authoritative for evidence and the
+latest documented outcome.
 The Missed Calls tracker is a RingCentral reconciliation source and is not
 added to call totals a second time. Pending Payouts remains available as an
 optional definition but is excluded from the initial active manifest.
@@ -142,11 +188,16 @@ approved recipient map and delivery connection; Test never messages employees.
 
 ## Test activation
 
+Until separately approved, accountability is run manually every weekday in
+Test only. The weekday scheduler wakes the Test work item; it is not permission
+to deploy, run, or deliver from Production. Production remains prohibited.
+
 1. Install the reviewed immutable release on `hermes-test-01` using the official
    Test deployment workflow.
 2. Create the Test-only manifest from
    `deploy/accountability/connection-manifest.example.json` under
    `/opt/streetsmart-hermes-test/accountability/`.
+   Keep leadership delivery and producer cleanup email disabled.
 3. Run the redacted connection check. It must not print secret values.
 4. Install the three recurring schedules into the Test Job database.
 5. Run each reporting mode against non-production fixtures, followed by fresh

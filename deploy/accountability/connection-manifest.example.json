@@ -1,4 +1,11 @@
 {
+  "safety": {
+    "environment": "Test",
+    "manual_weekday_runs_only": true,
+    "production_allowed": false,
+    "email_delivery_enabled": false,
+    "google_chat_delivery_enabled": false
+  },
   "output_dir": "/opt/streetsmart-hermes/accountability/reports",
   "sources": {
     "ringcentral": "/opt/streetsmart-hermes/accountability/inbox/ringcentral.csv",
@@ -29,36 +36,136 @@
   },
   "rules": {
     "sales_untouched_days": 5,
-    "submission_open_days": 30
+    "submission_open_days": 30,
+    "callback_sla_minutes": 30,
+    "business_timezone": "America/New_York",
+    "business_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    "business_hours": {"start": "09:00", "end": "17:00"},
+    "holiday_calendar": "US-FEDERAL",
+    "daily_reporting_period": "previous_business_day",
+    "coi_target": "same_business_day",
+    "policy_change_escalation_days": 7,
+    "require_complete_evidence": true
   },
   "collection": {
-    "ezlynx_submission_browser": {
+    "gmail_accountability": {
       "enabled": false,
-      "read_only": true,
-      "scope": "Streetsmart Insurance",
-      "time_frame": "All Submissions"
+      "scope": "https://www.googleapis.com/auth/gmail.metadata",
+      "allowlist_source": "approved_active_employee_roster",
+      "approved_domain": "streetsmart.insurance",
+      "require_every_mailbox_verified": true,
+      "message_bodies_enabled": false
     },
     "ringcentral_email": {
       "enabled": false,
       "mailbox": "report-mailbox@example.test",
       "max_age_hours": 36
     },
-    "scheduled_reports_email": {
+    "magellan": {
       "enabled": false,
-      "modes": ["weekly"],
-      "mailbox": "report-mailbox@example.test",
-      "max_age_hours": 192,
-      "allowed_sender_domains": ["ezlynx.com"],
-      "allowed_senders": [],
-      "reports": {
-        "tasks": {"label": "ROBIE_EZLYNX_TASKS", "destination": "source", "required": true, "worksheet": "Tasks", "required_columns": ["Assigned To", "Status"]},
-        "activities": {"label": "ROBIE_EZLYNX_ACTIVITIES", "destination": "source", "required": true, "worksheet": "Activities", "required_columns": ["Description"]},
-        "sales": {"label": "ROBIE_EZLYNX_SALES", "destination": "source", "required": true, "worksheet": "Sales Center", "required_columns": ["Assigned Producer", "Status"]},
-        "retention": {"label": "ROBIE_EZLYNX_RETENTION", "destination": "source", "required": true, "worksheet": "Retention", "required_columns": ["Expiration Date", "Status"]},
-        "submissions": {"label": "ROBIE_EZLYNX_SUBMISSIONS", "destination": "source", "required": true, "worksheet": "Submissions", "required_columns": ["Submission Title", "Submission URL", "Applicant", "Assigned Producer", "Status", "Quote Due Date", "Effective Date", "Overdue"]},
-        "policy_changes": {"label": "ROBIE_POLICY_CHANGES", "destination": "tracker", "required": true, "worksheet": "Policy Changes", "required_columns": ["Status", "Request Date"]},
-        "coi_endorsements": {"label": "ROBIE_COI_ENDORSEMENTS", "destination": "tracker", "required": true, "worksheet": "Certificates", "required_columns": ["Status", "Request Date"]},
-        "expirations": {"label": "ROBIE_EXPIRATIONS", "destination": "tracker", "required": true, "worksheet": "Expirations", "required_columns": ["Status", "Expiration Date"]}
+      "read_only": true,
+      "cdp_url": "http://127.0.0.1:9223",
+      "project": "streetsmart-hermes-poc",
+      "max_pages": 40,
+      "transcripts_enabled": false
+    },
+    "ezlynx_submission_center": {
+      "enabled": false,
+      "read_only": true,
+      "email_delivery_enabled": false,
+      "modes": ["daily", "weekly"]
+    },
+    "ezlynx_reports_5": {
+      "enabled": false,
+      "version": "5.0",
+      "base_url": "https://app.ezlynx.com/web/looker-reports",
+      "legacy_saved_reports_enabled": false,
+      "required_mappings": ["tasks_activities", "policy_changes", "coi", "sales", "retention", "audits"],
+      "mappings": {
+        "tasks_activities": {
+          "verified": true,
+          "dashboard": {"name": "Activity Summary", "report_id": 25979},
+          "look": {"name": "Activity Detail", "report_id": 546}
+        },
+        "policy_changes": {
+          "verified": true,
+          "dashboard": {"name": "Policy Change Request Summary", "report_id": 25997},
+          "look": {"name": "Change Request Detail", "report_id": 492}
+        },
+        "coi": {
+          "verified": true,
+          "source_type": "tracker_plus_account_activity",
+          "look": {"name": "Activity Detail", "report_id": 546},
+          "filter": {"field": "Activity Labels Activity Labels", "operator": "contains", "value": "Certificate of Insurance"},
+          "account_evidence": "Open the tracker Link and reconcile the matching account Activity discussion"
+        },
+        "sales": {
+          "verified": true,
+          "dashboard": {"name": "Sales Performance Dashboard", "report_id": 25985},
+          "look": {"name": "Sales Center Detail", "report_id": 3469}
+        },
+        "audits": {
+          "verified": true,
+          "source_type": "composite",
+          "looks": [
+            {"name": "Activity Detail", "report_id": 546},
+            {"name": "Policy Transaction Detail", "report_id": 489}
+          ],
+          "filter": {"field": "Activity Labels Activity Labels", "operator": "contains", "value": "Audit"},
+          "account_evidence": "Reconcile the activity label, policy transaction, and latest account Activity discussion"
+        },
+        "retention": {
+          "verified": true,
+          "dashboard": {"name": "Renewal Summary", "report_id": 25991},
+          "looks": [
+            {"name": "Premium Change Detail (EZLynx Data)", "report_id": 3688},
+            {"name": "Renewal Detail", "report_id": 494}
+          ]
+        }
+      }
+    }
+  },
+  "google_sheet_trackers": {
+    "enabled": false,
+    "read_only": true,
+    "trackers": {
+      "coi_endorsements": {
+        "spreadsheet_id": "1LXer2SjkQGvj1dsaRGmFnkB_hGBQeJolagw1oFbycZY",
+        "range": "{month}!A:H",
+        "allowed_columns": [
+          "Date",
+          "Date COI was Requested",
+          "Profile",
+          "Link",
+          "Requirements/Endo",
+          "Agent assigned to the task.",
+          "Status",
+          "Date Completed"
+        ]
+      },
+      "policy_changes": {
+        "spreadsheet_id": "1-_Egm_2K16aAQv8u_MqKzWJGFTEr4KA8reh_oFm3rg4",
+        "range": "{previous_business_week}!A:R",
+        "allowed_columns": [
+          "Action",
+          "Change Request Created Date",
+          "Days Open",
+          "Account Name",
+          "Assigned Producer",
+          "Branch",
+          "Effective Date",
+          "Line of Business",
+          "Master Company",
+          "Policy Number",
+          "Written Premium",
+          "Change Request Created By",
+          "Request Status",
+          "Policy Change Request ID",
+          "Expiration Date",
+          "Total Policy Change Requests",
+          "Total Open Change Requests",
+          "Column 1"
+        ]
       }
     }
   },
@@ -80,11 +187,19 @@
     "enabled": false,
     "spreadsheet_id": "REPLACE_WITH_PRIVATE_APPSHEET_BACKING_SHEET_ID",
     "employee_role_table": "employees",
-    "employee_role_columns": {"name": "Name", "role": "Role", "email": "Email"},
+    "employee_role_columns": {
+      "name": "name",
+      "role": "position",
+      "email": "email",
+      "department": "department",
+      "status": "employmentStatus",
+      "manager": "departmentHead",
+      "active_value": "Active"
+    },
     "tables": {
       "employees": {
-        "range": "Employees!A:Z",
-        "allowed_columns": ["Name", "Role", "Email", "Department", "Active"]
+        "range": "Street Smart Employees!A:AG",
+        "allowed_columns": ["name", "position", "email", "department", "employmentStatus", "departmentHead"]
       },
       "employee_performance": {
         "range": "Employee Performance!A:Z",
@@ -94,12 +209,13 @@
   },
   "delivery": {
     "enabled": false,
+    "requires_exact_digest_approval": true,
     "chat_spaces": [],
     "email_sender": "report-mailbox@example.test",
     "email_recipients": {
-      "daily": ["leader.one@example.test", "leader.two@example.test"],
-      "weekly": ["leader.one@example.test", "leader.two@example.test"],
-      "monthly": ["leader.one@example.test", "leader.two@example.test"]
+      "daily": ["carlo@streetsmart.insurance"],
+      "weekly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"],
+      "monthly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"]
     }
   }
 }

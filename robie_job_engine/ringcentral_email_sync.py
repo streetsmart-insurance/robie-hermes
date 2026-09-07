@@ -13,7 +13,7 @@ import hashlib
 import logging
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 from typing import Mapping
@@ -26,6 +26,7 @@ from .ringcentral_workbooks import (
     read_workbook,
     validate_coverage,
     validate_queue_membership,
+    validate_report_date,
     write_evidence_manifest,
 )
 
@@ -177,6 +178,7 @@ class RingCentralEmailSync:
         max_age_hours: int = 36,
         batch_window_minutes: int = 120,
         as_of: Optional[datetime] = None,
+        target_date: date | None = None,
     ) -> Path:
         """Collect the newest complete, explicitly labeled XLSX evidence bundle."""
         if report_kind not in DEFAULT_REQUIRED_SHEETS:
@@ -224,23 +226,37 @@ class RingCentralEmailSync:
         if not candidates:
             raise FileNotFoundError(f"no fresh explicitly labeled RingCentral {report_kind} XLSX was found")
         candidates.sort(key=lambda item: item["received_at"], reverse=True)
-        newest = datetime.fromisoformat(candidates[0]["received_at"])
-        lower_bound = newest - timedelta(minutes=max(1, batch_window_minutes))
         selected: list[dict[str, Any]] = []
-        available: set[str] = set()
-        for candidate in candidates:
-            if datetime.fromisoformat(candidate["received_at"]) < lower_bound:
+        newest: datetime | None = None
+        last_date_error: Exception | None = None
+        for anchor in candidates:
+            anchor_time = datetime.fromisoformat(anchor["received_at"])
+            lower_bound = anchor_time - timedelta(minutes=max(1, batch_window_minutes))
+            window = [item for item in candidates if lower_bound <= datetime.fromisoformat(item["received_at"]) <= anchor_time]
+            trial: list[dict[str, Any]] = []
+            available: set[str] = set()
+            for candidate in window:
+                contributes = set(candidate["workbook"].get("tables", {})) - available
+                if contributes or not trial:
+                    trial.append(candidate)
+                    available.update(candidate["workbook"].get("tables", {}))
+                if all(sheet in available for sheet in needed):
+                    break
+            if any(sheet not in available for sheet in needed):
                 continue
-            contributes = set(candidate["workbook"].get("tables", {})) - available
-            if contributes or not selected:
-                selected.append(candidate)
-                available.update(candidate["workbook"].get("tables", {}))
-            if all(sheet in available for sheet in needed):
-                break
-        missing = [sheet for sheet in needed if sheet not in available]
-        if missing:
+            if target_date is not None:
+                try:
+                    validate_report_date([item["workbook"] for item in trial], target_date)
+                except RingCentralEvidenceError as exc:
+                    last_date_error = exc
+                    continue
+            selected, newest = trial, anchor_time
+            break
+        if not selected or newest is None:
+            if last_date_error is not None:
+                raise RingCentralEvidenceError(str(last_date_error))
             raise RingCentralEvidenceError(
-                f"fresh RingCentral {report_kind} evidence is missing worksheets: {', '.join(missing)}"
+                f"fresh RingCentral {report_kind} evidence is missing worksheets: {', '.join(needed)}"
             )
         validate_coverage(
             [item["workbook"] for item in selected],
@@ -278,6 +294,7 @@ def collect_scheduled_ringcentral_report(
     required_queue_members: Mapping[str, Sequence[str]],
     required_sheets: Sequence[str] | None = None,
     max_age_hours: int = 36,
+    target_date: date | None = None,
     service_factory: Any = build_keyless_report_mailbox_service,
 ) -> Path:
     if not service_account_email or not mailbox:
@@ -291,5 +308,6 @@ def collect_scheduled_ringcentral_report(
         required_queue_members=required_queue_members,
         required_sheets=required_sheets,
         max_age_hours=max_age_hours,
+        target_date=target_date,
     )
     return path
