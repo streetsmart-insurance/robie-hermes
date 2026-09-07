@@ -230,6 +230,204 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
         self.assertEqual(res_second["cancellations_synced"], 0)
         self.assertEqual(res_second["past_due_synced"], 0)
 
+    @patch("robie_job_engine.ascend_sync.send_google_chat_alert")
+    def test_sync_signed_agreements_ready_to_bind(self, mock_chat) -> None:
+        mock_api = MagicMock()
+        mock_api.fetch_cancelation_returns.return_value = []
+        mock_api.fetch_invoices.return_value = []
+        mock_api.fetch_payouts.return_value = []
+        mock_api.fetch_programs.return_value = [
+            {
+                "id": "prog_signed_123",
+                "status": "checked_out",
+                "selected_payment_option_type": "monthly_financed",
+                "downpayment_amount_cents": 150000,
+                "total_payable_amount_cents": 600000,
+                "checkedout_at": "2026-09-07T10:00:00Z",
+                "program_url": "https://checkout.useascend.com/streetsmart/overview?program_id=prog_signed_123",
+                "insured": {"business_name": "Apex Builders LLC"},
+                "producer": {"first_name": "Matthew", "last_name": "Mancina"},
+                "billables": [
+                    {
+                        "policy_number": "POL-APEX-777",
+                        "carrier": {"title": "Travelers"},
+                        "wholesaler": {"title": "Amwins"},
+                        "coverage_type": {"title": "Commercial General Liability"},
+                    }
+                ],
+            }
+        ]
+
+        mock_matcher = MagicMock()
+        mock_matcher.match_account.return_value = ("app-apex", "Matthew Mancina")
+
+        mock_poster = MagicMock()
+        mock_poster.post_custom_note.return_value = {"status": "success"}
+        mock_poster.create_task.return_value = {"status": "success"}
+
+        manager = AscendEZLynxSyncManager(
+            api_client=mock_api,
+            store=self.store,
+            matcher=mock_matcher,
+            poster=mock_poster,
+        )
+
+        res = manager.sync_once()
+        self.assertEqual(res["signed_agreements_found"], 1)
+        self.assertEqual(res["signed_agreements_synced"], 1)
+
+        # Verify ready to bind note posted
+        mock_poster.post_custom_note.assert_called_once_with(
+            applicant_id="app-apex",
+            title="🎉 Agreement Signed & Checked Out - Travelers - POL-APEX-777",
+            note_text=unittest.mock.ANY,
+            policy_number="POL-APEX-777",
+            line_of_business="Commercial General Liability",
+            carrier_name="Travelers",
+        )
+
+        # Verify ready to bind task assigned to Matthew Mancina
+        mock_poster.create_task.assert_called_once_with(
+            applicant_id="app-apex",
+            title="🚨 READY TO BIND: POL-APEX-777 - Travelers - Apex Builders LLC (Agreement Signed)",
+            description=unittest.mock.ANY,
+            assigned_user="Matthew Mancina",
+            due_days_out=0,
+        )
+
+        # Verify Google Chat alert called
+        mock_chat.assert_called_once()
+
+    @patch("robie_job_engine.ascend_sync.send_google_chat_alert")
+    def test_sync_reinstatement_paid(self, mock_chat) -> None:
+        mock_api = MagicMock()
+        mock_api.fetch_cancelation_returns.return_value = []
+        mock_api.fetch_programs.return_value = []
+        mock_api.fetch_payouts.return_value = []
+        mock_api.fetch_invoices.return_value = [
+            {
+                "id": "inv_reinst_999",
+                "invoice_number": "INV-REINST-1",
+                "status": "paid",
+                "is_reinstatement": True,
+                "payer_name": "Global Hauling Inc",
+                "carrier_name": "Canal Insurance",
+                "memo": "CANAL-8899 Commercial Auto Reinstatement",
+                "total_amount_cents": 285000,
+                "paid_at": "2026-09-07T11:00:00Z",
+                "invoice_url": "https://api.cloudinary.com/reinstatement_receipt.pdf",
+            }
+        ]
+
+        mock_matcher = MagicMock()
+        mock_matcher.match_account.return_value = ("app-global-hauling", "Stef Reyes")
+
+        mock_poster = MagicMock()
+        mock_poster.post_custom_note.return_value = {"status": "success"}
+        mock_poster.create_task.return_value = {"status": "success"}
+
+        manager = AscendEZLynxSyncManager(
+            api_client=mock_api,
+            store=self.store,
+            matcher=mock_matcher,
+            poster=mock_poster,
+        )
+
+        res = manager.sync_once()
+        self.assertEqual(res["reinstatements_found"], 1)
+        self.assertEqual(res["reinstatements_synced"], 1)
+
+        # Verify discussion note posted with plain text amount
+        mock_poster.post_custom_note.assert_called_once_with(
+            applicant_id="app-global-hauling",
+            title="✅ Reinstatement Paid - CANAL-8899 - $2,850.00",
+            note_text=unittest.mock.ANY,
+            policy_number="CANAL-8899",
+        )
+
+        # Verify high priority reinstatement task created
+        mock_poster.create_task.assert_called_once_with(
+            applicant_id="app-global-hauling",
+            title="🚨 REINSTATEMENT PAID: Request Carrier Reinstatement - CANAL-8899 - Global Hauling Inc",
+            description=unittest.mock.ANY,
+            assigned_user="Stef Reyes",
+            due_days_out=0,
+        )
+
+        # Verify Google Chat alert called
+        mock_chat.assert_called_once()
+
+    @patch("robie_job_engine.ascend_sync.send_google_chat_alert")
+    def test_sync_accounting_unpaid_supplier_payout(self, mock_chat) -> None:
+        mock_api = MagicMock()
+        mock_api.fetch_cancelation_returns.return_value = []
+        mock_api.fetch_programs.return_value = []
+        mock_api.fetch_invoices.return_value = []
+        mock_api.fetch_payouts.return_value = [
+            {
+                "id": "payout_supp_failed_1",
+                "payout_type": "supplier",
+                "status": "failed",
+                "net_payout_amount_cents": 420000,
+                "program_id": "prog_xpt_1",
+                "paying_at": "2026-09-05",
+                "payable_account": {
+                    "owner_name": "XPT Specialty",
+                },
+            }
+        ]
+
+        mock_poster = MagicMock()
+        mock_poster.create_task.return_value = {"status": "success"}
+
+        manager = AscendEZLynxSyncManager(
+            api_client=mock_api,
+            store=self.store,
+            matcher=MagicMock(),
+            poster=mock_poster,
+        )
+
+        res = manager.sync_once()
+        self.assertEqual(res["payouts_found"], 1)
+        self.assertEqual(res["payouts_synced"], 1)
+
+        # Verify task created for accounting
+        mock_poster.create_task.assert_called_once_with(
+            applicant_id="0",
+            title="⚠️ ACCOUNTING AUDIT: FAILED Supplier Payout to XPT Specialty ($4,200.00)",
+            description=unittest.mock.ANY,
+            assigned_user="accounting@streetsmart.insurance",
+            due_days_out=1,
+        )
+
+        # Verify Google Chat alert dispatched
+        mock_chat.assert_called_once()
+
+    def test_endorsement_extractor(self) -> None:
+        from robie_job_engine.quote_extractor import EndorsementExtractor
+        extractor = EndorsementExtractor()
+
+        sample_endorsement = """
+        POLICY ENDORSEMENT REQUEST
+        Policy Number: GL-2026-99124
+        Named Insured: FastTrack Logistics LLC
+        Carrier: Liberty Mutual
+        Effective Date: 10/15/2026
+        Description of Change: Adding Blanket Additional Insured and Waiver of Subrogation
+        Additional Premium: $650.00
+        Surplus Lines Tax: $32.50
+        Commission: 15.0%
+        """
+
+        extracted = extractor.extract_from_text(sample_endorsement)
+        self.assertEqual(extracted.policy_number, "GL-2026-99124")
+        self.assertEqual(extracted.insured_name, "FastTrack Logistics LLC")
+        self.assertEqual(extracted.additional_premium_cents, 65000)
+        self.assertEqual(extracted.taxes_and_fees_cents, 3250)
+        self.assertEqual(extracted.total_cents, 68250)
+        self.assertEqual(extracted.effective_date, "2026-10-15")
+        self.assertIn("Blanket Additional Insured", extracted.description)
+
 
 if __name__ == "__main__":
     unittest.main()

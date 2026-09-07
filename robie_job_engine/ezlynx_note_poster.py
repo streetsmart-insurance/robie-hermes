@@ -156,6 +156,238 @@ def format_past_due_notice_note(
     return "\n".join(lines)
 
 
+def format_agreement_signed_note(
+    *,
+    insured_name: str,
+    policy_number: Optional[str] = None,
+    carrier_name: Optional[str] = None,
+    wholesaler_name: Optional[str] = None,
+    coverage_title: Optional[str] = None,
+    payment_option: str,
+    downpayment_text: str,
+    total_text: str,
+    checkedout_at: str,
+    program_url: Optional[str] = None,
+    producer_name: Optional[str] = None,
+) -> str:
+    """Format discussion note when insured signs and completes checkout on Ascend."""
+    wholesaler_line = f" (via {wholesaler_name})" if wholesaler_name else ""
+    opt_title = "Monthly Financed Installments" if "monthly" in payment_option.lower() else "Paid In Full"
+    lines = [
+        "🎉 ASCEND PAYMENT AGREEMENT SIGNED & COMPLETED",
+        "",
+        "• Status: READY TO BIND (Client Completed Checkout)",
+        f"• Insured: {insured_name}",
+    ]
+    if policy_number:
+        lines.append(f"• Policy Number: {policy_number}")
+    if carrier_name:
+        lines.append(f"• Carrier: {carrier_name}{wholesaler_line}")
+    if coverage_title:
+        lines.append(f"• Coverage: {coverage_title}")
+
+    lines.extend([
+        "",
+        f"• Selected Payment Plan: {opt_title}",
+        f"• Plain Text Down Payment / Initial Payment: {downpayment_text}",
+        f"• Plain Text Total Program Amount: {total_text}",
+        f"• Checkout Completed At: {checkedout_at}",
+    ])
+    if producer_name:
+        lines.append(f"• Assigned Producer/CSR: {producer_name}")
+
+    if program_url:
+        lines.extend([
+            "",
+            "Ascend Overview & Agreement Record:",
+            program_url,
+        ])
+
+    lines.append(ROBIE_SIGNATURE)
+    return "\n".join(lines)
+
+
+def format_reinstatement_paid_note(
+    *,
+    insured_name: str,
+    policy_number: str,
+    carrier_name: Optional[str] = None,
+    wholesaler_name: Optional[str] = None,
+    amount_paid_text: str,
+    paid_at: str,
+    invoice_number: Optional[str] = None,
+    payment_method_desc: Optional[str] = None,
+    receipt_url: Optional[str] = None,
+) -> str:
+    """Format discussion note when a past-due / reinstatement invoice is paid."""
+    wholesaler_line = f" (via {wholesaler_name})" if wholesaler_name else ""
+    lines = [
+        "✅ REINSTATEMENT PAYMENT RECEIVED - ASCEND SYNC",
+        "",
+        "• Status: PAID / PENDING CARRIER REINSTATEMENT",
+        f"• Insured: {insured_name}",
+        f"• Policy Number: {policy_number}",
+    ]
+    if carrier_name:
+        lines.append(f"• Carrier: {carrier_name}{wholesaler_line}")
+    if invoice_number:
+        lines.append(f"• Invoice Number: {invoice_number}")
+
+    lines.extend([
+        "",
+        f"• Plain Text Amount Paid: {amount_paid_text}",
+        f"• Plain Text Date & Time Paid: {paid_at}",
+    ])
+    if payment_method_desc:
+        lines.append(f"• Payment Method: {payment_method_desc}")
+
+    if receipt_url:
+        lines.extend([
+            "",
+            "Payment Receipt / Proof of Payment Document:",
+            receipt_url,
+        ])
+
+    lines.append(ROBIE_SIGNATURE)
+    return "\n".join(lines)
+
+
+def format_reinstatement_carrier_email(
+    *,
+    carrier_or_wholesaler_name: str,
+    policy_number: str,
+    insured_name: str,
+    amount_paid_text: str,
+    paid_at: str,
+    receipt_url: Optional[str] = None,
+    agency_rep_name: str = "StreetSmart Insurance Team",
+) -> dict[str, str]:
+    """Format carrier / wholesaler reinstatement request email."""
+    subject = f"REINSTATEMENT REQUEST: Policy #{policy_number} - {insured_name}"
+    body_lines = [
+        f"Dear {carrier_or_wholesaler_name} Underwriting & Accounting,",
+        "",
+        f"Please accept this request to reinstate Policy #{policy_number} for {insured_name} without lapse in coverage.",
+        "",
+        f"The outstanding balance of {amount_paid_text} was collected and processed via Ascend on {paid_at}.",
+    ]
+    if receipt_url:
+        body_lines.extend([
+            "",
+            f"You can verify and download the payment receipt here:",
+            receipt_url,
+        ])
+    body_lines.extend([
+        "",
+        "Please confirm receipt and provide the official Reinstatement Endorsement at your earliest convenience.",
+        "",
+        "Thank you,",
+        agency_rep_name,
+        "StreetSmart Insurance Agency",
+    ])
+    return {
+        "subject": subject,
+        "body": "\n".join(body_lines),
+    }
+
+
+def format_endorsement_note(
+    *,
+    insured_name: str,
+    policy_number: str,
+    carrier_name: Optional[str] = None,
+    wholesaler_name: Optional[str] = None,
+    coverage_title: Optional[str] = None,
+    endorsement_description: str,
+    effective_date: str,
+    additional_premium_text: str,
+    taxes_and_fees_text: Optional[str] = None,
+    total_endorsement_text: str,
+    endorsement_checkout_url: Optional[str] = None,
+) -> str:
+    """Format discussion note for mid-term endorsement / audit additional premium."""
+    wholesaler_line = f" (via {wholesaler_name})" if wholesaler_name else ""
+    lines = [
+        "📝 MID-TERM POLICY ENDORSEMENT / ADDITIONAL PREMIUM",
+        "",
+        f"• Insured: {insured_name}",
+        f"• Policy Number: {policy_number}",
+    ]
+    if carrier_name:
+        lines.append(f"• Carrier: {carrier_name}{wholesaler_line}")
+    if coverage_title:
+        lines.append(f"• Coverage: {coverage_title}")
+
+    lines.extend([
+        f"• Description: {endorsement_description}",
+        f"• Endorsement Effective Date: {effective_date}",
+        "",
+        f"• Additional / Return Premium: {additional_premium_text}",
+    ])
+    if taxes_and_fees_text:
+        lines.append(f"• Surplus Lines Tax & Fees: {taxes_and_fees_text}")
+    lines.append(f"• Total Endorsement Amount: {total_endorsement_text}")
+
+    if endorsement_checkout_url:
+        lines.extend([
+            "",
+            "Client Endorsement Payment Link:",
+            endorsement_checkout_url,
+        ])
+
+    lines.append(ROBIE_SIGNATURE)
+    return "\n".join(lines)
+
+
+def format_accounting_issue_task(
+    *,
+    issue_type: str,
+    insured_name: Optional[str] = None,
+    policy_number: Optional[str] = None,
+    carrier_name: Optional[str] = None,
+    wholesaler_name: Optional[str] = None,
+    expected_amount_text: Optional[str] = None,
+    actual_amount_text: Optional[str] = None,
+    discrepancy_details: str,
+    ascend_reference_url: Optional[str] = None,
+) -> str:
+    """Format task description for accounting team discrepancy review."""
+    lines = [
+        f"⚠️ ACCOUNTING ATTENTION REQUIRED: {issue_type.upper()}",
+        "",
+        f"• Issue Type: {issue_type}",
+    ]
+    if insured_name:
+        lines.append(f"• Insured: {insured_name}")
+    if policy_number:
+        lines.append(f"• Policy Number: {policy_number}")
+    if carrier_name:
+        lines.append(f"• Carrier: {carrier_name}")
+    if wholesaler_name:
+        lines.append(f"• Wholesaler: {wholesaler_name}")
+
+    lines.append("")
+    if expected_amount_text:
+        lines.append(f"• Expected Amount: {expected_amount_text}")
+    if actual_amount_text:
+        lines.append(f"• Actual Amount: {actual_amount_text}")
+
+    lines.extend([
+        "",
+        f"Details: {discrepancy_details}",
+    ])
+
+    if ascend_reference_url:
+        lines.extend([
+            "",
+            "Ascend Record:",
+            ascend_reference_url,
+        ])
+
+    lines.append("\nRobie Accounting Watchdog")
+    return "\n".join(lines)
+
+
 class EZLynxAgreementPoster:
     """Posts Ascend agreement links and notices into EZLynx."""
 

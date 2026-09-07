@@ -57,6 +57,7 @@ BILLABLE_FIELDS = frozenset(
         "agency_fees_cents",
         "attachments",
         "billable_identifier",
+        "billable_type",
         "broker_fee_cents",
         "carrier_identifier",
         "coverage_identifier",
@@ -74,6 +75,9 @@ BILLABLE_FIELDS = frozenset(
         "policy_fee_cents",
         "policy_number",
         "premium_cents",
+        "program_id",
+        "seller_commission_amount_cents",
+        "seller_commission_rate",
         "surplus_lines_tax_cents",
         "taxes_and_fees_cents",
         "wholesaler_identifier",
@@ -428,6 +432,92 @@ class AscendApiClient:
             if target in full_name or full_name in target:
                 return str(u.get("id"))
         return "3b5cc5b8-3636-4342-bd3d-9da12d2f690e"
+
+    def find_program_by_policy(self, policy_number: str) -> dict[str, Any] | None:
+        """Find active or purchased program containing the given policy number."""
+        clean_policy = policy_number.strip().upper()
+        # 1. Search billables directly if possible
+        try:
+            resp = self.transport.request("GET", "/billables", query={"policy_number": clean_policy})
+            items = resp.get("data", [])
+            if items:
+                first_billable = items[0]
+                prog_id = first_billable.get("program_id")
+                if prog_id:
+                    prog = self.get_program(prog_id)
+                    return {
+                        "program": prog,
+                        "billable": first_billable,
+                        "program_id": prog_id,
+                        "parent_billable_id": first_billable.get("id"),
+                    }
+        except Exception:
+            pass
+
+        # 2. Fallback: inspect recent programs
+        try:
+            progs = self.transport.request("GET", "/programs", query={"page_size": 50}).get("data", [])
+            for p in progs:
+                pid = p.get("id")
+                try:
+                    b_resp = self.transport.request("GET", f"/programs/{pid}/billables")
+                    for b in b_resp.get("data", []):
+                        if str(b.get("policy_number", "")).strip().upper() == clean_policy:
+                            return {
+                                "program": p,
+                                "billable": b,
+                                "program_id": pid,
+                                "parent_billable_id": b.get("id"),
+                            }
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def create_endorsement_billable(
+        self,
+        *,
+        program_id: str,
+        parent_billable_id: str,
+        description: str,
+        premium_cents: int,
+        effective_date: str,
+        taxes_and_fees_cents: int = 0,
+        seller_commission_rate: float | None = None,
+        billable_identifier: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Create an endorsement billable attached to an existing policy program."""
+        parent = self.get_billable(parent_billable_id)
+        carrier = parent.get("carrier") or {}
+        wholesaler = parent.get("wholesaler") or {}
+        coverage = parent.get("coverage_type") or {}
+
+        carrier_id = carrier.get("identifier") or parent.get("carrier_identifier")
+        wholesaler_id = wholesaler.get("identifier") or parent.get("wholesaler_identifier")
+        coverage_id = coverage.get("identifier") or parent.get("coverage_identifier") or "gl"
+        exp_date = parent.get("expiration_date") or effective_date
+
+        payload: dict[str, Any] = {
+            "program_id": program_id,
+            "parent_billable_id": parent_billable_id,
+            "billable_type": "endorsement",
+            "billable_identifier": billable_identifier or "1",
+            "policy_number": parent.get("policy_number", ""),
+            "description": description,
+            "effective_date": effective_date,
+            "expiration_date": exp_date,
+            "premium_cents": int(premium_cents),
+            "taxes_and_fees_cents": int(taxes_and_fees_cents),
+            "carrier_identifier": carrier_id,
+            "coverage_identifier": coverage_id,
+        }
+        if wholesaler_id:
+            payload["wholesaler_identifier"] = wholesaler_id
+        if seller_commission_rate is not None:
+            payload["seller_commission_rate"] = float(seller_commission_rate)
+
+        return self.create_billable(payload)
 
 
 def configured_client() -> AscendApiClient:

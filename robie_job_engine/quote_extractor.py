@@ -499,3 +499,106 @@ class QuoteExtractor:
             quote.hitl_questions = []
         return quote
 
+
+@dataclass
+class ExtractedEndorsement:
+    policy_number: str = ""
+    insured_name: str = ""
+    carrier_name: str = ""
+    wholesaler_name: Optional[str] = None
+    coverage_title: str = "Commercial Policy"
+    description: str = "Policy Endorsement / Change"
+    effective_date: str = ""
+    additional_premium_cents: int = 0
+    taxes_and_fees_cents: int = 0
+    seller_commission_rate: Optional[float] = None
+    is_return_premium: bool = False
+
+    @property
+    def total_cents(self) -> int:
+        return self.additional_premium_cents + self.taxes_and_fees_cents
+
+
+class EndorsementExtractor:
+    """Extracts policy endorsements, change requests, and audit additional premiums."""
+
+    def extract_from_text(self, text: str) -> ExtractedEndorsement:
+        endorsement = ExtractedEndorsement()
+        
+        # 1. Policy Number
+        pol_m = re.search(
+            r"(?:policy\s*(?:#|number|no\.?|num)?\s*[:#\-]?\s*)([A-Z0-9\-\/]{4,24})",
+            text,
+            re.IGNORECASE,
+        )
+        if pol_m:
+            endorsement.policy_number = pol_m.group(1).strip()
+
+        # 2. Insured Name
+        ins_m = re.search(
+            r"(?:named\s+insured|insured\s+name|insured|account\s+name)\s*[:\-]\s*([A-Za-z0-9\s,\.\-&]{3,50})",
+            text,
+            re.IGNORECASE,
+        )
+        if ins_m:
+            endorsement.insured_name = ins_m.group(1).strip().split("\n")[0]
+
+        # 3. Effective date
+        eff_m = re.search(
+            r"(?:effective\s+date|endorsement\s+effective|eff\s+date|change\s+effective)\s*[:\-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})",
+            text,
+            re.IGNORECASE,
+        )
+        if eff_m:
+            endorsement.effective_date = _format_iso_date(eff_m.group(1))
+        else:
+            endorsement.effective_date = date.today().isoformat()
+
+        # 4. Description / Change type
+        desc_m = re.search(
+            r"(?:description\s+of\s+change|change\s+description|endorsement\s+type|description|memo)\s*[:\-]?\s*([^\n\r]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if desc_m:
+            endorsement.description = desc_m.group(1).strip()
+        else:
+            # Look for common endorsement keywords
+            for kw in ("Blanket AI", "Waiver of Subrogation", "Add Vehicle", "Driver Addition", "Limit Increase", "Payroll Audit"):
+                if kw.lower() in text.lower():
+                    endorsement.description = kw
+                    break
+
+        # 5. Premium
+        # Look for additional premium or return premium
+        if re.search(r"\b(?:return\s+premium|refund|credit)\b", text, re.IGNORECASE):
+            endorsement.is_return_premium = True
+
+        prem_m = re.search(
+            r"(?:additional\s+premium|endorsement\s+premium|ap|return\s+premium|premium\s+due|net\s+premium|premium)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            text,
+            re.IGNORECASE,
+        )
+        if prem_m:
+            endorsement.additional_premium_cents = _parse_dollars_to_cents(prem_m.group(1))
+
+        # 6. Taxes and fees
+        tax_m = re.search(
+            r"(?:surplus\s+lines\s+tax|tax|fees?|stamping\s+fee)\s*[:\-]?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            text,
+            re.IGNORECASE,
+        )
+        if tax_m:
+            endorsement.taxes_and_fees_cents = _parse_dollars_to_cents(tax_m.group(1))
+
+        # 7. Commission rate
+        comm_m = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+        if comm_m:
+            endorsement.seller_commission_rate = _parse_percentage(comm_m.group(1))
+
+        return endorsement
+
+    def extract_from_pdf(self, pdf_bytes: bytes) -> ExtractedEndorsement:
+        text = _extract_text_from_pdf_stream(pdf_bytes)
+        return self.extract_from_text(text)
+

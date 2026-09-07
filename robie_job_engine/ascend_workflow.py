@@ -256,3 +256,100 @@ class AscendWorkflowManager:
             reply_email_subject=subject,
             reply_email_body="\n".join(body_lines),
         )
+
+    def process_endorsement_request(
+        self,
+        raw_text_or_pdf: str | bytes | Path,
+        applicant_id: Optional[str] = None,
+        sender_name: str = "",
+    ) -> dict[str, Any]:
+        """Process an endorsement or additional premium request."""
+        from robie_job_engine.quote_extractor import EndorsementExtractor
+        from robie_job_engine.ezlynx_note_poster import format_endorsement_note
+
+        extractor = EndorsementExtractor()
+        if isinstance(raw_text_or_pdf, (bytes, Path)):
+            endorsement = extractor.extract_from_pdf(raw_text_or_pdf)
+        else:
+            endorsement = extractor.extract_from_text(str(raw_text_or_pdf))
+
+        if not endorsement.policy_number:
+            return {
+                "status": "ERROR",
+                "error": "Could not identify policy number in endorsement document",
+                "endorsement": endorsement,
+            }
+
+        client = self.client_factory()
+        found = client.find_program_by_policy(endorsement.policy_number)
+        if not found:
+            return {
+                "status": "ERROR",
+                "error": f"No active Ascend program found for policy {endorsement.policy_number}",
+                "endorsement": endorsement,
+            }
+
+        program_id = found["program_id"]
+        parent_billable_id = found["parent_billable_id"]
+        program_obj = found.get("program") or {}
+        program_url = program_obj.get("program_url") or f"https://checkout.useascend.com/streetsmart_insurance_agency/overview?program_id={program_id}"
+
+        # Create endorsement billable
+        try:
+            billable_id, billable_rec = client.create_endorsement_billable(
+                program_id=program_id,
+                parent_billable_id=parent_billable_id,
+                description=endorsement.description,
+                premium_cents=endorsement.additional_premium_cents,
+                effective_date=endorsement.effective_date,
+                taxes_and_fees_cents=endorsement.taxes_and_fees_cents,
+                seller_commission_rate=endorsement.seller_commission_rate,
+            )
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "error": f"Ascend API error creating endorsement: {e}",
+                "endorsement": endorsement,
+            }
+
+        # Post note to EZLynx
+        prem_str = f"${endorsement.additional_premium_cents / 100:,.2f}"
+        tax_str = f"${endorsement.taxes_and_fees_cents / 100:,.2f}" if endorsement.taxes_and_fees_cents else None
+        tot_str = f"${endorsement.total_cents / 100:,.2f}"
+
+        note_text = format_endorsement_note(
+            insured_name=endorsement.insured_name or program_obj.get("insured", {}).get("business_name", "Insured"),
+            policy_number=endorsement.policy_number,
+            carrier_name=endorsement.carrier_name or found.get("billable", {}).get("carrier", {}).get("title"),
+            wholesaler_name=endorsement.wholesaler_name or found.get("billable", {}).get("wholesaler", {}).get("title"),
+            coverage_title=endorsement.coverage_title,
+            endorsement_description=endorsement.description,
+            effective_date=endorsement.effective_date,
+            additional_premium_text=prem_str,
+            taxes_and_fees_text=tax_str,
+            total_endorsement_text=tot_str,
+            endorsement_checkout_url=program_url,
+        )
+
+        ezlynx_res = None
+        target_applicant_id = applicant_id or "0"
+        try:
+            ezlynx_res = self.ezlynx_poster.post_custom_note(
+                applicant_id=target_applicant_id,
+                title=f"Endorsement: {endorsement.description} - Policy #{endorsement.policy_number}",
+                note_text=note_text,
+                policy_number=endorsement.policy_number,
+            )
+        except Exception as exc:
+            logger.warning("Failed to post endorsement note to EZLynx: %s", exc)
+
+        return {
+            "status": "COMPLETED",
+            "program_id": program_id,
+            "parent_billable_id": parent_billable_id,
+            "billable_id": billable_id,
+            "program_url": program_url,
+            "endorsement": endorsement,
+            "ezlynx_result": ezlynx_res,
+        }
+

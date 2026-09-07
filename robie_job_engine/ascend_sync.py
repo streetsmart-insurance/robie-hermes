@@ -36,9 +36,14 @@ from urllib import error, parse, request
 
 from .ezlynx_note_poster import (
     EZLynxAgreementPoster,
+    format_accounting_issue_task,
+    format_agreement_signed_note,
     format_cancellation_notice_note,
     format_past_due_notice_note,
+    format_reinstatement_carrier_email,
+    format_reinstatement_paid_note,
 )
+from .quickbooks_api import QuickBooksApiClient
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .secret_manager import GoogleSecretManagerAccessor, SecretAccessor
 from .secrets import redact_text
@@ -48,6 +53,26 @@ logger = logging.getLogger("robie.ascend_sync")
 PRODUCTION_API_ORIGIN = "https://api.useascend.com"
 SANDBOX_API_ORIGIN = "https://sandbox.api.useascend.com"
 DEFAULT_DB_PATH = Path("/opt/streetsmart-hermes/robie-job-engine/data/ascend_sync.db")
+
+
+def send_google_chat_alert(message: str, webhook_url: Optional[str] = None) -> bool:
+    """Dispatches real-time message notification to Google Chat space."""
+    target_url = webhook_url or os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
+    logger.info("GOOGLE CHAT ALERT: %s", message.replace("\n", " "))
+    if not target_url:
+        return False
+    try:
+        req = request.Request(
+            target_url,
+            data=json.dumps({"text": message}).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=UTF-8"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=10) as resp:
+            return resp.status in (200, 204)
+    except Exception as exc:
+        logger.warning("Failed to send Google Chat webhook alert: %s", exc)
+        return False
 
 
 def _now_iso() -> str:
@@ -312,6 +337,21 @@ class AscendApiClient:
         data = self.get("/v1/invoices", {"page_size": page_size})
         return data.get("data", [])
 
+    def fetch_programs(self, page_size: int = 50) -> List[Dict[str, Any]]:
+        """Fetch programs."""
+        data = self.get("/v1/programs", {"page_size": page_size})
+        return data.get("data", [])
+
+    def fetch_loans(self, page_size: int = 50) -> List[Dict[str, Any]]:
+        """Fetch loans."""
+        data = self.get("/v1/loans", {"page_size": page_size})
+        return data.get("data", [])
+
+    def fetch_payouts(self, page_size: int = 50) -> List[Dict[str, Any]]:
+        """Fetch payouts (supplier remittances and agency commissions)."""
+        data = self.get("/v1/payouts", {"page_size": page_size})
+        return data.get("data", [])
+
 
 class EZLynxAccountMatcher:
     """Matches Ascend events to EZLynx applicant IDs and staff assignments."""
@@ -390,11 +430,13 @@ class AscendEZLynxSyncManager:
         store: Optional[AscendSyncStore] = None,
         matcher: Optional[EZLynxAccountMatcher] = None,
         poster: Optional[EZLynxAgreementPoster] = None,
+        quickbooks_client: Optional[QuickBooksApiClient] = None,
     ) -> None:
         self.api = api_client or AscendApiClient()
         self.store = store or AscendSyncStore(DEFAULT_DB_PATH)
         self.matcher = matcher or EZLynxAccountMatcher()
         self.poster = poster or EZLynxAgreementPoster()
+        self.qb = quickbooks_client or QuickBooksApiClient()
 
     def sync_once(self) -> Dict[str, Any]:
         """Perform one full synchronization run of all Ascend event feeds."""
@@ -405,6 +447,12 @@ class AscendEZLynxSyncManager:
             "cancellations_synced": 0,
             "past_due_found": 0,
             "past_due_synced": 0,
+            "signed_agreements_found": 0,
+            "signed_agreements_synced": 0,
+            "reinstatements_found": 0,
+            "reinstatements_synced": 0,
+            "payouts_found": 0,
+            "payouts_synced": 0,
             "errors": [],
         }
 
@@ -426,9 +474,42 @@ class AscendEZLynxSyncManager:
             logger.error("Past due sync error: %s", exc, exc_info=True)
             stats["errors"].append(f"Past Due: {exc}")
 
+        # 3. Sync Signed Agreements & Ready-to-Bind Triggers
+        try:
+            signed_found, signed_synced = self._sync_signed_agreements()
+            stats["signed_agreements_found"] = signed_found
+            stats["signed_agreements_synced"] = signed_synced
+        except Exception as exc:
+            logger.error("Signed agreements sync error: %s", exc, exc_info=True)
+            stats["errors"].append(f"Signed Agreements: {exc}")
+
+        # 4. Sync Reinstatement Payments
+        try:
+            reinst_found, reinst_synced = self._sync_reinstatements()
+            stats["reinstatements_found"] = reinst_found
+            stats["reinstatements_synced"] = reinst_synced
+        except Exception as exc:
+            logger.error("Reinstatement sync error: %s", exc, exc_info=True)
+            stats["errors"].append(f"Reinstatements: {exc}")
+
+        # 5. Sync Accounting Payouts & Discrepancies
+        try:
+            payouts_found, payouts_synced = self._sync_accounting_payouts()
+            stats["payouts_found"] = payouts_found
+            stats["payouts_synced"] = payouts_synced
+        except Exception as exc:
+            logger.error("Accounting payouts sync error: %s", exc, exc_info=True)
+            stats["errors"].append(f"Accounting Payouts: {exc}")
+
         completed_at = _now_iso()
         stats["completed_at"] = completed_at
-        total_synced = stats["cancellations_synced"] + stats["past_due_synced"]
+        total_synced = (
+            stats["cancellations_synced"]
+            + stats["past_due_synced"]
+            + stats["signed_agreements_synced"]
+            + stats["reinstatements_synced"]
+            + stats["payouts_synced"]
+        )
         error_msg = "; ".join(stats["errors"]) if stats["errors"] else None
 
         self.store.update_checkpoint(
@@ -440,14 +521,21 @@ class AscendEZLynxSyncManager:
         )
 
         logger.info(
-            "Ascend sync completed. Cancellations: %d/%d, Past Due: %d/%d, Errors: %s",
+            "Ascend sync completed. Cancels: %d/%d, Past Due: %d/%d, Signed: %d/%d, Reinst: %d/%d, Payouts: %d/%d, Errors: %s",
             stats["cancellations_synced"],
             stats["cancellations_found"],
             stats["past_due_synced"],
             stats["past_due_found"],
+            stats["signed_agreements_synced"],
+            stats["signed_agreements_found"],
+            stats["reinstatements_synced"],
+            stats["reinstatements_found"],
+            stats["payouts_synced"],
+            stats["payouts_found"],
             error_msg or "None",
         )
         return stats
+
 
     def _sync_cancellations(self) -> Tuple[int, int]:
         """Fetch and process new cancellation returns."""
@@ -617,6 +705,376 @@ class AscendEZLynxSyncManager:
             synced += 1
 
         return found, synced
+
+    def _is_policy_cancelled(self, policy_number: str) -> bool:
+        if not policy_number:
+            return False
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM ascend_synced_events WHERE event_type = 'cancellation' AND policy_number = ?",
+                (policy_number,)
+            ).fetchone()
+            return row is not None
+
+    def _sync_signed_agreements(self) -> Tuple[int, int]:
+        """Fetch and process signed financing and checkout agreements."""
+        programs = self.api.fetch_programs(page_size=50)
+        found = 0
+        synced = 0
+
+        for prog in programs:
+            status = str(prog.get("status", "")).lower()
+            if status not in ("checked_out", "purchased"):
+                continue
+
+            found += 1
+            prog_id = prog.get("id")
+            event_id = f"signed_{prog_id}"
+            if not prog_id or self.store.is_event_processed(event_id):
+                continue
+
+            billables = prog.get("billables") or []
+            if not billables:
+                try:
+                    b_resp = self.api.get(f"/v1/programs/{prog_id}/billables")
+                    billables = b_resp.get("data") or []
+                except Exception:
+                    billables = []
+
+            first_b = billables[0] if billables else {}
+            carrier_info = first_b.get("carrier") or {}
+            wholesaler_info = first_b.get("wholesaler") or {}
+            coverage_info = first_b.get("coverage_type") or {}
+            policy_num = first_b.get("policy_number") or first_b.get("billable_identifier") or "Pending"
+            carrier_name = carrier_info.get("title") or carrier_info.get("identifier") or "Carrier"
+            wholesaler_name = wholesaler_info.get("title") or None
+            coverage_title = coverage_info.get("title") or coverage_info.get("identifier") or "Commercial"
+
+            insured = prog.get("insured") or {}
+            insured_name = (
+                insured.get("business_name")
+                or f"{insured.get('first_name', '')} {insured.get('last_name', '')}".strip()
+                or "Valued Client"
+            )
+
+            payment_option = prog.get("selected_payment_option_type") or "pay_in_full"
+            checkedout_at = prog.get("checkedout_at") or _now_iso()
+            downpayment_cents = int(prog.get("downpayment_amount_cents") or prog.get("total_payable_amount_cents") or 0)
+            total_cents = int(prog.get("total_payable_amount_cents") or downpayment_cents)
+
+            downpayment_text = f"${downpayment_cents / 100:,.2f}"
+            total_text = f"${total_cents / 100:,.2f}"
+
+            prod = prog.get("producer") or {}
+            producer_name = f"{prod.get('first_name', '')} {prod.get('last_name', '')}".strip() or None
+
+            prog_url = prog.get("program_url") or f"https://checkout.useascend.com/streetsmart_insurance_agency/overview?program_id={prog_id}"
+
+            applicant_id, rep_from_ezlynx = self.matcher.match_account(
+                policy_number=policy_num,
+                insured_name=insured_name,
+            )
+            assigned_rep = rep_from_ezlynx or producer_name or "Account Manager"
+
+            note_text = format_agreement_signed_note(
+                insured_name=insured_name,
+                policy_number=policy_num,
+                carrier_name=carrier_name,
+                wholesaler_name=wholesaler_name,
+                coverage_title=coverage_title,
+                payment_option=payment_option,
+                downpayment_text=downpayment_text,
+                total_text=total_text,
+                checkedout_at=checkedout_at,
+                program_url=prog_url,
+                producer_name=assigned_rep,
+            )
+
+            if applicant_id:
+                self.poster.post_custom_note(
+                    applicant_id=applicant_id,
+                    title=f"🎉 Agreement Signed & Checked Out - {carrier_name} - {policy_num}",
+                    note_text=note_text,
+                    policy_number=policy_num,
+                    line_of_business=coverage_title,
+                    carrier_name=carrier_name,
+                )
+
+                task_title = f"🚨 READY TO BIND: {policy_num} - {carrier_name} - {insured_name} (Agreement Signed)"
+                task_desc = (
+                    f"Insured {insured_name} completed Ascend checkout for Policy #{policy_num}.\n"
+                    f"Plan: {payment_option.replace('_', ' ').title()}\n"
+                    f"Initial Payment / Down Payment: {downpayment_text}\n"
+                    f"Total: {total_text}\n"
+                    f"Overview: {prog_url}\n\n"
+                    f"Coverage is ready to bind with carrier {carrier_name}!"
+                )
+                self.poster.create_task(
+                    applicant_id=applicant_id,
+                    title=task_title,
+                    description=task_desc,
+                    assigned_user=assigned_rep,
+                    due_days_out=0,
+                )
+
+            chat_msg = (
+                f"🎉 *Agreement Signed & Checked Out! Ready to Bind:*\n"
+                f"• Insured: *{insured_name}*\n"
+                f"• Policy: `{policy_num}` | Carrier: *{carrier_name}*{f' (via {wholesaler_name})' if wholesaler_name else ''}\n"
+                f"• Plan: {payment_option.replace('_', ' ').title()} (Down Payment: {downpayment_text}, Total: {total_text})\n"
+                f"• Ascend Link: {prog_url}"
+            )
+            send_google_chat_alert(chat_msg)
+
+            self.store.record_synced_event(
+                event_id=event_id,
+                event_type="agreement_signed",
+                policy_number=policy_num,
+                applicant_id=applicant_id,
+                amount_cents=total_cents,
+                status="SUCCESS" if applicant_id else "UNMATCHED",
+                raw_data=prog,
+            )
+            synced += 1
+
+        return found, synced
+
+    def _sync_reinstatements(self) -> Tuple[int, int]:
+        """Fetch and process reinstatement payments against cancelled or past-due policies."""
+        invoices = self.api.fetch_invoices(page_size=50)
+        found = 0
+        synced = 0
+
+        for inv in invoices:
+            status = str(inv.get("status", "")).lower()
+            is_reinstatement = bool(inv.get("is_reinstatement", False))
+
+            memo = inv.get("memo") or ""
+            policy_num = None
+            if memo:
+                parts = memo.split()
+                if parts and parts[0].isalnum():
+                    policy_num = parts[0]
+
+            if not is_reinstatement and status in ("paid", "processing_payment") and policy_num:
+                if self._is_policy_cancelled(policy_num):
+                    is_reinstatement = True
+
+            if not (is_reinstatement and status in ("paid", "processing_payment")):
+                continue
+
+            found += 1
+            inv_id = inv.get("id")
+            event_id = f"reinstatement_{inv_id}"
+            if not inv_id or self.store.is_event_processed(event_id):
+                continue
+
+            insured_name = inv.get("payer_name") or inv.get("payee") or "Insured"
+            amount_cents = int(inv.get("total_amount_cents") or 0)
+            amount_paid_text = f"${amount_cents / 100:,.2f}"
+            paid_at = inv.get("paid_at") or inv.get("updated_at") or _now_iso()
+            invoice_num = inv.get("invoice_number") or inv_id[:8]
+            receipt_url = inv.get("invoice_url") or inv.get("receipt_url")
+            carrier_name = inv.get("carrier_name") or "Carrier"
+
+            applicant_id, rep_from_ezlynx = self.matcher.match_account(
+                policy_number=policy_num,
+                insured_name=insured_name,
+            )
+            assigned_rep = rep_from_ezlynx or "Account Manager"
+
+            note_text = format_reinstatement_paid_note(
+                insured_name=insured_name,
+                policy_number=policy_num or "Pending",
+                carrier_name=carrier_name,
+                amount_paid_text=amount_paid_text,
+                paid_at=paid_at,
+                invoice_number=invoice_num,
+                receipt_url=receipt_url,
+            )
+
+            email_draft = format_reinstatement_carrier_email(
+                carrier_or_wholesaler_name=carrier_name,
+                policy_number=policy_num or "Pending",
+                insured_name=insured_name,
+                amount_paid_text=amount_paid_text,
+                paid_at=paid_at,
+                receipt_url=receipt_url,
+            )
+
+            if applicant_id:
+                self.poster.post_custom_note(
+                    applicant_id=applicant_id,
+                    title=f"✅ Reinstatement Paid - {policy_num} - {amount_paid_text}",
+                    note_text=note_text,
+                    policy_number=policy_num,
+                )
+
+                task_title = f"🚨 REINSTATEMENT PAID: Request Carrier Reinstatement - {policy_num} - {insured_name}"
+                task_desc = (
+                    f"Insured {insured_name} paid outstanding balance of {amount_paid_text} on {paid_at}.\n"
+                    f"Receipt: {receipt_url or 'N/A'}\n\n"
+                    f"DRAFT CARRIER EMAIL:\n"
+                    f"Subject: {email_draft['subject']}\n\n"
+                    f"{email_draft['body']}"
+                )
+                self.poster.create_task(
+                    applicant_id=applicant_id,
+                    title=task_title,
+                    description=task_desc,
+                    assigned_user=assigned_rep,
+                    due_days_out=0,
+                )
+
+            chat_msg = (
+                f"🚨 *REINSTATEMENT PAYMENT RECEIVED!*\n"
+                f"• Insured: *{insured_name}*\n"
+                f"• Policy: `{policy_num or 'N/A'}` | Amount Paid: *{amount_paid_text}*\n"
+                f"• Paid At: {paid_at}\n"
+                f"• Action: Please submit reinstatement request to *{carrier_name}* with payment receipt attached.\n"
+                f"• Receipt: {receipt_url or 'N/A'}"
+            )
+            send_google_chat_alert(chat_msg)
+
+            self.store.record_synced_event(
+                event_id=event_id,
+                event_type="reinstatement_paid",
+                policy_number=policy_num,
+                applicant_id=applicant_id,
+                amount_cents=amount_cents,
+                status="SUCCESS" if applicant_id else "UNMATCHED",
+                raw_data=inv,
+            )
+            synced += 1
+
+        return found, synced
+
+    def _sync_accounting_payouts(self) -> Tuple[int, int]:
+        """Audit Ascend payouts, sync to QuickBooks, and assign tasks to Accounting on issues."""
+        payouts = self.api.fetch_payouts(page_size=50)
+        found = len(payouts)
+        synced = 0
+        accounting_assignee = os.environ.get("ROBIE_ACCOUNTING_ASSIGNEE", "accounting@streetsmart.insurance")
+
+        for p in payouts:
+            payout_id = p.get("id")
+            if not payout_id:
+                continue
+
+            ptype = p.get("payout_type")
+            status = str(p.get("status", "")).lower()
+            net_cents = int(p.get("net_payout_amount_cents") or 0)
+            prog_id = p.get("program_id") or ""
+            payable_acc = p.get("payable_account") or {}
+            owner_name = payable_acc.get("owner_name") or "Recipient"
+
+            if ptype == "commission" and status == "paid":
+                event_id = f"comm_payout_{payout_id}"
+                if not self.store.is_event_processed(event_id):
+                    policy_num = "COMMISSION"
+                    insured_name = "Agency Commission"
+                    if prog_id:
+                        try:
+                            prog = self.api.fetch_program(prog_id)
+                            insured = prog.get("insured") or {}
+                            insured_name = insured.get("business_name") or insured.get("first_name") or insured_name
+                            b_list = prog.get("billables") or []
+                            if b_list:
+                                policy_num = b_list[0].get("policy_number") or policy_num
+                        except Exception:
+                            pass
+
+                    qb_res = self.qb.record_commission_deposit(
+                        program_id=prog_id,
+                        policy_number=policy_num,
+                        insured_name=insured_name,
+                        amount_cents=net_cents,
+                        deposit_date=p.get("paid_at")[:10] if p.get("paid_at") else None,
+                        payout_id=payout_id,
+                    )
+
+                    self.store.record_synced_event(
+                        event_id=event_id,
+                        event_type="commission_payout",
+                        policy_number=policy_num,
+                        amount_cents=net_cents,
+                        status="SUCCESS",
+                        raw_data={"payout": p, "quickbooks": qb_res},
+                    )
+                    synced += 1
+
+            elif ptype == "supplier" and status == "paid":
+                event_id = f"supp_payout_{payout_id}"
+                if not self.store.is_event_processed(event_id):
+                    qb_res = self.qb.record_supplier_payout_bill(
+                        program_id=prog_id,
+                        policy_number="WHOLESALER",
+                        wholesaler_name=owner_name,
+                        net_amount_cents=net_cents,
+                        payment_date=p.get("paid_at")[:10] if p.get("paid_at") else None,
+                        payout_id=payout_id,
+                    )
+                    self.store.record_synced_event(
+                        event_id=event_id,
+                        event_type="supplier_payout",
+                        amount_cents=net_cents,
+                        status="SUCCESS",
+                        raw_data={"payout": p, "quickbooks": qb_res},
+                    )
+                    synced += 1
+
+            elif ptype == "supplier" and (status == "failed" or status == "unpaid"):
+                event_id = f"acct_issue_{payout_id}_{status}"
+                if not self.store.is_event_processed(event_id):
+                    amount_text = f"${net_cents / 100:,.2f}"
+                    paying_at = p.get("paying_at") or "Unscheduled"
+                    
+                    details = (
+                        f"Ascend supplier remittance of {amount_text} to wholesaler '{owner_name}' is currently {status.upper()}.\n"
+                        f"Payout ID: {payout_id}\n"
+                        f"Scheduled / Paying At: {paying_at}\n"
+                        f"Action: Verify bank balance and Ascend supplier account settings to prevent carrier cancellation."
+                    )
+                    
+                    task_text = format_accounting_issue_task(
+                        issue_type=f"Unpaid Wholesaler Remittance ({status.upper()})",
+                        wholesaler_name=owner_name,
+                        expected_amount_text=amount_text,
+                        actual_amount_text="$0.00",
+                        discrepancy_details=details,
+                        ascend_reference_url=f"https://app.useascend.com/payouts/{payout_id}",
+                    )
+
+                    self.poster.create_task(
+                        applicant_id="0",
+                        title=f"⚠️ ACCOUNTING AUDIT: {status.upper()} Supplier Payout to {owner_name} ({amount_text})",
+                        description=task_text,
+                        assigned_user=accounting_assignee,
+                        due_days_out=1,
+                    )
+
+                    chat_msg = (
+                        f"⚠️ *ACCOUNTING ATTENTION REQUIRED: {status.upper()} Supplier Remittance*\n"
+                        f"• Wholesaler: *{owner_name}*\n"
+                        f"• Amount: *{amount_text}*\n"
+                        f"• Status: *{status.upper()}*\n"
+                        f"• Ascend Payout ID: `{payout_id}`\n"
+                        f"• Task assigned to Accounting team in EZLynx."
+                    )
+                    send_google_chat_alert(chat_msg)
+
+                    self.store.record_synced_event(
+                        event_id=event_id,
+                        event_type="accounting_issue",
+                        amount_cents=net_cents,
+                        status="FLAGGED",
+                        error_message=f"Supplier payout {payout_id} is {status}",
+                        raw_data=p,
+                    )
+                    synced += 1
+
+        return found, synced
+
 
     def _hydrate_cancellation_event(self, item: Dict[str, Any]) -> Optional[AscendCancellationEvent]:
         billable_summary = item.get("billable") or {}
