@@ -7,6 +7,8 @@ only — do not chain SSH/SCP micro-scripts per step.
 One connected CDP session, one Python job:
 
     live CDP page preflight (Login/forcedOff → HITL blocked; no retry) →
+    optional one-shot firmed-quote / Renewal Offer PDF fetch (Classic or
+    ``/Download/{id}``, never ``/Download/A…`` / RadPdf / OCR) →
     optional authentic PDF upload → exact titled discussion note →
     ``#RenewPolicyBtn`` shell (never Renew & Edit) → proof JSON
 
@@ -62,6 +64,7 @@ from src.ezlynx.cdp_session_preflight import (
     assert_live_cdp_authed,
     preflight_live_cdp_session,
 )
+from src.ezlynx.document_downloader import MIN_AUTHENTIC_PDF_BYTES
 
 logger = logging.getLogger("policy_renewer")
 
@@ -69,7 +72,6 @@ RENEW_POLICY_BTN_SELECTOR = "#RenewPolicyBtn"
 RENEW_POLICY_BTN_TEXT = "Renew Policy"
 FORBIDDEN_RENEW_BUTTON_TEXTS = ("Renew & Edit Policy",)
 FORBIDDEN_BIND_TEXTS = ("Bind", "Issue Policy", "Purchase", "Checkout")
-MIN_AUTHENTIC_PDF_BYTES = 10 * 1024
 DEFAULT_PRODUCER_CSR = "Carlo Ferrara"
 FORBIDDEN_PRODUCER_NAMES = ("Robie", "Robie AI", "SSRobie", "SS Robie")
 LIVE_ALLOW_TOKEN = "Carlo"
@@ -189,6 +191,8 @@ class RenewalJobSpec:
     cdp_url: Optional[str] = None
     proof_json: Optional[Path] = None
     already_in: bool = False
+    document_id: Optional[str] = None
+    fetch_firmed_quote: bool = False
 
 
 @dataclass
@@ -215,6 +219,9 @@ class RenewalJobResult:
     error: Optional[str] = None
     planned_actions: List[str] = field(default_factory=list)
     preflight: Optional[Dict[str, Any]] = None
+    firmed_quote_path: Optional[str] = None
+    firmed_quote_document_id: Optional[str] = None
+    premium_source: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -912,6 +919,7 @@ class ManualPolicyRenewer:
         try:
             assert_producer_is_carlo(spec.producer)
             assert_live_keying_allowed(spec)
+            self._maybe_fetch_firmed_quote(spec, result)
 
             # Dry-run plans locally unless the operator passed an explicit CDP URL
             # (live History verify). Do not implicit-connect via env on --dry-run.
@@ -1020,12 +1028,81 @@ class ManualPolicyRenewer:
             "Verify pending RWL via policy-summary History / in-page PolicyAPI (not Classic alone)",
             "Dedupe: stop if pending RWL exists for same term+premium",
         ]
+        if spec.document_id or spec.fetch_firmed_quote:
+            actions.append(
+                "One-shot firmed-quote fetch via Classic /document/{id} or "
+                "/Download/{numericId} (strip leading A- prefix); validate %PDF "
+                f">= {MIN_AUTHENTIC_PDF_BYTES} bytes; 0-byte → one corrected retry "
+                "then HITL (no RadPdf/OCR)"
+            )
         if spec.upload_path:
             actions.append(f"Upload {spec.upload_path} if >= {MIN_AUTHENTIC_PDF_BYTES} bytes")
         actions.append("Post note only on exact original titled discussion")
         actions.append(f"Click {RENEW_POLICY_BTN_SELECTOR} ('{RENEW_POLICY_BTN_TEXT}'); never Renew & Edit Policy")
         actions.append("Require Writing Company before submit; producer Carlo Ferrara; no bind")
         return actions
+
+    def _maybe_fetch_firmed_quote(self, spec: RenewalJobSpec, result: RenewalJobResult) -> None:
+        """One-shot firmed-quote PDF fetch + premium extract. Never invents premium. No bind."""
+        if not spec.document_id and not spec.fetch_firmed_quote:
+            return
+        from src.ezlynx.document_downloader import (
+            HITL_DOWNLOAD_MESSAGE,
+            FirmedQuoteDownloadError,
+            extract_premium_from_pdf,
+            fetch_firmed_quote_pdf,
+            normalize_ezlynx_download_id,
+            resolve_firmed_quote_document_id,
+        )
+
+        token = spec.document_id or "auto"
+        dest = (
+            settings.downloads_path
+            / "firmed_quotes"
+            / f"{spec.applicant_id}_{normalize_ezlynx_download_id(token) or 'auto'}.pdf"
+        )
+        try:
+            doc_id = resolve_firmed_quote_document_id(
+                self.api, spec.applicant_id, spec.document_id
+            )
+            dest = (
+                settings.downloads_path
+                / "firmed_quotes"
+                / f"{spec.applicant_id}_{doc_id}.pdf"
+            )
+            path = fetch_firmed_quote_pdf(doc_id, dest, client=self.api)
+        except FirmedQuoteDownloadError as exc:
+            result.firmed_quote_document_id = normalize_ezlynx_download_id(spec.document_id) or None
+            if spec.dry_run and not spec.cdp_url:
+                result.planned_actions.append(
+                    f"Would fail-fast HITL after one corrected Download retry — {HITL_DOWNLOAD_MESSAGE}"
+                )
+                logger.warning("Dry-run firmed-quote fetch: %s", exc)
+                return
+            raise RenewalGuardError(str(exc)) from exc
+
+        result.firmed_quote_path = str(path)
+        result.firmed_quote_document_id = normalize_ezlynx_download_id(doc_id)
+        extracted = extract_premium_from_pdf(path)
+        if extracted is not None:
+            if spec.premium is None:
+                spec.premium = extracted
+            if spec.full_term_premium is None:
+                spec.full_term_premium = extracted
+            if spec.annual_premium is None:
+                spec.annual_premium = extracted
+            result.premium_source = "firmed_quote_pdf"
+            logger.info("Premium extracted from firmed-quote PDF: %s (not invented)", extracted)
+            return
+        if spec.premium is None:
+            msg = (
+                "HITL: firmed quote PDF downloaded but premium could not be extracted. "
+                "Do not invent premium. Antigravity grab / read the PDF."
+            )
+            if spec.dry_run and not spec.cdp_url:
+                result.planned_actions.append(msg)
+                return
+            raise RenewalGuardError(msg)
 
     def _apply_local_dedupe(self, spec: RenewalJobSpec, result: RenewalJobResult) -> None:
         if spec.already_in:
@@ -1390,6 +1467,8 @@ def spec_from_args(args: argparse.Namespace) -> RenewalJobSpec:
         cdp_url=args.cdp_url,
         proof_json=proof,
         already_in=bool(getattr(args, "already_in", False)),
+        document_id=getattr(args, "document_id", None) or None,
+        fetch_firmed_quote=bool(getattr(args, "fetch_firmed_quote", False)),
     )
 
 
@@ -1423,6 +1502,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--note-text", default=None, help="Optional note body (header + Robie signature added)")
     parser.add_argument("--upload", default=None, help="Optional authentic PDF (>=10KB). Stubs are skipped.")
+    parser.add_argument(
+        "--document-id",
+        default=None,
+        help=(
+            "EZLynx Document Library id for a one-shot firmed-quote / Renewal Offer "
+            "PDF fetch (leading A- prefix is stripped). No RadPdf/OCR."
+        ),
+    )
+    parser.add_argument(
+        "--fetch-firmed-quote",
+        action="store_true",
+        help="Find a Firmed / Quote Proposal / Renewal Offer in the library, then one-shot fetch.",
+    )
     parser.add_argument(
         "--producer",
         default=DEFAULT_PRODUCER_CSR,

@@ -45,11 +45,35 @@ The job, in **one** connected Chrome session:
 1. Verify pending RWL shells on policy-summary **History** / in-page PolicyAPI  
    (Classic `get_applicant_policies` is **not** sufficient — it omits pending RWL.)
 2. If a pending RWL already exists for the **same term + premium** → `already_in`, **STOP**. No second shell. Skip docs and notes.
-3. Optional upload — skip stubs **&lt; 10KB**.
-4. Note only on the **exact original titled** discussion (caller `--discussion-title` or the policy-numbered card). Never untitled. Never `Workers Compensation Renewal` when `Renewal Manual Workers comp \| PWC…` exists.
-5. Fill required fields (Writing Company mandatory). Producer/CSR = **Carlo Ferrara**, never Robie.
-6. Click **`#RenewPolicyBtn`** ("Renew Policy"). Never "Renew & Edit Policy" (that is FormEntry, not this job).
-7. Write proof JSON. **No bind. No money. No client email. Never Add Policy from Quote ID.**
+3. Optional **one-shot firmed-quote / Renewal Offer PDF fetch** (`--document-id` / `--fetch-firmed-quote`) — see below.
+4. Optional upload — skip stubs **&lt; 10KB**.
+5. Note only on the **exact original titled** discussion (caller `--discussion-title` or the policy-numbered card). Never untitled. Never `Workers Compensation Renewal` when `Renewal Manual Workers comp \| PWC…` exists.
+6. Fill required fields (Writing Company mandatory). Producer/CSR = **Carlo Ferrara**, never Robie.
+7. Click **`#RenewPolicyBtn`** ("Renew Policy"). Never "Renew & Edit Policy" (that is FormEntry, not this job).
+8. Write proof JSON. **No bind. No money. No client email. Never Add Policy from Quote ID.**
+
+### Firmed-quote PDF (Paulette Fagone / 2026-09-07)
+
+Once the EZLynx document id is known (e.g. `675732963` — `Fagone - J&J Home Quote Proposal (Firmed).pdf`):
+
+- Prefer Classic `GET /document/{id}` or the known-good portal path **`/Download/675732963`**.
+- **Strip the leading `A`** (and similar type prefixes). `/Download/A675732963` returns **0 bytes**.
+- Accept only a real PDF (`%PDF` magic + **≥10KB** / 10240 bytes). On 0-byte / invalid: **one** retry with the corrected URL, then **HITL / Antigravity grab**.
+- **Do not** burn 20 minutes on Preview / RadPdf page images + OCR.
+- Premium extract runs from that PDF only. If the PDF has no premium, **stop** — do not invent one.
+
+```bash
+PYTHONPATH=. python3 scripts/run_manual_renewal.py --env test --dry-run \
+  --applicant-id 196126698 \
+  --document-id A675732963 \
+  --fetch-firmed-quote
+```
+
+Tests (hermes-test-01 before any Production zip):
+
+```bash
+PYTHONPATH=. .venv/bin/pytest tests/test_document_downloader.py tests/test_policy_renewer.py tests/test_cdp_session_preflight.py -v
+```
 
 ### Production live gate
 

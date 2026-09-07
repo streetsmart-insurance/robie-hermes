@@ -667,6 +667,121 @@ class EZLynxApiClient:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    def download_document_bytes(self, document_id: str) -> bytes:
+        """Classic GET /document/{id} — raw PDF bytes, or empty on failure.
+
+        Document ids are normalized (leading ``A`` stripped) before the request.
+        Does not open Preview/RadPdf.
+        """
+        from src.ezlynx.document_downloader import coerce_pdf_bytes, normalize_ezlynx_download_id
+
+        normalized = normalize_ezlynx_download_id(document_id)
+        if not normalized:
+            return b""
+        if not self.authenticate_classic():
+            logger.warning("Classic EZLynx auth failed; cannot GET /document/%s", normalized)
+            return b""
+        url = f"{self.services_url}/document/{normalized}"
+        headers = dict(self._get_classic_headers())
+        headers["Accept"] = "application/pdf, application/octet-stream, */*"
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                logger.warning(
+                    "Classic document download HTTP %s for id %s",
+                    resp.status_code,
+                    normalized,
+                )
+                return b""
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "json" in ctype:
+                try:
+                    return coerce_pdf_bytes(resp.json())
+                except Exception:
+                    return coerce_pdf_bytes(resp.content)
+            return coerce_pdf_bytes(resp.content)
+        except Exception as exc:
+            logger.warning("Classic document download error for id %s: %s", normalized, exc)
+            return b""
+
+    def download_portal_document_bytes(self, relative_url: str) -> bytes:
+        """GET an app.ezlynx.com Download path using portal cookies, then one CDP fetch.
+
+        ``relative_url`` must already be the known-good ``/Download/{numericId}``.
+        Never follows Preview/RadPdf. Empty bytes on failure.
+        """
+        from src.ezlynx.document_downloader import coerce_pdf_bytes, known_good_download_path
+
+        if not relative_url.startswith("/"):
+            relative_url = "/" + relative_url
+        # Force the corrected Download path if a caller handed us /Download/A…
+        if "/download/" in relative_url.lower():
+            relative_url = known_good_download_path(relative_url)
+        abs_url = f"https://app.ezlynx.com{relative_url}"
+        storage_file = self._portal_storage_state_path()
+        cookies = self._portal_session_cookies(storage_file)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/pdf,application/octet-stream,*/*",
+        }
+        if cookies:
+            try:
+                resp = requests.get(abs_url, cookies=cookies, headers=headers, timeout=30)
+                if resp.status_code == 200 and resp.content:
+                    return coerce_pdf_bytes(resp.content)
+                logger.warning(
+                    "Portal Download %s HTTP %s (%s bytes)",
+                    relative_url,
+                    resp.status_code,
+                    len(resp.content or b""),
+                )
+            except Exception as exc:
+                logger.debug("Portal cookie Download failed: %s", exc)
+
+        cdp_url = getattr(settings, "ezlynx_cdp_endpoint", None) or "http://localhost:9222"
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(cdp_url)
+                ctx = browser.contexts[0]
+                try:
+                    ctx.storage_state(path=str(storage_file))
+                except Exception:
+                    pass
+                page = None
+                for pg in ctx.pages:
+                    if "ezlynx.com" in (pg.url or ""):
+                        page = pg
+                        break
+                if page:
+                    import base64
+
+                    b64 = page.evaluate(
+                        f"""async () => {{
+                        const r = await fetch({relative_url!r});
+                        const buf = await r.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let binary = '';
+                        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                        return btoa(binary);
+                    }}"""
+                    )
+                    if b64:
+                        return coerce_pdf_bytes(base64.b64decode(b64))
+        except Exception as exc:
+            logger.debug("Portal CDP Download failed: %s", exc)
+        return b""
+
+    def fetch_firmed_quote_pdf(self, document_id: str, dest_path: Path) -> Path:
+        """One-shot firmed-quote fetch. See ``src.ezlynx.document_downloader``."""
+        from src.ezlynx.document_downloader import fetch_firmed_quote_pdf as _fetch
+
+        return _fetch(document_id, Path(dest_path), client=self)
+
     # -------------------------------------------------------------------------
     # Quoting & Sessions Management
     # -------------------------------------------------------------------------
