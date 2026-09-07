@@ -8,13 +8,13 @@ Production: Not touched or authorized
 
 - Automation ID: `previous-business-day-accountability`
 - Status: Active
-- Schedule: Monday–Friday at 6:25 AM America/New_York
+- Schedule: Monday–Friday at 9:00 AM America/New_York
 - Report period: previous business day; Monday reports Friday
 - Temporary recipients: Carlo, Jake, and Ashley
 - Google Chat: credential configured outside Git; delivery paused until Carlo approves the exact recurring link-only message
 - Daily Excel deliverable: required, uploaded as a downloadable `.xlsx`, shared with all current recipients, and linked prominently in the email; attach it when the mail action supports attachments
 
-The repository schedule is 6:25 AM Eastern. It must not be enabled for unattended sending until the gated Test run and immutable Production promotion pass every release gate. A scheduled start is not completion proof: stale or partial source evidence, unavailable authentication, failed mailbox preflight, or missing artifacts must block delivery.
+The repository schedule is 9:00 AM Eastern. It must not be enabled for unattended sending until the gated Test run and immutable Production promotion pass every release gate. A scheduled start is not completion proof: stale or partial source evidence, unavailable authentication, failed mailbox preflight, or missing artifacts must block delivery.
 
 ## Verified manual delivery
 
@@ -62,7 +62,7 @@ Do not infer hold or queue wait from `Call Length - Handle Time`. The August 31 
 
 For the September 1 manual Test report, the caller-perspective RingCentral session map was reviewed directly and yielded 26 explicit Hold phases above 120 seconds across 25 sessions. That proves the method for that reporting date only. Future daily runs must collect the same caller-perspective Hold phases automatically for every applicable session or mark the hold section `UNVERIFIED`; total call duration is never a substitute.
 
-## 6:25 AM previous-business-day run sequence
+## 9:00 AM previous-business-day run sequence
 
 1. Resolve the report date in America/New_York; Monday reports Friday.
 2. Create a new date-keyed run and reject any source whose coverage date does not match.

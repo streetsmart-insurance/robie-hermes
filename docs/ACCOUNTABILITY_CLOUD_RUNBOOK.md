@@ -12,7 +12,7 @@ The three scheduled read-only job types are:
 
 | Job | Eastern schedule | Purpose |
 |---|---|---|
-| `accountability.daily` | Weekdays at 5:00 PM | Calls, queues, callbacks, tasks, urgent service trackers, Magellan alerts |
+| `accountability.daily` | Weekdays at 9:00 AM | Prior-business-day calls, queues, callbacks, tasks, urgent service trackers, Magellan alerts |
 | `accountability.weekly` | Friday at 5:15 PM | Employee/department rollup, Retention, Submission, Gmail, AppSheet, all trackers |
 | `accountability.monthly` | First of month at 8:00 AM | Trends, recurring exceptions, verified case studies and churn evidence |
 

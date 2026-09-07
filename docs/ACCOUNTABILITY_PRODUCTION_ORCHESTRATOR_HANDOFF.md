@@ -2,7 +2,7 @@
 
 ## Outcome
 
-The weekday 6:25 AM service must run `scripts/run_accountability_job.py daily`.
+The weekday 9:00 AM Eastern service must run `scripts/run_accountability_job.py daily`.
 It must never call `scripts/run_productivity_pipeline_automated.py` directly.
 The new entry point creates one durable occurrence per reporting period, runs
 `AccountabilityReportWorker`, and requires independent verification before the
@@ -61,11 +61,33 @@ ready. This is configuration readiness, not proof that a run succeeded.
 4. Run the `Activate Production accountability schedule` workflow from the
    exact Production commit with its required confirmation phrase.
 5. Read back the timer and service command. The timer must be enabled/active at
-   `Mon..Fri 06:25 America/New_York`, and the service must call
+   `Mon..Fri 09:00 America/New_York`, and the service must call
    `run_accountability_job.py daily` as `streetsmart-hermes`.
 6. Trigger one bounded no-send run first. A missing source must exit nonzero.
    After complete-source and recipient verification, enable delivery and run
    the same immutable release again for the next unsent reporting period.
+
+## Local-to-cloud parity gate
+
+Production delivery is prohibited unless the Test artifact matches the approved
+local report contract for the same prior-business-day source package. The gate
+must verify all of the following, not merely that a report file exists:
+
+- the same Eastern reporting date and 9:00 AM–5:00 PM business-hours window;
+- the same approved active-employee roster and department routing;
+- complete RingCentral parent calls, routing legs, direct and queue sources,
+  callbacks, queue metrics, talk time, and explicit hold/queue-wait evidence;
+- EZLynx Reports 5.0 Tasks, Activities, Policy Changes limited to 90 days,
+  COIs, Sales Center assigned producer, Retention, Audits, and live Submission
+  Center evidence, plus Magellan and the approved trackers;
+- the pageless department-first Google Doc, complete multi-tab Excel workbook,
+  and all-data Google Sheet, with the same row counts and department totals;
+- successful source checksum validation, artifact read-back, recipient
+  preflight, and delivery receipt verification.
+
+Missing, stale, partial, differently dated, or unreconciled evidence must make
+the Job fail. It must never send a smaller cloud report as if it were equivalent
+to the approved local report.
 
 ## Retention follow-on
 
