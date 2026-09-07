@@ -18,6 +18,24 @@ from typing import Any, Iterable, Mapping, Sequence
 
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 UNKNOWN = "Unknown"
+CANONICAL_DEPARTMENTS = (
+    "Personal Lines", "Commercial Lines", "Trucking and Transportation",
+)
+DEPARTMENT_RECIPIENT_KEYS = {
+    "Personal Lines": "personal",
+    "Commercial Lines": "commercial",
+    "Trucking and Transportation": "trucking",
+}
+EXECUTIVE_DEPARTMENT = "Executive Team"
+SOP_RESULTS = ("Followed", "Partially Followed", "Not Followed", "Cannot Verify")
+SOP_SOURCES = {
+    "Cancellations": "1gpDHSl6xm_RTF9d4Htyd9i8zj7eIWebvIDjFJJSlQzo",
+    "Client Cancellation Request": "1rvAYtS1HY9hdX6Is0Z0Llt6FhizipoZOyZUbSyRkyhc",
+    "Remarketing and Rewriting": "1rFsVS4DzN7x3xL1aZS4qGU5pPQFHeULYROsXsn0i9lw",
+    "Reinstatements": "1nDze_axPNH7tqXr5GPnhoRP7j-eplAbmzkRcrSNZarQ",
+    "Manual Renewals": "1NSHFdtgKYXeF6OnJRg9Qlse_yiHUoaXTYPi0X1OwLr4",
+    "VIP Service Standards": "1YA70LaB0vmmRfKZZLFHMu2w8h8OrLGxrPG_h858oAis",
+}
 REQUIRED_REVIEW_HEADERS = (
     "Month", "Applicant ID", "Account Name", "Policy Count", "Lines of Business",
     "Policy Numbers", "Department", "CSR", "Assigned Agent", "Annualized Premium",
@@ -30,6 +48,99 @@ REQUIRED_REVIEW_HEADERS = (
 
 def normalize(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def normalize_name(value: Any) -> str:
+    name = normalize(value)
+    if "," in name:
+        last, first = [normalize(x) for x in name.split(",", 1)]
+        name = f"{first} {last}"
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def employee_directory(values: Sequence[Sequence[Any]]) -> dict[str, dict[str, str]]:
+    if not values:
+        raise ValueError("AppSheet Employees tab is empty")
+    headers = [normalize(v) for v in values[0]]
+    needed = ("Name", "Email", "Department", "Employment Status", "Position")
+    missing = [h for h in needed if h not in headers]
+    if missing:
+        raise ValueError(f"AppSheet Employees missing headers: {', '.join(missing)}")
+    result = {}
+    for row in values[1:]:
+        item = {h: normalize(row[i]) if i < len(row) else "" for i, h in enumerate(headers)}
+        key = normalize_name(item["Name"])
+        if key and item["Employment Status"].casefold() == "active":
+            result[key] = item
+    return result
+
+
+def fallback_department(lines_of_business: Any) -> str:
+    lob = normalize(lines_of_business).casefold()
+    if any(x in lob for x in ("trucking", "truckers", "motor carrier", "transportation")):
+        return "Trucking and Transportation"
+    if any(x in lob for x in ("personal", "homeowner", "flood", "dwelling", "umbrella")):
+        return "Personal Lines"
+    return "Commercial Lines"
+
+
+def resolve_department(item: Mapping[str, str], directory: Mapping[str, Mapping[str, str]]) -> tuple[str, str, bool]:
+    assigned = directory.get(normalize_name(item.get("Assigned Agent")))
+    csr = directory.get(normalize_name(item.get("CSR")))
+    chosen = csr if assigned and assigned.get("Department") == EXECUTIVE_DEPARTMENT else assigned
+    if not chosen or chosen.get("Department") not in CANONICAL_DEPARTMENTS:
+        chosen = csr if csr and csr.get("Department") in CANONICAL_DEPARTMENTS else None
+    if chosen:
+        return chosen["Department"], f"AppSheet Employees: {chosen['Name']}", False
+    return fallback_department(item.get("Lines of Business")), "LOB fallback — employee unmatched", True
+
+
+def tenure_months(as_of: datetime, start: datetime | None) -> int | None:
+    if start is None:
+        return None
+    return max(0, (as_of.year - start.year) * 12 + as_of.month - start.month - (as_of.day < start.day))
+
+
+def tenure_band(months: int | None) -> str:
+    if months is None:
+        return "Cannot Verify"
+    if months < 12:
+        return "<1 year"
+    if months < 36:
+        return "1–3 years"
+    if months < 60:
+        return "3–5 years"
+    return "5+ years"
+
+
+def conservative_sop_audit(item: Mapping[str, str]) -> dict[str, str]:
+    evidence = normalize(item.get("Evidence Summary"))
+    folded = evidence.casefold()
+    result = {key: "Cannot Verify" for key in (
+        "SPLICE Call", "Email", "Text", "Postal Mail / Bad Contact",
+        "Department Label", "Cancellation Notice / Reason", "Written Authorization",
+        "EFT / Payment Rescue", "$5k+ Two Outreaches", "$10k+ AM Alert",
+        "Licensed Handoff", "Carrier-Confirmed Reinstatement",
+        "No Premature Renewal/Coverage Confirmation",
+    )}
+    if "signed cancellation request" in folded or "signed lpr" in folded:
+        result["Written Authorization"] = "Followed"
+    if "cancellation notice" in folded and ("reason" in folded or item.get("Evidence-Supported Cause")):
+        result["Cancellation Notice / Reason"] = "Partially Followed"
+    if "mistaken renewal confirmation" in folded or "incorrectly told" in folded:
+        result["No Premature Renewal/Coverage Confirmation"] = "Not Followed"
+    if "carrier confirm" in folded and "reinstat" in folded:
+        result["Carrier-Confirmed Reinstatement"] = "Followed"
+    result["Overall SOP Result"] = (
+        "Not Followed" if "Not Followed" in result.values()
+        else "Partially Followed" if any(v in {"Followed", "Partially Followed"} for v in result.values())
+        else "Cannot Verify"
+    )
+    result["Evidence Citation"] = (
+        f"3-Month Account Review | {item.get('Month')} | Applicant {item.get('Applicant ID')} | "
+        f"Evidence Summary: {evidence or 'No supporting evidence recorded'}"
+    )
+    return result
 
 
 def money(value: Any) -> float:
@@ -121,6 +232,9 @@ def department_email(department: str, items: Sequence[Mapping[str, str]], *, run
             f"  Status: {item['Account Status Classification']} | Cause: {item['Evidence-Supported Cause'] or UNKNOWN}",
             f"  Evidence: {item['Evidence Summary'] or 'No supporting evidence found.'}",
             f"  Magellan: {item['Magellan Match'] or 'No matched record'} / {item['Magellan Sentiment'] or 'Not available'}",
+            f"  Department mapping: {item.get('_department_source', 'pre-mapped workbook')}"+
+            (" [FALLBACK EXCEPTION]" if item.get("_department_exception") else ""),
+            f"  SOP audit: {conservative_sop_audit(item)['Overall SOP Result']} | {conservative_sop_audit(item)['Evidence Citation']}",
             f"  Recommended action: {item['Recommended Account Action'] or 'Review and document a supported cause.'}",
         ]
     lines += ["", "Assignment alone is not evidence of employee fault. Unsupported causes remain Unknown."]
@@ -168,7 +282,7 @@ def build_messages(items: Sequence[Mapping[str, str]], recipients: Mapping[str, 
     by_department: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for item in items:
         by_department[item.get("Department") or UNKNOWN].append(item)
-    mapping = (("Commercial", "commercial"), ("Personal", "personal"), ("Trucking", "trucking"))
+    mapping = tuple((department, key) for department, key in DEPARTMENT_RECIPIENT_KEYS.items())
     messages = []
     for department, key in mapping:
         messages.append(MessageSpec(
@@ -207,4 +321,3 @@ def save_state(path: Path, state: Mapping[str, Any]) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     temp.replace(path)
-
