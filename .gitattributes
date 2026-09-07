@@ -1,9 +1,4 @@
-# The repository preserves Ascend history and incident evidence, but official
-# release archives are deliberately non-Ascend candidates.
-robie_job_engine/ascend*.py export-ignore
-robie_job_engine/locators/ascend.json export-ignore
-deploy/hermes/skills/ascend-* export-ignore
-skills/ascend-* export-ignore
-scripts/*ascend* export-ignore
+# Official release archive export settings
 tests export-ignore
 .github/workflows/ascend-disabled-test.yml export-ignore
+

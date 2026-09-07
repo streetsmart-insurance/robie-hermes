@@ -1,9 +1,9 @@
-"""Fail-closed business contract for EZLynx Policy Setup v0.1.0-draft.
+"""Fail-closed business contract for EZLynx Policy Setup v0.2.0-test.
 
 This module is deliberately side-effect free.  It validates an intake,
 creates a stable duplicate identity, and compares a reopened policy with the
-expected contract.  Browser writes stay disabled while every profile is in
-Testing.
+expected contract. Only the exact synthetic Homeowners Test drill may reach a
+consequential Save; every other profile remains read-only.
 """
 
 from __future__ import annotations
@@ -39,6 +39,9 @@ REQUIRED_CHECKPOINTS = (
     "post_save_readback",
     "reopen_verification",
 )
+PROFILE_VERSION = "0.2.0-test"
+HOMEOWNERS_TEST_APPLICANT_ID = "220250093"
+HOMEOWNERS_TEST_POLICY_PREFIX = "TEST-HO-"
 SENSITIVE_KEY_TOKENS = frozenset(
     {
         "address",
@@ -88,16 +91,35 @@ class PreflightResult:
 
 def load_profiles(path: str | Path = DEFAULT_PROFILE_PATH) -> dict[str, Any]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("version") != "0.1.0-draft":
+    if data.get("version") != PROFILE_VERSION:
         raise ValueError("unexpected EZLynx Policy Setup profile version")
     profiles = data.get("profiles")
     if not isinstance(profiles, list) or len(profiles) != 12:
         raise ValueError("EZLynx Policy Setup requires exactly 12 draft profiles")
+    enabled: list[str] = []
     for profile in profiles:
         if profile.get("state") != "Testing":
             raise ValueError(f"profile {profile.get('id')} is not in Testing")
-        if profile.get("consequential_writes_enabled") is not False:
-            raise ValueError(f"profile {profile.get('id')} enables consequential writes")
+        if profile.get("consequential_writes_enabled") is True:
+            enabled.append(str(profile.get("id") or ""))
+        elif profile.get("consequential_writes_enabled") is not False:
+            raise ValueError(f"profile {profile.get('id')} has invalid write state")
+    if enabled != ["homeowners"]:
+        raise ValueError("only the Homeowners Test profile may enable writes")
+    constraints = next(
+        item.get("test_write_constraints") or {}
+        for item in profiles
+        if item.get("id") == "homeowners"
+    )
+    if constraints != {
+        "environment": "TEST",
+        "applicant_id": HOMEOWNERS_TEST_APPLICANT_ID,
+        "policy_number_prefix": HOMEOWNERS_TEST_POLICY_PREFIX,
+        "premium": "1.00",
+        "synthetic_fixture_required": True,
+        "explicit_save_authorization_required": True,
+    }:
+        raise ValueError("Homeowners Test write constraints are not exact")
     return data
 
 
@@ -168,6 +190,29 @@ def _guard_reasons(profile_id: str, request: Mapping[str, Any]) -> tuple[str, ..
     return tuple(reasons)
 
 
+def _homeowners_test_write_reasons(request: Mapping[str, Any]) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if _normalized(request.get("environment")) != "test":
+        reasons.append("Homeowners consequential writes require ROBIE_ENV=TEST")
+    if normalize_applicant_id(request.get("applicant_id")) != HOMEOWNERS_TEST_APPLICANT_ID:
+        reasons.append("Homeowners consequential writes require ROBIE Test LLC 220250093")
+    policy_number = str(request.get("policy_number") or "").strip().upper()
+    if not policy_number.startswith(HOMEOWNERS_TEST_POLICY_PREFIX):
+        reasons.append("Homeowners Test policy number must start with TEST-HO-")
+    premium = re.sub(r"[^0-9.]", "", str(request.get("premium") or "").strip())
+    try:
+        premium_is_one = float(premium) == 1.0
+    except (TypeError, ValueError):
+        premium_is_one = False
+    if not premium_is_one:
+        reasons.append("Homeowners Test premium must be exactly $1.00")
+    if request.get("synthetic_fixture") is not True:
+        reasons.append("Homeowners Test writes require an explicitly synthetic fixture")
+    if request.get("save_authorized") is not True:
+        reasons.append("Homeowners Test Save requires explicit user authorization")
+    return tuple(reasons)
+
+
 def preflight_policy_setup(
     request: Mapping[str, Any],
     *,
@@ -209,19 +254,20 @@ def preflight_policy_setup(
             "EZLynx business-write allowlist"
         )
     reasons.extend(_guard_reasons(profile_id, request))
+    profile_writes = profile.get("consequential_writes_enabled") is True
+    if profile_writes:
+        reasons.extend(_homeowners_test_write_reasons(request))
     if request.get("source_conflicts"):
         reasons.append("authoritative source documents conflict")
     if reasons:
         return PreflightResult(NEEDS_CLARIFICATION, profile_id, tuple(reasons), None)
 
-    # The stable identity is produced for duplicate detection, but every draft
-    # profile remains non-writing until Test QA approves fixtures and selectors.
     return PreflightResult(
         READY,
         profile_id,
         (),
         duplicate_key(request),
-        consequential_writes_enabled=False,
+        consequential_writes_enabled=profile_writes,
     )
 
 

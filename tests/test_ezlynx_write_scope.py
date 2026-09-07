@@ -8,6 +8,7 @@ from robie_job_engine.ezlynx_write_scope import (
     EzlynxWriteScopeError,
     applicant_id_from_ezlynx_url,
     ezlynx_control_scope_block_reason,
+    is_policy_form_entry_url,
     require_allowed_ezlynx_write_applicant,
 )
 
@@ -52,6 +53,88 @@ def test_applicant_portal_edit_and_form_entry_urls_are_scoped():
             f"https://app.ezlynx.com/applicantportal/FormEntry/{ALLOWED}"
         )
         == ALLOWED
+    )
+
+
+def test_exact_applicant_portal_add_route_is_scoped_to_allowed_test_account():
+    url = (
+        "https://app.ezlynx.com/applicantportal/Policy/Actions/Add/"
+        f"{ALLOWED}/0"
+    )
+    assert applicant_id_from_ezlynx_url(url) == ALLOWED
+    assert (
+        ezlynx_control_scope_block_reason(url, requested_applicant_id=ALLOWED)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "",
+        "/1",
+        "/0/extra",
+        "/0evil",
+    ],
+)
+def test_applicant_portal_add_route_variations_remain_unscoped(suffix):
+    url = (
+        "https://app.ezlynx.com/applicantportal/Policy/Actions/Add/"
+        f"{ALLOWED}{suffix}"
+    )
+    assert applicant_id_from_ezlynx_url(url) is None
+    reason = ezlynx_control_scope_block_reason(
+        url, requested_applicant_id=ALLOWED
+    )
+    assert reason and "not scoped" in reason
+
+
+def test_exact_add_route_still_refuses_wrong_applicant():
+    url = "https://app.ezlynx.com/applicantportal/Policy/Actions/Add/220250094/0"
+    assert applicant_id_from_ezlynx_url(url) == "220250094"
+    reason = ezlynx_control_scope_block_reason(
+        url, requested_applicant_id=ALLOWED
+    )
+    assert reason and "does not match" in reason
+
+
+def test_numeric_policy_form_entry_route_requires_browser_attestation():
+    url = (
+        "https://app.ezlynx.com/applicantportal/Policy/83293089/"
+        "FormEntry/Index/480541001?prevApplied=480541001"
+    )
+    assert is_policy_form_entry_url(url) is True
+    assert applicant_id_from_ezlynx_url(url) is None
+    reason = ezlynx_control_scope_block_reason(url, requested_applicant_id=ALLOWED)
+    assert reason and "not scoped" in reason
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/applicantportal/Policy/83293088/FormEntry/Index/480541001",
+        "/applicantportal/Policy/83293089/FormEntry/Index/480541000",
+        "/applicantportal/Policy/83293089/FormEntry/Index/480541001/extra",
+    ],
+)
+def test_malformed_or_neighboring_policy_form_entry_routes_remain_unscoped(path):
+    url = f"https://app.ezlynx.com{path}"
+    assert applicant_id_from_ezlynx_url(url) is None
+    reason = ezlynx_control_scope_block_reason(
+        url, requested_applicant_id=ALLOWED
+    )
+    assert reason and "not scoped" in reason
+
+
+def test_policy_form_entry_shape_rejects_non_numeric_or_extra_paths():
+    assert not is_policy_form_entry_url(
+        "https://app.ezlynx.com/applicantportal/Policy/not-a-policy/FormEntry/Index/1"
+    )
+    assert not is_policy_form_entry_url(
+        "https://app.ezlynx.com/applicantportal/Policy/1/FormEntry/Index/2/extra"
+    )
+    assert not is_policy_form_entry_url(
+        "https://example.com/applicantportal/Policy/1/FormEntry/Index/2"
     )
 
 

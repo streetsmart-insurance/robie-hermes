@@ -1,0 +1,16 @@
+{
+  "action_id": "ascend.create_program",
+  "jobs": [
+    {
+      "captured_at": "2026-09-06T20:50:00Z",
+      "environment": "TEST",
+      "job_id": "test-ascend-001",
+      "program_id": "33333333-3333-3333-3333-333333333333",
+      "source": "ascend-api",
+      "verdict": "PASS",
+      "verification_method": "ASCEND_API_FRESH_GET"
+    }
+  ],
+  "passing_count": 1,
+  "required_clean_test_passes": 1
+}

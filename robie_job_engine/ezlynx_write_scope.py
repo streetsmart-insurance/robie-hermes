@@ -19,6 +19,14 @@ _APPLICANT_PORTAL_PATH = re.compile(
     r"/applicantportal/(?:policy/actions/edit|formentry)/([^/?#]+)(?:/|$)",
     re.IGNORECASE,
 )
+_APPLICANT_PORTAL_ADD_PATH = re.compile(
+    r"^/applicantportal/policy/actions/add/([^/?#]+)/0/?$",
+    re.IGNORECASE,
+)
+_POLICY_FORM_ENTRY_PATH = re.compile(
+    r"^/applicantportal/policy/[0-9]+/formentry/index/[0-9]+/?$",
+    re.IGNORECASE,
+)
 _AUTH_PATH_MARKERS = ("/login", "/signin", "/sign-in")
 
 
@@ -51,10 +59,28 @@ def applicant_id_from_ezlynx_url(url: object) -> str | None:
     parsed = urlparse(str(url or "").strip())
     if parsed.hostname and parsed.hostname.casefold() != "app.ezlynx.com":
         return None
-    match = _ACCOUNT_PATH.search(parsed.path or "") or _APPLICANT_PORTAL_PATH.search(
-        parsed.path or ""
+    path = parsed.path or ""
+    match = (
+        _ACCOUNT_PATH.search(path)
+        or _APPLICANT_PORTAL_PATH.search(path)
+        or _APPLICANT_PORTAL_ADD_PATH.fullmatch(path)
     )
     return normalize_applicant_id(match.group(1)) if match else None
+
+
+def is_policy_form_entry_url(url: object) -> bool:
+    """True for the numeric FormEntry route whose URL omits applicant id.
+
+    This shape alone never authorizes a write. The Playwright guard must also
+    attest the visible account and Test-policy header before permitting a
+    control action.
+    """
+
+    parsed = urlparse(str(url or "").strip())
+    return (
+        (parsed.hostname or "").casefold() == "app.ezlynx.com"
+        and _POLICY_FORM_ENTRY_PATH.fullmatch(parsed.path or "") is not None
+    )
 
 
 def ezlynx_control_scope_block_reason(
@@ -91,7 +117,7 @@ def ezlynx_control_scope_block_reason(
     if not target:
         return (
             f"{EZLYNX_WRITE_SCOPE_REFUSED}: EZLynx page is not scoped to an "
-            "explicit /web/account/<applicant_id>/ URL"
+            "explicit allowed applicant route"
         )
     if target != requested:
         return (

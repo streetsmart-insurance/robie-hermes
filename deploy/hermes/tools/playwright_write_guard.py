@@ -288,6 +288,68 @@ def _page_url_text(page: Any) -> str:
     return str(value or "").strip()
 
 
+def attested_test_form_entry_block_reason(
+    page: Any,
+    *,
+    url: str,
+    requested_applicant_id: object,
+) -> str | None:
+    """Fail closed unless an id-less FormEntry visibly belongs to Robie Test.
+
+    EZLynx's numeric ``/Policy/<id>/FormEntry/Index/<id>`` route omits the
+    applicant id. The URL shape is therefore insufficient. Permit this one
+    Test workflow only after the server-rendered account link and policy
+    header independently identify ROBIE Test LLC, a synthetic Homeowners
+    policy number, and the exact $1 Test premium.
+    """
+
+    refused = "EZLYNX_WRITE_SCOPE_REFUSED"
+    try:
+        from robie_job_engine.ezlynx_write_scope import (
+            applicant_is_write_allowed,
+            is_policy_form_entry_url,
+            normalize_applicant_id,
+        )
+    except Exception:
+        return f"{refused}: applicant scope guard is unavailable"
+    if not is_policy_form_entry_url(url):
+        return f"{refused}: page is not a numeric Policy FormEntry route"
+    requested = normalize_applicant_id(requested_applicant_id)
+    if requested != "220250093" or not applicant_is_write_allowed(requested):
+        return f"{refused}: FormEntry applicant is not the compiled Robie Test account"
+    locator_fn = getattr(page, "locator", None)
+    if not callable(locator_fn):
+        return f"{refused}: FormEntry account evidence is unavailable"
+    try:
+        account = locator_fn('a[title="Go to Applicant Overview"]')
+        if int(account.count()) != 1 or not bool(account.is_visible()):
+            return f"{refused}: FormEntry account link is missing or ambiguous"
+        account_name = " ".join(str(account.inner_text() or "").split())
+        href = str(account.get_attribute("href") or "").strip()
+        from urllib.parse import urlparse
+
+        account_url = urlparse(href)
+        if (
+            account_name != "ROBIE Test LLC"
+            or (account_url.hostname or "").casefold() != "app.ezlynx.com"
+            or account_url.path.casefold() != "/web/account/220250093/overview"
+        ):
+            return f"{refused}: FormEntry is not visibly scoped to ROBIE Test LLC"
+        body = locator_fn("body")
+        if int(body.count()) != 1:
+            return f"{refused}: FormEntry policy header is unavailable"
+        header = " ".join(str(body.inner_text() or "").split())
+    except Exception:
+        return f"{refused}: FormEntry account or policy attestation failed"
+    if "Line of Business: Homeowners" not in header:
+        return f"{refused}: FormEntry is not visibly a Homeowners policy"
+    if not re.search(r"\bPolicy Number:\s*TEST-HO-[A-Z0-9-]+\b", header):
+        return f"{refused}: FormEntry policy number is not synthetic TEST-HO"
+    if not re.search(r"\bFull Term Premium:\s*\$1\.00\b", header):
+        return f"{refused}: FormEntry premium is not exactly $1.00"
+    return None
+
+
 def _ezlynx_write_scope_block_reason(
     owner: Any,
     *,
@@ -319,12 +381,23 @@ def _ezlynx_write_scope_block_reason(
             "EZLYNX_WRITE_SCOPE_REFUSED: applicant scope guard is unavailable; "
             "refuse generic EZLynx control action"
         )
-    return ezlynx_control_scope_block_reason(
+    requested = os.environ.get("ROBIE_EZLYNX_WRITE_APPLICANT_ID", "")
+    reason = ezlynx_control_scope_block_reason(
         url,
-        requested_applicant_id=os.environ.get(
-            "ROBIE_EZLYNX_WRITE_APPLICANT_ID", ""
-        ),
+        requested_applicant_id=requested,
     )
+    if reason:
+        try:
+            from robie_job_engine.ezlynx_write_scope import is_policy_form_entry_url
+        except Exception:
+            return reason
+        if is_policy_form_entry_url(url):
+            return attested_test_form_entry_block_reason(
+                page,
+                url=url,
+                requested_applicant_id=requested,
+            )
+    return reason
 
 
 def collect_blocked_dialog(page: Any) -> tuple[str, list[str]]:

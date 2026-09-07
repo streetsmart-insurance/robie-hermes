@@ -24,6 +24,7 @@ from robie_job_engine.complete_guard import (
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 from robie_job_engine.playwright_write_guard import (
+    attested_test_form_entry_block_reason,
     collect_blocked_dialog,
     consult_gemini_for_blocked_write,
     install_playwright_write_guards,
@@ -173,6 +174,73 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "EZLYNX_WRITE_SCOPE_REFUSED"):
                 ScopedLocator.fill(wrong, "MUST-NOT-WRITE")
         self.assertEqual(wrong.fills, [])
+
+    def test_numeric_form_entry_requires_visible_robie_test_policy_attestation(self):
+        class EvidenceLocator:
+            def __init__(self, *, count=1, visible=True, text="", href=None):
+                self._count = count
+                self._visible = visible
+                self._text = text
+                self._href = href
+
+            def count(self):
+                return self._count
+
+            def is_visible(self):
+                return self._visible
+
+            def inner_text(self):
+                return self._text
+
+            def get_attribute(self, name):
+                return self._href if name == "href" else None
+
+        class EvidencePage:
+            def __init__(self, *, account="ROBIE Test LLC", href=None, header=""):
+                self.account = EvidenceLocator(
+                    text=account,
+                    href=href
+                    or "https://app.ezlynx.com/web/account/220250093/overview",
+                )
+                self.body = EvidenceLocator(text=header)
+
+            def locator(self, selector):
+                if selector == 'a[title="Go to Applicant Overview"]':
+                    return self.account
+                if selector == "body":
+                    return self.body
+                return EvidenceLocator(count=0, visible=False)
+
+        url = (
+            "https://app.ezlynx.com/applicantportal/Policy/90000001/"
+            "FormEntry/Index/70000001?prevApplied=70000001"
+        )
+        valid_header = (
+            "Policy Number: TEST-HO-08312026-02 - Inactive "
+            "Line of Business: Homeowners Term: 10/5/2024 - 10/5/2025 "
+            "Full Term Premium: $1.00 Source: Manual"
+        )
+        self.assertIsNone(
+            attested_test_form_entry_block_reason(
+                EvidencePage(header=valid_header),
+                url=url,
+                requested_applicant_id="220250093",
+            )
+        )
+        for page, applicant, marker in (
+            (EvidencePage(account="A Real Client", header=valid_header), "220250093", "ROBIE Test"),
+            (EvidencePage(header=valid_header.replace("TEST-HO-08312026-02", "REAL-01")), "220250093", "synthetic"),
+            (EvidencePage(header=valid_header.replace("$1.00", "$1,796.00")), "220250093", "$1.00"),
+            (EvidencePage(header=valid_header), "220250094", "compiled Robie Test"),
+        ):
+            reason = attested_test_form_entry_block_reason(
+                page,
+                url=url,
+                requested_applicant_id=applicant,
+            )
+            self.assertIsNotNone(reason)
+            self.assertIn("EZLYNX_WRITE_SCOPE_REFUSED", reason)
+            self.assertIn(marker, reason)
 
     def test_timeout_on_hidden_combobox_fill_is_playwright_blocked_not_bare_timeout(self):
         """c31f9c69: unique hidden/combobox fill TimeoutError must HITL, not retry."""

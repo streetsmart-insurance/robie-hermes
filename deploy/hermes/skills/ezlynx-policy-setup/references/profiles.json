@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0-draft",
+  "version": "0.2.0-test",
   "state": "Testing",
   "production_ready": false,
   "source": {
@@ -24,7 +24,15 @@
   "profiles": [
     {
       "id": "homeowners", "name": "Homeowners", "aliases": ["homeowner", "ho"],
-      "state": "Testing", "consequential_writes_enabled": false,
+      "state": "Testing", "consequential_writes_enabled": true,
+      "test_write_constraints": {
+        "environment": "TEST",
+        "applicant_id": "220250093",
+        "policy_number_prefix": "TEST-HO-",
+        "premium": "1.00",
+        "synthetic_fixture_required": true,
+        "explicit_save_authorization_required": true
+      },
       "required_fields": ["property_location", "coverages", "deductibles", "replacement_cost_basis"],
       "verification_fields": ["named_insured", "property_location", "coverages", "deductibles", "mortgagees"],
       "guards": ["Full Value treatment remains unresolved"]
