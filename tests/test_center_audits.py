@@ -4,6 +4,7 @@ from robie_job_engine.center_audits import (
     audit_sales_records,
     audit_retention_records,
     audit_submission_records,
+    audit_overdue_submission_records,
     enrich_sales_last_touches,
     parse_retention_csv,
     parse_sales_csv,
@@ -18,16 +19,16 @@ AS_OF = datetime(2026, 8, 30, 17, 0, tzinfo=timezone.utc)
 def test_retention_audit_flags_untouched_account_and_vague_note():
     records = parse_retention_csv(
         """Account ID,Account Name,Account Manager,Expiration Date,Last Activity Date,Last Note,Status
-132780296,Costa 1 Cleaning Services,Jackie Arriola,09/15/2026,08/01/2026,Left voicemail,Active
-200,Well Serviced LLC,Erika Palacios,10/15/2026,08/29/2026,Client confirmed renewal option and will sign proposal by 09/02,Active
+100,Example Cleaning Services,CSR One,09/15/2026,08/01/2026,Left voicemail,Active
+200,Well Serviced LLC,CSR Two,10/15/2026,08/29/2026,Client confirmed renewal option and will sign proposal by 09/02,Active
 """
     )
 
     findings = audit_retention_records(records, as_of=AS_OF)
 
     assert len(findings) == 1
-    assert findings[0].account_id == "132780296"
-    assert findings[0].owner == "Jackie Arriola"
+    assert findings[0].account_id == "100"
+    assert findings[0].owner == "CSR One"
     assert findings[0].days_to_expiration == 16
     assert findings[0].days_since_touch == 29
     assert findings[0].severity == "high"
@@ -37,7 +38,7 @@ def test_retention_audit_flags_untouched_account_and_vague_note():
 def test_retention_audit_ignores_accounts_outside_90_day_horizon():
     records = parse_retention_csv(
         """Account ID,Account Name,Owner,Expiration Date,Last Activity,Last Note,Status
-300,Future Account,Jackie Arriola,01/15/2027,01/01/2026,Called client,Active
+300,Future Account,CSR One,01/15/2027,01/01/2026,Called client,Active
 """
     )
     assert audit_retention_records(records, as_of=AS_OF) == []
@@ -46,9 +47,9 @@ def test_retention_audit_ignores_accounts_outside_90_day_horizon():
 def test_submission_audit_only_flags_open_items_over_30_days():
     records = parse_submission_csv(
         """Submission ID,Account Name,Owner,Carrier,Created Date,Last Activity,Last Note,Status
-S-1,Old Open Risk,Alexis Martinez,Carrier A,06/15/2026,07/01/2026,Follow up,Quoting
-S-2,Recent Risk,Nelson Maldonado,Carrier B,08/15/2026,08/29/2026,Submitted complete application to Carrier B; follow up by 09/03,Submitted
-S-3,Old Bound Risk,Alexis Martinez,Carrier C,06/01/2026,06/20/2026,Bound and handed off,Bound
+S-1,Old Open Risk,Producer One,Carrier A,06/15/2026,07/01/2026,Follow up,Quoting
+S-2,Recent Risk,Producer Two,Carrier B,08/15/2026,08/29/2026,Submitted complete application to Carrier B; follow up by 09/03,Submitted
+S-3,Old Bound Risk,Producer One,Carrier C,06/01/2026,06/20/2026,Bound and handed off,Bound
 """
     )
 
@@ -64,14 +65,14 @@ S-3,Old Bound Risk,Alexis Martinez,Carrier C,06/01/2026,06/20/2026,Bound and han
 def test_sales_audit_flags_open_producer_opportunity_without_recent_touch():
     records = parse_sales_csv(
         "Opportunity ID,Account Name,Producer,Stage,Created Date,Last Activity,Last Note\n"
-        "O-1,Inactive Risk,Alexis Martinez,Quoting,2026-07-01,2026-08-20,Followed up\n"
-        "O-2,Active Risk,Nelson Maldonado,Proposed,2026-08-20,2026-08-28,Proposal sent; call again 09/01\n"
-        "O-3,Bound Risk,Nelson Maldonado,Bound,2026-07-01,2026-07-10,Bound\n"
+        "O-1,Inactive Risk,Producer One,Quoting,2026-07-01,2026-08-20,Followed up\n"
+        "O-2,Active Risk,Producer Two,Proposed,2026-08-20,2026-08-28,Proposal sent; call again 09/01\n"
+        "O-3,Bound Risk,Producer Two,Bound,2026-07-01,2026-07-10,Bound\n"
     )
     findings = audit_sales_records(records, as_of=AS_OF, untouched_days=5)
     assert len(findings) == 1
     assert findings[0].opportunity_id == "O-1"
-    assert findings[0].producer == "Alexis Martinez"
+    assert findings[0].producer == "Producer One"
     assert findings[0].days_since_touch == 10
     assert "threshold 5" in findings[0].reasons[0]
 
@@ -97,3 +98,31 @@ def test_vague_note_is_a_signal_not_a_keyword_only_rule():
     assert vague_note_reasons("Called client")
     assert vague_note_reasons("Left voicemail")
     assert vague_note_reasons("Client selected option 2; producer will bind by 09/01") == []
+
+
+def test_weekly_submission_rule_requires_red_and_day_31_and_exact_closed_statuses():
+    records = parse_submission_csv(
+        "Submission ID,Applicant,Assigned Producer,Status,Quote Due Date,Effective Date,Overdue,Submission URL\n"
+        "S1,Example One,Producer One,Quoted,2026-07-30,2026-09-01,red,https://example.test/s/1\n"
+        "S2,Example Two,Producer One,Quoted,2026-07-31,2026-09-01,red,https://example.test/s/2\n"
+        "S3,Example Three,Producer Two,Closed - Bound,2026-06-01,2026-09-01,red,https://example.test/s/3\n"
+    )
+    findings = audit_overdue_submission_records(records, as_of=AS_OF)
+    assert [item.submission_id for item in findings] == ["S1"]
+    assert findings[0].overdue_days == 31
+
+
+def test_weekly_submission_rule_deduplicates_url_and_fails_closed():
+    records = parse_submission_csv(
+        "Submission ID,Applicant,Assigned Producer,Status,Quote Due Date,Effective Date,Overdue,Submission URL\n"
+        "S1,Example One,Producer One,Quoted,2026-06-01,2026-09-01,red,https://example.test/s/1\n"
+        "S1-copy,Example One,Producer One,Quoted,2026-06-01,2026-09-01,red,https://example.test/s/1\n"
+    )
+    assert len(audit_overdue_submission_records(records, as_of=AS_OF)) == 1
+    incomplete = parse_submission_csv(
+        "Submission ID,Applicant,Assigned Producer,Status,Quote Due Date,Effective Date,Submission URL\n"
+        "S2,Example Two,Producer Two,Quoted,2026-06-01,2026-09-01,https://example.test/s/2\n"
+    )
+    import pytest
+    with pytest.raises(ValueError, match="red/overdue marker"):
+        audit_overdue_submission_records(incomplete, as_of=AS_OF)

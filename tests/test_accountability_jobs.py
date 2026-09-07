@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from contextlib import nullcontext
 
 from robie_job_engine.accountability_jobs import AccountabilityReportWorker, _previous_business_day
 from robie_job_engine.accountability_schedule import install_accountability_schedules
@@ -66,7 +67,7 @@ def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_pat
         "rules": {"require_complete_evidence": False},
         "collection": {"ringcentral_email": {
             "enabled": True,
-            "mailbox": "robie@streetsmart.insurance",
+            "mailbox": "report-mailbox@example.test",
             "required_queues": ["Commercial Test"],
             "required_queue_members": {"Commercial Test": ["Alex Example"]},
         }},

@@ -201,15 +201,18 @@ def _set_page_size(page: Page) -> None:
 
 
 def _verify_page_size_result(page: Page) -> None:
+    total = _pager_total(page)
+    expected_rows = min(100, total)
     try:
         page.wait_for_function(
-            "() => document.querySelectorAll('mat-row').length === 100",
+            "expected => document.querySelectorAll('mat-row').length === expected",
+            arg=expected_rows,
             timeout=15_000,
         )
     except PlaywrightTimeoutError as exc:
         rows = page.locator("mat-row").count()
         raise RuntimeError(
-            f"PLAYWRIGHT_BLOCKED: 100-row selection rendered {rows} mat-row elements"
+            f"PLAYWRIGHT_BLOCKED: page-size selection expected {expected_rows} rows and rendered {rows}"
         ) from exc
     paginator = page.locator("mat-paginator")
     selected_value = paginator.locator(
@@ -220,12 +223,12 @@ def _verify_page_size_result(page: Page) -> None:
     range_label = paginator.locator(
         ".mat-paginator-range-label, .mat-mdc-paginator-range-label"
     )
-    if not range_label.count() or not re.search(
-        r"^1\s*[\-–—]\s*100\s+of\s+[\d,]+$",
-        " ".join(range_label.first.inner_text().split()),
-        re.I,
-    ):
-        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not confirm rows 1-100")
+    if not range_label.count():
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator range label is missing")
+    observed = " ".join(range_label.first.inner_text().split())
+    match = re.search(r"^1\s*[\-–—]\s*([\d,]+)\s+of\s+([\d,]+)$", observed, re.I)
+    if not match or int(match.group(1).replace(",", "")) != expected_rows or int(match.group(2).replace(",", "")) != total:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: paginator did not confirm the selected page size")
 
 
 def _headers(page: Page) -> list[str]:
@@ -552,9 +555,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--reuse", action="store_true")
+    parser.add_argument("--weekly-report", action="store_true")
     args = parser.parse_args()
     try:
-        print(json.dumps(audit(fresh=args.fresh), sort_keys=True))
+        result = weekly_report_audit(fresh=args.fresh) if args.weekly_report else audit(fresh=args.fresh)
+        print(json.dumps(result, sort_keys=True))
         return 0
     except PermissionError:
         print("NEEDS_AUTH")

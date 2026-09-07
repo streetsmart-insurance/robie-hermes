@@ -21,6 +21,7 @@ from .center_audits import (
     audit_sales_records,
     audit_retention_records,
     audit_submission_records,
+    audit_overdue_submission_records,
     finding_dicts,
     parse_retention_csv,
     parse_sales_csv,
@@ -608,6 +609,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             "exceptions": tracker_dicts(all_tracker_findings),
             "missed_call_reconciliation": tracker_dicts(missed_call_reconciliation),
         }
+        counts_by_key: dict[str, int] = {}
+        policy_change_blockers: dict[str, int] = {}
+        for item in all_tracker_findings:
+            counts_by_key[item.tracker_key] = counts_by_key.get(item.tracker_key, 0) + 1
+            if item.tracker_key == "policy_changes":
+                policy_change_blockers[item.blocker_party] = policy_change_blockers.get(item.blocker_party, 0) + 1
+        tracker_data["counts_by_key"] = counts_by_key
+        tracker_data["policy_change_blockers"] = policy_change_blockers
         phone_by_name = {
             str(item.get("employee") or "").casefold(): int(item.get("unreturned") or 0)
             for item in call_data.get("employee_rows", [])

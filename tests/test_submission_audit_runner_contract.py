@@ -85,8 +85,8 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         verification_block = source.split(
             "def _verify_page_size_result", 1
         )[1].split("def _headers", 1)[0]
-        self.assertIn("document.querySelectorAll('mat-row').length === 100", verification_block)
-        self.assertIn("paginator did not confirm rows 1-100", verification_block)
+        self.assertIn("document.querySelectorAll('mat-row').length === expected", verification_block)
+        self.assertIn("paginator did not confirm the selected page size", verification_block)
 
     def test_status_wait_uses_current_playwright_keyword_argument(self):
         source = (

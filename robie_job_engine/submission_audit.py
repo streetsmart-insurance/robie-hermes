@@ -104,13 +104,16 @@ def ensure_ezlynx_login() -> None:
     raise BoundedProcessError("EZLYNX_LOGIN_HELPER_FAILED")
 
 
-def _runner_command(*, fresh: bool) -> list[str]:
-    return [
+def _runner_command(*, fresh: bool, weekly_report: bool = False) -> list[str]:
+    command = [
         PYTHON,
         "-m",
         "robie_job_engine.submission_audit_runner",
         "--fresh" if fresh else "--reuse",
     ]
+    if weekly_report:
+        command.append("--weekly-report")
+    return command
 
 
 def run_submission_read(*, fresh: bool) -> dict[str, Any]:
@@ -125,6 +128,30 @@ def run_submission_read(*, fresh: bool) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError) as exc:
         raise BoundedProcessError("PLAYWRIGHT_OUTPUT_INVALID") from exc
     if not isinstance(result, dict) or result.get("read_only") is not True:
+        raise BoundedProcessError("PLAYWRIGHT_READ_ONLY_ASSERTION_MISSING")
+    return result
+
+
+def run_weekly_submission_read(*, fresh: bool = True) -> dict[str, Any]:
+    proc = _run_bounded(
+        _runner_command(fresh=fresh, weekly_report=True),
+        timeout=max(RUNNER_TIMEOUT_SECONDS, 300),
+    )
+    if proc.returncode != 0:
+        status = _safe_status(proc)
+        if status == "NEEDS_AUTH":
+            raise BoundedProcessError("NEEDS_AUTH")
+        raise BoundedProcessError(status or "PLAYWRIGHT_BLOCKED")
+    try:
+        result = json.loads((proc.stdout or "").strip())
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise BoundedProcessError("PLAYWRIGHT_OUTPUT_INVALID") from exc
+    if (
+        not isinstance(result, dict)
+        or result.get("read_only") is not True
+        or result.get("all_pages_inspected") is not True
+        or not isinstance(result.get("open_records"), list)
+    ):
         raise BoundedProcessError("PLAYWRIGHT_READ_ONLY_ASSERTION_MISSING")
     return result
 

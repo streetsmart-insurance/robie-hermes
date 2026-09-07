@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -73,3 +74,44 @@ class EzlynxLoginSecretVersionTests(TestCase):
             bootstrap.SUBMISSION_URL, wait_until="domcontentloaded"
         )
         page.wait_for_timeout.assert_called_once_with(2_000)
+
+    def test_secret_uses_pinned_version_without_listing_versions(self):
+        client = Mock()
+        client.access_secret_version.return_value = SimpleNamespace(
+            payload=SimpleNamespace(data=b"pinned-credential\n")
+        )
+        google = ModuleType("google")
+        google_cloud = ModuleType("google.cloud")
+        secretmanager = ModuleType("google.cloud.secretmanager")
+        secretmanager.SecretManagerServiceClient = Mock(return_value=client)
+        google_cloud.secretmanager = secretmanager
+        modules = {
+            "google": google,
+            "google.cloud": google_cloud,
+            "google.cloud.secretmanager": secretmanager,
+        }
+        module_path = Path(__file__).resolve().parents[1] / "ezlynx_login_bootstrap.py"
+        spec = importlib.util.spec_from_file_location("test_pinned_login_bootstrap", module_path)
+        bootstrap = importlib.util.module_from_spec(spec)
+        reference = (
+            "projects/streetsmart-hermes-poc/secrets/"
+            "ezlynx-password/versions/1"
+        )
+        with (
+            patch.dict(sys.modules, modules),
+            patch.dict(
+                os.environ,
+                {"ROBIE_EZLYNX_PASSWORD_SECRET": reference},
+                clear=False,
+            ),
+        ):
+            assert spec.loader is not None
+            spec.loader.exec_module(bootstrap)
+            value = bootstrap.secret("ezlynx-password")
+
+        self.assertEqual(value, "pinned-credential")
+        client.list_secret_versions.assert_not_called()
+        client.access_secret_version.assert_called_once_with(
+            request={"name": reference}
+        )
+

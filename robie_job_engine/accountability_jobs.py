@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import json
 import os
 from datetime import date, datetime, timedelta, timezone
@@ -295,6 +296,11 @@ class AccountabilityReportWorker:
                     retryable=True,
                     error="accountability report contains missing, stale, partial, or unreconciled required evidence",
                 )
+            dashboard_receipt: dict[str, Any] = {}
+            dashboard = dict(manifest.get("dashboard") or {})
+            if mode == "weekly" and dashboard.get("enabled"):
+                from .accountability_dashboard import publish_weekly_dashboard
+                dashboard_receipt = publish_weekly_dashboard(output, run_at=run_at, config=dashboard)
         except Exception as exc:
             return WorkerResult(
                 False,
@@ -322,10 +328,11 @@ class AccountabilityReportWorker:
         return WorkerResult(
             True,
             action,
-            {"artifact_path": str(output), "delivery_receipts": receipts},
+            {"artifact_path": str(output), "delivery_receipts": receipts, "dashboard_receipt": dashboard_receipt},
             {
                 "sha256": _checksum(output),
                 "mode": mode,
+                "dashboard_receipt": dashboard_receipt,
                 "manifest_path": str(manifest_path),
                 "idempotency_key": idempotency_key,
             },
@@ -361,6 +368,15 @@ class AccountabilityReportVerifier:
                 and not observed["simulation_marker"]
             )
         receipts = list(destination.get("delivery_receipts") or [])
+        dashboard_receipt = dict(destination.get("dashboard_receipt") or {})
+        if verified and dashboard_receipt:
+            try:
+                from .accountability_dashboard import verify_weekly_dashboard
+                dashboard_verified, dashboard_observed = verify_weekly_dashboard(dashboard_receipt)
+            except Exception as exc:
+                dashboard_verified, dashboard_observed = False, {"error": f"{type(exc).__name__}: {exc}"}
+            observed["dashboard"] = dashboard_observed
+            verified = verified and dashboard_verified
         if verified and receipts:
             try:
                 from .accountability_delivery import verify_delivery_receipts
@@ -371,8 +387,8 @@ class AccountabilityReportVerifier:
             observed["delivery"] = delivery_observed
             verified = verified and delivery_verified
         evidence = VerificationEvidence(
-            method="FRESH_DESTINATION_AND_FILESYSTEM_READBACK" if receipts else "FRESH_FILESYSTEM_READBACK",
-            source="accountability-report-and-delivery" if receipts else "accountability-report-artifact",
+            method="FRESH_DESTINATION_AND_FILESYSTEM_READBACK" if (receipts or dashboard_receipt) else "FRESH_FILESYSTEM_READBACK",
+            source="accountability-report-and-destinations" if (receipts or dashboard_receipt) else "accountability-report-artifact",
             expected={"sha256": detail.get("sha256"), "mode": mode, "simulation_marker": False},
             observed=observed,
             authoritative=True,

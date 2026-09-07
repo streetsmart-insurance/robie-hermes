@@ -58,7 +58,7 @@
     },
     "ringcentral_email": {
       "enabled": false,
-      "mailbox": "robie@streetsmart.insurance",
+      "mailbox": "report-mailbox@example.test",
       "max_age_hours": 36
     },
     "magellan": {
@@ -175,9 +175,16 @@
     "region_env": "APPSHEET_REGION",
     "tables": {}
   },
+  "dashboard": {
+    "enabled": false,
+    "spreadsheet_id": "REPLACE_WITH_PRIVATE_CONTROL_CENTER_SHEET_ID",
+    "sheet_name": "Agency Accountability",
+    "inspection_range": "A1:L120",
+    "environment_label": "TEST"
+  },
   "google_sheets": {
     "enabled": false,
-    "spreadsheet_id": "1dFmE_J-YM9ua7v_B2UDgHHFr6BofIpIuU9qEXXtoZnA",
+    "spreadsheet_id": "REPLACE_WITH_PRIVATE_APPSHEET_BACKING_SHEET_ID",
     "employee_role_table": "employees",
     "employee_role_columns": {
       "name": "name",
@@ -203,7 +210,7 @@
     "enabled": false,
     "requires_exact_digest_approval": true,
     "chat_spaces": [],
-    "email_sender": "robie@streetsmart.insurance",
+    "email_sender": "report-mailbox@example.test",
     "email_recipients": {
       "daily": ["carlo@streetsmart.insurance"],
       "weekly": ["carlo@streetsmart.insurance", "jake@streetsmart.insurance"],
