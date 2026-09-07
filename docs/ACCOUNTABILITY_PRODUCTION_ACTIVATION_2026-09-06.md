@@ -5,6 +5,23 @@ Target: `streetsmart-accountability-prod`, project `streetsmart-hermes-poc`, zon
 
 ## Verified state
 
+- On 2026-09-07, Google Workspace Admin domain-wide delegation client
+  `112650695780807418521` was updated from four to six scopes. The existing
+  Gmail and Drive scopes were retained, and only
+  `https://www.googleapis.com/auth/documents` plus
+  `https://www.googleapis.com/auth/spreadsheets.readonly` were added. A
+  delegated Google Docs read and a delegated Google Sheets read both succeeded
+  from `streetsmart-accountability-prod` afterward.
+- On 2026-09-07, the dedicated VM's persistent EZLynx browser was active and
+  its visible page was the authenticated Submission Center, not Login or Forgot
+  Password. This proves the current browser session, not the durability of the
+  still-unconfigured Reports 5.0 subscriptions.
+- The dedicated identity can read only the named Magellan username and password
+  secrets. An isolated server probe authenticated to the Magellan dashboard
+  without printing either secret. The three fail-closed Magellan bootstrap unit
+  tests passed on the VM, and the repository's focused accountability source,
+  calendar, Google Sheets, RingCentral and Magellan suite passed 35 tests
+  locally on 2026-09-07.
 - The current Production `ubuntu` crontab runs the accountability launcher at 9:00 AM Eastern, Monday through Friday. The reviewed candidate preserves that required 9:00 AM Eastern schedule; Production remains unchanged until immutable promotion.
 - The reporting date is the previous business day; Monday resolves to Friday.
 - The server's persistent EZLynx Chrome service is enabled and active.
@@ -16,13 +33,19 @@ Target: `streetsmart-accountability-prod`, project `streetsmart-hermes-poc`, zon
 
 ## Required human handoffs
 
-1. EZLynx is forcing the SSRobie account through a password-reset page. Carlo must complete that reset privately and update the existing Secret Manager password version. Never paste the password into Chat, Git, logs, or a command.
-2. Google Workspace domain-wide delegation client `112650695780807418521` still needs these scopes while retaining the approved Gmail scopes:
-   - `https://www.googleapis.com/auth/documents`
-   - `https://www.googleapis.com/auth/spreadsheets.readonly`
-   Live read-only checks from the server returned `unauthorized_client` for both.
-3. Magellan's normal Carlos account login was verified, its password was rotated, and `magellan-username` plus `magellan-password` now exist in Secret Manager. The candidate branch adds a separate port-9223 persistent browser and a read-only prior-business-day collector. It still requires Test verification and exact-digest Production promotion; do not copy cookies or credentials into Git.
-4. In EZLynx Reports 5.0, create or correct four weekday CSV/XLSX subscriptions to the Robie reporting mailbox early enough to arrive before 9:00 AM: Activities, overdue Tasks, Sales Center, and Policy Changes. Submission Center remains live-browser evidence because no scheduled report exists.
+1. In EZLynx Reports 5.0, create or correct four weekday CSV/XLSX
+   subscriptions to the Robie reporting mailbox early enough to arrive before
+   9:00 AM: Activities, overdue Tasks, Sales Center, and Policy Changes.
+   Submission Center remains live-browser evidence because no scheduled report
+   exists.
+2. Correct the RingCentral source so the workbook delivered before 9:00 AM
+   contains the exact prior business day on Mondays and after holidays. The
+   current dynamic `Yesterday Calls` schedule can deliver Sunday on Monday; the
+   source gate correctly refuses that file when Friday is required.
+3. Promote the reviewed Magellan credential bootstrap only through the dedicated
+   accountability Test and immutable-release path. The isolated Production probe
+   proves the credentials and identity, but it is not permission to patch the
+   live application directly.
 
 ## Release path for the remaining code
 
@@ -53,3 +76,19 @@ A complete Production activation requires one dry run for a known prior business
 - Google Docs and Sheets delegated reads succeed.
 - The persistent pageless department document and department workbook reconcile every collected row.
 - Recipient preflight passes, then the approved team-lead email and link-only Chat message are read back successfully.
+
+## Latest no-send rehearsal
+
+The 2026-09-07 Production rehearsal requested the prior business day,
+2026-09-04, without `--publish` or `--deliver`. It stopped before document or
+email changes because the Robie mailbox lacked all five exact inputs:
+
+- `Scheduled Reports from RingCentral`
+- `Robie - EZLynx Activities`
+- `Robie - EZLynx Overdue Tasks`
+- `Robie - EZLynx Sales Center`
+- `Robie - EZLynx Policy Changes`
+
+This is the intended fail-closed behavior. The 9:00 AM schedule exists, but the
+daily report is not production-ready until those subscriptions are configured
+and one exact-date dry run reconciles all source rows.
