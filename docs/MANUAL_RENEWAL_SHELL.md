@@ -111,7 +111,7 @@ Until that exists, run the one-shot CLI against the already-open CDP Chrome. Do 
 Paulette HO resolver + COMPLETE gate, Login fail-fast, shell keying, and one-shot firmed-quote download:
 
 ```bash
-PYTHONPATH=. .venv/bin/pytest tests/test_manual_renewal_gate.py tests/test_ezlynx_discussions.py tests/test_policy_renewer.py tests/test_cdp_session_preflight.py tests/test_document_downloader.py -v
+PYTHONPATH=. .venv/bin/pytest tests/test_manual_renewal_gate.py tests/test_ezlynx_discussions.py tests/test_policy_renewer.py tests/test_document_uploader.py tests/test_cdp_session_preflight.py tests/test_document_downloader.py -v
 ```
 
 Covers: existing `{LOB} Renewal` preferred over Manual/Update (HO + other LOBs); Renewal Offer folder selected/created (not a policy-number folder); Application / Bound Quote prints rejected as Renewal Offer; Email Automation / Automation Center rejected; missing `Manual {LOB} Renewal` is created only when no existing LOB renewal card exists (never untitled); COMPLETE fails when the required note is missing or the job is docs-only; Login wall still `blocked`; 0-byte / `A`-prefix download fail-fast.
