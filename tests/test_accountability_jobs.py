@@ -48,6 +48,48 @@ def test_previous_business_day_uses_friday_for_monday():
     assert _previous_business_day(datetime(2026, 9, 7, 13, tzinfo=timezone.utc)).isoformat() == "2026-09-04"
 
 
+def test_daily_worker_propagates_manifest_holiday_calendar_to_all_collectors(tmp_path):
+    from datetime import date
+
+    class LaborDayTuesday(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 8, 10, 25, tzinfo=timezone.utc)
+
+    email = tmp_path / 'email.json'
+    email.write_text('{"source_status":"available","by_employee":{}}')
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({
+        'output_dir': str(tmp_path / 'reports'),
+        'rules': {'holiday_calendar': 'US-FEDERAL', 'require_complete_evidence': False},
+        'sources': {'email_json': str(email)},
+        'google_sheets': {'enabled': True},
+        'google_sheet_trackers': {'enabled': True, 'trackers': {'policy_changes': {'range': '{previous_business_week}!A:R'}}},
+        'collection': {'ringcentral_email': {'enabled': True}, 'magellan': {'enabled': True}},
+        'delivery': {'enabled': False},
+    }))
+
+    def fake_build(arguments):
+        Path(arguments[arguments.index('--output') + 1]).write_text('Test report\n')
+        return 0
+
+    with patch('robie_job_engine.accountability_jobs.datetime', LaborDayTuesday), \
+         patch('robie_job_engine.accountability_jobs.build_report', side_effect=fake_build), \
+         patch('robie_job_engine.google_sheets_accountability.collect_allowlisted_tables', return_value={}) as sheets, \
+         patch('robie_job_engine.google_sheets_accountability.write_allowlisted_table_csv'), \
+         patch('robie_job_engine.ringcentral_email_sync.collect_scheduled_ringcentral_report', return_value=tmp_path / 'rc.json') as rc, \
+         patch('robie_job_engine.magellan_collection.collect_magellan_snapshot', return_value=tmp_path / 'magellan.json') as magellan:
+        result = AccountabilityReportWorker().perform(
+            {'action_type': 'accountability.daily', 'payload': {'manifest_path': str(manifest)}},
+            idempotency_key='holiday-regression',
+        )
+    assert result.succeeded, result.error
+    assert rc.call_args.kwargs['target_date'] == date(2026, 9, 4)
+    assert magellan.call_args.kwargs['target_date'] == date(2026, 9, 4)
+    assert sheets.call_count == 2
+    assert all(call.kwargs['holiday_calendar'] == 'US-FEDERAL' for call in sheets.call_args_list)
+
+
 def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_path: Path):
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps({

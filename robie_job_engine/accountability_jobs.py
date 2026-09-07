@@ -6,12 +6,13 @@ import hashlib
 import csv
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .accountability_cli import main as build_report
+from .business_calendar import previous_business_day
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 
 
@@ -40,12 +41,9 @@ SOURCE_FLAGS = {
 }
 
 
-def _previous_business_day(value: datetime) -> date:
+def _previous_business_day(value: datetime, *, holiday_calendar: str | None = None) -> date:
     eastern = value.astimezone(ZoneInfo("America/New_York")).date()
-    candidate = eastern - timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate -= timedelta(days=1)
-    return candidate
+    return previous_business_day(eastern, holiday_calendar=holiday_calendar)
 
 
 def _checksum(path: Path) -> str:
@@ -96,7 +94,8 @@ class AccountabilityReportWorker:
             output_dir = Path(str(manifest.get("output_dir") or manifest_path.parent / "reports")).expanduser().resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             run_at = datetime.now(timezone.utc)
-            report_date = _previous_business_day(run_at) if mode == "daily" else None
+            holiday_calendar = (manifest.get("rules") or {}).get("holiday_calendar")
+            report_date = _previous_business_day(run_at, holiday_calendar=holiday_calendar) if mode == "daily" else None
             output = output_dir / f"streetsmart-{mode}-{run_at:%Y%m%dT%H%M%SZ}.md"
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
             sources = dict(manifest.get("sources") or {})
@@ -106,7 +105,7 @@ class AccountabilityReportWorker:
             if google_sheets.get("enabled"):
                 from .google_sheets_accountability import collect_allowlisted_tables, role_registry_from_snapshot
 
-                sheet_snapshot = collect_allowlisted_tables(google_sheets)
+                sheet_snapshot = collect_allowlisted_tables(google_sheets, as_of=run_at, holiday_calendar=holiday_calendar)
                 sheet_path = output_dir / f"appsheet-backing-sheet-{run_at:%Y%m%dT%H%M%SZ}.json"
                 sheet_path.write_text(json.dumps(sheet_snapshot, indent=2, default=str), encoding="utf-8")
                 if mode == "weekly" and not (manifest.get("sources") or {}).get("appsheet_json"):
@@ -135,6 +134,7 @@ class AccountabilityReportWorker:
                             },
                         },
                         as_of=run_at,
+                        holiday_calendar=holiday_calendar,
                     )
                     tracker_path = output_dir / f"google-sheet-{tracker_key}-{run_at:%Y%m%dT%H%M%SZ}.csv"
                     write_allowlisted_table_csv(snapshot, tracker_key, tracker_path)

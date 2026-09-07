@@ -1,4 +1,5 @@
 from datetime import date
+import pytest
 
 from robie_job_engine.department_accountability import (
     department_totals,
@@ -29,3 +30,27 @@ A-2,Closed LLC,Jazmin Molina,Closed,08/10/2026,08/01/2026,08/29/2026,08/29/2026,
     assert offenders[0].owner == "Jazmin Molina"
     assert offenders[0].overdue_count == 1
     assert department_totals(tasks)[0]["overdue_tasks"] == 1
+
+
+@pytest.mark.parametrize('new_status,new_due', [('Closed', '08/20/2026'), ('Open', '09/10/2026'), ('Open', '')])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_latest_task_state_removes_stale_overdue_rows(new_status, new_due, reverse):
+    header = 'Task ID,Task Status,Task Due Date,Task Last Modified Date,Created Date,Note\n'
+    rows = [
+        'T-1,Open,08/20/2026,08/25/2026,08/30/2026,Old task state',
+        f'T-1,{new_status},{new_due},08/31/2026,08/24/2026,Updated task state',
+    ]
+    if reverse:
+        rows.reverse()
+    assert parse_overdue_activity_detail(header + '\n'.join(rows), as_of=date(2026, 9, 1)) == []
+
+
+def test_reopened_task_is_counted_once_with_latest_discussion():
+    source = '''Task ID,Task Status,Task Due Date,Task Last Modified Date,Created Date,Note
+T-1,Closed,08/20/2026,08/25/2026,08/25/2026,Closed
+T-1,Open,08/20/2026,08/31/2026,08/29/2026,Earlier discussion
+T-1,Open,08/20/2026,08/31/2026,08/30/2026,Latest discussion
+'''
+    tasks = parse_overdue_activity_detail(source, as_of=date(2026, 9, 1))
+    assert len(tasks) == 1
+    assert tasks[0].latest_note == 'Latest discussion'
