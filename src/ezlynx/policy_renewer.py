@@ -119,6 +119,8 @@ DEFAULT_PRODUCTION_LIVE_APPLICANTS = frozenset(
     {
         "25156187",  # Maier Solar LLC
         "21588091",  # Yes We Do WC (PWC1239278 discussion fixture / live card)
+        "79002334",  # Hanim Benli (Homeowners / Hyundai)
+        "54893172",  # Hua Li & Simon Zhou (Dwelling Fire / Hyundai)
     }
 )
 
@@ -1391,14 +1393,31 @@ class ManualPolicyRenewer:
         if await name_input.count() > 0:
             await name_input.fill(target_name)
         result.document_name = target_name
-        if spec.policy_number:
+        if spec.policy_number or spec.policy_number_aliases:
             policy_select = frame.locator("#selected-policyor-application-0")
             if await policy_select.count() > 0:
                 await policy_select.click()
                 await page.wait_for_timeout(500)
-                opt = frame.locator(f"mat-option:has-text('{spec.policy_number}')")
-                if await opt.count() > 0:
-                    await opt.first.click()
+                candidates = [n for n in [spec.policy_number, *spec.policy_number_aliases] if n]
+                selected = False
+                for cand in candidates:
+                    opt = frame.locator(f"mat-option:has-text('{cand}'), .mat-mdc-option:has-text('{cand}')")
+                    if await opt.count() > 0:
+                        await opt.first.click()
+                        selected = True
+                        await page.wait_for_timeout(400)
+                        break
+                if not selected:
+                    base = re.sub(r"-\d+$", "", spec.policy_number or "")
+                    if base:
+                        opt = frame.locator(f"mat-option:has-text('{base}'), .mat-mdc-option:has-text('{base}')")
+                        if await opt.count() > 0:
+                            await opt.first.click()
+                            selected = True
+                            await page.wait_for_timeout(400)
+                if not selected:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(400)
         applied_label = None
         try:
             label_filter = frame.locator(
@@ -1416,7 +1435,11 @@ class ManualPolicyRenewer:
                     applied_label = want_label
         except Exception as label_err:
             logger.warning("Could not apply %s label: %s", want_label, label_err)
-        await frame.locator("button:has-text('Upload')").first.click()
+        upload_btn = frame.locator("button:has-text('Upload')").first
+        try:
+            await upload_btn.click(timeout=10000)
+        except Exception:
+            await upload_btn.click(force=True)
         await page.wait_for_timeout(4000)
         result.document_uploaded = True
         result.document_label = applied_label
@@ -1598,6 +1621,7 @@ class ManualPolicyRenewer:
         premium = spec.premium if spec.premium is not None else spec.full_term_premium
         premium_str = "" if premium is None else f"{premium:.2f}"
         for sel, value in (
+            ("#PolicyNumber", spec.policy_number or ""),
             ("#Premium", premium_str),
             ("#FullTermPremium", f"{(spec.full_term_premium or premium):.2f}" if (spec.full_term_premium or premium) else ""),
             ("#AnnualPremium", f"{(spec.annual_premium or premium):.2f}" if (spec.annual_premium or premium) else ""),

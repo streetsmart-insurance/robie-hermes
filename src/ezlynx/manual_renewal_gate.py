@@ -50,7 +50,12 @@ _RENEWAL_OFFER_DOC_HINTS = (
     "renewal declaration",
     "declarations page",
     "declaration of insurance",
+    "policy declarations",
+    "policy declaration",
     "renewal dec",
+    "dec pages",
+    "dec page",
+    "policy dec",
     "quote proposal (firmed)",
     "firmed quote",
     "firmed proposal",
@@ -98,6 +103,9 @@ _LOB_DISPLAY = {
     "umbrella": "Excess",
     "flood": "Flood",
     "commercial package": "Commercial Package",
+    "dwelling fire": "Dwelling Fire",
+    "dwelling": "Dwelling Fire",
+    "dp": "Dwelling Fire",
 }
 
 # Extra {LOB} Renewal title stems for the same line (never hardcoded to HO).
@@ -111,6 +119,7 @@ _LOB_RENEWAL_ALIASES = {
     "Excess": ("Excess", "Umbrella"),
     "Flood": ("Flood",),
     "Commercial Package": ("Commercial Package",),
+    "Dwelling Fire": ("Dwelling Fire", "Dwelling", "DP"),
 }
 
 
@@ -200,7 +209,7 @@ def candidate_existing_lob_renewal_titles(line_of_business: Optional[str]) -> Li
     """Exact and close-variant existing workflow titles: ``{LOB} Renewal``."""
     titles: List[str] = []
     for alias in lob_renewal_aliases(line_of_business):
-        for variant in (f"{alias} Renewal", f"{alias} Renewal Offer"):
+        for variant in (f"{alias} Renewal", f"{alias} Renewal Offer", f"{alias} Manual Renewal"):
             if variant not in titles:
                 titles.append(variant)
     return titles
@@ -222,9 +231,10 @@ def is_existing_lob_renewal_title(
     if aliases:
         for alias in aliases:
             stem = _norm_title(f"{alias} Renewal")
+            manual_stem = _norm_title(f"{alias} Manual Renewal")
             if not stem:
                 continue
-            if t_norm == stem or t_norm == f"{stem} offer":
+            if t_norm == stem or t_norm == f"{stem} offer" or (manual_stem and t_norm == manual_stem):
                 return True
             if t_norm.startswith(f"{stem} ") or t_norm.startswith(f"{stem}/") or t_norm.startswith(f"{stem}("):
                 rest = t_norm[len(stem):].strip()
@@ -234,6 +244,8 @@ def is_existing_lob_renewal_title(
                     return True
                 if rest[:4].isdigit():
                     return True
+            if manual_stem and (t_norm.startswith(f"{manual_stem} ") or t_norm.startswith(f"{manual_stem}(")):
+                return True
         return False
     return bool(re.match(r"^.+ renewal( offer)?$", t_norm))
 
@@ -272,7 +284,7 @@ def resolve_renewal_offer_folder(
 
 
 def _doc_haystack(*parts: Optional[str]) -> str:
-    return " ".join(re.sub(r"\s+", " ", (p or "").strip()) for p in parts if p).strip()
+    return " ".join(re.sub(r"\s+", " ", (p or "").replace("_", " ").strip()) for p in parts if p).strip()
 
 
 def classify_renewal_document(

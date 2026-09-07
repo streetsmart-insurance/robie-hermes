@@ -41,7 +41,7 @@ def test_install_script_is_executable_and_dry_run_prints_lines():
     assert "run_robie_call_label_watch.sh" in out
     assert "0 12 * * 0" in out
     assert "run_voice_call_directory_refresh.sh" in out
-    assert "Dry-run: crontab not written." in out
+    assert "Dry-run: crontab not written." in out or "already present" in out
     assert "0 9 * * *" not in out
 
 

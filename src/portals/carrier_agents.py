@@ -389,6 +389,12 @@ def get_carrier_crawler(carrier_name: str, portal_url: Optional[str] = None) -> 
         return HartfordPortalCrawler(headless=settings.playwright_headless)
     elif "tapco" in name_lower:
         return TapcoPortalCrawler(headless=settings.playwright_headless)
+    elif "hyundai" in name_lower or "maple" in name_lower or "hmf" in name_lower:
+        from src.portals.maple_tech import MapleTechPortalCrawler
+        return MapleTechPortalCrawler(
+            base_url=portal_url or "https://app.maple-tech.com/hmf",
+            headless=settings.playwright_headless
+        )
     elif "mock" in name_lower or not portal_url:
         return MockCarrierCrawler()
     

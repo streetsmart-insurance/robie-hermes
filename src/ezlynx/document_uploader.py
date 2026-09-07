@@ -86,6 +86,22 @@ async def create_document_folder(page, folder_name: str) -> bool:
         return False
     await folder_item.first.click()
     await asyncio.sleep(1)
+
+    # Check for iframe modal (Classic/Legacy DocumentAddFolder)
+    for _ in range(10):
+        for fr in page.frames:
+            if "documentaddfolder" in (fr.url or "").lower():
+                folder_input = fr.locator("#FolderName")
+                if await folder_input.count() > 0:
+                    await folder_input.fill(folder_name)
+                    save_btn = fr.locator("input[type='submit'], button[type='submit'], input[value='Save']")
+                    if await save_btn.count() > 0:
+                        await save_btn.first.click()
+                        await asyncio.sleep(2)
+                        logger.info("Created Documents folder via iframe: %s", folder_name)
+                        return True
+        await asyncio.sleep(0.5)
+
     name_input = page.locator(
         "input[placeholder*='Folder'], input[placeholder*='folder'], "
         "input[formcontrolname*='name' i], .mat-mdc-dialog-container input, "

@@ -76,9 +76,9 @@
     "notes": "Email underwriter."
   },
   "Hyundai Marine & Fire Insurance Company": {
-    "channel": "EMAIL",
-    "underwriter_email": "renewals@hyundaifire.com",
-    "notes": "Email underwriter."
+    "channel": "PORTAL",
+    "portal_url": "https://app.maple-tech.com/hmf",
+    "notes": "Maple-Tech Aspire 3.0 agent portal. Search under Applications or In-force, retrieve dec pages from /api/v1/docs/app/{app_id}."
   },
   "NJCRIB - Liberty Assigned Risk": {
     "channel": "EMAIL_ASK_PORTAL",
@@ -144,5 +144,15 @@
     "channel": "PORTAL",
     "portal_url": "https://www.markel.com",
     "notes": "Markel Agent Portal."
+  },
+  "HYUNDAI MARINE & FIRE INS CO LTD": {
+    "channel": "PORTAL",
+    "portal_url": "https://app.maple-tech.com/hmf",
+    "notes": "Maple-Tech Aspire 3.0 agent portal. Search under Applications or In-force, retrieve dec pages from /api/v1/docs/app/{app_id}."
+  },
+  "Maple-Tech": {
+    "channel": "PORTAL",
+    "portal_url": "https://app.maple-tech.com/hmf",
+    "notes": "Maple-Tech Aspire 3.0 agent portal."
   }
 }
