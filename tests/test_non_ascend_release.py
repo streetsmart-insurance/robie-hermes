@@ -1,4 +1,4 @@
-"""Non-Ascend release contract. No network, browser, or credentials."""
+"""Environment-gated Ascend release contract. No network, browser, or credentials."""
 
 import json
 import subprocess
@@ -11,12 +11,13 @@ from robie_job_engine.chat_guard import guard_chat_response, open_chat_job
 from robie_job_engine.job_schema import get_bounded_job_schema, get_executable_skill_contract
 from robie_job_engine.models import JobStatus
 from robie_job_engine.request_routing import BOUNDED_ENGINE_ACTIONS, WORKER_FOR_ACTION, classify_request
-from robie_job_engine.release_profile import ASCEND_REQUEST_FIXTURES
+from robie_job_engine.release_profile import ASCEND_REQUEST_FIXTURES, verify_non_ascend_release
 from robie_job_engine.store import JobStore
 from robie_job_engine.test_runtime import build_runtime_engine
 
 
-def test_ascend_requests_route_to_unavailable_and_never_complete():
+def test_ascend_requests_route_to_unavailable_and_never_complete(monkeypatch):
+    monkeypatch.delenv("ROBIE_ASCEND_API_ENABLED", raising=False)
     requests = ASCEND_REQUEST_FIXTURES
     with durable_temporary_directory() as tmp:
         db = str(Path(tmp) / "jobs.db")
@@ -44,16 +45,35 @@ def test_ascend_has_no_worker_schema_or_executable_contract():
         assert not any(name.startswith("ascend") for name in engine.workers)
 
 
-def test_release_export_rules_exclude_ascend_execution_surfaces():
+def test_release_profile_allows_bundled_sources_but_keeps_ascend_environment_gated(monkeypatch):
+    monkeypatch.delenv("ROBIE_ASCEND_API_ENABLED", raising=False)
+    result = verify_non_ascend_release()
+    assert result["ok"] is True
+    assert result["profile"] == "ENV_GATED_ASCEND"
+    assert result["source_presence_allowed"] is True
+    assert result["ascend_source_paths_present"]
+    assert result["ascend_registrations"] == []
+    assert all(
+        item == {"action_type": "hermes.unavailable", "hold_status": "FAILED"}
+        for item in result["disabled_routing"].values()
+    )
+    assert all(
+        item == {"action_type": "hermes.google_chat_task", "hold_status": None}
+        for item in result["enabled_routing"].values()
+    )
+
+
+def test_release_export_rules_include_environment_gated_ascend_sources():
     rules = Path(".gitattributes").read_text(encoding="utf-8")
-    for required in (
+    for removed_rule in (
         "robie_job_engine/ascend*.py export-ignore",
         "robie_job_engine/locators/ascend.json export-ignore",
         "deploy/hermes/skills/ascend-* export-ignore",
         "skills/ascend-* export-ignore",
         "scripts/*ascend* export-ignore",
     ):
-        assert required in rules
+        assert removed_rule not in rules
+    assert "tests export-ignore" in rules
 
 
 def test_readonly_test_job_audit_is_redacted_and_unique():

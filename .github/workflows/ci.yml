@@ -55,6 +55,7 @@ jobs:
             tests/test_reporting_suite.py \
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py
+          PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
       - name: Build immutable release candidate
         run: bash scripts/build-release.sh "$RUNNER_TEMP/releases"
 
