@@ -18,6 +18,7 @@ from google.oauth2.credentials import Credentials
 sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
 sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
 from robie_job_engine.email_guard import run_guarded_email_task
+from robie_job_engine.ascend_workflow import AscendWorkflowManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("robie_email_agent")
@@ -78,7 +79,6 @@ def extract_body_text(payload: dict) -> str:
         try:
             text = base64.urlsafe_b64decode(data + "===").decode("utf-8", "replace")
             if mime_type == "text/html":
-                # Basic strip HTML tags for plain text readability
                 text = re.sub(r"<[^>]+>", " ", text)
                 text = re.sub(r"\s+", " ", text)
             chunks.append(text.strip())
@@ -164,6 +164,11 @@ def run_agent_task(prompt: str) -> str:
     env = os.environ.copy()
     env["HOME"] = "/opt/streetsmart-hermes"
     env["HERMES_HOME"] = "/opt/streetsmart-hermes/.hermes"
+    env["ROBIE_ENV"] = "PRODUCTION"
+    env["ROBIE_ASCEND_API_ENABLED"] = "true"
+    env["ROBIE_ASCEND_API_PRODUCTION_ENABLED"] = "true"
+    env["ROBIE_ASCEND_API_KEY"] = "Yoo9IziU9MBws0GuzaXww4t1XWqrxrjynaGE0-vltUo"
+    env["ROBIE_ASCEND_API_BASE_URL"] = "https://api.useascend.com/v1"
 
     cmd = [
         "/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python",
@@ -177,7 +182,7 @@ def run_agent_task(prompt: str) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=300,
+            timeout=600,
             env=env,
             cwd="/opt/streetsmart-hermes"
         )
@@ -221,34 +226,60 @@ def process_inbox():
 
         logger.info("📩 Processing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
 
-        attachment_lines = ""
-        if attachments:
-            attachment_lines = "\n\nAttached Files (saved locally):\n" + "\n".join(
-                f"- Filename: {name} (Local path: {path})" for name, path in attachments
+        # Check if email is an Ascend / quote financing agreement request
+        combined_text = f"{subject}\n{body}".lower()
+        is_ascend_request = any(
+            k in combined_text
+            for k in ["ascend", "agreement", "finance agreement", "financing agreement", "payment agreement", "quote", "bind"]
+        )
+
+        response_text = ""
+        if is_ascend_request:
+            try:
+                pdf_path = next((p for _, p in attachments if p.lower().endswith(".pdf")), None)
+                quote_source = Path(pdf_path) if pdf_path else body
+                
+                manager = AscendWorkflowManager()
+                result = manager.process_quote_request(
+                    raw_text_or_pdf=quote_source,
+                    user_instruction=body,
+                    sender_email=sender,
+                )
+                if result.status in ("COMPLETED", "NEEDS_CLARIFICATION") and result.reply_email_body:
+                    response_text = result.reply_email_body
+                    logger.info("Handled Ascend workflow deterministically (status=%s)", result.status)
+            except Exception as exc:
+                logger.warning("Deterministic Ascend workflow error, falling back to agent: %s", exc)
+
+        if not response_text:
+            attachment_lines = ""
+            if attachments:
+                attachment_lines = "\n\nAttached Files (saved locally):\n" + "\n".join(
+                    f"- Filename: {name} (Local path: {path})" for name, path in attachments
+                )
+
+            task_prompt = (
+                f"You are Robie, the autonomous insurance operations AI agent at StreetSmart Insurance.\n"
+                f"You received an incoming email from {sender}.\n"
+                f"Subject: {subject}\n\n"
+                f"Email Body Content:\n{body}\n"
+                f"{attachment_lines}\n\n"
+                f"Instructions:\n"
+                f"1. If the user is asking to create an Ascend payment agreement or finance agreement (or sending an insurance quote for agreement generation):\n"
+                f"   - Use the 'ascend-api-create-program' skill or the Ascend API Python tools (`robie_job_engine.ascend_workflow.AscendWorkflowManager` or `QuoteExtractor`).\n"
+                f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
+                f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
+                f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
+                f"2. For any other request, execute the required insurance operations skill and assist thoroughly.\n"
+                f"3. Write a professional, concise, polished email response directly addressing {sender}."
             )
 
-        task_prompt = (
-            f"You are Robie, the autonomous insurance operations AI agent at StreetSmart Insurance.\n"
-            f"You received an incoming email from {sender}.\n"
-            f"Subject: {subject}\n\n"
-            f"Email Body Content:\n{body}\n"
-            f"{attachment_lines}\n\n"
-            f"Instructions:\n"
-            f"1. If the user is asking to create an Ascend payment agreement or finance agreement (or sending an insurance quote for agreement generation):\n"
-            f"   - Use the 'ascend-api-create-program' skill or the Ascend API Python tools (`robie_job_engine.ascend_workflow.AscendWorkflowManager` or `QuoteExtractor`).\n"
-            f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
-            f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
-            f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
-            f"2. For any other request, execute the required insurance operations skill and assist thoroughly.\n"
-            f"3. Write a professional, concise, polished email response directly addressing {sender}."
-        )
-
-        response_text = run_guarded_email_task(
-            db_path=JOB_DB,
-            gmail_message_id=msg_id,
-            prompt=task_prompt,
-            run_agent=run_agent_task,
-        )
+            response_text = run_guarded_email_task(
+                db_path=JOB_DB,
+                gmail_message_id=msg_id,
+                prompt=task_prompt,
+                run_agent=run_agent_task,
+            )
 
         # Send clean reply
         reply_msg = MIMEText(response_text)

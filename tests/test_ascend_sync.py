@@ -396,7 +396,7 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
             applicant_id="0",
             title="⚠️ ACCOUNTING AUDIT: FAILED Supplier Payout to XPT Specialty ($4,200.00)",
             description=unittest.mock.ANY,
-            assigned_user="accounting@streetsmart.insurance",
+            assigned_user="Markley1",
             due_days_out=1,
         )
 

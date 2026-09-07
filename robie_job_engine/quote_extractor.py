@@ -295,8 +295,8 @@ class QuoteExtractor:
 
         # 9. Parameter 2: Commission Rate
         comm_match = re.search(
-            r"(?:Commission\s+Rate|Agency\s+Commission|Commission):\s*([\d.]+\s*%)",
-            text,
+            r"(?:Commission\s+Rate|Agency\s+Commission|Commission)\s*:\s*([\d.]+\s*%?)",
+            combined_text,
             re.IGNORECASE,
         )
         if comm_match:
@@ -308,15 +308,18 @@ class QuoteExtractor:
 
         # 10. Parameter 3: Surplus Lines Tax & Fees
         tax_match = re.search(
-            r"(?:Surplus\s+Lines\s+Tax|State\s+Tax|Taxes):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            text,
+            r"(?:Surplus\s+Lines\s+Tax|State\s+Tax|Taxes)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            combined_text,
             re.IGNORECASE,
         )
         if tax_match:
             quote.surplus_lines_tax_cents = _parse_dollars_to_cents(tax_match.group(1))
+        elif re.search(r"no\s+surplus\s+lines|surplus\s+lines\s+tax\s*:\s*\$0", combined_text, re.IGNORECASE):
+            quote.surplus_lines_tax_cents = 0
+
         stamping_match = re.search(
-            r"(?:Stamping\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            text,
+            r"(?:Stamping\s+Fee)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            combined_text,
             re.IGNORECASE,
         )
         if stamping_match:

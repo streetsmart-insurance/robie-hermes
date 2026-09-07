@@ -955,7 +955,7 @@ class AscendEZLynxSyncManager:
         payouts = self.api.fetch_payouts(page_size=50)
         found = len(payouts)
         synced = 0
-        accounting_assignee = os.environ.get("ROBIE_ACCOUNTING_ASSIGNEE", "accounting@streetsmart.insurance")
+        accounting_assignee = os.environ.get("ROBIE_ACCOUNTING_ASSIGNEE", "Markley1")
 
         for p in payouts:
             payout_id = p.get("id")
