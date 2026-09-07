@@ -221,4 +221,4 @@ jobs:
       - name: Validate June-August backfill without sending
         if: inputs.lost_customer_operation == 'dry-run'
         run: |
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='sudo -u streetsmart-hermes env PYTHONPATH=/opt/streetsmart-hermes/releases/current /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py --dry-run --backfill'
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='sudo env PYTHONPATH=/opt/streetsmart-hermes/releases/current /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py --dry-run --backfill'
