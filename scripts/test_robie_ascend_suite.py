@@ -227,7 +227,7 @@ def run_all_tests():
 
         mock_poster = MagicMock()
         mock_poster.create_task.return_value = {"status": "success", "task_id": 101}
-        mock_poster.add_label.return_value = {"status": "success"}
+        mock_poster.apply_account_label.return_value = {"status": "success"}
         mock_poster.post_custom_note.return_value = {"status": "success", "note_id": 202}
 
         with patch("robie_job_engine.ascend_sync.send_google_chat_alert") as mock_chat:
@@ -241,7 +241,11 @@ def run_all_tests():
 
             # Verify Cancellation
             assert stats["cancellations_synced"] == 1
-            mock_poster.add_label.assert_called_with("app-test-1", "Cancellation Notice")
+            mock_poster.apply_account_label.assert_called_with(
+                applicant_id="app-test-1",
+                label="Cancellation Notice",
+                policy_number="POL-9921",
+            )
             print("  ✓ Cancellation: Label 'Cancellation Notice' applied to account")
             print("  ✓ Cancellation: Notice PDF embedded and 🚨 CSR ACTION REQUIRED task created")
 
