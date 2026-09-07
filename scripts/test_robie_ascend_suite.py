@@ -318,23 +318,28 @@ def run_all_tests():
     # TEST 6: QuickBooks Online Staged Integration
     # -------------------------------------------------------------
     print("\n[TEST 6/6] Testing QuickBooks Online Staged Mode...")
-    qbo_client = QuickBooksApiClient(staged_mode=True)
+    qbo_client = QuickBooksApiClient()
     dep_res = qbo_client.record_commission_deposit(
+        program_id="prog-006",
+        policy_number="COMMISSION",
+        insured_name="Ascend Commission",
         amount_cents=125000,
-        description="Ascend Agency Commission Payout #pay-006",
-        date="2026-09-07",
+        deposit_date="2026-09-07",
+        payout_id="pay-006",
     )
     assert dep_res["status"] == "staged"
-    print(f"  ✓ Commission Deposit staged: ${dep_res['amount_cents'] / 100:,.2f} ({dep_res['description']})")
+    print(f"  ✓ Commission Deposit staged: ${dep_res['amount']:,.2f} ({dep_res['memo']})")
 
     bill_res = qbo_client.record_supplier_payout_bill(
+        program_id="prog-007",
+        policy_number="POL-7711",
         wholesaler_name="Tapco Underwriters",
-        amount_cents=850000,
-        date="2026-09-07",
+        net_amount_cents=850000,
+        payment_date="2026-09-07",
         payout_id="pay-007",
     )
     assert bill_res["status"] == "staged"
-    print(f"  ✓ Supplier Bill & Payment staged: ${bill_res['amount_cents'] / 100:,.2f} to {bill_res['wholesaler']}")
+    print(f"  ✓ Supplier Bill & Payment staged: ${bill_res['amount']:,.2f} to {bill_res['wholesaler']}")
     passed_count += 1
 
     # -------------------------------------------------------------
