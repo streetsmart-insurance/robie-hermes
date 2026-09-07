@@ -72,7 +72,8 @@
     "ezlynx_submission_center": {
       "enabled": false,
       "read_only": true,
-      "email_delivery_enabled": false
+      "email_delivery_enabled": false,
+      "modes": ["daily", "weekly"]
     },
     "ezlynx_reports_5": {
       "enabled": false,

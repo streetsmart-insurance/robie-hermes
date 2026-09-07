@@ -98,9 +98,48 @@ class AccountabilityReportWorker:
             report_date = _previous_business_day(run_at, holiday_calendar=holiday_calendar) if mode == "daily" else None
             output = output_dir / f"streetsmart-{mode}-{run_at:%Y%m%dT%H%M%SZ}.md"
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
+            if report_date is not None:
+                arguments.extend(["--report-date", report_date.isoformat()])
             sources = dict(manifest.get("sources") or {})
             sources["trackers"] = dict(sources.get("trackers") or {})
             collection = dict(manifest.get("collection") or {})
+            scheduled_reports = dict(collection.get("scheduled_reports_email") or {})
+            if scheduled_reports.get("enabled"):
+                from .ringcentral_email_sync import build_keyless_report_mailbox_service
+                from .scheduled_report_email_sync import collect_scheduled_tabular_reports
+
+                mailbox = str(
+                    scheduled_reports.get("mailbox")
+                    or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")
+                ).strip()
+                service_account = os.environ.get(
+                    "ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", ""
+                ).strip()
+                if not mailbox or not service_account:
+                    raise RuntimeError(
+                        "scheduled report collection requires the Robie report mailbox "
+                        "and delegated service account"
+                    )
+                collected = collect_scheduled_tabular_reports(
+                    build_keyless_report_mailbox_service(service_account, mailbox),
+                    output_dir=output_dir / "scheduled-reports",
+                    config=scheduled_reports,
+                    as_of=run_at,
+                )
+                for key, value in dict(collected.get("sources") or {}).items():
+                    if key in sources and sources[key] and Path(str(sources[key])).expanduser().is_file():
+                        raise RuntimeError(
+                            f"scheduled report source {key} conflicts with a configured file source"
+                        )
+                    sources[key] = str(value)
+                for key, value in dict(collected.get("trackers") or {}).items():
+                    if key in sources["trackers"] and Path(
+                        str(sources["trackers"][key])
+                    ).expanduser().is_file():
+                        raise RuntimeError(
+                            f"scheduled report tracker {key} conflicts with a configured tracker"
+                        )
+                    sources["trackers"][key] = str(value)
             google_sheets = dict(manifest.get("google_sheets") or {})
             if google_sheets.get("enabled"):
                 from .google_sheets_accountability import collect_allowlisted_tables, role_registry_from_snapshot
@@ -172,7 +211,11 @@ class AccountabilityReportWorker:
                     target_date=report_date,
                 ))
             submission_center = dict(collection.get("ezlynx_submission_center") or {})
-            if mode == "weekly" and submission_center.get("enabled"):
+            submission_modes = {
+                str(value).strip().casefold()
+                for value in submission_center.get("modes", ["weekly"])
+            }
+            if mode in submission_modes and submission_center.get("enabled"):
                 from .submission_audit import DEFAULT_SCOPE, EzlynxSubmissionAuditWorker
 
                 audit = EzlynxSubmissionAuditWorker().perform(

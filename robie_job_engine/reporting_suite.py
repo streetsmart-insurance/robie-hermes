@@ -5,7 +5,7 @@ with Habitual Task Postponement / Snooze Detection.
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -99,11 +99,14 @@ class ReportingSuite:
         sales_data: Optional[Dict[str, Any]] = None,
         role_rows: Optional[List[Dict[str, Any]]] = None,
         email_data: Optional[Dict[str, Any]] = None,
+        report_date: Optional[date] = None,
+        submission_data: Optional[Dict[str, Any]] = None,
+        tracker_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Daily: Phones + Overdue Tasks + Unreturned Calls SLA."""
         lines = [
             "📋 *STREETSMART DAILY SERVICE & PHONE WATCHDOG*",
-            f"📅 Date: {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}",
+            f"📅 Date: {(report_date or datetime.now(timezone.utc).date()).strftime('%A, %B %d, %Y')}",
             "",
             "🚨 *CRITICAL UNRETURNED CALLS (>30m SLA)*",
         ]
@@ -232,6 +235,28 @@ class ReportingSuite:
                     f"{item.get('stage', 'Unknown')} | last touch {item.get('days_since_touch', 'unknown')}d ago | "
                     f"{'; '.join(item.get('reasons', []))} | source row {item.get('source_row_number', '?')}"
                 )
+        tracker_data = tracker_data or {"source_status": "not supplied"}
+        tracker_exceptions = tracker_data.get("exceptions", [])
+        if tracker_exceptions:
+            lines.extend(["", "🧭 *DAILY POLICY CHANGES, COIS & SERVICE TRACKERS*"])
+            for item in tracker_exceptions[:50]:
+                lines.append(
+                    f"• {item.get('account', 'Unknown item')} — {item.get('owner', 'Unassigned')} | "
+                    f"{item.get('tracker_name', 'Tracker')} | {item.get('status', 'Unknown')} | "
+                    f"blocker: {item.get('blocker_party', 'unclear')} | "
+                    f"next: {item.get('next_action', 'Review EZLynx')} | "
+                    f"source row {item.get('source_row_number', '?')}"
+                )
+        submission_data = submission_data or {"source_status": "not supplied"}
+        submission_exceptions = submission_data.get("exceptions", [])
+        if submission_exceptions:
+            lines.extend(["", "📨 *DAILY SUBMISSION CENTER EXCEPTIONS (>30 DAYS OPEN)*"])
+            for item in submission_exceptions[:50]:
+                lines.append(
+                    f"• {item.get('account_name', 'Unknown account')} — "
+                    f"{item.get('owner', 'Unassigned')} | open {item.get('age_days', 'unknown')}d | "
+                    f"{item.get('status', 'Unknown')} | source row {item.get('source_row_number', '?')}"
+                )
         if role_rows:
             lines.extend(["", "🧩 *TODAY'S WORK ↔ ROLE RESPONSIBILITIES*"])
             for row in role_rows:
@@ -245,6 +270,8 @@ class ReportingSuite:
                 _source_warning("Magellan", magellan_data),
                 _source_warning("EZLynx Sales Center", sales_data),
                 _source_warning("Gmail metadata", email_data),
+                _source_warning("EZLynx Submission Center", submission_data),
+                _source_warning("Policy Change / COI trackers", tracker_data),
             )
             if warning
         ]

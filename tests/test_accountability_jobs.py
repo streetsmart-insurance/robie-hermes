@@ -74,7 +74,7 @@ def test_daily_worker_propagates_manifest_holiday_calendar_to_all_collectors(tmp
         return 0
 
     with patch('robie_job_engine.accountability_jobs.datetime', LaborDayTuesday), \
-         patch('robie_job_engine.accountability_jobs.build_report', side_effect=fake_build), \
+         patch('robie_job_engine.accountability_jobs.build_report', side_effect=fake_build) as build, \
          patch('robie_job_engine.google_sheets_accountability.collect_allowlisted_tables', return_value={}) as sheets, \
          patch('robie_job_engine.google_sheets_accountability.write_allowlisted_table_csv'), \
          patch('robie_job_engine.ringcentral_email_sync.collect_scheduled_ringcentral_report', return_value=tmp_path / 'rc.json') as rc, \
@@ -86,6 +86,8 @@ def test_daily_worker_propagates_manifest_holiday_calendar_to_all_collectors(tmp
     assert result.succeeded, result.error
     assert rc.call_args.kwargs['target_date'] == date(2026, 9, 4)
     assert magellan.call_args.kwargs['target_date'] == date(2026, 9, 4)
+    arguments = build.call_args.args[0]
+    assert arguments[arguments.index('--report-date') + 1] == '2026-09-04'
     assert sheets.call_count == 2
     assert all(call.kwargs['holiday_calendar'] == 'US-FEDERAL' for call in sheets.call_args_list)
 
@@ -232,3 +234,49 @@ def test_daily_worker_uses_every_approved_roster_mailbox_for_gmail_metadata(tmp_
         "alex@streetsmart.insurance",
         "blair@streetsmart.insurance",
     )
+
+
+def test_daily_worker_ingests_scheduled_ezlynx_reports_before_build(tmp_path: Path):
+    tasks = tmp_path / "tasks.csv"
+    tasks.write_text("Assigned To,Status\n", encoding="utf-8")
+    email = tmp_path / "email.json"
+    email.write_text('{"source_status":"available","by_employee":{}}', encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "output_dir": str(tmp_path / "reports"),
+        "sources": {"email_json": str(email)},
+        "rules": {"require_complete_evidence": False},
+        "collection": {"scheduled_reports_email": {
+            "enabled": True,
+            "mailbox": "robie@example.test",
+            "allowed_sender_domains": ["ezlynx.com"],
+            "reports": {"tasks": {"label": "ROBIE_TASKS"}},
+        }},
+    }), encoding="utf-8")
+
+    def fake_build(arguments):
+        Path(arguments[arguments.index("--output") + 1]).write_text(
+            "📋 *STREETSMART DAILY SERVICE & PHONE WATCHDOG*\n", encoding="utf-8"
+        )
+        return 0
+
+    with patch.dict("os.environ", {
+        "ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT": "worker@example.test",
+    }), patch(
+        "robie_job_engine.ringcentral_email_sync.build_keyless_report_mailbox_service",
+        return_value=object(),
+    ), patch(
+        "robie_job_engine.scheduled_report_email_sync.collect_scheduled_tabular_reports",
+        return_value={"sources": {"tasks": str(tasks)}, "trackers": {}},
+    ) as collect, patch(
+        "robie_job_engine.accountability_jobs.build_report", side_effect=fake_build
+    ) as build:
+        result = AccountabilityReportWorker().perform(
+            {"action_type": "accountability.daily", "payload": {"manifest_path": str(manifest)}},
+            idempotency_key="scheduled-reports-daily",
+        )
+
+    assert result.succeeded, result.error
+    collect.assert_called_once()
+    arguments = build.call_args.args[0]
+    assert arguments[arguments.index("--tasks") + 1] == str(tasks.resolve())

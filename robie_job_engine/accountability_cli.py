@@ -6,7 +6,7 @@ import argparse
 import csv
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -490,10 +490,61 @@ def _call_report(
     return call_data, task_data
 
 
+def _daily_submission_data(args: argparse.Namespace, as_of: datetime) -> dict[str, Any]:
+    if args.submissions_json and args.submissions_json.exists():
+        data = _json(args.submissions_json)
+        records = list(data.get("qualifying_records") or [])
+        data.update({
+            "source_status": "available" if data.get("first_closed_row_inspected") else "partial: closed-row boundary not verified",
+            "open_over_30_count": len(records),
+            "exceptions": [
+                {
+                    "account_name": item.get("applicant", "Unknown applicant"),
+                    "owner": item.get("assigned_producer", "Unassigned"),
+                    "age_days": item.get("age_days"),
+                    "status": item.get("status", "Unknown"),
+                    "source_row_number": f"page {item.get('source_page', '?')} row {item.get('source_row', '?')}",
+                }
+                for item in records
+            ],
+        })
+        return data
+    if args.submissions and args.submissions.exists():
+        findings = audit_submission_records(parse_submission_csv(args.submissions), as_of=as_of)
+        return {
+            "source_status": "available",
+            "open_over_30_count": len(findings),
+            "exceptions": finding_dicts(findings),
+        }
+    return {"source_status": "not supplied"}
+
+
+def _daily_tracker_data(specifications: list[str], as_of: datetime) -> dict[str, Any]:
+    if not specifications:
+        return {"source_status": "not supplied", "exceptions": []}
+    findings = []
+    errors = []
+    for spec in specifications:
+        try:
+            key, raw_path = spec.split("=", 1)
+            path = Path(raw_path)
+            if key not in TRACKER_DEFINITIONS or not path.exists():
+                raise ValueError(spec)
+            findings.extend(audit_tracker_csv(path, TRACKER_DEFINITIONS[key], as_of=as_of.date()))
+        except (ValueError, KeyError):
+            errors.append(spec)
+    return {
+        "source_status": "available" if not errors else f"partial: {len(errors)} invalid tracker source(s)",
+        "exception_count": len(findings),
+        "exceptions": tracker_dicts(findings),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build evidence-backed StreetSmart accountability reports")
     parser.add_argument("mode", choices=("daily", "weekly", "monthly"))
     parser.add_argument("--as-of", help="ISO timestamp; defaults to now in UTC")
+    parser.add_argument("--report-date", type=date.fromisoformat, help="Explicit audited business date")
     parser.add_argument("--ringcentral", type=Path, help="RingCentral CSV, XLSX, or collector evidence manifest")
     parser.add_argument("--tasks", type=Path)
     parser.add_argument("--activities", type=Path)
@@ -548,6 +599,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         magellan_data=magellan_data,
     ) if roles_data.get("employees") else []
     if args.mode == "daily":
+        submission_data = _daily_submission_data(args, as_of)
+        tracker_data = _daily_tracker_data(args.tracker, as_of)
         report = suite.build_daily_report(
             call_data,
             task_data,
@@ -555,6 +608,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             sales_data,
             role_rows,
             _json(args.email_json),
+            report_date=args.report_date,
+            submission_data=submission_data,
+            tracker_data=tracker_data,
         )
     elif args.mode == "weekly":
         retention = _json(args.retention_summary_json)
