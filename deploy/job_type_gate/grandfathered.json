@@ -11,6 +11,8 @@
     "ezlynx.submission_audit",
     "ezlynx.session_refresh",
     "filesystem.skill_update",
+    "appsheet.smart_reward",
+    "appsheet.qa_audit",
     "hermes.google_chat_task",
     "hermes.plain_english",
     "hermes.needs_clarification",
