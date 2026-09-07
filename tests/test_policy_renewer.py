@@ -412,6 +412,8 @@ async def test_connected_job_dry_run_plans_renew_policy_btn(tmp_path: Path):
     assert result.status == "dry_run"
     assert any("#RenewPolicyBtn" in a for a in result.planned_actions)
     assert any("Writing Company" in a for a in result.planned_actions)
+    assert any("Manual {LOB} Renewal" in a for a in result.planned_actions)
+    assert any("Renewal Update {LOB}" in a for a in result.planned_actions)
     assert result.bound is False
 
 

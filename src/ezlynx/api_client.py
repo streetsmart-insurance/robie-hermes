@@ -310,6 +310,7 @@ DISQUALIFIED_DISCUSSION_PATTERNS = [
     "text sent",
     "text received",
     "email sent by automation center",
+    "email automation",
     "automation center",
     "submission added",
     "billing and payments",
@@ -317,6 +318,20 @@ DISQUALIFIED_DISCUSSION_PATTERNS = [
     "eva inbound call",
     "incoming call",
 ]
+
+_MANUAL_LOB_RENEWAL_TITLE_RE = re.compile(r"^manual .+ renewal$", re.I)
+
+
+def is_manual_lob_renewal_title(title: Optional[str]) -> bool:
+    """Exact agency card ``Manual {LOB} Renewal`` (Paulette HO standing rule)."""
+    return bool(_MANUAL_LOB_RENEWAL_TITLE_RE.match((title or "").strip()))
+
+
+def is_disqualified_requested_title(title: Optional[str]) -> bool:
+    t_low = (title or "").strip().lower()
+    if not t_low or t_low in {"untitled", "(untitled)", "new discussion"}:
+        return True
+    return any(pat in t_low for pat in DISQUALIFIED_DISCUSSION_PATTERNS)
 
 
 class EZLynxApiClient:
@@ -1184,28 +1199,53 @@ class EZLynxApiClient:
         policy_numbers: Optional[List[str]] = None,
     ) -> str:
         """Resolves the authentic discussion title to ensure notes thread directly into the right card.
-        
-        If discussion_title is provided and already exists, it is preserved.
-        If it is a generic/fallback title or omitted, queries EZLynx to find the matching card.
-        If no existing card exists, constructs the agency standard:
-            'Renewal Manual {LOB} | {PolicyNumber} {Carrier}'
+
+        ``Manual {LOB} Renewal`` is an exact agency title (Paulette HO 2026-09-07):
+        honor it, create-if-missing by returning that title, never rematch onto
+        Email Automation / Automation Center / other cards.
+
+        Substring / first-card rematch is the Paulette misfire path and is not used.
         """
-        # 1. If discussion_title was explicitly supplied and is not a generic 'Manual ...' placeholder, prioritize matching it
-        if discussion_title and not discussion_title.startswith("Manual "):
-            dt_clean = discussion_title.strip().lower()
+        requested = (discussion_title or "").strip()
+        if requested and is_disqualified_requested_title(requested):
+            logger.warning("Ignoring disqualified/untitled requested discussion title: '%s'", requested)
+            requested = ""
+
+        # 1. Exact Manual {LOB} Renewal — never treat as a generic placeholder.
+        if requested and is_manual_lob_renewal_title(requested):
+            discussions = self.get_applicant_discussions(applicant_id)
+            want = requested.lower()
+            for d in discussions:
+                d_title = (d.get("title") or "").strip()
+                if d_title.lower() == want and not is_disqualified_requested_title(d_title):
+                    logger.info(
+                        "Matched exact Manual {LOB} Renewal card: '%s' (ID %s)",
+                        d_title,
+                        d.get("discussionId"),
+                    )
+                    return d_title
+            logger.info(
+                "Manual {LOB} Renewal '%s' not found — returning exact title so the note creates it",
+                requested,
+            )
+            return requested
+
+        # 2. Exact requested title only (no substring rematch).
+        if requested:
+            dt_clean = requested.lower()
             discussions = self.get_applicant_discussions(applicant_id)
             for d in discussions:
-                d_title = d.get("title", "")
-                if d_title.strip().lower() == dt_clean:
-                    logger.info(f"Matched explicitly requested discussion card: '{d_title}' (ID {d.get('discussionId')})")
-                    return d_title
-            for d in discussions:
-                d_title = d.get("title", "")
-                if dt_clean in d_title.lower() or (len(dt_clean) > 8 and d_title.lower() in dt_clean):
-                    logger.info(f"Matched partial explicitly requested discussion card: '{d_title}' (ID {d.get('discussionId')})")
+                d_title = (d.get("title") or "").strip()
+                if d_title.lower() == dt_clean and not is_disqualified_requested_title(d_title):
+                    logger.info(
+                        "Matched explicitly requested discussion card: '%s' (ID %s)",
+                        d_title,
+                        d.get("discussionId"),
+                    )
                     return d_title
 
-        # 2. If policy_number, LOB, or carrier is provided, attempt to match active card
+        # 3. If policy_number, LOB, or carrier is provided, attempt to match active card
+        #    (find_matching_discussion already drops Email Automation / aux cards).
         if policy_number or policy_numbers or line_of_business or carrier_name:
             matched = self.find_matching_discussion(
                 applicant_id=applicant_id,
@@ -1214,12 +1254,12 @@ class EZLynxApiClient:
                 carrier_name=carrier_name,
                 policy_numbers=policy_numbers,
             )
-            if matched and matched.get("title"):
+            if matched and matched.get("title") and not is_disqualified_requested_title(matched.get("title")):
                 return matched["title"]
 
-        # 3. If discussion_title was explicitly supplied and not a generic fallback, use it
-        if discussion_title and not discussion_title.startswith("Manual "):
-            return discussion_title
+        # 4. Honor a remaining explicit non-Manual title (create-if-missing).
+        if requested:
+            return requested
 
         # Fallback to agency standard naming convention
         lob_clean = line_of_business or "Policy"
@@ -1248,6 +1288,7 @@ class EZLynxApiClient:
         carrier_name: Optional[str] = None,
         use_playwright_fallback: bool = True,
         require_existing_discussion: bool = False,
+        honor_explicit_title: bool = False,
         policy_numbers: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Posts a note under the designated discussion title for an applicant.
@@ -1255,6 +1296,9 @@ class EZLynxApiClient:
         Mandates 'Robie was here' signature.
         Automatically resolves the authentic existing discussion card to thread directly inside it.
         Uses direct API if available, with graceful fallback to Playwright/CDP.
+
+        When ``honor_explicit_title`` is True, posts to ``discussion_title`` exactly
+        (creates that titled card if missing). Never rematches onto Email Automation.
 
         When ``require_existing_discussion`` is True (underwriter-reply filing),
         refuses to post if ``find_matching_discussion`` cannot locate an existing
@@ -1276,7 +1320,23 @@ class EZLynxApiClient:
         if "Robie was here" not in note_text:
             note_text = f"{note_text.rstrip()}{ROBIE_SIGNATURE}"
 
-        if require_existing_discussion:
+        if honor_explicit_title:
+            requested = (discussion_title or "").strip()
+            if not requested or is_disqualified_requested_title(requested):
+                logger.warning(
+                    "Refusing honor_explicit_title post for applicant %s: untitled/automation title '%s'",
+                    applicant_id,
+                    discussion_title,
+                )
+                return {
+                    "status": "error",
+                    "error": "disqualified_or_untitled_discussion",
+                    "applicant_id": applicant_id,
+                    "policy_number": policy_number,
+                    "discussion_title": discussion_title,
+                }
+            resolved_title = requested
+        elif require_existing_discussion:
             matched = self.find_matching_discussion(
                 applicant_id=str(applicant_id),
                 policy_number=policy_number,
@@ -1306,6 +1366,20 @@ class EZLynxApiClient:
                 carrier_name=carrier_name,
                 policy_numbers=policy_numbers,
             )
+
+        if is_disqualified_requested_title(resolved_title):
+            logger.warning(
+                "Refusing to post onto disqualified discussion '%s' for applicant %s",
+                resolved_title,
+                applicant_id,
+            )
+            return {
+                "status": "error",
+                "error": "disqualified_or_untitled_discussion",
+                "applicant_id": applicant_id,
+                "policy_number": policy_number,
+                "discussion_title": resolved_title,
+            }
 
         # 1. Direct Classic REST Note API (Fastest and direct)
         if self.authenticate_classic():

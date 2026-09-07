@@ -82,33 +82,53 @@ class EZLynxDiscussionPoster:
                     logger.error("EZLynx session is at login page.")
                     return {"success": False, "status": "blocked", "error": "Not authenticated with EZLynx"}
 
-                # Click Add to Discussion on the target card
-                logger.info(f"Locating discussion matching '{discussion_search_text}'...")
-                click_result = await page.evaluate(f'''() => {{
-                    const query = "{discussion_search_text}".toLowerCase();
-                    const cards = Array.from(document.querySelectorAll('.activity-container'));
-                    const card = cards.find(c => c.innerText.toLowerCase().includes(query));
-                    if (!card) return {{ success: false, error: "Card not found" }};
-                    
-                    const btn = card.querySelector('button[title="Add to Discussion"]');
-                    if (!btn) return {{ success: false, error: "Add to Discussion button not found" }};
-                    
-                    btn.click();
-                    return {{ success: true }};
-                }}''')
+                # Click Add to Discussion on the *exact* titled card.
+                # Substring / first-card fallback posted Paulette HO note 1123385828
+                # onto Email Automation — never do that.
+                logger.info("Locating exact discussion title '%s'...", discussion_search_text)
+                click_result = await page.evaluate(
+                    """(want) => {
+                        const query = String(want || '').trim().toLowerCase();
+                        if (!query) return { success: false, error: "empty title" };
+                        const forbidden = ["email automation", "automation center", "email sent by automation"];
+                        if (forbidden.some((p) => query.includes(p))) {
+                            return { success: false, error: "automation card refused" };
+                        }
+                        const untitled = new Set(["", "untitled", "(untitled)", "new discussion"]);
+                        const cards = Array.from(document.querySelectorAll('.activity-container'));
+                        const card = cards.find((c) => {
+                            const headingEl = c.querySelector(
+                                '.discussion-title, .activity-title, h3, h4, [class*="discussion-title"]'
+                            );
+                            const heading = ((headingEl && headingEl.innerText) || '').trim();
+                            const firstLine = ((c.innerText || '').split('\\n').map((s) => s.trim()).find(Boolean) || '');
+                            const title = (heading || firstLine).trim();
+                            const tLow = title.toLowerCase();
+                            if (untitled.has(tLow) || forbidden.some((p) => tLow.includes(p))) return false;
+                            return tLow === query;
+                        });
+                        if (!card) return { success: false, error: "Card not found" };
+                        const btn = card.querySelector('button[title="Add to Discussion"]');
+                        if (!btn) return { success: false, error: "Add to Discussion button not found" };
+                        btn.click();
+                        return { success: true };
+                    }""",
+                    discussion_search_text,
+                )
 
                 if not click_result.get("success"):
-                    logger.warning(f"Could not click Add to Discussion: {click_result.get('error')}")
-                    # Fallback to general note_add or top card
-                    fallback = await page.evaluate('''() => {
-                        const card = document.querySelector('.activity-container');
-                        if (!card) return false;
-                        const btn = card.querySelector('button[title="Add to Discussion"]');
-                        if (btn) { btn.click(); return true; }
-                        return false;
-                    }''')
-                    if not fallback:
-                        return {"success": False, "error": f"Discussion matching '{discussion_search_text}' not found"}
+                    logger.warning(
+                        "Could not click Add to Discussion on exact title '%s': %s",
+                        discussion_search_text,
+                        click_result.get("error"),
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Exact titled discussion '{discussion_search_text}' not found "
+                            f"({click_result.get('error')})"
+                        ),
+                    }
 
                 await asyncio.sleep(1)
 
@@ -141,12 +161,13 @@ class EZLynxDiscussionPoster:
 
                 saved_note_id = None
                 matched_discussion_title = None
+                want_title = (discussion_search_text or "").strip().lower()
                 if verify_data:
                     for d in verify_data:
-                        d_title = d.get("title", "")
-                        if discussion_search_text.lower() in d_title.lower() or not matched_discussion_title:
+                        d_title = (d.get("title") or "").strip()
+                        if d_title.lower() == want_title:
                             matched_discussion_title = d_title
-                            saved_note_id = d.get("discussionNote", {}).get("noteId")
+                            saved_note_id = (d.get("discussionNote") or {}).get("noteId")
                             break
 
                 # Capture verification screenshot

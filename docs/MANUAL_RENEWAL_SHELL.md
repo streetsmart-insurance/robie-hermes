@@ -46,11 +46,19 @@ The job, in **one** connected Chrome session:
    (Classic `get_applicant_policies` is **not** sufficient — it omits pending RWL.)
 2. If a pending RWL already exists for the **same term + premium** → `already_in`, **STOP**. No second shell. Skip docs and notes.
 3. Optional **one-shot firmed-quote / Renewal Offer PDF fetch** (`--document-id` / `--fetch-firmed-quote`) — see below.
-4. Optional upload — skip stubs **&lt; 10KB**.
-5. Note only on the **exact original titled** discussion (caller `--discussion-title` or the policy-numbered card). Never untitled. Never `Workers Compensation Renewal` when `Renewal Manual Workers comp \| PWC…` exists.
-6. Fill required fields (Writing Company mandatory). Producer/CSR = **Carlo Ferrara**, never Robie.
-7. Click **`#RenewPolicyBtn`** ("Renew Policy"). Never "Renew & Edit Policy" (that is FormEntry, not this job).
-8. Write proof JSON. **No bind. No money. No client email. Never Add Policy from Quote ID.**
+4. Optional upload — skip stubs **&lt; 10KB**. Apply label **Renewal Offer**.
+5. Notes on **both** exact titles (Carlo standing rule). Target `Manual {LOB} Renewal` (e.g. `Manual Homeowners Renewal`) and `Renewal Update {LOB}`. **Create** `Manual {LOB} Renewal` if missing — never untitled. Never Email Automation / Automation Center (Paulette HO note `1123385828`). Before COMPLETE, verify `discussionId` + exact title on both cards.
+6. **COMPLETE gate** (docs-only is **not** done). All required:
+   - Firmed PDF uploaded with label **Renewal Offer**
+   - PDF/extract premium matches keyed shell premium (PR 25 extract or `--pdf-premium`; do not invent)
+   - Exactly **one** pending RWL (`bound=false`)
+   - Verified note on `Manual {LOB} Renewal`
+   - Verified note on `Renewal Update {LOB}`
+   - `bound=false`
+   Any miss → `PARTIAL` / `BLOCKED`, never `COMPLETE` / `SUCCESS`.
+7. Fill required fields (Writing Company mandatory). Producer/CSR = **Carlo Ferrara**, never Robie.
+8. Click **`#RenewPolicyBtn`** ("Renew Policy"). Never "Renew & Edit Policy" (that is FormEntry, not this job).
+9. Write proof JSON. **No bind. No money. No client email. Never Add Policy from Quote ID.**
 
 ### Firmed-quote PDF (Paulette Fagone / 2026-09-07)
 
@@ -67,12 +75,6 @@ PYTHONPATH=. python3 scripts/run_manual_renewal.py --env test --dry-run \
   --applicant-id 196126698 \
   --document-id A675732963 \
   --fetch-firmed-quote
-```
-
-Tests (hermes-test-01 before any Production zip):
-
-```bash
-PYTHONPATH=. .venv/bin/pytest tests/test_document_downloader.py tests/test_policy_renewer.py tests/test_cdp_session_preflight.py -v
 ```
 
 ### Production live gate
@@ -104,3 +106,13 @@ ezlynx-renewer.service
 ```
 
 Until that exists, run the one-shot CLI against the already-open CDP Chrome. Do not invent per-step SCP wrappers.
+
+## How to run tests
+
+Paulette HO resolver + COMPLETE gate, Login fail-fast, shell keying, and one-shot firmed-quote download:
+
+```bash
+PYTHONPATH=. .venv/bin/pytest tests/test_manual_renewal_gate.py tests/test_ezlynx_discussions.py tests/test_policy_renewer.py tests/test_cdp_session_preflight.py tests/test_document_downloader.py -v
+```
+
+Covers: Email Automation / Automation Center rejected; missing `Manual Homeowners Renewal` is created (never untitled); COMPLETE fails when the Manual LOB note is missing or the job is docs-only; Login wall still `blocked`; 0-byte / `A`-prefix download fail-fast.
