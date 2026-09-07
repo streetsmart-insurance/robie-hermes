@@ -14,7 +14,7 @@ original evidence. Matching first prevents putting client work on the wrong
 account. The time savings come from removing manual Gmail-to-EZLynx re-entry.
 An intake receipt is not completed service or an issued certificate.
 
-The missing Documents API is handled as a manual-upload obligation in every
+The unverified Documents API availability is handled as a manual-upload obligation in every
 task. The original bytes are retained with a checksum in the configured private
 artifact store; the task links to the source and identifies the original file.
 A human uploads and verifies it, then performs the requested service. Task
@@ -45,7 +45,7 @@ against injected fixtures.
   builds callback text but does not call an API. `EzlynxApiAdapter` in the poller
   is a protocol with a mock, not the live task-creation integration Carlo described.
 - The connected GitHub organization returned only `robie-hermes` to this session.
-  The live service's location and wire format therefore remain unknown.
+  The live service's location and task API contract therefore remain unknown.
 - Jake's existing browser session was observed signed in as `jferrara3` on
   September 7, 2026. Browser login is not proof of server API connectivity.
   No passwords/cookies were copied or persisted and no user settings changed.
@@ -56,6 +56,24 @@ against injected fixtures.
   ID is used only by synthetic fixtures here; no live test against it occurred.
 
 ## Live EZLynx adapter contract — required from Carlo/integration owner
+
+Jake supplied the [EZLynx Postman collection](https://documenter.getpostman.com/view/56716523/2sBYApyCjN).
+`ezlynx_intake_reader.py` now implements Test-only, exact-ID reads from its
+documented contracts: `Applicant/v2/{id}`, `Policy/{id}` with unencrypted IDs,
+`User/{id}`, and `User/Users/{orgId}`. It verifies policy/account membership and
+normalizes active user records. It requires an explicit HTTPS API base URL and
+the existing server's credential provider; redirects are refused and credential
+values are never embedded. No live connection has been exercised.
+
+The collection uses an API-host placeholder and does not document task search,
+creation, independent task read-back, or general applicant search. Its applicant
+item named Search is an ID lookup. The reader deliberately holds unsupported
+operations. It cannot turn an unidentified email into an assigned live task yet.
+
+The collection also lists `POST /document` and Document Library list/download
+operations. This establishes a documented interface, not agency entitlement or
+successful upload. Keep the manual-upload obligation until availability and
+destination verification have been demonstrated in Test.
 
 `EzlynxIntakePort` is an internal boundary. It does not assert that EZLynx uses
 these names or supports these endpoints. Map it to the existing server adapter
@@ -112,14 +130,16 @@ changes, or portal completion clicks are implemented.
 Run the dependency-free checks with:
 
 ```sh
-ROBIE_ENV=TEST python -m unittest discover -s tests -p test_intake_phase1.py -v
+ROBIE_ENV=TEST python -m unittest discover -s tests -p '*intake*.py' -v
 ```
 
 The repository's existing unittest-discovery regression battery picks them up.
-The 25 focused tests pass locally. A broader local run (excluding the existing
+The 36 focused tests pass locally, including 11 documented-reader tests for
+field mappings, account membership, missing task APIs and transport safeguards.
+A broader local run (excluding the existing
 browser-fixture module) recorded 862 passed, 2 skipped and the same two macOS
 versus Linux rollback-tool failures seen on the earlier baseline. The final two
-intake tests were added afterward and are included in the focused pass. The
+intake tests and the 11 reader tests were added afterward and are included in the focused pass. The
 broader run is not represented as a full-suite pass; GitHub CI remains required.
 They cover all three flows, ambiguous and contradictory matches, original-file
 preservation, repeated and cross-flow source replay, a timeout after a remote
