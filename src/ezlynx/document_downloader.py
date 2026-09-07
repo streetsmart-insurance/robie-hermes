@@ -184,6 +184,7 @@ def coerce_pdf_bytes(payload: Any) -> bytes:
 def select_firmed_quote_document(records: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Pick a firmed quote / Renewal Offer row from a Classic document library list."""
     from src.ezlynx.api_client import document_display_fields
+    from src.ezlynx.manual_renewal_gate import is_application_or_bound_quote_document
 
     scored: List[Tuple[int, Dict[str, Any]]] = []
     for rec in records:
@@ -191,6 +192,10 @@ def select_firmed_quote_document(records: Sequence[Dict[str, Any]]) -> Optional[
             continue
         fields = document_display_fields(rec)
         name = (fields.get("name") or "").lower()
+
+        if is_application_or_bound_quote_document(name=fields.get("name") or name):
+            logger.info("Skipping Application / Bound Quote library row: %s", fields.get("name"))
+            continue
         score = 0
         if "firmed" in name:
             score += 100
@@ -198,6 +203,8 @@ def select_firmed_quote_document(records: Sequence[Dict[str, Any]]) -> Optional[
             score += 50
         if "renewal offer" in name:
             score += 40
+        if "declaration" in name or "renewal dec" in name:
+            score += 35
         if name.endswith(".pdf"):
             score += 5
         if score:

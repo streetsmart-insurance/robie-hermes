@@ -111,6 +111,30 @@ def test_zero_byte_after_one_corrected_retry_is_hitl(tmp_path: Path):
     assert all("/Download/A" not in c for c in calls)
 
 
+def test_select_firmed_quote_skips_bound_quote_application():
+    picked = select_firmed_quote_document(
+        [
+            {"Id": 1, "Description": "QHONJ2026080215 Bound Quote Application.pdf"},
+            {"Id": 2, "Description": "Hanim Benli Renewal Application.pdf"},
+            {"Id": 675732963, "Description": "Fagone - J&J Home Quote Proposal (Firmed).pdf"},
+        ]
+    )
+    assert picked is not None
+    assert picked["Id"] == 675732963
+
+
+def test_select_firmed_quote_returns_none_when_only_applications():
+    assert (
+        select_firmed_quote_document(
+            [
+                {"Id": 1, "Description": "QHONJ2026080215 Bound Quote Application.pdf"},
+                {"Id": 2, "Description": "Renewal Application.pdf"},
+            ]
+        )
+        is None
+    )
+
+
 def test_select_firmed_quote_prefers_firmed_filename():
     picked = select_firmed_quote_document(
         [

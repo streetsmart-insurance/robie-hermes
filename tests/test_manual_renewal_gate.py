@@ -1,19 +1,31 @@
-"""Paulette Fagone HO (2026-09-07): exact Manual {LOB} resolver + COMPLETE gate."""
+"""Manual renewal note targeting + COMPLETE gate (LOB-agnostic)."""
 
 from decimal import Decimal
 
+import pytest
+
 from src.ezlynx.manual_renewal_gate import (
+    DOC_KIND_APPLICATION,
+    DOC_KIND_BOUND_QUOTE,
+    DOC_KIND_RENEWAL_OFFER,
+    RENEWAL_OFFER_FOLDER,
     STATUS_BLOCKED,
     STATUS_COMPLETE,
     STATUS_PARTIAL,
     DoneChecklistEvidence,
     activity_card_matches_exact_title,
+    classify_renewal_document,
     evaluate_done_checklist,
     find_exact_titled_discussion,
+    is_application_or_bound_quote_document,
     is_automation_discussion_title,
+    is_true_renewal_offer_document,
     manual_lob_renewal_title,
     renewal_update_lob_title,
+    resolve_existing_lob_renewal_discussion,
     resolve_manual_lob_discussion,
+    resolve_manual_renewal_note_targets,
+    resolve_renewal_offer_folder,
     resolve_renewal_update_discussion,
     verify_discussion_id_and_title,
 )
@@ -48,6 +60,9 @@ def _complete_evidence(**overrides) -> DoneChecklistEvidence:
     data = dict(
         firmed_pdf_uploaded=True,
         firmed_pdf_label="Renewal Offer",
+        firmed_pdf_folder="Renewal Offer",
+        firmed_pdf_kind="renewal_offer",
+        firmed_pdf_name="HONJ2025100027 Renewal Offer.pdf",
         pdf_premium=Decimal("1842.00"),
         keyed_premium=Decimal("1842.00"),
         pending_rwl_count=1,
@@ -238,6 +253,195 @@ def test_renewer_apply_done_checklist_missing_manual_note_not_complete():
     assert result.status == "partial"
     assert result.done_checklist["complete"] is False
     assert "manual_lob_note" in result.done_checklist["missing"]
+
+
+EXISTING_LOB_RENEWAL_CASES = [
+    (
+        "Homeowners",
+        "Homeowners Renewal",
+        "Homeowners Renewal Offer",
+        "Manual Homeowners Renewal",
+        "Renewal Update Homeowners",
+    ),
+    (
+        "Commercial Auto",
+        "Commercial Auto Renewal",
+        "Commercial Auto Renewal Offer",
+        "Manual Commercial Auto Renewal",
+        "Renewal Update Commercial Auto",
+    ),
+    (
+        "Workers Compensation",
+        "Workers Compensation Renewal",
+        "Workers Comp Renewal Offer",
+        "Manual Workers Comp Renewal",
+        "Renewal Update Workers Comp",
+    ),
+    (
+        "BOP",
+        "BOP Renewal",
+        "Business Owners Renewal Offer",
+        "Manual Business Owners Renewal",
+        "Renewal Update Business Owners",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "lob,existing_title,variant_title,manual_title,update_title",
+    EXISTING_LOB_RENEWAL_CASES,
+)
+def test_existing_lob_renewal_preferred_over_manual_and_update(
+    lob, existing_title, variant_title, manual_title, update_title
+):
+    discussions = PAULETTE_DISCUSSIONS + [
+        {"discussionId": 44, "title": existing_title, "noteCount": 4},
+        {"discussionId": 45, "title": manual_title, "noteCount": 1},
+        {"discussionId": 46, "title": update_title, "noteCount": 1},
+    ]
+    existing = resolve_existing_lob_renewal_discussion(discussions, lob)
+    assert existing is not None
+    assert existing.title == existing_title
+    assert existing.kind == "existing_lob_renewal"
+    assert existing.created is False
+
+    targets = resolve_manual_renewal_note_targets(discussions, lob, create_if_missing=True)
+    assert targets.used_existing_lob_renewal is True
+    assert [t.title for t in targets.targets] == [existing_title]
+    assert manual_title not in [t.title for t in targets.targets]
+    assert update_title not in [t.title for t in targets.targets]
+    assert variant_title  # close-variant name is part of the candidate set
+
+
+@pytest.mark.parametrize(
+    "lob,existing_title,variant_title,manual_title,update_title",
+    EXISTING_LOB_RENEWAL_CASES,
+)
+def test_existing_lob_renewal_offer_variant_preferred_when_exact_missing(
+    lob, existing_title, variant_title, manual_title, update_title
+):
+    discussions = PAULETTE_DISCUSSIONS + [
+        {"discussionId": 77, "title": variant_title, "noteCount": 2},
+        {"discussionId": 78, "title": manual_title},
+        {"discussionId": 79, "title": update_title},
+    ]
+    targets = resolve_manual_renewal_note_targets(discussions, lob)
+    assert targets.used_existing_lob_renewal is True
+    assert targets.targets[0].title == variant_title
+    assert targets.targets[0].title != manual_title
+
+
+@pytest.mark.parametrize(
+    "lob,existing_title,variant_title,manual_title,update_title",
+    EXISTING_LOB_RENEWAL_CASES,
+)
+def test_fallback_creates_manual_and_update_when_no_existing_lob_renewal(
+    lob, existing_title, variant_title, manual_title, update_title
+):
+    targets = resolve_manual_renewal_note_targets(
+        PAULETTE_DISCUSSIONS, lob, create_if_missing=True
+    )
+    assert targets.used_existing_lob_renewal is False
+    titles = [t.title for t in targets.targets]
+    assert titles == [manual_title, update_title]
+    assert existing_title not in titles
+    assert all(t.created for t in targets.targets)
+
+
+def test_done_checklist_complete_on_existing_lob_renewal_without_manual_cards():
+    result = evaluate_done_checklist(
+        _complete_evidence(
+            used_existing_lob_renewal=True,
+            existing_lob_renewal_note_posted=True,
+            existing_lob_renewal_discussion_id="44",
+            existing_lob_renewal_title="Homeowners Renewal",
+            existing_lob_renewal_title_expected="Homeowners Renewal",
+            manual_lob_note_posted=False,
+            manual_lob_discussion_id=None,
+            manual_lob_title=None,
+            renewal_update_note_posted=False,
+            renewal_update_discussion_id=None,
+            renewal_update_title=None,
+        )
+    )
+    assert result.status == STATUS_COMPLETE
+    assert result.complete is True
+
+
+def test_done_checklist_requires_renewal_offer_folder_not_policy_number():
+    result = evaluate_done_checklist(_complete_evidence(firmed_pdf_folder="HONJ2025100027"))
+    assert result.status == STATUS_PARTIAL
+    assert "renewal_offer_folder" in result.missing
+
+
+def test_resolve_renewal_offer_folder_creates_when_only_policy_number_folder():
+    created = resolve_renewal_offer_folder(["HONJ2025100027", "Applications"])
+    assert created.action == "create"
+    assert created.created is True
+    assert created.folder == RENEWAL_OFFER_FOLDER
+
+    matched = resolve_renewal_offer_folder(["HONJ2025100027", "Renewal Offer"])
+    assert matched.action == "matched"
+    assert matched.created is False
+    assert matched.folder == "Renewal Offer"
+
+
+@pytest.mark.parametrize(
+    "name,text,expected",
+    [
+        (
+            "QHONJ2026080215 Bound Quote Application.pdf",
+            "Bound Quote Application",
+            DOC_KIND_BOUND_QUOTE,
+        ),
+        (
+            "HONJ2025100027 Renewal Offer.pdf",
+            "Renewal Application QHONJ2026080215 Bound Quote print",
+            DOC_KIND_BOUND_QUOTE,
+        ),
+        (
+            "Insured Renewal Application.pdf",
+            "ACORD Application for Insurance",
+            DOC_KIND_APPLICATION,
+        ),
+        (
+            "HONJ2025100027 Renewal Offer.pdf",
+            "Homeowners Renewal Offer / Declaration",
+            DOC_KIND_RENEWAL_OFFER,
+        ),
+        (
+            "Fagone - J&J Home Quote Proposal (Firmed).pdf",
+            None,
+            DOC_KIND_RENEWAL_OFFER,
+        ),
+    ],
+)
+def test_classify_rejects_application_and_bound_quote_as_renewal_offer(name, text, expected):
+    kind = classify_renewal_document(name=name, text=text)
+    assert kind == expected
+    if expected == DOC_KIND_RENEWAL_OFFER:
+        assert is_true_renewal_offer_document(name=name, text=text) is True
+        assert is_application_or_bound_quote_document(name=name, text=text) is False
+    else:
+        assert is_true_renewal_offer_document(name=name, text=text) is False
+        assert is_application_or_bound_quote_document(name=name, text=text) is True
+
+
+def test_done_checklist_rejects_bound_quote_labeled_renewal_offer():
+    """Benli: label said Renewal Offer but print was Bound Quote QHONJ2026080215."""
+    result = evaluate_done_checklist(
+        _complete_evidence(
+            firmed_pdf_label="Renewal Offer",
+            firmed_pdf_folder="Renewal Offer",
+            firmed_pdf_kind=None,
+            firmed_pdf_name="HONJ2025100027 Renewal Offer.pdf",
+            firmed_pdf_text="Bound Quote Application QHONJ2026080215",
+        )
+    )
+    assert result.status == STATUS_PARTIAL
+    assert result.complete is False
+    assert "true_renewal_offer_pdf" in result.missing
+    assert result.status != STATUS_COMPLETE
 
 
 def test_renewer_apply_done_checklist_does_not_override_login_blocked():

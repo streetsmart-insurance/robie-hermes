@@ -69,6 +69,29 @@ def test_find_matching_discussion_by_tokens_prefers_active_human_card(client):
         assert match["title"] == "Business Owners Manual Renewal"
 
 
+@pytest.mark.parametrize(
+    "lob,existing_title,manual_title",
+    [
+        ("Homeowners", "Homeowners Renewal", "Manual Homeowners Renewal"),
+        ("Commercial Auto", "Commercial Auto Renewal", "Manual Commercial Auto Renewal"),
+    ],
+)
+def test_resolve_discussion_title_prefers_existing_lob_renewal(client, lob, existing_title, manual_title):
+    discussions = [
+        {"discussionId": 1, "title": "Email Automation", "noteCount": 9},
+        {"discussionId": 2, "title": existing_title, "noteCount": 4},
+        {"discussionId": 3, "title": manual_title, "noteCount": 1},
+    ]
+    with patch.object(client, "get_applicant_discussions", return_value=discussions):
+        resolved = client.resolve_discussion_title(
+            applicant_id="196126698",
+            discussion_title=manual_title,
+            line_of_business=lob,
+        )
+        assert resolved == existing_title
+        assert resolved != manual_title
+
+
 def test_resolve_discussion_title_honors_exact_manual_lob_renewal(client):
     """Paulette: 'Manual {LOB} Renewal' is an exact title, not a fuzzy placeholder."""
     with patch.object(client, "get_applicant_discussions", return_value=MOCK_DISCUSSIONS):

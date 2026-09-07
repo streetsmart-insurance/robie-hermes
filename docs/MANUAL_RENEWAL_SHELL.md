@@ -46,14 +46,13 @@ The job, in **one** connected Chrome session:
    (Classic `get_applicant_policies` is **not** sufficient — it omits pending RWL.)
 2. If a pending RWL already exists for the **same term + premium** → `already_in`, **STOP**. No second shell. Skip docs and notes.
 3. Optional **one-shot firmed-quote / Renewal Offer PDF fetch** (`--document-id` / `--fetch-firmed-quote`) — see below.
-4. Optional upload — skip stubs **&lt; 10KB**. Apply label **Renewal Offer**.
-5. Notes on **both** exact titles (Carlo standing rule). Target `Manual {LOB} Renewal` (e.g. `Manual Homeowners Renewal`) and `Renewal Update {LOB}`. **Create** `Manual {LOB} Renewal` if missing — never untitled. Never Email Automation / Automation Center (Paulette HO note `1123385828`). Before COMPLETE, verify `discussionId` + exact title on both cards.
+4. Optional upload — skip stubs **&lt; 10KB**. **Doc-type gate:** only a true renewal offer / declaration / firmed renewal quote may be filed as Renewal Offer. Reject Application / Bound Quote Application / Renewal Application prints (e.g. Benli `QHONJ2026080215`) even if someone named the file Renewal Offer. If the portal only has a Bound Quote / Application, stage it as an application artifact and HITL for the real offer — do **not** COMPLETE as Renewal Offer filed. When the PDF *is* a true offer: apply label **Renewal Offer** **and** place it in the Documents folder named **Renewal Offer** (create that folder if missing). Do not leave a renewal offer only under a bare policy-number folder.
+5. Notes (LOB-agnostic). Prefer the existing titled discussion that matches the LOB renewal workflow for **that** LOB — `{LOB} Renewal` (e.g. `Homeowners Renewal`, `Commercial Auto Renewal`, `Workers Compensation Renewal`, `BOP Renewal`) and close variants such as `{LOB} Renewal Offer`. **Only** create/use `Manual {LOB} Renewal` and `Renewal Update {LOB}` when no matching existing LOB renewal discussion exists. Never untitled. Never Email Automation / Automation Center (Paulette HO note `1123385828`). Every note ends with `Robie was here`. Before COMPLETE, verify `discussionId` + exact title on the card(s) actually used.
 6. **COMPLETE gate** (docs-only is **not** done). All required:
-   - Firmed PDF uploaded with label **Renewal Offer**
+   - Firmed PDF is a **true** renewal offer / declaration / firmed quote (not Application / Bound Quote), uploaded with label **Renewal Offer** into the **Renewal Offer** folder
    - PDF/extract premium matches keyed shell premium (PR 25 extract or `--pdf-premium`; do not invent)
    - Exactly **one** pending RWL (`bound=false`)
-   - Verified note on `Manual {LOB} Renewal`
-   - Verified note on `Renewal Update {LOB}`
+   - Verified note on the existing `{LOB} Renewal` card **or**, if none exists, verified notes on both `Manual {LOB} Renewal` and `Renewal Update {LOB}`
    - `bound=false`
    Any miss → `PARTIAL` / `BLOCKED`, never `COMPLETE` / `SUCCESS`.
 7. Fill required fields (Writing Company mandatory). Producer/CSR = **Carlo Ferrara**, never Robie.
@@ -112,7 +111,7 @@ Until that exists, run the one-shot CLI against the already-open CDP Chrome. Do 
 Paulette HO resolver + COMPLETE gate, Login fail-fast, shell keying, and one-shot firmed-quote download:
 
 ```bash
-PYTHONPATH=. .venv/bin/pytest tests/test_manual_renewal_gate.py tests/test_ezlynx_discussions.py tests/test_policy_renewer.py tests/test_cdp_session_preflight.py tests/test_document_downloader.py -v
+PYTHONPATH=. .venv/bin/pytest tests/test_manual_renewal_gate.py tests/test_ezlynx_discussions.py tests/test_policy_renewer.py tests/test_document_uploader.py tests/test_cdp_session_preflight.py tests/test_document_downloader.py -v
 ```
 
-Covers: Email Automation / Automation Center rejected; missing `Manual Homeowners Renewal` is created (never untitled); COMPLETE fails when the Manual LOB note is missing or the job is docs-only; Login wall still `blocked`; 0-byte / `A`-prefix download fail-fast.
+Covers: existing `{LOB} Renewal` preferred over Manual/Update (HO + other LOBs); Renewal Offer folder selected/created (not a policy-number folder); Application / Bound Quote prints rejected as Renewal Offer; Email Automation / Automation Center rejected; missing `Manual {LOB} Renewal` is created only when no existing LOB renewal card exists (never untitled); COMPLETE fails when the required note is missing or the job is docs-only; Login wall still `blocked`; 0-byte / `A`-prefix download fail-fast.
