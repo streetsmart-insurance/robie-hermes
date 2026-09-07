@@ -142,63 +142,85 @@ def run_all_tests():
         test_store = AscendSyncStore(str(Path(tmp_dir) / "test_ascend_sync.db"))
         mock_api = MagicMock()
         mock_matcher = MagicMock()
-        mock_matcher.find_by_policy.return_value = {
-            "applicant_id": "app-test-1",
-            "insured_name": "Buckeye Freightways LLC",
-            "assigned_rep": "Zeus Quezada",
-            "carrier_name": "Nautilus",
-            "wholesaler_name": "Tapco",
-        }
-        mock_matcher.find_by_insured_name.return_value = {
-            "applicant_id": "app-test-1",
-            "insured_name": "Buckeye Freightways LLC",
-            "assigned_rep": "Zeus Quezada",
-            "carrier_name": "Nautilus",
-            "wholesaler_name": "Tapco",
-        }
+        mock_matcher.match_account.return_value = ("app-test-1", "Zeus Quezada")
 
-        # Setup mock events for 1 hourly run
+        # 4a: Cancellation return
         mock_api.fetch_cancelation_returns.return_value = [
             {
-                "id": "ret-001",
-                "policy_number": "POL-9921",
-                "insured_name": "Buckeye Freightways LLC",
-                "cancellation_effective_date": "2026-10-01",
-                "return_premium_cents": 340000,
-                "cancellation_notice_url": "https://ascend.test/notices/cancel-001.pdf",
+                "id": "cancel-001",
+                "unearned_premium_cents": 340000,
+                "unearned_commission_cents": 0,
+                "unearned_surplus_lines_tax_cents": 0,
+                "billable": {
+                    "id": "bill-001",
+                    "cancelation_effective_date": "2026-10-01",
+                },
+                "cancelation_docs": [
+                    {
+                        "id": "doc-001",
+                        "title": "Cancellation Notice POL-9921",
+                        "url": "https://ascend.test/notices/cancel-001.pdf",
+                    }
+                ],
             }
         ]
+        mock_api.fetch_billable.return_value = {
+            "policy_number": "POL-9921",
+            "program_id": "prog-001",
+            "carrier": {"title": "Western World Insurance Company"},
+            "wholesaler": {"title": "Johnson & Johnson, Inc"},
+            "coverage_type": {"title": "General Liability"},
+        }
+        mock_api.fetch_program.return_value = {
+            "insured": {"business_name": "Buckeye Freightways LLC"},
+            "producer": {"first_name": "Carlo", "last_name": "Ferrara"},
+            "account_manager": {"first_name": "Hello", "last_name": "Inbox"},
+        }
+
+        # 4b: Past Due & Reinstatement Invoices
         mock_api.fetch_invoices.return_value = [
             {
                 "id": "inv-002",
-                "policy_number": "POL-5541",
-                "insured_name": "Buckeye Freightways LLC",
+                "invoice_number": "IXQPHVKEO9",
+                "payer_name": "Buckeye Freightways LLC",
+                "total_amount_cents": 115000,
                 "due_date": "2026-09-10",
-                "amount_due_cents": 115000,
-                "status": "open",
-                "invoice_type": "recurring",
-                "hosted_invoice_url": "https://ascend.test/inv-002",
+                "status": "past_due",
+                "memo": "POL-5541 Commercial Auto Installment",
+                "invoice_url": "https://ascend.test/inv-002.pdf",
             },
             {
                 "id": "inv-reinstated-004",
-                "policy_number": "POL-9921",
-                "insured_name": "Buckeye Freightways LLC",
-                "is_reinstatement": True,
+                "invoice_number": "INV-REINST-1",
                 "status": "paid",
-                "amount_paid_cents": 125000,
+                "is_reinstatement": True,
+                "payer_name": "Buckeye Freightways LLC",
+                "carrier_name": "Canal Insurance",
+                "memo": "POL-9921 Commercial Auto Reinstatement",
+                "total_amount_cents": 125000,
                 "paid_at": "2026-09-07T12:00:00Z",
-                "receipt_url": "https://ascend.test/receipts/rec-004.pdf",
+                "invoice_url": "https://ascend.test/receipts/rec-004.pdf",
             }
         ]
+
+        # 4c: Signed Agreement
         mock_api.fetch_programs.return_value = [
             {
                 "id": "prog-signed-003",
                 "status": "checked_out",
-                "insured_name": "Buckeye Freightways LLC",
-                "payment_option": "Annual Pay In Full",
-                "down_payment_cents": 450000,
-                "total_amount_cents": 450000,
-                "overview_url": "https://checkout.useascend.com/overview-003",
+                "selected_payment_option_type": "annual_pay_in_full",
+                "downpayment_amount_cents": 450000,
+                "total_payable_amount_cents": 450000,
+                "checkedout_at": "2026-09-07T10:00:00Z",
+                "program_url": "https://checkout.useascend.com/overview-003",
+                "insured": {"business_name": "Buckeye Freightways LLC"},
+                "producer": {"first_name": "Matthew", "last_name": "Mancina"},
+                "billables": [
+                    {
+                        "policy_number": "POL-SIGNED-003",
+                        "carrier": {"title": "Progressive"},
+                    }
+                ],
             }
         ]
         mock_api.fetch_payouts.return_value = []
@@ -206,7 +228,7 @@ def run_all_tests():
         mock_poster = MagicMock()
         mock_poster.create_task.return_value = {"status": "success", "task_id": 101}
         mock_poster.add_label.return_value = {"status": "success"}
-        mock_poster.post_discussion_note.return_value = {"status": "success", "note_id": 202}
+        mock_poster.post_custom_note.return_value = {"status": "success", "note_id": 202}
 
         with patch("robie_job_engine.ascend_sync.send_google_chat_alert") as mock_chat:
             sync_mgr = AscendEZLynxSyncManager(
