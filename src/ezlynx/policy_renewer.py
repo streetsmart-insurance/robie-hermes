@@ -211,6 +211,8 @@ class RenewalJobResult:
     note_posted: bool = False
     document_uploaded: bool = False
     document_label: Optional[str] = None
+    document_folder: Optional[str] = None
+    document_folder_created: bool = False
     document_skipped_reason: Optional[str] = None
     note_skipped_reason: Optional[str] = None
     renew_button: Optional[str] = None
@@ -236,6 +238,10 @@ class RenewalJobResult:
     renewal_update_discussion_id: Optional[str] = None
     renewal_update_note_posted: bool = False
     created_renewal_update_discussion: bool = False
+    used_existing_lob_renewal: bool = False
+    existing_lob_renewal_title: Optional[str] = None
+    existing_lob_renewal_discussion_id: Optional[str] = None
+    existing_lob_renewal_note_posted: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -1054,9 +1060,16 @@ class ManualPolicyRenewer:
                 "then HITL (no RadPdf/OCR)"
             )
         if spec.upload_path:
-            actions.append(f"Upload {spec.upload_path} if >= {MIN_AUTHENTIC_PDF_BYTES} bytes with label Renewal Offer")
-        actions.append("Post note on exact title 'Manual {LOB} Renewal' (create if missing; never Email Automation)")
-        actions.append("Post note on exact title 'Renewal Update {LOB}' (create if missing)")
+            actions.append(
+                f"Upload {spec.upload_path} if >= {MIN_AUTHENTIC_PDF_BYTES} bytes "
+                "with label Renewal Offer into the Renewal Offer folder (create folder if missing)"
+            )
+        actions.append(
+            "Post note on existing '{LOB} Renewal' if present "
+            "(e.g. Homeowners Renewal, Commercial Auto Renewal); "
+            "else exact 'Manual {LOB} Renewal' + 'Renewal Update {LOB}' "
+            "(create if missing; never Email Automation / untitled)"
+        )
         actions.append(f"Click {RENEW_POLICY_BTN_SELECTOR} ('{RENEW_POLICY_BTN_TEXT}'); never Renew & Edit Policy")
         actions.append("Require Writing Company before submit; producer Carlo Ferrara; no bind")
         actions.append("COMPLETE only if done-checklist passes (docs-only is PARTIAL)")
@@ -1159,8 +1172,9 @@ class ManualPolicyRenewer:
 
         expected_manual = result.manual_lob_title
         expected_update = result.renewal_update_title
+        expected_existing = result.existing_lob_renewal_title
         try:
-            if spec.line_of_business:
+            if spec.line_of_business and not result.used_existing_lob_renewal:
                 expected_manual = expected_manual or manual_lob_renewal_title(spec.line_of_business)
                 expected_update = expected_update or renewal_update_lob_title(spec.line_of_business)
         except ValueError:
@@ -1169,10 +1183,16 @@ class ManualPolicyRenewer:
         evidence = DoneChecklistEvidence(
             firmed_pdf_uploaded=bool(result.document_uploaded),
             firmed_pdf_label=result.document_label,
+            firmed_pdf_folder=result.document_folder,
             pdf_premium=spec.pdf_extracted_premium,
             keyed_premium=spec.premium if spec.premium is not None else spec.full_term_premium,
             pending_rwl_count=len(result.pending_shells or []),
             bound=bool(result.bound),
+            used_existing_lob_renewal=bool(result.used_existing_lob_renewal),
+            existing_lob_renewal_note_posted=bool(result.existing_lob_renewal_note_posted),
+            existing_lob_renewal_discussion_id=result.existing_lob_renewal_discussion_id,
+            existing_lob_renewal_title=result.existing_lob_renewal_title,
+            existing_lob_renewal_title_expected=expected_existing,
             manual_lob_note_posted=bool(result.manual_lob_note_posted),
             manual_lob_discussion_id=result.manual_lob_discussion_id,
             manual_lob_title=result.manual_lob_title,
@@ -1270,10 +1290,12 @@ class ManualPolicyRenewer:
         docs_url = f"https://app.ezlynx.com/web/account/{spec.applicant_id}/documents"
         await page.goto(docs_url, wait_until="domcontentloaded", timeout=45000)
         await page.wait_for_timeout(2500)
-        folder = page.locator('td:has-text("Renewal Offers/Declarations")').first
-        if await folder.count() > 0:
-            await folder.click()
-            await page.wait_for_timeout(2000)
+        from src.ezlynx.document_uploader import ensure_renewal_offer_folder
+        from src.ezlynx.manual_renewal_gate import RENEWAL_OFFER_FOLDER
+
+        folder_info = await ensure_renewal_offer_folder(page)
+        result.document_folder = folder_info.get("folder") or RENEWAL_OFFER_FOLDER
+        result.document_folder_created = bool(folder_info.get("created"))
         add_btn = page.locator("#add-action")
         await add_btn.wait_for(state="visible", timeout=15000)
         await add_btn.click()
@@ -1327,23 +1349,19 @@ class ManualPolicyRenewer:
     async def _post_note_exact_title(self, page, spec: RenewalJobSpec, result: RenewalJobResult) -> None:
         from src.ezlynx.manual_renewal_gate import (
             is_automation_discussion_title,
-            resolve_manual_lob_discussion,
-            resolve_renewal_update_discussion,
+            resolve_manual_renewal_note_targets,
             verify_discussion_id_and_title,
         )
 
         if not spec.line_of_business:
             result.status = "error"
-            result.error = "line_of_business is required to resolve Manual {LOB} Renewal"
+            result.error = "line_of_business is required to resolve renewal discussion titles"
             result.note_skipped_reason = "missing_lob"
             return
 
         discussions = self.api.get_applicant_discussions(spec.applicant_id) or []
         try:
-            manual = resolve_manual_lob_discussion(
-                discussions, spec.line_of_business, create_if_missing=True
-            )
-            update = resolve_renewal_update_discussion(
+            note_targets = resolve_manual_renewal_note_targets(
                 discussions, spec.line_of_business, create_if_missing=True
             )
         except ValueError as exc:
@@ -1352,33 +1370,44 @@ class ManualPolicyRenewer:
             result.note_skipped_reason = "disqualified_discussion"
             return
 
-        if is_automation_discussion_title(manual.title) or is_automation_discussion_title(update.title):
+        if any(is_automation_discussion_title(t.title) for t in note_targets.targets):
             result.status = "blocked"
             result.error = "Refusing Email Automation / Automation Center discussion"
             result.note_skipped_reason = "automation_discussion"
             return
 
-        result.discussion_title = manual.title
-        result.manual_lob_title = manual.title
-        result.manual_lob_discussion_id = manual.discussion_id
-        result.created_manual_lob_discussion = manual.created
-        result.renewal_update_title = update.title
-        result.renewal_update_discussion_id = update.discussion_id
-        result.created_renewal_update_discussion = update.created
+        result.used_existing_lob_renewal = note_targets.used_existing_lob_renewal
+        if note_targets.used_existing_lob_renewal and note_targets.targets:
+            existing = note_targets.targets[0]
+            result.discussion_title = existing.title
+            result.existing_lob_renewal_title = existing.title
+            result.existing_lob_renewal_discussion_id = existing.discussion_id
+        else:
+            by_kind = {t.kind: t for t in note_targets.targets}
+            manual = by_kind.get("manual_lob")
+            update = by_kind.get("renewal_update")
+            if manual:
+                result.discussion_title = manual.title
+                result.manual_lob_title = manual.title
+                result.manual_lob_discussion_id = manual.discussion_id
+                result.created_manual_lob_discussion = manual.created
+            if update:
+                result.renewal_update_title = update.title
+                result.renewal_update_discussion_id = update.discussion_id
+                result.created_renewal_update_discussion = update.created
 
         note = build_shell_note(spec)
         if spec.dry_run:
-            create_m = " (create if missing)" if manual.created else ""
-            create_u = " (create if missing)" if update.created else ""
-            result.planned_actions.append(
-                f"Would post note onto exact title '{manual.title}'{create_m}"
-            )
-            result.planned_actions.append(
-                f"Would post note onto exact title '{update.title}'{create_u}"
-            )
+            for target in note_targets.targets:
+                extra = " (create if missing)" if target.created else ""
+                kind = "existing {LOB} Renewal" if target.kind == "existing_lob_renewal" else target.title
+                result.planned_actions.append(
+                    f"Would post note onto exact title '{target.title}'{extra} [{kind}]"
+                )
             return
 
-        for kind, target in (("manual_lob", manual), ("renewal_update", update)):
+        posted_ok = True
+        for target in note_targets.targets:
             posted = await self._post_honor_exact_title(page, spec, result, target.title, note)
             discussions = self.api.get_applicant_discussions(spec.applicant_id) or []
             proof = verify_discussion_id_and_title(
@@ -1386,26 +1415,33 @@ class ManualPolicyRenewer:
                 target.title,
                 expected_discussion_id=target.discussion_id if not target.created else None,
             )
-            if kind == "manual_lob":
-                result.manual_lob_note_posted = bool(posted and proof.get("verified"))
+            verified = bool(posted and proof.get("verified"))
+            posted_ok = posted_ok and verified
+            if target.kind == "existing_lob_renewal":
+                result.existing_lob_renewal_note_posted = verified
+                result.existing_lob_renewal_discussion_id = (
+                    proof.get("discussion_id") or result.existing_lob_renewal_discussion_id
+                )
+                result.existing_lob_renewal_title = proof.get("title") or result.existing_lob_renewal_title
+                result.discussion_title = result.existing_lob_renewal_title or result.discussion_title
+            elif target.kind == "manual_lob":
+                result.manual_lob_note_posted = verified
                 result.manual_lob_discussion_id = proof.get("discussion_id") or result.manual_lob_discussion_id
                 result.manual_lob_title = proof.get("title") or result.manual_lob_title
             else:
-                result.renewal_update_note_posted = bool(posted and proof.get("verified"))
+                result.renewal_update_note_posted = verified
                 result.renewal_update_discussion_id = (
                     proof.get("discussion_id") or result.renewal_update_discussion_id
                 )
                 result.renewal_update_title = proof.get("title") or result.renewal_update_title
 
-        result.note_posted = bool(result.manual_lob_note_posted and result.renewal_update_note_posted)
-        if not result.manual_lob_note_posted:
-            result.note_skipped_reason = result.note_skipped_reason or "manual_lob_note_unverified"
+        result.note_posted = posted_ok
+        if not posted_ok:
+            result.note_skipped_reason = result.note_skipped_reason or "renewal_note_unverified"
             if result.status not in {"blocked"}:
+                titles = ", ".join(t.title for t in note_targets.targets)
                 result.status = "error"
-                result.error = (
-                    result.error
-                    or f"Manual {{LOB}} Renewal note not verified on '{result.manual_lob_title}'"
-                )
+                result.error = result.error or f"Renewal note not verified on '{titles}'"
 
     async def _post_honor_exact_title(
         self,

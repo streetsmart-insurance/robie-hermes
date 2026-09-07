@@ -1200,9 +1200,9 @@ class EZLynxApiClient:
     ) -> str:
         """Resolves the authentic discussion title to ensure notes thread directly into the right card.
 
-        ``Manual {LOB} Renewal`` is an exact agency title (Paulette HO 2026-09-07):
-        honor it, create-if-missing by returning that title, never rematch onto
-        Email Automation / Automation Center / other cards.
+        Prefer an existing ``{LOB} Renewal`` card (any line of business) when
+        the caller asked for a Manual/Update fallback title. Only create
+        ``Manual {LOB} Renewal`` when no matching LOB renewal discussion exists.
 
         Substring / first-card rematch is the Paulette misfire path and is not used.
         """
@@ -1210,6 +1210,27 @@ class EZLynxApiClient:
         if requested and is_disqualified_requested_title(requested):
             logger.warning("Ignoring disqualified/untitled requested discussion title: '%s'", requested)
             requested = ""
+
+        from src.ezlynx.manual_renewal_gate import (
+            is_renewal_update_title,
+            resolve_existing_lob_renewal_discussion,
+        )
+
+        # 0. Existing {LOB} Renewal wins over Manual / Renewal Update fallbacks.
+        if line_of_business and (
+            not requested
+            or is_manual_lob_renewal_title(requested)
+            or is_renewal_update_title(requested)
+        ):
+            discussions = self.get_applicant_discussions(applicant_id)
+            existing = resolve_existing_lob_renewal_discussion(discussions, line_of_business)
+            if existing:
+                logger.info(
+                    "Preferred existing {LOB} Renewal card '%s' over fallback '%s'",
+                    existing.title,
+                    requested or "Manual/Update",
+                )
+                return existing.title
 
         # 1. Exact Manual {LOB} Renewal — never treat as a generic placeholder.
         if requested and is_manual_lob_renewal_title(requested):
@@ -1577,6 +1598,8 @@ class EZLynxApiClient:
                     "document_name": res.get("document_name"),
                     "policy_number": res.get("policy_number"),
                     "applied_label": res.get("applied_label"),
+                    "target_folder": res.get("target_folder"),
+                    "folder_created": res.get("folder_created"),
                     "screenshot_path": res.get("screenshot_path"),
                 }
             logger.warning(f"Playwright document uploader returned error: {res.get('error')}. Checking API/simulation.")
