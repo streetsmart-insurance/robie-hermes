@@ -2,7 +2,7 @@
 name: "ascend-api-create-program"
 description: "Create an Ascend program and quote billables through the bounded Ascend API worker with independent API readback. No browser or Playwright."
 job_type: "ascend.create_program"
-production_ready: true
+production_ready: false
 ---
 
 # Ascend API program creation & payment agreement workflow
