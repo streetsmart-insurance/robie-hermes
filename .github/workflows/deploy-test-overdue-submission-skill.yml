@@ -28,6 +28,7 @@ jobs:
       TEST_VM: hermes-test-01
       SKILL_NAME: ezlynx-overdue-submission-reports
       STAGING_DIR: /var/tmp/robie-test-skill/${{ github.sha }}
+      SSH_KEY: ${{ runner.temp }}/hermes-test-skill
     steps:
       - name: Check out protected main
         uses: actions/checkout@v4
@@ -78,15 +79,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gcloud compute ssh "${TEST_VM}" \
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}/${SKILL_NAME}'"
+          ssh-keygen -q -t rsa -b 3072 -N '' -f "${SSH_KEY}"
+          connected=false
+          for attempt in 1 2 3; do
+            if gcloud compute ssh "${TEST_VM}" \
+              --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --ssh-key-file="${SSH_KEY}" \
+              --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}/${SKILL_NAME}'"; then
+              connected=true
+              break
+            fi
+            sleep "$((attempt * 10))"
+          done
+          [[ "${connected}" == true ]] || { echo "bounded Test IAP connection failed" >&2; exit 2; }
           gcloud compute scp \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             "deploy/hermes/skills/${SKILL_NAME}/SKILL.md" \
             "${TEST_VM}:${STAGING_DIR}/${SKILL_NAME}/SKILL.md"
           gcloud compute scp \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             scripts/deploy-test-overdue-submission-skill.sh \
             "${TEST_VM}:${STAGING_DIR}/deploy-test-overdue-submission-skill.sh"
 
@@ -96,6 +109,7 @@ jobs:
           set -euo pipefail
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             --command="sudo bash '${STAGING_DIR}/deploy-test-overdue-submission-skill.sh' --source-dir '${STAGING_DIR}/${SKILL_NAME}' --commit '${GITHUB_SHA}' --expected-digest '${{ steps.skill.outputs.digest }}'"
 
       - name: Publish immutable Test evidence
@@ -110,4 +124,3 @@ jobs:
             echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
             echo "- Production deployment: \`false\`"
           } >>"${GITHUB_STEP_SUMMARY}"
-
