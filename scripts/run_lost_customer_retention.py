@@ -12,7 +12,8 @@ from zoneinfo import ZoneInfo
 
 from robie_job_engine.accountability_delivery import _delegated_gmail_sender
 from robie_job_engine.lost_customer_retention import (
-    build_messages, load_state, records, save_state, send_message, summarize,
+    CANONICAL_DEPARTMENTS, build_messages, employee_directory, load_state, records,
+    resolve_department, save_state, send_message, summarize,
     validate_monthly_source,
 )
 
@@ -52,11 +53,30 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
     config = json.loads(config_path.read_text(encoding="utf-8"))
     spreadsheet_id = config["spreadsheet_id"]
     sheets = sheets_client()
+    directory = employee_directory(values(
+        sheets, config["appsheet_spreadsheet_id"], "'Employees'!A1:AM250"
+    ))
     months = BACKFILL_MONTHS if backfill else (prior_completed_month(),)
     monthly = [validate_monthly_source(values(sheets, spreadsheet_id, f"'{m}'!A1:AK997"), m) for m in months]
     review = [r for r in records(values(sheets, spreadsheet_id, "'3-Month Account Review'!A1:U2000")) if r["Month"] in months]
     if not review or any(m["policy_rows"] == 0 for m in monthly):
         raise RuntimeError(f"fail-closed: no validated source/account review for {', '.join(months)}")
+    department_exceptions = []
+    for item in review:
+        department, source, exception = resolve_department(item, directory)
+        item["_department_source"] = source
+        item["_department_exception"] = "true" if exception else ""
+        if item.get("Department") not in CANONICAL_DEPARTMENTS:
+            raise RuntimeError(f"non-canonical department in workbook: {item.get('Department')}")
+        if item["Department"] != department:
+            raise RuntimeError(
+                f"department mismatch for applicant {item['Applicant ID']}: "
+                f"workbook={item['Department']} authoritative={department} ({source})"
+            )
+        if exception:
+            department_exceptions.append({
+                "applicant_id": item["Applicant ID"], "department": department, "source": source,
+            })
     if sum(m["policy_rows"] for m in monthly) != sum(int(float(x["Policy Count"] or 0)) for x in review):
         raise RuntimeError("policy/account consolidation does not reconcile")
     run_key = "2026-06_2026-08" if backfill else datetime.strptime(months[0], "%B %Y").strftime("%Y-%m")
@@ -66,7 +86,11 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
     state = load_state(state_path)
     previous = state.setdefault("runs", {}).get(run_key, {})
     messages = build_messages(review, config["recipients"], run_id)
-    result = {"run_id": run_id, "dry_run": dry_run, "source": monthly, "summary": summarize(review), "message_previews": [{"key": m.key, "to": list(m.to), "subject": m.subject, "bytes": len(m.body.encode())} for m in messages], "receipts": []}
+    result = {"run_id": run_id, "dry_run": dry_run, "source": monthly,
+              "summary": summarize(review), "department_exceptions": department_exceptions,
+              "sop_sources": config["sop_sources"],
+              "message_previews": [{"key": m.key, "to": list(m.to), "subject": m.subject,
+                                    "bytes": len(m.body.encode())} for m in messages], "receipts": []}
     if dry_run:
         return result
     if previous.get("digest") == digest and previous.get("complete"):
