@@ -62,6 +62,7 @@ class ExtractedQuote:
     agency_fees_cents: int = 35000  # Default $350.00
     commission_rate: Optional[float] = None
     surplus_lines_tax_cents: int = 0
+    surplus_lines_tax_addressed: bool = False
     policy_fee_cents: int = 0
     broker_fee_cents: int = 0
     other_fees_cents: int = 0
@@ -295,27 +296,29 @@ class QuoteExtractor:
 
         # 9. Parameter 2: Commission Rate
         comm_match = re.search(
-            r"(?:Commission\s+Rate|Agency\s+Commission|Commission)\s*:\s*([\d.]+\s*%?)",
+            r"(?:Commission\s+Rate|Agency\s+Commission|Commission|comm)\s*[:=]?\s*([\d.]+\s*%?)",
             combined_text,
             re.IGNORECASE,
         )
         if comm_match:
             quote.commission_rate = _parse_percentage(comm_match.group(1))
         else:
-            user_comm = re.search(r"(\d+(?:\.\d+)?)\s*%\s*commission", combined_text, re.IGNORECASE)
+            user_comm = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:commission|comm)", combined_text, re.IGNORECASE)
             if user_comm:
                 quote.commission_rate = _parse_percentage(user_comm.group(1))
 
         # 10. Parameter 3: Surplus Lines Tax & Fees
         tax_match = re.search(
-            r"(?:Surplus\s+Lines\s+Tax|State\s+Tax|Taxes)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            r"(?:Surplus\s+Lines\s+Tax|State\s+Tax|Taxes)\s*[:=]?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
             combined_text,
             re.IGNORECASE,
         )
         if tax_match:
             quote.surplus_lines_tax_cents = _parse_dollars_to_cents(tax_match.group(1))
-        elif re.search(r"no\s+surplus\s+lines|surplus\s+lines\s+tax\s*:\s*\$0", combined_text, re.IGNORECASE):
+            quote.surplus_lines_tax_addressed = True
+        elif re.search(r"no\s+surplus\s+(?:lines(?:\s+tax)?|tax)|surplus\s+lines\s+tax\s*:\s*\$0|tax(?:\s*:\s*|\s+is\s+)\$0", combined_text, re.IGNORECASE):
             quote.surplus_lines_tax_cents = 0
+            quote.surplus_lines_tax_addressed = True
 
         stamping_match = re.search(
             r"(?:Stamping\s+Fee)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
@@ -377,12 +380,12 @@ class QuoteExtractor:
                 quote.total_without_terrorism_cents = quote.pure_premium_cents
 
         # Check user instruction override for terrorism
-        if re.search(r"include\s+terrorism|with\s+terrorism|accept\s+tria", user_instruction, re.IGNORECASE):
+        if re.search(r"include\s+terrorism|with\s+terrorism|accept\s+tria|option\s*1", user_instruction, re.IGNORECASE):
             quote.terrorism_included = True
             quote.has_terrorism_options = False
             if quote.total_with_terrorism_cents:
                 quote.pure_premium_cents = quote.total_with_terrorism_cents
-        elif re.search(r"exclude\s+terrorism|without\s+terrorism|reject\s+tria|no\s+terrorism", user_instruction, re.IGNORECASE):
+        elif re.search(r"exclude\s+terrorism|without\s+terrorism|reject\s+tria|no\s+terrorism|option\s*2", user_instruction, re.IGNORECASE):
             quote.terrorism_included = False
             quote.has_terrorism_options = False
             if quote.total_without_terrorism_cents:
@@ -408,7 +411,7 @@ class QuoteExtractor:
 
         # Question 3: Surplus lines tax clarity
         is_surplus_lines_carrier = bool(quote.wholesaler_name or (quote.carrier_name and quote.carrier_name.lower() in ["nautilus", "evanston", "scottsdale", "tapco", "rps"]))
-        if is_surplus_lines_carrier and quote.surplus_lines_tax_cents == 0:
+        if is_surplus_lines_carrier and not quote.surplus_lines_tax_addressed and quote.surplus_lines_tax_cents == 0:
             questions.append("3. Surplus Lines Tax: Is surplus lines tax applicable to this quote? (If so, please specify tax/stamping fee amounts)")
             reasons.append("surplus_lines_tax_verification")
 
