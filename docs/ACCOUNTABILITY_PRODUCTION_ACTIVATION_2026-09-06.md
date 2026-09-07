@@ -92,3 +92,62 @@ email changes because the Robie mailbox lacked all five exact inputs:
 This is the intended fail-closed behavior. The 9:00 AM schedule exists, but the
 daily report is not production-ready until those subscriptions are configured
 and one exact-date dry run reconciles all source rows.
+
+## Subscription activation evidence — 2026-09-07
+
+The five approved source subscriptions were configured or corrected without
+changing the team-delivery gate:
+
+- RingCentral `Yesterday Calls`: active, Excel, Queues/Users/Calls, Robie
+  recipient, daily at 6:00 AM.
+- RingCentral `Robie last week calls`: active, Excel, Queues/Users/Calls,
+  Robie recipient, Monday at 6:00 AM. This is the post-weekend fallback source;
+  the ingest gate must still select the exact requested business date.
+- EZLynx `Robie - EZLynx Activities`: Activity Detail look 546, XLSX, weekdays
+  at 6:00 AM, Robie recipient, all results.
+- EZLynx `Robie - EZLynx Overdue Tasks`: Activity Detail look 546, XLSX,
+  weekdays at 6:00 AM, Robie recipient, all results, Created Date any time,
+  Task Status Open, and Task Due Date before relative `now`. The Activity Type
+  equality filter was intentionally left empty because EZLynx task evidence
+  uses several activity values (`Task Note`, `Task Creation Note`, and others);
+  an exact `Task` value produced a false zero.
+- EZLynx `Robie - EZLynx Sales Center`: Sales Center Detail look 3469, XLSX,
+  weekdays at 6:00 AM, Robie recipient, all results, and Opportunity Created
+  Date any time. The five-day untouched rule remains a downstream calculation.
+- EZLynx `Robie - EZLynx Policy Changes`: saved Policy Change Request look 4244,
+  XLSX, weekdays at 6:00 AM, Robie recipient, all results. It remains filtered
+  to pending Policy Change transactions; the report pipeline applies the
+  approved 90-day age ceiling and tracker reconciliation.
+
+Manual `Send Test` deliveries reached the Robie mailbox from
+`Applied Reporting <DoNotReply@appliedsystems.com>` with each of the four exact
+subjects and readable XLSX attachments. After correcting the overdue filter and
+the 500-row default cap, a second structure-only validation (no business rows
+printed or persisted) confirmed 10,936 Activity rows, 2,837 overdue Task rows,
+47,199 Sales Center rows, and 84 Policy Change rows. The files expose 32 columns
+for Activities/Tasks, 20 for Sales Center, and 23 for Policy Changes, including
+the department, responsible-person, age/date, status, lead-source, and policy
+fields needed by the downstream accountability report.
+
+The dedicated Production EZLynx Chrome session was also reauthenticated from
+the existing Secret Manager values and independently read back on the
+authenticated EZLynx Dashboard. No password or verification code was printed,
+and no interactive MFA step was required.
+
+### Newly exposed Production ingest defect
+
+The dedicated VM's standalone `src.scheduled_report_ingest` requests each Gmail
+message with `format="metadata"` and then searches that response for MIME
+attachment parts. Gmail metadata responses do not provide the attachment
+structure required by this implementation. As a result, the current no-send
+preflight still reports the exact EZLynx subjects as missing even though an
+independent Gmail MIME-structure read proves the messages and XLSX files exist.
+
+Do not weaken the exact-subject or attachment gates. Correct the standalone
+ingestor to make a metadata-only header read plus a separately field-masked MIME
+structure read (or a bounded `full` read that never persists bodies), add a
+regression test using a real metadata/full response split, and promote that
+change through the dedicated Test and immutable-release path before Production.
+Until that release and an exact-date RingCentral workbook arrive, the 9:00 AM
+job remains intentionally fail closed and cannot honestly be called fully
+production-ready.
