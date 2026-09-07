@@ -26,6 +26,7 @@ jobs:
       ZONE: us-east1-b
       TEST_VM: hermes-test-01
       STAGING_DIR: /var/tmp/robie-test-deploy/${{ github.sha }}
+      SSH_KEY: /tmp/hermes-test-deploy
     steps:
       - name: Check out protected main
         uses: actions/checkout@v4
@@ -86,14 +87,30 @@ jobs:
             --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
 
       - name: Create bounded Test staging directory
+        shell: bash
         run: |
-          gcloud compute ssh "${TEST_VM}" \
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}'"
+          set -euo pipefail
+          ssh-keygen -q -t rsa -b 3072 -N '' -f "${SSH_KEY}"
+          connected=false
+          for attempt in 1 2 3; do
+            if gcloud compute ssh "${TEST_VM}" \
+              --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --ssh-key-file="${SSH_KEY}" \
+              --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}'"; then
+              connected=true
+              break
+            fi
+            sleep "$((attempt * 10))"
+          done
+          if [[ "${connected}" != true ]]; then
+            echo "bounded Test IAP connection failed after 3 attempts" >&2
+            exit 2
+          fi
 
       - name: Transfer exact artifact and installer
         run: |
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             "${{ steps.release.outputs.archive }}" \
             "${{ steps.release.outputs.checksum }}" \
             scripts/deploy-test-release.sh \
@@ -105,6 +122,7 @@ jobs:
           checksum="${archive}.sha256"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             --command="sudo bash '${STAGING_DIR}/deploy-test-release.sh' --archive '${archive}' --checksum '${checksum}' --commit '${GITHUB_SHA}'"
 
       - name: Publish immutable Test evidence
