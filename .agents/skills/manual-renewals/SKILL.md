@@ -162,8 +162,8 @@ Autonomous manual renewal requires a two-step renewal and data entry pipeline in
    - `#FullTermPremium`: Full term premium (e.g. `5182.00`).
    - `#AnnualPremium`: Annualized premium (e.g. `5182.00`).
    - `#Description`: Standard format `Renewal of <expiring_policy_number>`.
-3. **Commit Action**: Click **`Renew & Edit Policy`** (`button:has-text("Renew & Edit Policy")`).
-   *CRITICAL*: Do NOT click just "Renew Policy"; "Renew & Edit Policy" commits the shell, generates the new transaction ID, and transitions directly into the FormEntry editor (`/applicantportal/Policy/{policy_id}/FormEntry/Index/{transaction_id}`).
+3. **Commit Action (shell-only)**: Click **`#RenewPolicyBtn`** ("Renew Policy").
+   *CRITICAL*: Do **not** click **Renew & Edit Policy** for a shell-only key — that opens FormEntry and is a separate HITL/coverage job. Routine keys use `src/ezlynx/policy_renewer.py` / `scripts/run_manual_renewal.py` in one CDP session. Verify pending RWL on the policy **History** tab (Classic `get_applicant_policies` omits pending shells). If a pending RWL already exists for the same term+premium, STOP. Writing Company is required before submit. Producer/CSR is Carlo Ferrara (never Robie). No bind.
 
 ### Step 2: FormEntry Deep Coverage Entry
 FormEntry contains multi-tab ACORD-level policy data (`Insured Information`, `Policy Level Coverages`, `Premises Information`, `GL Class Codes`, `Underwriting`, `Additional Interest / Policy Contacts`).

@@ -164,6 +164,23 @@ PYTHONPATH=. python3 -m src.email_outreach.uw_reply_filer
 PYTHONPATH=. python3 -m src.main --file-uw-replies --dry-run
 ```
 
+### Manual renewal shell (one CDP job)
+Routine EZLynx shell keys use the hardened server recipe — **not** Antigravity/Gemini SSH/SCP micro-scripts. Verify on **hermes-test-01** before any Production zip.
+
+```bash
+# Dry-run / plan (no submit)
+PYTHONPATH=. python3 scripts/run_manual_renewal.py --env test --dry-run \
+  --applicant-id <ID> --policy-id <PID> --policy-number <NUM> \
+  --lob "Workers comp" --writing-company "Associated Specialty" \
+  --discussion-title "Renewal Manual Workers comp | PWC1239278 Associated Specialty Insurance" \
+  --proof-json data/renewal_proofs/example.json
+
+# Same module
+PYTHONPATH=. python3 -m src.ezlynx.policy_renewer --help
+```
+
+Guards: UI History pending-RWL proof (Classic API is insufficient), same term+premium dedupe, `#RenewPolicyBtn` only, Writing Company required, exact titled discussion, skip stubs &lt;10KB and skip docs/notes when `already_in`, Carlo Ferrara never Robie, no bind. Operator notes: `docs/MANUAL_RENEWAL_SHELL.md`. Tests: `pytest tests/test_policy_renewer.py -v`.
+
 The daily pipeline (`--run-today`) and Robie inbox cleaner also invoke this path so cadence and cleanup stay in sync. Production cron on hermes-poc-01 is unchanged:
 
 `0 9 * * * /opt/renewal-automation-system/scripts/run_daily_renewal_pipeline.sh`
