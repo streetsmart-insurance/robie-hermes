@@ -22,8 +22,8 @@ The **StreetSmart Productivity & Accountability System (Iteration 1)** solves th
 | :--- | :--- | :--- | :--- |
 | **VoIP Call Graph** | RingCentral Detailed Call Log | `Date`, `Time`, `From` (Caller ID), `To` (Dialed DID), `Extension` (Rep / Queue), `Direction` (In/Out), `Action Result` (Accepted, Missed, Voicemail, Offline), `Duration` | Identifies who was called, whether they picked up, how long they spoke, and if a return call occurred. |
 | **Callback SLA & Graph** | RingCentral Outbound Logs | Normalized 10-digit caller phone matching against all outbound dials within 30 min / 2 hr / 24 hr windows. | Determines if an orphaned call was returned by the assigned rep vs. assisted by a teammate vs. abandoned. |
-| **Task Velocity & Backlog** | EZLynx `/web/tasks` | Total tasks assigned, tasks completed, overdue tasks (>1 day past due), task aging distribution per employee. | Identifies back-office operational bottlenecks and unworked service items. |
-| **Documentation Density** | EZLynx Activity Log & Looker #25979 | Discussion notes logged, policy changes recorded, quotes generated, COIs issued, rescissions filed. | Credits reps who are active in policy servicing even when off the phone. |
+| **Task Velocity & Backlog** | EZLynx Five / Reports 5.0 | Verified Reports 5.0 task/activity mapping only; total assigned, completed, overdue, aging, postponement, owner, account and source row. Legacy Saved Reports are not a fallback. | Identifies back-office operational bottlenecks and unworked service items. |
+| **Documentation & Resolution** | EZLynx Five / Reports 5.0 plus account Activity tab | Manual calls/texts/emails, automated notices, tasks, policy changes, COIs and documented outcomes. Automated notices and verification codes do not prove a human response. | Credits meaningful service work and prevents automation from being mistaken for follow-through. |
 | **Conversational Sentiment** | Magellan AI (`app.magellan.insure`) | AI Sentiment Score (54% Satisfied / 34% Neutral / 12% Sad), Intent Tags (`At-Risk`, `Cancellation`, `Claims`, `Billing`, `COI`). | Flags callers in emotional distress or active cancellation risk before churn occurs. |
 | **Lead / Prospect SLA** | RingCentral + EZLynx Client Match | Inbound numbers checked against EZLynx Active Client database to isolate `PROSPECT_NON_CLIENT` and `VENDOR_BROKER`. | Measures response speed on new business leads vs. existing policyholders. |
 
@@ -38,9 +38,10 @@ RingCentral handles calls through two distinct routing mechanisms, and the engin
 * **How RingCentral Logs It:**
   * If the rep is on another call or ignores it: `Action Result: Missed` or `Voicemail`.
   * If the rep’s computer/app is closed: `Action Result: IP Phone Offline`.
-* **Accountability Impact:** 
-  * **100% Attributable to That Individual Rep.** 
-  * If a voicemail is left and the assigned rep does not dial that number back, it is logged as an **Orphaned Missed Call** and heavily penalizes the rep's Weekly Grade.
+* **Accountability Impact:**
+  * Report the failed destination, assigned producer and assigned CSR separately.
+  * A direct missed line proves where the call failed, not by itself who owned follow-up. If the called employee differs from the assigned CSR, report an ownership gap unless a documented handoff rule assigns responsibility.
+  * Classify the final result as timely callback, non-call response, client had to redial, true no response, pending SLA or unverified caller.
 
 ### B. Queue Calls (Department / Agency Workload)
 * **What It Is:** An incoming call dialed to the agency main number `(732) 462-8343` or a department routing rule (`Ext 9006 - Commercial Queue`, `Ext 105 - Trucking Queue`, `Ext 104 - Personal Lines Queue`).
@@ -49,8 +50,9 @@ RingCentral handles calls through two distinct routing mechanisms, and the engin
   * **Answer Leg:** When a specific member answers, it logs: `Ext: [Rep Extension]`, `Action Result: Accepted` (or `Call connected`), with the exact duration.
   * **Queue Abandonment:** If nobody in the queue answers before timeout, it routes to `Voicemail` on the department extension.
 * **Accountability Impact:**
-  * Reps who answer queue calls receive **"Queue Rescuer / Assist" credit**, boosting their overall score.
-  * Queue voicemails are assigned to the department queue lead for mandatory same-day callback.
+  * Group every routing leg under one parent customer call. A stopped, missed or offline member leg is not a separate customer failure when another human leg answered.
+  * Do not label every rung endpoint an offender. Unless an explicit queue-owner or handoff rule exists, use the account's assigned CSR as the default follow-up owner and show the producer for oversight.
+  * AI Receptionist or queue acceptance is not human contact; require a connected/accepted human leg.
 
 ---
 
@@ -83,12 +85,8 @@ Across the past 7 days, the **Trucking Department** handled the following volume
 
 ---
 
-## 6. Employee Scoring Formula (0–100 Scale)
+## 6. Evidence Status Before Scoring
 
-$$\text{Final Score} = \text{Base (50)} + \text{Inbound Answer Bonus} + \text{Callback Bonus} + \text{Outbound Bonus} + \text{EZLynx Bonus} - \text{Penalties}$$
+Iteration 1 reports verified facts and exceptions; it does not automatically impose disciplinary scores. Any future score requires a separately approved formula, minimum sample sizes and written ownership rules.
 
-* **Inbound Answer Rate:** Up to $+20$ points ($>80\% = +20$, $<30\% = -15$).
-* **Missed Call Resolution:** $+15$ points for $100\%$ returned; **$-10$ points for EACH unreturned voicemail**.
-* **Outbound Dials & Talk Time:** $+10$ points for active phone outreach ($>150$ dials / $>5$ hrs talk time).
-* **EZLynx Velocity:** $+10$ points for high activity notes / zero overdue tasks; **$-2$ points per overdue task**.
-* **Queue Rescuer Assist:** $+5$ bonus points for answering general queue overflow calls.
+Every exception must preserve the parent call or source row, business-hours flag, failed destination, producer, CSR, response channel/time, final classification and evidence qualification. Missing identity, incomplete call coverage or an unverified Reports 5.0 mapping is shown as `UNVERIFIED`, never converted into a favorable or adverse employee result.

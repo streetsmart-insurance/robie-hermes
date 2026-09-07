@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from robie_job_engine.accountability_cli import load_ringcentral_source
+from robie_job_engine.accountability_cli import load_ringcentral_csv, load_ringcentral_source
 from robie_job_engine.productivity import ProductivityAuditor
 from robie_job_engine.ringcentral_workbooks import (
     DEFAULT_REQUIRED_SHEETS,
@@ -13,6 +13,7 @@ from robie_job_engine.ringcentral_workbooks import (
     RingCentralEvidenceError,
     classify_report,
     read_workbook,
+    validate_report_date,
     write_evidence_manifest,
 )
 
@@ -72,15 +73,44 @@ def _manifest(path: Path, kind: str, attachments: list[Path]) -> Path:
 def test_subscription_label_classifier_is_exact_and_refuses_ambiguity():
     assert classify_report("ROBIE_DAILY_CALLS", "report.xlsx") == "daily"
     assert classify_report("scheduled", "ROBIE_WEEKLY_CALLS.xlsx") == "weekly"
+    assert classify_report("Scheduled Reports from RingCentral", "Yesterday_Calls_Calls.xlsx") == "daily"
     assert classify_report("generic calls", "report.xlsx") is None
     with pytest.raises(RingCentralEvidenceError, match="conflicting"):
         classify_report("ROBIE_DAILY_CALLS and ROBIE_WEEKLY_CALLS", "report.xlsx")
+
+
+def test_report_date_gate_uses_call_rows_and_rejects_wrong_day(tmp_path: Path):
+    path = _workbook(tmp_path / "calls.xlsx", "Filters", "Calls")
+    workbook = read_workbook(path)
+    validate_report_date([workbook], datetime(2026, 8, 28).date())
+    with pytest.raises(RingCentralEvidenceError, match="expected 2026-08-29"):
+        validate_report_date([workbook], datetime(2026, 8, 29).date())
 
 
 def test_workbook_missing_observed_call_column_fails_closed(tmp_path: Path):
     path = _workbook(tmp_path / "bad.xlsx", "Calls", omit_call_column="Session Id")
     with pytest.raises(RingCentralEvidenceError, match="Session Id"):
         read_workbook(path, required_sheets=("Calls",))
+
+
+def test_call_parser_keeps_handle_hold_and_queue_wait_separate(tmp_path: Path):
+    path = tmp_path / "calls.csv"
+    path.write_text(
+        "Session Id,From Name,From Number,To Name,To Number,Result,Call Length,Handle Time,"
+        "Hold Time,Time to Answer,Call Start Time,Call Direction,Queue\n"
+        "session-1,Caller,8482185101,Alex Example,7325550100,Answered,00:10:00,00:07:00,"
+        "00:02:30,00:00:45,2026-09-01T14:00:00+00:00,Inbound,Personal Test\n",
+        encoding="utf-8",
+    )
+
+    calls, errors = load_ringcentral_csv(path)
+
+    assert errors == []
+    assert len(calls) == 1
+    assert calls[0].duration_seconds == 600
+    assert calls[0].handle_seconds == 420
+    assert calls[0].hold_seconds == 150
+    assert calls[0].queue_wait_seconds == 45
 
 
 def test_weekly_bundle_ingests_separate_tabs_deduplicates_and_reconciles(tmp_path: Path):

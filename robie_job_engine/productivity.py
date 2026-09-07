@@ -36,6 +36,9 @@ class RingCentralCall:
     queue_name: str = ""
     answered_by: str = ""
     queue_wait_seconds: int = 0
+    handle_seconds: int = 0
+    hold_seconds: int = 0
+    duration_source: str = "Call Length"
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], employee_mapping: Optional[Dict[str, str]] = None) -> RingCentralCall:
@@ -99,6 +102,9 @@ class RingCentralCall:
             queue_name=str(data.get("queue_name") or "").strip(),
             answered_by=str(data.get("answered_by") or "").strip(),
             queue_wait_seconds=int(data.get("queue_wait_seconds") or 0),
+            handle_seconds=int(data.get("handle_seconds") or 0),
+            hold_seconds=int(data.get("hold_seconds") or 0),
+            duration_source=str(data.get("duration_source") or "Call Length").strip(),
         )
 
 

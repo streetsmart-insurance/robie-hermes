@@ -1,8 +1,8 @@
 [Unit]
-Description=Ensure the Hermes EZLynx session daily at 9 a.m. Eastern
+Description=Ensure the Hermes EZLynx session before the 6:25 a.m. Eastern report
 
 [Timer]
-OnCalendar=*-*-* 09:00:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 06:00:00 America/New_York
 Persistent=true
 AccuracySec=1min
 Unit=robie-ezlynx-session.service

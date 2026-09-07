@@ -4,8 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 from contextlib import nullcontext
 
-from robie_job_engine.accountability_jobs import AccountabilityReportWorker
+from robie_job_engine.accountability_jobs import AccountabilityReportWorker, _previous_business_day
 from robie_job_engine.accountability_schedule import install_accountability_schedules
+from robie_job_engine.models import WorkerResult
 from robie_job_engine.operations import OperationsStore
 
 
@@ -38,6 +39,13 @@ def test_schedule_installer_creates_three_verified_schedules(tmp_path: Path):
     reread = OperationsStore(str(db), artifact_root=str(tmp_path / "artifacts")).list_recurring_jobs()
     assert len(reread) == 3
     assert all(item["enabled"] == 1 for item in reread)
+    daily = next(item for item in reread if item["action_type"] == "accountability.daily")
+    assert daily["cron_spec"] == "25 6 * * 1-5"
+    assert daily["parameters"]["reporting_period"] == "previous_business_day"
+
+
+def test_previous_business_day_uses_friday_for_monday():
+    assert _previous_business_day(datetime(2026, 9, 7, 13, tzinfo=timezone.utc)).isoformat() == "2026-09-04"
 
 
 def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_path: Path):
@@ -75,7 +83,7 @@ def test_worker_uses_approved_role_registry_as_current_ringcentral_users(tmp_pat
     assert collect.call_args.kwargs["required_queue_members"] == {"Commercial Test": ["Alex Example"]}
 
 
-def test_weekly_worker_collects_live_submission_center_read_only(tmp_path: Path):
+def test_weekly_worker_collects_fresh_read_only_submission_snapshot_without_email(tmp_path: Path):
     email = tmp_path / "email.json"
     email.write_text('{"source_status":"available","by_employee":{}}', encoding="utf-8")
     manifest = tmp_path / "manifest.json"
@@ -83,30 +91,102 @@ def test_weekly_worker_collects_live_submission_center_read_only(tmp_path: Path)
         "output_dir": str(tmp_path / "reports"),
         "sources": {"email_json": str(email)},
         "rules": {"require_complete_evidence": False},
-        "collection": {"ezlynx_submission_browser": {"enabled": True, "read_only": True}},
+        "collection": {"ezlynx_submission_center": {
+            "enabled": True,
+            "read_only": True,
+            "email_delivery_enabled": False,
+        }},
+        "delivery": {"enabled": False},
     }), encoding="utf-8")
-    observed = {"pages_inspected": 2, "rows_inspected": 101, "pager_total": 101,
-                "open_records_deduplicated": 1, "open_records": [{
-                    "Submission Title": "Example", "Submission URL": "https://example.test/s/1",
-                    "Applicant": "Example Applicant", "Assigned Producer": "Producer One", "Status": "Quoted",
-                    "Quote Due Date": "2026-06-01", "Effective Date": "2026-09-01", "Overdue": "red",
-                }]}
+    observed = {
+        "source_status": "available",
+        "status_aria_sort": "ascending",
+        "first_row_non_closed": True,
+        "first_closed_row_inspected": True,
+        "day_31_qualifies": True,
+        "email_delivery_enabled": False,
+        "open_over_30_count": 1,
+        "qualifying_records": [{"applicant": "Example LLC"}],
+    }
 
     def fake_build(arguments):
         output = Path(arguments[arguments.index("--output") + 1])
-        output.write_text("STREETSMART WEEKLY EXECUTIVE PERFORMANCE SCORECARD\n", encoding="utf-8")
+        output.write_text("🏆 *STREETSMART WEEKLY EXECUTIVE PERFORMANCE SCORECARD*\n", encoding="utf-8")
         return 0
 
-    with patch("robie_job_engine.ezlynx_session_lock.exclusive_session", return_value=nullcontext()), \
-         patch("robie_job_engine.submission_audit.ensure_ezlynx_login"), \
-         patch("robie_job_engine.submission_audit.run_weekly_submission_read", return_value=observed) as read, \
-         patch("robie_job_engine.accountability_jobs.build_report", side_effect=fake_build):
+    with patch(
+        "robie_job_engine.submission_audit.EzlynxSubmissionAuditWorker.perform",
+        return_value=WorkerResult(
+            True,
+            "ezlynx.submission_audit",
+            {"expected_postcondition": observed},
+            retryable=False,
+        ),
+    ) as collect, patch(
+        "robie_job_engine.accountability_jobs.build_report", side_effect=fake_build
+    ) as build:
         result = AccountabilityReportWorker().perform(
             {"action_type": "accountability.weekly", "payload": {"manifest_path": str(manifest)}},
-            idempotency_key="weekly-live",
+            idempotency_key="weekly-live-submissions",
         )
+
     assert result.succeeded
-    read.assert_called_once_with(fresh=True)
-    generated = list((tmp_path / "reports").glob("submission-center-*.csv"))
-    assert len(generated) == 1
-    assert "https://example.test/s/1" in generated[0].read_text(encoding="utf-8")
+    collect.assert_called_once()
+    job = collect.call_args.args[0]
+    assert job["payload"]["read_only"] is True
+    assert job["payload"]["expected_postcondition"]["email_delivery_enabled"] is False
+    arguments = build.call_args.args[0]
+    snapshot_path = Path(arguments[arguments.index("--submissions-json") + 1])
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["open_over_30_count"] == 1
+
+
+def test_daily_worker_uses_every_approved_roster_mailbox_for_gmail_metadata(tmp_path: Path):
+    roles = tmp_path / "roles.json"
+    roles.write_text(json.dumps({
+        "source_status": "available",
+        "employees": {
+            "Alex Example": {"role": "CSR", "email": "alex@streetsmart.insurance"},
+            "Blair Example": {"role": "Producer", "email": "blair@streetsmart.insurance"},
+        },
+    }), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "output_dir": str(tmp_path / "reports"),
+        "sources": {"roles_json": str(roles)},
+        "rules": {"require_complete_evidence": False},
+        "collection": {"gmail_accountability": {
+            "enabled": True,
+            "approved_domain": "streetsmart.insurance",
+        }},
+        "delivery": {"enabled": False},
+    }), encoding="utf-8")
+
+    observed = {
+        "source_status": "available",
+        "scope": "https://www.googleapis.com/auth/gmail.metadata",
+        "body_access": False,
+        "by_employee": {},
+    }
+
+    def fake_build(arguments):
+        output = Path(arguments[arguments.index("--output") + 1])
+        output.write_text("accountability report\n", encoding="utf-8")
+        return 0
+
+    with patch(
+        "robie_job_engine.gmail_accountability.collect_agency_summary",
+        return_value=observed,
+    ) as collect, patch(
+        "robie_job_engine.accountability_jobs.build_report", side_effect=fake_build
+    ):
+        result = AccountabilityReportWorker().perform(
+            {"action_type": "accountability.daily", "payload": {"manifest_path": str(manifest)}},
+            idempotency_key="daily-gmail-roster",
+        )
+
+    assert result.succeeded
+    assert collect.call_args.kwargs["approved_users"] == (
+        "alex@streetsmart.insurance",
+        "blair@streetsmart.insurance",
+    )

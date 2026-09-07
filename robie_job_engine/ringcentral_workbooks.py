@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -18,6 +18,12 @@ from typing import Any, Iterable, Mapping, Sequence
 REPORT_MARKERS = {
     "daily": "ROBIE_DAILY_CALLS",
     "weekly": "ROBIE_WEEKLY_CALLS",
+}
+REPORT_ALIASES = {
+    # RingCentral keeps the email subject generic ("Scheduled Reports from
+    # RingCentral") and places the saved-report name in each attachment.
+    "daily": ("ROBIE_DAILY_CALLS", "YESTERDAY_CALLS"),
+    "weekly": ("ROBIE_WEEKLY_CALLS",),
 }
 DEFAULT_REQUIRED_SHEETS = {
     "daily": ("Calls",),
@@ -54,10 +60,9 @@ def _normalized_marker_text(value: str) -> str:
 def classify_report(*values: str) -> str | None:
     """Classify by the explicit subscription label; ambiguous evidence is refused."""
     text = "_".join(_normalized_marker_text(value) for value in values)
-    matches = [
-        kind for kind, marker in REPORT_MARKERS.items()
-        if re.search(rf"(?:^|_){re.escape(marker)}(?:_|$)", text)
-    ]
+    matches = [kind for kind, aliases in REPORT_ALIASES.items() if any(
+        re.search(rf"(?:^|_){re.escape(alias)}(?:_|$)", text) for alias in aliases
+    )]
     if len(matches) > 1:
         raise RingCentralEvidenceError("RingCentral attachment contains conflicting report labels")
     return matches[0] if matches else None
@@ -182,6 +187,49 @@ def read_workbook(path: Path, *, required_sheets: Sequence[str] = ()) -> dict[st
 
 def _fold(value: str) -> str:
     return " ".join(str(value or "").casefold().split())
+
+
+def _parsed_date(value: str) -> date | None:
+    text = str(value or "").strip()
+    for pattern in (r"\b\d{1,2}/\d{1,2}/\d{4}\b", r"\b\d{4}-\d{2}-\d{2}\b"):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(match.group(0), fmt).date()
+            except ValueError:
+                pass
+    return None
+
+
+def validate_report_date(workbooks: Sequence[Mapping[str, Any]], target_date: date) -> None:
+    """Require the RingCentral bundle to describe exactly the requested day."""
+    call_dates = {
+        parsed
+        for workbook in workbooks
+        for row in ((workbook.get("tables") or {}).get("Calls") or {}).get("rows", [])
+        for parsed in [_parsed_date(row.get("Call Start Time", ""))]
+        if parsed is not None
+    }
+    if call_dates:
+        if call_dates != {target_date}:
+            observed = ", ".join(sorted(item.isoformat() for item in call_dates))
+            raise RingCentralEvidenceError(
+                f"RingCentral call rows cover {observed}; expected {target_date.isoformat()}"
+            )
+        return
+    filter_dates = {
+        parsed
+        for workbook in workbooks
+        for value in workbook.get("filters", [])
+        for parsed in [_parsed_date(value)]
+        if parsed is not None
+    }
+    if target_date not in filter_dates:
+        raise RingCentralEvidenceError(
+            f"RingCentral bundle has no target-date evidence for {target_date.isoformat()}"
+        )
 
 
 def _coverage_values(workbooks: Sequence[Mapping[str, Any]], sheet: str) -> set[str]:

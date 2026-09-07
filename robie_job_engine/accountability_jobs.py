@@ -6,9 +6,10 @@ import hashlib
 import csv
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .accountability_cli import main as build_report
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -29,6 +30,7 @@ SOURCE_FLAGS = {
     "retention": "--retention",
     "retention_summary_json": "--retention-summary-json",
     "submissions": "--submissions",
+    "submissions_json": "--submissions-json",
     "email_json": "--email-json",
     "appsheet_json": "--appsheet-json",
     "magellan_json": "--magellan-json",
@@ -36,6 +38,14 @@ SOURCE_FLAGS = {
     "monthly_kpis_json": "--monthly-kpis-json",
     "churn_json": "--churn-json",
 }
+
+
+def _previous_business_day(value: datetime) -> date:
+    eastern = value.astimezone(ZoneInfo("America/New_York")).date()
+    candidate = eastern - timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
 
 
 def _checksum(path: Path) -> str:
@@ -78,12 +88,19 @@ class AccountabilityReportWorker:
             )
         try:
             manifest = _manifest(manifest_path)
+            reports_5 = dict((manifest.get("collection") or {}).get("ezlynx_reports_5") or {})
+            if reports_5:
+                from .ezlynx_reports_5 import validate_reports_5_config
+
+                validate_reports_5_config(reports_5)
             output_dir = Path(str(manifest.get("output_dir") or manifest_path.parent / "reports")).expanduser().resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             run_at = datetime.now(timezone.utc)
+            report_date = _previous_business_day(run_at) if mode == "daily" else None
             output = output_dir / f"streetsmart-{mode}-{run_at:%Y%m%dT%H%M%SZ}.md"
             arguments = [mode, "--as-of", run_at.isoformat(), "--output", str(output)]
             sources = dict(manifest.get("sources") or {})
+            sources["trackers"] = dict(sources.get("trackers") or {})
             collection = dict(manifest.get("collection") or {})
             google_sheets = dict(manifest.get("google_sheets") or {})
             if google_sheets.get("enabled"):
@@ -101,6 +118,27 @@ class AccountabilityReportWorker:
                     roles_path = output_dir / f"employee-roles-{run_at:%Y%m%dT%H%M%SZ}.json"
                     roles_path.write_text(json.dumps(roles, indent=2, default=str), encoding="utf-8")
                     sources["roles_json"] = str(roles_path)
+            google_sheet_trackers = dict(manifest.get("google_sheet_trackers") or {})
+            if google_sheet_trackers.get("enabled"):
+                from .google_sheets_accountability import collect_allowlisted_tables, write_allowlisted_table_csv
+
+                for tracker_key, raw_tracker in sorted(dict(google_sheet_trackers.get("trackers") or {}).items()):
+                    tracker = dict(raw_tracker or {})
+                    snapshot = collect_allowlisted_tables(
+                        {
+                            "spreadsheet_id": tracker.get("spreadsheet_id"),
+                            "tables": {
+                                tracker_key: {
+                                    "range": tracker.get("range"),
+                                    "allowed_columns": tracker.get("allowed_columns"),
+                                }
+                            },
+                        },
+                        as_of=run_at,
+                    )
+                    tracker_path = output_dir / f"google-sheet-{tracker_key}-{run_at:%Y%m%dT%H%M%SZ}.csv"
+                    write_allowlisted_table_csv(snapshot, tracker_key, tracker_path)
+                    sources["trackers"][tracker_key] = str(tracker_path)
             ringcentral_email = dict(collection.get("ringcentral_email") or {})
             if ringcentral_email.get("enabled"):
                 from .ringcentral_email_sync import collect_scheduled_ringcentral_report
@@ -130,70 +168,97 @@ class AccountabilityReportWorker:
                     required_queues=required_queues,
                     required_queue_members=required_queue_members,
                     required_sheets=configured_sheets.get(mode),
-                    max_age_hours=int(ringcentral_email.get("max_age_hours") or 36),
+                    max_age_hours=int(ringcentral_email.get("max_age_hours") or (96 if mode == "daily" else 36)),
+                    target_date=report_date,
                 ))
-            scheduled_reports = dict(collection.get("scheduled_reports_email") or {})
-            collected_trackers: dict[str, str] = {}
-            if scheduled_reports.get("enabled") and mode in set(scheduled_reports.get("modes") or ["weekly"]):
-                from .ringcentral_email_sync import build_keyless_report_mailbox_service
-                from .scheduled_report_email_sync import collect_scheduled_tabular_reports
-                mailbox = str(
-                    scheduled_reports.get("mailbox") or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")
-                ).strip()
-                service_account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
-                if not mailbox or not service_account:
-                    raise ValueError("scheduled report collection requires report mailbox and delegated service account")
-                service = build_keyless_report_mailbox_service(service_account, mailbox)
-                collected = collect_scheduled_tabular_reports(
-                    service, output_dir=output_dir / "scheduled-reports", config=scheduled_reports, as_of=run_at
+            submission_center = dict(collection.get("ezlynx_submission_center") or {})
+            if mode == "weekly" and submission_center.get("enabled"):
+                from .submission_audit import DEFAULT_SCOPE, EzlynxSubmissionAuditWorker
+
+                audit = EzlynxSubmissionAuditWorker().perform(
+                    {
+                        "payload": {
+                            "read_only": True,
+                            "scope": DEFAULT_SCOPE,
+                            "expected_postcondition": {
+                                "source_status": "available",
+                                "status_aria_sort": "ascending",
+                                "first_row_non_closed": True,
+                                "first_closed_row_inspected": True,
+                                "day_31_qualifies": True,
+                                "email_delivery_enabled": False,
+                            },
+                        }
+                    },
+                    idempotency_key=f"{idempotency_key}:submission-center",
                 )
-                sources.update(collected["sources"])
-                collected_trackers.update(collected["trackers"])
-            submission_browser = dict(collection.get("ezlynx_submission_browser") or {})
-            if mode == "weekly" and submission_browser.get("enabled"):
-                from .ezlynx_session_lock import exclusive_session
-                from .submission_audit import ensure_ezlynx_login, run_weekly_submission_read
-                with exclusive_session():
-                    ensure_ezlynx_login()
-                    observed_submissions = run_weekly_submission_read(fresh=True)
-                submission_path = output_dir / f"submission-center-{run_at:%Y%m%dT%H%M%SZ}.csv"
-                headers = [
-                    "Submission Title", "Submission URL", "Applicant", "Assigned Producer",
-                    "Status", "Quote Due Date", "Effective Date", "Overdue",
-                ]
-                with submission_path.open("w", encoding="utf-8", newline="") as handle:
-                    writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(observed_submissions["open_records"])
-                submission_evidence = output_dir / f"submission-center-evidence-{run_at:%Y%m%dT%H%M%SZ}.json"
-                submission_evidence.write_text(json.dumps({
-                    "collected_at": run_at.isoformat(),
-                    "read_only": True,
-                    "all_pages_inspected": True,
-                    "pages_inspected": observed_submissions.get("pages_inspected"),
-                    "rows_inspected": observed_submissions.get("rows_inspected"),
-                    "pager_total": observed_submissions.get("pager_total"),
-                    "open_records_deduplicated": observed_submissions.get("open_records_deduplicated"),
-                    "normalized_csv_sha256": _checksum(submission_path),
-                }, indent=2), encoding="utf-8")
-                sources["submissions"] = str(submission_path)
+                if not audit.succeeded:
+                    return WorkerResult(
+                        False,
+                        action,
+                        {},
+                        retryable=audit.retryable,
+                        error=f"Submission Center evidence unavailable: {audit.error}",
+                        hold_status=audit.hold_status,
+                    )
+                submission_snapshot = dict(audit.destination.get("expected_postcondition") or {})
+                submission_path = output_dir / f"submission-center-{run_at:%Y%m%dT%H%M%SZ}.json"
+                submission_path.write_text(
+                    json.dumps(submission_snapshot, indent=2, default=str),
+                    encoding="utf-8",
+                )
+                sources["submissions_json"] = str(submission_path)
+            magellan = dict(collection.get("magellan") or {})
+            if mode == "daily" and magellan.get("enabled"):
+                if report_date is None:
+                    raise RuntimeError("Magellan daily collection requires a resolved report date")
+                from .magellan_collection import collect_magellan_snapshot
+
+                magellan_path = output_dir / f"magellan-{report_date.isoformat()}-{run_at:%Y%m%dT%H%M%SZ}.json"
+                sources["magellan_json"] = str(
+                    collect_magellan_snapshot(
+                        target_date=report_date,
+                        output_path=magellan_path,
+                        cdp_url=str(magellan.get("cdp_url") or "http://127.0.0.1:9223"),
+                        project=str(magellan.get("project") or "streetsmart-hermes-poc"),
+                        max_pages=max(1, int(magellan.get("max_pages") or 40)),
+                    )
+                )
             for key, flag in SOURCE_FLAGS.items():
                 value = sources.get(key)
                 if value:
                     arguments.extend([flag, str(Path(str(value)).expanduser().resolve())])
             if mode in {"daily", "weekly"} and not sources.get("email_json"):
-                from .gmail_accountability import collect_agency_summary
+                from .gmail_accountability import (
+                    approved_mailboxes_from_role_registry,
+                    collect_agency_summary,
+                )
 
-                gmail_snapshot = collect_agency_summary(environment=os.environ)
+                gmail_config = dict(collection.get("gmail_accountability") or {})
+                approved_users = None
+                if gmail_config.get("enabled"):
+                    role_source = Path(str(sources.get("roles_json") or "")).expanduser()
+                    if not role_source.is_file():
+                        raise RuntimeError(
+                            "Gmail accountability requires a current approved active employee roster"
+                        )
+                    approved_users = approved_mailboxes_from_role_registry(
+                        _manifest(role_source),
+                        approved_domain=str(
+                            gmail_config.get("approved_domain") or "streetsmart.insurance"
+                        ),
+                    )
+                gmail_snapshot = collect_agency_summary(
+                    environment=os.environ,
+                    approved_users=approved_users,
+                )
                 gmail_path = output_dir / f"gmail-{run_at:%Y%m%dT%H%M%SZ}.json"
                 gmail_path.write_text(json.dumps(gmail_snapshot, indent=2, default=str), encoding="utf-8")
                 arguments.extend(["--email-json", str(gmail_path)])
             sales_untouched_days = (manifest.get("rules") or {}).get("sales_untouched_days")
             if sales_untouched_days is not None:
                 arguments.extend(["--sales-untouched-days", str(max(1, int(sales_untouched_days)))])
-            tracker_sources = dict(((manifest.get("sources") or {}).get("trackers") or {}))
-            tracker_sources.update(collected_trackers)
-            for key, value in sorted(tracker_sources.items()):
+            for key, value in sorted(dict(sources.get("trackers") or {}).items()):
                 arguments.extend(["--tracker", f"{key}={Path(str(value)).expanduser().resolve()}"])
             appsheet = dict(manifest.get("appsheet") or {})
             if mode == "weekly" and appsheet.get("enabled"):

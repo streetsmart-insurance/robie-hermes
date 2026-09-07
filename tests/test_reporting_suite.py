@@ -127,3 +127,53 @@ def test_daily_report_never_marks_missing_call_source_resolved():
     )
     assert "UNVERIFIED — RingCentral evidence is unavailable." in daily
     assert "All client voicemails and missed calls resolved!" not in daily
+
+
+def test_daily_report_shows_cross_channel_and_metadata_only_email_evidence():
+    suite = ReportingSuite()
+    daily = suite.build_daily_report(
+        {
+            "source_status": "available",
+            "unreturned_calls": [],
+            "service_reconciliation": [{
+                "caller_phone_masked": "***-***-0101", "status": "UNRESOLVED", "resolution": "UNRESOLVED",
+                "failed_destination": "Service Queue", "assigned_producer": "Producer A", "assigned_csr": "CSR A",
+                "resolved_by": None, "evidence_source": "RingCentral", "parent_call_id": "parent-1",
+            }],
+        },
+        {"source_status": "available", "overdue_by_rep": {}},
+        email_data={
+            "source_status": "available",
+            "by_employee": {"csr@example.com": {"awaiting_employee": 2, "stalled_threads": 1, "awaiting_customer": 3}},
+        },
+    )
+    assert "CROSS-CHANNEL SERVICE RESOLUTION" in daily
+    assert "EMAIL RESPONSE METADATA (NO MESSAGE CONTENT)" in daily
+    assert "csr@example.com" in daily
+
+
+def test_daily_report_lists_magellan_sad_calls_without_transcript_content():
+    suite = ReportingSuite()
+    daily = suite.build_daily_report(
+        {"source_status": "available", "unreturned_calls": []},
+        {"source_status": "available", "overdue_by_rep": {}},
+        magellan_data={
+            "source_status": "available",
+            "sad_calls": [{
+                "account_name": "Example Transfer Account",
+                "caller_phone_masked": "***-***-2984",
+                "occurred_at": "2:39 PM",
+                "tags": ["Policy Transfer", "Delay"],
+                "answered_by": "Diana / Kyoungnam",
+                "assigned_producer": "Ricardo",
+                "assigned_csr": "UNVERIFIED",
+                "callback_status": "Carrier policy number pending",
+                "transcript": "This private transcript must never appear in the digest.",
+            }],
+        },
+    )
+    assert "MAGELLAN SAD / AT-RISK CUSTOMER CALLS" in daily
+    assert "***-***-2984" in daily
+    assert "Policy Transfer, Delay" in daily
+    assert "producer: Ricardo" in daily
+    assert "private transcript" not in daily

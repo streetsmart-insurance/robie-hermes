@@ -13,6 +13,7 @@ def test_connection_check_is_redacted_and_requires_core_sources(tmp_path: Path):
     manifest.write_text(json.dumps({
         "output_dir": str(tmp_path / "reports"),
         "sources": {"ringcentral": str(ringcentral), "tasks": str(tasks), "trackers": {}},
+        "collection": {"ezlynx_submission_center": {"enabled": True}},
         "appsheet": {"enabled": True},
     }), encoding="utf-8")
     environment = {
@@ -24,6 +25,7 @@ def test_connection_check_is_redacted_and_requires_core_sources(tmp_path: Path):
     result = check_connections(str(manifest), environment=environment)
     assert result["ready"]
     assert result["connections"]["appsheet"]["ready"]
+    assert result["connections"]["ezlynx"]["submission_center_live_read_configured"]
     assert "do-not-print-this" not in json.dumps(result)
 
 

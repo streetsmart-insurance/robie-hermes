@@ -11,7 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
@@ -32,7 +32,11 @@ _WEEKLY_CLOSED_SUBMISSION_STATUSES = {"closed - not sold", "closed - bound"}
 _CLOSED_SALES_STATUSES = {
     "bound",
     "closed",
+    "dead",
     "lost",
+    "won",
+    "sold",
+    "finalized",
     "declined",
     "withdrawn",
     "cancelled",
@@ -218,12 +222,16 @@ class SubmissionException:
 class SalesRecord:
     record_id: str
     opportunity_id: str
+    applicant_id: str
     account_name: str
     producer: str
+    lead_source: str
+    department: str
     stage: str
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
     last_note: str
+    last_touch_evidence: str
     source_row_number: int
 
 
@@ -231,9 +239,15 @@ class SalesRecord:
 class SalesException:
     record_id: str
     opportunity_id: str
+    applicant_id: str
     account_name: str
     producer: str
+    lead_source: str
+    department: str
     stage: str
+    opportunity_created_date: Optional[str]
+    last_touch_date: Optional[str]
+    last_touch_evidence: str
     age_days: Optional[int]
     days_since_touch: Optional[int]
     severity: str
@@ -291,6 +305,8 @@ def audit_retention_records(
         )
         reasons: list[str] = []
         if record.last_activity_at is None:
+            if age_days is not None and age_days <= untouched_days:
+                continue
             reasons.append("no last-touch timestamp in export")
         elif days_since_touch is not None and days_since_touch > untouched_days:
             reasons.append(f"no recorded touch for {days_since_touch} days")
@@ -491,8 +507,17 @@ def parse_sales_csv(source: Path | str) -> list[SalesRecord]:
     records: list[SalesRecord] = []
     for row_number, row in enumerate(_read_csv_rows(source), start=2):
         opportunity_id = _row_value(row, "Opportunity ID", "Sales ID", "Quote ID", "ID")
+        applicant_id = _row_value(row, "Applicant ID", "Account ID", "Customer ID")
         account_name = _row_value(row, "Account Name", "Applicant Name", "Customer Name", "Insured")
-        producer = _row_value(row, "Producer", "Owner", "Assigned To", "Sales Rep", "Agent") or "Unassigned"
+        # Sales Center assignment is intentionally authoritative.  Do not silently
+        # substitute the producer stored on the customer account.
+        producer = _row_value(row, "Assigned Producer", "Sales Center Assigned Producer") or "Unassigned"
+        if producer == "Unassigned" and not _row_value(row, "Assigned Producer", "Sales Center Assigned Producer"):
+            # Compatibility for older exports that genuinely label this field
+            # Producer, while keeping the source limitation explicit in evidence.
+            producer = _row_value(row, "Producer", "Owner", "Assigned To", "Sales Rep", "Agent") or "Unassigned"
+        lead_source = _row_value(row, "Lead Source", "Lead Channel", "Source") or "UNVERIFIED"
+        department = _row_value(row, "Department") or "UNVERIFIED"
         stage = _row_value(row, "Stage", "Pipeline Stage", "Opportunity Status", "Status") or "Unknown"
         created_at = parse_datetime(_row_value(row, "Created Date", "Created At", "Opportunity Created Date", "Date Created"))
         last_activity_at = parse_datetime(
@@ -504,16 +529,63 @@ def parse_sales_csv(source: Path | str) -> list[SalesRecord]:
             SalesRecord(
                 record_id=record_id,
                 opportunity_id=opportunity_id,
+                applicant_id=applicant_id,
                 account_name=account_name or "Unknown account",
                 producer=producer,
+                lead_source=lead_source,
+                department=department,
                 stage=stage,
                 created_at=created_at,
                 last_activity_at=last_activity_at,
                 last_note=last_note,
+                last_touch_evidence=("sales export" if last_activity_at else "UNVERIFIED"),
                 source_row_number=row_number,
             )
         )
     return records
+
+
+def enrich_sales_last_touches(
+    records: Iterable[SalesRecord],
+    activity_source: Path | str,
+    *,
+    window_days: int = 7,
+) -> list[SalesRecord]:
+    """Join Sales Center rows to the newest Activity Detail event by Applicant ID.
+
+    A missing match proves only that no activity was present in the supplied
+    validation window.  It does not invent an exact last-touch date.
+    """
+
+    newest: dict[str, tuple[datetime, str]] = {}
+    for row in _read_csv_rows(activity_source):
+        applicant_id = _row_value(row, "Applicant ID", "Account ID", "Customer ID")
+        created = parse_datetime(_row_value(row, "Created Date", "Activity Created Date", "Note Created Date"))
+        if not applicant_id or created is None:
+            continue
+        note = _row_value(row, "Note", "Comment", "Description")
+        prior = newest.get(applicant_id)
+        if prior is None or created > prior[0]:
+            newest[applicant_id] = (created, note)
+
+    enriched: list[SalesRecord] = []
+    for record in records:
+        match = newest.get(record.applicant_id)
+        if match:
+            enriched.append(replace(
+                record,
+                last_activity_at=match[0],
+                last_note=match[1] or record.last_note,
+                last_touch_evidence=f"Activity Detail exact match by Applicant ID ({window_days}-day window)",
+            ))
+        elif record.last_activity_at:
+            enriched.append(record)
+        else:
+            enriched.append(replace(
+                record,
+                last_touch_evidence=f"no Activity Detail match in {window_days}-day validation window; exact last touch UNVERIFIED",
+            ))
+    return enriched
 
 
 def audit_sales_records(
@@ -559,9 +631,15 @@ def audit_sales_records(
             SalesException(
                 record_id=record.record_id,
                 opportunity_id=record.opportunity_id,
+                applicant_id=record.applicant_id,
                 account_name=record.account_name,
                 producer=record.producer,
+                lead_source=record.lead_source,
+                department=record.department,
                 stage=record.stage,
+                opportunity_created_date=record.created_at.date().isoformat() if record.created_at else None,
+                last_touch_date=record.last_activity_at.date().isoformat() if record.last_activity_at else None,
+                last_touch_evidence=record.last_touch_evidence,
                 age_days=age_days,
                 days_since_touch=days_since_touch,
                 severity=severity,

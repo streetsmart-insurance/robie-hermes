@@ -13,7 +13,7 @@ from .operations import OperationsStore
 
 
 DEFAULT_SCHEDULES = (
-    ("StreetSmart daily accountability report", "accountability.daily", "0 17 * * 1-5"),
+    ("StreetSmart previous-business-day accountability report", "accountability.daily", "25 6 * * 1-5"),
     ("StreetSmart weekly accountability report", "accountability.weekly", "15 17 * * 5"),
     ("StreetSmart monthly accountability report", "accountability.monthly", "0 8 1 * *"),
 )
@@ -42,6 +42,8 @@ def install_accountability_schedules(
             "manifest_path": str(manifest),
             "read_only": True,
         }
+        if action_type == "accountability.daily":
+            payload["reporting_period"] = "previous_business_day"
         expected_next = next_cron_time(cron_spec, timezone_name, now=now)
         item = ops.ensure_recurring_job(
             task_name,
