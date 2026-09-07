@@ -2,7 +2,7 @@
 Description=Run yesterday's StreetSmart accountability report every weekday
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 06:25:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 09:00:00 America/New_York
 Persistent=true
 AccuracySec=1s
 RandomizedDelaySec=0

@@ -5,7 +5,7 @@ Target: `streetsmart-accountability-prod`, project `streetsmart-hermes-poc`, zon
 
 ## Verified state
 
-- The current Production `ubuntu` crontab runs the accountability launcher at 9:00 AM Eastern, Monday through Friday. This candidate changes the verified recurring schedule to 6:25 AM Eastern; Production remains unchanged until immutable promotion.
+- The current Production `ubuntu` crontab runs the accountability launcher at 9:00 AM Eastern, Monday through Friday. The reviewed candidate preserves that required 9:00 AM Eastern schedule; Production remains unchanged until immutable promotion.
 - The reporting date is the previous business day; Monday resolves to Friday.
 - The server's persistent EZLynx Chrome service is enabled and active.
 - The read-only live Submission Center adapter is present. It preserves the approved agency scope, 100-row page size, Status ordering, first-closed-row boundary, live red-overdue test, day-31 rule, direct links, and count reconciliation.
@@ -22,11 +22,11 @@ Target: `streetsmart-accountability-prod`, project `streetsmart-hermes-poc`, zon
    - `https://www.googleapis.com/auth/spreadsheets.readonly`
    Live read-only checks from the server returned `unauthorized_client` for both.
 3. Magellan's normal Carlos account login was verified, its password was rotated, and `magellan-username` plus `magellan-password` now exist in Secret Manager. The candidate branch adds a separate port-9223 persistent browser and a read-only prior-business-day collector. It still requires Test verification and exact-digest Production promotion; do not copy cookies or credentials into Git.
-4. In EZLynx Reports 5.0, create or correct four weekday CSV/XLSX subscriptions to the Robie reporting mailbox early enough to arrive before 6:25 AM: Activities, overdue Tasks, Sales Center, and Policy Changes. Submission Center remains live-browser evidence because no scheduled report exists.
+4. In EZLynx Reports 5.0, create or correct four weekday CSV/XLSX subscriptions to the Robie reporting mailbox early enough to arrive before 9:00 AM: Activities, overdue Tasks, Sales Center, and Policy Changes. Submission Center remains live-browser evidence because no scheduled report exists.
 
 ## Release path for the remaining code
 
-Do not patch the live VM directly. Use the accountability feature branch, run the repository checks, build one immutable archive, deploy it to Test, verify the target-date and missing-source failure cases, obtain Carlo's approval for that exact digest, and promote the same digest to `streetsmart-accountability-prod`. After promotion, reconcile the live schedule as `25 6 * * 1-5` in `America/New_York`, confirm the first run targets the prior business day, and record the rollback pointer and post-promotion evidence.
+Do not patch the live VM directly. Use the accountability feature branch, run the repository checks, build one immutable archive, deploy it to Test, verify the target-date and missing-source failure cases, obtain Carlo's approval for that exact digest, and promote the same digest to `streetsmart-accountability-prod`. After promotion, reconcile the live schedule as `0 9 * * 1-5` in `America/New_York`, confirm the first run targets the prior business day, and record the rollback pointer and post-promotion evidence.
 
 ## Magellan credential and candidate evidence
 
@@ -41,7 +41,7 @@ Do not patch the live VM directly. Use the accountability feature branch, run th
 
 - `streetsmart-accountability-prod` is the dedicated accountability VM. It currently runs the standalone `/opt/streetsmart-daily-accountability` application from the `ubuntu` crontab at 9:00 AM Eastern.
 - `hermes-poc-01` is the general Hermes Production VM targeted by the existing repository Production installer. They are different instances. Never use the `hermes-poc-01` installer as proof that the dedicated accountability VM changed.
-- The dedicated VM runner currently contains a one-date Labor Day skip for 2026-09-07. That live file and its 9:00 AM crontab remain unchanged until a reviewed, Test-verified, dedicated accountability release path is promoted. Therefore the requested 6:25 AM September 7 run is not yet installed.
+- The dedicated VM runner currently contains a one-date Labor Day skip for 2026-09-07. That live file and its 9:00 AM crontab remain unchanged until a reviewed, Test-verified, dedicated accountability release path is promoted.
 
 ## Acceptance proof
 

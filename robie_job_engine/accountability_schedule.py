@@ -13,7 +13,7 @@ from .operations import OperationsStore
 
 
 DEFAULT_SCHEDULES = (
-    ("StreetSmart previous-business-day accountability report", "accountability.daily", "25 6 * * 1-5"),
+    ("StreetSmart previous-business-day accountability report", "accountability.daily", "0 9 * * 1-5"),
     ("StreetSmart weekly accountability report", "accountability.weekly", "15 17 * * 5"),
     ("StreetSmart monthly accountability report", "accountability.monthly", "0 8 1 * *"),
 )
