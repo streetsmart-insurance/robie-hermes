@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -851,10 +852,10 @@ class AscendEZLynxSyncManager:
             is_reinstatement = bool(inv.get("is_reinstatement", False))
 
             memo = inv.get("memo") or ""
-            policy_num = None
-            if memo:
+            policy_num = inv.get("policy_number")
+            if not policy_num and memo:
                 parts = memo.split()
-                if parts and parts[0].isalnum():
+                if parts and re.match(r"^[A-Za-z0-9\-_]+$", parts[0]):
                     policy_num = parts[0]
 
             if not is_reinstatement and status in ("paid", "processing_payment") and policy_num:

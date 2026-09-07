@@ -64,8 +64,15 @@ class QuickBooksConfig:
                 is_production=os.environ.get("QUICKBOOKS_ENV", "production").lower() == "production",
             )
 
-        # 2. Secret Manager
-        sec_accessor = accessor or GoogleSecretManagerAccessor()
+        # 2. Secret Manager (only in live runtime when not in TEST mode)
+        if os.environ.get("ROBIE_ENV") == "TEST" or os.environ.get("PYTEST_CURRENT_TEST"):
+            return None
+
+        try:
+            sec_accessor = accessor or GoogleSecretManagerAccessor()
+        except Exception:
+            return None
+
         proj = project_id or os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or "streetsmart-hermes-poc"
 
         def _get_sec(name: str) -> str:

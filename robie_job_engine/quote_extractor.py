@@ -17,7 +17,14 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from pathlib import Path
-from typing import Any, Optional
+def _format_iso_date(raw_date: str) -> str:
+    cleaned = raw_date.strip().replace("-", "/")
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(cleaned, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return raw_date
 
 
 COVERAGE_MAP = {
@@ -533,11 +540,17 @@ class EndorsementExtractor:
         
         # 1. Policy Number
         pol_m = re.search(
-            r"(?:policy\s*(?:#|number|no\.?|num)?\s*[:#\-]?\s*)([A-Z0-9\-\/]{4,24})",
+            r"(?:policy\s*(?:#|number|no\.?|num)\s*[:#\-]?\s*)([A-Z0-9\-\/]{4,24})",
             text,
             re.IGNORECASE,
         )
-        if pol_m:
+        if not pol_m:
+            pol_m = re.search(
+                r"(?:policy\s*[:#\-]\s*)([A-Z0-9\-\/]{4,24})",
+                text,
+                re.IGNORECASE,
+            )
+        if pol_m and pol_m.group(1).upper() not in ("ENDORSEMENT", "CHANGE", "REQUEST", "PERIOD", "SCHEDULE"):
             endorsement.policy_number = pol_m.group(1).strip()
 
         # 2. Insured Name

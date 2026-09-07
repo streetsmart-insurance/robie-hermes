@@ -211,7 +211,7 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
         # Verify task created for cancellation assigned to Zeus Quezada (CSR/Lead)
         self.mock_poster.create_task.assert_called_once_with(
             applicant_id="app-garden-state",
-            title="🚨 CANCELLATION NOTICE: NPP6269395 - Western World Insurance Company - Due: 2026-07-30",
+            title="🚨 CSR ACTION REQUIRED: Cancellation Notice - NPP6269395 - Western World Insurance Company - Due: 2026-07-30",
             description=unittest.mock.ANY,
             assigned_user="Zeus Quezada",
             due_days_out=0,
