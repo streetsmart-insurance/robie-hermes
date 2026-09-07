@@ -1194,6 +1194,7 @@ class ManualPolicyRenewer:
             DoneChecklistEvidence,
             evaluate_done_checklist,
             manual_lob_renewal_title,
+            peek_pdf_text,
             renewal_update_lob_title,
         )
 
@@ -1207,12 +1208,18 @@ class ManualPolicyRenewer:
         except ValueError:
             pass
 
+        pdf_text = ""
+        peek_path = result.firmed_quote_path or spec.upload_path
+        if peek_path:
+            pdf_text = peek_pdf_text(peek_path, limit=8000, pages=3)
+
         evidence = DoneChecklistEvidence(
             firmed_pdf_uploaded=bool(result.document_uploaded),
             firmed_pdf_label=result.document_label,
             firmed_pdf_folder=result.document_folder,
             firmed_pdf_kind=result.document_kind,
             firmed_pdf_name=result.document_name,
+            firmed_pdf_text=pdf_text or None,
             pdf_premium=spec.pdf_extracted_premium,
             keyed_premium=spec.premium if spec.premium is not None else spec.full_term_premium,
             pending_rwl_count=len(result.pending_shells or []),

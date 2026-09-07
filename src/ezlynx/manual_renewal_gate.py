@@ -324,7 +324,7 @@ def is_application_or_bound_quote_document(
     }
 
 
-def peek_pdf_text(path: Optional[Any], *, limit: int = 4000) -> str:
+def peek_pdf_text(path: Optional[Any], *, limit: int = 4000, pages: int = 2) -> str:
     """Best-effort first-page text for classification. Never invents content."""
     if path is None:
         return ""
@@ -339,7 +339,7 @@ def peek_pdf_text(path: Optional[Any], *, limit: int = 4000) -> str:
 
         reader = PdfReader(str(pdf_path))
         chunks: List[str] = []
-        for page in reader.pages[:2]:
+        for page in reader.pages[: max(1, pages)]:
             chunks.append(page.extract_text() or "")
         return " ".join(chunks)[:limit]
     except Exception:
@@ -635,6 +635,32 @@ def _premiums_match(left: Any, right: Any) -> bool:
     return premiums_match(left, right)
 
 
+def _fmt_premium(value: Any) -> str:
+    from src.ezlynx.policy_renewer import parse_money
+
+    parsed = parse_money(value)
+    if parsed is None:
+        return "missing"
+    return f"${parsed:,.2f}"
+
+
+def _policy_total_from_evidence(evidence: "DoneChecklistEvidence") -> Any:
+    """Authoritative COMPLETE premium is Policy Total from the PDF text.
+
+    Re-parse ``firmed_pdf_text`` so a Coverage A extract stored as
+    ``pdf_premium`` cannot COMPLETE when the same page has a higher
+    Policy Total (Benli HONJ2025100027-26 / $1,116 vs $1,348).
+    """
+    text = (evidence.firmed_pdf_text or "").strip()
+    if text:
+        from src.extractor.quote_parser import extract_policy_total_premium
+
+        from_text = extract_policy_total_premium(text)
+        if from_text is not None:
+            return from_text
+    return evidence.pdf_premium
+
+
 @dataclass
 class DoneChecklistEvidence:
     firmed_pdf_uploaded: bool = False
@@ -716,9 +742,15 @@ def evaluate_done_checklist(evidence: DoneChecklistEvidence) -> DoneChecklistRes
             "HITL for a true offer, declaration, or firmed renewal quote"
         )
 
-    if not _premiums_match(evidence.pdf_premium, evidence.keyed_premium):
+    policy_total = _policy_total_from_evidence(evidence)
+    if not _premiums_match(policy_total, evidence.keyed_premium):
         missing.append("premium_match")
-        reasons.append("PDF/extract premium must match keyed shell premium")
+        reasons.append(
+            "keyed RWL premium "
+            f"{_fmt_premium(evidence.keyed_premium)} does not match "
+            f"PDF Policy Total {_fmt_premium(policy_total)} "
+            "(use Policy Total / Total Annual / Grand Total, not Coverage A)"
+        )
 
     if evidence.pending_rwl_count != 1:
         missing.append("exactly_one_pending_rwl")

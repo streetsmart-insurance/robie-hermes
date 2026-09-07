@@ -334,7 +334,11 @@ def fetch_firmed_quote_pdf(
 
 
 def extract_premium_from_pdf(path: Path) -> Optional[Decimal]:
-    """Parse renewal premium from an authentic PDF. Returns None — never invents."""
+    """Parse Policy Total premium from an authentic PDF. Returns None — never invents.
+
+    Prefers Policy Total / Total Annual / Grand Total over a Coverage A /
+    Dwelling (or other single coverage-line) annual premium.
+    """
     if not is_authentic_pdf_file(path):
         return None
     from src.extractor.quote_parser import QuoteDocumentParser
