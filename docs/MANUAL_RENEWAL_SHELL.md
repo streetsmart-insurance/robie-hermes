@@ -16,7 +16,9 @@ Production is **never** the first test. Prove the job on **hermes-test-01** (`--
 
 ## One command (one CDP session)
 
-On the VM, with Chrome already on CDP (`9222`):
+On the VM, with Chrome already on CDP (`9222`) **and SSRobie already logged into an EZLynx dashboard tab**:
+
+**SSRobie CDP session:** If the live tab on `:9222` is EZLynx Login / `auth/account/login` / forcedOff, the job **BLOCKED**s immediately (HITL + proof JSON). Cookie `storage_state` and Classic API “connected/active” are **not** proof. A human must re-login SSRobie on hermes CDP `:9222`. **Bots must not password-reset.** One live-page check, then stop — no attach-retry loop.
 
 ```bash
 PYTHONPATH=. .venv/bin/python3 scripts/run_manual_renewal.py \

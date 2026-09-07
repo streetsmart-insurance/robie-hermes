@@ -179,7 +179,7 @@ PYTHONPATH=. python3 scripts/run_manual_renewal.py --env test --dry-run \
 PYTHONPATH=. python3 -m src.ezlynx.policy_renewer --help
 ```
 
-Guards: UI History pending-RWL proof (Classic API is insufficient), same term+premium dedupe, `#RenewPolicyBtn` only, Writing Company required, exact titled discussion, skip stubs &lt;10KB and skip docs/notes when `already_in`, Carlo Ferrara never Robie, no bind. Operator notes: `docs/MANUAL_RENEWAL_SHELL.md`. Tests: `pytest tests/test_policy_renewer.py -v`.
+Guards: **live CDP page preflight** (Login / `auth/account/login` / forcedOff → HITL `blocked` immediately; `storage_state` and Classic API are not proof — human re-logins SSRobie on hermes CDP `:9222`; bots must not password-reset), UI History pending-RWL proof (Classic API is insufficient), same term+premium dedupe, `#RenewPolicyBtn` only, Writing Company required, exact titled discussion, skip stubs &lt;10KB and skip docs/notes when `already_in`, Carlo Ferrara never Robie, no bind. Operator notes: `docs/MANUAL_RENEWAL_SHELL.md`. Tests: `pytest tests/test_cdp_session_preflight.py tests/test_policy_renewer.py -v`.
 
 The daily pipeline (`--run-today`) and Robie inbox cleaner also invoke this path so cadence and cleanup stay in sync. Production cron on hermes-poc-01 is unchanged:
 

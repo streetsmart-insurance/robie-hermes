@@ -4,6 +4,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from playwright.async_api import async_playwright
 
+from src.ezlynx.cdp_session_preflight import (
+    CdpSessionBlocked,
+    HITL_RELOGIN_MESSAGE,
+    preflight_live_cdp_session,
+)
+
 logger = logging.getLogger("ezlynx_document_uploader")
 
 FOLDER_ROUTING = {
@@ -100,7 +106,7 @@ class EZLynxDocumentUploader:
             browser = None
             is_standalone = False
             try:
-                # 1. Use EZLynxSessionManager to get authenticated context (auto-handles login/2FA)
+                # 1. Use EZLynxSessionManager (CDP live-page preflight; no bot password-reset)
                 try:
                     from src.ezlynx.session_manager import EZLynxSessionManager
                     mgr = EZLynxSessionManager(
@@ -109,6 +115,13 @@ class EZLynxDocumentUploader:
                     )
                     browser, context = await mgr.get_authenticated_context(p, headless=True)
                     is_standalone = True
+                except CdpSessionBlocked as blocked:
+                    return {
+                        "success": False,
+                        "status": "blocked",
+                        "error": str(blocked),
+                        "preflight": blocked.preflight.to_dict(),
+                    }
                 except Exception as sess_err:
                     logger.warning(f"EZLynxSessionManager error: {sess_err}, trying direct storage_state or CDP fallback...")
                     if self.storage_state_path and Path(self.storage_state_path).is_file():
@@ -123,7 +136,21 @@ class EZLynxDocumentUploader:
                         is_standalone = True
                     elif self.cdp_url:
                         browser = await p.chromium.connect_over_cdp(self.cdp_url)
-                        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                        context = browser.contexts[0] if browser.contexts else None
+                        if context is None:
+                            return {
+                                "success": False,
+                                "status": "blocked",
+                                "error": HITL_RELOGIN_MESSAGE,
+                            }
+                        preflight = await preflight_live_cdp_session(context)
+                        if not preflight.ok:
+                            return {
+                                "success": False,
+                                "status": "blocked",
+                                "error": preflight.error_message,
+                                "preflight": preflight.to_dict(),
+                            }
 
                 if not browser or not context:
                     return {"success": False, "error": "Neither EZLynxSessionManager nor CDP connection could be established."}
@@ -135,14 +162,14 @@ class EZLynxDocumentUploader:
                 await page.goto(docs_url, wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(4)
 
-                # If redirected to login, re-authenticate on the spot
-                if "auth/account/login" in page.url.lower():
-                    logger.warning(f"Redirected to login while accessing {docs_url}. Performing in-line login...")
-                    from src.ezlynx.session_manager import EZLynxSessionManager
-                    mgr = EZLynxSessionManager(storage_state_path=self.storage_state_path)
-                    await mgr._perform_login(context)
-                    await page.goto(docs_url, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(4)
+                # Live Login wall: fail closed. Human re-logins SSRobie; bots must not password-reset.
+                if "auth/account/login" in page.url.lower() or "forcedoff" in page.url.lower():
+                    logger.error("Redirected to EZLynx Login/forcedOff. %s", HITL_RELOGIN_MESSAGE)
+                    return {
+                        "success": False,
+                        "status": "blocked",
+                        "error": HITL_RELOGIN_MESSAGE,
+                    }
 
                 # Optional: Navigate into target folder if it exists on page
                 for folder_candidate in candidate_folders:

@@ -116,7 +116,7 @@ On September 03, 2026, 4 active accounts (5 policies) totaling **$93,490.19** in
 - **Underwriter Reply Filer**: `src/email_outreach/uw_reply_filer.py`  
   Polls **robie@ + hello@ only**, matches `[RENEWAL-REQ-###]` / policy number, threads onto the existing titled renewal card via `find_matching_discussion`, and alerts the assigned CSR + Carlo. Never creates orphan/untitled discussions. Hooked from cadence, the inbox cleaner (additive), and `python -m src.email_outreach.uw_reply_filer`.
 - **Manual Renewal Shell Keyer**: `src/ezlynx/policy_renewer.py` + `scripts/run_manual_renewal.py`  
-  One connected CDP job (upload → exact titled note → `#RenewPolicyBtn` → proof JSON). UI History pending-RWL proof (Classic API is insufficient). Operator notes: `docs/MANUAL_RENEWAL_SHELL.md`. Verify on hermes-test-01 before Production.
+  One connected CDP job (upload → exact titled note → `#RenewPolicyBtn` → proof JSON). Live CDP page preflight (Login/forcedOff → HITL blocked; human re-logins SSRobie on `:9222`; bots must not password-reset). UI History pending-RWL proof (Classic API is insufficient). Operator notes: `docs/MANUAL_RENEWAL_SHELL.md`. Verify on hermes-test-01 before Production.
 - **Skills Directory**: `.agents/skills/manual-renewals/SKILL.md`  
   The native Antigravity skill governing manual renewal execution.
 

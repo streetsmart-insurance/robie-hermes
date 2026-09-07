@@ -16,6 +16,11 @@ from typing import Optional, Dict, Any, List
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from src.config import settings, BASE_DIR
+from src.ezlynx.cdp_session_preflight import (
+    CdpSessionBlocked,
+    LiveCdpPreflightResult,
+    preflight_live_cdp_session,
+)
 from src.security.secrets_manager import secrets_mgr
 from src.security.email_2fa_handler import email_2fa_resolver
 
@@ -78,15 +83,30 @@ class EZLynxSessionManager:
         Returns an authenticated Playwright Browser and BrowserContext.
         Uses existing storage state if valid, or logs in headlessly if expired.
         """
-        # Option 1: Connect to existing Chrome over CDP if explicitly running
+        # Option 1: Connect to existing Chrome over CDP if explicitly running.
+        # Live page is the gate — storage_state / Classic API are not proof.
+        # Login / forcedOff fails closed. Do not fall through to password login.
         if self.cdp_url:
             try:
                 logger.info(f"Connecting to existing Chrome instance over CDP at {self.cdp_url}...")
                 browser = await playwright_instance.chromium.connect_over_cdp(self.cdp_url)
+                if not browser.contexts:
+                    raise CdpSessionBlocked(
+                        LiveCdpPreflightResult(
+                            ok=False,
+                            status="blocked",
+                            reason="no_live_ezlynx_page",
+                            signals=["no_browser_context"],
+                        )
+                    )
                 ctx = browser.contexts[0]
-                if await self._is_context_authenticated(ctx):
-                    logger.info("CDP Chrome session is authenticated with EZLynx.")
+                preflight = await preflight_live_cdp_session(ctx)
+                if preflight.ok:
+                    logger.info("CDP live page is an authed EZLynx dashboard.")
                     return browser, ctx
+                raise CdpSessionBlocked(preflight)
+            except CdpSessionBlocked:
+                raise
             except Exception as e:
                 logger.debug(f"CDP connection to {self.cdp_url} unavailable ({e}), falling back to standalone...")
 

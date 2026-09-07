@@ -6,6 +6,7 @@ only — do not chain SSH/SCP micro-scripts per step.
 
 One connected CDP session, one Python job:
 
+    live CDP page preflight (Login/forcedOff → HITL blocked; no retry) →
     optional authentic PDF upload → exact titled discussion note →
     ``#RenewPolicyBtn`` shell (never Renew & Edit) → proof JSON
 
@@ -54,6 +55,12 @@ from src.ezlynx.api_client import (
     DISQUALIFIED_DISCUSSION_PATTERNS,
     EZLynxApiClient,
     ROBIE_SIGNATURE,
+)
+from src.ezlynx.cdp_session_preflight import (
+    CdpSessionBlocked,
+    LiveCdpPreflightResult,
+    assert_live_cdp_authed,
+    preflight_live_cdp_session,
 )
 
 logger = logging.getLogger("policy_renewer")
@@ -207,6 +214,7 @@ class RenewalJobResult:
     env: str = "test"
     error: Optional[str] = None
     planned_actions: List[str] = field(default_factory=list)
+    preflight: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -807,7 +815,11 @@ async ({ applicantId, policyId }) => {
 
 
 class ConnectedCdpSession:
-    """One Playwright CDP attach for the whole manual-renewal job."""
+    """One Playwright CDP attach for the whole manual-renewal job.
+
+    Live-page preflight runs exactly once after connect. Login / forcedOff /
+    non-dashboard tabs fail closed — no attach retry, no new-tab navigation.
+    """
 
     def __init__(self, cdp_url: Optional[str] = None):
         self.cdp_url = cdp_url or settings.ezlynx_cdp_endpoint or "http://localhost:9222"
@@ -816,23 +828,49 @@ class ConnectedCdpSession:
         self.context = None
         self.page = None
         self._created_page = False
+        self.preflight: Optional[LiveCdpPreflightResult] = None
+        self._preflight_checks = 0
 
     async def __aenter__(self) -> "ConnectedCdpSession":
         from playwright.async_api import async_playwright
+
+        if self._preflight_checks >= 1:
+            raise CdpSessionBlocked(
+                LiveCdpPreflightResult(
+                    ok=False,
+                    status="blocked",
+                    reason="preflight_retry_refused",
+                    signals=["retry_refused"],
+                    checks_run=self._preflight_checks,
+                )
+            )
 
         self._playwright = await async_playwright().start()
         self.browser = await self._playwright.chromium.connect_over_cdp(self.cdp_url)
         if not self.browser.contexts:
             raise RenewalGuardError(f"CDP at {self.cdp_url} has no browser context")
         self.context = self.browser.contexts[0]
-        for pg in self.context.pages:
-            if "ezlynx.com" in (pg.url or ""):
-                self.page = pg
-                break
-        if not self.page:
-            self.page = await self.context.new_page()
-            self._created_page = True
-        logger.info("Connected to EZLynx Chrome over CDP at %s", self.cdp_url)
+        self._preflight_checks += 1
+        self.preflight = await preflight_live_cdp_session(self.context)
+        assert_live_cdp_authed(self.preflight)
+        self.page = self.preflight.page
+        if self.page is None:
+            for pg in self.context.pages:
+                if "ezlynx.com" in (pg.url or "") and "login" not in (pg.url or "").lower():
+                    self.page = pg
+                    break
+        if self.page is None:
+            raise CdpSessionBlocked(
+                LiveCdpPreflightResult(
+                    ok=False,
+                    status="blocked",
+                    reason="no_live_ezlynx_page",
+                    signals=["no_authed_page_after_preflight"],
+                    storage_state_active=self.preflight.storage_state_active,
+                    classic_api_active=self.preflight.classic_api_active,
+                )
+            )
+        logger.info("Connected to EZLynx Chrome over CDP at %s (live %s)", self.cdp_url, self.preflight.url)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -888,6 +926,8 @@ class ManualPolicyRenewer:
             async with ConnectedCdpSession(spec.cdp_url) as session:
                 page = session.page
                 assert page is not None
+                if session.preflight is not None:
+                    result.preflight = session.preflight.to_dict()
                 shells, sources = await self.verify_pending_shells_via_ui(
                     page, spec.applicant_id, spec.policy_id
                 )
@@ -954,6 +994,12 @@ class ManualPolicyRenewer:
 
                 await self._key_renewal_shell(page, spec, result)
                 return self._finalize(spec, result)
+        except CdpSessionBlocked as exc:
+            result.status = "blocked"
+            result.error = str(exc)
+            result.proof_source = "live_cdp_preflight"
+            result.preflight = exc.preflight.to_dict()
+            return self._finalize(spec, result)
         except LiveKeyingBlocked as exc:
             result.status = "blocked"
             result.error = str(exc)
@@ -970,6 +1016,7 @@ class ManualPolicyRenewer:
 
     def _plan_actions(self, spec: RenewalJobSpec) -> List[str]:
         actions = [
+            "Live CDP preflight: inspect the open Chrome page (not storage_state / Classic API)",
             "Verify pending RWL via policy-summary History / in-page PolicyAPI (not Classic alone)",
             "Dedupe: stop if pending RWL exists for same term+premium",
         ]

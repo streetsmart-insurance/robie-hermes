@@ -6,6 +6,8 @@ import logging
 from typing import Optional, Dict, Any
 from playwright.async_api import async_playwright, Page
 
+from src.ezlynx.cdp_session_preflight import CdpSessionBlocked, preflight_live_cdp_session
+
 logger = logging.getLogger(__name__)
 
 class EZLynxDiscussionPoster:
@@ -35,16 +37,36 @@ class EZLynxDiscussionPoster:
                 try:
                     browser = await p.chromium.connect_over_cdp(self.cdp_url)
                     ctx = browser.contexts[0]
+                    preflight = await preflight_live_cdp_session(ctx)
+                    if not preflight.ok:
+                        raise CdpSessionBlocked(preflight)
+                except CdpSessionBlocked as blocked:
+                    logger.error("%s", blocked)
+                    return {
+                        "success": False,
+                        "status": "blocked",
+                        "error": str(blocked),
+                        "preflight": blocked.preflight.to_dict(),
+                    }
                 except Exception as cdp_err:
                     logger.info(f"CDP connection ({self.cdp_url}) unavailable ({cdp_err}). Using EZLynxSessionManager...")
                     from src.ezlynx.session_manager import EZLynxSessionManager
                     mgr = EZLynxSessionManager()
-                    browser, ctx = await mgr.get_authenticated_context(p, headless=True)
+                    try:
+                        browser, ctx = await mgr.get_authenticated_context(p, headless=True)
+                    except CdpSessionBlocked as blocked:
+                        logger.error("%s", blocked)
+                        return {
+                            "success": False,
+                            "status": "blocked",
+                            "error": str(blocked),
+                            "preflight": blocked.preflight.to_dict(),
+                        }
                 
-                # Re-use existing EZLynx tab or create new
+                # Re-use the preflight-approved EZLynx tab or create new
                 page = None
                 for pg in ctx.pages:
-                    if "ezlynx.com" in pg.url:
+                    if "ezlynx.com" in pg.url and "login" not in (pg.url or "").lower():
                         page = pg
                         break
                 if not page:
@@ -58,7 +80,7 @@ class EZLynxDiscussionPoster:
                 # Check if session is logged in
                 if "login" in page.url.lower():
                     logger.error("EZLynx session is at login page.")
-                    return {"success": False, "error": "Not authenticated with EZLynx"}
+                    return {"success": False, "status": "blocked", "error": "Not authenticated with EZLynx"}
 
                 # Click Add to Discussion on the target card
                 logger.info(f"Locating discussion matching '{discussion_search_text}'...")
