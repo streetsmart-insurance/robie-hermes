@@ -27,6 +27,15 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("hermes-poc-01", text)
         self.assertNotIn("systemctl restart hermes-gateway", text)
 
+    def test_iap_transport_uses_one_ephemeral_key_with_bounded_retries(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("SSH_KEY: /tmp/hermes-test-deploy", text)
+        self.assertIn("ssh-keygen -q -t rsa -b 3072 -N ''", text)
+        self.assertIn("for attempt in 1 2 3; do", text)
+        self.assertIn("bounded Test IAP connection failed after 3 attempts", text)
+        self.assertGreaterEqual(text.count('--ssh-key-file="${SSH_KEY}"'), 3)
+        self.assertNotIn("gcloud compute config-ssh", text)
+
     def test_installer_fails_closed_and_preserves_rollback(self):
         text = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('EXPECTED_HOST="hermes-test-01"', text)

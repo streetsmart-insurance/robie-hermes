@@ -1,0 +1,59 @@
+name: Diagnose Test VM gateway and browser setup (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_TEST_GATEWAY_AND_BROWSER
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'DIAGNOSE_TEST_GATEWAY_AND_BROWSER'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+      - name: Inventory robie-gateway unit, browser process, and CDP listener
+        shell: bash
+        run: |
+          set +e -uo pipefail
+          escape() {
+            printf '%s' "$1" | sed -e ':a' -e 'N' -e '$!ba' -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g'
+          }
+          out=$(gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command='
+              echo "--- systemctl cat robie-gateway ---";
+              systemctl cat robie-gateway 2>&1;
+              echo "--- all chrome/browser/ezlynx-related units ---";
+              systemctl list-units --type=service --all --no-pager 2>&1 | grep -iE "chrome|browser|ezlynx" || echo "(none found)";
+              echo "--- listener on CDP port 9222 ---";
+              (ss -tln 2>&1 | grep ":9222" || echo "(nothing listening on 9222)");
+              echo "--- chrome/chromium processes ---";
+              (pgrep -fa "chrome|chromium" 2>&1 || echo "(no chrome/chromium process found)");
+            ' 2>&1)
+          code=$?
+          echo "::notice::Test VM gateway/browser inventory (ssh exit ${code}): $(escape "$out")"
+          exit 0

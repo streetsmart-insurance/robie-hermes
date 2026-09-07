@@ -4,7 +4,7 @@ set -euo pipefail
 test "$(hostname -s)" = hermes-test-01
 test "${ROBIE_ENV:-}" = TEST
 test "${TEST_ROOT:-}" = /opt/streetsmart-hermes-test
-test "${EXPECTED_TEST_SHA:-}" = e18fcfa2ed13
+test "${EXPECTED_TEST_SHA:-}" = 11185ba7bad4
 
 job_db="${TEST_ROOT}/robie-job-engine/data/jobs.db"
 test -f "${job_db}"
@@ -22,6 +22,11 @@ if blocking:
     raise SystemExit(f"fixture readiness refused: {blocking} active Test jobs/leases")
 print("fixture_job_inventory=0")
 PY
+
+echo "=== robie-* systemd unit files on hermes-test-01 (diagnostic, read-only) ==="
+systemctl list-unit-files 'robie-*' --no-pager 2>&1 || true
+echo "=== robie-* timers: schedule + last/next run (diagnostic, read-only) ==="
+systemctl list-timers 'robie-*' --no-pager --all 2>&1 || true
 
 if ! systemctl is-active --quiet robie-gateway; then
   echo 'fixture readiness refused: Test gateway is not active' >&2

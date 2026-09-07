@@ -16,12 +16,16 @@ def test_workflow_is_protected_main_test_only_and_read_only():
     assert "github.ref == 'refs/heads/main'" in text
     assert "TEST_VM: hermes-test-01" in text
     assert "TEST_ROOT: /opt/streetsmart-hermes-test" in text
-    assert "EXPECTED_TEST_SHA: e18fcfa2ed13" in text
-    assert "AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13" in text
+    assert "EXPECTED_TEST_SHA: 11185ba7bad4" in text
+    assert "AUDIT_POLICY_SETUP_FIXTURES_ON_11185BA7BAD4" in text
     assert "id-token: write" in text
     assert "hermes-poc-01" not in text
     assert "systemctl restart" not in text
     assert "deploy-test-release" not in text
+    assert "::error::fixture-readiness audit failed: ssh_status=" in text
+    assert "log_bytes=" in text
+    assert "set +e -uo pipefail" in text
+    assert "DEBUG" not in text
 
 
 def test_remote_audit_requires_test_runtime_and_zero_active_jobs():

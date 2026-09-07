@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from google.auth.transport.requests import Request
-from google.cloud import secretmanager
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from playwright.sync_api import sync_playwright
-
 
 CDP_URL = "http://127.0.0.1:9222"
 TOKEN_PATH = Path("/opt/streetsmart-hermes/.hermes/robie_google_token.json")
@@ -27,8 +21,24 @@ INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def secret(name: str) -> str:
+    from google.cloud import secretmanager
+
     client = secretmanager.SecretManagerServiceClient()
     parent = f"projects/streetsmart-hermes-poc/secrets/{name}"
+    reference_env = {
+        "ezlynx-username": "ROBIE_EZLYNX_USERNAME_SECRET",
+        "ezlynx-password": "ROBIE_EZLYNX_PASSWORD_SECRET",
+    }
+    reference = os.environ.get(reference_env.get(name, ""), "").strip()
+    if reference:
+        expected = rf"{re.escape(parent)}/versions/[1-9]\d*"
+        if not re.fullmatch(expected, reference):
+            raise RuntimeError(
+                f"Pinned Secret Manager reference is invalid for required secret {name}"
+            )
+        response = client.access_secret_version(request={"name": reference})
+        return response.payload.data.decode("utf-8").strip()
+
     enabled = list(
         client.list_secret_versions(
             request={"parent": parent, "filter": "state:ENABLED"}
@@ -45,11 +55,36 @@ class MailboxIdentityError(RuntimeError):
     pass
 
 
-def gmail_service():
+def build_legacy_mailbox_service():
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def build_keyless_mailbox_service(service_account_email: str):
+    from robie_job_engine.ringcentral_email_sync import (
+        build_keyless_report_mailbox_service,
+    )
+
+    return build_keyless_report_mailbox_service(
+        service_account_email,
+        EXPECTED_MAILBOX,
+    )
+
+
+def gmail_service():
+    service_account = os.environ.get(
+        "ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", ""
+    ).strip()
+    if service_account:
+        service = build_keyless_mailbox_service(service_account)
+    else:
+        service = build_legacy_mailbox_service()
     profile = service.users().getProfile(userId="me").execute()
     mailbox = str(profile.get("emailAddress") or "").strip().casefold()
     if mailbox != EXPECTED_MAILBOX:
@@ -142,6 +177,8 @@ def navigate_to_submission_route(page) -> None:
 
 
 def main() -> int:
+    from playwright.sync_api import sync_playwright
+
     try:
         # Verify the OAuth identity before retrieving credentials or requesting
         # an MFA message. Carlo's mailbox must never be used as a fallback.

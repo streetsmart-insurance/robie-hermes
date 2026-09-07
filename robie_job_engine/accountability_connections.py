@@ -39,8 +39,18 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         and (ringcentral_email.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
         and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
     )
+    scheduled_reports = dict(((manifest.get("collection") or {}).get("scheduled_reports_email") or {}))
+    scheduled_reports_ready = bool(
+        scheduled_reports.get("enabled")
+        and (scheduled_reports.get("mailbox") or environment.get("ACCOUNTABILITY_REPORT_MAILBOX"))
+        and environment.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
+        and scheduled_reports.get("reports")
+        and (scheduled_reports.get("allowed_senders") or scheduled_reports.get("allowed_sender_domains"))
+    )
     ezlynx_exports = {key: file_state(key) for key in ("tasks", "activities", "retention", "submissions")}
     ezlynx_browser = _env_ready(environment, ("ROBIE_EZLYNX_USERNAME_SECRET", "ROBIE_EZLYNX_PASSWORD_SECRET"))
+    submission_center = dict(((manifest.get("collection") or {}).get("ezlynx_submission_center") or {}))
+    submission_center_ready = bool(submission_center.get("enabled") and ezlynx_browser)
     gmail_backend = (
         _env_ready(environment, ("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "ACCOUNTABILITY_GMAIL_USERS"))
         or _env_ready(environment, ("ACCOUNTABILITY_GMAIL_TOKEN_PATH", "ACCOUNTABILITY_GMAIL_USERS"))
@@ -55,6 +65,11 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
         key: {"configured": True, "available": Path(str(value)).expanduser().is_file(), "path": str(value)}
         for key, value in trackers.items()
     }
+    magellan_collection = dict(((manifest.get("collection") or {}).get("magellan") or {}))
+    magellan_browser = _env_ready(
+        environment,
+        ("ROBIE_MAGELLAN_USERNAME_SECRET", "ROBIE_MAGELLAN_PASSWORD_SECRET"),
+    )
     connections = {
         "ringcentral": {
             "ready": ringcentral_export["available"] or ringcentral_api or ringcentral_email_ready,
@@ -63,8 +78,10 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
             "scheduled_email_configured": ringcentral_email_ready,
         },
         "ezlynx": {
-            "ready": ezlynx_browser or any(item["available"] for item in ezlynx_exports.values()),
+            "ready": ezlynx_browser or scheduled_reports_ready or any(item["available"] for item in ezlynx_exports.values()),
             "browser_secret_references_configured": ezlynx_browser,
+            "submission_center_live_read_configured": submission_center_ready,
+            "scheduled_reports_configured": scheduled_reports_ready,
             "exports": ezlynx_exports,
         },
         "gmail": {
@@ -84,6 +101,14 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
                 bool((item or {}).get("allowed_columns")) for item in (google_sheets.get("tables") or {}).values()
             ) if google_sheets_enabled else True,
         },
+        "dashboard": {
+            "enabled": bool((manifest.get("dashboard") or {}).get("enabled")),
+            "ready": not (manifest.get("dashboard") or {}).get("enabled") or bool(
+                (manifest.get("dashboard") or {}).get("spreadsheet_id")
+                and (manifest.get("dashboard") or {}).get("sheet_name")
+            ),
+            "aggregate_only": True,
+        },
         "delivery": {
             "enabled": bool(delivery.get("enabled")),
             "ready": (not delivery.get("enabled")) or bool(delivery.get("chat_spaces") or delivery.get("email_recipients")),
@@ -91,8 +116,10 @@ def check_connections(manifest_path: str, *, environment: Mapping[str, str] | No
             "email_sender_configured": bool(delivery.get("email_sender")),
         },
         "magellan": {
-            "ready": file_state("magellan_json")["available"],
+            "ready": file_state("magellan_json")["available"] or bool(magellan_collection.get("enabled") and magellan_browser),
             "summary_export": file_state("magellan_json"),
+            "live_collection_configured": bool(magellan_collection.get("enabled") and magellan_browser),
+            "browser_secret_references_configured": magellan_browser,
         },
         "trackers": {
             "ready": bool(tracker_states) and all(item["available"] for item in tracker_states.values()),

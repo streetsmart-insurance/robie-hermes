@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13
+        description: Type AUDIT_POLICY_SETUP_FIXTURES_ON_11185BA7BAD4
         required: true
         type: string
 
@@ -16,7 +16,7 @@ jobs:
   fixture-readiness:
     if: >-
       github.ref == 'refs/heads/main' &&
-      inputs.confirmation == 'AUDIT_POLICY_SETUP_FIXTURES_ON_E18FCFA2ED13'
+      inputs.confirmation == 'AUDIT_POLICY_SETUP_FIXTURES_ON_11185BA7BAD4'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: Test
@@ -25,7 +25,7 @@ jobs:
       ZONE: us-east1-b
       TEST_VM: hermes-test-01
       TEST_ROOT: /opt/streetsmart-hermes-test
-      EXPECTED_TEST_SHA: e18fcfa2ed13
+      EXPECTED_TEST_SHA: 11185ba7bad4
       STAGING_ROOT: /var/tmp/robie-policy-setup-fixture-readiness
       ROBIE_ENV: TEST
     steps:
@@ -44,7 +44,7 @@ jobs:
           test "${GITHUB_REF}" = refs/heads/main
           test "${TEST_VM}" = hermes-test-01
           test "${TEST_ROOT}" = /opt/streetsmart-hermes-test
-          test "${EXPECTED_TEST_SHA}" = e18fcfa2ed13
+          test "${EXPECTED_TEST_SHA}" = 11185ba7bad4
           test "${ROBIE_ENV}" = TEST
           gcloud compute instances describe "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" \
@@ -65,12 +65,31 @@ jobs:
       - name: Audit Test browser without writes
         shell: bash
         run: |
-          set -euo pipefail
+          set +e -uo pipefail
           staging="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="sudo env ROBIE_ENV=TEST TEST_ROOT='${TEST_ROOT}' EXPECTED_TEST_SHA='${EXPECTED_TEST_SHA}' AUDIT_SCRIPT='${staging}/audit-policy-setup-fixture-readiness.py' bash '${staging}/run-policy-setup-fixture-readiness-remote.sh'" \
-            | tee "${RUNNER_TEMP}/fixture-readiness.log"
-          grep -Fq '"result": "TEST READINESS VERIFIED"' "${RUNNER_TEMP}/fixture-readiness.log"
-          grep -Fq '"consequential_writes": 0' "${RUNNER_TEMP}/fixture-readiness.log"
-          grep -Fq '"production_touched": false' "${RUNNER_TEMP}/fixture-readiness.log"
+            >"${RUNNER_TEMP}/fixture-readiness.log" 2>&1
+          ssh_status=$?
+          cat "${RUNNER_TEMP}/fixture-readiness.log"
+          ok=1
+          [ "${ssh_status}" -eq 0 ] || ok=0
+          if [ "${ok}" -eq 1 ] && ! grep -Fq '"result": "TEST READINESS VERIFIED"' "${RUNNER_TEMP}/fixture-readiness.log"; then
+            ok=0
+          fi
+          if [ "${ok}" -eq 1 ] && ! grep -Fq '"consequential_writes": 0' "${RUNNER_TEMP}/fixture-readiness.log"; then
+            ok=0
+          fi
+          if [ "${ok}" -eq 1 ] && ! grep -Fq '"production_touched": false' "${RUNNER_TEMP}/fixture-readiness.log"; then
+            ok=0
+          fi
+          if [ "${ok}" -ne 1 ]; then
+            log_bytes=$(wc -c < "${RUNNER_TEMP}/fixture-readiness.log" | tr -d '[:space:]')
+            echo "::group::fixture-readiness.log (audit failed, ssh_status=${ssh_status}, log_bytes=${log_bytes})"
+            cat "${RUNNER_TEMP}/fixture-readiness.log"
+            echo "::endgroup::"
+            escaped=$(sed -e ':a' -e 'N' -e '$!ba' -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g' "${RUNNER_TEMP}/fixture-readiness.log")
+            echo "::error::fixture-readiness audit failed: ssh_status=${ssh_status} log_bytes=${log_bytes}%0A${escaped}"
+            exit 1
+          fi

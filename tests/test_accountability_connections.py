@@ -13,6 +13,7 @@ def test_connection_check_is_redacted_and_requires_core_sources(tmp_path: Path):
     manifest.write_text(json.dumps({
         "output_dir": str(tmp_path / "reports"),
         "sources": {"ringcentral": str(ringcentral), "tasks": str(tasks), "trackers": {}},
+        "collection": {"ezlynx_submission_center": {"enabled": True}},
         "appsheet": {"enabled": True},
     }), encoding="utf-8")
     environment = {
@@ -24,4 +25,22 @@ def test_connection_check_is_redacted_and_requires_core_sources(tmp_path: Path):
     result = check_connections(str(manifest), environment=environment)
     assert result["ready"]
     assert result["connections"]["appsheet"]["ready"]
+    assert result["connections"]["ezlynx"]["submission_center_live_read_configured"]
     assert "do-not-print-this" not in json.dumps(result)
+
+
+def test_connection_check_reports_scheduled_reports_and_dashboard_without_ids(tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "collection": {"scheduled_reports_email": {
+            "enabled": True, "mailbox": "reports@example.test", "allowed_sender_domains": ["example.test"],
+            "reports": {"tasks": {"label": "ROBIE_TASKS"}},
+        }},
+        "dashboard": {"enabled": True, "spreadsheet_id": "private-sheet-id", "sheet_name": "Agency Accountability"},
+    }), encoding="utf-8")
+    result = check_connections(str(manifest), environment={
+        "ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT": "delegated@example.test",
+    })
+    assert result["connections"]["ezlynx"]["scheduled_reports_configured"]
+    assert result["connections"]["dashboard"] == {"enabled": True, "ready": True, "aggregate_only": True}
+    assert "private-sheet-id" not in json.dumps(result)

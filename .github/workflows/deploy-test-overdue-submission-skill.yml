@@ -1,0 +1,126 @@
+name: Deploy overdue-submission Skill to Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/hermes/skills/ezlynx-overdue-submission-reports/SKILL.md
+      - scripts/deploy-test-overdue-submission-skill.sh
+      - .github/workflows/deploy-test-overdue-submission-skill.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: robie-overdue-submission-skill-test
+  cancel-in-progress: false
+
+jobs:
+  deploy-test-skill:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      SKILL_NAME: ezlynx-overdue-submission-reports
+      STAGING_DIR: /var/tmp/robie-test-skill/${{ github.sha }}
+      SSH_KEY: /tmp/hermes-test-skill
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@v4
+
+      - name: Validate Test-only Skill package
+        id: skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          repository = Path("skills/ezlynx-overdue-submission-reports/SKILL.md")
+          deploy = Path("deploy/hermes/skills/ezlynx-overdue-submission-reports/SKILL.md")
+          assert repository.read_bytes() == deploy.read_bytes()
+          content = deploy.read_text(encoding="utf-8")
+          assert 'name: "ezlynx-overdue-submission-reports"' in content
+          assert 'job_type: "ezlynx.overdue_submission_reports"' in content
+          assert 'status: "Testing"' in content
+          assert "production_ready: false" in content
+          assert "run date - Quote Due Date > 30 days" in content
+          assert "must pass both checks" in content
+          assert "stop before classifying records or sending email" in content
+          PY
+          digest="$(sha256sum "deploy/hermes/skills/${SKILL_NAME}/SKILL.md" | awk '{print $1}')"
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = "hermes-test-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
+
+      - name: Stage exact Skill bytes on Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh-keygen -q -t rsa -b 3072 -N '' -f "${SSH_KEY}"
+          connected=false
+          for attempt in 1 2 3; do
+            if gcloud compute ssh "${TEST_VM}" \
+              --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --ssh-key-file="${SSH_KEY}" \
+              --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}/${SKILL_NAME}'"; then
+              connected=true
+              break
+            fi
+            sleep "$((attempt * 10))"
+          done
+          [[ "${connected}" == true ]] || { echo "bounded Test IAP connection failed" >&2; exit 2; }
+          gcloud compute scp \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
+            "deploy/hermes/skills/${SKILL_NAME}/SKILL.md" \
+            "${TEST_VM}:${STAGING_DIR}/${SKILL_NAME}/SKILL.md"
+          gcloud compute scp \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
+            scripts/deploy-test-overdue-submission-skill.sh \
+            "${TEST_VM}:${STAGING_DIR}/deploy-test-overdue-submission-skill.sh"
+
+      - name: Install and independently verify Test Skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
+            --command="sudo bash '${STAGING_DIR}/deploy-test-overdue-submission-skill.sh' --source-dir '${STAGING_DIR}/${SKILL_NAME}' --commit '${GITHUB_SHA}' --expected-digest '${{ steps.skill.outputs.digest }}'"
+
+      - name: Publish immutable Test evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Overdue-submission Skill — Test"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Skill SHA-256: \`${{ steps.skill.outputs.digest }}\`"
+            echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
+            echo "- Production deployment: \`false\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

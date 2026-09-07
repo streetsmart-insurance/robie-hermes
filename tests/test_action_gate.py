@@ -51,6 +51,43 @@ class ActionGateTests(unittest.TestCase):
         self.assertIn("production_ready: false", SKILL.read_text(encoding="utf-8"))
         self.assertNotIn("production_ready: true", SKILL.read_text(encoding="utf-8"))
 
+    def test_bare_ascend_name_mention_does_not_misclassify_policy_setup(self):
+        # 264a708f: chat text merely named the parked Ascend site (as a
+        # contrast/negation) while requesting ordinary EZLynx work, with no
+        # explicit skill/action_type declared. This must not fail-closed
+        # into ascend.create_program.
+        text = (
+            "The client asked if we could use Ascend for this account — "
+            "no, just set up the policy in EZLynx as usual."
+        )
+        action = classify_action(
+            text,
+            payload={"text": text},
+            action_type="hermes.google_chat_task",
+        )
+        self.assertNotEqual(action, CREATE_PROGRAM_ACTION)
+        reason = hold_reason_for_job(
+            {
+                "id": "264a708f-13b6-437b-aa43-4e6fb4ef86ae",
+                "action_type": "hermes.google_chat_task",
+                "payload": {"text": text},
+            },
+            env="PRODUCTION",
+        )
+        self.assertIsNone(reason)
+
+    def test_bare_ascend_mention_still_combines_with_real_create_program_intent(self):
+        # A name-only mention is not conclusive alone, but must still count
+        # as corroborating evidence once paired with actual create-program
+        # intent language, even without one of the other strong markers.
+        text = "new program request — mentions Ascend, please import document"
+        action = classify_action(
+            text,
+            payload={"text": text},
+            action_type="hermes.google_chat_task",
+        )
+        self.assertEqual(action, CREATE_PROGRAM_ACTION)
+
     def test_chat_job_type_does_not_hide_ascend_create_program(self):
         action = classify_action(
             CHAT_SHAPED_ASCEND,

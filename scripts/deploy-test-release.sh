@@ -182,7 +182,14 @@ if [[ ! -d "${runtime_root}" ]]; then
   trap - EXIT
 fi
 PYTHONPATH="${runtime_root}" "${gateway_python}" - <<'PY'
+from google.auth import credentials as google_credentials
+from google.cloud import secretmanager
+from googleapiclient.discovery import build
 from playwright.sync_api import sync_playwright
+
+assert google_credentials is not None
+assert secretmanager is not None
+assert callable(build)
 assert callable(sync_playwright)
 PY
 runtime_digest="$(find "${runtime_root}" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"

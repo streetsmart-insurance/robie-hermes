@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import random
 import threading
 import uuid
@@ -31,6 +32,9 @@ from .recording import RecordingManager, RecordingRequiredError
 from .runs import IsolatedRunStore, RunIsolationError
 from .secrets import redact_exception, redact_mapping
 from .store import JobStore
+
+
+logger = logging.getLogger(__name__)
 
 
 LEFTOVER_RETRY_REFUSED = "LEFTOVER_RETRY_REFUSED"
@@ -415,8 +419,19 @@ class JobEngine:
                     maybe_audit_terminal_job(self.store.path, job_id)
                     if self.recordings is not None:
                         self.recordings.release_local_after_audit(job_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Best-effort: a failure here (snapshot, terminal audit,
+                    # tab_cleanup, or recording release) must never flip a
+                    # completed job's outcome. It used to fail completely
+                    # silently, which meant a broken tab_cleanup run left no
+                    # trace anywhere — see Carlo's 2026-08-31 report of
+                    # leftover tabs accumulating with no visible cause.
+                    logger.error(
+                        "post-terminal cleanup failed for job %s (status=%s): %s",
+                        job_id,
+                        status_name,
+                        redact_exception(exc),
+                    )
 
     def _perform(
         self,
