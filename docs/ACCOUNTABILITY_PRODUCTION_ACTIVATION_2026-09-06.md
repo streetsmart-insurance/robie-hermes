@@ -151,3 +151,25 @@ change through the dedicated Test and immutable-release path before Production.
 Until that release and an exact-date RingCentral workbook arrive, the 9:00 AM
 job remains intentionally fail closed and cannot honestly be called fully
 production-ready.
+
+### Tested ingest repair candidate
+
+The standalone candidate now performs two bounded Gmail reads per candidate
+message: an approved-header `metadata` read and a separate partial `full` read
+whose field mask contains only message ID, internal date, MIME filenames/types,
+and attachment IDs. The field mask never requests MIME body data. The existing
+exact-subject, extension, and RingCentral target-date gates remain unchanged.
+
+- Test host focused suite: 8 passed, including a regression that asserts the
+  header/structure split and rejects any `data` field in the MIME mask.
+- Isolated live-mailbox proof: all four exact EZLynx subjects were accepted and
+  their attachments were downloaded without changing the live application or
+  sending a message.
+- Candidate archive:
+  `accountability-ingest-20260907-1.tar.gz`
+- SHA-256:
+  `205491b7a63a15a8000ae1ef8b1f65be6e9de974fc035601ccab10ab9562f4af`
+
+This candidate has not replaced the dedicated Production application. Preserve
+that boundary until the immutable digest is approved for promotion and the
+first RingCentral scheduled workbook proves the exact prior-business-day gate.
