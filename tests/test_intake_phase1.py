@@ -35,6 +35,8 @@ class FakeApi:
 
     def lookup_candidates(self, identifiers): return self.candidates
     def lookup_assignee(self, user_id): return self.assignees
+    def lookup_certificates_team_member(self, user_id):
+        return read(dict(user_id=user_id, certificates_team_member=True))
     def lookup_hello_owner(self, applicant, policy, request_type):
         return read(dict(applicant_id=applicant, policy_id=policy, user_id='test-reviewer',
                          role='originating_producer' if request_type == 'new_business' else 'applicable_csr'))
