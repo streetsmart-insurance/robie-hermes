@@ -47,7 +47,7 @@ class TestAscendNoteFormatting(unittest.TestCase):
         self.assertIn("Embedded Cancellation Document:", note)
         self.assertIn("https://api.cloudinary.com/sample_cancel_notice.pdf", note)
         self.assertIn("Assigned Representative: Zeus Quezada", note)
-        self.assertIn("Label Applied: Cancellation Notice", note)
+        self.assertIn("Label Applied: Ascend NOC", note)
         self.assertTrue(note.endswith(ROBIE_SIGNATURE))
 
     def test_past_due_notice_formatting(self) -> None:
@@ -201,10 +201,10 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
             carrier_name="Western World Insurance Company",
         )
 
-        # Verify label 'Cancellation Notice' applied
+        # Verify label 'Ascend NOC' applied
         self.mock_poster.apply_account_label.assert_called_once_with(
             applicant_id="app-garden-state",
-            label="Cancellation Notice",
+            label="Ascend NOC",
             policy_number="NPP6269395",
         )
 

@@ -10,7 +10,7 @@ Correlates events with EZLynx accounts and policies, applying:
    - Plain text Due Date / Cancellation Effective Date
    - Plain text Amount Due / Return Premium and tax breakdown
    - Embedded document link to cancellation notice PDF
-   - Account label: 'Cancellation Notice'
+   - Account label: 'Ascend NOC'
    - High-priority EZLynx follow-up task assigned to CSR or Producer
    - Permanent EZLynx discussion card note ending in 'Robie was here'
 2. Past Due / Payment Failures:
@@ -594,10 +594,10 @@ class AscendEZLynxSyncManager:
                     carrier_name=event.carrier_name,
                 )
 
-                # 2. Apply label 'Cancellation Notice'
+                # 2. Apply label 'Ascend NOC'
                 self.poster.apply_account_label(
                     applicant_id=applicant_id,
-                    label="Cancellation Notice",
+                    label="Ascend NOC",
                     policy_number=event.policy_number,
                 )
 
@@ -610,7 +610,10 @@ class AscendEZLynxSyncManager:
                     f"Plain Text Due Date / Effective Date: {event.due_date_text}\n"
                     f"Return Pure Premium: {event.unearned_premium_text}\n"
                     f"Embedded Document: {event.document_url or 'N/A'}\n"
-                    f"Label 'Cancellation Notice' applied. Please review and verify policy status."
+                    f"Action Required:\n"
+                    f"1) Ensure 'Ascend NOC' label is applied to policy in EZLynx.\n"
+                    f"2) Review notice terms and unearned return calculation.\n"
+                    f"3) Follow up with insured prior to cancellation effective date ({event.due_date_text})."
                 )
                 self.poster.create_task(
                     applicant_id=applicant_id,
