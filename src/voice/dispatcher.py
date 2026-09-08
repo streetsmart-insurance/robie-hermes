@@ -19,11 +19,7 @@ import logging
 import sys
 from typing import Any, Dict, List, Optional
 
-from src.voice.context_hydrator import (
-    CALL_TYPE_CARRIER,
-    CallingDossier,
-    ContextHydrator,
-)
+from src.voice.context_hydrator import CallingDossier, ContextHydrator
 from src.voice.voice_client import CarrierVoiceClient
 
 logger = logging.getLogger("voice_dispatcher")
@@ -46,23 +42,25 @@ class VoiceCallDispatcher:
         phone: Optional[str] = None,
         instructions: Optional[str] = None,
         dry_run: bool = False,
-        call_type: Optional[str] = None,
+        applicant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Hydrate policy context, then dispatch (or simulate) the carrier call."""
-        if not policy_number or not str(policy_number).strip():
+        if not policy_number and not applicant_id:
             return _failure_result(
                 error="HYDRATE_FAILED",
                 policy=policy_number,
-                details="Policy number is required.",
+                details="Policy number or applicant ID is required.",
             )
 
         try:
-            dossier = self.hydrator.hydrate(
-                policy_number=policy_number.strip(),
-                phone_override=phone,
-                instructions=instructions,
-                call_type=call_type or CALL_TYPE_CARRIER,
-            )
+            hydrate_kwargs = {
+                "policy_number": policy_number.strip() if policy_number else None,
+                "phone_override": phone,
+                "instructions": instructions,
+            }
+            if applicant_id:
+                hydrate_kwargs["applicant_id"] = applicant_id
+            dossier = self.hydrator.hydrate(**hydrate_kwargs)
         except Exception as exc:
             logger.error("Hydrate failed for %s: %s", policy_number, exc)
             return _failure_result(
@@ -74,13 +72,6 @@ class VoiceCallDispatcher:
         if dossier is None:
             logger.error("Could not hydrate policy context for %s", policy_number)
             return _failure_result(error="HYDRATE_FAILED", policy=policy_number)
-
-        try:
-            self.hydrator.enrich_identity_from_ezlynx(dossier)
-        except Exception as exc:
-            logger.debug("Producer/first-name enrichment skipped for %s: %s", policy_number, exc)
-        # CLI dispatch has no label invoker; warm transfer stays off unless a
-        # requestor was already set (HITL-safe — do not use EZLynx Producer).
 
         try:
             result = self.voice.dispatch_call(dossier=dossier, dry_run=dry_run)
@@ -166,8 +157,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--policy-number",
-        required=True,
+        default="",
         help="Policy number to hydrate and call about.",
+    )
+    parser.add_argument(
+        "--applicant-id",
+        default=None,
+        help="Optional applicant ID to hydrate metadata from EZLynx.",
     )
     parser.add_argument(
         "--dry-run",
@@ -184,7 +180,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional custom instructions for the voice agent.",
     )
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(argv)
+    if not parsed.policy_number and not parsed.applicant_id:
+        parser.error("At least one of --policy-number or --applicant-id is required.")
+    return parsed
 
 
 def main(
@@ -203,6 +202,7 @@ def main(
         phone=args.phone,
         instructions=args.instructions,
         dry_run=args.dry_run,
+        applicant_id=args.applicant_id,
     )
     print_dispatch_result(result)
     return 0 if result.get("success") else 1

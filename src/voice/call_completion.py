@@ -233,7 +233,6 @@ def upload_call_artifacts(
                     doc_type="correspondence",
                     label_to_apply=SAFE_DOCUMENT_LABEL,
                     use_playwright_fallback=True,
-                    prefer_api=True,
                 )
                 if up.get("status") in ("success", "simulated"):
                     result["recording_uploaded"] = True
@@ -259,7 +258,6 @@ def upload_call_artifacts(
                 doc_type="correspondence",
                 label_to_apply=SAFE_DOCUMENT_LABEL,
                 use_playwright_fallback=True,
-                prefer_api=True,
             )
             if up.get("status") in ("success", "simulated"):
                 result["transcript_uploaded"] = True
