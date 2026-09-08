@@ -146,6 +146,48 @@ KNOWN_CARRIERS = {
 }
 
 
+def is_within_carrier_calling_hours(tz_name: str = "America/New_York") -> tuple[bool, str]:
+    """
+    Enforces strict carrier business hours:
+    - Monday through Friday only (weekdays 0-4)
+    - Between 9:00 AM and 6:00 PM Eastern Time
+    - Excludes US federal / carrier holidays (e.g. Labor Day, Memorial Day, New Year, July 4, Thanksgiving, Christmas)
+    """
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        import pytz
+        now = datetime.now(pytz.timezone(tz_name))
+
+    weekday = now.weekday()
+    if weekday >= 5:
+        return False, f"Outside business days (Weekend: {now.strftime('%A')}). Calling hours are Mon-Fri 9:00 AM - 6:00 PM ET."
+
+    hour = now.hour
+    if hour < 9:
+        return False, f"Too early: {now.strftime('%I:%M %p %Z')}. Outbound calling begins at 9:00 AM ET."
+    if hour >= 18:
+        return False, f"Too late: {now.strftime('%I:%M %p %Z')}. Outbound calling closes at 6:00 PM ET."
+
+    month, day = now.month, now.day
+    # Fixed federal holidays
+    if (month == 1 and day == 1) or (month == 7 and day == 4) or (month == 12 and day == 25):
+        return False, f"Federal / Carrier holiday ({now.strftime('%B %d')}). Offices are closed."
+    # Labor Day (first Monday of September)
+    if month == 9 and weekday == 0 and 1 <= day <= 7:
+        return False, f"Labor Day holiday. Carrier and broker offices are closed."
+    # Memorial Day (last Monday of May)
+    if month == 5 and weekday == 0 and day >= 25:
+        return False, f"Memorial Day holiday. Carrier and broker offices are closed."
+    # Thanksgiving (fourth Thursday of November)
+    if month == 11 and weekday == 3 and 22 <= day <= 28:
+        return False, f"Thanksgiving Day holiday. Carrier and broker offices are closed."
+
+    return True, f"Within business hours ({now.strftime('%I:%M %p %Z')})."
+
+
 def resolve_carrier_details(carrier_name: Optional[str], phone_override: Optional[str]) -> Dict[str, Any]:
     """Resolves carrier contact information from known directory or phone override."""
     res = {
@@ -301,6 +343,20 @@ def dispatch_policy_change_call(
             "agency_code": agency_code,
             "prompt": prompt,
             "status": "DISPATCHED_SIMULATED",
+        }
+
+    # HARDENED INVARIANT 7: Business Hours Gate (Mon-Fri 9:00 AM - 6:00 PM Eastern Time)
+    within_hours, hours_msg = is_within_carrier_calling_hours()
+    if not within_hours:
+        logger.warning(f"[BUSINESS_HOURS_GATE] Call blocked for {policy_number} to {carrier_info['name']}: {hours_msg}")
+        return {
+            "success": False,
+            "error": "CALL_BLOCKED_AFTER_HOURS",
+            "carrier": carrier_info["name"],
+            "policy": policy_number,
+            "phone": clean_phone,
+            "details": hours_msg,
+            "status": "QUEUED_FOR_BUSINESS_HOURS",
         }
 
     # Live Bland AI Dispatch
