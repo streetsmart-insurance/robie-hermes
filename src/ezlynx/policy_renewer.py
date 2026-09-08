@@ -75,7 +75,7 @@ FORBIDDEN_BIND_TEXTS = ("Bind", "Issue Policy", "Purchase", "Checkout")
 DEFAULT_PRODUCER_CSR = "Carlo Ferrara"
 FORBIDDEN_PRODUCER_NAMES = ("Robie", "Robie AI", "SSRobie", "SS Robie")
 LIVE_ALLOW_TOKEN = "Carlo"
-ROBIE_SIGNATURE_LINE = "Robie was here"
+ROBIE_SIGNATURE_LINE = "ROBIE was here"
 
 GENERIC_LOB_TITLES = {
     "workers compensation renewal",

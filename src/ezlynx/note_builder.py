@@ -26,7 +26,7 @@ class EZLynxNoteBuilder:
         ]
         if downloaded_file:
             lines.append(f"Saved Document: {downloaded_file}")
-        lines.append("\nRobie was here")
+        lines.append("\nROBIE was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -57,7 +57,7 @@ class EZLynxNoteBuilder:
         ]
         if next_followup_date:
             lines.append(f"Next follow-up scheduled for {due_date_str}.")
-        lines.append("\nRobie was here")
+        lines.append("\nROBIE was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -92,7 +92,7 @@ class EZLynxNoteBuilder:
             lines.append(f'Underwriter Message:\n"{clean_reply_text}"')
         if has_attachment and attachment_name:
             lines.append(f"Attachment Received: {attachment_name} (Saved to Inbox Archive)")
-        lines.append("\nRobie was here")
+        lines.append("\nROBIE was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -120,7 +120,7 @@ class EZLynxNoteBuilder:
             f"Attached Quote: {document_path or 'Uploaded to Applicant Documents'}",
             f"Action Required: Account Manager review & customer presentation/binding."
         ]
-        lines.append("\nRobie was here")
+        lines.append("\nROBIE was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -140,7 +140,7 @@ class EZLynxNoteBuilder:
             f"Reason: {reason}",
             f"Action Required: High-priority CSR follow-up with carrier underwriter / portal."
         ]
-        lines.append("\nRobie was here")
+        lines.append("\nROBIE was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -166,7 +166,7 @@ class EZLynxNoteBuilder:
             f"Summary: {summary}",
             f"Action Required: Account Manager review customer sentiment prior to renewal presentation."
         ]
-        lines.append("\nRobie was here")
+        lines.append("\nROBIE was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -191,7 +191,7 @@ class EZLynxNoteBuilder:
             "No additional carrier calls will be placed for this policy/term. "
             "Client outreach is not part of this cadence.",
             "",
-            "Robie was here",
+            "ROBIE was here",
         ]
         return "\n".join(lines)
 
@@ -210,7 +210,7 @@ class EZLynxNoteBuilder:
             "",
             'Reply with "Phone: (xxx) xxx-xxxx" to trigger the call.',
             "",
-            "Robie was here",
+            "ROBIE was here",
         ]
         return "\n".join(lines)
 

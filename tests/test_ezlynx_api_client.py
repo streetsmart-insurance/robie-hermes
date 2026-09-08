@@ -158,7 +158,7 @@ def test_note_builder_mandates_robie_signature(api_client):
         use_playwright_fallback=False
     )
     assert res["status"] in ("success", "simulated")
-    assert "Robie was here" in res["text"]
+    assert "ROBIE was here" in res["text"]
 
 
 def test_session_overview_structure(api_client):
@@ -430,3 +430,38 @@ def test_document_data_uri_uses_audio_and_text_mime(tmp_path):
     assert mp3_uri.startswith("data:audio/mpeg;base64,")
     assert txt_uri.startswith("data:text/plain;base64,")
     assert "application/pdf" not in mp3_uri
+
+
+def test_normalize_robie_signature():
+    from src.ezlynx.api_client import normalize_robie_signature
+    assert normalize_robie_signature("Hello world").endswith("\n\nROBIE was here")
+    assert normalize_robie_signature("Hello world\n\nRobie was here").endswith("\n\nROBIE was here")
+    assert not normalize_robie_signature("Hello world\n\nRobie was here").endswith("Robie was here\n\nROBIE was here")
+    assert normalize_robie_signature("Test\nROBIE was here").endswith("\n\nROBIE was here")
+
+
+def test_validate_policy_payload(api_client, monkeypatch):
+    import pytest
+    monkeypatch.setattr(api_client, "get_applicant_policies", lambda aid: [
+        {"policyNumber": "POL-100", "companyName": "Travelers Indemnity"}
+    ])
+    # Success
+    res = api_client.validate_policy_payload("123", "POL-100", "Travelers")
+    assert res["valid"] is True
+    # Policy not found
+    with pytest.raises(ValueError, match="Policy .* not found"):
+        api_client.validate_policy_payload("123", "POL-999", "Travelers")
+    # Carrier mismatch
+    with pytest.raises(ValueError, match="Carrier mismatch"):
+        api_client.validate_policy_payload("123", "POL-100", "Hartford")
+
+
+def test_upload_document_no_simulation_fallback(api_client, tmp_path, monkeypatch):
+    f = tmp_path / "renewal.pdf"
+    f.write_text("pdf data")
+    monkeypatch.setattr(api_client, "_upload_document_via_api", lambda *a, **k: {"status": "error", "error": "API rejected"})
+    monkeypatch.setattr(api_client, "_upload_document_via_playwright", lambda *a, **k: {"status": "error", "error": "Playwright timed out"})
+    res = api_client.upload_document("123", f)
+    assert res["status"] == "error"
+    assert "simulated" not in res.get("status", "")
+    assert "Failed to upload document" in res["error"]

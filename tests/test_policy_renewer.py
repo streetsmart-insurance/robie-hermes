@@ -316,7 +316,7 @@ def test_shell_note_has_policy_header_and_robie_signature():
     )
     note = build_shell_note(spec)
     assert note.startswith("Policy: #PWC1239278 (Workers comp - Associated Specialty Insurance)")
-    assert note.rstrip().endswith("Robie was here")
+    assert note.rstrip().endswith("ROBIE was here")
     assert "Carlo Ferrara" in note
     assert "No bind" in note or "no bind" in note.lower()
 

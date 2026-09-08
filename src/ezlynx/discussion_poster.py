@@ -27,8 +27,8 @@ class EZLynxDiscussionPoster:
         Navigates to the applicant activity page, opens the target discussion card,
         posts the audit note, and takes a verification screenshot.
         """
-        if "Robie was here" not in note_text:
-            note_text = f"{note_text.strip()}\n\nRobie was here"
+        from src.ezlynx.api_client import normalize_robie_signature
+        note_text = normalize_robie_signature(note_text)
 
         async with async_playwright() as p:
             try:

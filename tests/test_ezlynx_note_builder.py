@@ -45,7 +45,7 @@ def test_note_builder_outreach_and_followup():
 
     assert "Emailed uw@libertymutual.com at Liberty Mutual." in note_init
     assert "[RENEWAL-REQ-101]" in note_init
-    assert "Robie was here" in note_init
+    assert "ROBIE was here" in note_init
     assert "09/08/2026" in note_init
 
     note_followup = EZLynxNoteBuilder.format_outreach_email_note(
@@ -59,7 +59,7 @@ def test_note_builder_outreach_and_followup():
     )
 
     assert "follow-up #2 email to uw@libertymutual.com" in note_followup
-    assert "Robie was here" in note_followup
+    assert "ROBIE was here" in note_followup
     assert "09/15/2026" in note_followup
 
 def test_note_builder_csr_escalation():
@@ -107,7 +107,7 @@ def test_note_builder_reply_received_with_clean_text():
     assert note.startswith("Policy: #CCP35165-01 (Commercial - Markel Insurance)")
     assert "Underwriter Message:" in note
     assert clean_text in note
-    assert note.rstrip().endswith("Robie was here")
+    assert note.rstrip().endswith("ROBIE was here")
 
 
 def test_note_builder_carrier_voice_cadence_and_phone_needed():
@@ -125,9 +125,9 @@ def test_note_builder_carrier_voice_cadence_and_phone_needed():
     assert dispatched.startswith("Policy: #UB-6N448514-25-42-V (Workers Comp - The Hartford)")
     assert "Call type: carrier" in dispatched
     assert "+18005551234" in dispatched
-    assert dispatched.rstrip().endswith("Robie was here")
+    assert dispatched.rstrip().endswith("ROBIE was here")
 
     needed = EZLynxNoteBuilder.format_carrier_voice_phone_needed_note(policy)
     assert needed.startswith("Policy: #UB-6N448514-25-42-V")
     assert "never invented" in needed.lower()
-    assert needed.rstrip().endswith("Robie was here")
+    assert needed.rstrip().endswith("ROBIE was here")
