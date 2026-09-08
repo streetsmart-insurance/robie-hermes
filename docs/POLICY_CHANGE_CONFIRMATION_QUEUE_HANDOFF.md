@@ -19,65 +19,107 @@ During this operational hardening session, we audited the active EZLynx Policy C
 ## 2. Accounts A, B, and C: Requested vs. Received & Closure Audit
 
 ### Account A: Haughey Brothers Landscaping LLC (`129480387`)
-* **Policy**: Geico Marine Insurance Company — Commercial Auto `9300289715`
+* **Policy**: Geico Marine Insurance Company — Commercial Auto `9300289715` (PolicyMasterID: `77799154`)
 * **EZLynx Discussion ID**: `835742254`  
   *Title*: `Commercial Auto Policy Change Request - 1htmnaam99h066087  2009 International Dump Truck Value $30,000 physical damage $30,000  remove italo as a driver`
 * **Requested**:
-  1. Add 2009 International 7400 Dump Truck (VIN: `1HTMNAAM99H066087`, Stated Value: \$30,000, Comprehensive: \$30,000, Collision: \$30,000).
+  1. Add 2009 International 7400 Dump Truck (VIN: `1HTMNAAM99H066087`, Stated Value: $30,000, Comprehensive: $30,000, Collision: $30,000).
   2. Remove Driver Italo from the active driver roster.
 * **Received & Verified (100% 3-Way Match PASS)**:
   * Carrier ACORD XML electronic feed parsed directly on `hermes-poc-01` (`60,091 bytes`):
-    * 2009 International Dump Truck is active with \$30,000 physical damage coverage (Territory 52, eff 08/19/2026).
+    * 2009 International Dump Truck is active with $30,000 physical damage coverage (Territory 52, eff 08/19/2026).
     * Driver Italo is completely absent from the carrier active driver roster.
-    * Written premium adjusted from \$43,052.00 to \$44,272.00 (+$1,220.00).
-  * EZLynx policy record displays downloaded transaction `8/25/2026 - PCH - $44272.00`.
+    * Written premium adjusted from $43,052.00 to $44,272.00 (+$1,220.00).
+  * EZLynx policy record displays downloaded transaction `8/25/2026 - PCH - $44,272.00`.
   * Insured Ethan Haughey was sent the completed endorsement documents by Lenin Perdomo.
+* **Yellow Change Request Confirmation Status**:
+  * **100% RECONCILED & CONFIRMED**: In Policy History (`/applicantportal/policy/77799154/history/index`), located yellow `Change Request 8/19/2026` row, clicked `Actions` -> `Confirm Change` -> confirmed using downloaded PCH transaction and confirmed accurate. Yellow row merged into download transaction `8/25/2026 PCH`, and the `Open Change Request` badge on the policy card was cleared.
 * **EZLynx System Action**:
   * Formal 3-Way Match Verification & Closure Note logged: **Note ID `1123408118`**.
-  * Status: **COMPLETED & CLOSED**.
+  * Status: **COMPLETED, RECONCILED & CLOSED**.
 * **Evidence Screenshots**:
   * Policy Summary Transaction: `data/policy_change_verification/screenshots/haughey_geico_policy_summary.png`
   * Discussion Closure Note: `data/policy_change_verification/screenshots/haughey_activity_closure_note.png`
   * Client Documents Library: `data/policy_change_verification/screenshots/haughey_documents_folder.png`
+  * History Modal Confirmation: `data/policy_change_verification/screenshots/haughey_confirm_change_modal.png`
+  * Confirmed History Grid: `data/policy_change_verification/screenshots/haughey_change_confirmed_success.png`
+  * Confirmed Policy Card (Badge Cleared): `data/policy_change_verification/screenshots/haughey_card_confirmed.png`
 
 ---
 
 ### Account B: On My Way Painting and Carpentry LLC (`77946351`)
-* **Policy**: Selective Insurance Company — Commercial Package `S 2527442`
+* **Policy**: Selective Insurance Company — Commercial Package `S 2527442` (PolicyMasterID: `46700098`)
 * **EZLynx Discussion ID**: `834789528`  
   *Title*: `Commercial Package Policy Change Request/Remove 2018 RAM 1500 PROMASTER - Policy No. S 2527442`
 * **Requested**:
-  * Remove 2018 RAM 1500 PROMASTER (VIN ending in 8161).
+  * Remove 2018 RAM 1500 PROMASTER (VIN ending in 8161 / VIN `#3C6TRVBG7JE102244`).
 * **Received & Verified (100% 3-Way Match PASS)**:
-  * Carrier electronic policy change transaction `8/20/2026 - Policy Change` arrived in EZLynx.
+  * Carrier electronic policy change transaction `8/18/2026 - Policy Change` (downloaded 8/21/2026) arrived in EZLynx with premium credit of `-$4,638.00` (new premium: $11,486.00).
   * Policy summary and carrier contract confirm 2018 RAM Promaster is deleted effective 08/18/2026.
+* **Yellow Change Request Confirmation Status**:
+  * **100% RECONCILED & CONFIRMED**: In Policy History (`/applicantportal/policy/46700098/history/index`), located yellow `Change Request 8/18/2026` row ("remove 2018 RAM 1500 PROMASTER..."), clicked `Actions` -> `Confirm Change` -> confirmed using downloaded PCH transaction. Yellow row merged directly into the `8/18/2026 Policy Change` download row, and the purple chip `Open Change Request effective 8/18/2026` on the policy card was completely cleared.
 * **EZLynx System Action**:
   * Formal 3-Way Match Verification & Closure Note logged: **Note ID `1123408119`**.
-  * Status: **COMPLETED & CLOSED**.
+  * Status: **COMPLETED, RECONCILED & CLOSED**.
 * **Evidence Screenshots**:
   * Discussion Closure Note: `data/policy_change_verification/screenshots/on_my_way_activity_closure_note.png`
   * Client Documents Library: `data/policy_change_verification/screenshots/on_my_way_documents_folder.png`
+  * History Modal Confirmation: `data/policy_change_verification/screenshots/on_my_way_confirm_modal_1.png`
+  * Confirmed History Grid: `data/policy_change_verification/screenshots/on_my_way_change_confirmed_success.png`
+  * Confirmed Policy Card (Badge Cleared): `data/policy_change_verification/screenshots/on_my_way_card_clean_final.png`
 
 ---
 
 ### Account C: James Santiago (`72885007`)
-* **Policy**: United States Liability Insurance Co. (USLI) — Commercial Package `CP 1924347`
+* **Policy**: United States Liability Insurance Co. (USLI) — Commercial Package `CP 1924347` (PolicyMasterID: `81555835`)
 * **EZLynx Discussion ID**: `839564978`  
   *Title*: `Commercial Package Policy Change Request - removing 416 west elm`
 * **Requested**:
   * Remove location: `416 West Elm Street`.
 * **Received & Verified (100% 3-Way Match PASS)**:
   * Carrier ACORD XML electronic download feed parsed directly on `hermes-poc-01` (`68,569 bytes`):
-    * Policy Change transaction effective 09/03/2026 downloaded at `2026-09-03T11:14:51.42`.
+    * Policy Change transaction effective 09/01/2026 (downloaded 09/03/2026) reflects premium credit `-$10,010.94` (new premium: $10,094.20).
     * Location `416 West Elm Street` is 100% removed from the policy.
-    * Active covered locations remaining: `813 George Street, Plainfield, NJ` and `14 Larch Street, Carteret, NJ`.
-    * Policy term written premium adjusted to \$10,094.20.
+    * Active covered locations remaining: `813 George Street, Plainfield, NJ`.
+* **Yellow Change Request Confirmation Status**:
+  * **100% RECONCILED & CONFIRMED**: In Policy History (`/applicantportal/policy/81555835/history/index`), located yellow `Change Request 9/1/2026` row ("Please remove: 416 west elm"), clicked `Actions` -> `Confirm Change` -> confirmed using downloaded PCH transaction. Yellow row merged directly into the `9/1/2026 Policy Change` download row, successfully reconciling the change request.
 * **EZLynx System Action**:
   * Formal 3-Way Match Verification & Closure Note logged: **Note ID `1123408410`**.
-  * Status: **COMPLETED & CLOSED**.
+  * Status: **COMPLETED, RECONCILED & CLOSED**.
 * **Evidence Screenshots**:
   * Discussion Closure Note: `data/policy_change_verification/screenshots/james_santiago_activity_closure_note.png`
   * Client Documents Library: `data/policy_change_verification/screenshots/james_santiago_documents_folder.png`
+  * History Modal Confirmation: `data/policy_change_verification/screenshots/james_santiago_confirm_modal_1.png`
+  * Confirmed History Grid: `data/policy_change_verification/screenshots/james_santiago_change_confirmed_success.png`
+  * Confirmed Policy Card: `data/policy_change_verification/screenshots/james_santiago_card_confirmed.png`
+
+---
+
+### Account D: United Paving & Masonry LLC (`108248067`)
+* **Policy**: Selective Insurance Company — Commercial Package `S 2472200` (PolicyMasterID: `44718619`)
+* **Requested**: Add driver Brandon Myles (DL: `B76100967401852`, DOB: 01-06-1985).
+* **Received & Verified (100% 3-Way Match PASS)**:
+  * Carrier electronic download `8/31/2026 Policy Change` arrived in EZLynx on `9/2/2026`.
+* **Yellow Change Request Confirmation Status**:
+  * **100% RECONCILED & CONFIRMED**: In Policy History (`/applicantportal/policy/44718619/history/index`), located yellow `Change Request 8/31/2026` row ("Add driver to policy: Brandon Myles..."), clicked `Actions` -> `Confirm Change` -> Modal 1 Yes ("Use downloaded PCH transaction to update policy?"). Yellow row merged directly into download row, and purple badge `Open Change Request` cleared from policy card.
+* **Evidence Screenshots**:
+  * History Modal Confirmation: `data/policy_change_verification/screenshots/united_paving_confirm_modal_1.png`
+  * Confirmed History Grid: `data/policy_change_verification/screenshots/united_paving_change_confirmed_success.png`
+  * Confirmed Policy Card: `data/policy_change_verification/screenshots/united_paving_card_confirmed.png`
+
+---
+
+### Account E: B&M All Inclusive LLC (`75172204`)
+* **Policy**: Utica First Insurance Company — Business Owners Policy `ART3000230570` (PolicyMasterID: `39652942`)
+* **Requested**: Update mailing address to `181 Liberty Ave., Staten Island, NY 10305`.
+* **Received & Verified (100% 3-Way Match PASS)**:
+  * Carrier electronic download `8/19/2026 Policy Change` arrived in EZLynx on `8/22/2026`.
+* **Yellow Change Request Confirmation Status**:
+  * **100% RECONCILED & CONFIRMED**: In Policy History (`/applicantportal/policy/39652942/history/index`), located yellow `Change Request 8/20/2026` row ("Update mailing address to: 181 Liberty Ave..."), clicked `Actions` -> `Confirm Change` -> Modal 1 Yes ("Use downloaded PCH transaction to update policy?"). Yellow row merged directly into download row, and purple badge `Open Change Request effective 8/20/2026` cleared from policy card.
+* **Evidence Screenshots**:
+  * History Modal Confirmation: `data/policy_change_verification/screenshots/bm_confirm_modal_1.png`
+  * Confirmed History Grid: `data/policy_change_verification/screenshots/bm_change_confirmed_success.png`
+  * Confirmed Policy Card: `data/policy_change_verification/screenshots/bm_card_confirmed.png`
 
 ---
 
