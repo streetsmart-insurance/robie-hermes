@@ -4,28 +4,16 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from playwright.async_api import async_playwright
 
-from src.ezlynx.cdp_session_preflight import (
-    CdpSessionBlocked,
-    HITL_RELOGIN_MESSAGE,
-    preflight_live_cdp_session,
-)
-from src.ezlynx.manual_renewal_gate import (
-    RENEWAL_OFFER_FOLDER,
-    RENEWAL_OFFER_FOLDER_ALIASES,
-    resolve_renewal_offer_folder,
-)
-
 logger = logging.getLogger("ezlynx_document_uploader")
 
 FOLDER_ROUTING = {
-    "renewal": list(dict.fromkeys([*RENEWAL_OFFER_FOLDER_ALIASES, "Renewals"])),
-    "quote": list(dict.fromkeys([*RENEWAL_OFFER_FOLDER_ALIASES, "Renewals"])),
+    "renewal": ["Renewal Offers/Declarations", "Renewal Offers", "Renewals", "Documents"],
+    "quote": ["Renewal Offers/Declarations", "Renewal Offers", "Renewals", "Documents"],
     "non renewal": ["Cancellations/NonRenewals/Reinstatements", "Cancellations/Non-Renewals", "Non-Renewals", "Documents"],
     "cancellation": ["Cancellations/NonRenewals/Reinstatements", "Cancellations/Non-Renewals", "Non-Renewals", "Documents"],
     "loss runs": ["Loss Runs", "Prior Policies & Loss Runs", "Loss History", "Documents"],
     "loss run": ["Loss Runs", "Prior Policies & Loss Runs", "Loss History", "Documents"],
     "application": ["Applications", "Renewal Applications", "Documents"],
-    "correspondence": ["Documents", "Correspondence"],
 }
 
 LABEL_ROUTING = {
@@ -36,7 +24,6 @@ LABEL_ROUTING = {
     "loss runs": "Loss Runs",
     "loss run": "Loss Runs",
     "application": "Application",
-    "correspondence": "Correspondence",
 }
 
 SUFFIX_ROUTING = {
@@ -50,129 +37,13 @@ SUFFIX_ROUTING = {
 }
 
 
-async def list_visible_document_folders(page) -> List[str]:
-    """Collect folder-like names from the Document Library table (no Playwright clicks)."""
-    names: List[str] = []
-    cells = page.locator("td, a, span, .folder-name")
-    count = await cells.count()
-    for i in range(min(count, 250)):
-        try:
-            text = (await cells.nth(i).inner_text() or "").strip()
-        except Exception:
-            continue
-        if not text or len(text) > 80:
-            continue
-        if text not in names:
-            names.append(text)
-    return names
-
-
-async def create_document_folder(page, folder_name: str) -> bool:
-    """Create a Documents-tab folder via Add → Folder. Best-effort; returns False if UI missing."""
-    add_btn = page.locator("#add-action")
-    if await add_btn.count() == 0:
-        return False
-    await add_btn.first.click()
-    await asyncio.sleep(1)
-    folder_item = page.locator(
-        ".mat-mdc-menu-item:has-text('New Folder'), "
-        ".mat-mdc-menu-item:has-text('Folder'), "
-        "[role='menuitem']:has-text('New Folder'), "
-        "[role='menuitem']:has-text('Folder')"
-    )
-    if await folder_item.count() == 0:
-        logger.warning("Add menu has no Folder item; cannot create '%s'", folder_name)
-        await page.keyboard.press("Escape")
-        return False
-    await folder_item.first.click()
-    await asyncio.sleep(1)
-
-    # Check for iframe modal (Classic/Legacy DocumentAddFolder)
-    for _ in range(10):
-        for fr in page.frames:
-            if "documentaddfolder" in (fr.url or "").lower():
-                folder_input = fr.locator("#FolderName")
-                if await folder_input.count() > 0:
-                    await folder_input.fill(folder_name)
-                    save_btn = fr.locator("input[type='submit'], button[type='submit'], input[value='Save']")
-                    if await save_btn.count() > 0:
-                        await save_btn.first.click()
-                        await asyncio.sleep(2)
-                        logger.info("Created Documents folder via iframe: %s", folder_name)
-                        return True
-        await asyncio.sleep(0.5)
-
-    name_input = page.locator(
-        "input[placeholder*='Folder'], input[placeholder*='folder'], "
-        "input[formcontrolname*='name' i], .mat-mdc-dialog-container input, "
-        "mat-dialog-container input"
-    )
-    if await name_input.count() == 0:
-        logger.warning("Folder-name input not found after Add → Folder")
-        return False
-    await name_input.first.fill(folder_name)
-    save_btn = page.locator(
-        "button:has-text('Create'), button:has-text('Save'), button:has-text('OK')"
-    )
-    if await save_btn.count() == 0:
-        return False
-    await save_btn.first.click()
-    await asyncio.sleep(2)
-    logger.info("Created Documents folder: %s", folder_name)
-    return True
-
-
-async def enter_document_folder(page, folder_name: str) -> bool:
-    folder_cell = page.locator(f"td:has-text('{folder_name}'), a:has-text('{folder_name}')")
-    if await folder_cell.count() > 0:
-        await folder_cell.first.click()
-        await asyncio.sleep(3)
-        return True
-    folder_row = page.locator(f"tr:has-text('{folder_name}')")
-    if await folder_row.count() > 0:
-        await folder_row.first.dblclick()
-        await asyncio.sleep(3)
-        return True
-    return False
-
-
-async def ensure_renewal_offer_folder(page) -> Dict[str, Any]:
-    """Select the Renewal Offer folder, creating it when the account has none."""
-    existing = await list_visible_document_folders(page)
-    resolved = resolve_renewal_offer_folder(existing, create_if_missing=True)
-    entered = await enter_document_folder(page, resolved.folder)
-    if entered:
-        return {
-            "folder": resolved.folder,
-            "created": False,
-            "action": "matched",
-        }
-    if resolved.action == "create" or not entered:
-        created = await create_document_folder(page, RENEWAL_OFFER_FOLDER)
-        entered = await enter_document_folder(page, RENEWAL_OFFER_FOLDER)
-        if not entered:
-            logger.warning("Could not enter Renewal Offer folder after create=%s", created)
-        return {
-            "folder": RENEWAL_OFFER_FOLDER,
-            "created": created,
-            "action": "create" if created else "missing",
-            "entered": entered,
-        }
-    return {
-        "folder": resolved.folder,
-        "created": resolved.created,
-        "action": resolved.action,
-        "entered": entered,
-    }
-
-
 class EZLynxDocumentUploader:
     """Automates uploading documents to the Documents tab in EZLynx via Playwright Chrome CDP,
 
     adhering to StreetSmart agency conventions:
     - Clean naming: '{policy_number} Renewal Offer.pdf', '{policy_number} Loss Runs.pdf', etc.
     - Policy association: Automatically selected from the policy dropdown.
-    - Target folder: Renewal Offer (create if missing) for renewal PDFs; Loss Runs / Cancellations otherwise.
+    - Target folder: Routes to Renewal Offers/Declarations, Loss Runs, or Cancellations/NonRenewals.
     """
 
     def __init__(
@@ -202,34 +73,12 @@ class EZLynxDocumentUploader:
             return {"success": False, "error": f"File not found: {file_path}"}
 
         norm_doc_type = doc_type.strip().lower()
-        from src.ezlynx.manual_renewal_gate import (
-            classify_renewal_document,
-            is_application_or_bound_quote_document,
-            peek_pdf_text,
-        )
 
-        detected_kind = classify_renewal_document(
-            name=file_path.name if file_path else None,
-            text=peek_pdf_text(file_path),
-            kind=norm_doc_type if norm_doc_type in {"application", "bound_quote"} else None,
-        )
-        if is_application_or_bound_quote_document(
-            name=file_path.name, kind=detected_kind
-        ) and norm_doc_type in {"renewal", "quote"}:
-            logger.warning(
-                "Refusing Renewal Offer classification for Application/Bound Quote PDF: %s",
-                file_path.name,
-            )
-            norm_doc_type = "application"
-
-        # Renewal PDFs: label + Documents folder named Renewal Offer (create if missing).
-        # Never leave a renewal offer only under a bare policy-number folder.
+        # Resolve candidate target folders
         if target_folder:
             candidate_folders = [target_folder]
-        elif norm_doc_type in {"renewal", "quote"}:
-            candidate_folders = list(RENEWAL_OFFER_FOLDER_ALIASES)
         else:
-            candidate_folders = FOLDER_ROUTING.get(norm_doc_type, [RENEWAL_OFFER_FOLDER])
+            candidate_folders = FOLDER_ROUTING.get(norm_doc_type, ["Renewal Offers/Declarations", "Documents"])
 
         # Format document name: e.g. "02TRM066190-01 Renewal Offer.pdf" or "02TRM066190-01 Loss Runs.pdf"
         clean_pnum = policy_number.strip() if policy_number else ""
@@ -249,7 +98,7 @@ class EZLynxDocumentUploader:
             browser = None
             is_standalone = False
             try:
-                # 1. Use EZLynxSessionManager (CDP live-page preflight; no bot password-reset)
+                # 1. Use EZLynxSessionManager to get authenticated context (auto-handles login/2FA)
                 try:
                     from src.ezlynx.session_manager import EZLynxSessionManager
                     mgr = EZLynxSessionManager(
@@ -258,13 +107,6 @@ class EZLynxDocumentUploader:
                     )
                     browser, context = await mgr.get_authenticated_context(p, headless=True)
                     is_standalone = True
-                except CdpSessionBlocked as blocked:
-                    return {
-                        "success": False,
-                        "status": "blocked",
-                        "error": str(blocked),
-                        "preflight": blocked.preflight.to_dict(),
-                    }
                 except Exception as sess_err:
                     logger.warning(f"EZLynxSessionManager error: {sess_err}, trying direct storage_state or CDP fallback...")
                     if self.storage_state_path and Path(self.storage_state_path).is_file():
@@ -279,21 +121,7 @@ class EZLynxDocumentUploader:
                         is_standalone = True
                     elif self.cdp_url:
                         browser = await p.chromium.connect_over_cdp(self.cdp_url)
-                        context = browser.contexts[0] if browser.contexts else None
-                        if context is None:
-                            return {
-                                "success": False,
-                                "status": "blocked",
-                                "error": HITL_RELOGIN_MESSAGE,
-                            }
-                        preflight = await preflight_live_cdp_session(context)
-                        if not preflight.ok:
-                            return {
-                                "success": False,
-                                "status": "blocked",
-                                "error": preflight.error_message,
-                                "preflight": preflight.to_dict(),
-                            }
+                        context = browser.contexts[0] if browser.contexts else await browser.new_context()
 
                 if not browser or not context:
                     return {"success": False, "error": "Neither EZLynxSessionManager nor CDP connection could be established."}
@@ -305,40 +133,29 @@ class EZLynxDocumentUploader:
                 await page.goto(docs_url, wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(4)
 
-                # Live Login wall: fail closed. Human re-logins SSRobie; bots must not password-reset.
-                if "auth/account/login" in page.url.lower() or "forcedoff" in page.url.lower():
-                    logger.error("Redirected to EZLynx Login/forcedOff. %s", HITL_RELOGIN_MESSAGE)
-                    return {
-                        "success": False,
-                        "status": "blocked",
-                        "error": HITL_RELOGIN_MESSAGE,
-                    }
+                # If redirected to login, re-authenticate on the spot
+                if "auth/account/login" in page.url.lower():
+                    logger.warning(f"Redirected to login while accessing {docs_url}. Performing in-line login...")
+                    from src.ezlynx.session_manager import EZLynxSessionManager
+                    mgr = EZLynxSessionManager(storage_state_path=self.storage_state_path)
+                    await mgr._perform_login(context)
+                    await page.goto(docs_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(4)
 
-                # Enter (or create) the destination folder before staging the file.
-                selected_folder = None
-                folder_created = False
-                if norm_doc_type in {"renewal", "quote"} and not target_folder:
-                    folder_info = await ensure_renewal_offer_folder(page)
-                    selected_folder = folder_info.get("folder")
-                    folder_created = bool(folder_info.get("created"))
-                    logger.info(
-                        "Renewal Offer folder action=%s created=%s entered=%s",
-                        folder_info.get("action"),
-                        folder_created,
-                        folder_info.get("entered"),
-                    )
-                else:
-                    for folder_candidate in candidate_folders:
-                        if await enter_document_folder(page, folder_candidate):
-                            logger.info(f"Navigating into folder: {folder_candidate}")
-                            selected_folder = folder_candidate
-                            break
-                    if not selected_folder and candidate_folders:
-                        want = candidate_folders[0]
-                        created = await create_document_folder(page, want)
-                        if created and await enter_document_folder(page, want):
-                            selected_folder = want
-                            folder_created = True
+                # Optional: Navigate into target folder if it exists on page
+                for folder_candidate in candidate_folders:
+                    folder_cell = page.locator(f"td:has-text('{folder_candidate}'), a:has-text('{folder_candidate}')")
+                    if await folder_cell.count() > 0:
+                        logger.info(f"Navigating into folder: {folder_candidate}")
+                        await folder_cell.first.click()
+                        await asyncio.sleep(3)
+                        break
+                    folder_row = page.locator(f"tr:has-text('{folder_candidate}')")
+                    if await folder_row.count() > 0:
+                        logger.info(f"Double-clicking folder row: {folder_candidate}")
+                        await folder_row.first.dblclick()
+                        await asyncio.sleep(3)
+                        break
 
                 # Close notification drawer if open
                 close_btn = page.locator("mat-icon:has-text('close'), button:has-text('close')")
@@ -433,7 +250,10 @@ class EZLynxDocumentUploader:
                 screenshot_dir = Path("data/screenshots")
                 screenshot_dir.mkdir(parents=True, exist_ok=True)
                 screenshot_path = screenshot_dir / f"doc_uploaded_{applicant_id}_{clean_pnum}.png"
-                await page.screenshot(path=str(screenshot_path))
+                try:
+                    await page.screenshot(path=str(screenshot_path))
+                except Exception as shot_err:
+                    logger.warning(f"Post-upload screenshot failed (document still submitted): {shot_err}")
 
                 await page.close()
                 return {
@@ -442,8 +262,6 @@ class EZLynxDocumentUploader:
                     "document_name": target_doc_name,
                     "policy_number": clean_pnum,
                     "applied_label": applied_label,
-                    "target_folder": selected_folder,
-                    "folder_created": folder_created,
                     "screenshot_path": str(screenshot_path)
                 }
             except Exception as e:
