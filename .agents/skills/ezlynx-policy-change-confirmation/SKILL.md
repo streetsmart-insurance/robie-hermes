@@ -15,17 +15,21 @@ Use the existing policy-change task and corresponding discussion as the permanen
   1. Original request and supporting evidence.
   2. Carrier-issued endorsement, declarations, schedule, confirmation, and premium change.
   3. EZLynx transaction and keyed policy data.
+- **HARDENED INVARIANT 1 — EZLynx Change Request State**: Never close a confirmation task or mark an audit passed if the policy card exhibits `hasPendingChangeRequest: True` or displays the purple badge `Open Change Request effective MM/DD/YYYY`. The Change Request row in the policy History tab must be formally confirmed (`Actions -> Confirm Change -> Apply Download`) before the task can be marked completed.
+- **HARDENED INVARIANT 2 — Dec-Less Carrier Verification Gate**: When carriers do not issue endorsement declaration pages for driver or schedule modifications (e.g., Merchants Insurance Group), verification MUST be performed via direct carrier portal inspection (e.g. `files.merchantsgroup.com` / `secure.merchantsgroup.com`) or explicit underwriter confirmation. A generic `$0.00` IVANS download without portal/transaction verification CANNOT be assumed to confirm the change.
+- **HARDENED INVARIANT 3 — Anti-Hallucination Baseline Verification for Removals**: Never deduce that a driver or vehicle was removed merely because it is absent from the current EZLynx summary screen. The auditor must verify whether the entity was present in the prior active policy baseline. If an entity was never keyed into EZLynx, its absence is an agency database artifact, not proof of carrier endorsement.
+- **HARDENED INVARIANT 4 — Carrier Self-Service Portal Preemption Gate**: When a carrier provides an active, real-time agent portal with online endorsement capabilities (e.g., Berkshire Hathaway GUARD Agency Service Center `gigezrate.guard.com`, Progressive FAO, BHHC), Robie must verify whether the endorsement was entered directly online. If the change was merely emailed or sent manually to an underwriter inbox rather than entered in the portal, Robie detects this absence in the portal's policy history and automatically alerts the assigned CSR and Producer to enter it online for faster turnaround.
+- **HARDENED INVARIANT 5 — Intake Channel Disambiguation & Dispatch Matrix**: Systematically classify accounts by carrier intake architecture:
+  - *Direct Carrier Portal First* (Progressive FAO, Guard, BHHC, Travelers): Key changes online; retrieve decs via automated portal scraping. Direct calling is bypassed unless portal errors.
+  - *Wholesale Broker / MGA Desk* (Jimcor, RT Specialty, TAPCO, Burns & Wilcox): Changes require underwriter negotiation; automated email cadence + autonomous voice AI calling to underwriter desks upon office reopenings.
+  - *Dec-Less Driver Schedules* (Merchants Insurance Group): Verify active driver roster on portal; no dec required.
+- **HARDENED INVARIANT 6 — Anti-Premature Follow-up (Business Day Turnaround Gate)**: Factor in carrier SLAs (24-48 business hours) and holiday weekends (e.g. Labor Day). Do not flag recent submissions as overdue before carrier SLA has elapsed, and synchronize automated follow-ups with the CSR's scheduled due date.
+- **HARDENED INVARIANT 7 — Strict Telephony Business Hours Gate (Mon-Fri 9:00 AM - 6:00 PM Eastern Time)**: Outbound carrier and underwriter phone calls must NEVER be initiated outside 9:00 AM to 6:00 PM Eastern Time, nor on weekends, nor on US federal / carrier holidays (e.g. Labor Day, Memorial Day, New Year's Day, Thanksgiving, Christmas). Any automated voice trigger occurring after hours or during carrier holidays must be blocked and queued for execution at 9:00 AM ET on the next business day.
 - If carrier documents are missing, use the live EZLynx Directory **Document Download** instructions to retrieve them. Never guess a portal or recipient.
 - Save documents in the corresponding folder, rename them clearly, apply the correct label, associate them with the policy, and verify they open.
 - Add every research step, carrier action, comparison result, correction, wait state, escalation, and completion result to the applicable discussion.
 - End every EZLynx note with the exact separate line `ROBIE was here`.
-- **MANDATORY Policy Association**: Every note must explicitly associate to the policy via `--policy-number <Policy#>` and include the top header `Policy: #{policy_number} ({line_of_business} - {carrier_name})`.
 - Leave the task open when documents, evidence, corrections, or approvals remain outstanding.
-- **EZLynx API Utilities (Fast Operations)**:
-  - Check applicant details & assigned agent: `scripts/ezlynx_cli.py applicant {applicantId} --json`
-  - List documents in Document Library: `scripts/ezlynx_cli.py documents {applicantId} --json`
-  - Verify active policies and terms: `scripts/ezlynx_cli.py policies {applicantId} --json`
-  - Post discussion audit note (policy associated): `scripts/ezlynx_cli.py note {applicantId} "{NoteText}" --policy-number {policyNumber} --lob "{lob}" --carrier "{carrier}"`
 
 ## Lines of Business (LOB) Reference Architecture & Video SOPs
 
@@ -59,11 +63,23 @@ Manual renewals and policy changes span multiple Lines of Business with distinct
    - Mortgage refinances/escrow, dwelling Coverage A, personal auto drivers/vehicles.
    - **QuickHome Routing Rule**: AllRisks / RT Specialty QuickHome is strictly Personal Lines.
 
-7. **Video Walkthroughs & Training Catalog**: [references/video_walkthroughs.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/video_walkthroughs.md)  
-   - Step-by-step video recordings (Loom, Google Drive) demonstrating manual portal entries and EZLynx transactions for edge cases.
+7. **Commercial Inland Marine**: [references/lobs/commercial_inland_marine.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_inland_marine.md)  
+   - Contractor's Equipment Floatters, 5-Year Replacement Cost rule vs ACV, serial numbers, loss payees, small tools floater.
 
-8. **Carrier & Wholesaler Routing Directory SOP**: [references/carrier_directory_sop.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/carrier_directory_sop.md)  
-   - Authoritative routing addresses, portal links, and endorsement follow-up schedules.
+8. **Errors & Omissions (E&O)**: [references/lobs/commercial_errors_and_omissions.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_errors_and_omissions.md)  
+   - Strict LOB selection ("Errors and Omissions" NOT Professional Liability), defense costs inside/outside, retroactive date preservation.
+
+9. **Garage & Dealers Policy**: [references/lobs/commercial_garage_and_dealers.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/lobs/commercial_garage_and_dealers.md)  
+   - Operations split (Auto Service vs Dealership), Symbols 29 & 30, Garagekeepers legal liability, mandatory driver listing.
+
+10. **Video Walkthroughs & Training Catalog**: [references/video_walkthroughs.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/video_walkthroughs.md)  
+    - Step-by-step video recordings (Loom, Google Drive) demonstrating manual portal entries and EZLynx transactions for edge cases.
+
+11. **Carrier & Wholesaler Routing Directory SOP**: [references/carrier_directory_sop.md](file:///Users/carloferrara/Documents/antigravity/happy-fermi/.agents/skills/ezlynx-policy-change-confirmation/references/carrier_directory_sop.md)  
+    - Authoritative routing addresses, portal links, and endorsement follow-up schedules.
+
+12. **Automated Verification Pipeline**: `scripts/policy_change_verification_pipeline.py`  
+    - CLI execution engine for automated three-way verification and confirmation reporting.
 
 ---
 
@@ -94,22 +110,21 @@ Build a requested-change packet from the client's request, signed form, email, c
 
 If the request is ambiguous or unsupported, set `request_unclear` and route it to the CSR before judging the carrier-issued change.
 
-### Obtain carrier evidence
+### Obtain carrier evidence & Hand-off Protocol
 
-1. Check the account's policy-change folder and carrier eDocs for an issued endorsement, revised declarations, schedule, confirmation, invoice, or premium notice.
+1. Check the account's policy-change folder, declarations folder, and carrier eDocs for an issued endorsement, revised declarations, schedule, confirmation, invoice, or premium notice.
 2. Confirm the document belongs to the correct insured, policy, effective date, and change.
    - **Check policy Named Insured**: Open the specific policy's **Summary tab** and check the **"Named Insured As Listed On The Policy"** field — this is the authoritative name and can differ from the account-level linked-applicants sidebar.
-3. If missing, read the live carrier Directory **Document Download** entry.
-4. If the method is **Website** or **Download**, retrieve the issued documents from the specified portal.
-5. If the method is **Email**, return to the applicant/account **Overview**, select the email icon in the upper-right, and choose the built-in template whose name starts with **Policy Change**. Use the recipient authorized by the Directory entry.
-   - **Carrier-Only Follow-Up Rule**: Always email the carrier or underwriter, NEVER the client/insured. Always remove the client's email from the 'To' or 'CC' list when dispatching carrier follow-up emails from EZLynx.
-   - **Line of Business Routing Rules (RT Specialty / AllRisks)**:
-     - `QuickHome` (`quickhome@allrisks.com`, `QuickHomeEndorsements@`, `QuickHomeQuotes@`) is strictly **Personal Lines**. Never route Commercial Lines to QuickHome inboxes.
-     - RT Specialty Commercial Lines endorsements route to `Caroline.shaddow@rtspeciality.com`, `stephanie.tower@rtspecialty.com`, or `interstate.endorsements@rtspecialty.com`.
-   - **Automation Center Completion Rule**: Do NOT manually email the client when a policy change is processed. EZLynx Automation Center automatically notifies the client upon transaction completion.
-6. Before sending, verify the exact template name, recipient, policy, subject, merge fields, requested change, and attachments. Do not substitute a free-form email when the matching built-in workflow template exists.
-7. If Directory instructions are missing or unclear, set `directory_incomplete`; do not guess.
-8. If the carrier has not issued the change, set `waiting_for_carrier`, add evidence and a follow-up date, and leave the task open.
+3. **If carrier documents are missing**:
+   - Route and delegate this account to the dedicated **`carrier-policy-document-retrieval`** skill (`.agents/skills/carrier-policy-document-retrieval/SKILL.md`).
+   - The retrieval skill executes the tri-channel hunting pipeline:
+     1. **Carrier Portals & IVANS eDocs**: Direct download (e.g., FAO, eSelect, Coterie, Geico, AmTrust).
+     2. **EZLynx Carrier Email Follow-Up**: Using official template `Policy Change Request Change Request Follow up Email Templates (Carrier)` (strict carrier-only routing; never client; personal vs commercial routing rules).
+     3. **Autonomous Voice AI Phone System**: Outbound call via `scripts/carrier_policy_change_caller.py` (Bland AI `+17322986745`) to carrier endorsement/servicing desks when written follow-ups are overdue (>3 business days) or carrier services by phone.
+   - Leave the task open in state `waiting_for_carrier` or `carrier_followup_dispatched`.
+4. **When documents are retrieved and filed**:
+   - Status transitions to `ready_for_confirmation`.
+   - Proceed immediately to **Document control** and **Three-way verification** below.
 
 ### Internal Email & Reporting Standards
 

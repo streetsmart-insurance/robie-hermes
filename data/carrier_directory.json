@@ -12,7 +12,30 @@
   "Travelers": {
     "channel": "PORTAL",
     "portal_url": "https://www.travelers.com/for-agents",
-    "notes": "Retrieve renewal quote and loss runs from Agent Portal."
+    "phone": "877-878-2468",
+    "notes": "Retrieve renewal quote and loss runs from Agent Portal. Audit Support: 800-842-8940.",
+    "ivr_instructions": "Press 2 for Commercial Lines, then 3 for Audits."
+  },
+  "Pie Insurance": {
+    "channel": "PORTAL",
+    "portal_url": "https://pieinsurance.com/partners/",
+    "phone": "855-965-1840",
+    "notes": "Partner Support & Premium Audit: 855-965-1840. Agency: StreetSmart Insurance.",
+    "ivr_instructions": "Press 2 for Partner/Agency Support, then 3 for Premium Audit or Underwriting."
+  },
+  "Selective Insurance": {
+    "channel": "EMAIL",
+    "underwriter_email": "myaudit@Selective.com",
+    "phone": "800-777-9656",
+    "notes": "Direct audit email: myaudit@Selective.com. Agency Support: 800-777-9656.",
+    "ivr_instructions": "Press 1 for Agency Operations, then follow prompts for Premium Audit.",
+    "email": "myaudit@Selective.com",
+    "underwriters": [
+      {
+        "name": "Selective Premium Audit Desk",
+        "email": "myaudit@Selective.com"
+      }
+    ]
   },
   "Chubb Group": {
     "channel": "PORTAL",
@@ -23,6 +46,57 @@
     "channel": "EMAIL_ASK_PORTAL",
     "underwriter_email": "assignedrisk@hartford.com",
     "notes": "Email underwriter; ask if self-service online portal is available."
+  },
+  "NJCRIB - Pennsylvania Lumbermans Assigned Risk": {
+    "channel": "EMAIL_AND_PHONE",
+    "underwriter_email": "policyservices@ormarks.com",
+    "phone": "800-752-1895",
+    "notes": "Serviced via PMA / Ormarks. Follow up via email to policyservices@ormarks.com and phone desk 800-752-1895.",
+    "ivr_instructions": "Press 2 for Policyholder/Agent Services, then 3 for Audits."
+  },
+  "Pennsylvania Lumbermens Mutual Insurance Company": {
+    "channel": "EMAIL_AND_PHONE",
+    "underwriter_email": "policyservices@ormarks.com",
+    "phone": "800-752-1895",
+    "notes": "Serviced via PMA / Ormarks. Follow up via email to policyservices@ormarks.com and phone desk 800-752-1895.",
+    "ivr_instructions": "Press 2 for Policyholder/Agent Services, then 3 for Audits."
+  },
+  "NJCRIB - New Jersey Manufacturers Assigned Risk": {
+    "channel": "EMAIL_AND_PHONE",
+    "underwriter_email": "wcumail@njm.com",
+    "phone": "800-232-6600",
+    "notes": "NJM Assigned Risk. Follow up via email to wcumail@njm.com and phone desk 800-232-6600.",
+    "ivr_instructions": "Press 2 for Commercial / Workers Comp, then follow prompts for Audit."
+  },
+  "NJM Insurance Group": {
+    "channel": "EMAIL_AND_PHONE",
+    "underwriter_email": "wcumail@njm.com",
+    "phone": "800-232-6600",
+    "notes": "NJM Commercial & Assigned Risk. Follow up via email to wcumail@njm.com and phone desk 800-232-6600.",
+    "ivr_instructions": "Press 2 for Commercial / Workers Comp, then follow prompts for Audit."
+  },
+  "Associated Specialty Insurance Agency MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "underwriting@asiaworkerscomp.com",
+    "notes": "Workers Comp MGA. JCF Masonry handled by Debra Cowling (dcowling@asiaworkerscomp.com). Director of Ops: Ashley DaCosta (610-543-5510 x113).",
+    "phone": "610-543-5510",
+    "underwriters": [
+      {
+        "name": "Debra Cowling",
+        "title": "Account Specialist / Underwriting",
+        "email": "dcowling@asiaworkerscomp.com"
+      },
+      {
+        "name": "Ashley DaCosta",
+        "title": "Director of Operations",
+        "email": "adacosta@asiaworkerscomp.com",
+        "phone": "610-543-5510 x113"
+      },
+      {
+        "name": "Underwriting General Desk",
+        "email": "underwriting@asiaworkerscomp.com"
+      }
+    ]
   },
   "AmWINS MGA": {
     "channel": "EMAIL",
@@ -76,9 +150,9 @@
     "notes": "Email underwriter."
   },
   "Hyundai Marine & Fire Insurance Company": {
-    "channel": "PORTAL",
-    "portal_url": "https://app.maple-tech.com/hmf",
-    "notes": "Maple-Tech Aspire 3.0 agent portal. Search under Applications or In-force, retrieve dec pages from /api/v1/docs/app/{app_id}."
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@hyundaifire.com",
+    "notes": "Email underwriter."
   },
   "NJCRIB - Liberty Assigned Risk": {
     "channel": "EMAIL_ASK_PORTAL",
@@ -91,9 +165,11 @@
     "notes": "Email underwriter."
   },
   "Johnson & Johnson, Inc.  MGA": {
-    "channel": "EMAIL",
+    "channel": "EMAIL_AND_VOICE",
+    "phone": "800-487-7565",
+    "agency_code": "895543",
     "underwriter_email": "renewals@jjins.com",
-    "notes": "Email underwriter."
+    "notes": "Agency Code: 895543. Main Phone: 800-487-7565. Direct Underwriting / MGA. Renewals: renewals@jjins.com. DO NOT route to JJPF financing."
   },
   "FTP INC.  MGA": {
     "channel": "EMAIL",
@@ -145,14 +221,46 @@
     "portal_url": "https://www.markel.com",
     "notes": "Markel Agent Portal."
   },
-  "HYUNDAI MARINE & FIRE INS CO LTD": {
-    "channel": "PORTAL",
-    "portal_url": "https://app.maple-tech.com/hmf",
-    "notes": "Maple-Tech Aspire 3.0 agent portal. Search under Applications or In-force, retrieve dec pages from /api/v1/docs/app/{app_id}."
+  "NYSIF": {
+    "channel": "EMAIL_AND_PHONE",
+    "phone": "888-875-5790",
+    "email": "CustomerService@nysif.com",
+    "website": "https://www.nysif.com/",
+    "portal_url": "https://www.nysif.com/",
+    "producer_code": "1960636",
+    "underwriters": [
+      {
+        "name": "NYSIF Customer Service / Payroll Verification Desk",
+        "email": "CustomerService@nysif.com",
+        "phone": "888-875-5790"
+      }
+    ],
+    "notes": "New York State Insurance Fund. Annual audits are designated as Payroll Verifications. Handled via PASS portal (nysif.com), email to CustomerService@nysif.com, or phone 888-875-5790. Inquiries must cite Producer Code 1960636. Disputes require NYS-45 quarterly wage reports, payroll summaries, and subcontractor certificates of insurance.",
+    "agency_code": "1960636",
+    "ivr_instructions": "Select Workers Comp Customer Service or Premium Audit / Payroll Verification"
   },
-  "Maple-Tech": {
-    "channel": "PORTAL",
-    "portal_url": "https://app.maple-tech.com/hmf",
-    "notes": "Maple-Tech Aspire 3.0 agent portal."
+  "NJCRIB - Continental Assigned Risk": {
+    "channel": "EMAIL",
+    "phone": "800-752-1895",
+    "email": "policyservices@berkleyrisk.com",
+    "website": "https://www.berkleyrisk.com",
+    "underwriters": [
+      {
+        "name": "Berkley Risk Policy Services",
+        "email": "policyservices@berkleyrisk.com"
+      },
+      {
+        "name": "Hartford Assigned Risk Servicing",
+        "email": "assignedrisk@hartford.com"
+      }
+    ],
+    "notes": "Continental Casualty Co Assigned Risk serviced via Berkley Risk. Direct audit inquiries to policyservices@berkleyrisk.com and assignedrisk@hartford.com."
+  },
+  "Johnson & Johnson Insurance": {
+    "channel": "EMAIL_AND_VOICE",
+    "phone": "800-487-7565",
+    "agency_code": "895543",
+    "underwriter_email": "renewals@jjins.com",
+    "notes": "Agency Code: 895543. Main Phone: 800-487-7565. Direct Underwriting / MGA. Renewals: renewals@jjins.com. DO NOT route to JJPF financing."
   }
 }
