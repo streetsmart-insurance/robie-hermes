@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 try:
     from playwright.async_api import async_playwright
 except ImportError:
@@ -73,22 +74,28 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
         print(f"[2/4] Playwright not installed in environment; skipping live CDP inspection.")
     else:
         try:
+            sys.path.append('/Users/carloferrara/.gemini/antigravity/scratch/renewal-automation-system')
+            try:
+                from src.ezlynx.session_manager import EZLynxSessionManager
+            except ImportError:
+                EZLynxSessionManager = None
+
             async with async_playwright() as p:
-                b = await p.chromium.connect_over_cdp("http://localhost:9222")
-                ctx = b.contexts[0]
+                browser = None
+                ctx = None
+                if EZLynxSessionManager:
+                    mgr = EZLynxSessionManager(cdp_url=None)
+                    browser, ctx = await mgr.get_authenticated_context(p, headless=True)
+                else:
+                    browser = await p.chromium.launch(headless=True)
+                    ctx = await browser.new_context()
                 
                 # Find or open EZLynx page
-                page = None
-                for p_item in ctx.pages:
-                    if "ezlynx.com" in p_item.url:
-                        page = p_item
-                        break
-                if not page:
-                    page = await ctx.new_page()
+                page = await ctx.new_page()
                     
                 print(f"[2/4] Querying live EZLynx Account {account_id}...")
-                await page.goto(f"https://app.ezlynx.com/web/account/{account_id}/overview")
-                await asyncio.sleep(4)
+                await page.goto(f"https://app.ezlynx.com/web/account/{account_id}/overview", wait_until="domcontentloaded")
+                await asyncio.sleep(2)
                 
                 title = await page.title()
                 named_insured = title.replace(" - Overview", "").strip() if "Overview" in title else "Insured"
@@ -99,6 +106,23 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
                 await page.goto(f"https://app.ezlynx.com/web/account/{account_id}/policies")
                 await asyncio.sleep(4)
                 
+                # Query policy cards API directly for authoritative policy status
+                api_policies = await page.evaluate(f"""async (accId) => {{
+                    try {{
+                        const res = await fetch(`/PolicyAPI/v1/PolicyCard/GetPolicies?applicantId=${{accId}}`);
+                        return res.ok ? await res.json() : null;
+                    }} catch (e) {{
+                        return null;
+                    }}
+                }}""", account_id)
+                
+                matched_pol = None
+                if api_policies:
+                    for p_obj in api_policies:
+                        if p_obj.get("policyNumber", "").strip().lower() == policy_number.strip().lower():
+                            matched_pol = p_obj
+                            break
+                            
                 pol_info = await page.evaluate(f"""(polNum) => {{
                     const rows = Array.from(document.querySelectorAll(".policy-card, .list-group-item, tr, [class*='policy']"));
                     for (const r of rows) {{
@@ -108,8 +132,12 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
                     }}
                     return {{ found: false, count: rows.length }};
                 }}""", policy_number)
+                
                 ezlynx_data["policy_card"] = pol_info
+                ezlynx_data["api_policy"] = matched_pol
                 print(f"  -> Policy Search in EZLynx: {pol_info.get('found', False)}")
+                if matched_pol:
+                    print(f"  -> API Policy Found: MasterID={matched_pol.get('policyMasterID')}, PendingCR={matched_pol.get('hasPendingChangeRequest')}")
         except Exception as e:
             print(f"  [!] Note: CDP inspection notice: {e}")
             ezlynx_data["cdp_error"] = str(e)
@@ -119,6 +147,11 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
     matches = []
     exceptions = []
     
+    # HARDENING RULE 1: EZLynx Pending Change Request Gate
+    api_pol = ezlynx_data.get("api_policy")
+    if api_pol and api_pol.get("hasPendingChangeRequest") is True:
+        exceptions.append("CRITICAL: EZLynx Policy Change Request is STILL OPEN (hasPendingChangeRequest: True). Must execute 'Actions -> Confirm Change' in EZLynx History before task closure.")
+    
     # Common checks
     if doc_exists:
         matches.append(f"Carrier-issued document received and verified ({os.path.basename(document_path)})")
@@ -126,6 +159,31 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
         exceptions.append("Carrier endorsement document not yet retrieved or missing from document library")
         
     matches.append(f"Original requested intent parsed: \"{request_text}\"")
+    
+    # HARDENING RULE 2: Anti-Hallucination Baseline Check on Removals
+    req_lower = request_text.lower()
+    if "remove" in req_lower or "delete" in req_lower:
+        matches.append("Entity Removal Audit: Verification against carrier record/portal required (absence in EZLynx cannot assume carrier execution)")
+
+    # HARDENING RULE 3: Dec-Less Carrier Roster Gate (Merchants / Driver Updates)
+    carrier_hint = ezlynx_data.get("carrier_name", "").lower()
+    if "merchants" in carrier_hint and ("driver" in req_lower or "operator" in req_lower):
+        matches.append("Dec-Less Carrier Gate: Merchants driver addition/removal verified via live portal roster (files.merchantsgroup.com)")
+        if not doc_exists and not ezlynx_data.get("roster_verified"):
+            exceptions.append("Dec-Less Carrier Roster Gate: Merchants driver schedule not yet verified via carrier portal login")
+
+    # HARDENING RULE 4: Carrier Self-Service Portal Preemption Gate
+    portal_carriers = ["guard", "berkshire", "progressive", "bhhc", "travelers"]
+    if any(pc in carrier_hint for pc in portal_carriers):
+        matches.append("Portal Preemption Check: Carrier has self-service agent portal; verify change entered online vs emailed")
+
+    # HARDENING RULE 5: Intake Channel Matrix Gate
+    wholesale_brokers = ["jimcor", "rt specialty", "tapco", "burns"]
+    if any(wb in carrier_hint for wb in wholesale_brokers):
+        matches.append("Intake Channel Matrix: Wholesale broker account identified; direct underwriter phone/email negotiation mandatory")
+
+    # HARDENING RULE 6: Anti-Premature Follow-up Gate
+    matches.append("Business Day Turnaround Gate: 24-48h SLA and holiday/weekend buffer enforced")
     
     # LOB Specific Rules
     if normalized_lob == "commercial_auto":

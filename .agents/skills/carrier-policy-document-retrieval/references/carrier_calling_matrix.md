@@ -29,6 +29,7 @@ This directory provides the authoritative phone numbers, agency producer codes, 
 | **JIMCOR Agencies** | `(201) 573-8200` | `Agt8572` | Excess, Umbrella, Hard-to-Place | Ask for Arlene Rivera (`ARivera@jimcor.com`) or Markel Excess Underwriting team. |
 | **XS Brokers** | `(800) 343-7049` | On File | Excess & Specialty Commercial | Commercial endorsement service line. Have policy number & insured name ready. |
 | **TAPCO Underwriters** | `(800) 334-5579` | On File | Commercial Property, Excess Lines | Press 2 for Commercial Policy Servicing. Direct email: `renewals@gotapco.com`. |
+| **Johnson & Johnson Insurance** | `(800) 487-7565` | `895543` | Homeowners, Flood, Lloyd's, Specialty | MGA wholesale broker. Direct emails: `quote@jjins.com`, `mail@jjins.com`.<br>**GUARDRAIL**: Never dial JJPF Financing (`800-868-5573`) for policy servicing! |
 
 ---
 

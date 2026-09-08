@@ -113,6 +113,36 @@ KNOWN_CARRIERS = {
         "agency_code": "Agt8572",
         "ivr": "Ask for Arlene Rivera (ARivera@jimcor.com) or Markel Excess Endorsement team.",
     },
+    "johnson & johnson": {
+        "name": "Johnson & Johnson Insurance (MGA)",
+        "phone": "+18004877565",
+        "agency_code": "895543",
+        "ivr": "Wholesale broker / MGA for Lloyd's of London & specialty policies. Do NOT route to JJPF financing.",
+    },
+    "j&j": {
+        "name": "Johnson & Johnson Insurance (MGA)",
+        "phone": "+18004877565",
+        "agency_code": "895543",
+        "ivr": "Wholesale broker / MGA for Lloyd's of London & specialty policies. Do NOT route to JJPF financing.",
+    },
+    "berkshire hathaway": {
+        "name": "Berkshire Hathaway Homestate Companies",
+        "phone": "+18004882930",
+        "agency_code": "On File",
+        "ivr": "Commercial Auto Underwriting & Policy Servicing. Direct email: bhservices@bhhomestate.com / auto@bhhomestate.com",
+    },
+    "bhhc": {
+        "name": "Berkshire Hathaway Homestate Companies",
+        "phone": "+18004882930",
+        "agency_code": "On File",
+        "ivr": "Commercial Auto Underwriting & Policy Servicing. Direct email: bhservices@bhhomestate.com / auto@bhhomestate.com",
+    },
+    "guard": {
+        "name": "Berkshire Hathaway GUARD",
+        "phone": "+18006732465",
+        "agency_code": "On File",
+        "ivr": "Customer Service & Policy Servicing Department.",
+    },
 }
 
 
@@ -144,7 +174,11 @@ def resolve_carrier_details(carrier_name: Optional[str], phone_override: Optiona
             try:
                 orgs = json.loads(ez_orgs_path.read_text(encoding="utf-8"))
                 for o in orgs:
-                    if clean in o.get("name", "").lower():
+                    org_name = o.get("name", "").lower()
+                    # Skip financial/financing companies
+                    if "financing" in org_name or "financial" in org_name:
+                        continue
+                    if clean in org_name:
                         p = o.get("phone")
                         if p:
                             clean_p = re.sub(r"[^\d+]", "", str(p))
