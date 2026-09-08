@@ -221,7 +221,7 @@ def run_buster_brown_tests() -> bool:
     # =========================================================================
     # TEST 3: Cancellation Notice Flow for Buster Brown
     # =========================================================================
-    print("\n[TEST 3/5] Cancellation Flow: Ingesting Notice, Applying Label & Creating CSR Task...")
+    print("\n[TEST 3/5] Cancellation Flow: Ingesting Notice & Creating CSR Task (No Label)...")
     cancel_doc_url = "https://storage.googleapis.com/streetsmart-hermes-assets/cancellations/BB-2026-ASC-001-cancellation-notice.pdf"
     cancel_eff_date = "2026-09-25"
     due_date_text = "2026-09-25"
@@ -249,7 +249,7 @@ def run_buster_brown_tests() -> bool:
     assert f"• Plain Text Amount Due / Return Amount: {return_amount_text}" in cancel_note
     assert "Embedded Cancellation Document:" in cancel_note
     assert cancel_doc_url in cancel_note
-    assert "Label Applied: Ascend NOC" in cancel_note
+    assert "Label Applied" not in cancel_note
     assert cancel_note.endswith(ROBIE_SIGNATURE)
     print("  ✓ Formatted Cancellation Notice Note:")
     print(f"    • Plain Text Due Date   : {due_date_text}")
@@ -310,13 +310,9 @@ def run_buster_brown_tests() -> bool:
         sync_stats = sync_mgr.sync_once()
 
         assert sync_stats["cancellations_synced"] == 1
-        # Check Label Application
-        mock_poster_sync.apply_account_label.assert_called_once_with(
-            applicant_id=BUSTER_BROWN_APPLICANT_ID,
-            label="Ascend NOC",
-            policy_number=BUSTER_BROWN_POLICY,
-        )
-        print(f"  ✓ Label 'Ascend NOC' applied to Applicant #{BUSTER_BROWN_APPLICANT_ID}")
+        # Check That NO Label Is Applied
+        mock_poster_sync.apply_account_label.assert_not_called()
+        print("  ✓ STRICT COMPLIANCE: No label applied (task assigned directly to CSR)")
 
         # Check Task Creation for CSR
         mock_poster_sync.create_task.assert_called_once()

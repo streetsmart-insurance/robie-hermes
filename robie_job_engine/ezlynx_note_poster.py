@@ -108,7 +108,6 @@ def format_cancellation_notice_note(
 
     if assigned_rep:
         lines.append(f"\nAssigned Representative: {assigned_rep}")
-    lines.append("Label Applied: Ascend NOC")
     lines.append(ROBIE_SIGNATURE)
 
     return "\n".join(lines)
