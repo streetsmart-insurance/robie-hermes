@@ -104,9 +104,12 @@
     "notes": "Direct underwriter email outreach."
   },
   "JIMCOR MGA": {
-    "channel": "EMAIL_ASK_PORTAL",
-    "underwriter_email": "renewals@jimcor.com",
-    "notes": "Email underwriter; ask if website/portal download is available."
+    "channel": "PHONE_AND_EMAIL",
+    "phone": "201-573-8200",
+    "underwriter_email": "ARivera@jimcor.com",
+    "agency_code": "StreetSmart Insurance",
+    "ivr": "Option for Commercial Excess Underwriting or ask for Arlene Rivera",
+    "notes": "Jimcor Agencies (Montvale, NJ). Underwriter Arlene Rivera."
   },
   "Specialty Coverage Insurance Agency MGA": {
     "channel": "EMAIL",
@@ -155,9 +158,11 @@
     "notes": "Email underwriter."
   },
   "NJCRIB - Liberty Assigned Risk": {
-    "channel": "EMAIL_ASK_PORTAL",
-    "underwriter_email": "assignedrisk@libertymutual.com",
-    "notes": "Email underwriter; ask if portal available."
+    "channel": "PORTAL",
+    "portal_url": "https://account.libertymutual.com/broker",
+    "underwriter_email": "IMS@LibertyMutual.com",
+    "phone": "800-653-7893",
+    "notes": "Retrieve renewal quotes and policies via Liberty Mutual Broker Portal (account.libertymutual.com/broker). Client must be added to Streetsmart Risk Managers Inc (user: cferrara3212, agency: 2920784). Involuntary assigned risk WC documents available under Agreements/Documents API."
   },
   "InterGUARD Ltd": {
     "channel": "EMAIL",
@@ -165,11 +170,9 @@
     "notes": "Email underwriter."
   },
   "Johnson & Johnson, Inc.  MGA": {
-    "channel": "EMAIL_AND_VOICE",
-    "phone": "800-487-7565",
-    "agency_code": "895543",
+    "channel": "EMAIL",
     "underwriter_email": "renewals@jjins.com",
-    "notes": "Agency Code: 895543. Main Phone: 800-487-7565. Direct Underwriting / MGA. Renewals: renewals@jjins.com. DO NOT route to JJPF financing."
+    "notes": "Email underwriter."
   },
   "FTP INC.  MGA": {
     "channel": "EMAIL",
@@ -255,12 +258,5 @@
       }
     ],
     "notes": "Continental Casualty Co Assigned Risk serviced via Berkley Risk. Direct audit inquiries to policyservices@berkleyrisk.com and assignedrisk@hartford.com."
-  },
-  "Johnson & Johnson Insurance": {
-    "channel": "EMAIL_AND_VOICE",
-    "phone": "800-487-7565",
-    "agency_code": "895543",
-    "underwriter_email": "renewals@jjins.com",
-    "notes": "Agency Code: 895543. Main Phone: 800-487-7565. Direct Underwriting / MGA. Renewals: renewals@jjins.com. DO NOT route to JJPF financing."
   }
 }
