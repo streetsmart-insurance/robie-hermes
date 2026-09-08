@@ -364,10 +364,10 @@ def dispatch_policy_change_call(
     headers = {
         "Authorization": resolved_key,
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     payload = {
         "phone_number": clean_phone,
-        "from": resolved_caller_id,
         "task": prompt,
         "voice": "nat",
         "model": "enhanced",
@@ -390,48 +390,76 @@ def dispatch_policy_change_call(
             "type": "policy_change_endorsement_followup",
         },
     }
+    if resolved_caller_id:
+        payload["from"] = resolved_caller_id
 
     try:
-        req_data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            resp_code = resp.getcode()
-            resp_text = resp.read().decode("utf-8")
-            resp_data = json.loads(resp_text) if resp_text else {}
-            if resp_code in (200, 201):
-                return {
-                    "success": True,
-                    "mode": "LIVE_BLAND_AI",
-                    "call_id": resp_data.get("call_id"),
-                    "carrier": carrier_info["name"],
-                    "policy": policy_number,
-                    "phone": clean_phone,
-                    "status": resp_data.get("status", "queued"),
-                    "raw_response": resp_data,
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": "API_ERROR",
-                    "status_code": resp_code,
-                    "carrier": carrier_info["name"],
-                    "policy": policy_number,
-                    "phone": clean_phone,
-                    "details": resp_data,
-                }
-    except urllib.error.HTTPError as he:
-        err_body = he.read().decode("utf-8", errors="ignore")
-        logger.error(f"Bland AI API error {he.code}: {err_body}")
+        import requests
+        resp = requests.post(url, json=payload, headers=headers, timeout=25)
+        # If rejected due to 'from' ownership/concurrency, retry once without 'from'
+        if resp.status_code in (400, 422) and "from" in payload:
+            logger.warning(f"Bland AI rejected 'from' caller ID ({resolved_caller_id}). Retrying with default outbound pool...")
+            payload.pop("from", None)
+            resp = requests.post(url, json=payload, headers=headers, timeout=25)
+
+        resp_data = resp.json() if resp.text else {}
+        if resp.status_code in (200, 201):
+            call_id = resp_data.get("call_id")
+            # Auto-post dispatch note to EZLynx
+            try:
+                from src.ezlynx.api_client import EZLynxApiClient
+                client = EZLynxApiClient()
+                search_hit = client.search_applicant(policy_number)
+                applicant_id = search_hit.get("applicant_id") if search_hit else None
+                if applicant_id:
+                    note_body = f"""=== [AUTONOMOUS POLICY CHANGE CALL DISPATCHED] ===
+Policy: #{policy_number} ({carrier_info['name']})
+Insured: {insured_name}
+Target Carrier Desk: {clean_phone}
+Purpose: {change_summary}
+Telephony Engine: Bland AI (Call ID: {call_id})
+
+ROBIE was here"""
+                    client.add_note_to_discussion(
+                        applicant_id=str(applicant_id),
+                        discussion_title=f"Policy Change Call | {policy_number} {carrier_info['name']}",
+                        note_text=note_body,
+                        policy_number=policy_number,
+                        carrier_name=carrier_info["name"],
+                    )
+            except Exception as ez_err:
+                logger.warning(f"Failed to post caller dispatch to EZLynx: {ez_err}")
+
+            return {
+                "success": True,
+                "mode": "LIVE_BLAND_AI",
+                "call_id": call_id,
+                "carrier": carrier_info["name"],
+                "policy": policy_number,
+                "phone": clean_phone,
+                "status": resp_data.get("status", "queued"),
+                "raw_response": resp_data,
+            }
+        else:
+            logger.error(f"Bland AI API error {resp.status_code}: {resp.text}")
+            return {
+                "success": False,
+                "error": "API_ERROR",
+                "status_code": resp.status_code,
+                "carrier": carrier_info["name"],
+                "policy": policy_number,
+                "phone": clean_phone,
+                "details": resp_data,
+            }
+    except Exception as e:
+        logger.error(f"Failed to dispatch Bland AI call: {e}")
         return {
             "success": False,
             "error": "HTTP_ERROR",
-            "status_code": he.code,
+            "message": str(e),
             "carrier": carrier_info["name"],
             "policy": policy_number,
             "phone": clean_phone,
-            "details": err_body,
-        }
-    except Exception as e:
         logger.error(f"Failed to dispatch live Bland AI call: {e}")
         return {
             "success": False,
