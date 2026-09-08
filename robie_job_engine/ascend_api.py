@@ -240,6 +240,8 @@ class AscendApiConfig:
             raise AscendConfigurationError("Ascend API execution is not enabled")
         env = current_robie_env()
         origin = str(os.environ.get("ROBIE_ASCEND_API_BASE_URL") or SANDBOX_API_ORIGIN).rstrip("/")
+        if origin.endswith("/v1"):
+            origin = origin[:-3]
         if env == TEST_ENV_NAME and origin != SANDBOX_API_ORIGIN:
             raise AscendConfigurationError("TEST may use only the Ascend sandbox API")
         if env in PRODUCTION_ENV_NAMES:
@@ -250,14 +252,16 @@ class AscendApiConfig:
         elif env != TEST_ENV_NAME:
             raise AscendConfigurationError("ROBIE_ENV must be TEST or PRODUCTION")
 
+        token = str(os.environ.get("ROBIE_ASCEND_API_KEY") or "").strip()
         secret_ref = str(os.environ.get("ROBIE_ASCEND_API_KEY_SECRET") or "").strip()
-        if not secret_ref:
-            raise AscendConfigurationError("ROBIE_ASCEND_API_KEY_SECRET is required")
-        if not secret_ref.startswith("projects/"):
-            project = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or "streetsmart-hermes-poc"
-            secret_ref = f"projects/{project}/secrets/{secret_ref}/versions/latest"
-        secret_accessor = accessor or GoogleSecretManagerAccessor()
-        token = secret_accessor.access(secret_ref).strip()
+        if not token:
+            if not secret_ref:
+                raise AscendConfigurationError("ROBIE_ASCEND_API_KEY or ROBIE_ASCEND_API_KEY_SECRET is required")
+            if not secret_ref.startswith("projects/"):
+                project = os.environ.get("GCP_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT") or "streetsmart-hermes-poc"
+                secret_ref = f"projects/{project}/secrets/{secret_ref}/versions/latest"
+            secret_accessor = accessor or GoogleSecretManagerAccessor()
+            token = secret_accessor.access(secret_ref).strip()
         if not token:
             raise AscendConfigurationError("Ascend API credential is empty")
         return cls(origin=origin, token=token)
