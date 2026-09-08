@@ -10,8 +10,7 @@ Correlates events with EZLynx accounts and policies, applying:
    - Plain text Due Date / Cancellation Effective Date
    - Plain text Amount Due / Return Premium and tax breakdown
    - Embedded document link to cancellation notice PDF
-   - Account label: 'Ascend NOC'
-   - High-priority EZLynx follow-up task assigned to CSR or Producer
+   - High-priority EZLynx follow-up task assigned to CSR or Producer (no label applied)
    - Permanent EZLynx discussion card note ending in 'Robie was here'
 2. Past Due / Payment Failures:
    - Plain text Amount Due and Due Date
@@ -594,14 +593,7 @@ class AscendEZLynxSyncManager:
                     carrier_name=event.carrier_name,
                 )
 
-                # 2. Apply label 'Ascend NOC'
-                self.poster.apply_account_label(
-                    applicant_id=applicant_id,
-                    label="Ascend NOC",
-                    policy_number=event.policy_number,
-                )
-
-                # 3. Create high-priority task assigned to CSR or Producer
+                # 2. Create high-priority task assigned to CSR or Producer (no label)
                 task_title = f"🚨 CSR ACTION REQUIRED: Cancellation Notice - {event.policy_number} - {event.carrier_name} - Due: {event.due_date_text}"
                 task_desc = (
                     f"Ascend cancellation notice received for {event.insured_name} (Policy #{event.policy_number}).\n"
@@ -611,9 +603,8 @@ class AscendEZLynxSyncManager:
                     f"Return Pure Premium: {event.unearned_premium_text}\n"
                     f"Embedded Document: {event.document_url or 'N/A'}\n"
                     f"Action Required:\n"
-                    f"1) Ensure 'Ascend NOC' label is applied to policy in EZLynx.\n"
-                    f"2) Review notice terms and unearned return calculation.\n"
-                    f"3) Follow up with insured prior to cancellation effective date ({event.due_date_text})."
+                    f"1) Review notice terms and unearned return calculation.\n"
+                    f"2) Follow up with insured and carrier prior to cancellation effective date ({event.due_date_text})."
                 )
                 self.poster.create_task(
                     applicant_id=applicant_id,
