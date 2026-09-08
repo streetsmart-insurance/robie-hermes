@@ -86,6 +86,7 @@ class ExtractedQuote:
     hitl_questions: list[str] = field(default_factory=list)
     hitl_reasons: list[str] = field(default_factory=list)
     raw_text: str = ""
+    sub_policies: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def total_premium_cents(self) -> int:
@@ -136,6 +137,28 @@ def _parse_percentage(pct_str: str) -> Optional[float]:
         return None
 
 
+def strip_email_reply_history(text: str) -> str:
+    """Strips quoted email threads, signatures, and reply headers so only new reply text is evaluated."""
+    if not text:
+        return ""
+    lines = []
+    for line in text.splitlines():
+        clean = line.strip()
+        # Quoted lines in email threads
+        if clean.startswith(">"):
+            continue
+        # Common reply header intros
+        if re.match(r"^On\s+.+wrote:$", clean, re.IGNORECASE):
+            break
+        if re.match(r"^-+\s*(?:Original|Forwarded)\s+Message\s*-+", clean, re.IGNORECASE):
+            break
+        # Email signatures
+        if clean in ("--", "___", "Kind regards,", "Best regards,", "Best,", "Thanks,", "Thank you,"):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def extract_text_from_pdf(pdf_bytes_or_path: bytes | Path | str) -> str:
     """Extract plain text from PDF using pypdf."""
     try:
@@ -172,18 +195,33 @@ class QuoteExtractor:
 
     def extract_from_text(self, text: str, user_instruction: str = "") -> ExtractedQuote:
         quote = ExtractedQuote(raw_text=text, agency_fees_cents=self.default_agency_fee_cents)
-        combined_text = f"{user_instruction}\n{text}"
+        clean_user_instruction = strip_email_reply_history(user_instruction)
+        combined_text = f"{clean_user_instruction}\n{text}"
 
         # 1. Insured Name
-        insured_match = re.search(
-            r"(?:Named\s+Insured|Insured\s+Name|Applicant|Account\s+Name|Insured):\s*([^\n\r,]+)",
+        # Check explicit proposal layout first: "Insured OHANA 6 LIMITED COMPANY LLC Mailing Address"
+        proposal_insured = re.search(
+            r"\bInsured\s+([A-Z0-9\s&,.-]+?)\s+(?:Mailing\s+Address|DBA|Policy\s+Effective|DOT\b)",
             text,
-            re.IGNORECASE,
         )
-        if insured_match:
-            quote.insured_name = insured_match.group(1).strip()
-        elif "yes we do" in text.lower():
-            quote.insured_name = "Yes We Do LLC"
+        if proposal_insured and len(proposal_insured.group(1).strip()) > 2:
+            quote.insured_name = proposal_insured.group(1).strip()
+        else:
+            insured_match = re.search(
+                r"(?:Named\s+Insured|Insured\s+Name|Applicant|Account\s+Name)[ \t]*:[ \t]*([^\n\r,]+)",
+                text,
+                re.IGNORECASE,
+            )
+            if insured_match:
+                quote.insured_name = insured_match.group(1).strip()
+            else:
+                bare_insured = re.search(r"\bInsured[ \t]*:[ \t]*([^\n\r,]+)", text, re.IGNORECASE)
+                if bare_insured:
+                    candidate = bare_insured.group(1).strip()
+                    if not any(k in candidate.lower() for k in ["cargo", "mtc", "deductible", "limit", "coverage"]):
+                        quote.insured_name = candidate
+            if not quote.insured_name and "yes we do" in text.lower():
+                quote.insured_name = "Yes We Do LLC"
 
         # 2. Carrier Name
         carrier_match = re.search(
@@ -231,9 +269,10 @@ class QuoteExtractor:
                 "Hull & Company",
                 "Amwins",
                 "Jencap",
+                "Diesel",
             ]:
                 if w_name.lower() in text.lower():
-                    quote.wholesaler_name = w_name
+                    quote.wholesaler_name = "Diesel Insurance Solutions Inc." if w_name == "Diesel" else w_name
                     break
 
         # 4. Coverage / Line of Business
@@ -245,7 +284,7 @@ class QuoteExtractor:
 
         # 5. Policy / Quote Number
         pol_match = re.search(
-            r"(?:Quote\s+#|Quote\s+Number|Policy\s+#|Policy\s+Number|Reference\s+#):\s*([A-Z0-9\-_]+)",
+            r"(?:Quote\s+#|Quote\s+Number|Quote\s+ID|Policy\s+#|Policy\s+Number|Reference\s+#)[:\s]+([A-Z0-9\-_]+)",
             text,
             re.IGNORECASE,
         )
@@ -271,22 +310,72 @@ class QuoteExtractor:
             quote.effective_date = today.isoformat()
             quote.expiration_date = date(today.year + 1, today.month, today.day).isoformat()
 
-        # 7. Pure Premium
-        premium_match = re.search(
-            r"(?:Pure\s+Premium|Base\s+Premium|Coverage\s+Premium|Policy\s+Premium):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            text,
-            re.IGNORECASE,
+        # 7. Pure Premium & Multi-Coverage Table Check
+        has_mtc = bool(re.search(r"MOTOR TRUCK CARGO", text, re.IGNORECASE))
+        has_pd = bool(re.search(r"PHYSICAL DAMAGE", text, re.IGNORECASE))
+        prem_two_col = re.search(
+            r"PREMIUM\s+\$([\d,]+(?:\.\d{2})?)\s+\$([\d,]+(?:\.\d{2})?)", text
         )
-        if premium_match:
-            quote.pure_premium_cents = _parse_dollars_to_cents(premium_match.group(1))
+
+        if has_mtc and has_pd and prem_two_col:
+            mtc_prem = _parse_dollars_to_cents(prem_two_col.group(1))
+            pd_prem = _parse_dollars_to_cents(prem_two_col.group(2))
+
+            mga_two_col = re.search(
+                r"MGA Fee\s+\$([\d,]+(?:\.\d{2})?)\s+\$([\d,]+(?:\.\d{2})?)", text
+            )
+            mtc_mga = _parse_dollars_to_cents(mga_two_col.group(1)) if mga_two_col else 0
+            pd_mga = _parse_dollars_to_cents(mga_two_col.group(2)) if mga_two_col else 0
+
+            tax_two_col = re.search(
+                r"Total Taxes\s+\$([\d,]+(?:\.\d{2})?)\s+\$([\d,]+(?:\.\d{2})?)", text
+            )
+            mtc_tax = _parse_dollars_to_cents(tax_two_col.group(1)) if tax_two_col else 0
+            pd_tax = _parse_dollars_to_cents(tax_two_col.group(2)) if tax_two_col else 0
+
+            quote.pure_premium_cents = mtc_prem + pd_prem
+            quote.policy_fee_cents = mtc_mga + pd_mga
+            quote.surplus_lines_tax_cents = mtc_tax + pd_tax
+            quote.surplus_lines_tax_addressed = True
+            quote.coverage_title = "Motor Truck Cargo & Physical Damage"
+            quote.coverage_identifier = "cargo"
+
+            quote.sub_policies = [
+                {
+                    "title": "Motor Truck Cargo",
+                    "coverage_identifier": "cargo",
+                    "pure_premium_cents": mtc_prem,
+                    "policy_fee_cents": mtc_mga,
+                    "taxes_and_fees_cents": mtc_tax,
+                    "surplus_lines_tax_cents": mtc_tax,
+                    "billable_suffix": "MTC",
+                },
+                {
+                    "title": "Auto Physical Damage",
+                    "coverage_identifier": "auto_physical_damage",
+                    "pure_premium_cents": pd_prem,
+                    "policy_fee_cents": pd_mga,
+                    "taxes_and_fees_cents": pd_tax,
+                    "surplus_lines_tax_cents": pd_tax,
+                    "billable_suffix": "PD",
+                },
+            ]
         else:
-            general_premium = re.search(
-                r"(?:Premium|Total\s+Cost|Total\s+Due):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+            premium_match = re.search(
+                r"(?:Pure\s+Premium|Base\s+Premium|Coverage\s+Premium|Policy\s+Premium):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
                 text,
                 re.IGNORECASE,
             )
-            if general_premium:
-                quote.pure_premium_cents = _parse_dollars_to_cents(general_premium.group(1))
+            if premium_match:
+                quote.pure_premium_cents = _parse_dollars_to_cents(premium_match.group(1))
+            else:
+                general_premium = re.search(
+                    r"(?:Premium|Total\s+Cost|Total\s+Due):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                    text,
+                    re.IGNORECASE,
+                )
+                if general_premium:
+                    quote.pure_premium_cents = _parse_dollars_to_cents(general_premium.group(1))
 
         # 8. Parameter 1: Agency Fee
         fee_match = re.search(
@@ -303,53 +392,58 @@ class QuoteExtractor:
 
         # 9. Parameter 2: Commission Rate
         comm_match = re.search(
-            r"(?:Commission\s+Rate|Agency\s+Commission|Commission|comm)\s*[:=]?\s*([\d.]+\s*%?)",
+            r"(?:Commission\s*(?:Rate)?|Agency\s+Commission|Commission|comm)\s*(?:on\s+this\s+is|is|of|:|=)?\s*([\d.]+\s*%?)",
             combined_text,
             re.IGNORECASE,
         )
-        if comm_match:
+        if comm_match and _parse_percentage(comm_match.group(1)) is not None:
             quote.commission_rate = _parse_percentage(comm_match.group(1))
         else:
-            user_comm = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:commission|comm)", combined_text, re.IGNORECASE)
-            if user_comm:
+            user_comm = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:commission|comm)?", combined_text, re.IGNORECASE)
+            if user_comm and _parse_percentage(user_comm.group(1)) is not None:
                 quote.commission_rate = _parse_percentage(user_comm.group(1))
+            else:
+                table_comm = re.search(r"\bCommission\s+(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
+                if table_comm:
+                    quote.commission_rate = _parse_percentage(table_comm.group(1))
 
-        # 10. Parameter 3: Surplus Lines Tax & Fees
-        tax_match = re.search(
-            r"(?:Surplus\s+Lines\s+Tax|State\s+Tax|Taxes)\s*[:=]?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            combined_text,
-            re.IGNORECASE,
-        )
-        if tax_match:
-            quote.surplus_lines_tax_cents = _parse_dollars_to_cents(tax_match.group(1))
-            quote.surplus_lines_tax_addressed = True
-        elif re.search(r"no\s+surplus\s+(?:lines(?:\s+tax)?|tax)|surplus\s+lines\s+tax\s*:\s*\$0|tax(?:\s*:\s*|\s+is\s+)\$0", combined_text, re.IGNORECASE):
-            quote.surplus_lines_tax_cents = 0
-            quote.surplus_lines_tax_addressed = True
+        # 10. Parameter 3: Surplus Lines Tax & Fees (if not extracted by multi-coverage table)
+        if not quote.sub_policies:
+            tax_match = re.search(
+                r"(?:Surplus\s+Lines\s+Tax|State\s+Tax|Taxes)\s*[:=]?\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                combined_text,
+                re.IGNORECASE,
+            )
+            if tax_match:
+                quote.surplus_lines_tax_cents = _parse_dollars_to_cents(tax_match.group(1))
+                quote.surplus_lines_tax_addressed = True
+            elif re.search(r"no\s+surplus\s+(?:lines(?:\s+tax)?|tax)|surplus\s+lines\s+tax\s*:\s*\$0|tax(?:\s*:\s*|\s+is\s+)\$0", combined_text, re.IGNORECASE):
+                quote.surplus_lines_tax_cents = 0
+                quote.surplus_lines_tax_addressed = True
 
-        stamping_match = re.search(
-            r"(?:Stamping\s+Fee)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            combined_text,
-            re.IGNORECASE,
-        )
-        if stamping_match:
-            quote.surplus_lines_tax_cents += _parse_dollars_to_cents(stamping_match.group(1))
+            stamping_match = re.search(
+                r"(?:Stamping\s+Fee)\s*:\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                combined_text,
+                re.IGNORECASE,
+            )
+            if stamping_match:
+                quote.surplus_lines_tax_cents += _parse_dollars_to_cents(stamping_match.group(1))
 
-        # Other fees
-        pol_fee_match = re.search(
-            r"(?:Policy\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            text,
-            re.IGNORECASE,
-        )
-        if pol_fee_match:
-            quote.policy_fee_cents = _parse_dollars_to_cents(pol_fee_match.group(1))
-        broker_fee_match = re.search(
-            r"(?:Broker\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
-            text,
-            re.IGNORECASE,
-        )
-        if broker_fee_match:
-            quote.broker_fee_cents = _parse_dollars_to_cents(broker_fee_match.group(1))
+            # Other fees
+            pol_fee_match = re.search(
+                r"(?:Policy\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                text,
+                re.IGNORECASE,
+            )
+            if pol_fee_match:
+                quote.policy_fee_cents = _parse_dollars_to_cents(pol_fee_match.group(1))
+            broker_fee_match = re.search(
+                r"(?:Broker\s+Fee):\s*\$?\s*([\d,]+(?:\.\d{2})?)",
+                text,
+                re.IGNORECASE,
+            )
+            if broker_fee_match:
+                quote.broker_fee_cents = _parse_dollars_to_cents(broker_fee_match.group(1))
 
         # 11. Parameter 4: Terrorism Coverage (TRIA) & Dual Quoting
         tria_option_with = re.search(
@@ -387,54 +481,62 @@ class QuoteExtractor:
                 quote.total_without_terrorism_cents = quote.pure_premium_cents
 
         # Check user instruction override for terrorism
-        if re.search(r"include\s+terrorism|with\s+terrorism|accept\s+tria|option\s*1", user_instruction, re.IGNORECASE):
-            quote.terrorism_included = True
-            quote.has_terrorism_options = False
-            if quote.total_with_terrorism_cents:
-                quote.pure_premium_cents = quote.total_with_terrorism_cents
-        elif re.search(r"exclude\s+terrorism|without\s+terrorism|reject\s+tria|no\s+terrorism|option\s*2", user_instruction, re.IGNORECASE):
+        if re.search(r"\b(?:exclude\s+terrorism|without\s+terrorism|reject\s+tria|without\s+tria|no\s+tria|no\s+terrorism|option\s*2)\b", clean_user_instruction, re.IGNORECASE):
             quote.terrorism_included = False
             quote.has_terrorism_options = False
             if quote.total_without_terrorism_cents:
                 quote.pure_premium_cents = quote.total_without_terrorism_cents
+        elif re.search(r"\b(?:include\s+terrorism|with\s+terrorism|accept\s+tria|with\s+tria|option\s*1)\b", clean_user_instruction, re.IGNORECASE):
+            quote.terrorism_included = True
+            quote.has_terrorism_options = False
+            if quote.total_with_terrorism_cents:
+                quote.pure_premium_cents = quote.total_with_terrorism_cents
 
         # 12. Evaluate Clarity & HITL Questions
         self._evaluate_hitl_requirements(quote, combined_text)
         return quote
 
     def _evaluate_hitl_requirements(self, quote: ExtractedQuote, combined_text: str) -> None:
-        questions: list[str] = []
         reasons: list[str] = []
 
         # Question 1: Agency fee clarity
         if not re.search(r"agency\s+fee|fee|\$\s*350", combined_text, re.IGNORECASE):
-            questions.append("1. Agency Fee: Is there an agency fee? (Default is $350.00, or specify amount)")
             reasons.append("agency_fee_unspecified")
 
         # Question 2: Commission rate clarity
         if quote.commission_rate is None:
-            questions.append("2. Commission Rate: What is the commission rate for this policy? (e.g., 10%, 12%, 15%)")
             reasons.append("commission_rate_unspecified")
 
         # Question 3: Surplus lines tax clarity
         is_surplus_lines_carrier = bool(quote.wholesaler_name or (quote.carrier_name and quote.carrier_name.lower() in ["nautilus", "evanston", "scottsdale", "tapco", "rps"]))
         if is_surplus_lines_carrier and not quote.surplus_lines_tax_addressed and quote.surplus_lines_tax_cents == 0:
-            questions.append("3. Surplus Lines Tax: Is surplus lines tax applicable to this quote? (If so, please specify tax/stamping fee amounts)")
             reasons.append("surplus_lines_tax_verification")
 
         # Question 4: Terrorism coverage clarity
         if quote.has_terrorism_options and quote.terrorism_included is None:
-            with_str = f"${quote.total_with_terrorism_cents / 100:,.2f}" if quote.total_with_terrorism_cents else "With TRIA"
-            without_str = f"${quote.total_without_terrorism_cents / 100:,.2f}" if quote.total_without_terrorism_cents else "Without TRIA"
-            questions.append(
-                f"4. Terrorism Coverage: The quote includes options {with_str} and {without_str}. Which coverage should be applied to the Ascend agreement?"
-            )
             reasons.append("dual_terrorism_options_present")
 
-        if questions:
-            quote.requires_hitl = True
-            quote.hitl_questions = questions
-            quote.hitl_reasons = reasons
+        quote.hitl_reasons = reasons
+        self._sync_hitl_questions(quote)
+
+    def _sync_hitl_questions(self, quote: ExtractedQuote) -> None:
+        """Synchronizes quote.hitl_questions dynamically based on remaining hitl_reasons."""
+        questions: list[str] = []
+        for reason in quote.hitl_reasons:
+            if reason == "agency_fee_unspecified":
+                questions.append("1. Agency Fee: Is there an agency fee? (Default is $350.00, or specify amount)")
+            elif reason == "commission_rate_unspecified":
+                questions.append("2. Commission Rate: What is the commission rate for this policy? (e.g., 10%, 12%, 15%)")
+            elif reason == "surplus_lines_tax_verification":
+                questions.append("3. Surplus Lines Tax: Is surplus lines tax applicable to this quote? (If so, please specify tax/stamping fee amounts)")
+            elif reason == "dual_terrorism_options_present":
+                with_str = f"${quote.total_with_terrorism_cents / 100:,.2f}" if quote.total_with_terrorism_cents else "With TRIA"
+                without_str = f"${quote.total_without_terrorism_cents / 100:,.2f}" if quote.total_without_terrorism_cents else "Without TRIA"
+                questions.append(
+                    f"4. Terrorism Coverage: The quote includes options {with_str} and {without_str}. Which coverage should be applied to the Ascend agreement?"
+                )
+        quote.hitl_questions = questions
+        quote.requires_hitl = len(questions) > 0
 
     def extract_from_pdf(self, pdf_path_or_bytes: bytes | Path | str, user_instruction: str = "") -> ExtractedQuote:
         text = extract_text_from_pdf(pdf_path_or_bytes)
@@ -442,7 +544,8 @@ class QuoteExtractor:
 
     def apply_user_clarifications(self, quote: ExtractedQuote, reply_text: str) -> ExtractedQuote:
         """Applies user's email or chat responses to resolve ambiguous quote parameters."""
-        text = reply_text.strip()
+        clean_text = strip_email_reply_history(reply_text.strip())
+        text = clean_text or reply_text.strip()
         
         # 1. Agency fee
         if re.search(r"\b(?:no\s+(?:agency\s+)?fee|\$0(?:\.00)?|zero\s+fee)\b", text, re.IGNORECASE):
@@ -450,9 +553,14 @@ class QuoteExtractor:
             if "agency_fee_unspecified" in quote.hitl_reasons:
                 quote.hitl_reasons.remove("agency_fee_unspecified")
         else:
-            fee_before = re.search(r"\$\s*([\d,]+(?:\.\d{2})?)\s*(?:agency\s+fee|fee)", text, re.IGNORECASE)
-            fee_after = re.search(r"(?:agency\s+fee|fee)\s*(?:is|of|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)", text, re.IGNORECASE)
-            if fee_before:
+            fee_before = re.search(r"\$\s*([\d,]+(?:\.\d{2})?)\s*(?:agency\s+fee|broker\s+fee|fee)", text, re.IGNORECASE)
+            fee_after = re.search(r"(?:agency\s+fee|broker\s+fee|fee)\s*(?:is|of|:|=)?\s*\$?\s*([\d,]+(?:\.\d{2})?)", text, re.IGNORECASE)
+            fee_make = re.search(r"\bmake\s+(?:the\s+)?(?:agency\s+)?fee\s*\$?\s*([\d,]+(?:\.\d{2})?)", text, re.IGNORECASE)
+            if fee_make:
+                quote.agency_fees_cents = _parse_dollars_to_cents(fee_make.group(1))
+                if "agency_fee_unspecified" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("agency_fee_unspecified")
+            elif fee_before:
                 quote.agency_fees_cents = _parse_dollars_to_cents(fee_before.group(1))
                 if "agency_fee_unspecified" in quote.hitl_reasons:
                     quote.hitl_reasons.remove("agency_fee_unspecified")
@@ -469,11 +577,21 @@ class QuoteExtractor:
                     quote.hitl_reasons.remove("agency_fee_unspecified")
 
         # 2. Commission rate
-        comm_m = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
-        if comm_m:
-            quote.commission_rate = _parse_percentage(comm_m.group(1))
+        comm_phrase = re.search(
+            r"(?:Commission\s*(?:Rate)?|Agency\s+Commission|Commission|comm)\s*(?:on\s+this\s+is|is|of|:|=)?\s*([\d.]+\s*%?)",
+            text,
+            re.IGNORECASE,
+        )
+        if comm_phrase and _parse_percentage(comm_phrase.group(1)) is not None:
+            quote.commission_rate = _parse_percentage(comm_phrase.group(1))
             if "commission_rate_unspecified" in quote.hitl_reasons:
                 quote.hitl_reasons.remove("commission_rate_unspecified")
+        else:
+            comm_m = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+            if comm_m and _parse_percentage(comm_m.group(1)) is not None:
+                quote.commission_rate = _parse_percentage(comm_m.group(1))
+                if "commission_rate_unspecified" in quote.hitl_reasons:
+                    quote.hitl_reasons.remove("commission_rate_unspecified")
 
         # 3. Surplus lines tax
         if re.search(r"\b(?:no\s+tax|no\s+surplus|admitted|none|\$0|0\s+tax)\b", text, re.IGNORECASE):
@@ -492,24 +610,22 @@ class QuoteExtractor:
                 if "surplus_lines_tax_verification" in quote.hitl_reasons:
                     quote.hitl_reasons.remove("surplus_lines_tax_verification")
 
-        # 4. Terrorism coverage
-        if re.search(r"(?:include|with|accept|yes|option\s*1)", text, re.IGNORECASE) and "dual_terrorism_options_present" in quote.hitl_reasons:
-            quote.terrorism_included = True
-            quote.has_terrorism_options = False
-            if quote.total_with_terrorism_cents:
-                quote.pure_premium_cents = quote.total_with_terrorism_cents
-            quote.hitl_reasons.remove("dual_terrorism_options_present")
-        elif re.search(r"(?:exclude|without|reject|no|option\s*2)", text, re.IGNORECASE) and "dual_terrorism_options_present" in quote.hitl_reasons:
+        # 4. Terrorism coverage (Check negative/rejection first with word boundaries)
+        if re.search(r"\b(?:exclude|without|reject|no\s+tria|no\s+terrorism|option\s*2)\b", text, re.IGNORECASE) and "dual_terrorism_options_present" in quote.hitl_reasons:
             quote.terrorism_included = False
             quote.has_terrorism_options = False
             if quote.total_without_terrorism_cents:
                 quote.pure_premium_cents = quote.total_without_terrorism_cents
             quote.hitl_reasons.remove("dual_terrorism_options_present")
+        elif re.search(r"\b(?:include|with\s+terrorism|with\s+tria|accept|accepted|yes|option\s*1)\b", text, re.IGNORECASE) and "dual_terrorism_options_present" in quote.hitl_reasons:
+            quote.terrorism_included = True
+            quote.has_terrorism_options = False
+            if quote.total_with_terrorism_cents:
+                quote.pure_premium_cents = quote.total_with_terrorism_cents
+            quote.hitl_reasons.remove("dual_terrorism_options_present")
 
-        # Re-evaluate HITL status
-        quote.requires_hitl = len(quote.hitl_reasons) > 0
-        if not quote.requires_hitl:
-            quote.hitl_questions = []
+        # Re-evaluate HITL status and dynamically synchronize remaining questions
+        self._sync_hitl_questions(quote)
         return quote
 
 

@@ -114,17 +114,83 @@ class AscendWorkflowManager:
         sender_email: str = "",
         sender_name: str = "",
         applicant_id: Optional[str] = None,
+        clarification_attempts: int = 1,
     ) -> WorkflowResult:
         """Resume workflow after receiving user reply to clarification questions."""
         updated_quote = self.quote_extractor.apply_user_clarifications(quote, clarification_reply)
         if updated_quote.requires_hitl:
-            # Still requires answers for remaining items
-            return self.process_quote_request(
-                raw_text_or_pdf=updated_quote.raw_text,
-                user_instruction=clarification_reply,
-                sender_email=sender_email,
-                sender_name=sender_name,
-                applicant_id=applicant_id,
+            greeting_name = sender_name or (sender_email.split("@")[0].title() if sender_email else "Team")
+
+            # Hard Circuit Breaker: If clarification attempts >= 2, escalate to EZLynx CSR task
+            if clarification_attempts >= 2:
+                logger.warning(
+                    "Ascend clarification circuit breaker tripped (attempts=%d) for %s. Escalating to EZLynx task.",
+                    clarification_attempts,
+                    updated_quote.insured_name,
+                )
+                escalation_subject = f"Escalated to CSR: Ascend Agreement for {updated_quote.insured_name or 'Insurance Quote'}"
+                unresolved_items = [q.split(":")[0].strip() for q in updated_quote.hitl_questions] or updated_quote.hitl_reasons
+
+                ezlynx_task_res = None
+                try:
+                    if self.ezlynx_poster:
+                        task_desc = (
+                            f"Manual Ascend Agreement Review Required for {updated_quote.insured_name or 'Applicant'}.\n\n"
+                            f"Carrier: {updated_quote.carrier_name or 'Unspecified'}\n"
+                            f"Pure Premium: ${updated_quote.pure_premium_cents / 100:,.2f}\n"
+                            f"Pending Clarifications:\n" + "\n".join(f"- {q}" for q in updated_quote.hitl_questions) + "\n\n"
+                            f"Robie was here"
+                        )
+                        target_applicant = applicant_id
+                        if not target_applicant and updated_quote.insured_name:
+                            target_applicant = self.ezlynx_poster.find_applicant_by_name(updated_quote.insured_name)
+
+                        if target_applicant:
+                            ezlynx_task_res = self.ezlynx_poster.create_cancellation_task(
+                                applicant_id=str(target_applicant),
+                                title=f"Ascend Financing Agreement Review - {updated_quote.insured_name or 'Quote'}",
+                                description=task_desc,
+                            )
+                except Exception as exc:
+                    logger.warning("Could not auto-create EZLynx escalation task: %s", exc)
+
+                escalation_body = (
+                    f"Hi {greeting_name},\n\n"
+                    f"I received your response regarding {updated_quote.insured_name or 'the quote'}, but I was unable to fully confirm all remaining items ({', '.join(unresolved_items)}) after {clarification_attempts} clarification attempts.\n\n"
+                    f"To prevent any delays, I have stopped automated clarification and escalated this to our CSR team in EZLynx for manual completion.\n\n"
+                    f"Best,\n"
+                    f"Robie AI"
+                )
+                return WorkflowResult(
+                    status="ESCALATED",
+                    quote=updated_quote,
+                    reply_email_subject=escalation_subject,
+                    reply_email_body=escalation_body,
+                    ezlynx_note_result=ezlynx_task_res,
+                )
+
+            # Still within attempt limit (< 2): Send concise prompt with ONLY remaining questions
+            subject = f"Clarification Needed: Ascend Agreement for {updated_quote.insured_name or 'Insurance Quote'}"
+            body_lines = [
+                f"Hi {greeting_name},",
+                "",
+                f"Thank you. I still need clarification on the following remaining item(s) before creating the Ascend financing agreement:",
+                "",
+            ]
+            for q in updated_quote.hitl_questions:
+                body_lines.append(f"• {q}")
+            body_lines.extend([
+                "",
+                "Please reply directly to this email with your answers, and I will generate the Ascend agreement and file it into EZLynx.",
+                "",
+                "Best,",
+                "Robie AI",
+            ])
+            return WorkflowResult(
+                status="NEEDS_CLARIFICATION",
+                quote=updated_quote,
+                reply_email_subject=subject,
+                reply_email_body="\n".join(body_lines),
             )
 
         return self.create_agreement_and_file_ezlynx(
@@ -156,7 +222,8 @@ class AscendWorkflowManager:
         # 2. Match Wholesaler Identifier
         wholesaler_identifier = quote.wholesaler_identifier
         if not wholesaler_identifier and quote.wholesaler_name:
-            wholesalers = client.search_wholesalers(quote.wholesaler_name)
+            clean_wholesaler = quote.wholesaler_name.split("|")[0].strip()
+            wholesalers = client.search_wholesalers(clean_wholesaler)
             if wholesalers:
                 wholesaler_identifier = wholesalers[0].get("identifier")
 
@@ -177,26 +244,55 @@ class AscendWorkflowManager:
                 "account_manager_id": producer_id,
                 "billing_type": "agency_bill",
             },
-            "billables": [
-                {
-                    "billable_identifier": billable_ident,
+            "billables": [],
+        }
+
+        if quote.sub_policies:
+            for i, sp in enumerate(quote.sub_policies):
+                suffix = sp.get("billable_suffix") or str(i + 1)
+                b_ident = f"{billable_ident}-{suffix}"
+                b_cov = sp.get("coverage_identifier") or quote.coverage_identifier or "commercial_auto"
+                b_prem = sp.get("pure_premium_cents", 0)
+                b_pol_fee = sp.get("policy_fee_cents", 0)
+                b_tax = sp.get("taxes_and_fees_cents") or sp.get("surplus_lines_tax_cents", 0)
+                # Apply agency fee to primary (first) policy so it is charged once on the agreement
+                b_agency_fee = quote.agency_fees_cents if i == 0 else 0
+
+                billable = {
+                    "billable_identifier": b_ident,
                     "carrier_identifier": carrier_identifier or "nautilus_insurance_group_scottsdale_e3f1c1",
-                    "coverage_identifier": quote.coverage_identifier or "commercial_auto",
+                    "coverage_identifier": b_cov,
                     "effective_date": quote.effective_date,
                     "expiration_date": quote.expiration_date,
-                    "premium_cents": quote.pure_premium_cents,
-                    "agency_fees_cents": quote.agency_fees_cents,
+                    "premium_cents": b_prem,
+                    "agency_fees_cents": b_agency_fee,
                     "organization_commission_rate": quote.commission_rate if quote.commission_rate is not None else 0.10,
-                    "surplus_lines_tax_cents": quote.surplus_lines_tax_cents,
+                    "taxes_and_fees_cents": b_tax,
                 }
-            ],
-        }
-        if wholesaler_identifier:
-            payload["billables"][0]["wholesaler_identifier"] = wholesaler_identifier
-        if quote.policy_fee_cents > 0:
-            payload["billables"][0]["policy_fee_cents"] = quote.policy_fee_cents
-        if quote.broker_fee_cents > 0:
-            payload["billables"][0]["broker_fee_cents"] = quote.broker_fee_cents
+                if wholesaler_identifier:
+                    billable["wholesaler_identifier"] = wholesaler_identifier
+                if b_pol_fee > 0:
+                    billable["policy_fee_cents"] = b_pol_fee
+                payload["billables"].append(billable)
+        else:
+            billable = {
+                "billable_identifier": billable_ident,
+                "carrier_identifier": carrier_identifier or "nautilus_insurance_group_scottsdale_e3f1c1",
+                "coverage_identifier": quote.coverage_identifier or "commercial_auto",
+                "effective_date": quote.effective_date,
+                "expiration_date": quote.expiration_date,
+                "premium_cents": quote.pure_premium_cents,
+                "agency_fees_cents": quote.agency_fees_cents,
+                "organization_commission_rate": quote.commission_rate if quote.commission_rate is not None else 0.10,
+                "taxes_and_fees_cents": quote.surplus_lines_tax_cents,
+            }
+            if wholesaler_identifier:
+                billable["wholesaler_identifier"] = wholesaler_identifier
+            if quote.policy_fee_cents > 0:
+                billable["policy_fee_cents"] = quote.policy_fee_cents
+            if quote.broker_fee_cents > 0:
+                billable["broker_fee_cents"] = quote.broker_fee_cents
+            payload["billables"].append(billable)
 
         # 6. Execute Program Creation Worker
         worker = AscendCreateProgramWorker(client_factory=lambda: client)
@@ -236,7 +332,22 @@ class AscendWorkflowManager:
             f"The Ascend payment and financing agreement has been generated for {quote.insured_name}!",
             "",
             f"• Carrier: {quote.carrier_name or 'N/A'}",
-            f"• Coverage: {quote.coverage_title}",
+        ]
+        if quote.sub_policies:
+            body_lines.append("• Separate Itemized Policies on Agreement:")
+            for sp in quote.sub_policies:
+                title = sp.get("title") or sp.get("coverage_identifier")
+                p_cents = sp.get("pure_premium_cents", 0)
+                f_cents = sp.get("policy_fee_cents", 0)
+                t_cents = sp.get("taxes_and_fees_cents") or sp.get("surplus_lines_tax_cents", 0)
+                pol_tot = p_cents + f_cents + t_cents
+                body_lines.append(f"  - {title}: ${pol_tot / 100:,.2f} (Base: ${p_cents / 100:,.2f}, MGA Fee: ${f_cents / 100:,.2f}, Taxes: ${t_cents / 100:,.2f})")
+            if quote.agency_fees_cents > 0:
+                body_lines.append(f"• Broker / Agency Fee: ${quote.agency_fees_cents / 100:,.2f}")
+        else:
+            body_lines.append(f"• Coverage: {quote.coverage_title}")
+
+        body_lines.extend([
             f"• Total Financed / Payable: {total_str}",
             "",
             "Client Agreement & Checkout Link:",
@@ -245,7 +356,7 @@ class AscendWorkflowManager:
             "EZLynx Filing Status: Agreement link and policy details filed to EZLynx discussion card.",
             "",
             "Robie was here",
-        ]
+        ])
 
         return WorkflowResult(
             status="COMPLETED",

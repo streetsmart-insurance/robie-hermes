@@ -41,22 +41,48 @@ def format_ascend_agreement_note(quote: ExtractedQuote, program_url: str) -> str
 
     total = f"${quote.total_premium_cents / 100:,.2f}"
 
-    lines = [
-        "Ascend Payment & Financing Agreement Generated:",
-        f"• Insured: {quote.insured_name}",
-        f"• Carrier: {carrier_line}{wholesaler_line}",
-        f"• Coverage: {quote.coverage_title}",
-        f"• Base Premium: {pure_prem}",
-        f"• Agency Fee: {agency_fee}",
-        f"• Surplus Lines Tax & Fees: {tax}",
-        f"• Commission Rate: {comm}",
-        f"• Terrorism Coverage: {tria_str}",
-        f"• Total Financed / Payable: {total}",
-        "",
-        "Client Agreement & Checkout Link:",
-        program_url,
-        ROBIE_SIGNATURE,
-    ]
+    if quote.sub_policies:
+        lines = [
+            "Ascend Payment & Financing Agreement Generated:",
+            f"• Insured: {quote.insured_name}",
+            f"• Carrier: {carrier_line}{wholesaler_line}",
+            "• Policies Included on Agreement (Itemized Billables):",
+        ]
+        for sp in quote.sub_policies:
+            title = sp.get("title") or sp.get("coverage_identifier")
+            p_cents = sp.get("pure_premium_cents", 0)
+            f_cents = sp.get("policy_fee_cents", 0)
+            t_cents = sp.get("taxes_and_fees_cents") or sp.get("surplus_lines_tax_cents", 0)
+            pol_tot = p_cents + f_cents + t_cents
+            lines.append(f"  - {title}: ${pol_tot / 100:,.2f} (Base: ${p_cents / 100:,.2f}, MGA Fee: ${f_cents / 100:,.2f}, Taxes: ${t_cents / 100:,.2f})")
+        if quote.agency_fees_cents > 0:
+            lines.append(f"• Agency Fee: {agency_fee}")
+        lines.extend([
+            f"• Commission Rate: {comm}",
+            f"• Terrorism Coverage: {tria_str}",
+            f"• Total Financed / Payable: {total}",
+            "",
+            "Client Agreement & Checkout Link:",
+            program_url,
+            ROBIE_SIGNATURE,
+        ])
+    else:
+        lines = [
+            "Ascend Payment & Financing Agreement Generated:",
+            f"• Insured: {quote.insured_name}",
+            f"• Carrier: {carrier_line}{wholesaler_line}",
+            f"• Coverage: {quote.coverage_title}",
+            f"• Base Premium: {pure_prem}",
+            f"• Agency Fee: {agency_fee}",
+            f"• Surplus Lines Tax & Fees: {tax}",
+            f"• Commission Rate: {comm}",
+            f"• Terrorism Coverage: {tria_str}",
+            f"• Total Financed / Payable: {total}",
+            "",
+            "Client Agreement & Checkout Link:",
+            program_url,
+            ROBIE_SIGNATURE,
+        ]
     return "\n".join(lines)
 
 
