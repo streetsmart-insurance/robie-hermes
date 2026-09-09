@@ -15,6 +15,12 @@ on:
         description: Type DEPLOY_TO_HERMES_POC_01
         required: true
         type: string
+      lost_customer_operation:
+        description: Optional lost-customer operation through the protected Production controller
+        required: true
+        default: none
+        type: choice
+        options: [none, inspect, deploy, dry-run]
 
 permissions:
   contents: read
@@ -28,7 +34,8 @@ jobs:
   deploy-production:
     if: >-
       github.ref == 'refs/heads/main' &&
-      inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01'
+      inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01' &&
+      inputs.lost_customer_operation == 'none'
     environment: Production
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -177,3 +184,42 @@ jobs:
               echo "No final evidence file was available. The deployment is not verified."
             } >>"${GITHUB_STEP_SUMMARY}"
           fi
+
+  lost-customer-retention:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'DEPLOY_TO_HERMES_POC_01' &&
+      inputs.lost_customer_operation != 'none'
+    environment: Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Authenticate with short-lived Production identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - name: Inspect for existing lost-customer jobs
+        run: |
+          echo "vm_service_accounts=$(gcloud compute instances describe "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(serviceAccounts.email)' | tr '\n' ',')"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='set -e; test "$(hostname -s)" = hermes-poc-01; systemctl list-timers --all --no-pager | grep -Ei "lost.customer|retention" || true; systemctl status streetsmart-lost-customer-retention.timer --no-pager || true; systemctl show streetsmart-lost-customer-retention.timer -p Unit -p NextElapseUSecRealtime -p LastTriggerUSec --no-pager || true; systemctl show streetsmart-lost-customer-retention.service -p ExecStart -p User -p Group -p WorkingDirectory --no-pager || true; test ! -e /etc/systemd/system/monthly-lost-customer-retention-review.timer || { echo DUPLICATE_LOCAL_STYLE_TIMER; exit 3; }'
+      - name: Install dedicated lost-customer service and timer
+        if: inputs.lost_customer_operation == 'deploy'
+        run: |
+          stage="/var/tmp/lost-customer-retention-${GITHUB_SHA}"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command="mkdir -p '${stage}'"
+          gcloud compute scp --recurse --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap robie_job_engine/lost_customer_retention.py scripts/run_lost_customer_retention.py scripts/install-lost-customer-retention-production.sh deploy/systemd/streetsmart-lost-customer-retention.service deploy/systemd/streetsmart-lost-customer-retention.timer deploy/accountability/lost-customer-retention-config.example.json "${PRODUCTION_VM}:${stage}/"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command="set -e; sudo install -o root -g root -m 0644 '${stage}/lost_customer_retention.py' /opt/streetsmart-hermes/releases/current/robie_job_engine/lost_customer_retention.py; sudo install -o root -g root -m 0755 '${stage}/run_lost_customer_retention.py' /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py; sudo install -o root -g root -m 0755 '${stage}/install-lost-customer-retention-production.sh' /opt/streetsmart-hermes/releases/current/scripts/install-lost-customer-retention-production.sh; sudo install -o root -g root -m 0644 '${stage}/streetsmart-lost-customer-retention.service' /opt/streetsmart-hermes/releases/current/deploy/systemd/streetsmart-lost-customer-retention.service; sudo install -o root -g root -m 0644 '${stage}/streetsmart-lost-customer-retention.timer' /opt/streetsmart-hermes/releases/current/deploy/systemd/streetsmart-lost-customer-retention.timer; sudo install -o root -g root -m 0644 '${stage}/lost-customer-retention-config.example.json' /opt/streetsmart-hermes/releases/current/deploy/accountability/lost-customer-retention-config.example.json; sudo bash /opt/streetsmart-hermes/releases/current/scripts/install-lost-customer-retention-production.sh"
+      - name: Validate June-August backfill without sending
+        if: inputs.lost_customer_operation == 'dry-run'
+        run: |
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command='sudo env PYTHONPATH=/opt/streetsmart-hermes/releases/current /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python /opt/streetsmart-hermes/releases/current/scripts/run_lost_customer_retention.py --dry-run --backfill'

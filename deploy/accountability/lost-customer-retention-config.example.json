@@ -1,0 +1,21 @@
+{
+  "spreadsheet_id": "1Lo1NTbURH3tKoBvQXelT432uo1A-_DkGiR5E5faiEXA",
+  "appsheet_spreadsheet_id": "1ZyX1rUzDmRLMLMGrRzS48BlwvUdfkBd060ekZqoKsvo",
+  "sop_sources": {
+    "Cancellations": "1gpDHSl6xm_RTF9d4Htyd9i8zj7eIWebvIDjFJJSlQzo",
+    "Client Cancellation Request": "1rvAYtS1HY9hdX6Is0Z0Llt6FhizipoZOyZUbSyRkyhc",
+    "Remarketing and Rewriting": "1rFsVS4DzN7x3xL1aZS4qGU5pPQFHeULYROsXsn0i9lw",
+    "Reinstatements": "1nDze_axPNH7tqXr5GPnhoRP7j-eplAbmzkRcrSNZarQ",
+    "Manual Renewals": "1NSHFdtgKYXeF6OnJRg9Qlse_yiHUoaXTYPi0X1OwLr4",
+    "VIP Service Standards": "1YA70LaB0vmmRfKZZLFHMu2w8h8OrLGxrPG_h858oAis"
+  },
+  "sender": "robie@streetsmart.insurance",
+  "state_path": "/opt/streetsmart-hermes/lost-customer-retention/state.json",
+  "recipients": {
+    "commercial": "sandy@streetsmart.insurance",
+    "personal": "ashley@streetsmart.insurance",
+    "trucking": "gabrielac@streetsmart.insurance",
+    "carlo": "carlo@streetsmart.insurance",
+    "jake": "jake@streetsmart.insurance"
+  }
+}

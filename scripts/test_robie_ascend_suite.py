@@ -241,13 +241,8 @@ def run_all_tests():
 
             # Verify Cancellation
             assert stats["cancellations_synced"] == 1
-            mock_poster.apply_account_label.assert_called_with(
-                applicant_id="app-test-1",
-                label="Cancellation Notice",
-                policy_number="POL-9921",
-            )
-            print("  ✓ Cancellation: Label 'Cancellation Notice' applied to account")
-            print("  ✓ Cancellation: Notice PDF embedded and 🚨 CSR ACTION REQUIRED task created")
+            mock_poster.apply_account_label.assert_not_called()
+            print("  ✓ Cancellation: Notice PDF embedded and 🚨 CSR ACTION REQUIRED task created (no label applied)")
 
             # Verify Past Due
             assert stats["past_due_synced"] == 1
