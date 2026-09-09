@@ -104,6 +104,16 @@ class ScheduledReportEmailIngestor:
             new_count, in_win = self.ingestor.sync_to_database(db=db)
             total_synced = new_count
             logger.info(f"Successfully synced {new_count} new policies ({in_win} in 30-45d window)")
+            
+            # Automatically dispatch daily lead report if confirmation queue was downloaded
+            has_conf_queue = any("policy_change_request_confirmation_queue" in f.name.lower() for f in downloaded_files)
+            if has_conf_queue:
+                try:
+                    from src.reporting.daily_policy_change_lead_report import dispatch_daily_lead_report
+                    logger.info("New Policy Change Confirmation Queue report detected. Dispatching daily lead report...")
+                    dispatch_daily_lead_report()
+                except Exception as e:
+                    logger.error(f"Failed to trigger daily lead report from email ingest: {e}")
         finally:
             db.close()
 

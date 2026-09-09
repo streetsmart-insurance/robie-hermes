@@ -32,7 +32,7 @@ try:
     tail = ''.join(lines[-40:])
     client = GmailRenewalClient()
     client.send_email(
-        to=['carlo@streetsmart.insurance'],
+        to_email='carlo@streetsmart.insurance',
         subject='🚨 ALERT: StreetSmart Daily Renewal Pipeline Failed on VM',
         body_text=f'The StreetSmart Renewal Pipeline encountered a fatal error on hermes-poc-01 with exit code ${exit_code}.\n\nLog tail (last 40 lines):\n----------------------------------------\n{tail}\n----------------------------------------\nLog file on server: ${LOGFILE}'
     )
@@ -44,8 +44,28 @@ except Exception as e:
 
 trap send_failure_alert ERR
 
-# Run the master pipeline and handoff reporter
+# 1. Pre-Flight Database State & Invariant Checks
+echo "=================================================================" >> "$LOGFILE"
+echo "🔍 [PRE-FLIGHT] Running Database State & Invariant Checks..." >> "$LOGFILE"
+PYTHONPATH=. "${APP_DIR}/venv/bin/python3" src/database/integrity_check.py >> "$LOGFILE" 2>&1
+
+# 2. Pre-Flight Fast Automated Regression Suite
+echo "🧪 [PRE-FLIGHT] Running Fast Automated Regression Suite..." >> "$LOGFILE"
+PYTHONPATH=. "${APP_DIR}/venv/bin/pytest" tests/test_policy_number_aliases.py tests/test_ezlynx_api_client.py -q >> "$LOGFILE" 2>&1
+echo "=================================================================" >> "$LOGFILE"
+
+# 3. Run the master pipeline and handoff reporter
 PYTHONPATH=. "${APP_DIR}/venv/bin/python3" scripts/run_and_report_daily_pipeline.py >> "$LOGFILE" 2>&1
+
+# 3b. Run the Daily Policy Change & Commercial Lead Reporter
+echo "=================================================================" >> "$LOGFILE"
+echo "📋 [REPORTING] Running Daily Policy Change & Commercial Lead Reporter..." >> "$LOGFILE"
+PYTHONPATH=. "${APP_DIR}/venv/bin/python3" src/reporting/daily_policy_change_lead_report.py >> "$LOGFILE" 2>&1
+
+# 4. Post-Flight Database State Verification
+echo "=================================================================" >> "$LOGFILE"
+echo "🔍 [POST-FLIGHT] Verifying Database Invariants Post-Run..." >> "$LOGFILE"
+PYTHONPATH=. "${APP_DIR}/venv/bin/python3" src/database/integrity_check.py >> "$LOGFILE" 2>&1
 
 echo "=================================================================" >> "$LOGFILE"
 echo "✅ StreetSmart Renewal Daily Pipeline Finished at: $(date +"%Y-%m-%d_%H-%M-%S")" >> "$LOGFILE"
