@@ -75,6 +75,21 @@ creation, independent task read-back, or general applicant search. Its applicant
 item named Search is an ID lookup. The reader deliberately holds unsupported
 operations. It cannot turn an unidentified email into an assigned live task yet.
 
+`ezlynx_intake_task_adapter.py` now supplies the durable coordinator around the
+eventual persistent-Chrome task bridge. It records the one permitted external
+action before the browser write, reconciles by source key after a timeout or
+restart, and permanently holds an uncertain result instead of attempting a
+second create. The narrow browser port still needs verified EZLynx Test URLs and
+locators; none are guessed in this candidate.
+
+On September 9, 2026, IAP access to `hermes-test-01` was verified. The active
+Test release resolved to `328c7df2dc71`, and `robie-gateway.service` was active.
+The required local CDP endpoint at `127.0.0.1:9222` refused the connection, and
+no Chrome, browser, Xvfb, or EZLynx system service appeared in the service list.
+This blocks live task-selector capture and browser read-back until the Test
+persistent-browser runtime is restored or its correct endpoint/service is
+identified. Production was not accessed or changed.
+
 The collection also lists `POST /document` and Document Library list/download
 operations. This establishes a documented interface, not agency entitlement or
 successful upload. Keep the manual-upload obligation until availability and
