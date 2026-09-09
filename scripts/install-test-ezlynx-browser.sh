@@ -16,7 +16,7 @@ UNIT_NAME="robie-ezlynx-browser-test.service"
 release_root="$(readlink -f "${TEST_ROOT}/releases/current")"
 unit_source="${release_root}/deploy/systemd/${UNIT_NAME}"
 [[ -f "${unit_source}" ]] || { echo "Test browser unit missing from current release" >&2; exit 2; }
-grep -Fqx 'ConditionHost=hermes-test-01' "${unit_source}" || { echo "Test host condition missing" >&2; exit 2; }
+grep -Fqx 'ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal' "${unit_source}" || { echo "Test host condition missing" >&2; exit 2; }
 grep -Fq 'User=streetsmart-hermes-test' "${unit_source}" || { echo "Test service user missing" >&2; exit 2; }
 grep -Fq -- '--remote-debugging-address=127.0.0.1' "${unit_source}" || { echo "CDP is not loopback-only" >&2; exit 2; }
 if grep -Eq '(^|[ =])/opt/streetsmart-hermes/' "${unit_source}"; then
