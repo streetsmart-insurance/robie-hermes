@@ -90,6 +90,16 @@ This blocks live task-selector capture and browser read-back until the Test
 persistent-browser runtime is restored or its correct endpoint/service is
 identified. Production was not accessed or changed.
 
+The repository's existing `robie-ezlynx-browser.service` is Production-specific
+and must not be installed on Test. This branch adds the isolated
+`robie-ezlynx-browser-test.service` plus
+`scripts/install-test-ezlynx-browser.sh`. The installer refuses every host
+except `hermes-test-01`, loads the unit only from the current immutable Test
+release, uses the `streetsmart-hermes-test` identity and Test profile paths,
+binds CDP to loopback, and waits for an HTTP-ready endpoint. It starts a blank
+browser only; authenticated EZLynx login still requires isolated Test secrets
+and a verified session workflow.
+
 The collection also lists `POST /document` and Document Library list/download
 operations. This establishes a documented interface, not agency entitlement or
 successful upload. Keep the manual-upload obligation until availability and
