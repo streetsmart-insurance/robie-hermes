@@ -49,7 +49,10 @@ class DurableTaskAdapterTests(unittest.TestCase):
         self.env = patch.dict("os.environ", {"ROBIE_ENV": "TEST"})
         self.env.start()
         self.addCleanup(self.env.stop)
-        self.temp = tempfile.TemporaryDirectory()
+        # The production ledger correctly refuses /tmp. Keep this fixture under
+        # the checkout so Linux CI exercises a path that represents durable
+        # server storage instead of weakening the safety check.
+        self.temp = tempfile.TemporaryDirectory(dir=Path.cwd())
         self.addCleanup(self.temp.cleanup)
         self.browser = Browser()
         self.db = Path(self.temp.name) / "durable" / "intake.sqlite3"
