@@ -258,16 +258,24 @@ def check_login_secret_report(db_path: str) -> dict:
         return {"ok": True, "present": True, "job_id": job_id,
                 "unparseable": True}
     secrets = []
-    for item in data.get("secrets") or []:
-        secrets.append(
-            {
-                "secret_id": item.get("secret_id"),
-                "newest_enabled_version": item.get("newest_enabled_version"),
-                "newest_version": item.get("newest_version"),
-                "newest_state": item.get("newest_state"),
-                "missing_enabled": item.get("missing_enabled"),
-            }
-        )
+    # Known engine behavior: the checkpoint writer's redact_mapping replaces
+    # the whole `secrets` key with "[REDACTED]" (the key name matches the
+    # secret filter; see login_secret_health.format_leftover_note). A non-list
+    # therefore means "redacted", not "malformed" -- never crash the audit.
+    raw_secrets = data.get("secrets")
+    if isinstance(raw_secrets, list):
+        for item in raw_secrets:
+            if not isinstance(item, dict):
+                continue
+            secrets.append(
+                {
+                    "secret_id": item.get("secret_id"),
+                    "newest_enabled_version": item.get("newest_enabled_version"),
+                    "newest_version": item.get("newest_version"),
+                    "newest_state": item.get("newest_state"),
+                    "missing_enabled": item.get("missing_enabled"),
+                }
+            )
     return {
         "ok": True,
         "present": True,
@@ -275,6 +283,7 @@ def check_login_secret_report(db_path: str) -> dict:
         "checked_at": cp[1],
         "result": data.get("result"),
         "secrets": secrets,
+        "secrets_redacted": not isinstance(raw_secrets, list),
     }
 
 
