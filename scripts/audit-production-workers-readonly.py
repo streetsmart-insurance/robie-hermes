@@ -6,6 +6,7 @@ Checks (never mutates, never prints secrets):
   2. hermes-gateway active
   3. the 5 verification job types import cleanly from the live release
   4. verification schedules present in scheduled_jobs (sqlite, read-only)
+  4b. robie-scheduler 60s tick timer/service health (journal redacted)
   5. VM service account (metadata server, no auth)
   6. secret *names* configured for EZLynx (names only, never values)
 
@@ -36,6 +37,11 @@ EXPECTED_SCHEDULES = (
     "StreetSmart daily mortgagee verification",
     "StreetSmart daily policy change verification",
     "StreetSmart daily verification digest",
+)
+
+# Schedules intentionally disabled by kill-switch (audited as "must stay disabled").
+EXPECTED_DISABLED_SCHEDULES = (
+    "StreetSmart daily policy change verification",  # kill-switched until report 4359 schema verified
 )
 
 
@@ -123,11 +129,74 @@ def check_schedules(db_path: str) -> dict:
         for r in rows
         if r[0] not in EXPECTED_SCHEDULES
     ]
+    for s in schedules:
+        want_enabled = s["task_name"] not in EXPECTED_DISABLED_SCHEDULES
+        s["expected_enabled"] = want_enabled
     return {
-        "ok": all(s["installed"] and s["enabled"] for s in schedules),
+        "ok": all(
+            s["installed"] and s["enabled"] == s["expected_enabled"]
+            for s in schedules
+        ),
         "schedules": schedules,
         "other_schedules": other,
         "db_path": db_path,
+    }
+
+
+def check_scheduler_tick(
+    timer: str = "robie-scheduler.timer",
+    service: str = "robie-scheduler.service",
+    release_root: str = "/opt/streetsmart-hermes/current",
+) -> dict:
+    """Inspect the 60s scheduler tick that picks up PENDING jobs (read-only).
+
+    Journal lines are passed through the engine's secret redactor before
+    being included, so no credential can leak into the audit output.
+    """
+    rc, out = _run(["systemctl", "is-active", timer])
+    timer_active = rc == 0 and out == "active"
+    rc, out = _run(["systemctl", "is-enabled", timer])
+    timer_enabled = rc == 0 and out == "enabled"
+    _, last_trigger = _run(
+        ["systemctl", "show", timer, "-p", "LastTriggerUSec", "--value"]
+    )
+    _, next_elapse = _run(
+        ["systemctl", "show", timer, "-p", "NextElapseUSec", "--value"]
+    )
+    _, exec_status = _run(
+        ["systemctl", "show", service, "-p", "ExecMainStatus", "--value"]
+    )
+    # Journal evidence: how many tick runs in the last 30 min, plus the most
+    # recent error-ish lines (redacted). Never print raw journal text.
+    redact = lambda t: t  # noqa: E731 - replaced below when engine importable
+    try:
+        if release_root not in sys.path:
+            sys.path.insert(0, release_root)
+        from robie_job_engine.secrets import redact_text  # noqa: E402
+
+        redact = redact_text
+    except Exception:  # noqa: BLE001 - fall back to truncation only
+        pass
+    _, journal_tail = _run(
+        ["journalctl", "-u", service, "--since", "30 minutes ago",
+         "--no-pager", "-o", "cat"]
+    )
+    tick_lines = [l for l in journal_tail.splitlines() if l.strip()]
+    err_lines = [
+        redact(l)[:300]
+        for l in tick_lines
+        if any(k in l.lower() for k in ("error", "fail", "exception", "traceback"))
+    ][:10]
+    return {
+        "timer": timer,
+        "timer_active": timer_active,
+        "timer_enabled": timer_enabled,
+        "last_trigger_usec": last_trigger or None,
+        "next_elapse_usec": next_elapse or None,
+        "last_exec_status": exec_status or None,
+        "journal_lines_30min": len(tick_lines),
+        "recent_error_lines": err_lines,
+        "ok": timer_active and timer_enabled,
     }
 
 
@@ -186,6 +255,9 @@ def main() -> int:
         "gateway": check_gateway(),
         "job_types": check_job_types(release_root),
         "schedules": check_schedules(args.db),
+        "scheduler_tick": check_scheduler_tick(
+            release_root=str(Path(args.opt_root) / "current")
+        ),
         "vm_service_account": check_vm_service_account(),
         "env": check_secret_names(),
     }
@@ -195,6 +267,7 @@ def main() -> int:
             result["gateway"]["ok"],
             result["job_types"]["ok"],
             result["schedules"]["ok"],
+            result["scheduler_tick"]["ok"],
         ]
     )
     print(json.dumps(result, indent=2))
