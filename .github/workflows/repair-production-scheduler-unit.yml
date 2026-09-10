@@ -45,6 +45,21 @@ jobs:
           case "${EXPECT_SHA}" in
             ""|*[!0-9a-f]*) echo "expect_sha must be a hex prefix" >&2; exit 1;;
           esac
+      - name: Deep venv permission diagnostics (read-only)
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          STAGING="/tmp/robie-scheduler-repair/${{ github.run_id }}-1"
+          echo "=== path ownership chain ==="
+          $SSH --command="sudo namei -l /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python" || true
+          echo "=== venv bin listing ==="
+          $SSH --command="sudo ls -la /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/ 2>&1 | head -15" || true
+          echo "=== gateway unit (how does the gateway run?) ==="
+          $SSH --command="sudo systemctl cat hermes-gateway 2>&1 | head -45" || true
+          echo "=== scheduler unit (current on-disk) ==="
+          $SSH --command="sudo systemctl cat robie-scheduler 2>&1 | head -45" || true
+          echo "=== gateway liveness ==="
+          $SSH --command="sudo systemctl show hermes-gateway -p ActiveState -p SubState -p MainPID -p ExecMainStatus --no-pager" || true
       - name: Install fixed scheduler unit and restart the tick
         run: |
           set -euo pipefail
