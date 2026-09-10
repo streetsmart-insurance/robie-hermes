@@ -151,9 +151,19 @@ PLAYWRIGHT_CDP_CHAT = (
     "must be visible without a live browser."
 )
 
+UNVERIFIED_UNMASK_CHAT = (
+    "UNVERIFIED-UNMASK class returned (d5fd2307): a Chat job that never "
+    "claimed destination success and never emitted a destination action "
+    "checkpoint closed UNVERIFIED with 'no structured destination action "
+    "checkpoint' after CDP ECONNREFUSED / PLAYWRIGHT_BLOCKED. Infra fail "
+    "is FAILED or HITL with the real last error. COMPLETE stays blocked. "
+    "Claimed progress without evidence stays UNVERIFIED."
+)
+
 ACTION_GATE_SCENARIO_ID = "action-gate:test-pass-required-before-production"
 PLAYWRIGHT_SILENT_SCENARIO_ID = "playwright-silent:zero-tool-rows-1df9740b"
 PLAYWRIGHT_CDP_SCENARIO_ID = "playwright-cdp:json-list-fixture"
+UNVERIFIED_UNMASK_SCENARIO_ID = "unverified-unmask:infra-error-not-checkpoint"
 CHAT_SHAPED_ASCEND = (
     "@robie create a program in Ascend for PAWIVA premium finance"
 )
@@ -189,6 +199,7 @@ NAMED_SCENARIO_IDS = frozenset(
         "action-gate:test-pass-required-before-production",
         "playwright-silent:zero-tool-rows-1df9740b",
         "playwright-cdp:json-list-fixture",
+        "unverified-unmask:infra-error-not-checkpoint",
     }
 )
 
@@ -1149,6 +1160,78 @@ def run_zero_playwright_tool_row_scenario(*, work_dir: Path) -> dict[str, Any]:
             stop_generic_chat_job_heartbeat(db, job_id)
 
 
+def run_unverified_unmask_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """d5fd2307: infra ECONNREFUSED is FAILED, not UNVERIFIED checkpoint mask."""
+    if is_live_hermes_path(work_dir):
+        raise ProductionGuardError(
+            f"refusing unverified-unmask scenario on live Hermes path: {work_dir}"
+        )
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    db = str(work_dir / "unverified-unmask.db")
+    infra = (
+        "Could not attach to persistent Chrome: "
+        "[Errno 111] Connection refused (127.0.0.1:9222)"
+    )
+    job_id = None
+    claimed_id = None
+    try:
+        job_id = open_chat_job(
+            db,
+            "spaces/d5fd2307/messages/open",
+            "Gold Eagle Bond Chat quote",
+            requested_by="Carlo",
+            conversation_id="spaces/d5fd2307",
+        )
+        if job_id is None:
+            return _fail(UNVERIFIED_UNMASK_SCENARIO_ID, "unmask job did not open")
+        response = guard_chat_response(db, job_id, infra)
+        store = JobStore(db)
+        job = store.get_job(job_id)
+        claimed_id = open_chat_job(
+            db,
+            "spaces/d5fd2307/messages/claimed",
+            "Gold Eagle Bond Chat quote",
+            requested_by="Carlo",
+            conversation_id="spaces/d5fd2307-claimed",
+        )
+        claimed_response = guard_chat_response(db, claimed_id, I_DID_IT_PROSE)
+        claimed = store.get_job(claimed_id)
+        ok = (
+            job["status"] == JobStatus.FAILED.value
+            and job["status"] != JobStatus.UNVERIFIED.value
+            and job["status"] != JobStatus.COMPLETE.value
+            and "ECONNREFUSED" in str(job.get("last_error") or "")
+            and "no structured destination action checkpoint"
+            not in str(job.get("last_error") or "")
+            and store.get_checkpoint(job_id, "action") is None
+            and store.list_evidence(job_id) == []
+            and claimed["status"] == JobStatus.UNVERIFIED.value
+            and claimed["status"] != JobStatus.COMPLETE.value
+            and "UNVERIFIED" in claimed_response
+            and "FAILED" in response
+        )
+        return _result(
+            UNVERIFIED_UNMASK_SCENARIO_ID,
+            ok=ok,
+            outcome="PASS" if ok else "FAILED",
+            evidence=(
+                UNVERIFIED_UNMASK_CHAT
+                if ok
+                else (
+                    f"unmask leaked: infra={job['status']} "
+                    f"claimed={claimed['status']} response={response[:240]!r}"
+                )
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — scenario must classify, not crash
+        return _fail(UNVERIFIED_UNMASK_SCENARIO_ID, f"{type(exc).__name__}: {exc}")
+    finally:
+        if job_id:
+            stop_generic_chat_job_heartbeat(db, job_id)
+        if claimed_id:
+            stop_generic_chat_job_heartbeat(db, claimed_id)
+
+
 def run_cdp_json_list_fixture_scenario(*, work_dir: Path) -> dict[str, Any]:
     """Write CDP url+title checkpoints from fixture /json/list. No live browser."""
     from .playwright_observability import (
@@ -1251,5 +1334,8 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     )
     results.append(
         run_cdp_json_list_fixture_scenario(work_dir=work_dir / "playwright-cdp")
+    )
+    results.append(
+        run_unverified_unmask_scenario(work_dir=work_dir / "unverified-unmask")
     )
     return results

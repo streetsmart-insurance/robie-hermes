@@ -3,6 +3,10 @@ Description=ROBIE Test-only persistent EZLynx Chrome profile
 After=network-online.target
 Wants=network-online.target
 ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
+# Rate-limit Restart=always so a flush/CDP race cannot thrash Chrome.
+# Daily robie-chrome-refresh at 3:30 AM ET is the intentional restart.
+StartLimitIntervalSec=10min
+StartLimitBurst=3
 
 [Service]
 Type=simple

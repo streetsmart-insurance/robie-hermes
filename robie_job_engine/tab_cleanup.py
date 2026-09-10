@@ -781,15 +781,33 @@ def plan_tab_cleanup(
     for tab in extras:
         keep.remove(tab)
         close.append(tab)
+    close, keep, session = _preserve_last_browser_target(close, keep, session)
     return CleanupPlan(
         close=close,
         keep=keep,
         session_tab=session,
         reason=(
             f"{mode}: close {len(close)} leftover tab(s); "
-            f"keep {len(keep)} including one /web/ session"
+            f"keep {len(keep)} including one /web/ session; "
+            "never close the last browser target"
         ),
     )
+
+
+def _preserve_last_browser_target(
+    close: list[BrowserTab],
+    keep: list[BrowserTab],
+    session: BrowserTab | None,
+) -> tuple[list[BrowserTab], list[BrowserTab], BrowserTab | None]:
+    """Chrome exits when the last page target closes. Always keep one page."""
+    if keep:
+        return close, keep, session
+    if not close:
+        return close, keep, session
+    rescued = max(close, key=lambda tab: (session_keep_rank(tab.url), -len(tab.url)))
+    close = [tab for tab in close if tab.identity != rescued.identity]
+    keep = [rescued]
+    return close, keep, session or rescued
 
 
 def close_cdp_target(
@@ -909,10 +927,16 @@ def apply_cleanup(
     cdp_url: str | None = None,
     http_get: Callable[[str], tuple[int, bytes]] | None = None,
 ) -> dict[str, Any]:
+    close, keep, session = _preserve_last_browser_target(
+        list(plan.close), list(plan.keep), plan.session_tab
+    )
+    preserved_last_target = len(keep) > len(plan.keep) or (
+        not plan.keep and bool(keep) and len(close) < len(plan.close)
+    )
     by_id = {candidate.identity: live for candidate, live in pages_as_candidates(pages or [])}
     closed: list[dict[str, Any]] = []
     errors: list[str] = []
-    for tab in plan.close:
+    for tab in close:
         try:
             if closer is not None:
                 result = closer(tab)
@@ -925,14 +949,15 @@ def apply_cleanup(
             closed.append(close_cdp_target(tab.identity, cdp_url=cdp_url, http_get=http_get))
         except Exception as exc:
             errors.append(f"{tab.identity}: {type(exc).__name__}")
-    remaining = [tab for tab in plan.keep]
+    remaining = [tab for tab in keep]
     return {
         "closed": closed,
-        "closed_urls": [tab.url for tab in plan.close],
+        "closed_urls": [tab.url for tab in close],
         "kept_urls": [tab.url for tab in remaining],
-        "session_url": plan.session_tab.url if plan.session_tab else None,
+        "session_url": session.url if session else None,
         "errors": errors,
         "reason": plan.reason,
+        "preserved_last_target": preserved_last_target,
     }
 
 
@@ -1144,7 +1169,10 @@ def flush_tabs_at_job_start(
 
     Does not wait for terminal close-out or pre-flight. Unclaimed leftovers
     close; one EZLynx ``/web/`` session stays. Stale live-status jobs do not
-    keep tabs.
+    keep tabs. Never close the last browser target — Chrome exits when the
+    last page is gone, then ``Restart=always`` thrashes CDP. Never invoke
+    systemctl against ``robie-ezlynx-browser`` from flush. Daily
+    ``robie-chrome-refresh`` at 3:30 AM ET is the intentional restart.
     """
     try:
         return maybe_flush_orphaned_tabs(db_path=db_path, **kwargs)

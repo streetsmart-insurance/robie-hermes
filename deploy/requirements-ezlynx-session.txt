@@ -1,3 +1,4 @@
 google-cloud-secret-manager>=2.20,<3
 playwright>=1.45,<2
+playwright-stealth>=1.0.6,<3
 pypdf>=5,<7
