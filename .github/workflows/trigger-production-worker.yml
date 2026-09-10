@@ -50,43 +50,25 @@ jobs:
             mortgagee)       ACTION=mortgagee_verification;       PAYLOAD='{"worker":"mortgagee","report_id":"4372"}' ;;
           esac
           echo "action=${ACTION}"
-          JOB_ID=$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo python3 -c \"
-          import json, sys
-          sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
-          from robie_job_engine.store import JobStore
-          store = JobStore('${JOB_DB}')
-          job = store.create_job(action_type='${ACTION}', payload=json.loads('${PAYLOAD}'), idempotency_key='manual-trigger-${ACTION}-${{ github.run_id }}')
-          print(job['id'] if isinstance(job, dict) else job)
-          \"" 2>/dev/null | tail -1)
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          REMOTE_DIR=/var/tmp/robie-worker-trigger/${{ github.run_id }}
+          $SSH --command="mkdir -p ${REMOTE_DIR}"
+          gcloud compute scp scripts/trigger_worker_job.py scripts/worker_job_status.py \
+            "${PRODUCTION_VM}:${REMOTE_DIR}/" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap
+          JOB_ID=$($SSH --command="sudo python3 ${REMOTE_DIR}/trigger_worker_job.py '${ACTION}' '${PAYLOAD}' 'manual-trigger-${ACTION}-${{ github.run_id }}'" 2>&1 | tail -1)
           echo "JOB_ID=${JOB_ID}" | tee "${RUNNER_TEMP}/trigger.env"
+          test -n "${JOB_ID}"
           echo "Created job ${JOB_ID}; scheduler tick picks it up within ~60s."
           for i in $(seq 1 80); do
-            STATE=$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-              --command="sudo python3 -c \"
-          import sys
-          sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
-          from robie_job_engine.store import JobStore
-          store = JobStore('${JOB_DB}')
-          job = store.get_job('${JOB_ID}')
-          print(job.get('status', 'unknown') if job else 'missing')
-          \"" 2>/dev/null | tail -1)
+            STATE=$($SSH --command="sudo python3 ${REMOTE_DIR}/worker_job_status.py '${JOB_ID}'" 2>&1 | head -1)
             echo "[$(date -u +%H:%M:%S)] job ${JOB_ID} status=${STATE}"
             case "${STATE}" in
-              completed|failed|cancelled) break ;;
+              completed|failed|cancelled|missing) break ;;
             esac
             sleep 60
           done
           echo "--- final job record ---"
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo python3 -c \"
-          import json, sys
-          sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
-          from robie_job_engine.store import JobStore
-          store = JobStore('${JOB_DB}')
-          job = store.get_job('${JOB_ID}')
-          print(json.dumps(job, indent=2, default=str)[:6000])
-          \"" | tee "${RUNNER_TEMP}/trigger-result.json"
+          $SSH --command="sudo python3 ${REMOTE_DIR}/worker_job_status.py '${JOB_ID}'" | tail -n +2 | tee "${RUNNER_TEMP}/trigger-result.json"
       - name: Publish evidence artifact
         uses: actions/upload-artifact@v4
         with:
