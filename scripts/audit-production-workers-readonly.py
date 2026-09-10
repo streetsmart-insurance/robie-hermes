@@ -179,6 +179,45 @@ def check_jobs(db_path: str) -> dict:
     return {"ok": True, "non_terminal_jobs": jobs, "count": len(jobs)}
 
 
+def check_recordings(db_path: str) -> dict:
+    """Read-only dump of the latest recording segments (diagnoses capture failures)."""
+    if not Path(db_path).is_file():
+        return {"ok": False, "error": f"db not found: {db_path}"}
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            tables = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "job_recordings" not in tables:
+                return {"ok": True, "note": "no job_recordings table", "segments": []}
+            rows = con.execute(
+                "SELECT job_id, segment_number, status, capture_pid,"
+                " substr(coalesce(failure,''),1,300), failure_stage,"
+                " local_path, started_at, stopped_at"
+                " FROM job_recordings ORDER BY started_at DESC LIMIT 10"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    segments = [
+        {
+            "job_id": r[0],
+            "segment": r[1],
+            "status": r[2],
+            "capture_pid": r[3],
+            "failure": r[4],
+            "failure_stage": r[5],
+            "local_path": r[6],
+            "started_at": r[7],
+            "stopped_at": r[8],
+        }
+        for r in rows
+    ]
+    return {"ok": True, "segments": segments, "count": len(segments)}
+
+
 def check_scheduler_tick(
     timer: str = "robie-scheduler.timer",
     service: str = "robie-scheduler.service",
@@ -294,6 +333,7 @@ def main() -> int:
         "job_types": check_job_types(release_root),
         "schedules": check_schedules(args.db),
         "jobs": check_jobs(args.db),
+        "recordings": check_recordings(args.db),
         "scheduler_tick": check_scheduler_tick(
             release_root=str(Path(args.opt_root) / "current")
         ),
