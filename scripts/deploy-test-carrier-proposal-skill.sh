@@ -44,6 +44,15 @@ PY
 
 actual_digest="$(bundle_digest "${source_dir}")"
 [[ "${actual_digest}" == "${expected_digest}" ]] || { echo "staged bundle digest mismatch" >&2; exit 2; }
+if ! command -v node >/dev/null 2>&1 \
+  || { ! command -v npm >/dev/null 2>&1 && ! command -v pnpm >/dev/null 2>&1; } \
+  || { ! command -v soffice >/dev/null 2>&1 && ! command -v libreoffice >/dev/null 2>&1; } \
+  || ! command -v pdfinfo >/dev/null 2>&1; then
+  command -v apt-get >/dev/null 2>&1 || { echo "Test dependency installer is unavailable" >&2; exit 3; }
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends nodejs npm libreoffice-writer poppler-utils
+fi
 command -v node >/dev/null || { echo "node is unavailable on Test" >&2; exit 3; }
 command -v npm >/dev/null || command -v pnpm >/dev/null || { echo "npm/pnpm is unavailable on Test" >&2; exit 3; }
 command -v soffice >/dev/null || command -v libreoffice >/dev/null || { echo "LibreOffice is unavailable on Test" >&2; exit 3; }
