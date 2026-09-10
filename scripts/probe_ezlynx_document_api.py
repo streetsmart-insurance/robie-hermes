@@ -32,6 +32,18 @@ import sys
 import time
 import urllib.parse
 
+# Mirrors robie_job_engine.ezlynx_api.REQUIRED_CONFIG_FIELDS exactly, so the
+# probe validates the same secret shape the engine will consume.
+REQUIRED_FIELDS = (
+    "client_id",
+    "client_secret",
+    "username",
+    "integration_group_id",
+    "token_endpoint",
+    "document_base_url",
+    "scope",
+)
+
 CANDIDATE_PATHS = [
     "documents",
     "document",
@@ -74,17 +86,20 @@ def load_secret(secret_resource: str) -> dict:
     return json.loads(proc.stdout.strip())
 
 
+GRANT_TYPE = "vendor_data_access"
+
+
 def get_token(cfg: dict) -> str:
-    """OAuth2 vendor_data_access grant, mirroring EzlynxApiClient."""
-    parsed = urllib.parse.urlparse(cfg["token_url"])
+    """OAuth2 token request, mirroring EzlynxApiClient.get_token exactly."""
+    parsed = urllib.parse.urlparse(cfg["token_endpoint"])
     conn = http.client.HTTPSConnection(parsed.hostname, timeout=CALL_TIMEOUT)
     try:
         body = urllib.parse.urlencode(
             {
-                "grant_type": "vendor_data_access",
                 "client_id": cfg["client_id"],
                 "client_secret": cfg["client_secret"],
-                "app_secret": cfg["app_secret"],
+                "grant_type": GRANT_TYPE,
+                "scope": cfg["scope"],
                 "username": cfg["username"],
                 "integration_group_id": cfg["integration_group_id"],
             }
@@ -114,7 +129,7 @@ def get_token(cfg: dict) -> str:
 def probe_path(cfg: dict, token: str, path: str) -> dict:
     entry: dict = {"path": path}
     try:
-        parsed = urllib.parse.urlparse(cfg["document_api_base"])
+        parsed = urllib.parse.urlparse(cfg["document_base_url"])
         base = (parsed.path or "").rstrip("/")
         full_path = f"{base}/{path.lstrip('/')}"
         if parsed.query:
@@ -163,6 +178,23 @@ def main(argv: list[str]) -> int:
         cfg = load_secret(argv[2])
     except Exception as exc:  # noqa: BLE001
         summary["auth"] = {"ok": False, "error": f"config load failed: {exc}"[:200]}
+        print(json.dumps(summary, indent=2))
+        return 1
+
+    if not isinstance(cfg, dict):
+        summary["auth"] = {"ok": False, "error": "config payload is not a JSON object"}
+        print(json.dumps(summary, indent=2))
+        return 1
+    missing = [f for f in REQUIRED_FIELDS if not str(cfg.get(f) or "").strip()]
+    summary["config"] = {
+        "fields_present": sorted(k for k in cfg.keys()),
+        "fields_missing": missing,
+    }
+    if missing:
+        summary["auth"] = {
+            "ok": False,
+            "error": f"secret missing fields: {', '.join(missing)}",
+        }
         print(json.dumps(summary, indent=2))
         return 1
 
