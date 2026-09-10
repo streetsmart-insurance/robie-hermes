@@ -1,0 +1,148 @@
+{
+  "Coterie": {
+    "channel": "PORTAL",
+    "portal_url": "https://agent.coterieinsurance.com",
+    "notes": "Retrieve renewal quote directly from agent portal."
+  },
+  "The Hartford": {
+    "channel": "PORTAL",
+    "portal_url": "https://ebusiness.thehartford.com",
+    "notes": "Retrieve renewal documents directly from Electronic Business Center."
+  },
+  "Travelers": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.travelers.com/for-agents",
+    "notes": "Retrieve renewal quote and loss runs from Agent Portal."
+  },
+  "Chubb Group": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.chubb.com/us-en/agents-brokers.html",
+    "notes": "Check Chubb Agent Portal first."
+  },
+  "NJCRIB - Hartford Assigned Risk": {
+    "channel": "EMAIL_ASK_PORTAL",
+    "underwriter_email": "assignedrisk@hartford.com",
+    "notes": "Email underwriter; ask if self-service online portal is available."
+  },
+  "AmWINS MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@amwins.com",
+    "notes": "Direct underwriter email outreach."
+  },
+  "JIMCOR MGA": {
+    "channel": "EMAIL_ASK_PORTAL",
+    "underwriter_email": "renewals@jimcor.com",
+    "notes": "Email underwriter; ask if website/portal download is available."
+  },
+  "Specialty Coverage Insurance Agency MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@specialtycoverage.com",
+    "notes": "Email underwriter."
+  },
+  "Rocklake Insurance Group MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@rocklakeins.com",
+    "notes": "Email underwriter."
+  },
+  "TAPCO Underwriters Inc.": {
+    "channel": "PORTAL",
+    "underwriter_email": "renewals@gotapco.com",
+    "notes": "TAPCO is online if renewal is offered.",
+    "portal_url": "https://www.gotapco.com"
+  },
+  "Diesel Insurance Solutions": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@dieselins.com",
+    "notes": "Email underwriter."
+  },
+  "Trinity Underwriters": {
+    "channel": "EMAIL",
+    "underwriter_email": "quotes@trinityunderwriters.net",
+    "notes": "Direct underwriter email outreach."
+  },
+  "Risk Placement Services (RPS) MGA": {
+    "channel": "EMAIL_ASK_PORTAL",
+    "underwriter_email": "renewals@rpsins.com",
+    "notes": "Email underwriter; check if RPS portal is available."
+  },
+  "Cover Whale  MGA": {
+    "channel": "PORTAL",
+    "portal_url": "https://app.coverwhale.com",
+    "notes": "Cover Whale agent portal."
+  },
+  "XPT Partners MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@xptpartners.com",
+    "notes": "Email underwriter."
+  },
+  "Hyundai Marine & Fire Insurance Company": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@hyundaifire.com",
+    "notes": "Email underwriter."
+  },
+  "NJCRIB - Liberty Assigned Risk": {
+    "channel": "EMAIL_ASK_PORTAL",
+    "underwriter_email": "assignedrisk@libertymutual.com",
+    "notes": "Email underwriter; ask if portal available."
+  },
+  "InterGUARD Ltd": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@interguard.com",
+    "notes": "Email underwriter."
+  },
+  "Johnson & Johnson, Inc.  MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@jjins.com",
+    "notes": "Email underwriter."
+  },
+  "FTP INC.  MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@ftpinc.com",
+    "notes": "Email underwriter."
+  },
+  "New England Excess Exchange MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@neee.com",
+    "notes": "Email underwriter."
+  },
+  "MGA Resource, LLC": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@mgaresource.com",
+    "notes": "Email underwriter."
+  },
+  "Homeowners Choice": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.hcpci.com",
+    "notes": "HCPCI agent portal."
+  },
+  "CNA Surety": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.cnasurety.com",
+    "notes": "CNA Surety online portal."
+  },
+  "Insurtec Inc MGA": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@insurtec.com",
+    "notes": "Email underwriter."
+  },
+  "Geico": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.geico.com",
+    "notes": "Commercial auto portal."
+  },
+  "Berkshire Hathaway Inc": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.bhhc.com",
+    "notes": "BHHC Agent Portal."
+  },
+  "Morstan General Agency": {
+    "channel": "EMAIL",
+    "underwriter_email": "renewals@morstan.com",
+    "notes": "Email underwriter."
+  },
+  "Markel Insurance Company": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.markel.com",
+    "notes": "Markel Agent Portal."
+  }
+}

@@ -24,6 +24,11 @@ WORKER_FOR_ACTION = {
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
     "hermes.unavailable": "hermes-cua",
+    "manual_renewal_verification": "manual-renewal",
+    "audit_verification": "audit-verification",
+    "mortgagee_verification": "mortgagee-verification",
+    "policy_change_verification": "policy-change-verification",
+    "daily_verification_digest": "verification-digest",
 }
 
 BOUNDED_ENGINE_ACTIONS = frozenset(
@@ -41,6 +46,11 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.session_refresh",
         "appsheet.smart_reward",
         "appsheet.qa_audit",
+        "manual_renewal_verification",
+        "audit_verification",
+        "mortgagee_verification",
+        "policy_change_verification",
+        "daily_verification_digest",
     }
 )
 

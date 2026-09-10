@@ -1,0 +1,264 @@
+"""Unit tests for robie_job_engine.report_fetcher. Fakes only — no live browser."""
+
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+import unittest.mock
+from pathlib import Path
+
+from _sibling_fakes import ensure_real_module
+
+# The verification worker test modules install fake `robie_job_engine.*`
+# siblings in sys.modules (plus the parent package attribute) at their import
+# time, and pytest imports every test module before running any test. Evict
+# any such fakes so the imports below bind the REAL modules under test.
+# (The worker test modules already bound their fakes into their worker
+# namespaces at their own import time, so this does not disturb them.)
+ensure_real_module("robie_job_engine.verification_common")
+rf = ensure_real_module("robie_job_engine.report_fetcher")
+
+from durable_temp import durable_temporary_directory
+
+from robie_job_engine.report_registry import ReportRegistryError, get_report_spec
+
+
+class _NoTouch:
+    """Sentinel session: any attribute access means the browser was touched."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"browser/session must not be touched: {name}")
+
+
+class _FakeDownload:
+    def __init__(self, csv_text):
+        self.csv_text = csv_text
+
+    def save_as(self, dest):
+        Path(dest).write_text(self.csv_text, encoding="utf-8")
+
+
+class _FakeDownloadCtx:
+    def __init__(self, csv_text):
+        self._download = _FakeDownload(csv_text)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    @property
+    def value(self):
+        return self._download
+
+
+class _FakeLocator:
+    def __init__(self, count=1, text=""):
+        self._count = count
+        self._text = text
+        self.clicks = 0
+
+    def count(self):
+        return self._count
+
+    def click(self):
+        self.clicks += 1
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, timeout=None):
+        return None
+
+    def inner_text(self, timeout=None):
+        return self._text
+
+
+class _FakePage:
+    def __init__(self, csv_text, body_text="report body"):
+        self.csv_text = csv_text
+        self.body_text = body_text
+        self.visited = []
+
+    def goto(self, url, **kwargs):
+        self.visited.append(url)
+
+    def locator(self, selector):
+        if selector == "body":
+            return _FakeLocator(text=self.body_text)
+        return _FakeLocator(count=1)
+
+    def expect_download(self, timeout=None):
+        return _FakeDownloadCtx(self.csv_text)
+
+    def wait_for_load_state(self, *args, **kwargs):
+        return None
+
+
+def _run(run_id="run-1", fields=None):
+    return {"run_id": run_id, "fields": list(fields or [])}
+
+
+class StartRunRefusalTests(unittest.TestCase):
+    def test_4359_start_run_refuses_before_browser(self):
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ReportRegistryError) as ctx:
+                rf.fetch_report_rows(
+                    report_id="4359",
+                    db_path=f"{tmp}/jobs.db",
+                    session=_NoTouch(),
+                )
+            self.assertIn("4359", str(ctx.exception))
+
+    def test_unknown_report_id_refuses(self):
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ReportRegistryError):
+                rf.fetch_report_rows(
+                    report_id="9999", db_path=f"{tmp}/jobs.db", session=_NoTouch()
+                )
+
+    def test_metadata_only_alias_refuses(self):
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ReportRegistryError):
+                rf.fetch_report_rows(
+                    report_id="4244", db_path=f"{tmp}/jobs.db", session=_NoTouch()
+                )
+
+    def test_missing_db_path_fails_closed(self):
+        env = {key: value for key, value in os.environ.items() if key != "ROBIE_JOB_DB"}
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ValueError):
+                rf.fetch_report_rows(report_id="4247", session=_NoTouch())
+
+    def test_runtime_filters_fail_closed(self):
+        # Runtime filters are fingerprinted but never applied in the Looker UI;
+        # silently ignoring them would return wrong-scope rows.
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                rf.fetch_report_rows(
+                    report_id="4247",
+                    filters={"carrier": "Coterie"},
+                    db_path=f"{tmp}/jobs.db",
+                    session=_NoTouch(),
+                )
+        self.assertIn("filters", str(ctx.exception))
+
+
+class ParseCsvTests(unittest.TestCase):
+    def test_rows_keyed_and_deduped_by_identity(self):
+        spec = get_report_spec("4247")
+        csv_text = (
+            "policy_number,insured_name,carrier\n"
+            "P1,Acme LLC,Coterie\n"
+            "P2,Globex Inc,Travelers\n"
+            "P1,Acme LLC Duplicate,Coterie\n"
+            "\n"
+        )
+        rows = rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["policy_number"] for row in rows], ["P1", "P2"])
+        # first occurrence wins
+        self.assertEqual(rows[0]["insured_name"], "Acme LLC")
+
+    def test_field_projection(self):
+        spec = get_report_spec("4247")
+        csv_text = "policy_number,insured_name,carrier\nP1,Acme,Coterie\n"
+        rows = rf._parse_report_csv(
+            csv_text, spec=spec, fields=["policy_number", "carrier"]
+        )
+        self.assertEqual(rows, [{"policy_number": "P1", "carrier": "Coterie"}])
+
+    def test_missing_identity_column_fails_closed(self):
+        spec = get_report_spec("4247")
+        csv_text = "policy_name,carrier\nP1,Coterie\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        self.assertIn("missing identity columns", str(ctx.exception))
+
+    def test_missing_requested_field_fails_closed(self):
+        spec = get_report_spec("4247")
+        csv_text = "policy_number,carrier\nP1,Coterie\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            rf._parse_report_csv(
+                csv_text, spec=spec, fields=["policy_number", "nope"]
+            )
+        self.assertIn("missing requested fields", str(ctx.exception))
+
+    def test_row_missing_identity_value_fails_closed(self):
+        spec = get_report_spec("4247")
+        csv_text = "policy_number,carrier\n,Coterie\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        self.assertIn("missing an identity value", str(ctx.exception))
+
+    def test_loan_number_identity_for_mortgagee(self):
+        spec = get_report_spec("4372")
+        csv_text = "loan_number,policy_number\nL1,P1\nL1,P1-dup\n"
+        rows = rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["loan_number"], "L1")
+
+
+class ExportFailClosedTests(unittest.TestCase):
+    def test_export_with_missing_identity_columns_raises(self):
+        spec = get_report_spec("4247")
+        page = _FakePage(csv_text="policy_name,carrier\nP1,Coterie\n")
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                rf._export_looker_report_csv(
+                    page, spec=spec, run=_run(), download_dir=Path(tmp)
+                )
+        self.assertIn("missing identity columns", str(ctx.exception))
+        self.assertTrue(page.visited)
+        self.assertIn("looker-reports", page.visited[0])
+
+    def test_saved_filter_not_visible_fails_closed(self):
+        spec = get_report_spec("4372")  # filter_name="ROBIE Intake"
+        page = _FakePage(
+            csv_text="loan_number\nL1\n",
+            body_text="some report without the saved filter",
+        )
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                rf._export_looker_report_csv(
+                    page, spec=spec, run=_run(), download_dir=Path(tmp)
+                )
+        self.assertIn("ROBIE Intake", str(ctx.exception))
+
+    def test_saved_filter_visible_exports_rows(self):
+        spec = get_report_spec("4372")
+        page = _FakePage(
+            csv_text="loan_number,policy_number\nL1,P1\n",
+            body_text="filtered by ROBIE Intake",
+        )
+        with durable_temporary_directory() as tmp:
+            rows = rf._export_looker_report_csv(
+                page,
+                spec=spec,
+                run=_run(fields=["loan_number"]),
+                download_dir=Path(tmp),
+                fields=["loan_number"],
+            )
+        self.assertEqual(rows, [{"loan_number": "L1"}])
+
+    def test_fields_none_returns_all_exported_columns(self):
+        # Regression: the parser must use the CALLER's fields, not start_run()'s
+        # resolved fields (identity fields only when omitted); otherwise every
+        # non-identity column would be silently dropped.
+        spec = get_report_spec("4372")
+        page = _FakePage(
+            csv_text="loan_number,policy_number\nL1,P1\n",
+            body_text="filtered by ROBIE Intake",
+        )
+        with durable_temporary_directory() as tmp:
+            rows = rf._export_looker_report_csv(
+                page, spec=spec, run=_run(), download_dir=Path(tmp), fields=None
+            )
+        self.assertEqual(rows, [{"loan_number": "L1", "policy_number": "P1"}])
+
+
+if __name__ == "__main__":
+    unittest.main()
