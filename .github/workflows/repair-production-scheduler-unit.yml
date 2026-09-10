@@ -28,7 +28,7 @@ jobs:
       ZONE: us-east1-b
       PRODUCTION_VM: hermes-poc-01
       EXPECT_SHA: ${{ inputs.expect_sha }}
-      STAGING: /var/tmp/robie-scheduler-repair/${{ github.run_id }}-${{ github.run_attempt }}
+      STAGING: /tmp/robie-scheduler-repair/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v3
@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
-          $SSH --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          $SSH --command="hostname -s && mkdir -p '${STAGING}' && ls -ld '${STAGING}'"
           # Fail fast if the target venv is not executable by the service user.
           $SSH --command="sudo -u streetsmart-hermes test -x /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python"
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
