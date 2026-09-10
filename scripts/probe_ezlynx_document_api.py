@@ -1,47 +1,36 @@
 #!/usr/bin/env python3
-"""Read-only probe of the EZLynx Documents API.
+"""Read-only probe of the EZLynx Documents API (self-contained).
 
 Runs on hermes-poc-01 (which has real internet access and the VM service
 account). It:
 
   1. Loads the EZLynx API config for the requested environment from
-     Secret Manager (UAT or Production credentials).
+     Secret Manager (UAT or Production credentials) via the gcloud CLI.
   2. Acquires an OAuth2 token (vendor_data_access grant).
   3. Issues read-only GETs against candidate DocumentApi paths and
      reports HTTP status codes.
 
+Self-contained: imports nothing from robie_job_engine, so the workflow
+only has to copy this one script to the VM (no recursive folder copy,
+which proved unreliable).
+
 No documents are downloaded, nothing is written, and no secret values
 are printed. Output is a JSON summary for the workflow evidence artifact.
+Every network call carries an explicit timeout so the probe can never
+hang indefinitely.
 
 Usage:
-  sudo python3 probe_ezlynx_document_api.py <uat|prod> <secret-resource-name> [engine-dir]
-
-The engine dir defaults to /opt/streetsmart-hermes/robie-job-engine; the
-probe workflow passes a staging dir holding the PR's engine code so the
-probe validates the candidate code before it is deployed.
+  sudo python3 probe_ezlynx_document_api.py <uat|prod> <secret-resource-name>
 """
 
 from __future__ import annotations
 
+import http.client
 import json
-import os
+import subprocess
 import sys
 import time
-
-ENGINE_DIR = (
-    sys.argv[3]
-    if len(sys.argv) > 3
-    else "/opt/streetsmart-hermes/robie-job-engine"
-)
-sys.path.insert(0, ENGINE_DIR)
-
-from robie_job_engine.ezlynx_api import (  # noqa: E402
-    ENV_PROD_SECRET,
-    ENV_UAT_SECRET,
-    EzlynxApiClient,
-    EzlynxApiError,
-    load_ezlynx_api_config,
-)
+import urllib.parse
 
 CANDIDATE_PATHS = [
     "documents",
@@ -53,67 +42,139 @@ CANDIDATE_PATHS = [
     "documents/search",
 ]
 
+CALL_TIMEOUT = 30  # seconds for every network operation
+
+
+def load_secret(secret_resource: str) -> dict:
+    """Fetch the secret JSON via the gcloud CLI on the VM."""
+    proc = subprocess.run(
+        [
+            "gcloud",
+            "secrets",
+            "versions",
+            "access",
+            "latest",
+            "--secret",
+            secret_resource.split("/secrets/")[1].split("/")[0],
+            "--project",
+            secret_resource.split("/")[1],
+            "--format",
+            "value(payload.data)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=CALL_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"gcloud secret access failed: {proc.stderr[:160]}")
+    import base64
+
+    return json.loads(base64.b64decode(proc.stdout.strip()).decode())
+
+
+def get_token(cfg: dict) -> str:
+    """OAuth2 vendor_data_access grant, mirroring EzlynxApiClient."""
+    parsed = urllib.parse.urlparse(cfg["token_url"])
+    conn = http.client.HTTPSConnection(parsed.hostname, timeout=CALL_TIMEOUT)
+    try:
+        body = urllib.parse.urlencode(
+            {
+                "grant_type": "vendor_data_access",
+                "client_id": cfg["client_id"],
+                "client_secret": cfg["client_secret"],
+                "app_secret": cfg["app_secret"],
+                "username": cfg["username"],
+                "integration_group_id": cfg["integration_group_id"],
+            }
+        )
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        conn.request(
+            "POST",
+            path,
+            body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp = conn.getresponse()
+        raw = resp.read()
+    finally:
+        conn.close()
+    if resp.status != 200:
+        raise RuntimeError(f"token request failed: HTTP {resp.status}")
+    data = json.loads(raw.decode())
+    token = data.get("access_token")
+    if not token:
+        raise RuntimeError("token response had no access_token")
+    return token
+
+
+def probe_path(cfg: dict, token: str, path: str) -> dict:
+    entry: dict = {"path": path}
+    try:
+        parsed = urllib.parse.urlparse(cfg["document_api_base"])
+        base = (parsed.path or "").rstrip("/")
+        full_path = f"{base}/{path.lstrip('/')}"
+        if parsed.query:
+            full_path += "?" + parsed.query
+        conn = http.client.HTTPSConnection(parsed.hostname, timeout=CALL_TIMEOUT)
+        try:
+            conn.request("GET", full_path, headers={"Authorization": f"Bearer {token}"})
+            resp = conn.getresponse()
+            raw = resp.read()
+        finally:
+            conn.close()
+        entry["status"] = resp.status
+        if resp.status == 200:
+            try:
+                result = json.loads(raw.decode())
+                entry["shape"] = type(result).__name__
+                if isinstance(result, dict):
+                    entry["keys"] = list(result.keys())[:10]
+            except Exception:  # noqa: BLE001
+                entry["shape"] = f"non-json ({len(raw)} bytes)"
+        else:
+            entry["body_hint"] = raw[:120].decode(errors="replace")
+    except Exception as exc:  # noqa: BLE001 - report, don't crash
+        entry["status"] = None
+        entry["error"] = f"{type(exc).__name__}: {exc}"[:160]
+    return entry
+
 
 def main(argv: list[str]) -> int:
     if len(argv) < 3 or argv[1] not in {"uat", "prod"}:
         print(
-            "usage: probe_ezlynx_document_api.py <uat|prod> <secret-resource-name> [engine-dir]",
+            "usage: probe_ezlynx_document_api.py <uat|prod> <secret-resource-name>",
             file=sys.stderr,
         )
         return 2
-    if argv[1] == "uat":
-        os.environ["ROBIE_ENV"] = "TEST"
-        os.environ[ENV_UAT_SECRET] = argv[2]
-    else:
-        os.environ["ROBIE_ENV"] = "PRODUCTION"
-        os.environ[ENV_PROD_SECRET] = argv[2]
 
     summary: dict = {
-        "environment": os.environ["ROBIE_ENV"],
+        "environment": argv[1],
         "probed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "engine_dir": ENGINE_DIR,
+        "self_contained": True,
         "auth": {"ok": False},
         "paths": [],
     }
 
     try:
-        config = load_ezlynx_api_config()
-    except Exception as exc:  # noqa: BLE001 - report, don't crash
-        summary["auth"] = {
-            "ok": False,
-            "error": f"{type(exc).__name__}: config load failed",
-        }
+        cfg = load_secret(argv[2])
+    except Exception as exc:  # noqa: BLE001
+        summary["auth"] = {"ok": False, "error": f"config load failed: {exc}"[:200]}
         print(json.dumps(summary, indent=2))
         return 1
 
-    client = EzlynxApiClient(config)
     try:
-        token = client.get_token()
-    except EzlynxApiError as exc:
-        summary["auth"] = {
-            "ok": False,
-            "status": exc.status,
-            "retryable": exc.retryable,
-            "error": str(exc)[:200],
-        }
+        token = get_token(cfg)
+    except Exception as exc:  # noqa: BLE001
+        summary["auth"] = {"ok": False, "error": str(exc)[:200]}
         print(json.dumps(summary, indent=2))
         return 1
 
-    summary["auth"] = {"ok": True, "token_acquired": bool(token)}
+    summary["auth"] = {"ok": True, "token_acquired": True}
 
     for path in CANDIDATE_PATHS:
-        entry: dict = {"path": path}
-        try:
-            result = client.api_get(path, timeout=30)
-            entry["status"] = 200
-            entry["shape"] = type(result).__name__
-            if isinstance(result, dict):
-                entry["keys"] = list(result.keys())[:10]
-        except EzlynxApiError as exc:
-            entry["status"] = exc.status
-            entry["retryable"] = exc.retryable
-            entry["error"] = str(exc)[:160]
-        summary["paths"].append(entry)
+        summary["paths"].append(probe_path(cfg, token, path))
 
     print(json.dumps(summary, indent=2))
     return 0
