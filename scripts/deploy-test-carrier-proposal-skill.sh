@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Atomically installs and smoke-tests the complete carrier-proposal Skill on Test only.
+# Atomically installs and smoke-tests the approved carrier-proposal Skill on Test only.
 set -euo pipefail
 
 EXPECTED_HOST="hermes-test-01"
 OPT_ROOT="/opt/streetsmart-hermes-test"
+SERVICE_USER="streetsmart-hermes-test"
 SKILL_NAME="streetsmart-carrier-proposal"
 
 source_dir=""
@@ -22,9 +23,7 @@ done
 [[ "$(hostname -s)" == "${EXPECTED_HOST}" ]] || { echo "refusing non-Test host" >&2; exit 2; }
 [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid commit SHA" >&2; exit 2; }
 [[ "${expected_digest}" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid bundle digest" >&2; exit 2; }
-[[ -f "${source_dir}/SKILL.md" && -x "${source_dir}/scripts/render_proposal.sh" ]] || {
-  echo "staged Skill bundle is incomplete" >&2; exit 2;
-}
+id -u "${SERVICE_USER}" >/dev/null
 
 bundle_digest() {
   python3 - "$1" <<'PY'
@@ -34,7 +33,7 @@ import sys
 
 root = Path(sys.argv[1])
 digest = sha256()
-for path in sorted(p for p in root.rglob("*") if p.is_file() and "node_modules" not in p.parts):
+for path in sorted(p for p in root.rglob("*") if p.is_file()):
     digest.update(path.relative_to(root).as_posix().encode())
     digest.update(b"\0")
     digest.update(sha256(path.read_bytes()).digest())
@@ -44,22 +43,15 @@ PY
 
 actual_digest="$(bundle_digest "${source_dir}")"
 [[ "${actual_digest}" == "${expected_digest}" ]] || { echo "staged bundle digest mismatch" >&2; exit 2; }
-if ! command -v node >/dev/null 2>&1 \
-  || { ! command -v npm >/dev/null 2>&1 && ! command -v pnpm >/dev/null 2>&1; } \
-  || { ! command -v soffice >/dev/null 2>&1 && ! command -v libreoffice >/dev/null 2>&1; } \
-  || ! command -v pdfinfo >/dev/null 2>&1; then
-  command -v apt-get >/dev/null 2>&1 || { echo "Test dependency installer is unavailable" >&2; exit 3; }
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends nodejs npm libreoffice-writer poppler-utils
-fi
 command -v node >/dev/null || { echo "node is unavailable on Test" >&2; exit 3; }
-command -v npm >/dev/null || command -v pnpm >/dev/null || { echo "npm/pnpm is unavailable on Test" >&2; exit 3; }
+command -v npm >/dev/null || { echo "npm is unavailable on Test" >&2; exit 3; }
 command -v soffice >/dev/null || command -v libreoffice >/dev/null || { echo "LibreOffice is unavailable on Test" >&2; exit 3; }
 command -v pdfinfo >/dev/null || { echo "pdfinfo is unavailable on Test" >&2; exit 3; }
+command -v pdftotext >/dev/null || { echo "pdftotext is unavailable on Test" >&2; exit 3; }
 
 release_parent="${OPT_ROOT}/skill-releases/${commit}"
 release_dir="${release_parent}/${SKILL_NAME}"
+runtime_dir="${OPT_ROOT}/skill-runtimes/${commit}/${SKILL_NAME}"
 skill_link="${OPT_ROOT}/.hermes/skills/${SKILL_NAME}"
 old_target=""
 if [[ -e "${skill_link}" || -L "${skill_link}" ]]; then
@@ -76,30 +68,48 @@ else
   trap 'rm -rf -- "${staging:-}"' EXIT
   install -d -m 0755 "${release_parent}"
   cp -a "${source_dir}" "${staging}"
+  chmod -R a+rX "${staging}"
   chmod 0755 "${staging}/scripts/render_proposal.sh"
   mv "${staging}" "${release_dir}"
   trap - EXIT
 fi
+[[ "$(bundle_digest "${release_dir}")" == "${expected_digest}" ]] || { echo "installed bundle digest mismatch" >&2; exit 2; }
 
-if ! (cd "${release_dir}/scripts" && node -e 'require("docx")' >/dev/null 2>&1); then
-  if command -v pnpm >/dev/null 2>&1; then
-    (cd "${release_dir}/scripts" && pnpm install --prod --no-frozen-lockfile)
-  else
-    (cd "${release_dir}/scripts" && npm install --omit=dev --save-exact)
-  fi
+if [[ ! -d "${runtime_dir}/node_modules/docx" ]]; then
+  install -d -m 0755 "${runtime_dir}"
+  npm install --prefix "${runtime_dir}" --omit=dev --no-package-lock --save-exact docx@9.7.1 >/dev/null
 fi
+chmod -R a+rX "${runtime_dir}"
+
+for required in SKILL.md agents/openai.yaml scripts/generate_proposal.js scripts/render_proposal.sh scripts/package.json scripts/assets/cns_logo.png scripts/assets/jake_photo.png scripts/assets/logo-expanded-v2.png scripts/assets/logo.png scripts/assets/quote-video-qr.png scripts/assets/stripe.png; do
+  sudo -u "${SERVICE_USER}" test -r "${release_dir}/${required}"
+done
 
 smoke_dir="$(mktemp -d)"
 trap 'rm -rf -- "${smoke_dir:-}"' EXIT
 cat >"${smoke_dir}/data.json" <<'JSON'
-{"business_name":"Robie Validation Transport LLC","address":"100 Test Route, Newark, NJ 07102","phone":"(973) 555-0100","email":"validation@example.invalid","business_type":"General Freight Trucking","usdot_number":"1234567","policy_period":"09/10/2026 to 09/10/2027","rated_drivers":[{"name":"Test Driver","date_of_birth":"01/01/1980","points":"0","additional_information":""}],"radius_of_operation":"500 miles","coverage_groups":[{"title":"Commercial Automobile Liability","items":[{"name":"Bodily Injury and Property Damage","limit":"$1,000,000 CSL"}]},{"title":"Motor Truck Cargo","items":[{"name":"Cargo Limit","limit":"$100,000 with $1,000 deductible"}]}],"total_annual_premium":"$24,000.00","required_initial_payment":"$4,000.00","taxes_and_fees":"$0.00","required_initial_payment_includes_taxes_and_fees":false,"payment_plan_label":"10 Monthly Payments","monthly_installment":"$2,000.00/month"}
+{"business_name":"ROBIE TEST TRANSPORT LLC","address":"100 Test Route, Newark, NJ 07102","phone":"(973) 555-0100","email":"validation@example.invalid","business_type":"General Freight Trucking","usdot_number":"TEST-ONLY","policy_period":"09/10/2026 to 09/10/2027","rated_drivers":[{"name":"TEST DRIVER","date_of_birth":"01/01/1980","points":"0","additional_information":"Synthetic Test record"}],"radius_of_operation":"500 miles","coverage_groups":[{"title":"Commercial Automobile Liability","items":[{"name":"Bodily Injury and Property Damage","limit":"$1,000,000 CSL"}]},{"title":"Motor Truck Cargo","items":[{"name":"Cargo Limit","limit":"$100,000 with $1,000 deductible"}]}],"total_annual_premium":"$24,000.00","required_initial_payment":"$4,000.00","taxes_and_fees":"$450.00","required_initial_payment_includes_taxes_and_fees":false,"payment_plan_label":"10 Monthly Payments","monthly_installment":"$2,000.00/month"}
 JSON
-bash "${release_dir}/scripts/render_proposal.sh" "${smoke_dir}/data.json" "${smoke_dir}/Robie_Validation_Proposal"
-[[ -s "${smoke_dir}/Robie_Validation_Proposal.docx" && -s "${smoke_dir}/Robie_Validation_Proposal.pdf" ]] || {
-  echo "Test smoke output is incomplete" >&2; exit 4;
-}
-pages="$(pdfinfo "${smoke_dir}/Robie_Validation_Proposal.pdf" | awk '/^Pages:/ {print $2}')"
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${smoke_dir}"
+sudo -u "${SERVICE_USER}" env HOME="${smoke_dir}" NODE_PATH="${runtime_dir}/node_modules" \
+  bash "${release_dir}/scripts/render_proposal.sh" "${smoke_dir}/data.json" "${smoke_dir}/Robie_Validation_Proposal"
+docx="${smoke_dir}/Robie_Validation_Proposal.docx"
+pdf="${smoke_dir}/Robie_Validation_Proposal.pdf"
+[[ -s "${docx}" && -s "${pdf}" ]] || { echo "Test smoke output is incomplete" >&2; exit 4; }
+pages="$(pdfinfo "${pdf}" | awk '/^Pages:/ {print $2}')"
+page_size="$(pdfinfo "${pdf}" | awk -F': *' '/^Page size:/ {print $2}')"
+producer="$(pdfinfo "${pdf}" | awk -F': *' '/^Producer:/ {print $2}')"
 [[ "${pages}" -ge 2 ]] || { echo "Test smoke PDF has an invalid page count" >&2; exit 4; }
+[[ "${page_size}" == *"612 x 792 pts"* ]] || { echo "Test smoke PDF is not US Letter" >&2; exit 4; }
+[[ "${producer}" == *"LibreOffice"* ]] || { echo "Test smoke PDF was not produced by LibreOffice" >&2; exit 4; }
+pdftotext "${pdf}" "${smoke_dir}/proposal.txt"
+grep -Fq '$4,450.00' "${smoke_dir}/proposal.txt"
+grep -Fq 'Taxes and fees' "${smoke_dir}/proposal.txt"
+! grep -Eiq 'Agency fee|Service fee|Broker fee|GEICO|Progressive|Cover Whale' "${smoke_dir}/proposal.txt"
+for page in $(seq 1 "${pages}"); do
+  text_count="$(pdftotext -f "${page}" -l "${page}" "${pdf}" - | tr -d '[:space:]' | wc -c)"
+  [[ "${text_count}" -gt 20 ]] || { echo "blank filler page detected: ${page}" >&2; exit 4; }
+done
 
 install -d -m 0755 "$(dirname "${skill_link}")"
 python3 - "${release_dir}" "${skill_link}" <<'PY'
@@ -115,6 +125,7 @@ os.replace(temporary, link)
 PY
 
 [[ "$(readlink -f "${skill_link}")" == "${release_dir}" ]] || { echo "Test Skill pointer mismatch" >&2; exit 2; }
+sudo -u "${SERVICE_USER}" grep -Fq 'name: streetsmart-carrier-proposal' "${skill_link}/SKILL.md"
 evidence_dir="${OPT_ROOT}/skill-deployments"
 install -d -m 0755 "${evidence_dir}"
 python3 - "${evidence_dir}/${commit}-${SKILL_NAME}.json" "${commit}" "${expected_digest}" "${release_dir}" "${skill_link}" "${old_target}" "${pages}" <<'PY'
@@ -122,7 +133,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
-payload = {"environment":"Test","host":"hermes-test-01","skill":"streetsmart-carrier-proposal","job_type":"carrier.proposal","commit":sys.argv[2],"bundle_sha256":sys.argv[3],"release_dir":sys.argv[4],"destination":sys.argv[5],"previous_target":sys.argv[6] or None,"smoke_docx":True,"smoke_pdf":True,"smoke_pdf_pages":int(sys.argv[7]),"verified_at":datetime.now(timezone.utc).isoformat(),"production_touched":False}
+payload = {"environment":"Test","host":"hermes-test-01","skill":"streetsmart-carrier-proposal","commit":sys.argv[2],"bundle_sha256":sys.argv[3],"release_dir":sys.argv[4],"destination":sys.argv[5],"previous_target":sys.argv[6] or None,"smoke_docx":True,"smoke_pdf":True,"smoke_pdf_pages":int(sys.argv[7]),"pdf_letter":True,"pdf_producer":"LibreOffice","taxes_and_fees":"$450.00","blank_pages":0,"service_identity_readable":True,"production_touched":False,"verified_at":datetime.now(timezone.utc).isoformat()}
 Path(sys.argv[1]).write_text(json.dumps(payload, indent=2, sort_keys=True)+"\n", encoding="utf-8")
 print(json.dumps(payload, sort_keys=True))
 PY
