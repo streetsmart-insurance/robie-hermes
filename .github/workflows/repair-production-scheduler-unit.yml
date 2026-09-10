@@ -1,0 +1,92 @@
+name: Repair Production scheduler unit
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type REPAIR_SCHEDULER_UNIT_ON_HERMES_POC_01
+        required: true
+        type: string
+      expect_sha:
+        description: Expected Production release commit prefix (for post-repair audit)
+        required: false
+        default: 7758a91de97b
+        type: string
+
+permissions:
+  contents: read
+id-token: write
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'REPAIR_SCHEDULER_UNIT_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      EXPECT_SHA: ${{ inputs.expect_sha }}
+      STAGING: /var/tmp/robie-scheduler-repair/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+          case "${EXPECT_SHA}" in
+            ""|*[!0-9a-f]*) echo "expect_sha must be a hex prefix" >&2; exit 1;;
+          esac
+      - name: Install fixed scheduler unit and restart the tick
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          $SSH --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          # Fail fast if the target venv is not executable by the service user.
+          $SSH --command="sudo -u streetsmart-hermes test -x /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            deploy/systemd/robie-scheduler.service deploy/systemd/robie-scheduler.timer \
+            scripts/audit-production-workers-readonly.py "${PRODUCTION_VM}:${STAGING}/"
+          echo "--- diff of unit about to be installed ---"
+          $SSH --command="diff -u /etc/systemd/system/robie-scheduler.service '${STAGING}/robie-scheduler.service' || true"
+          $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.service' /etc/systemd/system/robie-scheduler.service"
+          $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.timer' /etc/systemd/system/robie-scheduler.timer"
+          $SSH --command="sudo systemctl daemon-reload"
+          $SSH --command="sudo systemctl enable --now robie-scheduler.timer"
+          # Trigger one immediate tick, then let the timer fire on its own.
+          $SSH --command="sudo systemctl restart robie-scheduler.service"
+          echo "Waiting for timer-driven ticks..."
+          sleep 150
+      - name: Verify the tick is green
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          $SSH --command="sudo python3 '${STAGING}/audit-production-workers-readonly.py' --expect-sha '${EXPECT_SHA}'" \
+            | tee "${RUNNER_TEMP}/scheduler-repair-audit.json"
+          python3 - <<'PYEOF'
+          import json, os
+          d = json.load(open(os.environ["RUNNER_TEMP"] + "/scheduler-repair-audit.json"))
+          tick = d["scheduler_tick"]
+          print(json.dumps(tick, indent=2))
+          assert tick["timer_active"] and tick["timer_enabled"], "timer not active+enabled"
+          assert (tick["last_exec_status"] or "").strip() == "0", \
+              f"last tick failed, exec status={tick['last_exec_status']}"
+          assert tick["journal_lines_30min"] > 0, "no tick ran in the last 30 min"
+          print("SCHEDULER TICK GREEN")
+          PYEOF
+      - name: Publish evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-repair-audit
+          path: ${{ runner.temp }}/scheduler-repair-audit.json
+          if-no-files-found: warn
+          retention-days: 30
