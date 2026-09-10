@@ -1,0 +1,96 @@
+name: Trigger Production worker run
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN_WORKER_ON_HERMES_POC_01
+        required: true
+        type: string
+      worker:
+        description: Worker to run
+        required: true
+        type: choice
+        options: [manual-renewal, audit, mortgagee]
+        default: manual-renewal
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  trigger:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'RUN_WORKER_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+      - name: Create worker job and observe
+        run: |
+          set -euo pipefail
+          case "${{ inputs.worker }}" in
+            manual-renewal) ACTION=manual_renewal_verification; PAYLOAD='{"worker":"manual-renewal","report_id":"4247"}' ;;
+            audit)           ACTION=audit_verification;            PAYLOAD='{"worker":"audit","report_id":"4246"}' ;;
+            mortgagee)       ACTION=mortgagee_verification;       PAYLOAD='{"worker":"mortgagee","report_id":"4372"}' ;;
+          esac
+          echo "action=${ACTION}"
+          JOB_ID=$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 -c \"
+          import json, sys
+          sys.path.insert(0, '/opt/streetsmart-hermes/current/robie_job_engine')
+          from store import JobStore
+          store = JobStore('${JOB_DB}')
+          job = store.create_job(action_type='${ACTION}', payload=json.loads('${PAYLOAD}'), idempotency_key='manual-trigger-${ACTION}-${{ github.run_id }}')
+          print(job['id'] if isinstance(job, dict) else job)
+          \"" 2>/dev/null | tail -1)
+          echo "JOB_ID=${JOB_ID}" | tee "${RUNNER_TEMP}/trigger.env"
+          echo "Created job ${JOB_ID}; scheduler tick picks it up within ~60s."
+          for i in $(seq 1 80); do
+            STATE=$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --command="sudo python3 -c \"
+          import sys
+          sys.path.insert(0, '/opt/streetsmart-hermes/current/robie_job_engine')
+          from store import JobStore
+          store = JobStore('${JOB_DB}')
+          job = store.get_job('${JOB_ID}')
+          print(job.get('status', 'unknown') if job else 'missing')
+          \"" 2>/dev/null | tail -1)
+            echo "[$(date -u +%H:%M:%S)] job ${JOB_ID} status=${STATE}"
+            case "${STATE}" in
+              completed|failed|cancelled) break ;;
+            esac
+            sleep 60
+          done
+          echo "--- final job record ---"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 -c \"
+          import json, sys
+          sys.path.insert(0, '/opt/streetsmart-hermes/current/robie_job_engine')
+          from store import JobStore
+          store = JobStore('${JOB_DB}')
+          job = store.get_job('${JOB_ID}')
+          print(json.dumps(job, indent=2, default=str)[:6000])
+          \"" | tee "${RUNNER_TEMP}/trigger-result.json"
+      - name: Publish evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-worker-trigger-${{ inputs.worker }}
+          path: ${{ runner.temp }}/trigger*.json
+          if-no-files-found: warn
+          retention-days: 30
