@@ -413,7 +413,23 @@ def _default_chat_verifiers() -> dict[str, Any]:
             + "/opt/streetsmart-hermes-test/.hermes/skills",
         ).split(os.pathsep) if item
     )
-    return {"filesystem.skill_update": FilesystemSkillUpdateVerifier(roots), **_CHAT_VERIFIERS}
+    verifiers: dict[str, Any] = {
+        "filesystem.skill_update": FilesystemSkillUpdateVerifier(roots),
+    }
+    # Browser jobs driven from Chat previously found no verifier here and
+    # fell to UNVERIFIED ("no independent verifier registered") even when
+    # the work succeeded. Register the read-only CDP verifier so
+    # verification-backed actions (mortgagee checks, renewal checks,
+    # policy-change review) can actually complete.
+    try:
+        from .browser_read import BrowserReadVerifier
+        from .chat_verifier_ports import CdpReadPort
+
+        verifiers["browser.read"] = BrowserReadVerifier(CdpReadPort())
+    except Exception:
+        logger.exception("browser.read verifier unavailable; those jobs stay UNVERIFIED")
+    verifiers.update(_CHAT_VERIFIERS)
+    return verifiers
 
 
 def chat_message_requires_job(

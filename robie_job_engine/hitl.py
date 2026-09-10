@@ -13,7 +13,13 @@ _MISSING_FIELD = re.compile(
     re.IGNORECASE,
 )
 _STRUCTURED_BLOCKER = re.compile(
-    r"^\s*ROBIE_BLOCKED:\s*"
+    # The worker contract asks for the ROBIE_BLOCKED: prefix, but workers
+    # often paste the raw guard error instead (e.g. "PLAYWRIGHT_BLOCKED:
+    # write target matched 3 fields"). The prefix is therefore optional:
+    # a bare PLAYWRIGHT_BLOCKED / MISSING_REQUIRED_FIELD line is the same
+    # machine signal and must also park for human input. This was the
+    # root cause of HITL never firing on Google Chat (2026-09-10).
+    r"^\s*(?:ROBIE_BLOCKED:\s*)?"
     r"((?:MISSING_REQUIRED_FIELD|PLAYWRIGHT_BLOCKED)\s*:\s*[^\r\n]+)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
