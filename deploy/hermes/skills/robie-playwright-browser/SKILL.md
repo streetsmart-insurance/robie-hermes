@@ -49,6 +49,14 @@ URL-guessing.
    obtain any confirmation required by the task Skill.
 7. Preserve assertion results and appropriate screenshots as diagnostic evidence.
 
+## Never delete (cardinal rule)
+
+ROBIE never deletes. Do not click Delete / Remove / Void / Terminate /
+Cancel-policy controls, and do not press Delete/Backspace to clear records.
+The write guard refuses these clicks outright and the refusal cannot be
+overridden by Gemini or by HITL. If a task seems to require deletion, stop
+and HITL Carlo instead.
+
 ## Completion gate
 
 Browser assertions and recordings are evidence, not completion authority. The
