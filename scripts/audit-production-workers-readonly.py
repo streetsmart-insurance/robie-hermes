@@ -196,7 +196,9 @@ def check_scheduler_tick(
         "last_exec_status": exec_status or None,
         "journal_lines_30min": len(tick_lines),
         "recent_error_lines": err_lines,
-        "ok": timer_active and timer_enabled,
+        # A firing-but-crashing tick must fail the audit: require evidence the
+        # last tick actually executed (systemd ExecMainStatus 0).
+        "ok": timer_active and timer_enabled and (exec_status or "").strip() == "0",
     }
 
 
