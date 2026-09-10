@@ -100,6 +100,70 @@ class NoDeleteGuardTests(unittest.TestCase):
             destructive_action_block_reason(locator, method_name="fill")
         )
 
+    def test_cancel_policy_context_is_refused(self):
+        locator = _FakeLocator("button", text="Cancel policy")
+        reason = destructive_action_block_reason(locator, method_name="click")
+        self.assertIsNotNone(reason)
+        self.assertIn("never deletes", reason)
+
+    def test_bare_dialog_cancel_is_allowed(self):
+        # A plain dialog Cancel button has no policy/account/client context.
+        locator = _FakeLocator("button", text="Cancel")
+        self.assertIsNone(
+            destructive_action_block_reason(locator, method_name="click")
+        )
+
+    def test_press_delete_on_deletion_shaped_target_is_refused(self):
+        locator = _FakeLocator("tr.policy-row", text="Delete policy")
+        reason = destructive_action_block_reason(
+            locator, method_name="press", key="Delete"
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("never deletes", reason)
+        self.assertIn("key press", reason)
+
+    def test_press_backspace_in_plain_field_is_allowed(self):
+        locator = _FakeLocator("input", text="First name")
+        self.assertIsNone(
+            destructive_action_block_reason(
+                locator, method_name="press", key="Backspace"
+            )
+        )
+
+    def test_press_enter_is_allowed(self):
+        locator = _FakeLocator("button", aria_label="Delete", text="Delete")
+        self.assertIsNone(
+            destructive_action_block_reason(
+                locator, method_name="press", key="Enter"
+            )
+        )
+
+    def test_page_press_delete_with_delete_selector_is_refused(self):
+        page = _FakeLocator("page")
+        reason = destructive_action_block_reason(
+            page,
+            method_name="press",
+            selector="tr:has-text('Delete policy')",
+            key="Delete",
+        )
+        self.assertIsNotNone(reason)
+
+    def test_wrapped_press_raises_hard_with_no_override(self):
+        class FakeLocatorClass:
+            def press(self, key):
+                return f"pressed {key}"
+
+        scope: dict = {"Locator": FakeLocatorClass}
+        install_playwright_write_guards(scope)
+        locator = FakeLocatorClass()
+        locator.get_attribute = lambda name: "Delete" if name == "aria-label" else None
+        locator.inner_text = lambda: "Delete"
+        locator.text_content = lambda: "Delete"
+        with self.assertRaisesRegex(RuntimeError, "never deletes"):
+            locator.press("Delete")
+        # Other keys still pass through untouched.
+        self.assertEqual(locator.press("Enter"), "pressed Enter")
+
     def test_wrapped_click_raises_hard_with_no_override(self):
         class FakeLocatorClass:
             def click(self):
