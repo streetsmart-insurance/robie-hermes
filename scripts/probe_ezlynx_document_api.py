@@ -46,7 +46,13 @@ CALL_TIMEOUT = 30  # seconds for every network operation
 
 
 def load_secret(secret_resource: str) -> dict:
-    """Fetch the secret JSON via the gcloud CLI on the VM."""
+    """Fetch the secret JSON via the gcloud CLI on the VM.
+
+    `gcloud secrets versions access` prints the raw payload (already
+    decoded), so no base64 step is needed.
+    """
+    parts = secret_resource.split("/")
+    project, name = parts[1], parts[3]
     proc = subprocess.run(
         [
             "gcloud",
@@ -55,11 +61,9 @@ def load_secret(secret_resource: str) -> dict:
             "access",
             "latest",
             "--secret",
-            secret_resource.split("/secrets/")[1].split("/")[0],
+            name,
             "--project",
-            secret_resource.split("/")[1],
-            "--format",
-            "value(payload.data)",
+            project,
         ],
         capture_output=True,
         text=True,
@@ -67,9 +71,7 @@ def load_secret(secret_resource: str) -> dict:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"gcloud secret access failed: {proc.stderr[:160]}")
-    import base64
-
-    return json.loads(base64.b64decode(proc.stdout.strip()).decode())
+    return json.loads(proc.stdout.strip())
 
 
 def get_token(cfg: dict) -> str:
