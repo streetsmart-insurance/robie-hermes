@@ -1,0 +1,4 @@
+interface:
+  display_name: "StreetSmart Carrier Proposal"
+  short_description: "Create branded StreetSmart quote proposals"
+  default_prompt: "Use $streetsmart-carrier-proposal to turn this carrier quote into a branded proposal."

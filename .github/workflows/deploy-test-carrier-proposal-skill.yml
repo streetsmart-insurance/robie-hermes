@@ -1,0 +1,101 @@
+name: Deploy carrier-proposal Skill to Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/hermes/skills/streetsmart-carrier-proposal/**
+      - scripts/deploy-test-carrier-proposal-skill.sh
+      - .github/workflows/deploy-test-carrier-proposal-skill.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: robie-carrier-proposal-skill-test
+  cancel-in-progress: false
+
+jobs:
+  deploy-test-skill:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      SKILL_NAME: streetsmart-carrier-proposal
+      STAGING_DIR: /var/tmp/robie-test-skill/${{ github.sha }}
+      SSH_KEY: /tmp/hermes-test-skill
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@v4
+
+      - name: Validate complete Test Skill package
+        id: skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_streetsmart_carrier_proposal_skill.py'
+          digest="$(python3 - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+          root = Path('deploy/hermes/skills/streetsmart-carrier-proposal')
+          digest = sha256()
+          for path in sorted(p for p in root.rglob('*') if p.is_file()):
+              digest.update(path.relative_to(root).as_posix().encode())
+              digest.update(b'\0')
+              digest.update(sha256(path.read_bytes()).digest())
+          print(digest.hexdigest())
+          PY
+          )"
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = "hermes-test-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          gcloud compute instances describe "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
+
+      - name: Stage exact Skill bundle on Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh-keygen -q -t rsa -b 3072 -N '' -f "${SSH_KEY}"
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --ssh-key-file="${SSH_KEY}" --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}'"
+          tar -C "deploy/hermes/skills" -czf /tmp/carrier-proposal-skill.tgz "${SKILL_NAME}"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --ssh-key-file="${SSH_KEY}" /tmp/carrier-proposal-skill.tgz scripts/deploy-test-carrier-proposal-skill.sh "${TEST_VM}:${STAGING_DIR}/"
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --ssh-key-file="${SSH_KEY}" --command="tar -xzf '${STAGING_DIR}/carrier-proposal-skill.tgz' -C '${STAGING_DIR}' && chmod +x '${STAGING_DIR}/deploy-test-carrier-proposal-skill.sh'"
+
+      - name: Install and smoke-test the Test Skill
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --ssh-key-file="${SSH_KEY}" --command="sudo bash '${STAGING_DIR}/deploy-test-carrier-proposal-skill.sh' --source-dir '${STAGING_DIR}/${SKILL_NAME}' --commit '${GITHUB_SHA}' --expected-digest '${{ steps.skill.outputs.digest }}'"
+
+      - name: Publish immutable Test evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Carrier-proposal Skill — Test"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Bundle SHA-256: \`${{ steps.skill.outputs.digest }}\`"
+            echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
+            echo "- Smoke test: DOCX + PDF"
+            echo "- Production deployment: \`false\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
