@@ -91,6 +91,11 @@ jobs:
           VENV_CHECK=$($SSH --command="sudo -u streetsmart-hermes PYTHONPATH=/opt/streetsmart-hermes/releases/current /opt/streetsmart-hermes/venv/bin/python -c 'import robie_job_engine.scheduler; print(12345)'" 2>/dev/null | tail -1)
           echo "venv check result: ${VENV_CHECK}"
           if [ "${VENV_CHECK}" != "12345" ]; then echo "Refusing: ROBIE venv cannot import the scheduler as the service user" >&2; exit 1; fi
+          echo "=== ensure job DB dir exists and is service-owned ==="
+          $SSH --command="sudo mkdir -p /opt/streetsmart-hermes/robie-job-engine/data && sudo chown -R streetsmart-hermes:streetsmart-hermes /opt/streetsmart-hermes/robie-job-engine/data && ls -ld /opt/streetsmart-hermes/robie-job-engine/data"
+          DB_CHECK=$($SSH --command="sudo -u streetsmart-hermes python3 -c 'import sqlite3; sqlite3.connect(\"/opt/streetsmart-hermes/robie-job-engine/data/jobs.db\").execute(\"select 1\"); print(67890)'" 2>/dev/null | tail -1)
+          echo "db check result: ${DB_CHECK}"
+          if [ "${DB_CHECK}" != "67890" ]; then echo "Refusing: service user cannot open the job DB" >&2; exit 1; fi
           $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.service' /etc/systemd/system/robie-scheduler.service"
           $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.timer' /etc/systemd/system/robie-scheduler.timer"
           $SSH --command="sudo systemctl daemon-reload"
