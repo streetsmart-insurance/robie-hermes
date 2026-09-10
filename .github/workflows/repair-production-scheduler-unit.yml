@@ -96,7 +96,13 @@ jobs:
           $SSH --command="sudo systemctl daemon-reload"
           $SSH --command="sudo systemctl enable --now robie-scheduler.timer"
           # Trigger one immediate tick, then let the timer fire on its own.
-          $SSH --command="sudo systemctl restart robie-scheduler.service"
+          # The restart is allowed to fail here: status and journal are dumped
+          # for diagnosis, and the verify step below is the real gate.
+          $SSH --command="sudo systemctl restart robie-scheduler.service" || true
+          echo "=== scheduler status after restart ==="
+          $SSH --command="sudo systemctl status robie-scheduler.service --no-pager || true"
+          echo "=== recent scheduler journal ==="
+          $SSH --command="sudo journalctl -u robie-scheduler.service --no-pager -n 40 || true"
           echo "Waiting for timer-driven ticks..."
           sleep 150
       - name: Verify the tick is green
