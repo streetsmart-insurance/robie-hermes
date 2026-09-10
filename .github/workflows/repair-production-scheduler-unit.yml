@@ -60,6 +60,22 @@ jobs:
           $SSH --command="sudo systemctl cat robie-scheduler 2>&1 | head -45" || true
           echo "=== gateway liveness ==="
           $SSH --command="sudo systemctl show hermes-gateway -p ActiveState -p SubState -p MainPID -p ExecMainStatus --no-pager" || true
+      - name: Build ROBIE-owned scheduler venv under /opt
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          VENV=/opt/streetsmart-hermes/venv
+          echo "=== system python ==="
+          $SSH --command="python3 --version"
+          $SSH --command="python3 -c 'import sys; assert sys.version_info >= (3,11), sys.version'" \
+            || { echo "system python3 < 3.11, cannot build venv" >&2; exit 1; }
+          echo "=== create venv if missing ==="
+          $SSH --command="test -x ${VENV}/bin/python || sudo python3 -m venv ${VENV} || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv && sudo python3 -m venv ${VENV}; }"
+          $SSH --command="sudo chown -R streetsmart-hermes:streetsmart-hermes ${VENV}"
+          echo "=== install engine dependencies ==="
+          $SSH --command="sudo -u streetsmart-hermes ${VENV}/bin/pip install -q 'google-api-python-client>=2.170,<3' 'google-auth>=2.40,<3' 'google-cloud-secret-manager>=2.24,<3' 'openpyxl>=3.1,<4' 'playwright>=1.52,<2' 'pypdf>=5,<7' 'PyYAML>=6.0,<7'"
+          echo "=== verify imports as the service user ==="
+          $SSH --command="sudo -u streetsmart-hermes PYTHONPATH=/opt/streetsmart-hermes/releases/current ${VENV}/bin/python -c 'import robie_job_engine.scheduler, playwright, google.cloud.secretmanager, yaml, openpyxl, pypdf, googleapiclient; print(98765)'"
       - name: Install fixed scheduler unit and restart the tick
         run: |
           set -euo pipefail
@@ -72,9 +88,9 @@ jobs:
             scripts/audit-production-workers-readonly.py "${PRODUCTION_VM}:${STAGING}/"
           echo "--- diff of unit about to be installed ---"
           $SSH --command="diff -u /etc/systemd/system/robie-scheduler.service '${STAGING}/robie-scheduler.service' || true"
-          VENV_CHECK=$($SSH --command="sudo -u streetsmart-hermes test -x /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python && echo HOME_OK || echo HOME_BAD" 2>/dev/null | tail -1)
+          VENV_CHECK=$($SSH --command="sudo -u streetsmart-hermes PYTHONPATH=/opt/streetsmart-hermes/releases/current /opt/streetsmart-hermes/venv/bin/python -c 'import robie_job_engine.scheduler; print(12345)'" 2>/dev/null | tail -1)
           echo "venv check result: ${VENV_CHECK}"
-          if [ "${VENV_CHECK}" != "HOME_OK" ]; then echo "Refusing: service user cannot execute the gateway venv python" >&2; exit 1; fi
+          if [ "${VENV_CHECK}" != "12345" ]; then echo "Refusing: ROBIE venv cannot import the scheduler as the service user" >&2; exit 1; fi
           $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.service' /etc/systemd/system/robie-scheduler.service"
           $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.timer' /etc/systemd/system/robie-scheduler.timer"
           $SSH --command="sudo systemctl daemon-reload"
