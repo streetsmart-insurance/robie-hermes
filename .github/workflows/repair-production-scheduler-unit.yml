@@ -76,6 +76,44 @@ jobs:
           $SSH --command="sudo -u streetsmart-hermes ${VENV}/bin/pip install -q 'google-api-python-client>=2.170,<3' 'google-auth>=2.40,<3' 'google-cloud-secret-manager>=2.24,<3' 'openpyxl>=3.1,<4' 'playwright>=1.52,<2' 'pypdf>=5,<7' 'PyYAML>=6.0,<7'"
           echo "=== verify imports as the service user ==="
           $SSH --command="sudo -u streetsmart-hermes PYTHONPATH=/opt/streetsmart-hermes/releases/current ${VENV}/bin/python -c 'import robie_job_engine.scheduler, playwright, google.cloud.secretmanager, yaml, openpyxl, pypdf, googleapiclient; print(98765)'"
+      - name: Configure EZLynx secret-name env file (names only, never values)
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          # Resolve the newest ENABLED version of each login secret. States and
+          # version numbers only — payloads are never read or printed.
+          # (Do not use versions/latest: it may be a DESTROYED leftover.)
+          UVER=$(gcloud secrets versions list ezlynx-username --project="${PROJECT_ID}" --format="json(name,state)" | python3 -c "
+          import json,sys
+          best = -1
+          for v in json.load(sys.stdin):
+              if v.get('state') == 'ENABLED':
+                  try: n = int(v['name'].rsplit('/versions/',1)[1])
+                  except (IndexError, ValueError): continue
+                  best = max(best, n)
+          print(best if best >= 0 else '')
+          ")
+          PVER=$(gcloud secrets versions list ezlynx-password --project="${PROJECT_ID}" --format="json(name,state)" | python3 -c "
+          import json,sys
+          best = -1
+          for v in json.load(sys.stdin):
+              if v.get('state') == 'ENABLED':
+                  try: n = int(v['name'].rsplit('/versions/',1)[1])
+                  except (IndexError, ValueError): continue
+                  best = max(best, n)
+          print(best if best >= 0 else '')
+          ")
+          test -n "${UVER}" || { echo "no ENABLED version for ezlynx-username" >&2; exit 1; }
+          test -n "${PVER}" || { echo "no ENABLED version for ezlynx-password" >&2; exit 1; }
+          echo "ezlynx-username newest ENABLED: v${UVER}; ezlynx-password newest ENABLED: v${PVER}"
+          mkdir -p "${STAGING}"
+          {
+            printf 'ROBIE_EZLYNX_USERNAME_SECRET=projects/%s/secrets/ezlynx-username/versions/%s\n' "${PROJECT_ID}" "${UVER}"
+            printf 'ROBIE_EZLYNX_PASSWORD_SECRET=projects/%s/secrets/ezlynx-password/versions/%s\n' "${PROJECT_ID}" "${PVER}"
+          } > "${STAGING}/robie-ezlynx.env"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${STAGING}/robie-ezlynx.env" "${PRODUCTION_VM}:/tmp/robie-ezlynx.env"
+          $SSH --command="sudo mkdir -p /etc/streetsmart-hermes && sudo install -o root -g root -m 0600 /tmp/robie-ezlynx.env /etc/streetsmart-hermes/robie-ezlynx.env && sudo rm -f /tmp/robie-ezlynx.env && echo EZLYNX_ENV_INSTALLED && sudo ls -l /etc/streetsmart-hermes/robie-ezlynx.env"
       - name: Install fixed scheduler unit and restart the tick
         run: |
           set -euo pipefail
