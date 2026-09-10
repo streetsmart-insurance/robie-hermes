@@ -1,0 +1,102 @@
+name: Configure Production verification workers
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CONFIGURE_WORKERS_ON_HERMES_POC_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'CONFIGURE_WORKERS_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      STAGING: /var/tmp/robie-prod-config/${{ github.run_id }}-${{ github.run_attempt }}
+      JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+      DIGEST_DIR: /opt/streetsmart-hermes/robie-job-engine/data/digests
+      DIGEST_SENDER: robie@streetsmart.insurance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+      - name: Configure workers on hermes-poc-01
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -e
+            sudo mkdir -p /etc/streetsmart-hermes /etc/systemd/system/robie-scheduler.service.d '${DIGEST_DIR}'
+            sudo chown streetsmart-hermes:streetsmart-hermes '${DIGEST_DIR}'
+            printf '%s\n' \
+              'ROBIE_EZLYNX_USERNAME_SECRET=ezlynx-username' \
+              'ROBIE_EZLYNX_PASSWORD_SECRET=ezlynx-password' \
+              'VERIFICATION_DIGEST_OUTPUT_DIR=${DIGEST_DIR}' \
+              'VERIFICATION_DIGEST_EMAIL_SENDER=${DIGEST_SENDER}' \
+              | sudo tee /etc/streetsmart-hermes/robie-verification.env >/dev/null
+            sudo chmod 600 /etc/streetsmart-hermes/robie-verification.env
+            printf '%s\n' '[Service]' 'EnvironmentFile=/etc/streetsmart-hermes/robie-verification.env' \
+              | sudo tee /etc/systemd/system/robie-scheduler.service.d/verification-env.conf >/dev/null
+            sudo systemctl daemon-reload
+            echo '--- env file (names only) ---'
+            sudo cut -d= -f1 /etc/streetsmart-hermes/robie-verification.env
+            " | tee "${RUNNER_TEMP}/configure-step1.log"
+      - name: Install verification schedules
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -e
+            sudo /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+              /opt/streetsmart-hermes/current/scripts/install_verification_schedules.py \
+              --db '${JOB_DB}' \
+              --digest-output-dir '${DIGEST_DIR}' \
+              --digest-email-sender '${DIGEST_SENDER}'
+            echo '--- disabling policy-change schedule (kill-switched until report 4359 schema confirmed) ---'
+            sudo python3 -c \"
+          import sqlite3
+          con = sqlite3.connect('${JOB_DB}')
+          cur = con.execute(
+              \\\"UPDATE scheduled_jobs SET enabled=0, updated_at=datetime('now') WHERE task_name='StreetSmart daily policy change verification'\\\"
+          )
+          con.commit()
+          print('policy-change rows disabled:', cur.rowcount)
+          con.close()
+          \"
+            echo '--- installed schedules ---'
+            sudo python3 -c \"
+          import sqlite3, json
+          con = sqlite3.connect('file:${JOB_DB}?mode=ro', uri=True)
+          rows = con.execute(
+              'SELECT task_name, action_type, cron_spec, timezone, enabled, next_run_at FROM scheduled_jobs WHERE task_name LIKE \\\"%daily%verification%\\\" OR task_name LIKE \\\"%verification digest%\\\"'
+          ).fetchall()
+          con.close()
+          print(json.dumps([{'task': r[0], 'action': r[1], 'cron': r[2], 'tz': r[3], 'enabled': bool(r[4]), 'next_run': r[5]} for r in rows], indent=2))
+          \"
+            " | tee "${RUNNER_TEMP}/configure-step2.log"
+      - name: Publish evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-worker-configure
+          path: ${{ runner.temp }}/configure-step*.log
+          if-no-files-found: error
+          retention-days: 30
