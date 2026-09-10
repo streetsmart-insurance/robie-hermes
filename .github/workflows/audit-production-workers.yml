@@ -1,0 +1,92 @@
+name: Read-only Production worker audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type AUDIT_WORKERS_ON_HERMES_POC_01
+        required: true
+        type: string
+      expect_sha:
+        description: Expected release commit prefix (e.g. 7758a91de97b)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+id-token: write
+
+jobs:
+  audit:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'AUDIT_WORKERS_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      EXPECT_SHA: ${{ inputs.expect_sha }}
+      STAGING: /var/tmp/robie-prod-audit/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+          case "${EXPECT_SHA}" in
+            ""|*[!0-9a-f]*) echo "expect_sha must be a hex prefix" >&2; exit 1;;
+          esac
+      - name: Read-only worker audit on hermes-poc-01
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/audit-production-workers-readonly.py "${PRODUCTION_VM}:${STAGING}/"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 '${STAGING}/audit-production-workers-readonly.py' --expect-sha '${EXPECT_SHA}'" \
+            | tee "${RUNNER_TEMP}/prod-worker-audit.json"
+          python3 -m json.tool "${RUNNER_TEMP}/prod-worker-audit.json" >/dev/null
+      - name: Check Secret Manager grants for the VM service account
+        run: |
+          set -euo pipefail
+          VM_SA=$(python3 -c "import json; print(json.load(open('${RUNNER_TEMP}/prod-worker-audit.json'))['vm_service_account']['email'])"
+          echo "VM service account: ${VM_SA}"
+          SECRETS=$(python3 -c "
+          import json
+          names = json.load(open('${RUNNER_TEMP}/prod-worker-audit.json'))['env']['secret_names_configured']
+          for v in ('ROBIE_EZLYNX_USERNAME_SECRET', 'ROBIE_EZLYNX_PASSWORD_SECRET'):
+              s = names.get(v)
+              if s: print(s)
+          ")
+          if [ -z "${SECRETS}" ]; then
+            echo "No EZLynx secret names configured on the service; skipping grant check."
+            exit 0
+          fi
+          for SECRET in ${SECRETS}; do
+            echo "--- ${SECRET} ---"
+            gcloud secrets get-iam-policy "${SECRET}" --project="${PROJECT_ID}" --format=json \
+              | python3 -c "
+          import json,sys
+          policy = json.load(sys.stdin)
+          sa = '${VM_SA}'
+          grants = [b['role'] for b in policy.get('bindings', []) if ('serviceAccount:' + sa) in b.get('members', [])]
+          print(json.dumps({'secret': '${SECRET}', 'vm_sa_roles': grants,
+                            'has_secret_accessor': 'roles/secretmanager.secretAccessor' in grants}))
+          "
+          done
+      - name: Publish evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-worker-readonly-audit
+          path: ${{ runner.temp }}/prod-worker-audit.json
+          if-no-files-found: error
+          retention-days: 30
