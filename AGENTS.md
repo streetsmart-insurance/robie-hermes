@@ -129,3 +129,52 @@ Neither copy is authoritative and nobody can tell what production is running.*
 
 End every session with the work you attempted and abandoned, and why. A session
 summary listing only successes is incomplete, and by CR-4 it is `UNVERIFIED`.
+
+---
+
+## SHIPPING RULES — how code reaches production
+
+The production checkout is `hermes-poc-01:/opt/renewal-automation-system`.
+It is not `/opt/busy-borg` — busy-borg is the separate mortgagee project.
+Confirm the path before acting; do not assume either.
+
+**S-1 — the server is a git checkout, and iterating on it is allowed.**
+Fast iteration directly on the box is fine and often correct. What is never
+allowed is *leaving* work there. Work on a branch, and end every session with
+the change committed and pushed from the box. Uncommitted work on
+`hermes-poc-01` is the single way this project loses code.
+If the server is not currently a checkout with a remote, making it one is the
+job — say so and stop rather than working around it.
+
+**S-2 — never leave a file on the server that is not in the repo.** If you find
+one, commit it. Working around it is how the two copies diverged.
+
+**S-3 — never claim a change is live without re-reading it from the server.**
+"Deployed", "done", "should be working" are not evidence. Quote the file or the
+command output. If you cannot verify, report `UNVERIFIED` (CR-4).
+
+**S-4 — label every claim BUILT or DESIGNED.** BUILT means committed and
+confirmed running on the box. Everything else is DESIGNED and must say so on the
+same line as the claim. Never document a command, flag or feature you have not
+built. *Origin: the project charter documented `--voice`, `--live-voice` and
+`--write-notes` for weeks. None of the three existed in the code.*
+
+**S-5 — one change, one commit, one verification.** No batching six fixes into
+"cleaned things up." A commit you cannot verify in a single command is too big.
+
+**S-6 — safe defaults live in the library, not in the CLI.** If a function can
+dial a phone, post a note, or spend money, its default argument is the safe one.
+The CLI is the second layer, never the only one. *Origin:
+`carrier_policy_change_caller.py` had `dry_run=False` in the function signature
+with only a CLI opt-out, so every programmatic caller got the dangerous default.*
+
+**S-7 — if the repo and the server disagree, stop and report the difference.**
+Do not reconcile by overwriting either side. Neither copy is presumed
+authoritative: the server runs production, the laptop holds the guard layer and
+the governance docs, and each contains work the other does not. Reconciliation
+is a deliberate merge with a human, never a force-push.
+
+**S-8 — secrets are a deploy dependency.** `carrier_policy_change_caller.py`
+reads its `.env` from the sibling `busy-borg` project. Any deploy that does not
+account for that ships a caller with no API key, which fails quietly. State
+external dependencies before deploying, do not discover them after.
