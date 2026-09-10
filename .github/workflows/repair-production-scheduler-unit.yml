@@ -81,15 +81,16 @@ jobs:
           set -euo pipefail
           SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
           # The deployer identity has no Secret Manager list grants, so resolve
-          # versions where the grants live: on the VM. The scheduler tick
-          # records version STATES (never payloads) in the login_secret_health
-          # sentinel checkpoint; read the newest ENABLED version per secret
-          # from the local job DB (read-only) and pin full resource names.
-          # (Do not use versions/latest: it may be a DESTROYED leftover.)
+          # versions where the grants live: on the VM itself. Run the resolver
+          # with the engine venv as the service user; the VM service account
+          # supplies secretmanager.versions.list via the metadata server.
+          # Lists version STATES only, never payloads. Pins the newest ENABLED
+          # version per secret (never versions/latest: it may be a DESTROYED
+          # leftover).
           $SSH --command="mkdir -p '${STAGING}'"
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             scripts/read-login-secret-versions.py "${PRODUCTION_VM}:${STAGING}/"
-          $SSH --command="sudo -u streetsmart-hermes python3 '${STAGING}/read-login-secret-versions.py' --project '${PROJECT_ID}'" \
+          $SSH --command="sudo -u streetsmart-hermes env PYTHONPATH=/opt/streetsmart-hermes/releases/current /opt/streetsmart-hermes/venv/bin/python '${STAGING}/read-login-secret-versions.py' --project '${PROJECT_ID}'" \
             > "${RUNNER_TEMP}/robie-ezlynx.env"
           echo "--- env file to install (resource names only) ---"
           cat "${RUNNER_TEMP}/robie-ezlynx.env"
