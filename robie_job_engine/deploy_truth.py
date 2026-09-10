@@ -454,9 +454,18 @@ def parse_timestamp(value: str | datetime | None) -> datetime | None:
         return parsed
     for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S %Z"):
         try:
-            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            wall_clock = datetime.strptime(text, fmt)
         except ValueError:
             continue
+        # systemctl prints ActiveEnterTimestamp in the SYSTEM LOCAL timezone
+        # (e.g. "Thu 2026-09-10 12:02:06 EDT"), and strptime discards the zone
+        # name. Re-attach the local zone explicitly: labeling local wall-clock
+        # time as UTC made the Production verifier compare 12:02 EDT against
+        # a true-UTC 16:02 flip and roll back good deploys ("pointer-only is
+        # not live"). DST-boundary skew (service started under a different
+        # offset than now) is out of scope for a seconds-after-flip check.
+        local_tz = datetime.now().astimezone().tzinfo
+        return wall_clock.replace(tzinfo=local_tz).astimezone(timezone.utc)
     return None
 
 
