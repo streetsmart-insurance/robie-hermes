@@ -43,3 +43,89 @@ not confirm) · `BLOCKED` (refused, precondition unmet) · `CATASTROPHE` (cardin
 rule violated — halt every job, escalate to Carlo).
 "Done" / "complete" / "success" are not outcomes. `receipt.outcome()` decides,
 never the agent.
+
+---
+
+## CODE WORK — the same contract applies to changing this repo
+
+CR-4 is not only about EZLynx. An agent's belief that it wrote working code is
+the same untrusted memory as its belief that it posted a note. These rules exist
+because each one was broken in this repo in the first week of September 2026.
+
+### 1. Never claim a change you have not executed
+
+Before saying a file is fixed:
+
+```bash
+python3 -m py_compile <file>          # it must at least parse
+python3 -m pytest tests/ -q           # the suite must be green
+git diff --stat                       # the change must exist
+```
+
+*Origin: `1766d37` "feat(telephony): add Invariant 8 email preemption safeguard"
+committed a file with an unclosed dict. It could not be imported, let alone run.
+The caller was dead for two days. One `py_compile` would have caught it.*
+
+### 2. A commit message is a claim, and claims need evidence
+
+The message must describe what the diff does, not what the task was called.
+`1766d37` claimed an email-preemption safeguard; the diff contained no email
+watcher, no call-kill path, and no preemption state. If the feature is not in
+the diff, it does not go in the message.
+
+### 3. Never hardcode narrative into generated output
+
+Report text, status columns, and summaries are derived from data or they are not
+written. A status string chosen by matching a carrier or account name is a
+fabrication, even when it happens to be true today.
+
+*Origin: the daily lead report stamped "Underwriter Arlene Rivera confirmed
+handling; voice call preempted" on every Jimcor row and "Follow-up scheduled for
+09/10" on every Family Tradition row, keyed off substrings, and mailed it to six
+people each morning as verified status.*
+
+If the data does not support a status, the status is
+`no verified carrier evidence on file`. That is the reporting form of
+`UNVERIFIED`, and it is a passing outcome.
+
+### 4. A safeguard is enforced only when a test proves it
+
+Do not write "ENFORCED", "Active", or "machine-enforced" in any document,
+report, or commit unless you can name the test that fails when the safeguard is
+removed. Documented-but-unwired is `BLOCKED`, and the document must say so.
+
+*Origin: `CARDINAL_RULES.md` said "Machine-enforced copy: robie_guard/cardinal.py"
+while `robie_guard` had zero production call sites; the charter documented a
+`--write-notes` gate that did not exist in the codebase; the daily report
+advertised Invariant 8 as active when no such code was ever written.*
+
+### 5. Safety defaults are closed, and the closed path is the one you test
+
+Any flag controlling a real-world side effect — dialing a carrier, writing to
+EZLynx, sending email — defaults to the safe value. The test that matters is the
+one proving the unauthorized path refuses.
+
+*Origin: `carrier_policy_change_caller.py` took `dry_run=False`, so a bare
+invocation placed a real call to a carrier.*
+
+Writes go through the gate. There is no other way to write:
+
+```python
+from robie_guard import assert_write_allowed
+assert_write_allowed("post_note", applicant_id=aid, policy_number=pol)
+```
+
+### 6. Production is reached by deploy, never by hand
+
+Never edit files directly on `hermes-poc-01`. Commit to the repo, push, and let
+the box pull. A fix typed into the server is a fix that will be silently lost
+and will make the next reconciliation harder.
+
+*Origin: the VM and the laptop hold the same commit message under two different
+hashes (`b4baee9` / `4bb6c0a`) because there is no remote and no deploy step.
+Neither copy is authoritative and nobody can tell what production is running.*
+
+### 7. Report what you did not do
+
+End every session with the work you attempted and abandoned, and why. A session
+summary listing only successes is incomplete, and by CR-4 it is `UNVERIFIED`.
