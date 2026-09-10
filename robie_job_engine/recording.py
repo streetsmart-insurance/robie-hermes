@@ -415,7 +415,11 @@ class RecordingManager:
         if not self.enabled:
             return None
         active = self.store.active(job_id)
-        if active:
+        # Only a live RECORDING segment may be reused. A segment left in
+        # STARTING/STOPPING/UPLOADING by an earlier run is not capturing
+        # anything; hand back a fresh segment instead of a dead one that
+        # start_required would fail closed on.
+        if active and active.get("status") == "RECORDING":
             return active
         job_dir = self.root / _safe(job_id)
         job_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -445,7 +449,9 @@ class RecordingManager:
             raise RecordingRequiredError("recording is required but disabled")
         recording = self.start(job_id)
         if not recording or recording.get("status") != "RECORDING":
-            detail = (recording or {}).get("failure") or "capture did not enter RECORDING"
+            detail = (recording or {}).get("failure") or (
+                f"capture status is {(recording or {}).get('status')}, not RECORDING"
+            )
             raise RecordingRequiredError(f"recording start failed: {detail}")
         return recording
 
