@@ -113,8 +113,8 @@ def wait_for_cdp_json_version(
 def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
     """Apply playwright-stealth to attached contexts/pages. Soft-fail if missing.
 
-    Mirrors renewal-automation-system session_manager: stealth after attach,
-    never Browserbase advancedStealth. Missing package logs and continues.
+    Mirrors renewal-automation-system session_manager: stealth after attach
+    on the persistent Chrome CDP path only. Missing package logs and continues.
     """
     def _log(message):
         if log is not None:

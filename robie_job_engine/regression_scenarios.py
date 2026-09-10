@@ -1170,7 +1170,7 @@ def run_unverified_unmask_scenario(*, work_dir: Path) -> dict[str, Any]:
     db = str(work_dir / "unverified-unmask.db")
     infra = (
         "Could not attach to persistent Chrome: "
-        "[Errno 111] Connection refused (127.0.0.1:9222)"
+        "[Errno 111] ECONNREFUSED Connection refused (127.0.0.1:9222)"
     )
     job_id = None
     claimed_id = None

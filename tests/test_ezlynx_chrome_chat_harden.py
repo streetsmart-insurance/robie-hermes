@@ -47,7 +47,7 @@ SESSION = "https://app.ezlynx.com/web/"
 LEFTOVER = "https://dashboard.useascend.com/create/new"
 CDP_REFUSED = (
     "Could not attach to persistent Chrome: "
-    "[Errno 111] Connection refused (127.0.0.1:9222)"
+    "[Errno 111] ECONNREFUSED Connection refused (127.0.0.1:9222)"
 )
 HTTP_429 = "Vertex quota exceeded: HTTP 429 Too Many Requests"
 I_DID_IT = "I did it. The job is complete. Completed successfully — COMPLETE."
@@ -148,7 +148,7 @@ class FlushNeverKillsBrowserTests(unittest.TestCase):
         self.assertNotIn("subprocess.run", source)
         self.assertNotIn("systemctl restart", source)
         self.assertIn("never close the last browser target", source)
-        self.assertIn("Never invoke systemctl", source)
+        self.assertIn("systemctl against", source)
 
 
 class CdpWaitAndStealthTests(unittest.TestCase):

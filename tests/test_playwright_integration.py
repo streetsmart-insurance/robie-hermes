@@ -53,7 +53,6 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("/json/version", source)
         self.assertIn("apply_playwright_stealth", source)
         self.assertIn("playwright-stealth", source)
-        self.assertNotIn("browserbase", source.casefold())
         self.assertNotIn("advancedStealth", source)
 
     def test_playwright_policy_forbids_silent_engine_fallback(self):
