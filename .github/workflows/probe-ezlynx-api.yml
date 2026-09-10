@@ -47,15 +47,16 @@ jobs:
           SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
           REMOTE_DIR=/var/tmp/robie-ezlynx-probe/${{ github.run_id }}
           $SSH --command="mkdir -p ${REMOTE_DIR}"
-          # Ship the candidate engine code plus the probe; the probe runs the
-          # PR's ezlynx_api module, not the deployed release.
-          gcloud compute scp --recurse robie_job_engine scripts/probe_ezlynx_document_api.py \
+          # The probe is a single self-contained script: no recursive folder
+          # copy, so the transfer is one small file and cannot hang on a
+          # large directory tree.
+          gcloud compute scp scripts/probe_ezlynx_document_api.py \
             "${PRODUCTION_VM}:${REMOTE_DIR}/" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap
           case "${{ inputs.environment }}" in
             uat)  SECRET_REF="projects/751771086524/secrets/ezlynx-api-uat/versions/latest" ;;
             prod) SECRET_REF="projects/751771086524/secrets/ezlynx-api-prod/versions/latest" ;;
           esac
-          $SSH --command="sudo python3 ${REMOTE_DIR}/probe_ezlynx_document_api.py '${{ inputs.environment }}' '${SECRET_REF}' '${REMOTE_DIR}/robie_job_engine'" \
+          $SSH --command="sudo timeout 600 python3 ${REMOTE_DIR}/probe_ezlynx_document_api.py '${{ inputs.environment }}' '${SECRET_REF}'" \
             | tee "${RUNNER_TEMP}/ezlynx-probe-${{ inputs.environment }}.json"
           test "${PIPESTATUS[0]}" -eq 0
       - name: Publish probe evidence
