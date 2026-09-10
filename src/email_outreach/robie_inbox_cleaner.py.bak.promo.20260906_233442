@@ -1,0 +1,689 @@
+"""Robie Hourly Inbox Cleaner & Reporter.
+
+Scans robie@streetsmart.insurance, trashes disposable noise, archives known automated
+mail out of Inbox, and emails Carlo an hourly report with a Needs Decision list he can
+reply to (KEEP / ARCHIVE / TRASH / FILE).
+"""
+
+import argparse
+import datetime
+import html
+import logging
+import os
+import sys
+from typing import Any, Dict, List, Optional
+
+from src.email_outreach.gmail_client import GmailRenewalClient
+from src.email_outreach.uw_reply_filer import run_uw_reply_filing
+
+logger = logging.getLogger("robie_cleaner")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+ROBIE_EMAIL = "robie@streetsmart.insurance"
+CARLO_EMAIL = "carlo@streetsmart.insurance"
+
+
+def process_carlo_reply_commands(service, dry_run: bool = False) -> Dict[str, Any]:
+    """Apply Carlo reply commands to the latest Robie Hourly Inbox report.
+
+    Reply body lines (case-insensitive):
+      KEEP <gmail_id>
+      ARCHIVE <gmail_id>
+      TRASH <gmail_id>
+      FILE <gmail_id> as renewal|audit|service
+    """
+    import re
+
+    result = {"processed": 0, "actions": [], "errors": []}
+    try:
+        # Replies to Robie Hourly Inbox from Carlo in last 2 days
+        q = f'from:{CARLO_EMAIL} to:{ROBIE_EMAIL} subject:"Robie Hourly Inbox" newer_than:2d'
+        res = service.users().messages().list(userId="me", q=q, maxResults=20).execute()
+        msgs = res.get("messages", []) or []
+    except Exception as e:
+        logger.warning(f"Reply command search failed: {e}")
+        return result
+
+    cmd_re = re.compile(
+        r"^(KEEP|ARCHIVE|TRASH|FILE)\s+([a-zA-Z0-9]+)(?:\s+as\s+(renewal|audit|service))?\s*$",
+        re.I,
+    )
+
+    for m in msgs:
+        mid = m["id"]
+        try:
+            full = service.users().messages().get(userId="me", id=mid, format="full").execute()
+            label_ids = full.get("labelIds", [])
+            # Only process unread replies so we do not re-apply forever
+            if "UNREAD" not in label_ids:
+                continue
+            payload = full.get("payload", {})
+            body_text = ""
+            if payload.get("body", {}).get("data"):
+                import base64
+                body_text = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+            for part in payload.get("parts") or []:
+                if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
+                    import base64
+                    body_text = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+                    break
+            for line in body_text.splitlines():
+                line = line.strip()
+                # stop at quoted reply
+                if line.startswith(">") or line.startswith("On ") and "wrote:" in line:
+                    break
+                match = cmd_re.match(line)
+                if not match:
+                    continue
+                action, target_id, file_as = match.group(1).upper(), match.group(2), (match.group(3) or "").lower()
+                try:
+                    if action == "KEEP":
+                        if not dry_run:
+                            service.users().messages().modify(
+                                userId="me", id=target_id,
+                                body={"addLabelIds": ["INBOX", "UNREAD"], "removeLabelIds": ["TRASH"]},
+                            ).execute()
+                        result["actions"].append(f"KEEP {target_id}")
+                    elif action == "ARCHIVE":
+                        if not dry_run:
+                            service.users().messages().modify(
+                                userId="me", id=target_id,
+                                body={"removeLabelIds": ["INBOX", "UNREAD"]},
+                            ).execute()
+                        result["actions"].append(f"ARCHIVE {target_id}")
+                    elif action == "TRASH":
+                        if not dry_run:
+                            service.users().messages().trash(userId="me", id=target_id).execute()
+                        result["actions"].append(f"TRASH {target_id}")
+                    elif action == "FILE":
+                        # Label for downstream filing; do not invent EZLynx writes here
+                        label_name = f"Robie/File-{file_as or 'renewal'}"
+                        result["actions"].append(f"FILE {target_id} as {file_as or 'renewal'} (label {label_name})")
+                        if not dry_run:
+                            # Ensure label exists
+                            labs = service.users().labels().list(userId="me").execute().get("labels", [])
+                            lab = next((l for l in labs if l.get("name") == label_name), None)
+                            if not lab:
+                                lab = service.users().labels().create(
+                                    userId="me",
+                                    body={"name": label_name, "labelListVisibility": "labelShow", "messageListVisibility": "show"},
+                                ).execute()
+                            service.users().messages().modify(
+                                userId="me", id=target_id,
+                                body={"addLabelIds": [lab["id"]], "removeLabelIds": ["INBOX"]},
+                            ).execute()
+                    result["processed"] += 1
+                except Exception as e:
+                    result["errors"].append(f"{action} {target_id}: {e}")
+                    logger.warning(f"Reply command failed {action} {target_id}: {e}")
+            # Mark Carlo's reply read so we do not reprocess
+            if not dry_run:
+                service.users().messages().modify(
+                    userId="me", id=mid, body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
+        except Exception as e:
+            result["errors"].append(f"reply {mid}: {e}")
+            logger.warning(f"Error processing Carlo reply {mid}: {e}")
+
+    logger.info(
+        "Carlo reply commands: processed=%s actions=%s errors=%s",
+        result["processed"], len(result["actions"]), len(result["errors"]),
+    )
+    return result
+
+
+
+NOISE_QUERIES = [
+    ("Mailer-Daemon Bounces", "from:mailer-daemon"),
+    ("Postmaster Delivery Notices", "from:postmaster"),
+    ("Automated Delivery Failures", 'subject:"Delivery Status Notification (Failure)"'),
+    ("Test Suite Remnants", 'subject:"David Clark"'),
+    ("Applied ROBIE Queues", "from:DoNotReply@appliedsystems.com subject:ROBIE"),
+    ("RingCentral Scheduled Reports", "from:analytics.portal@ringcentral.com"),
+    ("RingCentral Call Logs", 'from:service@ringcentral.com subject:"Call Log"'),
+    ("EZLynx OTP Codes (stale)", 'from:noreply@ezlynx.com subject:"Verification Code" older_than:1d'),
+    ("Robie Self Audit Reports", 'from:robie@streetsmart.insurance subject:"Mailbox Audit"'),
+    ("Robie Hourly Inbox Reports", 'from:robie@streetsmart.insurance subject:"Robie Hourly Inbox"'),
+]
+
+ARCHIVE_QUERIES = [
+    ("Applied Systems", "in:inbox from:DoNotReply@appliedsystems.com"),
+    ("RingCentral Noise", "in:inbox (from:analytics.portal@ringcentral.com OR from:service@ringcentral.com)"),
+    ("Stale EZLynx OTP", 'in:inbox from:noreply@ezlynx.com subject:"Verification Code" older_than:1d'),
+    ("Robie Self Reports", 'in:inbox from:robie@streetsmart.insurance (subject:"Mailbox Audit" OR subject:"Robie Hourly Inbox")'),
+]
+
+
+def parse_headers(payload: Dict[str, Any]) -> Dict[str, str]:
+    headers = {}
+    for h in payload.get("headers", []):
+        headers[h.get("name", "").lower()] = h.get("value", "")
+    return headers
+
+
+def categorize_message(sender: str, subject: str) -> str:
+    s_low = sender.lower()
+    sub_low = subject.lower()
+
+    if any(k in s_low or k in sub_low for k in [
+        "tapco", "coterie", "hartford", "foremost", "next insurance", "portal", "access application"
+    ]):
+        return "Carrier Portals & Onboarding"
+    if any(k in s_low or k in sub_low for k in [
+        "quote", "renewal", "underwrit", "binder", "policy", "premium"
+    ]):
+        return "Active Renewals & Underwriter Quotes"
+    if any(d in s_low for d in ["@streetsmart.insurance"]):
+        return "Internal Team Coordination"
+    if "ezlynx" in s_low or "applied" in s_low or "ezlynx" in sub_low:
+        return "EZLynx System & Tickets"
+    return "General Communications"
+
+
+def run_daily_inbox_cleanup_and_report(
+    client: Optional[GmailRenewalClient] = None,
+    recipient: str = "carlo@streetsmart.insurance",
+    dry_run: bool = False,
+    days_to_check: int = 2,
+) -> Dict[str, Any]:
+    """Cleans Robie mailbox and emails Carlo an hourly needs-decision report."""
+    if client is None:
+        client = GmailRenewalClient()
+
+    service = client.inbox_services.get(ROBIE_EMAIL)
+    if not service:
+        logger.error(f"Cannot access Gmail API service for {ROBIE_EMAIL}")
+        return {
+            "error": "Gmail service unavailable",
+            "noise_trashed": 0,
+            "real_messages_count": 0,
+            "report_sent": False,
+        }
+
+    logger.info(f"Starting hourly inbox audit for {ROBIE_EMAIL} (dry_run={dry_run})...")
+
+    reply_cmds = process_carlo_reply_commands(service, dry_run=dry_run)
+
+    total_noise_trashed = 0
+    noise_breakdown: Dict[str, int] = {}
+
+    for label, query in NOISE_QUERIES:
+        try:
+            res = service.users().messages().list(userId="me", q=query, maxResults=500).execute()
+            messages = res.get("messages", []) or []
+            count = len(messages)
+            noise_breakdown[label] = count
+            if count > 0:
+                logger.info(f"Found {count} messages matching noise category: {label}")
+                for m in messages:
+                    if not dry_run:
+                        try:
+                            service.users().messages().trash(userId="me", id=m["id"]).execute()
+                            total_noise_trashed += 1
+                        except Exception as e:
+                            logger.warning(f"Error trashing message {m['id']}: {e}")
+                    else:
+                        total_noise_trashed += 1
+        except Exception as e:
+            logger.error(f"Error checking noise query '{query}': {e}")
+            noise_breakdown[label] = 0
+
+    logger.info(f"Noise cleanup complete: {total_noise_trashed} messages moved to trash.")
+
+    filing_result: Dict[str, Any] = {}
+    try:
+        filing_result = run_uw_reply_filing(gmail_client=client, dry_run=dry_run) or {}
+        logger.info(
+            "UW reply filing from cleaner: filed=%s skipped=%s dry_run=%s",
+            filing_result.get("filed"),
+            filing_result.get("skipped"),
+            dry_run,
+        )
+    except Exception as e:
+        logger.warning(f"UW reply filing skipped (cleaner continues; replies are not trashed): {e}")
+        filing_result = {"error": str(e), "filed": 0, "skipped": 0}
+
+    real_messages: List[Dict[str, Any]] = []
+    try:
+        q_real = f"newer_than:{days_to_check}d"
+        res_real = service.users().messages().list(userId="me", q=q_real, maxResults=200).execute()
+        candidates = res_real.get("messages", []) or []
+
+        for c in candidates:
+            try:
+                msg_data = service.users().messages().get(userId="me", id=c["id"], format="full").execute()
+                payload = msg_data.get("payload", {})
+                headers = parse_headers(payload)
+
+                sender = headers.get("from", "Unknown")
+                subject = headers.get("subject", "(No Subject)")
+                date_str = headers.get("date", "")
+                snippet = msg_data.get("snippet", "")
+
+                if ROBIE_EMAIL.lower() in sender.lower() and (
+                    "audit" in subject.lower() or "hourly inbox" in subject.lower()
+                ):
+                    continue
+                if "mailer-daemon" in sender.lower() or "postmaster" in sender.lower():
+                    continue
+                if "donotreply@appliedsystems.com" in sender.lower():
+                    continue
+                if "ringcentral.com" in sender.lower():
+                    continue
+
+                sub_clean = subject.strip().lower()
+                if any(
+                    sub_clean.startswith(p)
+                    for p in [
+                        "automatic reply:",
+                        "auto:",
+                        "auto reply:",
+                        "out of office:",
+                        "undeliverable:",
+                        "delivery status notification",
+                        "failure notice",
+                    ]
+                ):
+                    noise_breakdown["Automated Server Auto-Replies"] = (
+                        noise_breakdown.get("Automated Server Auto-Replies", 0) + 1
+                    )
+                    if not dry_run:
+                        try:
+                            service.users().messages().trash(userId="me", id=c["id"]).execute()
+                            total_noise_trashed += 1
+                        except Exception as e:
+                            logger.warning(f"Error trashing auto-reply {c['id']}: {e}")
+                    else:
+                        total_noise_trashed += 1
+                    continue
+
+                category = categorize_message(sender, subject)
+                real_messages.append(
+                    {
+                        "id": c["id"],
+                        "from": sender,
+                        "subject": subject,
+                        "date": date_str,
+                        "category": category,
+                        "snippet": snippet,
+                        "label_ids": msg_data.get("labelIds", []),
+                    }
+                )
+            except Exception as e:
+                logger.debug(f"Error fetching message details for {c['id']}: {e}")
+    except Exception as e:
+        logger.error(f"Error querying recent messages: {e}")
+
+    logger.info(f"Gathered {len(real_messages)} authentic messages for reporting.")
+
+    archived_automated: List[Dict[str, Any]] = []
+    for label, query in ARCHIVE_QUERIES:
+        try:
+            res = service.users().messages().list(userId="me", q=query, maxResults=500).execute()
+            for m in res.get("messages", []) or []:
+                mid = m["id"]
+                try:
+                    full = service.users().messages().get(
+                        userId="me",
+                        id=mid,
+                        format="metadata",
+                        metadataHeaders=["From", "Subject", "Date"],
+                    ).execute()
+                    headers = parse_headers(full.get("payload", {}))
+                    archived_automated.append(
+                        {
+                            "id": mid,
+                            "label": label,
+                            "from": headers.get("from", ""),
+                            "subject": headers.get("subject", ""),
+                            "date": headers.get("date", ""),
+                        }
+                    )
+                    if not dry_run:
+                        service.users().messages().modify(
+                            userId="me",
+                            id=mid,
+                            body={"removeLabelIds": ["INBOX", "UNREAD"]},
+                        ).execute()
+                except Exception as e:
+                    logger.warning(f"Archive skip {mid}: {e}")
+        except Exception as e:
+            logger.error(f"Archive query failed {query}: {e}")
+    logger.info(f"Archived {len(archived_automated)} automated messages out of Inbox.")
+
+    needs_decision: List[Dict[str, Any]] = []
+    categorized_real: List[Dict[str, Any]] = []
+    for m in real_messages:
+        is_unread = "UNREAD" in (m.get("label_ids") or [])
+        if m.get("category") == "General Communications" or is_unread:
+            needs_decision.append(m)
+        else:
+            categorized_real.append(m)
+
+    try:
+        res_unread = service.users().messages().list(
+            userId="me", q="in:inbox is:unread", maxResults=100
+        ).execute()
+        known_ids = {m["id"] for m in real_messages} | {a["id"] for a in archived_automated}
+        for u in res_unread.get("messages", []) or []:
+            if u["id"] in known_ids:
+                continue
+            try:
+                full = service.users().messages().get(userId="me", id=u["id"], format="full").execute()
+                headers = parse_headers(full.get("payload", {}))
+                sender = headers.get("from", "Unknown")
+                subject = headers.get("subject", "(No Subject)")
+                if ROBIE_EMAIL.lower() in sender.lower() and (
+                    "audit" in subject.lower() or "hourly inbox" in subject.lower()
+                ):
+                    continue
+                needs_decision.append(
+                    {
+                        "id": u["id"],
+                        "from": sender,
+                        "subject": subject,
+                        "date": headers.get("date", ""),
+                        "category": "Unread — Robie unsure",
+                        "snippet": full.get("snippet", ""),
+                    }
+                )
+            except Exception as e:
+                logger.debug(f"unread fetch {u['id']}: {e}")
+    except Exception as e:
+        logger.warning(f"Unread sweep failed: {e}")
+
+    # Dedupe needs_decision by id
+    seen = set()
+    deduped = []
+    for m in needs_decision:
+        if m["id"] in seen:
+            continue
+        seen.add(m["id"])
+        deduped.append(m)
+    needs_decision = deduped
+
+    carrier_actions = []
+    try:
+        db_paths = ["data/renewals.db", "/opt/renewal-automation-system/data/renewals.db"]
+        active_db = next((p for p in db_paths if os.path.exists(p)), None)
+        if active_db:
+            import sqlite3
+
+            conn = sqlite3.connect(active_db)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT p.insured_name, p.policy_number, p.carrier_name, p.status, a.note_text, a.created_at, a.synced_to_ezlynx, p.applicant_id
+                FROM audit_note_logs a
+                JOIN policy_renewals p ON a.policy_id = p.id
+                WHERE (p.status LIKE '%NON_RENEWAL%' OR a.note_text LIKE '%UNDERWRITER%' OR a.note_text LIKE '%NON-RENEWAL%' OR a.note_text LIKE '%Carrier Response%')
+                ORDER BY a.id DESC LIMIT 10
+                """
+            )
+            for row in cur.fetchall():
+                carrier_actions.append(
+                    {
+                        "insured_name": row[0],
+                        "policy_number": row[1],
+                        "carrier_name": row[2],
+                        "status": row[3],
+                        "summary": row[4].split("\n")[0][:120],
+                        "timestamp": row[5],
+                        "synced": bool(row[6]),
+                        "applicant_id": row[7],
+                    }
+                )
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Error querying carrier actions from db: {e}")
+
+    now_str = datetime.datetime.now().strftime("%B %d, %Y %H:%M UTC")
+
+    text_lines = [
+        f"Robie Hourly Inbox Report - {now_str}",
+        "=" * 60,
+        f"Mailbox: {ROBIE_EMAIL}",
+        f"Noise Purged to Trash: {total_noise_trashed}",
+        f"Automated archived out of Inbox: {len(archived_automated)}",
+        f"Needs your decision: {len(needs_decision)}",
+        f"Categorized authentic (awareness): {len(categorized_real)}",
+        "-" * 60,
+        "Noise Categories Purged:",
+    ]
+    for label, cnt in noise_breakdown.items():
+        text_lines.append(f"  • {label}: {cnt}")
+
+    text_lines.append("-" * 60)
+    text_lines.append("HOW TO REPLY (reply to this email):")
+    text_lines.append("  KEEP <gmail_id>     — leave in inbox / treat as important")
+    text_lines.append("  ARCHIVE <gmail_id>  — archive out of inbox")
+    text_lines.append("  TRASH <gmail_id>    — trash")
+    text_lines.append("  FILE <gmail_id> as renewal|audit|service — Robie will file next run")
+    text_lines.append("-" * 60)
+    text_lines.append(f"NEEDS YOUR DECISION ({len(needs_decision)}):")
+    for m in needs_decision:
+        text_lines.append(f"  ID:{m['id']} [{m['category']}] From: {m['from']} | {m['subject']}")
+        text_lines.append(f"    {(m.get('snippet') or '')[:120]}")
+    text_lines.append("-" * 60)
+    text_lines.append("Categorized authentic (kept for awareness):")
+    for m in categorized_real:
+        text_lines.append(f"  [{m['category']}] From: {m['from']} | Subject: {m['subject']}")
+        text_lines.append(f"    Snippet: {(m.get('snippet') or '')[:120]}...")
+
+    text_report = "\n".join(text_lines)
+
+    def rows_for(messages: List[Dict[str, Any]]) -> str:
+        rows = ""
+        for m in messages:
+            cat_badge = (
+                f"<span style='background:#e0f2fe; color:#0369a1; padding:2px 8px; "
+                f"border-radius:12px; font-size:12px;'>{html.escape(m['category'])}</span>"
+            )
+            rows += f"""
+        <tr style="border-bottom: 1px solid #e5e7eb;">
+          <td style="padding: 10px 12px; font-size: 12px; font-family: monospace;">{html.escape(m['id'])}</td>
+          <td style="padding: 10px 12px; font-size: 13px;">{cat_badge}</td>
+          <td style="padding: 10px 12px; font-size: 13px; font-weight: 500;">{html.escape(m['from'])}</td>
+          <td style="padding: 10px 12px; font-size: 13px;">
+            <strong>{html.escape(m['subject'])}</strong><br>
+            <span style="color: #6b7280; font-size: 12px;">{html.escape((m.get('snippet') or '')[:160])}</span>
+          </td>
+          <td style="padding: 10px 12px; font-size: 12px; color: #6b7280; white-space: nowrap;">{html.escape(m['date'])}</td>
+        </tr>
+        """
+        if not rows:
+            rows = (
+                "<tr><td colspan='5' style='padding:16px; text-align:center; color:#6b7280;'>"
+                "None this hour.</td></tr>"
+            )
+        return rows
+
+    needs_rows = rows_for(needs_decision)
+    cat_rows = rows_for(categorized_real)
+    noise_items_html = "".join(
+        [f"<li><strong>{html.escape(k)}:</strong> {v} purged</li>" for k, v in noise_breakdown.items() if v > 0]
+        or ["<li>No noise messages detected this hour.</li>"]
+    )
+
+    carrier_actions_html = ""
+    for ca in carrier_actions:
+        ez_link = f"https://app.ezlynx.com/web/account/{ca['applicant_id']}/activity"
+        sync_badge = (
+            "<span style='background:#dcfce7; color:#166534; padding:2px 6px; border-radius:10px; font-size:11px;'>Synced</span>"
+            if ca["synced"]
+            else "<span style='background:#fef3c7; color:#92400e; padding:2px 6px; border-radius:10px; font-size:11px;'>Queued</span>"
+        )
+        status_badge = (
+            f"<span style='background:#fee2e2; color:#991b1b; padding:2px 6px; border-radius:10px; font-size:11px;'>{html.escape(ca['status'])}</span>"
+            if "NON_RENEWAL" in ca["status"]
+            else f"<span style='background:#e0f2fe; color:#075985; padding:2px 6px; border-radius:10px; font-size:11px;'>{html.escape(ca['status'])}</span>"
+        )
+        carrier_actions_html += f"""
+        <tr style="border-bottom: 1px solid #e5e7eb;">
+          <td style="padding: 10px 12px; font-size: 13px;"><a href="{ez_link}" style="color:#2563eb; text-decoration:none; font-weight:600;">{html.escape(ca['insured_name'])}</a><br><span style="color:#6b7280; font-size:11px;">Pol #{html.escape(ca['policy_number'])}</span></td>
+          <td style="padding: 10px 12px; font-size: 13px;">{html.escape(ca['carrier_name'])}</td>
+          <td style="padding: 10px 12px; font-size: 13px;">{status_badge}</td>
+          <td style="padding: 10px 12px; font-size: 12px; color:#374151;">{html.escape(ca['summary'])}</td>
+          <td style="padding: 10px 12px; font-size: 12px;">{sync_badge}</td>
+        </tr>
+        """
+    if not carrier_actions_html:
+        carrier_actions_html = (
+            "<tr><td colspan='5' style='padding:14px; text-align:center; color:#6b7280;'>"
+            "No carrier decisions or non-renewals logged in the past 48 hours.</td></tr>"
+        )
+
+    html_report = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 900px; margin: 0 auto; color: #1f2937;">
+      <div style="background: linear-gradient(135deg, #1e3a8a, #2563eb); padding: 24px; border-radius: 8px 8px 0 0; color: white;">
+        <h2 style="margin: 0; font-size: 22px;">Robie Hourly Inbox Cleanup</h2>
+        <p style="margin: 4px 0 0; opacity: 0.9; font-size: 14px;">Clear + needs-decision report — reply with KEEP / ARCHIVE / TRASH / FILE &bull; {now_str}</p>
+      </div>
+
+      <div style="background: #f9fafb; padding: 18px 24px; border: 1px solid #e5e7eb; border-top: none;">
+        <div style="display: flex; gap: 16px; margin-bottom: 16px;">
+          <div style="flex: 1; background: white; padding: 14px; border-radius: 6px; border: 1px solid #e5e7eb;">
+            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Noise Purged (Trash)</div>
+            <div style="font-size: 24px; font-weight: bold; color: #dc2626; margin-top: 4px;">{total_noise_trashed}</div>
+          </div>
+          <div style="flex: 1; background: white; padding: 14px; border-radius: 6px; border: 1px solid #e5e7eb;">
+            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Archived Automated</div>
+            <div style="font-size: 24px; font-weight: bold; color: #2563eb; margin-top: 4px;">{len(archived_automated)}</div>
+          </div>
+          <div style="flex: 1; background: white; padding: 14px; border-radius: 6px; border: 1px solid #e5e7eb;">
+            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Need Carlo Decision</div>
+            <div style="font-size: 24px; font-weight: bold; color: #d97706; margin-top: 4px;">{len(needs_decision)}</div>
+          </div>
+        </div>
+
+        <div style="background: #fffbeb; padding: 14px; border-radius: 6px; border: 1px solid #fcd34d; margin-bottom: 16px; font-size: 13px; color: #92400e;">
+          <strong>Reply to this email</strong> with one command per line:<br>
+          <code>KEEP &lt;gmail_id&gt;</code> &nbsp; <code>ARCHIVE &lt;gmail_id&gt;</code> &nbsp;
+          <code>TRASH &lt;gmail_id&gt;</code> &nbsp; <code>FILE &lt;gmail_id&gt; as renewal|audit|service</code>
+        </div>
+
+        <div style="background: white; padding: 16px; border-radius: 6px; border: 1px solid #e5e7eb; margin-bottom: 20px;">
+          <h4 style="margin: 0 0 8px; font-size: 14px; color: #374151;">Purge Breakdown:</h4>
+          <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #4b5563;">
+            {noise_items_html}
+          </ul>
+        </div>
+
+        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">Needs your decision</h3>
+        <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+          <thead>
+            <tr style="background: #fef3c7; text-align: left;">
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Gmail ID</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Category</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">From</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Subject &amp; Snippet</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {needs_rows}
+          </tbody>
+        </table>
+
+        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">Carrier Decisions &amp; Underwriter Responses (Last 48 Hours)</h3>
+        <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb; margin-bottom: 24px;">
+          <thead>
+            <tr style="background: #f3f4f6; text-align: left;">
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Insured Account</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Carrier</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Status</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Underwriter Summary</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">EZLynx</th>
+            </tr>
+          </thead>
+          <tbody>
+            {carrier_actions_html}
+          </tbody>
+        </table>
+
+        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">Categorized authentic (awareness)</h3>
+        <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb;">
+          <thead>
+            <tr style="background: #f3f4f6; text-align: left;">
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Gmail ID</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Category</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">From</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Subject &amp; Snippet</th>
+              <th style="padding: 10px 12px; font-size: 12px; color: #4b5563;">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cat_rows}
+          </tbody>
+        </table>
+
+        <div style="margin-top: 24px; padding-top: 14px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #9ca3af; text-align: center;">
+          Hourly on hermes-poc-01 &bull; StreetSmart Insurance
+        </div>
+      </div>
+    </div>
+    """
+
+    report_sent = False
+    subject_line = (
+        f"Robie Hourly Inbox — {now_str} "
+        f"({len(needs_decision)} need decision, {total_noise_trashed} purged, {len(archived_automated)} archived)"
+    )
+
+    if not dry_run and recipient:
+        try:
+            send_res = client.send_email(
+                to_email=recipient,
+                subject=subject_line,
+                body_text=text_report,
+                html_body=html_report,
+            )
+            logger.info(f"Successfully dispatched hourly report to {recipient} (ID: {send_res.get('id')})")
+            report_sent = True
+        except Exception as e:
+            logger.error(f"Failed to dispatch hourly report email to {recipient}: {e}")
+    else:
+        logger.info("Dry run enabled or no recipient; skipped emailing report.")
+
+    return {
+        "noise_trashed": total_noise_trashed,
+        "noise_breakdown": noise_breakdown,
+        "real_messages_count": len(categorized_real),
+        "real_messages": categorized_real,
+        "needs_decision_count": len(needs_decision),
+        "needs_decision": needs_decision,
+        "archived_automated": len(archived_automated),
+        "report_sent": report_sent,
+        "uw_replies_filed": filing_result.get("filed", 0),
+        "uw_replies_skipped": filing_result.get("skipped", 0),
+        "reply_commands": reply_cmds,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Robie hourly mailbox cleanup and report.")
+    parser.add_argument(
+        "--recipient",
+        default="carlo@streetsmart.insurance",
+        help="Email recipient for hourly report. Empty string skips email.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Audit without deleting or sending email.")
+    parser.add_argument("--days", type=int, default=2, help="Number of days lookback for authentic emails.")
+    args = parser.parse_args()
+
+    result = run_daily_inbox_cleanup_and_report(
+        recipient=args.recipient,
+        dry_run=args.dry_run,
+        days_to_check=args.days,
+    )
+    print(
+        f"\nExecution Finished: {result.get('noise_trashed', 0)} noise trashed, "
+        f"{result.get('archived_automated', 0)} archived, "
+        f"{result.get('needs_decision_count', 0)} need decision, "
+        f"{result.get('real_messages_count', 0)} categorized. "
+        f"Report sent: {result.get('report_sent')}"
+    )
+
+
+if __name__ == "__main__":
+    main()

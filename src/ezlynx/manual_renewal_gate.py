@@ -106,6 +106,20 @@ _LOB_DISPLAY = {
     "dwelling fire": "Dwelling Fire",
     "dwelling": "Dwelling Fire",
     "dp": "Dwelling Fire",
+    "employee practices liability": "Employee Practices Liability",
+    "employment practices liability": "Employee Practices Liability",
+    "empl practices liab": "Employee Practices Liability",
+    "epli": "Employee Practices Liability",
+    "cyber liability": "Cyber Liability",
+    "cyber": "Cyber Liability",
+    "errors and omissions": "Professional Liability",
+    "e&o": "Professional Liability",
+    "professional liability": "Professional Liability",
+    "directors and officers": "Directors and Officers",
+    "d&o": "Directors and Officers",
+    "bonds": "Bonds",
+    "surety": "Bonds",
+    "bonds miscellaneous": "Bonds",
 }
 
 # Extra {LOB} Renewal title stems for the same line (never hardcoded to HO).
@@ -120,6 +134,11 @@ _LOB_RENEWAL_ALIASES = {
     "Flood": ("Flood",),
     "Commercial Package": ("Commercial Package",),
     "Dwelling Fire": ("Dwelling Fire", "Dwelling", "DP"),
+    "Employee Practices Liability": ("Employee Practices Liability", "Empl Practices Liab", "Employment Practices Liability", "EPLI"),
+    "Cyber Liability": ("Cyber Liability", "Cyber"),
+    "Professional Liability": ("Professional Liability", "Errors and Omissions", "E&O"),
+    "Directors and Officers": ("Directors and Officers", "D&O"),
+    "Bonds": ("Bonds", "Surety", "Bonds Miscellaneous"),
 }
 
 

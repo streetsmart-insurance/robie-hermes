@@ -193,20 +193,21 @@ def _upload_attachments_and_maybe_task(
     attached_file_path: Optional[str],
     association_number: Optional[str] = None,
 ) -> bool:
-    """Upload via EZLynxApiClient → document_uploader routing; create the existing CSR task."""
-    if not attached_file_path:
+    """Upload via EZLynxApiClient → document_uploader routing; create the CSR task."""
+    folder_name = "Renewals"
+    if attached_file_path:
+        doc_type = doc_type_for_intent(classification)
+        folder_name, label_to_apply = folder_and_label_for_doc_type(doc_type)
+        ezlynx.upload_document(
+            applicant_id=policy.applicant_id,
+            file_path=Path(attached_file_path),
+            folder_name=folder_name,
+            policy_number=association_number or policy.policy_number,
+            doc_type=doc_type,
+            label_to_apply=label_to_apply,
+        )
+    elif classification.intent != "NON_RENEWAL_DECLINED":
         return False
-
-    doc_type = doc_type_for_intent(classification)
-    folder_name, label_to_apply = folder_and_label_for_doc_type(doc_type)
-    ezlynx.upload_document(
-        applicant_id=policy.applicant_id,
-        file_path=Path(attached_file_path),
-        folder_name=folder_name,
-        policy_number=association_number or policy.policy_number,
-        doc_type=doc_type,
-        label_to_apply=label_to_apply,
-    )
 
     if classification.intent == "QUOTE_ATTACHED":
         task_res = ezlynx.create_user_task(
@@ -217,6 +218,10 @@ def _upload_attachments_and_maybe_task(
                 f"Document uploaded to Documents > {folder_name}."
             ),
             assigned_user=policy.assigned_agent,
+            policy_number=association_number or policy.policy_number,
+            line_of_business=policy.line_of_business,
+            carrier_name=policy.carrier_name,
+            high_priority=False,
         )
         return bool(task_res and task_res.get("status") not in ("simulated", "error", None))
 
@@ -229,18 +234,30 @@ def _upload_attachments_and_maybe_task(
                 f"Document uploaded to Documents > {folder_name}."
             ),
             assigned_user=policy.assigned_agent,
+            policy_number=association_number or policy.policy_number,
+            line_of_business=policy.line_of_business,
+            carrier_name=policy.carrier_name,
+            high_priority=False,
         )
         return bool(task_res and task_res.get("status") not in ("simulated", "error", None))
 
     if classification.intent == "NON_RENEWAL_DECLINED":
+        desc = (
+            f"Carrier issued non-renewal / decline notice for Pol #{policy.policy_number} ({policy.carrier_name}). "
+            f"Immediate action required to re-market or cure requirements with insured."
+        )
+        if attached_file_path:
+            desc += f" Document uploaded to Documents > {folder_name}."
         task_res = ezlynx.create_user_task(
             applicant_id=policy.applicant_id,
             title=f"CRITICAL: Non-Renewal Notice - Re-market {policy.insured_name} ({policy.carrier_name})",
-            description=(
-                f"Carrier issued non-renewal notice for Pol #{policy.policy_number}. "
-                f"Document uploaded to Documents > {folder_name}."
-            ),
+            description=desc,
             assigned_user=policy.assigned_agent,
+            due_days_out=1,
+            policy_number=association_number or policy.policy_number,
+            line_of_business=policy.line_of_business,
+            carrier_name=policy.carrier_name,
+            high_priority=True,
         )
         return bool(task_res and task_res.get("status") not in ("simulated", "error", None))
 
@@ -289,17 +306,18 @@ def file_single_reply(
         policy_numbers=known_numbers,
     )
     if not matched or not matched.get("title"):
-        logger.info(
+        logger.warning(
             f"No existing titled renewal discussion for applicant {policy.applicant_id} "
-            f"/ Pol #{policy.policy_number}; defaulting to 'Email recieved by Robie'."
+            f"/ Pol #{policy.policy_number}; refusing orphan card creation."
         )
-        discussion_title = "Email recieved by Robie"
-        require_existing = False
-        honor_explicit = True
-    else:
-        discussion_title = matched["title"]
-        require_existing = True
-        honor_explicit = False
+        return {
+            "status": "skipped",
+            "reason": "no_existing_titled_discussion",
+            "message_id": message_id,
+            "policy_number": policy.policy_number,
+        }
+
+    discussion_title = matched["title"]
     thread = db.query(OutreachThread).filter(OutreachThread.policy_id == policy.id).first()
     tracking_code = thread.tracking_code if thread else f"RENEWAL-REQ-{policy.id}"
 
@@ -383,8 +401,7 @@ def file_single_reply(
         policy_number=policy.policy_number,
         line_of_business=policy.line_of_business,
         carrier_name=policy.carrier_name,
-        require_existing_discussion=require_existing,
-        honor_explicit_title=honor_explicit,
+        require_existing_discussion=True,
         policy_numbers=known_numbers,
     )
     if isinstance(note_res, dict) and isinstance(note_res.get("discussion_title"), str):
@@ -422,6 +439,7 @@ def file_single_reply(
                 task_created=task_created,
                 note_id=note_id,
                 clean_reply_text=reply.get("clean_reply_text"),
+                cc_carlo=False,
             )
         except Exception as exc:
             logger.error(f"Failed to send CSR/Carlo alert for Pol #{policy.policy_number}: {exc}")
@@ -525,6 +543,7 @@ def file_inbox_replies(
             else:
                 skipped += 1
         except Exception as exc:
+            db.rollback()
             errors += 1
             logger.exception(f"Error filing UW reply {reply.get('message_id')}: {exc}")
             results.append(

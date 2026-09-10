@@ -51,7 +51,7 @@ class ProcessedRobieCallStore:
             return False
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM processed_robie_call_notes WHERE identity = ? LIMIT 1",
+                "SELECT 1 FROM processed_robie_call_notes WHERE identity = ? AND dry_run = 0 LIMIT 1",
                 (identity,),
             ).fetchone()
         return row is not None
@@ -66,7 +66,7 @@ class ProcessedRobieCallStore:
         status: str = "DISPATCHED",
         dry_run: bool = False,
     ) -> None:
-        if not identity:
+        if not identity or dry_run:
             return
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:

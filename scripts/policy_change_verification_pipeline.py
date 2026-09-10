@@ -287,7 +287,7 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
     print("-------------------------------------------------------")
     
     # Save report to audit artifact
-    audit_file = f"/Users/carloferrara/Documents/antigravity/happy-fermi/data/audits/audit_{policy_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    audit_file = f"/opt/renewal-automation-system/data/audits/audit_{policy_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     os.makedirs(os.path.dirname(audit_file), exist_ok=True)
     with open(audit_file, "w") as af:
         af.write(full_report)

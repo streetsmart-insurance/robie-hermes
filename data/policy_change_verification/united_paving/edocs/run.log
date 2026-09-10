@@ -1,0 +1,31 @@
+/tmp/united_paving_edocs.py:100: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  result["ts"] = datetime.utcnow().isoformat() + "Z"
+{
+  "ok": true,
+  "url": "https://app.ezlynx.com/web/account/108248067/documents",
+  "folders": [
+    {
+      "name": "Declarations",
+      "count": 4
+    }
+  ],
+  "files": [
+    "PolicyChangeRequest_Policy No S 2472200_Change Effective 8/31/2026\tDocument\t\nadd\nAdd label\n\tS 2472200\tLenin Perdomo\t08/31/2026\t08/31/2026\t\t\nActions\narrow_drop_down",
+    "PolicyChangeRequest_Policy No S 2472200_Change Effective 8/31/2026\tDocument\t\nadd\nAdd label\n\tS 2472200\tLenin Perdomo\t08/31/2026\t08/31/2026\t\t\nActions\narrow_drop_down",
+    "Brandon DL.jpg\tDocument\t\nadd\nAdd label\n\tN/A\tSandeep Yadav\t08/31/2026\t08/31/2026\t\t\nActions\narrow_drop_down",
+    "United Paving & Masonry LLC - S 2472200.pdf\tDocument\t\nadd\nAdd label\n\tS 2472200\tLenin Perdomo\t08/20/2026\t08/20/2026\t\t\nActions\narrow_drop_down",
+    "6S60UB-0W89857-7-26 Dec pages 5-8 2026.pdf\tDocument\t\nadd\nAdd label\n\tS 2472200\tLenin Perdomo\t08/17/2026\t08/17/2026\t\t\nActions\narrow_drop_down",
+    "PolicyChangeRequest_Policy No S 2472200_Change Effective 8/14/2026\tDocument\t\nadd\nAdd label\n\tS 2472200\tZeus Quezada\t08/14/2026\t08/14/2026\t\t\nActions\narrow_drop_down",
+    "Master Certificate of Liability Insurance 26-27\tCertificate Master\t\nadd\nAdd label\n\tS 2472200\tSteffany Canales\t03/05/2026\t03/05/2026\t\t\nActions\narrow_drop_down",
+    "Renewed Master Certificate of Liability Insurance 25-26\tCertificate Master\t\nadd\nAdd label\n\tS 2472200\tMaria Bara\t03/07/2025\t08/01/2025\t\t\nActions\narrow_drop_down",
+    "PolicyChangeRequest_Policy No S 2472200_Change Effective 2/19/2025\tDocument\t\nadd\nAdd label\n\tS 2472200\tTaylor Cimei\t02/19/2025\t02/19/2025\t\t\nActions\narrow_drop_down",
+    "New Business/Application/Declarations\tFolder\t\tN/A\tJeffrey Chua\t12/18/2024\t12/18/2024\t\t\nActions\narrow_drop_down",
+    "Renewal Offers/Declarations\tFolder\t\tN/A\tJeffrey Chua\t12/18/2024\t12/18/2024\t\t\nActions\narrow_drop_down",
+    "Ryan McDarby\tAdding PickUp and New Driver\t\t7/19/2024 8:48 PM\t7/19/2024 10:11:12 PM\t\nCompleted\n\t\n\t\nActions\narrow_drop_down",
+    "United Paving & Masonry LLC\tPolicy Change Request\t\t10/20/2023 2:18 PM\t\t\nPending\n\t\t\nActions\narrow_drop_down"
+  ],
+  "downloaded": [],
+  "errors": [],
+  "opened_folder": null,
+  "ts": "2026-09-07T01:26:17.083551Z"
+}

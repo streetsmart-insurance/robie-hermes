@@ -1,0 +1,40 @@
+{
+  "pilot_name": "Robie Sales Center & Quoted Lead Outreach Pilot",
+  "version": "1.0.0",
+  "status": "CONTROLLED_PILOT",
+  "approved_producer": {
+    "name": "Jake Ferrara",
+    "email": "jake@streetsmart.insurance",
+    "transfer_did": "+17324812520",
+    "transfer_did_display": "(732) 481-2520"
+  },
+  "approved_lines_of_business": [
+    "Personal Auto",
+    "Homeowners"
+  ],
+  "approved_lead_sources": [
+    "StreetSmart Website",
+    "Website Inbound",
+    "EverQuote",
+    "QuoteWizard",
+    "Sales Center X-Date"
+  ],
+  "agency_contact": {
+    "agency_name": "StreetSmart Insurance",
+    "main_callback_e164": "+17324628343",
+    "main_callback_display": "(732) 462-8343",
+    "main_callback_spoken": "seven three two, four six two, eight three four three",
+    "voice_caller_id": "+17322986745",
+    "robie_email": "robie@streetsmart.insurance"
+  },
+  "cohort_limits": {
+    "max_active_pilot_leads": 50,
+    "min_cohort_size": 25,
+    "max_daily_voice_dials": 20
+  },
+  "contact_hours": {
+    "start_hour": 9,
+    "end_hour": 18,
+    "allowed_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+  }
+}

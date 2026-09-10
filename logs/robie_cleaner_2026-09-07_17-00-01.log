@@ -1,0 +1,41 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-07_17-00-01 ===
+2026-09-07 17:00:02,627 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 17:00:02,948 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 17:00:03,298 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 17:00:03,633 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 17:00:03,933 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-07 17:00:04,227 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-07 17:00:04,276 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 17:00:04,710 [ERROR] gmail_client: Error downloading attachment RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0775c756130946_RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml'
+2026-09-07 17:00:05,033 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-07 17:00:05,201 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-07 17:00:05,653 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-07 17:00:05,789 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 17:00:06,642 [INFO] gmail_client: Downloaded email attachment: 1a07b5958ef75333_POLTRANSNOT-NJSMAR10-09-07-2026-06-10-37_(c).pdf
+2026-09-07 17:00:06,966 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-07 17:00:07,169 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-07 17:00:07,399 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-07 17:00:07,578 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-07 17:00:07,886 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-07 17:00:08,172 [INFO] gmail_client: Downloaded email attachment: 1a07aa15d49c5cb9_Policy29115152937909.Zip
+2026-09-07 17:00:08,901 [INFO] gmail_client: Downloaded email attachment: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-07 17:00:09,392 [INFO] gmail_client: Downloaded email attachment: 1a07810d2f75fea6_HAUL AZZ LLC-Binder-DSLA1000836-00.pdf.pdf
+2026-09-07 17:00:09,400 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-07 17:00:09,402 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-07 17:00:09,404 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-07 17:00:09,406 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-07 17:00:09,407 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-07 17:00:09,408 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-07 17:00:09,410 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-07 17:00:09,411 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-07 17:00:09,413 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-07 17:00:09,414 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-07 17:00:09,416 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-07 17:00:09,416 [INFO] uw_reply_filer: UW reply filing complete: filed=0 skipped=11 errors=0 dry_run=False
+2026-09-07 17:00:09,417 [INFO] robie_cleaner: UW reply filing from cleaner: filed=0 skipped=11 dry_run=False
+2026-09-07 17:00:12,842 [INFO] robie_cleaner: Gathered 33 authentic messages for reporting.
+2026-09-07 17:00:13,100 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a07cd02d4751cb2)
+2026-09-07 17:00:13,100 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a07cd02d4751cb2)
+
+Execution Finished: 0 noise trashed, 33 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-07_17-00-13 ===

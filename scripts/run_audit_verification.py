@@ -163,13 +163,9 @@ def main():
                 print(f"    Dial To   : {res['client_autodial_draft']['phone']} ({res['client_autodial_draft']['recipient']})")
                 print(f"    AI Prompt : \"{res['client_autodial_draft']['prompt'][:120]}...\"")
 
-            if res.get('draft_note'):
-                print("\n  [Discussion Note Preview (ROBIE was here)]:")
-                for note_line in res['draft_note'].splitlines():
-                    print(f"    | {note_line}")
-            else:
-                last_action = res['actions_taken'][-1] if res.get('actions_taken') else 'Audit in progress'
-                print(f"\n  [Status Summary]: {last_action}")
+            print("\n  [Discussion Note Preview (ROBIE was here)]:")
+            for note_line in res['draft_note'].splitlines():
+                print(f"    | {note_line}")
             print("\n")
 
     if args.json:

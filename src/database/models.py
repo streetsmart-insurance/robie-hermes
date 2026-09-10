@@ -29,6 +29,8 @@ class RenewalStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     EXCLUDED_INACTIVE_ACCOUNT = "EXCLUDED_INACTIVE_ACCOUNT"
     EXCLUDED_TEST_ACCOUNT = "EXCLUDED_TEST_ACCOUNT"
+    EXCLUDED_CANCELLATION_PENDING = "EXCLUDED_CANCELLATION_PENDING"
+    ESCALATED_CSR_REVIEW = "ESCALATED_CSR_REVIEW"
     RENEWAL_OFFER_RECEIVED = "RENEWAL_OFFER_RECEIVED"
 
 class ThreadStatus(str, enum.Enum):
@@ -75,8 +77,6 @@ class PolicyRenewal(Base):
     source = Column(String(50), default="Manual", nullable=True, index=True)
     portal_supported = Column(Boolean, default=False)
     portal_url = Column(String(255), nullable=True)
-    # One carrier Robie Call after N=2 quiet follow-ups. Never re-fires.
-    carrier_voice_attempted = Column(Boolean, default=False, nullable=False)
     
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

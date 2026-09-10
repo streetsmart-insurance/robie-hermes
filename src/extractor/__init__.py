@@ -1,13 +1,5 @@
 """Extractor package exports."""
 
-from src.extractor.quote_parser import (
-    ExtractedQuoteData,
-    QuoteDocumentParser,
-    extract_policy_total_premium,
-)
+from src.extractor.quote_parser import QuoteDocumentParser, ExtractedQuoteData
 
-__all__ = [
-    "ExtractedQuoteData",
-    "QuoteDocumentParser",
-    "extract_policy_total_premium",
-]
+__all__ = ["QuoteDocumentParser", "ExtractedQuoteData"]

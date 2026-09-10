@@ -80,12 +80,14 @@ def test_audit_document_classifier():
 def test_carrier_channel_matcher():
     # Assigned Risk tests
     res_pma = CarrierChannelMatcher.match("NJCRIB - Pennsylvania Lumbermans Assigned Risk")
-    assert res_pma["channel"] == "EMAIL"
+    assert res_pma["channel"] == "EMAIL_AND_PHONE"
     assert "policyservices@ormarks.com" in res_pma["underwriter_emails"]
+    assert res_pma.get("phone") == "800-752-1895"
 
     res_njm = CarrierChannelMatcher.match("NJCRIB - New Jersey Manufacturers Assigned Risk")
-    assert res_njm["channel"] == "EMAIL"
+    assert res_njm["channel"] == "EMAIL_AND_PHONE"
     assert "wcumail@njm.com" in res_njm["underwriter_emails"]
+    assert res_njm.get("phone") == "800-232-6600"
 
     res_arwc = CarrierChannelMatcher.match("NJCRIB - Hartford Assigned Risk")
     assert res_arwc["channel"] == "EMAIL"
@@ -102,6 +104,11 @@ def test_carrier_channel_matcher():
 
     res_travelers = CarrierChannelMatcher.match("Travelers")
     assert res_travelers["channel"] == "PORTAL"
+
+    res_nysif = CarrierChannelMatcher.match("NYSIF")
+    assert res_nysif["channel"] == "EMAIL_AND_PHONE"
+    assert "CustomerService@nysif.com" in res_nysif["underwriter_emails"]
+    assert res_nysif.get("phone") == "888-875-5790"
 
 
 def test_audit_note_builder_signature():
@@ -218,3 +225,51 @@ def test_audit_voice_dispatcher():
     assert "Acme Corp" in carrier_prompt
     assert "POL-123" in carrier_prompt
     assert "SS1234" in carrier_prompt
+
+
+def test_audit_verifier_rejects_non_auditable_lob():
+    mock_client = MagicMock()
+    verifier = AuditVerifier(mock_client)
+
+    # Test Commercial Auto rejection (e.g. Kuzy Trucking case)
+    kuzy_row = {
+        "Applicant ID": "194416437",
+        "Account Name": "KUZY TRUCKING LLC",
+        "Policy Number": "9300186932",
+        "Master Company": "GEICO",
+        "Effective Date": "2025-09-02",
+        "Expiration Date": "2026-09-02",
+        "Line of Business": "Auto (Commercial)",
+        "CSR": "Ricardo Aguilar",
+        "Assigned Producer": "Ricardo Aguilar"
+    }
+    result = verifier.process_account(kuzy_row)
+    assert result["state"] == "rejected_non_auditable_lob"
+    assert result["status"] == "REJECTED_NON_AUDITABLE_LOB"
+    assert "not subject to annual payroll audit" in result["error"]
+    # Ensure client API was not called
+    mock_client.get_applicant.assert_not_called()
+
+
+def test_audit_eligibility_gate():
+    from src.intake.safety_gate import AuditEligibilityGate
+
+    # Eligible
+    ok, err = AuditEligibilityGate.is_eligible_for_audit("Workers comp")
+    assert ok is True
+    assert err is None
+
+    ok, err = AuditEligibilityGate.is_eligible_for_audit("WORK")
+    assert ok is True
+
+    # Ineligible
+    ok, err = AuditEligibilityGate.is_eligible_for_audit("Commercial Auto")
+    assert ok is False
+    assert "not subject to payroll audit" in err
+
+    ok, err = AuditEligibilityGate.is_eligible_for_audit("Homeowners")
+    assert ok is False
+
+    ok, err = AuditEligibilityGate.is_eligible_for_audit("BOP")
+    assert ok is False
+

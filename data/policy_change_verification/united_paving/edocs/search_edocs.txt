@@ -1,0 +1,111 @@
+search
+EVA AI
+RA
+note_add
+list
+notifications
+415
+account_tree
+help
+dashboard
+folder_shared
+folder_open
+local_atm
+insert_chart
+settings
+menu_book
+business_center
+power
+redeem
+Applicant Search
+Search Applicants
+Personal Lines
+Commercial Lines
+ Search	
+Hide Search Options
+
+	
+Deleted Applicants
+Search on:
+First Name
+ 
+Last Name
+ 
+Co-Applicant
+ 
+Business Name
+ 
+Email
+ 
+Policy Number
+ 
+Applicant Id
+ 
+City
+ 
+Zip Code
+ 
+Phone Number
+Filter by:
+Personal / Commercial
+<Select>
+Personal
+Commercial
+ 
+Lead Status
+<Select>
+New
+Renewal
+Assigned
+Quoted/Active
+Price not competitive
+Pending Sale
+Proposed
+Campaign Email
+Campaign Phone
+Refused
+Responded
+Sold
+Future Prospect
+Bad Lead
+Ineligible
+Dead Lead
+Duplicate
+ 
+Applicant Type
+<Select>
+Unknown
+Prospect/Lead
+Active Client
+Inactive Client
+ 
+Lead Source
+<Select>
+AAA-CHANGE ME
+Bold Penguin
+Click Rush
+ClickRush
+Cross Sell
+Dave Ramsey
+Facebook
+Google
+InsureNJFlood
+Lead 360
+Lead360
+Maverick Commercial
+Maverick Personal
+Maverick Trucking
+Option 1
+Referral - Other
+Sales Center X-Date
+Savvy
+Sonant Inbound Call
+StreetSmart Website
+Tivly
+Assignment:
+Show only my Applicants 
+Show All Applicants 
+Show Applicants from specific users
+Showing 0 of 0 items.
+EZLynx Five [B06] (SSRobie)
+© EZLynx. All Rights Reserved

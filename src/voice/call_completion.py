@@ -138,6 +138,7 @@ def build_completion_note(
     recording_uploaded: bool = False,
     transcript_attached: bool = False,
     transfer_line: str = "",
+    result_status: str = "Call finished successfully",
 ) -> str:
     """Structured EZLynx note: Policy header + Robie self-markers + transcript."""
     excerpt, truncated = truncate_transcript(transcript)
@@ -149,7 +150,7 @@ def build_completion_note(
     note = (
         f"Policy: #{policy_number} ({line_of_business} - {carrier_name})\n"
         f"Autonomous Carrier Phone Outreach Completed:\n"
-        f"- Result: Call finished successfully\n"
+        f"- Result: {result_status}\n"
         f"- Call ID: {call_id}\n"
         f"- Summary: {summary}\n"
         f"- Audio Recording: {recording_url}\n"
@@ -397,6 +398,16 @@ def handle_completed_call(
         else:
             transfer_line = f"- Transfer: {transfer_outcome}"
 
+    c_status = str(merged.get("status") or merged.get("queue_status") or "").lower()
+    if "cancel" in c_status:
+        call_outcome = "Call cancelled before connecting"
+    elif "fail" in c_status or "error" in c_status:
+        call_outcome = "Call failed or network error"
+    elif not transcript and (not recording_url or recording_url == "N/A"):
+        call_outcome = "Call ended without audio or transcript"
+    else:
+        call_outcome = "Call finished successfully"
+
     note_body = build_completion_note(
         policy_number=policy_number,
         line_of_business=lob,
@@ -408,6 +419,19 @@ def handle_completed_call(
         recording_uploaded=bool(upload_info.get("recording_uploaded")),
         transcript_attached=bool(upload_info.get("transcript_uploaded")),
         transfer_line=transfer_line,
+        result_status=call_outcome,
+    )
+
+    meta = merged.get("metadata") or merged.get("variables") or {}
+    existing_title = (
+        meta.get("discussion_title")
+        or merged.get("discussion_title")
+        or data.get("discussion_title")
+    )
+    target_discussion = (
+        existing_title.strip()
+        if existing_title and existing_title.strip()
+        else "Phone Call by Robie"
     )
 
     ezlynx_posted = False
@@ -416,7 +440,7 @@ def handle_completed_call(
         try:
             res = ezlynx.add_note_to_discussion(
                 applicant_id=int(applicant_id) if str(applicant_id).isdigit() else applicant_id,
-                discussion_title=f"Renewal Manual {lob} | {policy_number} {carrier_name}",
+                discussion_title=target_discussion,
                 note_text=note_body,
                 policy_number=policy_number,
                 line_of_business=lob,
@@ -443,8 +467,13 @@ def handle_completed_call(
     email_sent = False
     if not skip_email:
         try:
+            from src.utils.subject_formatter import format_subject_with_insured_and_policy
             gmail = GmailRenewalClient()
-            email_subj = f"Carrier Call Report: {carrier_name} - Pol #{policy_number} ({insured_name})"
+            email_subj = format_subject_with_insured_and_policy(
+                f"Carrier Call Report: {carrier_name}",
+                insured_name=insured_name,
+                policy_number=policy_number,
+            )
             email_body = f"""Hi there,
 
 Robie has completed the outbound follow-up call with {carrier_name} underwriting.
@@ -465,7 +494,14 @@ Best regards,
 Robie
 StreetSmart Insurance Operations Engine
 """
-            gmail.send_email(to_email=csr_email, subject=email_subj, body_text=email_body)
+            gmail.send_email(
+                to_email=csr_email,
+                subject=email_subj,
+                body_text=email_body,
+                insured_name=insured_name,
+                policy_number=policy_number,
+                applicant_id=str(applicant_id) if applicant_id else None,
+            )
             email_sent = True
         except Exception as exc:
             logger.error("Failed to send CSR email for call %s: %s", call_id, exc)

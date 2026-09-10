@@ -1,0 +1,13 @@
+=================================================================
+🚀 StreetSmart Renewal Daily Pipeline Started at: 2026-09-06_09-00-02
+=================================================================
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/scripts/run_and_report_daily_pipeline.py", line 24, in <module>
+    from src.scheduler.daily_runner import DailyRenewalOrchestrator
+  File "/opt/renewal-automation-system/src/scheduler/daily_runner.py", line 31, in <module>
+    from src.quote_processing.document_parser import QuoteDocumentParser
+ModuleNotFoundError: No module named 'src.quote_processing'
+=================================================================
+❌ CRITICAL: Pipeline crashed with exit code 1 at 2026-09-06 09:00:04
+=================================================================
+Failed to dispatch failure alert: GmailRenewalClient.send_email() got an unexpected keyword argument 'to'

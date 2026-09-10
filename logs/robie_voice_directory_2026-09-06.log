@@ -1,0 +1,18 @@
+2026-09-06T12:00:01+00:00 start voice directory refresh extra=--refresh
+2026-09-06 12:00:01,978 [INFO] StreetSmart directory hook: no export at /opt/renewal-automation-system/data/streetsmart_voice_directory_export.json (set STREETSMART_VOICE_DIRECTORY_JSON to enable).
+2026-09-06 12:00:01,981 [INFO] Wrote 467 voice directory entries to /opt/renewal-automation-system/data/voice_call_directory.json
+{
+  "path": "/opt/renewal-automation-system/data/voice_call_directory.json",
+  "count": 467,
+  "sources": [
+    "known_carrier_phones_seed",
+    "ezlynx_extracted_directory",
+    "streetsmart_directory_hook"
+  ],
+  "source_counts": {
+    "known_carrier_phones_seed": 35,
+    "ezlynx_extracted_directory": 438,
+    "streetsmart_directory_hook": 0
+  }
+}
+2026-09-06T12:00:02+00:00 finish voice directory refresh rc=0

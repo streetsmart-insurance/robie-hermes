@@ -1,0 +1,382 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-type" content="text/html;charset=UTF-8"><title>
+	National General Insurance, Inc.
+</title>
+    <!-- Favicon default is old NatGen arrow, but is overridden by id in code behind -->
+    <link id="ctl00_linkIcon" rel="icon" href="Images/favicon.ico" type="image/ico"><link id="ctl00_linkShortcutIcon" rel="shortcut icon" href="Images/favicon.ico" type="image/x-icon">
+
+    <!-- Datadog RUM -->
+    <script type="text/javascript" src="https://www.datadoghq-browser-agent.com/us1/v7/datadog-rum.js" crossorigin="anonymous"></script>
+    <script type="text/javascript">
+        window.DD_RUM && window.DD_RUM.init({
+            clientToken: 'pub828f594412c7b8b35d8f4ceea7f1b22e',
+            applicationId: '414858ea-8939-40ad-990c-84b511ba56c9',
+            site: 'datadoghq.com',
+            service: '041800001t95---natgen-pl',
+            env: 'live',
+            version: '3.131.54.0',
+            sessionSampleRate: 100,
+            sessionReplaySampleRate: 20,
+            defaultPrivacyLevel: 'mask'
+        })
+    </script>
+
+    <script type="text/javascript">
+        
+        window.DD_RUM && window.DD_RUM.setUser({
+            id: '8d1ca8e5-a458-4f56-93a2-bd05eb3bb7e9',
+        });
+        
+    </script>
+
+    <script type="text/javascript" src="/Scripts/HackTimer.min.js?v=639239151078166808"></script>
+    <script type="text/javascript" src="/Scripts/HackTimerWorker.min.js?v=639239151077817362"></script>
+
+    <link id="ctl00_googleFontsRoboto" rel="stylesheet" type="text/css" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,400,400italic,500,500italic,700,700italic&amp;subset=latin">
+
+    <!-- SP 153468 track branding to load refactored minified bundle - JSpetz 09/29/2021 -->
+    <!-- AllState will be default; NatGen is legacy compatible so explicitly allow for IE6 -->
+    <link rel="stylesheet" type="text/css" href="/Styles/MasterAllState?v=8qkn1ya5RqiKFk3SSvG6JdOucEQ88KByUsvTmQ-jlrg1">
+<script type="text/javascript" src="/bundles/Master?v=-nDJoG6BEkMJSAgVQqdlfKR6uF5DAghZ_JZxihq-F1M1"></script>
+
+        <script type="text/javascript">
+            //<![CDATA[
+            window.onerror = function (msg, url, lineNo, columnNo, error) {
+                function suppressError() {
+                    var isEcomm = false;
+                    if (isEcomm) {
+                        Helpers.ConsoleMessage('Suppressing error...');
+                        return true;
+                    }
+
+                    var filePath = '/ErrorPage.aspx';
+                    var ecommRegEx = /Register|LoginInsured/gi;
+                    if (ecommRegEx.test(filePath)) {
+                        Helpers.ConsoleMessage('Suppressing error...');
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                
+
+                if (!msg.toLowerCase().indexOf('script error') > -1 && !suppressError()) {
+                    try {
+                        var ParameterData = '{';
+                        ParameterData += 'message: "##"'.replace('##', msg);
+                        ParameterData += ', url: "##"'.replace('##', url);
+                        ParameterData += ', userAgent: "##"'.replace('##', navigator.userAgent);
+                        ParameterData += ', stack: "##"'.replace('##', (error && error.stack) ? error.stack : 'Undefined');
+                        ParameterData += ', agentID: ##'.replace('##', 113563);
+                        ParameterData += ', policyID: ##'.replace('##', -1);
+                        ParameterData += ', quoteNum: ##'.replace('##', -1);
+                        ParameterData += ', loginUserId: "##"'.replace('##', '8d1ca8e5-a458-4f56-93a2-bd05eb3bb7e9');
+                        ParameterData += ', loginProviderType: "##"'.replace('##', 'Nis');
+                        ParameterData += '}';
+
+                        var xhr;
+                        if (window.XMLHttpRequest) {
+                            xhr = new window.XMLHttpRequest;
+                        }
+                        else {
+                            try {
+                                xhr = new ActiveXObject("MSXML2.XMLHTTP.3.0");
+                            }
+                            catch (ex) {
+                                xhr = new XMLHttpRequest();
+                            }
+                        }
+
+                        xhr.open('POST', '/WebMethods/General.asmx/LogJavascriptError', true);
+                        xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+                        xhr.setRequestHeader('Accept', 'application/json; charset=utf-8');
+                        xhr.setRequestHeader('__RequestVerificationToken', $('[name=__RequestVerificationToken]').val());
+                        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+                        xhr.send(ParameterData);                        
+                    }
+                    catch (ex) {
+                        Helpers.ConsoleMessage('There was a problem logging the JavaScript error:');
+                        Helpers.ConsoleMessage(ex);
+                    }
+                }
+
+                return true;
+            };
+            //]]>
+        </script>
+    
+
+    <script type="text/javascript">
+        //<![CDATA[
+        var loadingImgUri = '/Images/ajax-loader-small.gif';
+        //]]>
+    </script>
+
+    <script type="text/javascript">
+        //<![CDATA[
+        Globals.BaseURL = '/';
+        Globals.SessionTracker.LogoutRedirectUrl = 'https://natgenagency.com/Logout.aspx';
+
+        
+        var baseURL = '/';
+        var lastNameFormatting = 'False'
+        //]]>
+    </script>
+    
+    <style type="text/css">
+        .layoutAH span.button:has(a[disabled="disabled"]):hover
+        ,.layoutAH span.button:has(a:disabled):hover
+        ,.layoutAH span.button:has(a.disabled):hover
+        ,.layoutAH span.button:has(a[disabled="disabled"])
+        ,.layoutAH span.button:has(a:disabled)
+        ,.layoutAH span.button:has(a.disabled){ box-shadow: none; background-color: #CCF3EC; }
+    </style>
+</head>
+<body class="GMAC" style="position: relative;">
+    <script type="text/javascript">
+        //<![CDATA[
+		
+        var data = new Image();
+        data.onload = data.onerror = function () {
+            if (this.width != 1 || this.height != 1) {
+                document.documentElement.className += " no-data-uri";
+            }
+        }
+        data.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        //]]>
+    </script>
+    <div id="container-wrapper" style="margin: 0; padding: 0;">
+        <div id="container">
+            
+            <div style="display: none">
+                <img id="imgTracker" src="/Images/spacer.gif" height="0" width="0" alt="Abandonment Tracker">
+            </div>
+            <form name="aspnetForm" method="post" action="./ErrorPage.aspx?eid=382707897" id="aspnetForm">
+<div>
+<input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value="" style="">
+<input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="" style="">
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="Qg31+3T8/Zkb2fDO/JDD2gBI325pHC3QRKpVAXjNcaf0E9gMHm5JacUwEO57BxA71oQBvrCtmUSjpWKnsL2PkwJJ5ilmJzz3DJdGnlghgRu7mNkuz9VNXnABj9LsymZcEk1GaiDvR/E5i8FPcTE7+SVx3udH4J3lx2Ek71nuDbgbmTvg4P0rIkKaQjrmi3AkHE6zWu+fb6s74GZ9oTnEBQZsKUineVxdXpF3+369TqenIUabG7Ic8Kp9BrvO1wDdxeZ/j4q6qG4PcXpYme1ucqv9w07gSXIoENleMQgw7q41rjIWarHRyYyl5iue+1QfMk4NJWZdfN88uhjvg5+eh2iwA/2dSzs4Go3kYzuhTYslv54+fjlGBAHseUCjvCM+FtrsAHb6T07y6yaU0rBdb8VsIKc1l2oSL3ZzBr5L/lPZ6rmhzoqLjjt2ubGo+h7ywG5ewpxtPnz5uWW6voijxF9OV5++e2nx60lJ49zX4S1Y6b44cRNhRVRB+wiiPzb+xlx6Exb2opBtHpZT4iBlQADcBG9mAdXgioW7LuFiPXP7aN1X7w7nORMAuQy2JZJhAADj8bNSw3z/98JYidGogmqvcXWwESAs66Z/nl3wCHZROgGO3FWdbwpG0KcXhfPlj8gLO2eVnOjzU2neK9WswJ3Y132jd73d/umdPrAQ6sxc72/Flxc6H8+lsmH+KZcj+kpXBag//kg1Ba+zAPL8NH55ERjxt8ZKKbUoJWTW+kY=" style="">
+</div>
+
+<script type="text/javascript">
+//<![CDATA[
+var theForm = document.forms['aspnetForm'];
+if (!theForm) {
+    theForm = document.aspnetForm;
+}
+function __doPostBack(eventTarget, eventArgument) {
+    if (!theForm.onsubmit || (theForm.onsubmit() != false)) {
+        theForm.__EVENTTARGET.value = eventTarget;
+        theForm.__EVENTARGUMENT.value = eventArgument;
+        theForm.submit();
+    }
+}
+//]]>
+</script>
+
+
+<script src="/WebResource.axd?d=pynGkmcFUV13He1Qd6_TZDr3o9VuQCyw8xBaZrzqvqTMyMy5TiaiQ2_RGB5gATcg7ocxewesp8bQLIga_CzRMg2&amp;t=639190732880000000" type="text/javascript"></script>
+
+<div>
+
+	<input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="5ED29197" style="">
+	<input type="hidden" name="__VIEWSTATEENCRYPTED" id="__VIEWSTATEENCRYPTED" value="" style="">
+	<input type="hidden" name="__PREVIOUSPAGE" id="__PREVIOUSPAGE" value="I6kgCUqGIHAGhyN0tdpB2S-9za0Nyj357fuh4F2pbL5IZsoqa3OrNituGmk5zR_NIq4RCksNMDKKM5dAUKQakQ2" style="">
+	<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="zpo4X0+mCxcSQbZKyqXCy9aPdS6x4HOwotjY0U5LijrzSI5WeudUH++P2Z5cgkk7stUuk3skRE2sXASakb10mAlz2iAkjH/6+x+daD7mHdXhnuVejowQWXluDyvYMuF2+Kc8VWJpN0J2LIcZtOfopHcxQIcwmMAZKbiiEAbHT8RAIJRFYpX8Zfv+p7kPLi705S8ordy7vzpvXxSVETBPuQ==" style="">
+</div>
+                <input name="__RequestVerificationToken" type="hidden" value="0ox5rXHcGpj077OiQS3hK4pyjm7kquphtwudhljdI_Hi1H_pbxQXtVdp_279XqJ7ceEXvT7ICDQrzMdWVBy25OMaQFEqYQSRrwc28PJPFH3H4iKG9OSNuoQ1IjjP73CbuSKbIGLGEIwcmdzQOOgfog2" style="">
+
+            <script type="text/javascript">
+                //<![CDATA[
+                $(document).ajaxSend(function(event, jqxhr, settings) {
+                    if (settings.type === 'POST' || settings.type === 'PUT') {
+                        jqxhr.setRequestHeader("__RequestVerificationToken", $('[name=__RequestVerificationToken]').val());
+                    }
+                })
+                //]]>
+            </script>
+                <div id="main">
+                    <script type="text/javascript">
+                    //<![CDATA[
+                        Globals.IsLocal = false;
+                        Globals.Lockdown.FileRoom = false;
+                        Globals.Lockdown.Cancellation = false;
+                        Globals.Container.IsPolicy = false;
+                        Globals.Container.IsQuote = false;
+                        Globals.Container.Exists = false;
+                        Globals.BaseURL = '/';
+                        Globals.LoginType = 'Agent';
+                        Globals.ProductVersion = '';
+                    //]]>
+                    </script>
+
+                    
+                    
+                    <div id="ctl00_pnlMasterHeader" class="pnlMasterHeader">
+	
+                        <input type="hidden" name="ctl00$hdnLoggedInAgtID" id="ctl00_hdnLoggedInAgtID" value="113563" style="">
+                        <input type="hidden" name="ctl00$hdnCrosssellProduct" id="ctl00_hdnCrosssellProduct" style="">
+                        <span id="ctl00_lblHiddenIdNumber" style="display: none;"></span>
+                        <span id="ctl00_lblHiddenPlanCode" style="display: none;"></span>
+                        <span id="ctl00_lblHiddenMediaCode" style="display: none;"></span>
+                        <span id="ctl00_lblHiddenState" style="display: none;"></span>
+                        <span id="ctl00_lblHiddenProduct" style="display: none;">Uninitialized</span>
+                        <span id="ctl00_lblHiddenEnvironment" style="display: none;">Prod</span>
+                        <div id="ctl00_tdLogo" class="MASTERLOGO">
+
+	</div>
+                        
+
+                        
+
+                        
+
+                        <div id="ctl00_pnlMasterHeaderRight" class="pnlMasterHeaderRight" style="text-align: right; position: absolute; top: 3px; right: 10px;">
+		
+                            <span id="ctl00_lblVirtualAgentPhone" style="position: relative; top: 66px; right: 80px; font-size: larger; color: #3551A3; font-weight: bold; display: block;"></span>
+                            
+                            
+                            <span id="ctl00_lblHeaderPageTitle" class="pgMasterPage-HeaderPageTitleCSS">Error Page</span>
+                            
+                            <span id="ctl00_lblInsName" class="font-main" style="color: #666666; font-size: medium"></span>
+                            <span id="ctl00_lblHeaderPageTitleTop" class="font-main" style="color: #666666; font-size: medium;"></span>
+
+                            
+                            <span id="ctl00_lblMoreInfo" style="display: block; font-size: 10px;"></span>
+                            
+                        
+	</div>
+                        
+                        
+                            <span id="ctl00_lblInfo" class="pgMasterPage-InfoLabelTitle"></span>
+                        
+                        
+                        <div id="ctl00_pnlLoggedUser" class="pnlLoggedUser">
+		
+                            <span id="ctl00_lblUserFullName" style="font-size: x-small; font-weight: bold;">Hello, Carlo, Streetsmart Risk Managers, Inc 9010158.</span>
+                            <a id="ctl00_lblLoginManagement" href="javascript:__doPostBack('ctl00$lblLoginManagement','')" style="font-size: x-small;" oncontextmenu="return false;">Login Management</a>
+                            <span id="ctl00_lblLoggedUserLinkDivider" style="font-size: x-small; font-weight: bold;">|</span>
+                            <a onclick="setTargetSelf();" id="ctl00_lblLogOut" href="javascript:WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;ctl00$lblLogOut&quot;, &quot;&quot;, false, &quot;&quot;, &quot;Logout.aspx&quot;, false, true))" style="font-size: x-small;" oncontextmenu="return false;">Log Out &gt;</a>
+                        
+	</div>
+                    
+</div>
+                    
+                    
+                    
+                    <table class="mainContent PAGE" cellpadding="0" cellspacing="0">
+                        <tbody><tr>
+                            <td align="left" valign="top" style="min-height: 300px; padding-top: 3px;" class="MainContent-wrapper">
+                                
+    <div id="ctl00_MainContent_pnlErrorDisplay">
+	
+        An error has been detected.   If you continue to experience this problem, please contact us with the reference number below.
+        <table width="100%" align="center">
+            <tbody><tr>
+                <td align="left">
+                </td>
+            </tr>
+        </tbody></table>
+        <table width="100%" align="center">
+            <tbody><tr>
+                <td align="center">
+                    Your Reference Number is:
+                    <span id="ctl00_MainContent_lblReferenceNumber" style="font-weight: bold">382707897</span>
+                </td>
+            </tr>
+            <tr>
+                <td align="left">
+                </td>
+            </tr>
+            <tr>
+                <td align="center">
+                    <div id="ctl00_MainContent_pnlDetails">
+		
+                        
+                    
+	</div>
+                </td>
+            </tr>
+        </tbody></table>
+        <table width="100%" align="center">
+            <tbody><tr>
+                <td align="center">
+                    <a id="ctl00_MainContent_btnReturnHome" class="BLUEHEADER" href="javascript:__doPostBack('ctl00$MainContent$btnReturnHome','')" style="display:inline-block;width:225px;" oncontextmenu="return false;">Return to Home Screen</a>
+                </td>
+            </tr>
+        </tbody></table>
+    
+</div>
+
+                            </td>
+                        </tr>
+                    </tbody></table>
+                    <div id="divPostMainContent">
+                        
+                    </div>
+                </div>
+                <div id="footer">
+                    
+                    <span class="COPYRIGHT">
+                        © 2026
+                        <span id="ctl00_footerWording">National General, an Allstate company. All rights reserved.</span>
+                        <span id="ctl00_lblFooterServerNode" style="display: block;">Node PWV14</span>
+                        
+                    </span>
+                    <div class="allstate-ecomm" style="display: none;">
+	                    <div class="beacon"></div>
+	                    <div class="links">
+		                    <a href="https://www.allstate.com/privacy-center/Online/onlineprivacystatement" target="_blank" rel="noopener" oncontextmenu="return false;">Privacy Policy</a> 
+		                    <a href="https://www.allstate.com/privacy-center/Online/terms-of-use" target="_blank" rel="noopener" oncontextmenu="return false;">Terms &amp; Conditions</a> 
+	                    </div>
+	                    <div style="width: 130px;justify-content: right;align-content: center;text-align: right; padding-right:5px; font-size:19px; color:#0033a0;">
+		                    <div style="float: right;margin: 15% 0 0 0;"><sup style="font-size:19px;">®</sup></div>
+		                    <div style="float: right;font-weight:bold;">
+			                    <span style="color: #0e1941;">you're in</span><br>
+			                    <span>good hands</span>
+		                    </div>
+	                    </div>
+                    </div>
+                    <div class="allstate-ecomm-copyright" style="display: none;">© 2026 Allstate Insurance Company, Northbrook, IL. All rights reserved.</div>
+                </div>
+            </form>
+        </div>
+    </div>
+    <div id="sessionTimeoutWarning" style="display: none; position: relative;"></div>
+
+    
+
+    <div id="OverlayBlock" class="blue noSelect" style="display: none;">
+        <span id="ProcessingMaskMessage" class="ProcessingMaskMessage"></span>
+        <span id="ajaxSpinner" class="ajaxSpinner" style="background-position: -16px 0px;"></span>
+        <span id="loadingText" class="loadingText"></span>
+    </div>
+    <div id="ProcessingMask" class="ProcessingMask noSelect" style="display: none;"></div>
+    
+        <script type="text/javascript">
+            $(document).ready(function () {
+                Globals.PageLoad(); });
+        </script>
+    
+
+    <script type="text/javascript">
+        //<![CDATA[
+        RegisterDynaDdl('select.DynaDdl');
+	    
+            $('a').attr('oncontextmenu', 'return false;');
+        
+        //]]>
+
+        //AGrbach SP119385 Ancillary stated that all the things should be locked down for Ancillary cancellations
+        $(window).on('load', function () {
+            if (Globals.Lockdown.Cancellation) {
+                window.setTimeout(function () {
+                    $("#pageContent input").each(function () { if (!($(this).hasClass("NoLock-AncillaryCancel"))) { Helpers.DisableItem(this); } });
+                    $("#pageContent select").each(function () { if (!($(this).hasClass("NoLock-AncillaryCancel"))) { Helpers.DisableItem(this); } });
+                }, 0);
+            }
+        });
+    </script>
+
+
+</body></html>

@@ -1,0 +1,13 @@
+[
+  {
+    "record_id": "SUPP-FD8B7415EF2E",
+    "phone_hash": "6da0b94111aee86b54a1573ec2653bdd237c8cdfd49d2b95f7011ece21b979a7",
+    "email_hash": "86e0b9e56c17cc4d12387e1949b85053fbe73bc3ce5a1188713a9d300cc6133d",
+    "applicant_id": "AP-201",
+    "channel": "ALL",
+    "reason": "OPT_OUT_CALL",
+    "source_workflow": "INBOUND_LEAD",
+    "created_at": "2026-09-08T23:20:42.503450",
+    "notes": "Triggered by VOICE_DISPOSITION_NOT_INTERESTED at 2026-09-08T23:20:42.503442"
+  }
+]

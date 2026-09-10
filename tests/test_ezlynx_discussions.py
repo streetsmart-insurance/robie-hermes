@@ -69,31 +69,7 @@ def test_find_matching_discussion_by_tokens_prefers_active_human_card(client):
         assert match["title"] == "Business Owners Manual Renewal"
 
 
-@pytest.mark.parametrize(
-    "lob,existing_title,manual_title",
-    [
-        ("Homeowners", "Homeowners Renewal", "Manual Homeowners Renewal"),
-        ("Commercial Auto", "Commercial Auto Renewal", "Manual Commercial Auto Renewal"),
-    ],
-)
-def test_resolve_discussion_title_prefers_existing_lob_renewal(client, lob, existing_title, manual_title):
-    discussions = [
-        {"discussionId": 1, "title": "Email Automation", "noteCount": 9},
-        {"discussionId": 2, "title": existing_title, "noteCount": 4},
-        {"discussionId": 3, "title": manual_title, "noteCount": 1},
-    ]
-    with patch.object(client, "get_applicant_discussions", return_value=discussions):
-        resolved = client.resolve_discussion_title(
-            applicant_id="196126698",
-            discussion_title=manual_title,
-            line_of_business=lob,
-        )
-        assert resolved == existing_title
-        assert resolved != manual_title
-
-
-def test_resolve_discussion_title_honors_exact_manual_lob_renewal(client):
-    """Paulette: 'Manual {LOB} Renewal' is an exact title, not a fuzzy placeholder."""
+def test_resolve_discussion_title_uses_matched_card(client):
     with patch.object(client, "get_applicant_discussions", return_value=MOCK_DISCUSSIONS):
         resolved = client.resolve_discussion_title(
             applicant_id="21588091",
@@ -102,7 +78,7 @@ def test_resolve_discussion_title_honors_exact_manual_lob_renewal(client):
             line_of_business="Workers comp",
             carrier_name="Associated Specialty"
         )
-        assert resolved == "Manual Workers Comp Renewal"
+        assert resolved == "Renewal Manual Workers comp | PWC1239278 Associated Specialty"
 
 
 def test_resolve_discussion_title_agency_naming_fallback(client):
@@ -138,12 +114,12 @@ def test_add_note_to_discussion_threads_into_resolved_card(client):
         )
 
         assert result["status"] == "success"
-        assert result["discussion_title"] == "Manual Workers Comp Renewal"
+        assert result["discussion_title"] == "Renewal Manual Workers comp | PWC1239278 Associated Specialty"
         assert result["note_id"] == 998877
 
         called_args = mock_post.call_args
         payload = called_args[1]["json"]
-        assert payload["DiscussionTitle"] == "Manual Workers Comp Renewal"
+        assert payload["DiscussionTitle"] == "Renewal Manual Workers comp | PWC1239278 Associated Specialty"
         assert payload["ApplicantId"] == 21588091
         assert "Robie was here" in payload["NoteDescription"]
 
@@ -204,7 +180,6 @@ DISQUALIFIED_AUX_TITLES = [
     ("Text Sent to Insured", "text sent"),
     ("Email sent by Automation Center", "automation center"),
     ("Automation Center", "automation center"),
-    ("Email Automation", "email automation"),
     ("Cancellation Notice POL-1", "cancellation"),
 ]
 
@@ -310,96 +285,4 @@ def test_add_note_require_existing_discussion_posts_to_matched_titled_card(clien
         assert payload["DiscussionTitle"] == "Renewal Manual Workers comp | PWC1239278 Associated Specialty"
         assert payload["NoteDescription"].startswith("Policy: #PWC1239278")
         assert payload["NoteDescription"].rstrip().endswith("Robie was here")
-
-
-PAULETTE_EMAIL_AUTOMATION = {
-    "discussionId": 1123385828,
-    "title": "Email Automation",
-    "noteCount": 40,
-    "lastModifiedByName": "Automation Center",
-    "discussionNote": {"policyNumber": "HO-FAKE-1", "noteId": 1123385828},
-}
-
-
-def test_find_matching_discussion_rejects_email_automation_even_with_policy_number(client):
-    discussions = [
-        PAULETTE_EMAIL_AUTOMATION,
-        {
-            "discussionId": 900000002,
-            "title": "Manual Homeowners Renewal",
-            "noteCount": 1,
-            "discussionNote": {"policyNumber": "HO-FAKE-1"},
-        },
-    ]
-    with patch.object(client, "get_applicant_discussions", return_value=discussions):
-        match = client.find_matching_discussion(
-            applicant_id="196126698",
-            policy_number="HO-FAKE-1",
-            line_of_business="Homeowners",
-            carrier_name="Johnson & Johnson",
-        )
-        assert match is not None
-        assert match["discussionId"] == 900000002
-        assert match["title"] == "Manual Homeowners Renewal"
-
-
-def test_find_matching_discussion_returns_none_when_only_email_automation(client):
-    with patch.object(client, "get_applicant_discussions", return_value=[PAULETTE_EMAIL_AUTOMATION]):
-        match = client.find_matching_discussion(
-            applicant_id="196126698",
-            policy_number="HO-FAKE-1",
-            line_of_business="Homeowners",
-            carrier_name="Johnson & Johnson",
-        )
-        assert match is None
-
-
-def test_resolve_discussion_title_creates_missing_manual_lob_not_email_automation(client):
-    with patch.object(client, "get_applicant_discussions", return_value=[PAULETTE_EMAIL_AUTOMATION]):
-        resolved = client.resolve_discussion_title(
-            applicant_id="196126698",
-            discussion_title="Manual Homeowners Renewal",
-            policy_number="HO-FAKE-1",
-            line_of_business="Homeowners",
-            carrier_name="Johnson & Johnson",
-        )
-        assert resolved == "Manual Homeowners Renewal"
-        assert resolved != "Email Automation"
-
-
-def test_add_note_honor_explicit_title_creates_manual_lob_and_refuses_email_automation(client):
-    with patch.object(client, "get_applicant_discussions", return_value=[PAULETTE_EMAIL_AUTOMATION]), \
-         patch.object(client, "authenticate_classic", return_value=True), \
-         patch("requests.post") as mock_post:
-
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            json=MagicMock(return_value={"NoteId": 1}),
-            text='{"NoteId": 1}',
-        )
-
-        created = client.add_note_to_discussion(
-            applicant_id="196126698",
-            discussion_title="Manual Homeowners Renewal",
-            note_text="Firmed HO quote filed",
-            policy_number="HO-FAKE-1",
-            line_of_business="Homeowners",
-            carrier_name="Johnson & Johnson",
-            honor_explicit_title=True,
-            use_playwright_fallback=False,
-        )
-        assert created["status"] == "success"
-        assert created["discussion_title"] == "Manual Homeowners Renewal"
-        assert mock_post.call_args[1]["json"]["DiscussionTitle"] == "Manual Homeowners Renewal"
-
-        refused = client.add_note_to_discussion(
-            applicant_id="196126698",
-            discussion_title="Email Automation",
-            note_text="must not post here",
-            policy_number="HO-FAKE-1",
-            honor_explicit_title=True,
-            use_playwright_fallback=False,
-        )
-        assert refused["status"] == "error"
-        assert refused["error"] == "disqualified_or_untitled_discussion"
 

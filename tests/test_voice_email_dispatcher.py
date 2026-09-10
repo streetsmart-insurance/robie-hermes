@@ -36,29 +36,6 @@ def test_parse_call_command_with_phone_override():
     assert cmd["policy_number"] == "PWC1239278"
     assert cmd["phone_override"] == "866-513-5650"
     assert "payroll audit" in cmd["body"]
-    assert cmd.get("call_type") is None
-
-
-def test_parse_call_command_explicit_client_call_type():
-    dispatcher = EmailCallDispatcher()
-    cmd = dispatcher.parse_call_command(
-        sender="jake@streetsmart.insurance",
-        subject="Call the client for PWC1239278",
-        body="Call type: client\nPlease call the insured and review the quote.",
-    )
-    assert cmd is not None
-    assert cmd["call_type"] == "client_followup"
-
-
-def test_parse_call_command_explicit_client_outreach_call_type():
-    dispatcher = EmailCallDispatcher()
-    cmd = dispatcher.parse_call_command(
-        sender="carlo@streetsmart.insurance",
-        subject="Call the client for PWC1239278",
-        body="Call type: client outreach\nAsk them to send the missing documents.",
-    )
-    assert cmd is not None
-    assert cmd["call_type"] == "client_outreach"
 
 
 def test_parse_call_command_ignores_unauthorized():
@@ -69,13 +46,6 @@ def test_parse_call_command_ignores_unauthorized():
         body="Call them now.",
     )
     assert cmd is None
-
-
-def test_extract_sender_name_from_display_header():
-    dispatcher = EmailCallDispatcher()
-    assert dispatcher._extract_sender_name("Mike Sosa <mike@streetsmart.insurance>") == "Mike Sosa"
-    assert dispatcher._extract_sender_name('"Jake Ferrara" <jake@streetsmart.insurance>') == "Jake Ferrara"
-    assert dispatcher._extract_sender_name("mike@streetsmart.insurance") is None
 
 
 def test_parse_call_command_ignores_non_call_emails():

@@ -207,16 +207,10 @@ def test_file_inbox_replies_posts_formatted_note_and_skips_disqualified_card(db,
     assert audit.discussion_title == "Commercial Auto Renewal (2026-2027)"
 
 
-def test_file_inbox_replies_falls_back_to_email_recieved_by_robie_when_no_matching_discussion(db, policy):
+def test_file_inbox_replies_skips_when_only_disqualified_discussions_exist(db, policy):
     mock_gmail = MagicMock()
     mock_ezlynx = MagicMock()
     mock_ezlynx.find_matching_discussion.return_value = None
-    mock_ezlynx.add_note_to_discussion.return_value = {
-        "status": "created",
-        "discussion_id": "disc_fallback_99",
-        "discussion_title": "Email recieved by Robie",
-        "note_id": "note_fallback_1",
-    }
 
     summary = file_inbox_replies(
         db=db,
@@ -228,13 +222,10 @@ def test_file_inbox_replies_falls_back_to_email_recieved_by_robie_when_no_matchi
         alert_csr=False,
     )
 
-    assert summary["filed"] == 1
-    assert summary["skipped"] == 0
-    mock_ezlynx.add_note_to_discussion.assert_called_once()
-    call_kwargs = mock_ezlynx.add_note_to_discussion.call_args[1]
-    assert call_kwargs["discussion_title"] == "Email recieved by Robie"
-    assert call_kwargs["require_existing_discussion"] is False
-    assert call_kwargs["honor_explicit_title"] is True
+    assert summary["filed"] == 0
+    assert summary["skipped"] == 1
+    assert summary["results"][0]["reason"] == "no_existing_titled_discussion"
+    mock_ezlynx.add_note_to_discussion.assert_not_called()
 
 
 def test_file_inbox_replies_skips_carlo_inbox_even_if_injected(db, policy):

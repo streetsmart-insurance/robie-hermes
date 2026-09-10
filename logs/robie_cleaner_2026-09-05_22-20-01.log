@@ -1,0 +1,67 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-05_22-20-01 ===
+2026-09-05 22:20:03,150 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 22:20:03,524 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 22:20:03,851 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 22:20:04,318 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 22:20:04,601 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-05 22:20:04,882 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-05 22:20:04,949 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-05 22:20:05,467 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-05 22:20:05,792 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-05 22:20:06,263 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-05 22:20:06,521 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-05 22:20:06,869 [INFO] policy_aliases: Aliased app.ezlynx.com/web/account/21588091/ (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,870 [INFO] policy_aliases: Not aliasing PWC1239278 onto policy 30: already bound to policy 74
+2026-09-05 22:20:06,883 [INFO] policy_aliases: Aliased app.ezlynx.com/web/account/220250093/ (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,883 [INFO] policy_aliases: Not aliasing UB-6N448514-25-42-V onto policy 30: already bound to policy 63
+2026-09-05 22:20:06,897 [INFO] policy_aliases: Aliased app.ezlynx.com/web/account/144897143/ (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,910 [INFO] policy_aliases: Aliased app.ezlynx.com/web/account/58768907/ (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,910 [INFO] policy_aliases: Not aliasing 268224700A onto policy 30: already bound to policy 17
+2026-09-05 22:20:06,924 [INFO] policy_aliases: Aliased app.ezlynx.com/web/account/199797602/ (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,925 [INFO] policy_aliases: Not aliasing CCP35165-01 onto policy 30: already bound to policy 62
+2026-09-05 22:20:06,938 [INFO] policy_aliases: Aliased UB-6N448514-25-4 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,949 [INFO] policy_aliases: Aliased org_020b04143009 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,962 [INFO] policy_aliases: Aliased org_020b04143009fc2cd8e95b2d711a20c890cd (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,976 [INFO] policy_aliases: Aliased 6S60UB (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,990 [INFO] policy_aliases: Aliased A422965-3-25 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:06,990 [INFO] policy_aliases: Not aliasing CBB-00113127-02 onto policy 30: already bound to policy 1
+2026-09-05 22:20:07,002 [INFO] policy_aliases: Aliased BL8665 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,015 [INFO] policy_aliases: Aliased 0725HN (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,028 [INFO] policy_aliases: Aliased MGL0200092 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,041 [INFO] policy_aliases: Aliased MXL0446256 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,053 [INFO] policy_aliases: Aliased CAPI075976 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,065 [INFO] policy_aliases: Aliased ACONKLI2 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,066 [INFO] policy_aliases: Not aliasing 02TRM066190-01 onto policy 30: already bound to policy 50
+2026-09-05 22:20:07,078 [INFO] policy_aliases: Aliased WPH5080304 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,079 [INFO] policy_aliases: Not aliasing TNF4012536 onto policy 30: already bound to policy 67
+2026-09-05 22:20:07,080 [INFO] policy_aliases: Not aliasing 6S60UB-A448971-5-26 onto policy 30: already bound to policy 66
+2026-09-05 22:20:07,093 [INFO] policy_aliases: Aliased TPM5334908-00 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,106 [INFO] policy_aliases: Aliased CW5342160-00 (renewal_term) → Pol #6S60UB A422965-3-25 (id=30)
+2026-09-05 22:20:07,325 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 102351931
+2026-09-05 22:20:07,325 [INFO] ezlynx_api: Matched discussion by policy# '6S60UB A422965-3-25': 'Workers Compensation Manual Renewal' (ID 827318436)
+2026-09-05 22:20:07,559 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 102351931
+2026-09-05 22:20:07,559 [INFO] ezlynx_api: Matched discussion by policy# '6S60UB A422965-3-25': 'Workers Compensation Manual Renewal' (ID 827318436)
+2026-09-05 22:20:08,079 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-05 22:20:08,545 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 102351931: NoteId 1123347897 into 'Workers Compensation Manual Renewal'
+2026-09-05 22:20:08,597 [INFO] email_handoff: Sending immediate underwriter reply notification to sandy@streetsmart.insurance for Pol #6S60UB A422965-3-25
+2026-09-05 22:20:08,786 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to sandy@streetsmart.insurance (Msg ID: 1a073a85c6073801)
+2026-09-05 22:20:08,891 [INFO] gmail_client: Marked message 1a0738c912f4eabd as READ.
+2026-09-05 22:20:08,893 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-05 22:20:08,895 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-05 22:20:08,897 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e1922727d73b for Pol #106793-4-25
+2026-09-05 22:20:08,898 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-05 22:20:08,899 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-05 22:20:08,901 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-05 22:20:08,902 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-05 22:20:08,904 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-05 22:20:08,905 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-05 22:20:08,906 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-05 22:20:08,908 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-05 22:20:08,926 [INFO] uw_reply_filer: UW reply filing complete: filed=1 skipped=11 errors=0 dry_run=False
+2026-09-05 22:20:08,927 [INFO] robie_cleaner: UW reply filing from cleaner: filed=1 skipped=11 dry_run=False
+2026-09-05 22:20:20,398 [INFO] robie_cleaner: Gathered 185 authentic messages for reporting.
+2026-09-05 22:20:20,771 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a073a88bfacc07d)
+2026-09-05 22:20:20,771 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a073a88bfacc07d)
+
+Execution Finished: 4 noise trashed, 185 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-05_22-20-21 ===

@@ -1,0 +1,74 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-09_07-00-01 ===
+2026-09-09 07:00:01,885 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 07:00:02,189 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 07:00:02,470 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 07:00:02,887 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 07:00:03,148 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-09 07:00:03,513 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-09 07:00:03,514 [WARNING] robie_cleaner: UW reply filing skipped (cleaner continues; replies are not trashed): (sqlite3.OperationalError) attempt to write a readonly database
+[SQL: PRAGMA main.table_info("policy_renewals")]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2026-09-09 07:00:17,779 [INFO] robie_cleaner: Gathered 183 authentic messages for reporting.
+2026-09-09 07:00:17,779 [WARNING] robie_cleaner: Error querying carrier actions from db: attempt to write a readonly database
+2026-09-09 07:00:17,781 [INFO] robie_cleaner: Current time (03:00 AM America/New_York) is outside designated report hours (12, 15, 17). Mailbox cleaned and replies filed; email report suppressed.
+2026-09-09 07:00:17,781 [INFO] robie_cleaner: Report delivery skipped per schedule gate (12pm, 3pm, 5pm ET).
+
+Execution Finished: 0 noise trashed, 183 real messages found. Report sent: False
+=== Robie Daily Mailbox Audit Finished at 2026-09-09_07-00-18 ===
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-09_07-00-01 ===
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 112, in _get_module_details
+  File "/opt/renewal-automation-system/src/email_outreach/__init__.py", line 3, in <module>
+    from src.email_outreach.auth_setup import get_gmail_service, get_gmail_credentials
+  File "/opt/renewal-automation-system/src/email_outreach/auth_setup.py", line 15, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'
+❌ CRITICAL: Robie Mailbox Cleaner crashed with exit code 1 at 2026-09-09 07:00:02
+Traceback (most recent call last):
+  File "<string>", line 2, in <module>
+  File "/opt/renewal-automation-system/src/email_outreach/__init__.py", line 3, in <module>
+    from src.email_outreach.auth_setup import get_gmail_service, get_gmail_credentials
+  File "/opt/renewal-automation-system/src/email_outreach/auth_setup.py", line 15, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'

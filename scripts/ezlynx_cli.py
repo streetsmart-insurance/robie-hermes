@@ -83,6 +83,17 @@ def main():
     p_quote.add_argument("quote_id", help="EZLynx Quote ID")
     p_quote.add_argument("--json", action="store_true", help="Output raw JSON")
 
+    # 9. Upload Document
+    p_upload = subparsers.add_parser("upload", help="Upload document into applicant Document Library via browser automation")
+    p_upload.add_argument("applicant_id", help="EZLynx Applicant ID")
+    p_upload.add_argument("file_path", help="Local path to file to upload (PDF, etc.)")
+    p_upload.add_argument("--policy", default=None, help="Policy number to link")
+    p_upload.add_argument("--type", default="audit correspondence", help="Document type")
+    p_upload.add_argument("--title", default=None, help="Custom document title")
+    p_upload.add_argument("--folder", default=None, help="Target folder (e.g. Documents, Audits)")
+    p_upload.add_argument("--label", default=None, help="System label to apply")
+    p_upload.add_argument("--json", action="store_true", help="Output raw JSON")
+
     args = parser.parse_args()
     client = EZLynxApiClient()
 
@@ -140,7 +151,8 @@ def main():
                 sys.exit(1)
 
     elif args.command == "documents":
-        res = client.list_applicant_documents(args.applicant_id, args.page, args.size)
+        api_page = max(0, args.page - 1) if args.page > 0 else 0
+        res = client.list_applicant_documents(args.applicant_id, page_index=api_page, page_size=args.size)
         if args.json:
             print(json.dumps(res, indent=2))
         else:
@@ -227,6 +239,31 @@ def main():
                     print(f"  • Carrier: {r.get('CarrierName')} | Premium: {prem} | Status: {r.get('Status')} | LOB: {r.get('LOB')}")
             else:
                 print(f"Error fetching quote session: {res.get('error')}", file=sys.stderr)
+                sys.exit(1)
+
+    elif args.command == "upload":
+        import asyncio
+        from src.ezlynx.document_uploader import EZLynxDocumentUploader
+        uploader = EZLynxDocumentUploader()
+        res = asyncio.run(uploader.upload_document(
+            applicant_id=args.applicant_id,
+            file_path=Path(args.file_path),
+            policy_number=args.policy,
+            doc_type=args.type,
+            doc_title=args.title,
+            label_to_apply=args.label,
+            target_folder=args.folder
+        ))
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get("success"):
+                print(f"✅ Successfully uploaded '{res.get('document_name')}' to Applicant #{args.applicant_id}")
+                print(f"   Policy    : {res.get('policy_number') or 'None'}")
+                print(f"   Label     : {res.get('applied_label') or 'Default'}")
+                print(f"   Screenshot: {res.get('screenshot_path')}")
+            else:
+                print(f"❌ Upload failed: {res.get('error')}", file=sys.stderr)
                 sys.exit(1)
 
 

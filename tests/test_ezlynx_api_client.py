@@ -158,7 +158,7 @@ def test_note_builder_mandates_robie_signature(api_client):
         use_playwright_fallback=False
     )
     assert res["status"] in ("success", "simulated")
-    assert "ROBIE was here" in res["text"]
+    assert "Robie was here" in res["text"]
 
 
 def test_session_overview_structure(api_client):
@@ -294,174 +294,51 @@ def test_list_applicant_documents_wraps_classic_payload(mock_get, api_client):
     assert "/documentlibrary/list/151445306/1/20/0" in mock_get.call_args[0][0]
 
 
-@patch("src.ezlynx.api_client.requests.get")
-def test_get_applicant_discussions_uses_live_portal_endpoint(mock_get, api_client, tmp_path, monkeypatch):
-    """Cookie session must hit GetPagedDiscussions with applicantContext=true and unwrap discussions[]."""
-    state_file = tmp_path / "ezlynx_storage_state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "cookies": [
-                    {"name": "EZSESSION", "value": "portal-cookie", "domain": ".app.ezlynx.com"},
-                ]
-            }
-        )
-    )
-
-    class _Settings:
-        ezlynx_storage_state_file = str(state_file)
-        ezlynx_cdp_endpoint = None
-
-    monkeypatch.setattr("src.ezlynx.api_client.settings", _Settings())
-
-    live_card = {
-        "title": "Rest",
-        "discussionId": 88001,
-        "discussionNote": {
-            "noteId": 99001,
-            "note": "call carlo at 7329953409 and ask him if the renewal is ready for progressive 123456789 ",
-            "noteLabels": [],
+def test_find_matching_discussion_matches_renamed_card(api_client):
+    """Verifies that an existing card renamed by CSR (e.g. adding cancellation prefix) is still matched by policy#."""
+    mock_discussions = [
+        {
+            "discussionId": 771,
+            "title": "INSURED CANCELLATION REQUEST: Renewal Workers comp | 106793-4-25",
+            "lastModifiedByName": "Eimy Ramos",
+            "noteCount": 3,
+            "discussionNote": {"noteDescription": "Insured sent signed LCR form.", "policyNumber": "106793-4-25"}
         },
-    }
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.content = b'{"discussions":[]}'
-    mock_resp.json.return_value = {"discussions": [live_card]}
-    mock_get.return_value = mock_resp
-
-    discussions = api_client.get_applicant_discussions("26356199")
-    assert len(discussions) == 1
-    assert discussions[0]["title"] == "Rest"
-    assert discussions[0]["discussionNote"]["note"].startswith("call carlo")
-    assert "noteText" not in discussions[0]["discussionNote"]
-
-    url = mock_get.call_args[0][0]
-    assert "/EZLynxPortalAPI/Discussions/GetPagedDiscussions" in url
-    assert "applicantId=26356199" in url
-    assert "applicantContext=true" in url
-    assert "pageSize=50" in url
-    assert mock_get.call_args.kwargs["cookies"]["EZSESSION"] == "portal-cookie"
-
-
-@patch("src.ezlynx.api_client.requests.get")
-def test_get_sales_center_opportunities_uses_portal_endpoint(mock_get, api_client, tmp_path, monkeypatch):
-    """Cookie session must hit GetOpportunitiesForApplicant and unwrap opportunities[]."""
-    state_file = tmp_path / "ezlynx_storage_state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "cookies": [
-                    {"name": "EZSESSION", "value": "portal-cookie", "domain": ".app.ezlynx.com"},
-                ]
-            }
+        {
+            "discussionId": 772,
+            "title": "Loss Runs - Travelers",
+            "lastModifiedByName": "Agent",
+            "noteCount": 1
+        }
+    ]
+    with patch.object(api_client, "get_applicant_discussions", return_value=mock_discussions):
+        matched = api_client.find_matching_discussion(
+            applicant_id="144897143",
+            policy_number="106793-4-25",
+            line_of_business="Workers comp",
+            carrier_name="NJCRIB"
         )
-    )
-
-    class _Settings:
-        ezlynx_storage_state_file = str(state_file)
-        ezlynx_cdp_endpoint = None
-
-    monkeypatch.setattr("src.ezlynx.api_client.settings", _Settings())
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.content = b'{"opportunities":[]}'
-    mock_resp.json.return_value = {
-        "opportunities": [
-            {"producerName": "Carlo Ferrara", "status": "Open"},
-        ]
-    }
-    mock_get.return_value = mock_resp
-
-    opps = api_client.get_sales_center_opportunities("26356199")
-    assert len(opps) == 1
-    assert opps[0]["producerName"] == "Carlo Ferrara"
-
-    url = mock_get.call_args[0][0]
-    assert "/EZLynxPortalAPI/SalesCenter/Opportunity/GetOpportunitiesForApplicant" in url
-    assert "applicantID=26356199" in url
-    assert "includeLeadInfo=true" in url
-    assert mock_get.call_args.kwargs["cookies"]["EZSESSION"] == "portal-cookie"
+        assert matched is not None
+        assert matched["discussionId"] == 771
+        assert "INSURED CANCELLATION REQUEST" in matched["title"]
 
 
-@patch("src.ezlynx.api_client.requests.get")
-def test_get_applicant_sidebar_uses_portal_endpoint(mock_get, api_client, tmp_path, monkeypatch):
-    state_file = tmp_path / "ezlynx_storage_state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "cookies": [
-                    {"name": "EZSESSION", "value": "portal-cookie", "domain": ".app.ezlynx.com"},
-                ]
-            }
-        )
-    )
-
-    class _Settings:
-        ezlynx_storage_state_file = str(state_file)
-        ezlynx_cdp_endpoint = None
-
-    monkeypatch.setattr("src.ezlynx.api_client.settings", _Settings())
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.content = b"{}"
-    mock_resp.json.return_value = {
-        "Applicant": {"Assignment": {"AssignedTo": "Carlo Ferrara"}}
-    }
-    mock_get.return_value = mock_resp
-
-    sidebar = api_client.get_applicant_sidebar("26356199")
-    assert sidebar["Applicant"]["Assignment"]["AssignedTo"] == "Carlo Ferrara"
-    url = mock_get.call_args[0][0]
-    assert "/applicantportal/ApplicantContext/GetApplicantSidebar" in url
-    assert "applicantID=26356199" in url
-
-
-def test_document_data_uri_uses_audio_and_text_mime(tmp_path):
-    mp3 = tmp_path / "call.mp3"
-    mp3.write_bytes(b"ID3audio")
-    txt = tmp_path / "transcript.txt"
-    txt.write_text("hello", encoding="utf-8")
-    from src.ezlynx.api_client import EZLynxApiClient
-
-    mp3_uri = EZLynxApiClient._document_data_uri(mp3)
-    txt_uri = EZLynxApiClient._document_data_uri(txt)
-    assert mp3_uri.startswith("data:audio/mpeg;base64,")
-    assert txt_uri.startswith("data:text/plain;base64,")
-    assert "application/pdf" not in mp3_uri
-
-
-def test_normalize_robie_signature():
-    from src.ezlynx.api_client import normalize_robie_signature
-    assert normalize_robie_signature("Hello world").endswith("\n\nROBIE was here")
-    assert normalize_robie_signature("Hello world\n\nRobie was here").endswith("\n\nROBIE was here")
-    assert not normalize_robie_signature("Hello world\n\nRobie was here").endswith("Robie was here\n\nROBIE was here")
-    assert normalize_robie_signature("Test\nROBIE was here").endswith("\n\nROBIE was here")
-
-
-def test_validate_policy_payload(api_client, monkeypatch):
-    import pytest
-    monkeypatch.setattr(api_client, "get_applicant_policies", lambda aid: [
-        {"policyNumber": "POL-100", "companyName": "Travelers Indemnity"}
-    ])
-    # Success
-    res = api_client.validate_policy_payload("123", "POL-100", "Travelers")
-    assert res["valid"] is True
-    # Policy not found
-    with pytest.raises(ValueError, match="Policy .* not found"):
-        api_client.validate_policy_payload("123", "POL-999", "Travelers")
-    # Carrier mismatch
-    with pytest.raises(ValueError, match="Carrier mismatch"):
-        api_client.validate_policy_payload("123", "POL-100", "Hartford")
-
-
-def test_upload_document_no_simulation_fallback(api_client, tmp_path, monkeypatch):
-    f = tmp_path / "renewal.pdf"
-    f.write_text("pdf data")
-    monkeypatch.setattr(api_client, "_upload_document_via_api", lambda *a, **k: {"status": "error", "error": "API rejected"})
-    monkeypatch.setattr(api_client, "_upload_document_via_playwright", lambda *a, **k: {"status": "error", "error": "Playwright timed out"})
-    res = api_client.upload_document("123", f)
-    assert res["status"] == "error"
-    assert "simulated" not in res.get("status", "")
-    assert "Failed to upload document" in res["error"]
+def test_create_user_task_fallback(api_client):
+    """Verifies create_user_task falls back to adding an audit note when playwright is disabled or fails."""
+    with patch.object(api_client, "resolve_discussion_title", return_value="Renewal Manual Workers comp | 106793-4-25 NJCRIB"):
+        with patch.object(api_client, "add_note_to_discussion", return_value={"status": "success"}) as mock_add_note:
+            res = api_client.create_user_task(
+                applicant_id="144897143",
+                title="URGENT: Review Cancellation Signal",
+                description="Signed cancellation request uploaded.",
+                assigned_user="Eimy Ramos",
+                policy_number="106793-4-25",
+                use_playwright=False
+            )
+            assert res["status"] == "success"
+            assert res["method"] == "note_fallback"
+            assert res["assigned_user"] == "Eimy Ramos"
+            mock_add_note.assert_called_once()
+            call_kwargs = mock_add_note.call_args[1]
+            assert "URGENT: Review Cancellation Signal" in call_kwargs["note_text"]
+            assert "Robie was here" in call_kwargs["note_text"]

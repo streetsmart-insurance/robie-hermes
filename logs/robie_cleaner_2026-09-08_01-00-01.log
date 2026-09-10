@@ -1,0 +1,16 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-08_01-00-01 ===
+2026-09-08 01:00:02,994 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 01:00:03,374 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 01:00:03,735 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 01:00:04,163 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 01:00:04,485 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-08 01:00:04,768 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-08 01:00:04,798 [WARNING] robie_cleaner: UW reply filing skipped (cleaner continues; replies are not trashed): 'ESCALATED_CSR_REVIEW' is not among the defined enum values. Enum name: renewalstatus. Possible values: PENDING_EVA.., CHECKING_PO.., PORTAL_QUOT.., ..., RENEWAL_OFF..
+2026-09-08 01:00:11,660 [INFO] robie_cleaner: Gathered 72 authentic messages for reporting.
+2026-09-08 01:00:11,986 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a07e879d5e9ae99)
+2026-09-08 01:00:12,172 [INFO] ezlynx_api: Successfully authenticated with Modern EZLynx OAuth2 Gateway.
+2026-09-08 01:00:12,345 [INFO] gmail_client: [EZLynx Sync] Outbound email to carlo@streetsmart.insurance ('Robie Daily Mailbox Audit & Cleanup Report - September 08, 2026 (72 active, 3 purged)') not linked to an applicant file. Skipping note filing.
+2026-09-08 01:00:12,345 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a07e879d5e9ae99)
+
+Execution Finished: 3 noise trashed, 72 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-08_01-00-12 ===

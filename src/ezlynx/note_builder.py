@@ -26,7 +26,7 @@ class EZLynxNoteBuilder:
         ]
         if downloaded_file:
             lines.append(f"Saved Document: {downloaded_file}")
-        lines.append("\nROBIE was here")
+        lines.append("\nRobie was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -57,7 +57,7 @@ class EZLynxNoteBuilder:
         ]
         if next_followup_date:
             lines.append(f"Next follow-up scheduled for {due_date_str}.")
-        lines.append("\nROBIE was here")
+        lines.append("\nRobie was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -92,7 +92,7 @@ class EZLynxNoteBuilder:
             lines.append(f'Underwriter Message:\n"{clean_reply_text}"')
         if has_attachment and attachment_name:
             lines.append(f"Attachment Received: {attachment_name} (Saved to Inbox Archive)")
-        lines.append("\nROBIE was here")
+        lines.append("\nRobie was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -120,7 +120,7 @@ class EZLynxNoteBuilder:
             f"Attached Quote: {document_path or 'Uploaded to Applicant Documents'}",
             f"Action Required: Account Manager review & customer presentation/binding."
         ]
-        lines.append("\nROBIE was here")
+        lines.append("\nRobie was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -140,7 +140,7 @@ class EZLynxNoteBuilder:
             f"Reason: {reason}",
             f"Action Required: High-priority CSR follow-up with carrier underwriter / portal."
         ]
-        lines.append("\nROBIE was here")
+        lines.append("\nRobie was here")
         return "\n".join(lines)
 
     @staticmethod
@@ -166,51 +166,6 @@ class EZLynxNoteBuilder:
             f"Summary: {summary}",
             f"Action Required: Account Manager review customer sentiment prior to renewal presentation."
         ]
-        lines.append("\nROBIE was here")
-        return "\n".join(lines)
-
-    @staticmethod
-    def format_carrier_voice_cadence_note(
-        policy: PolicyRenewal,
-        phone: str,
-        call_id: Optional[str] = None,
-        status: str = "DISPATCHED",
-        attempts: int = 2,
-    ) -> str:
-        lob = getattr(policy, "line_of_business", "") or "Commercial"
-        cname = getattr(policy, "carrier_name", "") or "Carrier"
-        lines = [
-            f"Policy: #{policy.policy_number} ({lob} - {cname})",
-            "",
-            "🤖 [ROBIE AUTONOMOUS CALL DISPATCHED]",
-            f"5–7d follow-up budget exhausted ({attempts} quiet checks). "
-            f"Robie placed one outbound carrier Robie Call to {cname} at {phone}.",
-            "Call type: carrier",
-            f"Call ID: {call_id or 'n/a'}",
-            f"Status: {status}",
-            "No additional carrier calls will be placed for this policy/term. "
-            "Client outreach is not part of this cadence.",
-            "",
-            "ROBIE was here",
-        ]
-        return "\n".join(lines)
-
-    @staticmethod
-    def format_carrier_voice_phone_needed_note(policy: PolicyRenewal) -> str:
-        lob = getattr(policy, "line_of_business", "") or "Commercial"
-        cname = getattr(policy, "carrier_name", "") or "Carrier"
-        lines = [
-            f"Policy: #{policy.policy_number} ({lob} - {cname})",
-            "",
-            "⚠️ [ROBIE CALL - PHONE NUMBER NEEDED]",
-            "The 5–7d follow-up budget (2 quiet checks) received no renewal. "
-            "Robie would place one carrier Robie Call, but no E.164 "
-            "underwriter/carrier phone is on file. "
-            "Numbers are never invented.",
-            "",
-            'Reply with "Phone: (xxx) xxx-xxxx" to trigger the call.',
-            "",
-            "ROBIE was here",
-        ]
+        lines.append("\nRobie was here")
         return "\n".join(lines)
 

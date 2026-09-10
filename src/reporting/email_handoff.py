@@ -92,10 +92,11 @@ def notify_csr_of_underwriter_reply(
     note_synced: bool = False,
     task_created: bool = False,
     note_id: Optional[Union[str, int]] = None,
-    clean_reply_text: Optional[str] = None
+    clean_reply_text: Optional[str] = None,
+    cc_carlo: bool = True,
 ) -> dict:
     """
-    Sends an immediate high-priority email notification to the assigned CSR (CC Carlo and Jake)
+    Sends an immediate high-priority email notification to the assigned CSR (optionally CC Carlo)
     when an underwriter response is received. Accurately reports whether discussion note / task
     has been posted to EZLynx via REST API or is pending live browser sync.
     """
@@ -156,10 +157,9 @@ def notify_csr_of_underwriter_reply(
         f"StreetSmart Insurance Autonomous System"
     )
 
-    # Instant CSR alert + Carlo (existing handoff path; outbound CSR CC rules stay on outreach).
     cc_list = []
     carlo_email = "carlo@streetsmart.insurance"
-    if csr_email and csr_email.lower() != carlo_email:
+    if cc_carlo and csr_email and csr_email.lower() != carlo_email:
         cc_list.append(carlo_email)
 
     logger.info(f"Sending immediate underwriter reply notification to {csr_email} for Pol #{policy.policy_number}")

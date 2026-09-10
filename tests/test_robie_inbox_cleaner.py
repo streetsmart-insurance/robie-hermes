@@ -66,10 +66,11 @@ class TestRobieInboxCleaner(unittest.TestCase):
         res = run_daily_inbox_cleanup_and_report(
             client=mock_client,
             recipient="carlo@streetsmart.insurance",
-            dry_run=False
+            dry_run=False,
+            force_email=True
         )
 
-        self.assertEqual(res["noise_trashed"], 3)
+        self.assertEqual(res["noise_trashed"], 5)
         self.assertEqual(res["real_messages_count"], 1)
         self.assertEqual(res["real_messages"][0]["from"], "underwriter@trinity.com")
         self.assertTrue(res["report_sent"])

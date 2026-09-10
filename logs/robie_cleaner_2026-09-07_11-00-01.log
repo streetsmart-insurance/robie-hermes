@@ -1,0 +1,45 @@
+=== Starting Robie Hourly Inbox Cleanup + Carlo report at 2026-09-07_11-00-01 ===
+2026-09-07 11:00:02,921 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 11:00:03,255 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 11:00:03,553 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 11:00:03,929 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 11:00:04,229 [INFO] robie_cleaner: Starting hourly inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-07 11:00:04,328 [INFO] robie_cleaner: Carlo reply commands: processed=0 actions=0 errors=0
+2026-09-07 11:00:04,680 [INFO] robie_cleaner: Found 4 messages matching noise category: Applied ROBIE Queues
+2026-09-07 11:00:05,724 [INFO] robie_cleaner: Found 1 messages matching noise category: Robie Hourly Inbox Reports
+2026-09-07 11:00:05,915 [INFO] robie_cleaner: Noise cleanup complete: 5 messages moved to trash.
+2026-09-07 11:00:05,967 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 11:00:06,220 [ERROR] gmail_client: Error downloading attachment RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0775c756130946_RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml'
+2026-09-07 11:00:06,589 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-07 11:00:06,772 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-07 11:00:07,250 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-07 11:00:07,375 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 11:00:08,116 [INFO] gmail_client: Downloaded email attachment: 1a07b5958ef75333_POLTRANSNOT-NJSMAR10-09-07-2026-06-10-37_(c).pdf
+2026-09-07 11:00:08,404 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-07 11:00:08,565 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-07 11:00:08,786 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-07 11:00:08,937 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-07 11:00:09,237 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-07 11:00:09,563 [INFO] gmail_client: Downloaded email attachment: 1a07aa15d49c5cb9_Policy29115152937909.Zip
+2026-09-07 11:00:10,341 [INFO] gmail_client: Downloaded email attachment: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-07 11:00:10,636 [INFO] gmail_client: Downloaded email attachment: 1a07810d2f75fea6_HAUL AZZ LLC-Binder-DSLA1000836-00.pdf.pdf
+2026-09-07 11:00:10,644 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-07 11:00:10,646 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-07 11:00:10,647 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-07 11:00:10,649 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-07 11:00:10,650 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-07 11:00:10,651 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-07 11:00:10,653 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-07 11:00:10,654 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-07 11:00:10,655 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-07 11:00:10,657 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-07 11:00:10,658 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-07 11:00:10,659 [INFO] uw_reply_filer: UW reply filing complete: filed=0 skipped=11 errors=0 dry_run=False
+2026-09-07 11:00:10,659 [INFO] robie_cleaner: UW reply filing from cleaner: filed=0 skipped=11 dry_run=False
+2026-09-07 11:00:16,491 [INFO] robie_cleaner: Gathered 76 authentic messages for reporting.
+2026-09-07 11:00:17,317 [INFO] robie_cleaner: Archived 0 automated messages out of Inbox.
+2026-09-07 11:00:23,410 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a07b86bfd1ed5cf)
+2026-09-07 11:00:23,410 [INFO] robie_cleaner: Successfully dispatched hourly report to carlo@streetsmart.insurance (ID: 1a07b86bfd1ed5cf)
+
+Execution Finished: 6 noise trashed, 2 archived, 4 need decision, 70 categorized. Report sent: True
+=== Robie Hourly Mailbox Cleanup Finished at 2026-09-07_11-00-23 ===

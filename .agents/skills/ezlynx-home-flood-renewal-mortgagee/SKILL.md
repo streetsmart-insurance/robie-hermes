@@ -26,14 +26,7 @@ Do not create a parallel Mortgagee Bill Policies task when the applicable renewa
 - Never send an unreviewed renewal to a lender; require producer clearance when coverage, premium, underwriting, or retention review is pending.
 - Stop normal delivery for cancelled/nonrenewed policies and route ownership to the producer unless an active task already owns the issue.
 - End each note with the exact separate line `ROBIE was here`.
-- **MANDATORY Policy Association**: Every note must explicitly associate to the policy via `--policy-number <Policy#>` and include the top header `Policy: #{policy_number} ({line_of_business} - {carrier_name})`.
 - Keep the task open until payment or a documented CSR handoff resolves the case.
-- **EZLynx API Utilities (Fast Operations)**:
-  - Check active policies and expiration dates: `scripts/ezlynx_cli.py policies {applicantId} --json`
-  - Get applicant details & assigned producer: `scripts/ezlynx_cli.py applicant {applicantId} --json`
-  - Check Document Library for uploaded renewal packets: `scripts/ezlynx_cli.py documents {applicantId} --json`
-  - Post renewal discussion note (policy associated): `scripts/ezlynx_cli.py note {applicantId} "{NoteText}" --policy-number {policyNumber} --lob "{lob}" --carrier "{carrier}"`
-
 
 ## R&D boundary
 
@@ -78,11 +71,27 @@ The producer reviews coverage, premium, rescoring opportunities, underwriting co
 
 #### Mortgagee pays
 
-1. Capture mortgage company, loan number, and property ZIP.
-2. Verify the lender through MyCoverageInfo, MyInsuranceInfo, or the applicable approved channel.
-3. Upload the declaration and invoice after producer clearance.
-4. Record confirmation evidence and set `waiting_for_mortgagee_payment`.
-5. Check payment weekly and add a dated note after each check.
+Follow the **Lender Verification & Delivery Waterfall**:
+
+1. **Digital Portals (Level 1)**:
+   - Check third-party verification portals: **MyCoverageInfo**, **MyInsuranceInfo** (MyInsInfo), **Insurance Express**, or applicable lender portal.
+   - Verify loan number and property ZIP. If found, upload the declaration and invoice after producer clearance, record confirmation evidence, and set `waiting_for_mortgagee_payment`.
+2. **Direct Email / Fax (Level 1 Alternate)**:
+   - If the mortgage company provides a dedicated insurance/escrow email or fax number, transmit the renewal packet directly and record transmission confirmation.
+3. **Autonomous Phone Call to Mortgage Company (Level 2)**:
+   - If portal lookup fails, loan/ZIP is rejected, servicing transferred, or no direct portal/email/fax is verified, trigger an outbound call to the mortgage company's **Insurance Department / Escrow Department** from StreetSmart Caller ID `+1 (732) 298-6745`.
+   - **IVR & Hold Handling**: Barge through automated prompts, press `0` repeatedly, or state "Representative" / "Insurance Department" / "Escrow" to bypass IVR loops. Stay on the line through hold music until a live human answers.
+   - **Authentication Dossier**:
+     - Borrower Name, Loan Number, Property Address (street, city, state, ZIP).
+     - **Date of Birth (DOB)**: Pulled from EZLynx applicant profile (e.g., `MM/DD/YYYY`).
+     - **Social Security Number (SSN)**: Agency does not retain full SSN. When asked, instruct the voice agent to state: *"I don't have the full Social Security Number on file, but I have the borrower's Date of Birth: [DOB]."*
+   - **Call Objectives**:
+     - Verify current mortgagee clause and confirm loan number on file.
+     - Inquire about escrow status and renewal premium disbursement schedule.
+     - Obtain the exact transmission destination: portal URL, insurance department email, or fax number.
+   - **Audit & Callback**: Automatically thread the call recording URL, full transcript, and structured summary back into the applicant's EZLynx renewal discussion thread.
+4. **Payment Monitoring**:
+   - Check payment weekly and add a dated note after each check ending with `ROBIE was here`.
 
 #### Insured pays
 

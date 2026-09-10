@@ -516,3 +516,21 @@ def test_renewer_apply_done_checklist_does_not_override_login_blocked():
     ManualPolicyRenewer(api_client=None)._apply_done_checklist(spec, result)
     assert result.status == "blocked"
     assert result.done_checklist is None
+
+def test_commercial_lobs_canonical_resolution():
+    from src.ezlynx.manual_renewal_gate import (
+        canonical_lob_display,
+        manual_lob_renewal_title,
+        renewal_update_lob_title,
+        candidate_existing_lob_renewal_titles,
+    )
+    assert canonical_lob_display("epli") == "Employee Practices Liability"
+    assert canonical_lob_display("employment practices liability") == "Employee Practices Liability"
+    assert canonical_lob_display("cyber") == "Cyber Liability"
+    assert canonical_lob_display("e&o") == "Professional Liability"
+    assert canonical_lob_display("d&o") == "Directors and Officers"
+    assert canonical_lob_display("bonds") == "Bonds"
+    assert manual_lob_renewal_title("epli") == "Manual Employee Practices Liability Renewal"
+    assert renewal_update_lob_title("epli") == "Renewal Update Employee Practices Liability"
+    assert "Employee Practices Liability Renewal" in candidate_existing_lob_renewal_titles("epli")
+    assert "Cyber Liability Renewal" in candidate_existing_lob_renewal_titles("cyber")

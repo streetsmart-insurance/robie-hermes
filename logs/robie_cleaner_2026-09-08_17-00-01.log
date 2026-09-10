@@ -1,0 +1,150 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-08_17-00-01 ===
+2026-09-08 17:00:02,535 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 17:00:02,861 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 17:00:03,199 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 17:00:03,592 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 17:00:03,895 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-08 17:00:04,036 [INFO] robie_cleaner: Found 1 messages matching noise category: Postmaster Delivery Notices
+2026-09-08 17:00:04,362 [INFO] robie_cleaner: Found 1 messages matching noise category: Automatic Replies & Out of Office
+2026-09-08 17:00:04,560 [INFO] robie_cleaner: Noise cleanup complete: 2 messages moved to trash.
+2026-09-08 17:00:04,620 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-08 17:00:05,078 [INFO] gmail_client: Downloaded email attachment: 1a080feb059c3c87_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-08 17:00:05,475 [INFO] gmail_client: Downloaded email attachment: 1a0808858fe7727d_Robie_-_EZLynx_Overdue_Tasks_2026-09-08T0607.xlsx
+2026-09-08 17:00:06,169 [INFO] gmail_client: Downloaded email attachment: 1a07ce8390c63143_Robie_-_EZLynx_Activities_2026-09-07T1326.xlsx
+2026-09-08 17:00:06,824 [INFO] gmail_client: Downloaded email attachment: 1a07ce437dbb6352_Robie_-_EZLynx_Activities_2026-09-07T1321.xlsx
+2026-09-08 17:00:07,080 [INFO] gmail_client: Downloaded email attachment: 1a07ce415307a2fa_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1321.xlsx
+2026-09-08 17:00:07,258 [INFO] gmail_client: Downloaded email attachment: 1a07ce110ca26f68_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1318.xlsx
+2026-09-08 17:00:07,483 [INFO] gmail_client: Downloaded email attachment: 1a07cd6db0b97ceb_Robie_-_EZLynx_Activities_2026-09-07T1307.xlsx
+2026-09-08 17:00:07,731 [ERROR] gmail_client: Error downloading attachment RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0775c756130946_RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml'
+2026-09-08 17:00:08,201 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-08 17:00:08,371 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-08 17:00:08,914 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-08 17:00:09,094 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-08 17:00:10,310 [INFO] gmail_client: Downloaded email attachment: 1a081e74e0dc8510_CWIS-Quote-BINTEK LLC-266145918033.pdf
+2026-09-08 17:00:10,462 [INFO] gmail_client: Downloaded email attachment: 1a081e74e0dc8510_Quote Disclosure.pdf
+2026-09-08 17:00:10,625 [INFO] gmail_client: Downloaded email attachment: 1a081e74e0dc8510_CWIS-Filings-BINTEK LLC-266145918033.pdf
+2026-09-08 17:00:10,840 [INFO] gmail_client: Downloaded email attachment: 1a081e74e0dc8510_CWIS-NewVentureForm-BINTEK LLC-266145918033.pdf
+2026-09-08 17:00:11,006 [INFO] gmail_client: Downloaded email attachment: 1a081e74e0dc8510_CWIS-PFA-BINTEK LLC-266145918033.pdf
+2026-09-08 17:00:11,167 [ERROR] gmail_client: Error downloading attachment UM Selection/Rejection Form.pdf: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a081e74e0dc8510_UM Selection/Rejection Form.pdf'
+2026-09-08 17:00:11,525 [INFO] gmail_client: Downloaded email attachment: 1a0819396d2ad1ac_CWIS-PFA-EZV LOGISTICS LLC-267113837945.pdf
+2026-09-08 17:00:11,798 [INFO] gmail_client: Downloaded email attachment: 1a0819396d2ad1ac_CWIS-Quote-EZV LOGISTICS LLC-267113837945.pdf
+2026-09-08 17:00:11,965 [INFO] gmail_client: Downloaded email attachment: 1a0819396d2ad1ac_Quote Disclosure.pdf
+2026-09-08 17:00:12,150 [INFO] gmail_client: Downloaded email attachment: 1a0819396d2ad1ac_CWIS-Filings-EZV LOGISTICS LLC-267113837945.pdf
+2026-09-08 17:00:12,358 [ERROR] gmail_client: Error downloading attachment UM Selection/Rejection Form.pdf: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0819396d2ad1ac_UM Selection/Rejection Form.pdf'
+2026-09-08 17:00:12,530 [INFO] gmail_client: Downloaded email attachment: 1a0819396d2ad1ac_Telematic Device Approval Form.pdf
+2026-09-08 17:00:12,864 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_image001.png
+2026-09-08 17:00:13,058 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-08 17:00:13,297 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_INVOICE.pdf
+2026-09-08 17:00:13,485 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_Blank Affidavit - NJ.pdf
+2026-09-08 17:00:13,713 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_Blank NJ Exhibit A.pdf
+2026-09-08 17:00:13,714 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 17:00:14,453 [INFO] gmail_client: Downloaded email attachment: 1a07b5958ef75333_POLTRANSNOT-NJSMAR10-09-07-2026-06-10-37_(c).pdf
+2026-09-08 17:00:14,744 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-08 17:00:14,875 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-08 17:00:15,040 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-08 17:00:15,189 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-08 17:00:15,565 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-08 17:00:16,061 [INFO] gmail_client: Downloaded email attachment: 1a07aa15d49c5cb9_Policy29115152937909.Zip
+2026-09-08 17:00:16,854 [INFO] gmail_client: Downloaded email attachment: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-08 17:00:16,858 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 17:00:17,386 [INFO] gmail_client: Downloaded email attachment: 1a07810d2f75fea6_HAUL AZZ LLC-Binder-DSLA1000836-00.pdf.pdf
+2026-09-08 17:00:17,387 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 17:00:17,488 [INFO] policy_aliases: Aliased danielle.roberts2 (renewal_term) → Pol #67664405 (id=20)
+2026-09-08 17:00:17,728 [INFO] ezlynx_api: Matched discussion by policy# '67664405': 'Miscellaneous Bonds Manual Renewal' (ID 826326622)
+2026-09-08 17:00:17,980 [INFO] ezlynx_api: Matched discussion by policy# '67664405': 'Miscellaneous Bonds Manual Renewal' (ID 826326622)
+2026-09-08 17:00:18,512 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-08 17:00:19,811 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 76858853: NoteId 1123701963 into 'Miscellaneous Bonds Manual Renewal'
+2026-09-08 17:00:19,856 [INFO] email_handoff: Sending immediate underwriter reply notification to angie@streetsmart.insurance for Pol #67664405
+2026-09-08 17:00:20,039 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to angie@streetsmart.insurance (Msg ID: 1a081f6a4f8457ee)
+2026-09-08 17:00:20,040 [WARNING] gmail_client: ⚠️ [EZLynx Sync] Failed to save outbound email to EZLynx: EZLynxApiClient.add_note_to_discussion() got an unexpected keyword argument 'honor_explicit_title'
+2026-09-08 17:00:20,190 [INFO] gmail_client: Marked message 1a0818441f191306 as READ.
+2026-09-08 17:00:20,216 [INFO] policy_aliases: Aliased QQ41152139 (renewal_term) → Pol #106793-4-25 (id=72)
+2026-09-08 17:00:20,229 [INFO] policy_aliases: Aliased AA14083242 (renewal_term) → Pol #106793-4-25 (id=72)
+2026-09-08 17:00:20,241 [INFO] policy_aliases: Aliased 596452684.pdf (renewal_term) → Pol #106793-4-25 (id=72)
+2026-09-08 17:00:20,446 [INFO] ezlynx_api: Matched discussion by policy# '106793-4-25': 'Renewal Manual Workers comp | 106793-4-25 NJCRIB - New' (ID 841878949)
+2026-09-08 17:00:20,668 [INFO] ezlynx_api: Matched discussion by policy# '106793-4-25': 'Renewal Manual Workers comp | 106793-4-25 NJCRIB - New' (ID 841878949)
+2026-09-08 17:00:21,152 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 144897143: NoteId 1123701982 into 'Renewal Manual Workers comp | 106793-4-25 NJCRIB - New'
+2026-09-08 17:00:22,023 [INFO] ezlynx_document_uploader: Connecting to live Chrome over CDP at http://localhost:9222...
+2026-09-08 17:00:22,706 [INFO] ezlynx_document_uploader: Connected to live Chrome via CDP successfully.
+2026-09-08 17:00:22,706 [INFO] ezlynx_document_uploader: Navigating to https://app.ezlynx.com/web/account/144897143/documents for applicant 144897143...
+2026-09-08 17:00:27,955 [INFO] ezlynx_document_uploader: Navigating into folder: Renewal Offers/Declarations
+2026-09-08 17:00:43,713 [INFO] ezlynx_document_uploader: Attached file: 1a080feb059c3c87_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-08 17:00:45,789 [INFO] ezlynx_document_uploader: Filled document title: 106793-4-25 Renewal Offer.pdf
+2026-09-08 17:00:47,235 [INFO] ezlynx_document_uploader: Linked document to policy matching: 106793-4-25
+2026-09-08 17:00:49,672 [INFO] ezlynx_document_uploader: Applied existing system label: Renewal Offer
+2026-09-08 17:00:49,903 [INFO] ezlynx_document_uploader: Submitted document upload to EZLynx.
+2026-09-08 17:00:59,617 [INFO] ezlynx_api: Successfully uploaded document via Playwright CDP for Applicant 144897143.
+2026-09-08 17:00:59,625 [INFO] email_handoff: Sending immediate underwriter reply notification to eimy@streetsmart.insurance for Pol #106793-4-25
+2026-09-08 17:00:59,817 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to eimy@streetsmart.insurance (Msg ID: 1a081f73f846f30d)
+2026-09-08 17:00:59,817 [WARNING] gmail_client: ⚠️ [EZLynx Sync] Failed to save outbound email to EZLynx: EZLynxApiClient.add_note_to_discussion() got an unexpected keyword argument 'honor_explicit_title'
+2026-09-08 17:00:59,944 [INFO] gmail_client: Marked message 1a080feb059c3c87 as READ.
+2026-09-08 17:00:59,982 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07e763c98b936a for Pol #WPH5080304 001
+2026-09-08 17:00:59,985 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dd56907441ad for Pol #ACT4034556
+2026-09-08 17:00:59,990 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dc83ce522777 for Pol #LSP600011096
+2026-09-08 17:01:00,133 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-08 17:01:00,134 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-08 17:01:00,135 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-08 17:01:00,137 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-08 17:01:00,138 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-08 17:01:00,139 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-08 17:01:00,140 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-08 17:01:00,141 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-08 17:01:00,142 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-08 17:01:00,144 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-08 17:01:00,145 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-08 17:01:00,164 [INFO] policy_aliases: Aliased DP2563394 (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,177 [INFO] policy_aliases: Aliased 0F74450 (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,190 [INFO] policy_aliases: Aliased 20Jayakrishna (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,203 [INFO] policy_aliases: Aliased 20Customer (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,215 [INFO] policy_aliases: Aliased 20Service (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,227 [INFO] policy_aliases: Aliased 20Review (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,239 [INFO] policy_aliases: Aliased image001.png (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,251 [INFO] policy_aliases: Aliased 2563394_RetailerBinder.pdf.pdf (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-08 17:01:00,463 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-08 17:01:00,700 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-08 17:01:01,657 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 99340932: NoteId 1123702530 into 'Flood Renewal - Neptune'
+2026-09-08 17:01:02,513 [INFO] ezlynx_document_uploader: Connecting to live Chrome over CDP at http://localhost:9222...
+2026-09-08 17:01:03,449 [INFO] ezlynx_document_uploader: Connected to live Chrome via CDP successfully.
+2026-09-08 17:01:03,450 [INFO] ezlynx_document_uploader: Navigating to https://app.ezlynx.com/web/account/99340932/documents for applicant 99340932...
+2026-09-08 17:01:03,758 [ERROR] ezlynx_document_uploader: Failed to upload document for applicant 99340932: Page.goto: net::ERR_ABORTED at https://app.ezlynx.com/web/account/99340932/documents
+Call log:
+  - navigating to "https://app.ezlynx.com/web/account/99340932/documents", waiting until "domcontentloaded"
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/src/ezlynx/document_uploader.py", line 289, in upload_document
+    await page.goto(docs_url, wait_until="domcontentloaded", timeout=30000)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/playwright/async_api/_generated.py", line 9869, in goto
+    await self._impl_obj.goto(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/playwright/_impl/_page.py", line 560, in goto
+    return await self._main_frame.goto(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/playwright/_impl/_frame.py", line 156, in goto
+    await self._channel.send(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/playwright/_impl/_connection.py", line 76, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/playwright/_impl/_connection.py", line 632, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.Error: Page.goto: net::ERR_ABORTED at https://app.ezlynx.com/web/account/99340932/documents
+Call log:
+  - navigating to "https://app.ezlynx.com/web/account/99340932/documents", waiting until "domcontentloaded"
+
+2026-09-08 17:01:03,788 [WARNING] ezlynx_api: Playwright document uploader returned error: Page.goto: net::ERR_ABORTED at https://app.ezlynx.com/web/account/99340932/documents
+Call log:
+  - navigating to "https://app.ezlynx.com/web/account/99340932/documents", waiting until "domcontentloaded"
+. Checking simulation.
+2026-09-08 17:01:03,788 [INFO] ezlynx_api: [SIMULATION] Document '1a08148222708144_image001.png' uploaded to Applicant 99340932 (Folder: Renewal Offers/Declarations)
+2026-09-08 17:01:03,789 [INFO] ezlynx_api: [TASK] EZLynx Task Created for Applicant: 99340932 | Title: 'Review Renewal Quote: Larry Gonzales (Neptune Insurance)' | Assigned: Daniela Aguilar
+2026-09-08 17:01:03,789 [INFO] email_handoff: Sending immediate underwriter reply notification to daniela@streetsmart.insurance for Pol #ACT4034556
+2026-09-08 17:01:03,976 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to daniela@streetsmart.insurance (Msg ID: 1a081f750f39390a)
+2026-09-08 17:01:03,977 [WARNING] gmail_client: ⚠️ [EZLynx Sync] Failed to save outbound email to EZLynx: EZLynxApiClient.add_note_to_discussion() got an unexpected keyword argument 'honor_explicit_title'
+2026-09-08 17:01:04,259 [INFO] gmail_client: Marked message 1a08148222708144 as READ.
+2026-09-08 17:01:04,266 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a078fee8dc2315b for Pol #ACT4034556
+2026-09-08 17:01:04,270 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07810d2f75fea6 for Pol #ACT4034556
+2026-09-08 17:01:04,288 [INFO] uw_reply_filer: UW reply filing complete: filed=3 skipped=22 errors=0 dry_run=False
+2026-09-08 17:01:04,288 [INFO] robie_cleaner: UW reply filing from cleaner: filed=3 skipped=22 dry_run=False
+2026-09-08 17:01:18,861 [INFO] robie_cleaner: Gathered 163 authentic messages for reporting.
+2026-09-08 17:01:18,868 [INFO] robie_cleaner: Current time (01:01 PM America/New_York) is outside designated report hours (12, 15, 17). Mailbox cleaned and replies filed; email report suppressed.
+2026-09-08 17:01:18,869 [INFO] robie_cleaner: Report delivery skipped per schedule gate (12pm, 3pm, 5pm ET).
+
+Execution Finished: 2 noise trashed, 163 real messages found. Report sent: False
+=== Robie Daily Mailbox Audit Finished at 2026-09-08_17-01-19 ===

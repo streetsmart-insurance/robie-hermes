@@ -62,3 +62,28 @@ Every discussion note, document upload, or activity task in EZLynx **MUST be exp
   ```text
   Robie was here
   ```
+
+## Carrier Portal Sub-Account Mandate (Always Email Nicole)
+Whenever a carrier portal crawler requires credentials or dedicated sub-account access:
+- **Always email Nicole** (`nicole@streetsmart.insurance`, CC `carlo@streetsmart.insurance`, `jake@streetsmart.insurance`).
+- **Request a dedicated sub-account** for `robie@streetsmart.insurance` (Name: `Robie Automation`) with permissions to view policies & download documents.
+- **Mandate 2FA via Email**: 2FA/MFA delivery method MUST be set to EMAIL (`robie@streetsmart.insurance`) so Robie intercepts verification codes headlessly via Gmail API.
+- **Automated Dispatch**: Use `PYTHONPATH=. python3 -m src.portals.portal_credential_requester --carrier "<Carrier>" --portal-url "<URL>" --send`
+- **Secrets Storage**: Store provisioned credentials into GCP Secret Manager under `<carrier_key>_username` and `<carrier_key>_password`.
+
+## Urgent Non-Renewal & Lapse Notice Mandate (Tasks, NOT Notes)
+Whenever a portal crawl, carrier document retrieval, or underwriter reply reveals a **Notice of Non-Renewal**, **Conditional Renewal**, or **Lapse Warning**:
+- **Mandatory High-Priority Task**: The autonomous engine **MUST create a High-Priority Task (`!`) in EZLynx assigned to the Account Manager / CSR**, NOT just a discussion note. Non-renewal notices jeopardize client coverage and require proactive re-marketing or urgent client outreach.
+- **Task Specifications**:
+  - Priority: High Priority (`!`, toggle `#btnPriority`).
+  - Due Date: Next business day (1 day out).
+  - Assignee: The assigned CSR / Producer on the policy.
+  - Body: Include policy reference header (`Policy: #{policy_number} ({line_of_business} - {carrier_name})`), clear reason for non-renewal, required actions (e.g. questionnaires, re-marketing), and mandatory signature `Robie was here`.
+  - Policy Association: Must be associated to the specific policy record.
+
+## Mandatory Task Assignment Mandate (Never Just a Note for Handoffs)
+Whenever communication, workflow logs, or agent actions state or imply that something was given, transferred, or handed off to a CSR, Producer, Account Manager, or any specific individual:
+- **Mandatory Assigned Task**: The autonomous engine **MUST create and assign an actual Task in EZLynx to that specific individual**. Never post just a passive discussion note when an action or follow-up is expected from a team member.
+- **Accountability**: If an agent or workflow says "gave to CSR" or "assigned to Producer", there MUST be a corresponding active task assigned to that person in EZLynx with an appropriate due date and clear action instructions.
+- **Signature & Association**: The task must include the policy header (`Policy: #{policy_number} ({line_of_business} - {carrier_name})`), mandatory signature `Robie was here`, and be associated directly to the relevant policy record.
+

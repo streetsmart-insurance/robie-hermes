@@ -1364,8 +1364,30 @@ class ManualPolicyRenewer:
             result.document_folder = folder_info.get("folder") or RENEWAL_OFFER_FOLDER
             result.document_folder_created = bool(folder_info.get("created"))
             result.document_kind = result.document_kind or DOC_KIND_RENEWAL_OFFER
+
+        target_name = (
+            f"{spec.policy_number} Renewal Application.pdf"
+            if as_application and spec.policy_number
+            else f"{spec.policy_number} Renewal Offer.pdf"
+            if spec.policy_number
+            else path.name
+        )
+
+        want_label = "Application" if as_application else "Renewal Offer"
+        await page.wait_for_timeout(3000)
+        existing_doc = page.locator(f"tr:has-text('{target_name}')")
+        if await existing_doc.count() > 0:
+            logger.info("Document %s already present in %s folder; skipping duplicate upload", target_name, result.document_folder)
+            result.document_uploaded = True
+            result.document_name = target_name
+            if want_label:
+                labeled = await ensure_document_label(page, target_name, want_label)
+                if labeled:
+                    result.document_label = want_label
+            return
+
         add_btn = page.locator("#add-action")
-        await add_btn.wait_for(state="visible", timeout=15000)
+        await add_btn.wait_for(state="visible", timeout=30000)
         await add_btn.click()
         await page.wait_for_timeout(800)
         await page.locator(".mat-mdc-menu-item:has-text('Upload')").click()
@@ -1431,7 +1453,7 @@ class ManualPolicyRenewer:
                     f"mat-option:has-text('{want_label}'), .mat-mdc-option:has-text('{want_label}')"
                 )
                 if await mat_opt.count() > 0:
-                    await mat_opt.first.click()
+                    await mat_opt.first.click(timeout=3000)
                     applied_label = want_label
         except Exception as label_err:
             logger.warning("Could not apply %s label: %s", want_label, label_err)
@@ -1442,6 +1464,11 @@ class ManualPolicyRenewer:
             await upload_btn.click(force=True)
         await page.wait_for_timeout(4000)
         result.document_uploaded = True
+        # Hardcode side-panel label persistence across any LOB
+        if want_label:
+            labeled = await ensure_document_label(page, target_name, want_label)
+            if labeled:
+                applied_label = want_label
         result.document_label = applied_label
 
     async def _post_note_exact_title(self, page, spec: RenewalJobSpec, result: RenewalJobResult) -> None:
@@ -1653,7 +1680,10 @@ class ManualPolicyRenewer:
         if is_forbidden_renew_button(label, "RenewPolicyBtn"):
             raise RenewalGuardError(f"Refusing forbidden renew button text: {label}")
         await btn.first.click()
-        await page.wait_for_timeout(2500)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            await page.wait_for_timeout(4000)
         result.renew_button = RENEW_POLICY_BTN_SELECTOR
         result.status = "keyed"
 

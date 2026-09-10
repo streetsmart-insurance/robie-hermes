@@ -1,0 +1,13 @@
+[
+  {
+    "record_id": "SUPP-A8DA95208CBC",
+    "phone_hash": "11851260b1d2b31d663c8eeeca44e00a32879853aaf2ee58a1e9caf129ac4e88",
+    "email_hash": null,
+    "applicant_id": null,
+    "channel": "ALL",
+    "reason": "OPT_OUT_SMS_STOP",
+    "source_workflow": "INBOUND_LEAD",
+    "created_at": "2026-09-08T23:21:17.241692",
+    "notes": null
+  }
+]

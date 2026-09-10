@@ -14,16 +14,32 @@ FOLDER_ROUTING = {
     "loss runs": ["Loss Runs", "Prior Policies & Loss Runs", "Loss History", "Documents"],
     "loss run": ["Loss Runs", "Prior Policies & Loss Runs", "Loss History", "Documents"],
     "application": ["Applications", "Renewal Applications", "Documents"],
+    "audit": ["Audits", "Policy Audits", "Documents"],
+    "audit correspondence": ["Audits", "Policy Audits", "Documents"],
+    "audit statement": ["Audits", "Policy Audits", "Documents"],
+    "audit packet": ["Audits", "Policy Audits", "Documents"],
+    "endorsement": ["Endorsements", "Policy Changes", "Documents"],
+    "policy change": ["Endorsements", "Policy Changes", "Documents"],
+    "confirmation": ["Renewal Offers/Declarations", "Renewal Offers", "Renewal Offer", "Renewals", "Documents"],
+    "mortgagee": ["Renewal Offers/Declarations", "Renewal Offers", "Renewal Offer", "Renewals", "Documents"],
 }
 
 LABEL_ROUTING = {
     "renewal": "Renewal Offer",
     "quote": "Renewal Offer",
+    "confirmation": "Renewal Offer",
+    "mortgagee": "Renewal Offer",
     "non renewal": "Non Renewal",
     "cancellation": "Non Renewal",
     "loss runs": "Loss Runs",
     "loss run": "Loss Runs",
     "application": "Application",
+    "audit": "Audit",
+    "audit correspondence": "Audit",
+    "audit statement": "Audit",
+    "audit packet": "Audit",
+    "endorsement": "Endorsement",
+    "policy change": "Endorsement",
 }
 
 SUFFIX_ROUTING = {
@@ -34,7 +50,14 @@ SUFFIX_ROUTING = {
     "loss runs": "Loss Runs.pdf",
     "loss run": "Loss Runs.pdf",
     "application": "Renewal Application.pdf",
+    "audit": "Audit Correspondence.pdf",
+    "audit correspondence": "Audit Correspondence.pdf",
+    "audit statement": "Final Audit Statement.pdf",
+    "audit packet": "Audit Packet.pdf",
+    "endorsement": "Carrier Endorsement.pdf",
+    "policy change": "Policy Change Request.pdf",
 }
+
 
 
 class EZLynxDocumentUploader:
@@ -98,35 +121,47 @@ class EZLynxDocumentUploader:
             browser = None
             is_standalone = False
             try:
-                # 1. Use EZLynxSessionManager to get authenticated context (auto-handles login/2FA)
-                try:
-                    from src.ezlynx.session_manager import EZLynxSessionManager
-                    mgr = EZLynxSessionManager(
-                        storage_state_path=self.storage_state_path,
-                        cdp_url=self.cdp_url
-                    )
-                    browser, context = await mgr.get_authenticated_context(p, headless=True)
-                    is_standalone = True
-                except Exception as sess_err:
-                    logger.warning(f"EZLynxSessionManager error: {sess_err}, trying direct storage_state or CDP fallback...")
-                    if self.storage_state_path and Path(self.storage_state_path).is_file():
-                        browser = await p.chromium.launch(
-                            headless=True,
-                            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-                        )
-                        context = await browser.new_context(
-                            storage_state=str(self.storage_state_path),
-                            viewport={"width": 1440, "height": 900}
-                        )
-                        is_standalone = True
-                    elif self.cdp_url:
+                # 1. First, connect directly to running authenticated Chrome over CDP if available
+                if self.cdp_url:
+                    try:
+                        logger.info(f"Connecting to live Chrome over CDP at {self.cdp_url}...")
                         browser = await p.chromium.connect_over_cdp(self.cdp_url)
                         context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                        is_standalone = False
+                        logger.info("Connected to live Chrome via CDP successfully.")
+                    except Exception as cdp_err:
+                        logger.warning(f"CDP connection to {self.cdp_url} failed: {cdp_err}, trying session manager...")
+
+                # 2. If CDP not available, fallback to EZLynxSessionManager
+                if not browser or not context:
+                    try:
+                        from src.ezlynx.session_manager import EZLynxSessionManager
+                        mgr = EZLynxSessionManager(
+                            storage_state_path=self.storage_state_path,
+                            cdp_url=self.cdp_url
+                        )
+                        browser, context = await mgr.get_authenticated_context(p, headless=True)
+                        is_standalone = True
+                    except Exception as sess_err:
+                        logger.warning(f"EZLynxSessionManager error: {sess_err}, trying direct storage_state...")
+                        if self.storage_state_path and Path(self.storage_state_path).is_file():
+                            try:
+                                browser = await p.chromium.launch(
+                                    headless=True,
+                                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+                                )
+                                context = await browser.new_context(
+                                    storage_state=str(self.storage_state_path),
+                                    viewport={"width": 1440, "height": 900}
+                                )
+                                is_standalone = True
+                            except Exception as launch_err:
+                                logger.error(f"Chromium launch failed: {launch_err}")
+
 
                 if not browser or not context:
                     return {"success": False, "error": "Neither EZLynxSessionManager nor CDP connection could be established."}
-
-                page = await context.new_page()
+                page = context.pages[0] if context.pages else await context.new_page()
 
                 docs_url = f"https://app.ezlynx.com/web/account/{applicant_id}/documents"
                 logger.info(f"Navigating to {docs_url} for applicant {applicant_id}...")
@@ -250,12 +285,10 @@ class EZLynxDocumentUploader:
                 screenshot_dir = Path("data/screenshots")
                 screenshot_dir.mkdir(parents=True, exist_ok=True)
                 screenshot_path = screenshot_dir / f"doc_uploaded_{applicant_id}_{clean_pnum}.png"
-                try:
-                    await page.screenshot(path=str(screenshot_path))
-                except Exception as shot_err:
-                    logger.warning(f"Post-upload screenshot failed (document still submitted): {shot_err}")
+                await page.screenshot(path=str(screenshot_path))
 
-                await page.close()
+                if is_standalone:
+                    await page.close()
                 return {
                     "success": True,
                     "applicant_id": applicant_id,
@@ -271,5 +304,14 @@ class EZLynxDocumentUploader:
                 if is_standalone and browser:
                     try:
                         await browser.close()
+                    except Exception:
+                        pass
+                elif not is_standalone and page:
+                    try:
+                        # Auto-close rule: close extra tabs, reset primary tab to about:blank
+                        if context and len(context.pages) > 1:
+                            await page.close()
+                        else:
+                            await page.goto("about:blank", timeout=5000)
                     except Exception:
                         pass

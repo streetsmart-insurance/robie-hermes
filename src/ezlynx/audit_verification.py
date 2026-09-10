@@ -26,17 +26,19 @@ class CarrierChannelMatcher:
     KNOWN_ROUTING = {
         "pennsylvania lumbermans": {
             "matched_name": "NJCRIB - Pennsylvania Lumbermans Assigned Risk (PMA / Ormarks)",
-            "channel": "EMAIL",
+            "channel": "EMAIL_AND_PHONE",
+            "phone": "800-752-1895",
             "portal_url": "https://www.ormarks.com",
-            "underwriter_emails": ["policyservices@ormarks.com"],
-            "notes": "Assigned Risk serviced by PMA / Ormarks. Request audit via policyservices@ormarks.com."
+            "underwriter_emails": ["policyservices@ormarks.com", "custserv@plmins.com"],
+            "notes": "Assigned Risk serviced by PMA / Ormarks. Follow up via email (policyservices@ormarks.com) and phone desk (800-752-1895)."
         },
         "new jersey manufacturers": {
             "matched_name": "NJCRIB - New Jersey Manufacturers Assigned Risk",
-            "channel": "EMAIL",
+            "channel": "EMAIL_AND_PHONE",
+            "phone": "800-232-6600",
             "portal_url": "https://www.njm.com/",
             "underwriter_emails": ["wcumail@njm.com"],
-            "notes": "Assigned Risk serviced by NJM. Request audit via wcumail@njm.com."
+            "notes": "Assigned Risk serviced by NJM. Follow up via email (wcumail@njm.com) and phone desk (800-232-6600)."
         },
         "hartford assigned risk": {
             "matched_name": "NJCRIB - Hartford Assigned Risk",
@@ -63,15 +65,17 @@ class CarrierChannelMatcher:
             "matched_name": "Pie Insurance",
             "channel": "PORTAL",
             "portal_url": "https://portal.pieinsurance.com",
+            "phone": "855-965-1840",
             "underwriter_emails": ["service@pieinsurance.com"],
-            "notes": "Check Pie Partner Portal for audit status and payroll reporting."
+            "notes": "Check Pie Partner Portal for audit status and call Partner Support 855-965-1840."
         },
         "selective": {
             "matched_name": "Selective Insurance",
-            "channel": "PORTAL",
+            "channel": "EMAIL",
+            "phone": "800-777-9656",
             "portal_url": "https://home.selectiveinsurance.com/WebApplications/EDS/eSelect/Home_Agent.aspx",
-            "underwriter_emails": [],
-            "notes": "Check Selective eSelect Agent Portal."
+            "underwriter_emails": ["myaudit@Selective.com"],
+            "notes": "Email audit inquiries directly to myaudit@Selective.com."
         },
         "associated specialty": {
             "matched_name": "Associated Specialty Insurance Agency MGA",
@@ -86,6 +90,14 @@ class CarrierChannelMatcher:
             "portal_url": None,
             "underwriter_emails": ["policyservices@berkleyrisk.com"],
             "notes": "Assigned Risk servicing carrier. Check underwriter contacts or request audit via email."
+        },
+        "nysif": {
+            "matched_name": "NYSIF (New York State Insurance Fund)",
+            "channel": "EMAIL_AND_PHONE",
+            "phone": "888-875-5790",
+            "portal_url": "https://www.nysif.com/",
+            "underwriter_emails": ["CustomerService@nysif.com"],
+            "notes": "New York State Insurance Fund. Annual audits designated as Payroll Verifications. Submit/verify via CustomerService@nysif.com, phone 888-875-5790, or PASS portal. Agency producer code 1960636."
         }
     }
 
@@ -265,33 +277,6 @@ class AuditNoteBuilder:
         lines.append(ROBIE_SIGNATURE)
         return "\n".join(lines)
 
-    @staticmethod
-    def format_halted_in_progress_note(
-        policy_number: str,
-        carrier_name: str,
-        lob: str,
-        term_dates: str,
-        csr_name: str,
-        discussion_title: str,
-        in_progress_reason: str,
-        follow_up_date: str = None
-    ) -> str:
-        return AuditNoteBuilder.build(
-            policy_number=policy_number,
-            carrier_name=carrier_name,
-            lob=lob,
-            term_dates=term_dates,
-            csr_name=csr_name or "Audit Verification",
-            status_summary=f"Audit check initiated. Robie reviewed account and halted: active audit communication/handling already detected on '{discussion_title}'.",
-            actions_taken=[
-                f"Reviewed existing discussion thread and activity history on '{discussion_title}'",
-                f"Detected ongoing dialogue / active audit handling ({in_progress_reason})",
-                "Halted automated verification to prevent duplicate cards or redundant outreach"
-            ],
-            next_steps=f"Monitoring active audit handling on '{discussion_title}'.",
-            follow_up_date=follow_up_date or datetime.now().strftime("%Y-%m-%d")
-        )
-
 
 class AuditEmailBuilder:
     """Builds client delivery email drafts and carrier underwriter requests."""
@@ -416,6 +401,42 @@ class AuditVerifier:
         producer = row.get("Assigned Producer", "").strip()
         term = f"{eff_date} to {exp_date}"
 
+        # Pre-Flight Safety Filter: Auditable Line of Business Hardening
+        # Workers' Comp is audited. Commercial Auto, Personal Auto, Cargo, APD, Homeowners, Umbrella, Bonds, and standard BOP are NOT audited.
+        lob_lower = (lob or "").lower().strip()
+        NON_AUDITABLE_LOBS = {
+            "commercial auto", "auto (commercial)", "autob", "autop", "personal auto",
+            "cargo", "motor truck cargo", "auto physical damage", "apd", "fleet",
+            "homeowners", "home", "dwelling", "bonds", "bonds miscellaneous", "bmisc",
+            "commercial umbrella", "umbrella - comm", "cumbr", "business owners", "bop",
+            "business owners policy"
+        }
+        AUDITABLE_LOBS = {"workers comp", "workers' comp", "workers compensation", "workers' compensation", "work", "wc"}
+
+        is_explicitly_non_auditable = any(non in lob_lower for non in NON_AUDITABLE_LOBS)
+        is_auditable = any(aud in lob_lower for aud in AUDITABLE_LOBS)
+
+        if is_explicitly_non_auditable and not is_auditable:
+            logger.warning(
+                f"[AUDIT SAFETY GATE] Blocked non-auditable account '{account_name}' (App #{app_id}, Policy #{policy_num}): "
+                f"LOB '{lob}' is not subject to payroll audit."
+            )
+            return {
+                "applicant_id": app_id,
+                "account_name": account_name,
+                "policy_number": policy_num,
+                "carrier": carrier_raw,
+                "term": term,
+                "csr": csr,
+                "producer": producer,
+                "lob": lob,
+                "state": "rejected_non_auditable_lob",
+                "status": "REJECTED_NON_AUDITABLE_LOB",
+                "error": f"LOB '{lob}' is not subject to annual payroll audit.",
+                "actions_taken": [f"Audit Safety Gate rejected non-auditable LOB '{lob}' (Commercial Auto / Cargo / Personal lines are excluded)."],
+                "evidence": {}
+            }
+
         result = {
             "applicant_id": app_id,
             "account_name": account_name,
@@ -448,61 +469,19 @@ class AuditVerifier:
             contact_email = None
             contact_phone = None
             result["actions_taken"].append(f"Applicant profile check skipped/errored: {e}")
-        # Carrier Channel Resolution
-        carrier_info = CarrierChannelMatcher.match(carrier_raw, self.carrier_directory)
-        result["carrier_info"] = carrier_info
-        channel = carrier_info.get("channel", "UNKNOWN")
-        result["actions_taken"].append(
-            f"Carrier Directory: Matched '{carrier_info.get('matched_name')}' -> Channel: {channel}"
-        )
 
-# 1b. Check Existing Discussions, Active Tasks, and Prior Term Safeguards
+                # 1b. Check Existing Discussions and Active Tasks First
         existing_audit_discussion = None
         active_team_task = None
-        in_progress_by_team = False
-        in_progress_reason = ""
-
-        try:
-            eff_year = int(eff_date[:4]) if len(eff_date) >= 4 and eff_date[:4].isdigit() else 2026
-        except Exception:
-            eff_year = 2026
-
         try:
             discs = self.client.get_applicant_discussions(app_id)
-            # Scan discussions for current-term audit cards and active dialogue
             for d in discs:
                 d_title = d.get("title", "")
-                created_str = (d.get("created") or "")[:10]
-                try:
-                    created_year = int(created_str[:4])
-                except Exception:
-                    created_year = eff_year
-
-                # SAFEGUARD: Ignore cards created in prior years (prior policy terms)
-                # e.g. Diamond Counseling and Realty Improvement cards from Sept 2025
-                if created_year < eff_year:
-                    continue
-
-                d_title_lower = d_title.lower()
-                if any(disq in d_title_lower for disq in ["automation center", "email sent by automation center"]):
-                    continue
-
-                is_audit_card = any(w in d_title_lower for w in [
-                    "audit not complete", "policy audit verification",
-                    "audit documents", "_wc audit_", "audit checker",
-                    "insurance audit", "urgent: complete your insurance audit"
-                ])
-
-                if is_audit_card:
-                    if existing_audit_discussion is None:
-                        existing_audit_discussion = d
-
+                if any(w in d_title.lower() for w in ["audit", "wc audit", "policy audit verification"]):
+                    existing_audit_discussion = d
                     dn = d.get("discussionNote", {})
-                    note_text = (dn.get("note") or "") if isinstance(dn, dict) else str(dn or "")
-                    note_lower = note_text.lower()
-
-                    task = dn.get("task") if isinstance(dn, dict) else None
-                    if task and not active_team_task:
+                    task = dn.get("task") if dn else None
+                    if task:
                         active_team_task = {
                             "discussion_id": d.get("discussionId"),
                             "discussion_title": d_title,
@@ -512,57 +491,9 @@ class AuditVerifier:
                             "created_by": d.get("lastModifiedByName") or d.get("createdByName") or "Teammate",
                             "due_date": (task.get("dueDate") or "")[:10]
                         }
-
-                    # Check for active dialogue showing team is working on audit or with client/carrier
-                    if any(phrase in d_title_lower for phrase in ["audit not complete", "audit documents"]) or                        any(phrase in note_lower for phrase in ["underwriting@", "called asia", "working with", "sent to", "audit request to client", "carrier audit request"]):
-                        in_progress_by_team = True
-                        in_progress_reason = f"Active dialogue on '{d_title}'"
-                        existing_audit_discussion = d
-                        break
-
+                    break
         except Exception as e:
             logger.debug(f"Could not fetch discussions for {app_id}: {e}")
-
-        if in_progress_by_team:
-            result["state"] = "in_progress_by_team"
-            disc_title = existing_audit_discussion.get("title") if existing_audit_discussion else "Policy Audit Verification"
-            result["discussion_title"] = disc_title
-            
-            carrier_str = carrier_info.get("matched_name", carrier_raw)
-            term_str = f"{eff_date} to {exp_date}" if eff_date and exp_date else "Current Term"
-            halt_note = AuditNoteBuilder.format_halted_in_progress_note(
-                policy_number=policy_num,
-                carrier_name=carrier_str,
-                lob=lob,
-                term_dates=term_str,
-                csr_name=csr or "Audit Verification",
-                discussion_title=disc_title,
-                in_progress_reason=in_progress_reason,
-                follow_up_date=datetime.now().strftime("%Y-%m-%d")
-            )
-            result["draft_note"] = halt_note
-            result["actions_taken"].append(
-                f"Active audit dialogue detected on '{result['discussion_title']}': {in_progress_reason}. Halting to prevent duplicate discussions/outreach."
-            )
-            
-            # Post note into EZLynx discussion card so client file documents that Robie saw and halted
-            try:
-                self.client.add_note_to_discussion(
-                    applicant_id=str(app_id),
-                    discussion_title=disc_title,
-                    note_text=halt_note,
-                    policy_number=policy_num,
-                    line_of_business=lob,
-                    carrier_name=carrier_str,
-                    honor_explicit_title=True
-                )
-                result["actions_taken"].append(
-                    f"Saved note to EZLynx discussion '{disc_title}': Robie confirmed active dialogue in progress and recorded halt."
-                )
-            except Exception as e:
-                logger.warning(f"Could not post halt note to EZLynx discussion '{disc_title}': {e}")
-
-            return result
 
         if active_team_task:
             result["existing_task"] = active_team_task
@@ -577,8 +508,13 @@ class AuditVerifier:
         else:
             result["discussion_title"] = "Audit"
 
-
-# Carrier channel resolved at step 1
+# 2. Carrier Channel Resolution
+        carrier_info = CarrierChannelMatcher.match(carrier_raw, self.carrier_directory)
+        result["carrier_info"] = carrier_info
+        channel = carrier_info.get("channel", "UNKNOWN")
+        result["actions_taken"].append(
+            f"Carrier Directory: Matched '{carrier_info.get('matched_name')}' -> Channel: {channel}"
+        )
 
         # 3. Document Library Classification
         try:

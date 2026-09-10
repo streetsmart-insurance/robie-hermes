@@ -168,10 +168,26 @@ class SecretsManager:
         seen = set()
         projects = [x for x in projects_to_try if not (x in seen or seen.add(x))]
 
+        if getattr(self, "_gcp_disabled", False):
+            return None
+
+        # Fast upfront validation of GCP credentials to avoid gRPC retry hangs
+        try:
+            import google.auth
+            from google.auth.transport.requests import Request
+            creds, _ = google.auth.default()
+            if hasattr(creds, "refresh") and not creds.valid:
+                creds.refresh(Request())
+        except Exception as e:
+            logger.debug(f"GCP default credentials unavailable ({e}); bypassing GCP secrets.")
+            self._gcp_disabled = True
+            return None
+
         try:
             client = secretmanager.SecretManagerServiceClient()
         except Exception as e:
             logger.debug(f"Failed to initialize GCP Secret Manager client: {e}")
+            self._gcp_disabled = True
             return None
         svc_norm = service_name.lower().replace(" ", "").replace("-", "").replace("_", "")
         svc_snake = service_name.lower().replace(" ", "_").replace("-", "_")
@@ -181,6 +197,9 @@ class SecretsManager:
 
         # Prioritized candidate names
         candidates = [
+            f"{svc_snake}_robie_{fld_norm}",
+            f"{svc_kebab}-robie-{fld_kebab}",
+            f"{svc_norm}_robie_{fld_norm}",
             f"{svc_snake}_{fld_norm}",
             f"{svc_kebab}-{fld_kebab}",
             f"{svc_kebab}-{fld_norm}",
@@ -210,8 +229,9 @@ class SecretsManager:
                     return raw_val
                 except Exception as e:
                     err_str = str(e)
-                    if "Reauthentication is needed" in err_str or "RefreshError" in err_str or "invalid_grant" in err_str or "Unauthenticated" in err_str:
-                        logger.debug(f"GCP authentication unavailable ({e}); aborting GCP secret lookup.")
+                    if any(k in err_str for k in ["Reauthentication is needed", "RefreshError", "invalid_grant", "Unauthenticated", "MetadataPlugin"]):
+                        logger.debug(f"GCP authentication unavailable ({e}); disabling GCP secret lookup.")
+                        self._gcp_disabled = True
                         return None
                     # If latest fails, inspect enabled versions
                     try:
@@ -227,7 +247,8 @@ class SecretsManager:
                                 return raw_val
                     except Exception as inner_e:
                         inner_err = str(inner_e)
-                        if "Reauthentication is needed" in inner_err or "RefreshError" in inner_err or "invalid_grant" in inner_err:
+                        if any(k in inner_err for k in ["Reauthentication is needed", "RefreshError", "invalid_grant", "Unauthenticated", "MetadataPlugin"]):
+                            self._gcp_disabled = True
                             return None
         return None
 

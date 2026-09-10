@@ -38,7 +38,7 @@ async def run_batch():
             policy_number=pol,
             doc_type='renewal',
             doc_title=doc_title,
-            target_folder='Billing and Payments'
+            target_folder='Renewal Offers/Declarations'
         )
         logger.info(f'Result for {name}: {res.get("success")} - {res.get("error", "OK")}')
         await asyncio.sleep(2)

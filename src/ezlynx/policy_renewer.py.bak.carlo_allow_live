@@ -1,0 +1,1108 @@
+"""Official Robie EZLynx policy renewer (shell term key + file).
+
+CLI:
+  PYTHONPATH=. ./venv/bin/python -m src.ezlynx.policy_renewer --applicant 220250093
+
+Behavior:
+  - Inspect existing policies via EZLynxApiClient.get_applicant_policies
+  - Decide Renew vs Add Policy (same writing co + policy # + LOB => Renew)
+  - Key a SHELL renewal term only when real dates/premium come from quote/PDF
+    or explicit CLI overrides — never invent premium/class codes
+  - Upload/label renewal PDF when a real quote PDF is present
+  - Post note on an existing titled discussion (never untitled)
+  - Write proof JSON under data/handoffs/
+
+No bind. No money. No client email. Assigned Producer/CSR stays Carlo Ferrara
+when set on the form; actor in proof is always robie_policy_renewer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import re
+import sqlite3
+from dataclasses import dataclass, field, asdict
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from src.ezlynx.api_client import (
+    EZLynxApiClient,
+    extract_document_records,
+)
+
+logger = logging.getLogger("robie_policy_renewer")
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PROOF = ROOT / "data" / "handoffs" / "robie_testllc_key_proof.json"
+DEFAULT_CDP = "http://127.0.0.1:9222"
+ACTOR = "robie_policy_renewer"
+SAFE_APPLICANTS = {"163863318", "151445306"}  # Safe Man, Pross — never touch
+
+# Explicit allow-list for Production keying in this module.
+ALLOWED_PRODUCTION_APPLICANTS = {"220250093"}  # ROBIE Test LLC
+
+
+@dataclass
+class QuoteFacts:
+    """Facts extracted from a real renewal quote/PDF — never invented."""
+
+    source: Optional[str] = None
+    policy_number: Optional[str] = None
+    effective_date: Optional[str] = None  # YYYY-MM-DD
+    expiration_date: Optional[str] = None
+    premium: Optional[float] = None
+    is_real_quote: bool = False
+    notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RenewDecision:
+    method: str  # "Renew" | "Add Policy"
+    reason: str
+    match_policy: Optional[Dict[str, Any]] = None
+    numeric_policy_id: Optional[str] = None
+    encoded_policy_id: Optional[str] = None
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _to_mmddyyyy(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", text):
+        return text
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
+    if m:
+        return f"{int(m.group(2)):02d}/{int(m.group(3)):02d}/{m.group(1)}"
+    return text
+
+
+def _to_yyyy_mm_dd(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", text)
+    if m:
+        return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return None
+
+
+def _normalize_lob(lob: Optional[str]) -> str:
+    t = (lob or "").strip().lower()
+    aliases = {
+        "work": "workers comp",
+        "workers compensation": "workers comp",
+        "wc": "workers comp",
+        "workers' compensation": "workers comp",
+    }
+    return aliases.get(t, t)
+
+
+def _policy_matches(
+    pol: Dict[str, Any],
+    policy_number: str,
+    lob: Optional[str],
+    carrier: Optional[str],
+) -> bool:
+    pn = str(pol.get("PolicyNumber") or "").strip()
+    if pn != policy_number.strip():
+        return False
+    if lob:
+        pol_lob = _normalize_lob(pol.get("LOB") or pol.get("LOBText"))
+        if pol_lob and pol_lob != _normalize_lob(lob):
+            return False
+    if carrier:
+        names = " ".join(
+            str(x or "")
+            for x in (
+                pol.get("CarrierName"),
+                pol.get("MasterCompanyName"),
+                pol.get("WritingCompanyName"),
+                pol.get("Company"),
+            )
+        ).lower()
+        if carrier.lower() not in names and names:
+            # Soft match — still OK if policy number + LOB matched
+            pass
+    return True
+
+
+def load_renewal_row(applicant_id: str, policy_number: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    db_path = ROOT / "data" / "renewals.db"
+    if not db_path.is_file():
+        return None
+    con = sqlite3.connect(str(db_path))
+    con.row_factory = sqlite3.Row
+    try:
+        if policy_number:
+            row = con.execute(
+                "SELECT * FROM policy_renewals WHERE applicant_id=? AND policy_number=? ORDER BY id DESC LIMIT 1",
+                (applicant_id, policy_number),
+            ).fetchone()
+        else:
+            row = con.execute(
+                "SELECT * FROM policy_renewals WHERE applicant_id=? ORDER BY id DESC LIMIT 1",
+                (applicant_id,),
+            ).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def decide_renew_vs_add(
+    policies: List[Dict[str, Any]],
+    policy_number: str,
+    lob: Optional[str],
+    carrier: Optional[str],
+) -> RenewDecision:
+    """If same writing co + policy # + LOB exists, Add Policy fails — use Renew."""
+    matches = [p for p in policies if _policy_matches(p, policy_number, lob, carrier)]
+    if matches:
+        # Prefer Active / latest expiration
+        def sort_key(p: Dict[str, Any]) -> str:
+            return str(p.get("ExpirationDate") or p.get("TermExpirationDate") or "")
+
+        matches.sort(key=sort_key, reverse=True)
+        best = matches[0]
+        return RenewDecision(
+            method="Renew",
+            reason="Existing policy with same policy number + LOB found; EZLynx Add Policy would fail.",
+            match_policy=best,
+            encoded_policy_id=str(best.get("Id") or "") or None,
+        )
+    return RenewDecision(
+        method="Add Policy",
+        reason="No existing same policy# + LOB; new number / GUARD-style uses Add Policy.",
+        match_policy=None,
+    )
+
+
+def extract_quote_from_pdf(pdf_path: Path) -> QuoteFacts:
+    """Extract premium/dates from a PDF. Call logs / audio summaries are NOT quotes."""
+    facts = QuoteFacts(source=str(pdf_path))
+    if not pdf_path.is_file():
+        facts.notes.append("pdf_missing")
+        return facts
+
+    text = ""
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(pdf_path) as pdf:
+            text = "\n".join((page.extract_text() or "") for page in pdf.pages)
+    except Exception as exc:
+        facts.notes.append(f"pdfplumber_error:{exc}")
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(pdf_path))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        except Exception as exc2:
+            facts.notes.append(f"pypdf_error:{exc2}")
+            return facts
+
+    lowered = text.lower()
+    # Reject known non-quote artifacts (call logs, transcripts)
+    non_quote_markers = (
+        "autonomous renewal audio log",
+        "verbatim transcript",
+        "call duration",
+        "audio recording url",
+        "quoted renewal premium was not yet",
+        "i don't have it yet",
+        "not yet finalized",
+    )
+    if any(m in lowered for m in non_quote_markers):
+        facts.notes.append("pdf_is_call_log_not_quote")
+        facts.is_real_quote = False
+        return facts
+
+    # Premium patterns
+    premium = None
+    for pat in (
+        r"(?:renewal\s+)?(?:premium|total\s+premium|estimated\s+premium)\s*[:=]?\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)",
+        r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)\s*(?:annual|renewal)?",
+    ):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                premium = float(m.group(1).replace(",", ""))
+                break
+            except ValueError:
+                pass
+
+    # Date range patterns
+    eff = exp = None
+    m = re.search(
+        r"(?:effective|eff\.?)\s*(?:date)?\s*[:=]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        eff = _to_yyyy_mm_dd(m.group(1).replace("-", "/") if "/" in m.group(1) else m.group(1))
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", m.group(1)):
+            eff = m.group(1)
+        else:
+            eff = _to_yyyy_mm_dd(m.group(1))
+    m = re.search(
+        r"(?:expiration|exp\.?)\s*(?:date)?\s*[:=]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        exp = _to_yyyy_mm_dd(m.group(1))
+
+    m = re.search(r"Policy\s*#?\s*:?\s*([A-Z0-9][A-Z0-9\-]+)", text, re.IGNORECASE)
+    if m:
+        facts.policy_number = m.group(1).strip()
+
+    facts.premium = premium
+    facts.effective_date = eff
+    facts.expiration_date = exp
+    facts.is_real_quote = premium is not None and (eff is not None or exp is not None)
+    if not facts.is_real_quote:
+        facts.notes.append("insufficient_quote_fields")
+    return facts
+
+
+def find_local_quote_pdf(policy_number: str, applicant_id: str) -> Optional[Path]:
+    downloads = ROOT / "data" / "downloads"
+    if not downloads.is_dir():
+        return None
+    candidates: List[Path] = []
+    for path in downloads.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() != ".pdf":
+            continue
+        name = path.name.lower()
+        if policy_number.lower() in name or applicant_id in name:
+            candidates.append(path)
+        elif "renewal" in name and ("offer" in name or "quote" in name):
+            # Only if policy token present in parent or nearby
+            if policy_number.split("-")[0].lower() in name:
+                candidates.append(path)
+    # Prefer larger files (real carrier PDFs) over tiny stubs
+    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def derive_term_dates_from_expiring(expiring_expiration: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Shell term dates: new eff = prior exp, new exp = +1 year. No premium invention."""
+    ymd = _to_yyyy_mm_dd(expiring_expiration)
+    if not ymd:
+        return None, None
+    y, m, d = map(int, ymd.split("-"))
+    try:
+        eff = date(y, m, d)
+    except ValueError:
+        return None, None
+    try:
+        exp = date(y + 1, m, d)
+    except ValueError:
+        exp = date(y + 1, m, d - 1)
+    return eff.isoformat(), exp.isoformat()
+
+
+async def resolve_numeric_policy_id(
+    applicant_id: str,
+    policy_number: str,
+    cdp_url: str = DEFAULT_CDP,
+) -> Optional[str]:
+    """Discover ApplicantPortal numeric policy id for Renew/{applicant}/{id}."""
+    from playwright.async_api import async_playwright
+    from src.ezlynx.session_manager import EZLynxSessionManager
+
+    sm = EZLynxSessionManager(cdp_url=cdp_url)
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.connect_over_cdp(cdp_url)
+            ctx = browser.contexts[0]
+        except Exception:
+            browser, ctx = await sm.get_authenticated_context(p, headless=True)
+
+        if not await sm._is_context_authenticated(ctx):
+            await sm._perform_login(ctx)
+
+        page = await ctx.new_page()
+        try:
+            # Policies list often embeds Renew/Change hrefs with numeric ids
+            await page.goto(
+                f"https://app.ezlynx.com/web/account/{applicant_id}/policies",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            await asyncio.sleep(3)
+            # Click into the policy if needed
+            found = await page.evaluate(
+                """(pol) => {
+                  const hrefs = Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href)
+                    .filter(h => /Policy\\/Actions\\/(Renew|Change|Edit|View)/i.test(h));
+                  const hit = hrefs.find(h => h.includes(pol)) || hrefs[0] || null;
+                  const all = hrefs.slice(0, 40);
+                  // Also scan page text for Renew/<applicant>/<digits>
+                  const html = document.documentElement.innerHTML;
+                  const m = html.match(new RegExp('Renew/' + '\\\\d+/' + '(\\\\d+)', 'i'))
+                    || html.match(/Policy\\/Actions\\/Renew\\/\\d+\\/(\\d+)/i)
+                    || html.match(/policyId[=:]\\s*[\"']?(\\d{5,})/i);
+                  return {hrefs: all, regexId: m && m[1], hit};
+                }""",
+                policy_number,
+            )
+            numeric = found.get("regexId") if isinstance(found, dict) else None
+            if numeric:
+                return str(numeric)
+
+            # Click policy number then open Actions > Renew
+            loc = page.get_by_text(policy_number, exact=False).first
+            if await loc.count():
+                await loc.click()
+                await asyncio.sleep(2.5)
+                for sel in (
+                    "button:has-text('Actions')",
+                    "button[aria-label*='Action']",
+                    "button:has-text('more_vert')",
+                ):
+                    btn = page.locator(sel).first
+                    if await btn.count() and await btn.is_visible():
+                        await btn.click()
+                        await asyncio.sleep(1)
+                        break
+                renew = page.locator(
+                    "a:has-text('Renew'), button:has-text('Renew'), [role=menuitem]:has-text('Renew')"
+                ).first
+                if await renew.count():
+                    href = await renew.get_attribute("href")
+                    if href:
+                        m = re.search(r"/Renew/\d+/(\d+)", href)
+                        if m:
+                            return m.group(1)
+                    await renew.click()
+                    await asyncio.sleep(2)
+                    m = re.search(r"/Renew/\d+/(\d+)", page.url)
+                    if m:
+                        return m.group(1)
+
+            # Classic policy detail page sometimes in network/DOM
+            html = await page.content()
+            m = re.search(rf"/Renew/{re.escape(applicant_id)}/(\d+)", html)
+            if m:
+                return m.group(1)
+            m = re.search(r"policyId[=\"':\s]+(\d{5,})", html, re.IGNORECASE)
+            if m:
+                return m.group(1)
+            return None
+        finally:
+            await page.close()
+
+
+async def key_shell_renewal(
+    *,
+    applicant_id: str,
+    method: str,
+    policy_number: str,
+    numeric_policy_id: Optional[str],
+    effective_date: str,
+    expiration_date: str,
+    premium: float,
+    cdp_url: str = DEFAULT_CDP,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Open Renew or Add Policy form and submit a SHELL term. Never binds."""
+    from playwright.async_api import async_playwright
+    from src.ezlynx.session_manager import EZLynxSessionManager
+
+    sm = EZLynxSessionManager(cdp_url=cdp_url)
+    dialogs: List[Dict[str, str]] = []
+    result: Dict[str, Any] = {
+        "success": False,
+        "method": method,
+        "landed_url": None,
+        "clicked": None,
+        "dialogs": dialogs,
+        "toast": [],
+        "dry_run": dry_run,
+    }
+
+    eff = _to_mmddyyyy(effective_date)
+    exp = _to_mmddyyyy(expiration_date)
+    prem = f"{premium:.2f}".rstrip("0").rstrip(".") if premium == int(premium) else f"{premium:.2f}"
+
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.connect_over_cdp(cdp_url)
+            ctx = browser.contexts[0]
+        except Exception:
+            browser, ctx = await sm.get_authenticated_context(p, headless=True)
+
+        if not await sm._is_context_authenticated(ctx):
+            await sm._perform_login(ctx)
+            result["login"] = "refreshed"
+        else:
+            result["login"] = "ok_cdp"
+
+        page = await ctx.new_page()
+
+        async def on_dialog(d):
+            dialogs.append({"type": d.type, "message": d.message})
+            msg = d.message or ""
+            if "bind" in msg.lower() or "payment" in msg.lower():
+                await d.dismiss()
+            else:
+                await d.accept()
+
+        page.on("dialog", lambda d: asyncio.create_task(on_dialog(d)))
+
+        candidates: List[str] = []
+        if method == "Renew" and numeric_policy_id:
+            candidates.append(
+                f"https://app.ezlynx.com/ApplicantPortal/Policy/Actions/Renew/{applicant_id}/{numeric_policy_id}"
+            )
+            candidates.append(
+                f"https://app.ezlynx.com/applicantportal/Policy/Actions/Renew/{applicant_id}/{numeric_policy_id}"
+            )
+        # Add Policy path (new number / no match)
+        candidates.append(
+            f"https://app.ezlynx.com/ApplicantPortal/Policy/Actions/Add/{applicant_id}/0"
+        )
+        candidates.append(
+            f"https://app.ezlynx.com/applicantportal/Policy/Actions/Add/{applicant_id}/0"
+        )
+
+        landed = None
+        for url in candidates:
+            logger.info("Navigating to %s", url)
+            try:
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(2.5)
+                n = await page.locator("#TransactionType, #PolicyNumber, #EffectiveDate").count()
+                result.setdefault("nav", []).append(
+                    {
+                        "url": url,
+                        "status": getattr(resp, "status", None),
+                        "final": page.url,
+                        "fields": n,
+                    }
+                )
+                if n >= 2:
+                    landed = page.url
+                    break
+            except Exception as exc:
+                result.setdefault("nav", []).append({"url": url, "error": str(exc)[:200]})
+
+        if not landed:
+            result["error"] = "renew_form_not_found"
+            shot = ROOT / "data" / "screenshots" / f"renewer_nofile_{applicant_id}.png"
+            shot.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(shot), full_page=True)
+            result["screenshot"] = str(shot)
+            await page.close()
+            return result
+
+        result["landed_url"] = landed
+
+        # Force RWL when Renew
+        if await page.locator("#TransactionType").count():
+            try:
+                await page.locator("#TransactionType").select_option(value="RWL")
+                await page.locator("#TransactionType").dispatch_event("change")
+            except Exception:
+                pass
+
+        if await page.locator("#PolicyNumber").count():
+            await page.locator("#PolicyNumber").fill(policy_number)
+        if await page.locator("#EffectiveDate").count() and eff:
+            await page.locator("#EffectiveDate").fill(eff)
+        if await page.locator("#ExpirationDate").count() and exp:
+            await page.locator("#ExpirationDate").fill(exp)
+        for sel in ("#Premium", "#AnnualPremium", "#FullTermPremium", "#WrittenPremium"):
+            if await page.locator(sel).count():
+                await page.locator(sel).fill(str(prem))
+
+        # Keep Assigned Producer / CSR as Carlo Ferrara when present — never Robie
+        for sel in (
+            "#AssignedProducer",
+            "#Producer",
+            "#CSR",
+            "#AssignedCSR",
+            "select[name*='Producer']",
+            "select[name*='CSR']",
+        ):
+            loc = page.locator(sel).first
+            if await loc.count():
+                try:
+                    options = await loc.evaluate(
+                        """el => Array.from(el.options||[]).map(o=>({v:o.value,t:(o.textContent||'').trim()}))"""
+                    )
+                    carlo = next(
+                        (
+                            o
+                            for o in options
+                            if "carlo" in (o.get("t") or "").lower()
+                            and "ferrara" in (o.get("t") or "").lower()
+                        ),
+                        None,
+                    )
+                    if carlo and carlo.get("v") is not None:
+                        await loc.select_option(value=str(carlo["v"]))
+                        result["producer_set"] = carlo.get("t")
+                except Exception:
+                    pass
+
+        form_dump = await page.evaluate(
+            """() => ({
+              url: location.href,
+              pol: (document.querySelector('#PolicyNumber')||{}).value,
+              trans: (document.querySelector('#TransactionType')||{}).value,
+              eff: (document.querySelector('#EffectiveDate')||{}).value,
+              exp: (document.querySelector('#ExpirationDate')||{}).value,
+              prem: (document.querySelector('#Premium')||document.querySelector('#AnnualPremium')||{}).value,
+              master: (document.querySelector('#MasterCompany')||{}).selectedOptions?.[0]?.text
+                || (document.querySelector('#MasterCompany')||{}).value,
+              writing: (document.querySelector('#WritingCompany')||{}).selectedOptions?.[0]?.text
+                || (document.querySelector('#WritingCompany')||{}).value,
+            })"""
+        )
+        result["form"] = form_dump
+
+        shot = ROOT / "data" / "screenshots" / f"renewer_filled_{applicant_id}.png"
+        shot.parent.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(shot), full_page=True)
+        result["screenshot_filled"] = str(shot)
+
+        if dry_run:
+            result["success"] = True
+            result["skipped_submit"] = True
+            result["message"] = "dry_run: form reached and filled; submit skipped"
+            await page.close()
+            return result
+
+        clicked = None
+        for sel in (
+            "#AddPolicyBtn",
+            "button:has-text('Add Policy')",
+            "button:has-text('Renew')",
+            "button:has-text('Save')",
+            "button.btn-primary",
+        ):
+            btn = page.locator(sel).first
+            if await btn.count() and await btn.is_visible():
+                await btn.click()
+                clicked = sel
+                break
+        result["clicked"] = clicked
+        if not clicked:
+            result["error"] = "no_submit_button"
+            await page.close()
+            return result
+
+        await asyncio.sleep(6)
+        result["after_url"] = page.url
+        toast = await page.evaluate(
+            """() => {
+              const sels=['.toast','.noty_body','.alert','.validation-summary-errors',
+                '.field-validation-error','.alert-danger','[role=alert]'];
+              const out=[];
+              for (const s of sels) document.querySelectorAll(s).forEach(e=>{
+                const t=(e.innerText||'').trim(); if(t) out.push(t.slice(0,240));
+              });
+              return [...new Set(out)].slice(0,20);
+            }"""
+        )
+        result["toast"] = toast
+        shot2 = ROOT / "data" / "screenshots" / f"renewer_after_{applicant_id}.png"
+        await page.screenshot(path=str(shot2), full_page=True)
+        result["screenshot_after"] = str(shot2)
+        # Success is verified by caller via get_applicant_policies
+        result["success"] = True
+        await page.close()
+        return result
+
+
+def verify_term_created(
+    client: EZLynxApiClient,
+    applicant_id: str,
+    policy_number: str,
+    effective_date: str,
+    expiration_date: str,
+) -> Dict[str, Any]:
+    res = client.get_applicant_policies(applicant_id, start_date="2020-01-01", end_date="2030-12-31")
+    policies = res.get("policies") or []
+    eff = _to_yyyy_mm_dd(effective_date) or effective_date
+    exp = _to_yyyy_mm_dd(expiration_date) or expiration_date
+    matched = []
+    for p in policies:
+        pn = str(p.get("PolicyNumber") or "")
+        if policy_number not in pn:
+            continue
+        pe = str(p.get("EffectiveDate") or p.get("TermEffectiveDate") or "")
+        px = str(p.get("ExpirationDate") or p.get("TermExpirationDate") or "")
+        if (eff and eff in pe) or (exp and exp in px):
+            matched.append(p)
+    return {
+        "policies_count": len(policies),
+        "matched": [
+            {
+                "PolicyNumber": m.get("PolicyNumber"),
+                "EffectiveDate": m.get("EffectiveDate"),
+                "ExpirationDate": m.get("ExpirationDate"),
+                "Status": m.get("Status"),
+                "TransactionType": m.get("TransactionType"),
+                "WrittenPremium": m.get("WrittenPremium"),
+                "LastChangeDate": m.get("LastChangeDate"),
+                "Id": m.get("Id"),
+            }
+            for m in matched
+        ],
+        "all_rows": [
+            {
+                "PolicyNumber": p.get("PolicyNumber"),
+                "EffectiveDate": p.get("EffectiveDate"),
+                "ExpirationDate": p.get("ExpirationDate"),
+                "Status": p.get("Status"),
+                "TransactionType": p.get("TransactionType"),
+                "LastChangeDate": p.get("LastChangeDate"),
+            }
+            for p in policies
+        ],
+    }
+
+
+def post_audit_note(
+    client: EZLynxApiClient,
+    *,
+    applicant_id: str,
+    discussion_title: str,
+    policy_number: str,
+    lob: Optional[str],
+    carrier: Optional[str],
+    body: str,
+) -> Dict[str, Any]:
+    """Post on the known titled discussion from renewals.db.
+
+    We pass the exact titled card (never blank/untitled). ``require_existing_discussion``
+    is False so Classic note API can target that title even when portal GetPagedDiscussions
+    briefly 403s; resolve_discussion_title still prefers an existing match when available.
+    """
+    if not (discussion_title or "").strip():
+        return {"status": "error", "error": "refusing_untitled_discussion"}
+    return client.add_note_to_discussion(
+        applicant_id=applicant_id,
+        discussion_title=discussion_title,
+        note_text=body,
+        policy_number=policy_number,
+        line_of_business=lob,
+        carrier_name=carrier,
+        require_existing_discussion=False,
+    )
+
+
+async def maybe_upload_quote_pdf(
+    client: EZLynxApiClient,
+    *,
+    applicant_id: str,
+    policy_number: str,
+    pdf_path: Path,
+) -> Dict[str, Any]:
+    return client.upload_document(
+        applicant_id=applicant_id,
+        file_path=pdf_path,
+        folder_name="Renewal Offers/Declarations",
+        policy_number=policy_number,
+        doc_type="renewal",
+        label_to_apply="Renewal Offer",
+    )
+
+
+async def run_policy_renewer(
+    *,
+    applicant_id: str,
+    policy_number: Optional[str] = None,
+    force_method: Optional[str] = None,
+    premium: Optional[float] = None,
+    effective_date: Optional[str] = None,
+    expiration_date: Optional[str] = None,
+    pdf_path: Optional[str] = None,
+    dry_run: bool = False,
+    allow_hitl_note: bool = True,
+    proof_path: Optional[Path] = None,
+    cdp_url: str = DEFAULT_CDP,
+) -> Dict[str, Any]:
+    """Main entry: inspect → decide → key shell (or HITL) → note → proof JSON."""
+    proof_path = Path(proof_path) if proof_path else DEFAULT_PROOF
+    proof: Dict[str, Any] = {
+        "at": _iso_now(),
+        "actor": ACTOR,
+        "module": "src.ezlynx.policy_renewer",
+        "applicant_id": str(applicant_id),
+        "bind": False,
+        "success": False,
+        "method": None,
+        "policy_number": None,
+        "dates": {},
+        "premium": None,
+        "note_id": None,
+        "hitl": False,
+        "dry_run": dry_run,
+        "blockers": [],
+        "evidence": {},
+    }
+
+    if str(applicant_id) in SAFE_APPLICANTS:
+        proof["blockers"].append("refused_safe_man_or_pross")
+        _write_proof(proof_path, proof)
+        return proof
+
+    if str(applicant_id) not in ALLOWED_PRODUCTION_APPLICANTS and not dry_run:
+        # Still allow inspect dry-run elsewhere, but refuse live keying outside Test LLC
+        proof["blockers"].append(
+            "live_key_refused_outside_allowed_applicants; use --dry-run for inspect-only"
+        )
+        dry_run = True
+        proof["dry_run"] = True
+
+    client = EZLynxApiClient()
+    row = load_renewal_row(str(applicant_id), policy_number)
+    if row:
+        proof["db_row"] = {
+            "id": row.get("id"),
+            "policy_number": row.get("policy_number"),
+            "status": row.get("status"),
+            "expiration_date": row.get("expiration_date"),
+            "discussion_title": row.get("discussion_title"),
+            "carrier_name": row.get("carrier_name"),
+            "line_of_business": row.get("line_of_business"),
+            "renewal_premium": row.get("renewal_premium"),
+            "expiring_premium": row.get("expiring_premium"),
+        }
+        policy_number = policy_number or row.get("policy_number")
+        lob = row.get("line_of_business")
+        carrier = row.get("carrier_name")
+        discussion_title = row.get("discussion_title")
+        expiring_exp = str(row.get("expiration_date") or "")
+    else:
+        lob = carrier = discussion_title = None
+        expiring_exp = None
+
+    if not policy_number:
+        proof["blockers"].append("no_policy_number")
+        _write_proof(proof_path, proof)
+        return proof
+
+    proof["policy_number"] = policy_number
+
+    # Session / login proof
+    sessions = client.get_session_overview()
+    proof["evidence"]["sessions"] = {
+        "classic": sessions.get("classic_api", {}).get("authenticated"),
+        "oauth": sessions.get("oauth_gateway", {}).get("authenticated"),
+        "cdp": sessions.get("browser_session", {}).get("cdp_connected"),
+        "username": sessions.get("classic_api", {}).get("username"),
+    }
+
+    pol_res = client.get_applicant_policies(
+        str(applicant_id), start_date="2020-01-01", end_date="2030-12-31"
+    )
+    policies = pol_res.get("policies") or []
+    proof["evidence"]["policy_inspect"] = {
+        "status": pol_res.get("status"),
+        "count": len(policies),
+        "rows": [
+            {
+                "PolicyNumber": p.get("PolicyNumber"),
+                "LOB": p.get("LOB"),
+                "CarrierName": p.get("CarrierName"),
+                "Status": p.get("Status"),
+                "EffectiveDate": p.get("EffectiveDate"),
+                "ExpirationDate": p.get("ExpirationDate"),
+                "WrittenPremium": p.get("WrittenPremium"),
+                "TransactionType": p.get("TransactionType"),
+                "LastChangeDate": p.get("LastChangeDate"),
+                "Id": p.get("Id"),
+            }
+            for p in policies
+        ],
+    }
+    if pol_res.get("status") != "success":
+        proof["blockers"].append(f"policy_inspect_failed:{pol_res.get('error')}")
+        _write_proof(proof_path, proof)
+        return proof
+
+    decision = decide_renew_vs_add(policies, policy_number, lob, carrier)
+    if force_method in ("Renew", "Add Policy"):
+        decision.method = force_method
+        decision.reason = f"forced via CLI --method {force_method}"
+    proof["method"] = decision.method
+    proof["decision_reason"] = decision.reason
+    proof["encoded_policy_id"] = decision.encoded_policy_id
+
+    # Quote / PDF facts — never invent
+    quote = QuoteFacts()
+    local_pdf = Path(pdf_path) if pdf_path else find_local_quote_pdf(policy_number, str(applicant_id))
+    if local_pdf:
+        quote = extract_quote_from_pdf(local_pdf)
+        proof["evidence"]["pdf"] = asdict(quote)
+
+    # Explicit CLI overrides count as operator-supplied real facts
+    if premium is not None:
+        quote.premium = float(premium)
+        quote.is_real_quote = True
+        quote.notes.append("premium_from_cli")
+    if effective_date:
+        quote.effective_date = _to_yyyy_mm_dd(effective_date) or effective_date
+        quote.notes.append("eff_from_cli")
+    if expiration_date:
+        quote.expiration_date = _to_yyyy_mm_dd(expiration_date) or expiration_date
+        quote.notes.append("exp_from_cli")
+
+    # Fill dates from expiring term when we have a real premium but missing dates
+    if quote.premium is not None and (not quote.effective_date or not quote.expiration_date):
+        d_eff, d_exp = derive_term_dates_from_expiring(expiring_exp)
+        quote.effective_date = quote.effective_date or d_eff
+        quote.expiration_date = quote.expiration_date or d_exp
+
+    can_key = (
+        quote.premium is not None
+        and quote.effective_date
+        and quote.expiration_date
+        and (quote.is_real_quote or premium is not None)
+    )
+
+    if not can_key:
+        proof["hitl"] = True
+        proof["blockers"].append(
+            "HITL: no real renewal quote/PDF premium — refusing to invent premium/class codes"
+        )
+        proof["dates"] = {
+            "proposed_eff": derive_term_dates_from_expiring(expiring_exp)[0],
+            "proposed_exp": derive_term_dates_from_expiring(expiring_exp)[1],
+            "source": "derived_from_expiring_only_not_keyed",
+        }
+        # Dry-run may hunt numeric id + reach form. HITL inspect skips slow CDP hunt.
+        numeric = None
+        if dry_run:
+            try:
+                numeric = await asyncio.wait_for(
+                    resolve_numeric_policy_id(
+                        str(applicant_id), policy_number, cdp_url=cdp_url
+                    ),
+                    timeout=45,
+                )
+                proof["evidence"]["numeric_policy_id"] = numeric
+            except Exception as exc:
+                proof["evidence"]["numeric_policy_id_error"] = str(exc)[:300]
+
+        if dry_run and decision.method == "Renew" and numeric:
+            try:
+                d_eff, d_exp = derive_term_dates_from_expiring(expiring_exp)
+                # Use 0 premium only inside dry_run form fill to prove UI — never submit
+                form_res = await key_shell_renewal(
+                    applicant_id=str(applicant_id),
+                    method="Renew",
+                    policy_number=policy_number,
+                    numeric_policy_id=numeric,
+                    effective_date=d_eff or "2026-10-05",
+                    expiration_date=d_exp or "2027-10-05",
+                    premium=0.0,
+                    cdp_url=cdp_url,
+                    dry_run=True,
+                )
+                proof["evidence"]["form_dry_run"] = form_res
+            except Exception as exc:
+                proof["evidence"]["form_dry_run_error"] = str(exc)[:400]
+
+        if allow_hitl_note and discussion_title:
+            note_body = (
+                "=== [ROBIE POLICY RENEWER — HITL] ===\n"
+                f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Applicant: {applicant_id}\n"
+                f"Policy #: {policy_number}\n"
+                f"Decision: would use {decision.method} ({decision.reason})\n"
+                "Status: STOPPED — no real renewal quote/PDF premium available.\n"
+                "Action required: provide renewal offer PDF or premium+dates, then re-run:\n"
+                f"  PYTHONPATH=. ./venv/bin/python -m src.ezlynx.policy_renewer "
+                f"--applicant {applicant_id} --premium <amt>\n"
+                "Bind=false. No class codes invented.\n"
+                "\nRobie was here"
+            )
+            note_res = post_audit_note(
+                client,
+                applicant_id=str(applicant_id),
+                discussion_title=discussion_title,
+                policy_number=policy_number,
+                lob=lob,
+                carrier=carrier,
+                body=note_body,
+            )
+            proof["evidence"]["note"] = {
+                "status": note_res.get("status"),
+                "note_id": note_res.get("note_id"),
+                "discussion_title": note_res.get("discussion_title") or discussion_title,
+                "method": note_res.get("method"),
+            }
+            proof["note_id"] = note_res.get("note_id")
+            proof["discussion_title"] = note_res.get("discussion_title") or discussion_title
+
+        # Inspect-only success for automation visibility
+        proof["success"] = False
+        proof["inspect_ok"] = (
+            proof["evidence"]["sessions"].get("classic")
+            and proof["evidence"]["policy_inspect"].get("status") == "success"
+        )
+        _write_proof(proof_path, proof)
+        return proof
+
+    # --- Key path (real premium present) ---
+    proof["premium"] = quote.premium
+    proof["dates"] = {"effective": quote.effective_date, "expiration": quote.expiration_date}
+    numeric = decision.numeric_policy_id
+    if decision.method == "Renew" and not numeric:
+        try:
+            numeric = await resolve_numeric_policy_id(
+                str(applicant_id), policy_number, cdp_url=cdp_url
+            )
+        except Exception as exc:
+            proof["blockers"].append(f"numeric_id_resolve_failed:{exc}")
+    proof["evidence"]["numeric_policy_id"] = numeric
+
+    if decision.method == "Renew" and not numeric and not dry_run:
+        proof["blockers"].append("Renew selected but numeric policy id not found")
+        proof["hitl"] = True
+        _write_proof(proof_path, proof)
+        return proof
+
+    key_res = await key_shell_renewal(
+        applicant_id=str(applicant_id),
+        method=decision.method,
+        policy_number=policy_number,
+        numeric_policy_id=numeric,
+        effective_date=quote.effective_date,
+        expiration_date=quote.expiration_date,
+        premium=float(quote.premium),
+        cdp_url=cdp_url,
+        dry_run=dry_run,
+    )
+    proof["evidence"]["key_result"] = key_res
+
+    verify = verify_term_created(
+        client,
+        str(applicant_id),
+        policy_number,
+        quote.effective_date,
+        quote.expiration_date,
+    )
+    proof["evidence"]["verify"] = verify
+    term_ok = bool(verify.get("matched")) or (
+        dry_run and key_res.get("success") and key_res.get("skipped_submit")
+    )
+    proof["success"] = bool(term_ok and key_res.get("success") and not key_res.get("error"))
+
+    # Upload real quote PDF (not call logs)
+    if local_pdf and quote.is_real_quote and not dry_run:
+        try:
+            up = await maybe_upload_quote_pdf(
+                client,
+                applicant_id=str(applicant_id),
+                policy_number=policy_number,
+                pdf_path=local_pdf,
+            )
+            proof["evidence"]["upload"] = up
+        except Exception as exc:
+            proof["evidence"]["upload_error"] = str(exc)[:300]
+
+    if discussion_title:
+        status_line = "SHELL TERM KEYED" if proof["success"] and not dry_run else (
+            "DRY-RUN FORM REACHED" if dry_run else "KEY ATTEMPTED — VERIFY"
+        )
+        note_body = (
+            "=== [ROBIE POLICY RENEWER] ===\n"
+            f"Status: {status_line}\n"
+            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Method: {decision.method}\n"
+            f"Policy #: {policy_number}\n"
+            f"Term: {quote.effective_date} → {quote.expiration_date}\n"
+            f"Premium: ${float(quote.premium):,.2f}\n"
+            f"Bind: false\n"
+            f"Actor: {ACTOR}\n"
+            "\nRobie was here"
+        )
+        note_res = post_audit_note(
+            client,
+            applicant_id=str(applicant_id),
+            discussion_title=discussion_title,
+            policy_number=policy_number,
+            lob=lob,
+            carrier=carrier,
+            body=note_body,
+        )
+        proof["note_id"] = note_res.get("note_id")
+        proof["evidence"]["note"] = note_res
+        proof["discussion_title"] = note_res.get("discussion_title") or discussion_title
+
+    _write_proof(proof_path, proof)
+    return proof
+
+
+def _write_proof(path: Path, proof: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(proof, indent=2, default=str))
+    logger.info("Wrote proof %s success=%s", path, proof.get("success"))
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Robie EZLynx policy renewer (shell term, no bind)")
+    p.add_argument("--applicant", required=True, help="EZLynx applicant id")
+    p.add_argument("--policy-number", default=None, help="Policy number (defaults from renewals.db)")
+    p.add_argument("--method", choices=["Renew", "Add Policy"], default=None)
+    p.add_argument("--premium", type=float, default=None, help="Real renewal premium (required to key)")
+    p.add_argument("--effective-date", default=None, help="YYYY-MM-DD or MM/DD/YYYY")
+    p.add_argument("--expiration-date", default=None, help="YYYY-MM-DD or MM/DD/YYYY")
+    p.add_argument("--pdf", default=None, help="Path to real renewal quote PDF")
+    p.add_argument("--dry-run", action="store_true", help="Inspect + form fill only; do not submit")
+    p.add_argument("--no-hitl-note", action="store_true", help="Skip HITL discussion note")
+    p.add_argument("--proof", default=str(DEFAULT_PROOF), help="Proof JSON output path")
+    p.add_argument("--cdp", default=DEFAULT_CDP, help="Chrome CDP endpoint")
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    args = build_arg_parser().parse_args(argv)
+    proof = asyncio.run(
+        run_policy_renewer(
+            applicant_id=args.applicant,
+            policy_number=args.policy_number,
+            force_method=args.method,
+            premium=args.premium,
+            effective_date=args.effective_date,
+            expiration_date=args.expiration_date,
+            pdf_path=args.pdf,
+            dry_run=args.dry_run,
+            allow_hitl_note=not args.no_hitl_note,
+            proof_path=Path(args.proof),
+            cdp_url=args.cdp,
+        )
+    )
+    print(json.dumps({k: proof.get(k) for k in (
+        "success", "hitl", "method", "policy_number", "premium", "dates",
+        "note_id", "bind", "actor", "blockers", "inspect_ok", "dry_run"
+    ) if k in proof or True}, indent=2, default=str))
+    # Exit 0 when inspect worked even if HITL stopped keying — automation module is live
+    if proof.get("inspect_ok") or proof.get("success"):
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

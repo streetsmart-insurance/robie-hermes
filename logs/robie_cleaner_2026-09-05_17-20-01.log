@@ -1,0 +1,31 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-05_17-20-01 ===
+2026-09-05 17:20:02,999 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 17:20:03,326 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 17:20:03,657 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 17:20:04,034 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-05 17:20:04,345 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-05 17:20:04,743 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-05 17:20:04,797 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-05 17:20:05,397 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-05 17:20:05,709 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-05 17:20:06,249 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-05 17:20:06,588 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-05 17:20:06,896 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-05 17:20:06,898 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-05 17:20:06,899 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e1922727d73b for Pol #106793-4-25
+2026-09-05 17:20:06,901 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-05 17:20:06,902 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-05 17:20:06,903 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-05 17:20:06,905 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-05 17:20:06,906 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-05 17:20:06,908 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-05 17:20:06,910 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-05 17:20:06,911 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-05 17:20:06,912 [INFO] uw_reply_filer: UW reply filing complete: filed=0 skipped=11 errors=0 dry_run=False
+2026-09-05 17:20:06,912 [INFO] robie_cleaner: UW reply filing from cleaner: filed=0 skipped=11 dry_run=False
+2026-09-05 17:20:19,519 [INFO] robie_cleaner: Gathered 185 authentic messages for reporting.
+2026-09-05 17:20:19,979 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a07295df348807b)
+2026-09-05 17:20:19,979 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a07295df348807b)
+
+Execution Finished: 4 noise trashed, 185 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-05_17-20-20 ===

@@ -28,8 +28,8 @@ from src.reporting.daily_handoff import DailyHandoffReporter
 from src.reporting.email_handoff import send_daily_handoff_email
 from pathlib import Path
 
-from src.quote_processing.document_parser import QuoteDocumentParser
 from src.voice.email_dispatcher import EmailCallDispatcher
+from src.intake.safety_gate import RenewalSafetyGate
 from src.database.policy_aliases import (
     association_policy_number,
     collect_policy_numbers,
@@ -47,6 +47,7 @@ class DailyRenewalOrchestrator:
         init_db()
         self.ingestor = ReportIngestor()
         self.ezlynx = EZLynxApiClient()
+        self.safety_gate = RenewalSafetyGate(ezlynx_client=self.ezlynx)
         self.downloader = EZLynxReportDownloader()
         self.gmail = GmailRenewalClient()
         self.classifier = UnderwriterIntentClassifier()
@@ -69,7 +70,19 @@ class DailyRenewalOrchestrator:
         ref_date = reference_date or date.today()
         logger.info(f"=== Starting Daily Renewal Cycle for Date: {ref_date} ===")
 
-        # 0a. Check robie@streetsmart.insurance inbox for scheduled EZLynx / Applied renewal reports
+        # 🛑 FAIL-CLOSED PRE-FLIGHT SAFETY GATE
+        # Never allow an automated job to touch EZLynx, crawl portals, or dispatch emails if DB state is corrupt
+        from src.database.integrity_check import DatabaseIntegrityValidator
+        passed, integrity_report = DatabaseIntegrityValidator().run_all_checks()
+        if not passed:
+            violations = integrity_report.get("violations", [])
+            critical_msg = (
+                f"🛑 [FAIL-CLOSED SAFETY GATE] Aborting daily renewal run! "
+                f"Database integrity/invariant check failed with {len(violations)} violation(s): "
+                f"{violations}. Refusing to touch EZLynx, carrier portals, or email."
+            )
+            logger.critical(critical_msg)
+            raise RuntimeError(critical_msg)
         try:
             downloaded_reports = self.ingestor.poll_email_reports(gmail_client=self.cadence_mgr.gmail)
             if downloaded_reports:
@@ -115,6 +128,46 @@ class DailyRenewalOrchestrator:
             ).all()
 
             for pol in portal_policies:
+                # Pre-flight Cancellation & Non-Renewal Safety Gate
+                safety_res = self.safety_gate.check_cancellation_risk(
+                    applicant_id=pol.applicant_id,
+                    policy_number=pol.policy_number
+                )
+                if safety_res.risk_detected:
+                    logger.warning(
+                        f"Skipping portal check for {pol.policy_number} ({pol.insured_name}): {safety_res.reason}"
+                    )
+                    pol.status = RenewalStatus.ESCALATED_CSR_REVIEW
+                    esc_note = (
+                        f"⚠️ === [PRE-FLIGHT ESCALATION: CANCELLATION/NON-RENEWAL SIGNAL] ===\n"
+                        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"Policy #: {pol.policy_number}\n"
+                        f"Named Insured: {pol.insured_name}\n"
+                        f"Carrier: {pol.carrier_name}\n"
+                        f"Reason: {safety_res.reason}\n"
+                        f"Action: Quoting and automated outreach blocked. Assigned for high-priority CSR review.\n\n"
+                        f"Robie was here"
+                    )
+                    db.add(AuditNoteLog(
+                        policy_id=pol.id,
+                        applicant_id=pol.applicant_id,
+                        discussion_title=pol.discussion_title,
+                        action_type=ActionType.STATUS_CHANGE,
+                        note_text=esc_note
+                    ))
+                    self.ezlynx.create_user_task(
+                        applicant_id=pol.applicant_id,
+                        title=f"URGENT: Review Cancellation Signal for {pol.insured_name}",
+                        description=esc_note,
+                        assigned_user=pol.assigned_agent,
+                        due_days_out=1,
+                        policy_number=pol.policy_number,
+                        line_of_business=pol.line_of_business,
+                        carrier_name=pol.carrier_name,
+                        high_priority=True
+                    )
+                    continue
+
                 pol.status = RenewalStatus.CHECKING_PORTAL
                 crawler = get_carrier_crawler(pol.carrier_name, pol.portal_url)
                 search_res = None
@@ -236,10 +289,7 @@ class DailyRenewalOrchestrator:
             init_sent = self.cadence_mgr.process_pending_outreach(db, ref_date)
             results["initial_emails_sent"] = init_sent
 
-            # Step 4: 5-7 Day Follow-Up Cadence (quiet checks — no autodial).
-            # After N=2 failed checks the give-up branch in process_due_followups
-            # places exactly one carrier Robie Call via VoiceCallDispatcher.
-            # Not a parallel scan. Step 5b stays CSR Email-Robie-to-Call only.
+            # Step 4: 5-7 Day Follow-Up Cadence
             followups = self.cadence_mgr.process_due_followups(db, ref_date)
             results["followups_sent"] = followups
 
@@ -256,7 +306,7 @@ class DailyRenewalOrchestrator:
             except Exception as e:
                 logger.warning(f"Could not process inbound carrier call commands: {e}")
 
-            # Step 6: 20-25 Day CSR Escalation Check (non-autodial)
+            # Step 6: 20-25 Day CSR Escalation Check
             # If no renewal quote received by day 20-25, assign task to CSR in existing discussion title
             pending_escalation = db.query(PolicyRenewal).filter(
                 PolicyRenewal.status.in_([

@@ -1,0 +1,16 @@
+=================================================================
+🚀 ROBIE 1.0 Scheduled Audit Calls Runner Started at: 2026-09-09_00-21-15
+=================================================================
+2026-09-09 00:21:16,501 [INFO] Starting Scheduled Carrier Audit Calls execution (dry_run=True, test_email=False)...
+2026-09-09 00:21:16,560 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 00:21:16,914 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 00:21:17,284 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 00:21:17,810 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 00:21:18,131 [INFO] Running in verification/test mode. Compiling simulated results based on recent successful calls...
+2026-09-09 00:21:18,131 [INFO] Generating email report for carlo@streetsmart.insurance...
+2026-09-09 00:21:18,368 [INFO] Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a0838a5c20099e4)
+2026-09-09 00:21:18,368 [INFO] Results report email successfully sent to carlo@streetsmart.insurance: {'id': '1a0838a5c20099e4', 'threadId': '1a0838a5c20099e4', 'labelIds': ['SENT']}
+2026-09-09 00:21:18,368 [INFO] Verification test email sent successfully.
+=================================================================
+✅ ROBIE 1.0 Scheduled Audit Calls Runner Finished at: 2026-09-09_00-21-19
+=================================================================

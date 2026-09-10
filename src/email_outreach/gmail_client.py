@@ -118,13 +118,7 @@ class GmailRenewalClient:
         references: Optional[str] = None,
         attachment_paths: Optional[List[Path]] = None,
         cc: Optional[List[str]] = None,
-        html_body: Optional[str] = None,
-        applicant_id: Optional[str] = None,
-        policy_number: Optional[str] = None,
-        discussion_title: Optional[str] = None,
-        carrier_name: Optional[str] = None,
-        line_of_business: Optional[str] = None,
-        save_to_ezlynx: bool = True
+        html_body: Optional[str] = None
     ) -> Dict[str, Any]:
         """Sends an email from Robie (robie@streetsmart.insurance) with threading headers, optional CC, and HTML support."""
         # Hard safety check: Prevent accidental real email sends during testing
@@ -145,11 +139,14 @@ class GmailRenewalClient:
         message["from"] = self.outreach_email
         message["subject"] = subject
         if cc:
-            message["cc"] = ", ".join(cc)
+            if isinstance(cc, str):
+                message["cc"] = cc
+            else:
+                message["cc"] = ", ".join(cc)
 
-        if in_reply_to and not in_reply_to.startswith("sim_"):
+        if in_reply_to:
             message["In-Reply-To"] = in_reply_to
-        if references and not references.startswith("sim_"):
+        if references:
             message["References"] = references
 
         message.attach(MIMEText(body_text, "plain"))
@@ -166,119 +163,16 @@ class GmailRenewalClient:
 
         raw_encoded = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
         send_body = {"raw": raw_encoded}
-        if thread_id and not thread_id.startswith("sim_"):
+        if thread_id:
             send_body["threadId"] = thread_id
 
         try:
             sent_msg = self.service.users().messages().send(userId="me", body=send_body).execute()
             logger.info(f"Email successfully sent from {self.outreach_email} to {to_email} (Msg ID: {sent_msg.get('id')})")
-            if save_to_ezlynx:
-                self._save_sent_email_to_ezlynx(
-                    to_email=to_email,
-                    subject=subject,
-                    body_text=body_text,
-                    sent_msg_id=sent_msg.get("id"),
-                    applicant_id=applicant_id,
-                    policy_number=policy_number,
-                    discussion_title=discussion_title,
-                    carrier_name=carrier_name,
-                    line_of_business=line_of_business,
-                    cc_emails=cc
-                )
             return sent_msg
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {e}")
             return {"status": "error", "error": str(e)}
-
-    def _save_sent_email_to_ezlynx(
-        self,
-        to_email: str,
-        subject: str,
-        body_text: str,
-        sent_msg_id: Optional[str] = None,
-        applicant_id: Optional[str] = None,
-        policy_number: Optional[str] = None,
-        discussion_title: Optional[str] = None,
-        carrier_name: Optional[str] = None,
-        line_of_business: Optional[str] = None,
-        cc_emails: Optional[List[str]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Hard-coded rule: Whenever Robie sends an email from Gmail, save it to the EZLynx client file."""
-        try:
-            from src.ezlynx.api_client import EZLynxApiClient
-            ezlynx = EZLynxApiClient()
-
-            target_app_id = applicant_id
-            target_policy_num = policy_number
-
-            if not target_app_id:
-                import re
-                pol_match = re.search(
-                    r'\b(?:[0-9]{2}[A-Z]{3,4}[0-9A-Z]+|[A-Z0-9]{3,4}[0-9]{6,10}|[0-9]{7,10}|6S[0-9A-Z\-]+|13[0-9A-Z\-]+|UBB[0-9]+)\b',
-                    f"{subject} {body_text}"
-                )
-                if pol_match and not target_policy_num:
-                    target_policy_num = pol_match.group(0)
-
-                if target_policy_num:
-                    try:
-                        pol_info = ezlynx.search_policy_by_number(target_policy_num)
-                        if pol_info and pol_info.get("applicantId"):
-                            target_app_id = str(pol_info.get("applicantId"))
-                    except Exception as e:
-                        logger.debug(f"Could not lookup policy {target_policy_num} in EZLynx: {e}")
-
-                if not target_app_id and to_email and "@" in to_email and not any(internal in to_email.lower() for internal in ["@streetsmart.insurance"]):
-                    try:
-                        apps = ezlynx.search_applicants(to_email)
-                        if apps and len(apps) > 0:
-                            target_app_id = str(apps[0].get("applicantId") or apps[0].get("id"))
-                    except Exception as e:
-                        logger.debug(f"Could not search applicant by email {to_email}: {e}")
-
-            if not target_app_id:
-                logger.info(f"[EZLynx Sync] Outbound email to {to_email} ('{subject}') not linked to an applicant file. Skipping note filing.")
-                return None
-
-            title = discussion_title or "Email sent by Robie"
-
-            from datetime import datetime
-            today_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            note_lines = [
-                f"Policy: #{target_policy_num or 'N/A'} ({line_of_business or 'Commercial'} - {carrier_name or 'Direct'})",
-                f"Outbound Email Sent by Robie | Date: {today_str}",
-                "",
-                "Details:",
-                f"- To: {to_email}",
-            ]
-            if cc_emails:
-                note_lines.append(f"- Cc: {', '.join(cc_emails)}")
-            note_lines.append(f"- Subject: {subject}")
-            if sent_msg_id:
-                note_lines.append(f"- Message ID: {sent_msg_id}")
-            note_lines.append("")
-            note_lines.append("Body:")
-            note_lines.append(body_text[:1500] if body_text else "(No text body)")
-            note_lines.append("")
-            note_lines.append("ROBIE was here")
-
-            formatted_note = "\n".join(note_lines)
-
-            res = ezlynx.add_note_to_discussion(
-                applicant_id=target_app_id,
-                discussion_title=title,
-                note_text=formatted_note,
-                policy_number=target_policy_num,
-                line_of_business=line_of_business,
-                carrier_name=carrier_name,
-                honor_explicit_title=True,
-                require_existing_discussion=False
-            )
-            logger.info(f"✅ [EZLynx Sync] Saved outbound email to applicant {target_app_id} discussion '{title}'. Result: {res}")
-            return res
-        except Exception as e:
-            logger.warning(f"⚠️ [EZLynx Sync] Failed to save outbound email to EZLynx: {e}")
-            return None
 
     def poll_matching_replies(
         self,
@@ -437,7 +331,9 @@ class GmailRenewalClient:
             file_data = base64.urlsafe_b64decode(att["data"])
             dest_dir = self.downloads_dir / "inbox_attachments"
             dest_dir.mkdir(parents=True, exist_ok=True)
-            out_file = dest_dir / f"{message_id}_{filename}"
+            import re
+            safe_filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
+            out_file = dest_dir / f"{message_id}_{safe_filename}"
             with open(out_file, "wb") as f:
                 f.write(file_data)
             logger.info(f"Downloaded email attachment: {out_file.name}")

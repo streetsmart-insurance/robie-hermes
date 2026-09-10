@@ -39,17 +39,16 @@ Outbound email outreach is conducted using Google Workspace Gmail APIs.
 
 ### Outreach Cadence & Timing Rules:
 1. **Outreach Window (Day 45 to Day 25)**: Initial outreach begins at Day 45 prior to policy expiration. Policies expiring in > 45 days remain in the upcoming queue.
-2. **Follow-Up Frequency**: Check back **no more than twice** after the initial UW email (N=2). The hook is the give-up branch of `OutreachCadenceManager.process_due_followups` (`src/email_outreach/thread_tracker.py`): after two failed 5–7d checks, place **exactly one** carrier Robie Call via `VoiceCallDispatcher().dispatch(policy_number=...)` (`src/voice/dispatcher.py` → `CarrierVoiceClient`). Do **not** post a Robie Call EZLynx label (avoids watcher loops). Set `carrier_voice_attempted` so it never re-fires. CSR escalate (`max_followups=3` / 25d / Step 6 “contact underwriter directly”) may still happen later. No client autodial. Portal is only tried while `PENDING_EVALUATION`; PORTAL-only carriers with no UW email do not invent email attempts — skip voice unless a carrier phone exists in the directory. Never invent a carrier phone; if no E.164, post an EZLynx note ending with `Robie was here` and skip the dial.
-3. **Stop when the renewal lands**: If a renewal PDF is filed, the UW reply filer matched, or pipeline status says we have the dec/offer → **STOP**. No more carrier calls. Do **not** auto-dial the client on a successful or in-progress manual renewal. CSR-only Splice replacements (`renewal_reachout` / `Robie client outreach`) never fire from this pipeline — they require an explicit CSR label or note.
-4. **25-Day Auto-Escalation to CSR**: If no renewal quote is received by **Day 25** prior to expiration (or if email follow-ups are exhausted), the engine automatically:
+2. **Follow-Up Frequency**: Up to 3 follow-up emails spaced 5–7 business days apart.
+3. **25-Day Auto-Escalation to CSR**: If no renewal quote is received by **Day 25** prior to expiration (or if 3 follow-ups are exhausted), the engine automatically:
    - Sets status to `RenewalStatus.ESCALATED_MANUAL`.
    - Posts a high-priority audit note to the EZLynx discussion card ending with `Robie was here`.
    - Creates a high-priority EZLynx task assigned to the CSR for direct underwriter/phone escalation.
-5. **Instant CSR Reply Alerts**: When an underwriter replies or sends terms, the engine:
+4. **Instant CSR Reply Alerts**: When an underwriter replies or sends terms, the engine:
    - Immediately dispatches a high-priority email alert to the assigned CSR (CC'ing `carlo@streetsmart.insurance` and `jake@streetsmart.insurance`).
    - Logs the underwriter response note to the EZLynx discussion card.
    - Uploads attached quote PDFs to the EZLynx Documents tab and creates a review task.
-6. **Sender Identity**: All outbound outreach and cadence follow-ups **MUST be sent from `robie@streetsmart.insurance` and signed by Robie**, NEVER the assigned CSR.
+5. **Sender Identity**: All outbound outreach and cadence follow-ups **MUST be sent from `robie@streetsmart.insurance` and signed by Robie**, NEVER the assigned CSR.
    ```text
    Should you have any questions please feel free to email me back.
 
@@ -58,8 +57,8 @@ Outbound email outreach is conducted using Google Workspace Gmail APIs.
    Robie
    StreetSmart Insurance
    ```
-7. **Mandatory CSR CC Guarantee**: Outbound emails MUST ALWAYS CC the assigned CSR (resolved via `CSR_EMAIL_DIRECTORY` with fallback to `sandy@streetsmart.insurance` if unmapped) and `jake@streetsmart.insurance`.
-8. **Subject Line Tracking Tag**: Every thread must include a unique tracking reference tag formatted as `[RENEWAL-REQ-###]`.
+6. **Mandatory CSR CC Guarantee**: Outbound emails MUST ALWAYS CC the assigned CSR (resolved via `CSR_EMAIL_DIRECTORY` with fallback to `sandy@streetsmart.insurance` if unmapped) and `jake@streetsmart.insurance`.
+7. **Subject Line Tracking Tag**: Every thread must include a unique tracking reference tag formatted as `[RENEWAL-REQ-###]`.
 
 ---
 
@@ -162,8 +161,8 @@ Autonomous manual renewal requires a two-step renewal and data entry pipeline in
    - `#FullTermPremium`: Full term premium (e.g. `5182.00`).
    - `#AnnualPremium`: Annualized premium (e.g. `5182.00`).
    - `#Description`: Standard format `Renewal of <expiring_policy_number>`.
-3. **Commit Action (shell-only)**: Click **`#RenewPolicyBtn`** ("Renew Policy").
-   *CRITICAL*: Do **not** click **Renew & Edit Policy** for a shell-only key — that opens FormEntry and is a separate HITL/coverage job. Routine keys use `src/ezlynx/policy_renewer.py` / `scripts/run_manual_renewal.py` in one CDP session. Verify pending RWL on the policy **History** tab (Classic `get_applicant_policies` omits pending shells). If a pending RWL already exists for the same term+premium, STOP. Writing Company is required before submit. Producer/CSR is Carlo Ferrara (never Robie). No bind.
+3. **Commit Action**: Click **`Renew & Edit Policy`** (`button:has-text("Renew & Edit Policy")`).
+   *CRITICAL*: Do NOT click just "Renew Policy"; "Renew & Edit Policy" commits the shell, generates the new transaction ID, and transitions directly into the FormEntry editor (`/applicantportal/Policy/{policy_id}/FormEntry/Index/{transaction_id}`).
 
 ### Step 2: FormEntry Deep Coverage Entry
 FormEntry contains multi-tab ACORD-level policy data (`Insured Information`, `Policy Level Coverages`, `Premises Information`, `GL Class Codes`, `Underwriting`, `Additional Interest / Policy Contacts`).

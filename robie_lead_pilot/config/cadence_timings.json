@@ -1,0 +1,58 @@
+{
+  "inbound_lead": {
+    "touch_0": {
+      "channel": ["sms", "email"],
+      "delay_minutes": 2,
+      "description": "Immediate acknowledgment"
+    },
+    "touch_1": {
+      "channel": ["voice", "email"],
+      "offset_days": 1,
+      "description": "Day 1 follow-up call"
+    },
+    "touch_2": {
+      "channel": ["email", "sms"],
+      "offset_days": 3,
+      "description": "Day 3 check-in"
+    },
+    "touch_3": {
+      "channel": ["voice", "email"],
+      "offset_days": 7,
+      "description": "Day 7 final follow-up before closing file"
+    }
+  },
+  "quoted_prospect": {
+    "touch_1": {
+      "channel": ["voice", "email"],
+      "offset_days": 1,
+      "description": "Day 1 post-quote review call"
+    },
+    "touch_2": {
+      "channel": ["email", "sms"],
+      "offset_days": 3,
+      "description": "Day 3 coverage comparison review"
+    },
+    "touch_3": {
+      "channel": ["voice", "email"],
+      "offset_days": 7,
+      "description": "Day 7 proposal status check"
+    }
+  },
+  "xdate_opportunity": {
+    "touch_1": {
+      "channel": ["voice", "email"],
+      "days_before_expiration": 45,
+      "description": "T-45 day upcoming expiration outreach"
+    },
+    "touch_2": {
+      "channel": ["voice", "email"],
+      "days_before_expiration": 30,
+      "description": "T-30 day re-rating & vehicle/driver review"
+    },
+    "touch_3": {
+      "channel": ["voice", "sms"],
+      "days_before_expiration": 14,
+      "description": "T-14 day fast-turnaround rate lock before auto-renewal"
+    }
+  }
+}

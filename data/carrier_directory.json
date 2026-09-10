@@ -104,12 +104,9 @@
     "notes": "Direct underwriter email outreach."
   },
   "JIMCOR MGA": {
-    "channel": "PHONE_AND_EMAIL",
-    "phone": "201-573-8200",
-    "underwriter_email": "ARivera@jimcor.com",
-    "agency_code": "StreetSmart Insurance",
-    "ivr": "Option for Commercial Excess Underwriting or ask for Arlene Rivera",
-    "notes": "Jimcor Agencies (Montvale, NJ). Underwriter Arlene Rivera."
+    "channel": "EMAIL_ASK_PORTAL",
+    "underwriter_email": "renewals@jimcor.com",
+    "notes": "Email underwriter; ask if website/portal download is available."
   },
   "Specialty Coverage Insurance Agency MGA": {
     "channel": "EMAIL",
@@ -139,8 +136,8 @@
   },
   "Risk Placement Services (RPS) MGA": {
     "channel": "EMAIL_ASK_PORTAL",
-    "underwriter_email": "renewals@rpsins.com",
-    "notes": "Email underwriter; check if RPS portal is available."
+    "underwriter_email": "RPS_FairLawn@rpsins.com",
+    "notes": "Email underwriter; Fair Lawn branch desk: RPS_FairLawn@rpsins.com. Underwriter: Helen_Feygin@rpsins.com."
   },
   "Cover Whale  MGA": {
     "channel": "PORTAL",
@@ -258,5 +255,11 @@
       }
     ],
     "notes": "Continental Casualty Co Assigned Risk serviced via Berkley Risk. Direct audit inquiries to policyservices@berkleyrisk.com and assignedrisk@hartford.com."
+  },
+  "Utica First Insurance Company": {
+    "channel": "PORTAL",
+    "portal_url": "https://www.uticafirst.com/",
+    "phone": "800-556-5376",
+    "notes": "Retrieve renewal quote and policies from Utica First Agent Portal. Phone: 800-556-5376. Covers Artisan Contractors & Business Owners Policies."
   }
 }

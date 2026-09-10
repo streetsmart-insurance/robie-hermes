@@ -169,6 +169,15 @@ class MagellanCrawler:
             logger.info("[Magellan] Session is already authenticated.")
             return True
 
+        from src.portals.stealth_browser import human_type, human_click, detect_waf_challenge, capture_waf_diagnostic
+
+        # Check for WAF challenges
+        is_waf, waf_type = await detect_waf_challenge(page)
+        if is_waf:
+            logger.warning(f"[Magellan] Blocked by WAF: {waf_type}")
+            await capture_waf_diagnostic(page, "Magellan")
+            return False
+
         # Locate Email input
         email_selector = "input#email, input[type='email'], input[placeholder*='email' i], input[type='text']"
         email_input = await page.wait_for_selector(email_selector, timeout=10000)
@@ -176,7 +185,7 @@ class MagellanCrawler:
             logger.error("[Magellan] Could not locate email input field.")
             return False
 
-        await email_input.fill(username)
+        await human_type(page, email_input, username)
         await asyncio.sleep(0.3)
 
         # Locate Password input
@@ -186,7 +195,7 @@ class MagellanCrawler:
             logger.error("[Magellan] Could not locate password input field.")
             return False
 
-        await pwd_input.fill(password)
+        await human_type(page, pwd_input, password)
         await asyncio.sleep(0.3)
 
         # Submit login
@@ -195,8 +204,8 @@ class MagellanCrawler:
             logger.error("[Magellan] Could not locate Login submit button.")
             return False
 
-        logger.info("[Magellan] Submitting credentials...")
-        await submit_btn.click()
+        logger.info("[Magellan] Submitting credentials with human cadence...")
+        await human_click(page, submit_btn)
         await page.wait_for_timeout(4000)
 
         # Handle 2FA if present

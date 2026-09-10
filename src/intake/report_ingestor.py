@@ -336,9 +336,10 @@ class ReportIngestor(BaseRenewalSource):
     def fetch_renewals(self, target_date: Optional[date] = None) -> List[RawRenewalItem]:
         """Scans input directory for all CSVs and XLSX files and returns parsed items."""
         all_items: List[RawRenewalItem] = []
+        ignored_patterns = ["activities", "overdue_tasks", "sales_center", "calls", "users", "queues", "policy_change"]
         files = [
             f for f in (list(self.input_dir.glob("*.csv")) + list(self.input_dir.glob("*.xlsx")))
-            if not f.name.startswith(".")
+            if not f.name.startswith(".") and not any(pat in f.name.lower() for pat in ignored_patterns)
         ]
         for f in files:
             try:

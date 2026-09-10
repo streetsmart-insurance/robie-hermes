@@ -1,0 +1,151 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-07_23-00-01 ===
+2026-09-07 23:00:02,229 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:02,547 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:02,854 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:03,225 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:03,525 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-07 23:00:03,821 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-07 23:00:03,878 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 23:00:04,712 [INFO] gmail_client: Downloaded email attachment: 1a07ce8390c63143_Robie_-_EZLynx_Activities_2026-09-07T1326.xlsx
+2026-09-07 23:00:05,123 [INFO] gmail_client: Downloaded email attachment: 1a07ce437dbb6352_Robie_-_EZLynx_Activities_2026-09-07T1321.xlsx
+2026-09-07 23:00:05,359 [INFO] gmail_client: Downloaded email attachment: 1a07ce415307a2fa_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1321.xlsx
+2026-09-07 23:00:05,514 [INFO] gmail_client: Downloaded email attachment: 1a07ce110ca26f68_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1318.xlsx
+2026-09-07 23:00:05,700 [INFO] gmail_client: Downloaded email attachment: 1a07cd6db0b97ceb_Robie_-_EZLynx_Activities_2026-09-07T1307.xlsx
+2026-09-07 23:00:05,873 [ERROR] gmail_client: Error downloading attachment RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0775c756130946_RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml'
+2026-09-07 23:00:06,280 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-07 23:00:06,475 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-07 23:00:06,994 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-07 23:00:07,181 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 23:00:08,035 [INFO] gmail_client: Downloaded email attachment: 1a07b5958ef75333_POLTRANSNOT-NJSMAR10-09-07-2026-06-10-37_(c).pdf
+2026-09-07 23:00:08,373 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-07 23:00:08,576 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-07 23:00:08,858 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-07 23:00:09,043 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-07 23:00:09,338 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-07 23:00:09,796 [INFO] gmail_client: Downloaded email attachment: 1a07aa15d49c5cb9_Policy29115152937909.Zip
+2026-09-07 23:00:10,531 [INFO] gmail_client: Downloaded email attachment: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-07 23:00:10,533 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-07 23:00:10,854 [INFO] gmail_client: Downloaded email attachment: 1a07810d2f75fea6_HAUL AZZ LLC-Binder-DSLA1000836-00.pdf.pdf
+2026-09-07 23:00:10,855 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-07 23:00:10,867 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dd56907441ad for Pol #ACT4034556
+2026-09-07 23:00:10,870 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dd505b51ac50 for Pol #ACT4034556
+2026-09-07 23:00:10,876 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dc83ce522777 for Pol #LSP600011096
+2026-09-07 23:00:11,029 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-07 23:00:11,033 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-07 23:00:11,035 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-07 23:00:11,037 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-07 23:00:11,038 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-07 23:00:11,039 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-07 23:00:11,042 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-07 23:00:11,043 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-07 23:00:11,045 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-07 23:00:11,046 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-07 23:00:11,047 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-07 23:00:11,066 [INFO] policy_aliases: Aliased Ahphoo1oleiYud3eaphei8EPdie0Ohc1 (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-07 23:00:11,077 [INFO] policy_aliases: Aliased policies/1f619f32-66ce-4641-8e7b- (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-07 23:00:11,088 [INFO] policy_aliases: Aliased c1a406d34379/submissions/51767/quotes/ (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-07 23:00:11,099 [INFO] policy_aliases: Aliased eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9. (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-07 23:00:11,110 [INFO] policy_aliases: Aliased LLC-Policy-DSLA1000836-00.pdf.pdf (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-07 23:00:11,370 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 99340932
+2026-09-07 23:00:11,371 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-07 23:00:11,590 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 99340932
+2026-09-07 23:00:11,591 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-07 23:00:12,124 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-07 23:00:13,344 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 99340932: NoteId 1123408740 into 'Flood Renewal - Neptune'
+2026-09-07 23:00:14,821 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:15,104 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:15,481 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 23:00:15,755 [INFO] ezlynx_session: Connecting to existing Chrome instance over CDP at http://localhost:9222...
+2026-09-07 23:00:16,527 [INFO] cdp_session_preflight: Live CDP preflight PASS url=https://app.ezlynx.com/web/account/138675525/overview title=Norris Mechanical LLC - Overview (storage_state=None classic_api=None ignored)
+2026-09-07 23:00:16,527 [INFO] ezlynx_session: CDP live page is an authed EZLynx dashboard.
+2026-09-07 23:00:16,649 [INFO] ezlynx_document_uploader: Navigating to https://app.ezlynx.com/web/account/99340932/documents for applicant 99340932...
+2026-09-07 23:00:27,194 [INFO] ezlynx_document_uploader: Created Documents folder via iframe: Renewal Offer
+2026-09-07 23:00:36,480 [INFO] ezlynx_document_uploader: Attached file: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-07 23:00:38,531 [INFO] ezlynx_document_uploader: Filled document title: ACT4034556 Renewal Offer.pdf
+2026-09-07 23:00:39,927 [INFO] ezlynx_document_uploader: Linked document to policy matching: ACT4034556
+2026-09-07 23:00:42,119 [INFO] ezlynx_document_uploader: Label 'Renewal Offer' not found in system options; skipping without creating new one.
+2026-09-07 23:00:42,337 [INFO] ezlynx_document_uploader: Submitted document upload to EZLynx.
+2026-09-07 23:00:48,617 [INFO] ezlynx_api: Successfully uploaded document via Playwright CDP for Applicant 99340932.
+2026-09-07 23:00:48,617 [INFO] ezlynx_api: [TASK] EZLynx Task Created for Applicant: 99340932 | Title: 'Review Renewal Quote: Larry Gonzales (Neptune Insurance)' | Assigned: Daniela Aguilar
+2026-09-07 23:00:48,660 [INFO] email_handoff: Sending immediate underwriter reply notification to daniela@streetsmart.insurance for Pol #ACT4034556
+2026-09-07 23:00:48,870 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to daniela@streetsmart.insurance (Msg ID: 1a07e1a50e88989e)
+2026-09-07 23:00:49,039 [INFO] ezlynx_api: Successfully authenticated with Modern EZLynx OAuth2 Gateway.
+2026-09-07 23:00:49,182 [INFO] gmail_client: [EZLynx Sync] Outbound email to daniela@streetsmart.insurance ('[URGENT / CSR ACTION] Carrier Response Received: Larry Gonzales - Pol #ACT4034556') not linked to an applicant file. Skipping note filing.
+2026-09-07 23:00:49,524 [INFO] gmail_client: Marked message 1a078fee8dc2315b as READ.
+2026-09-07 23:00:49,543 [ERROR] uw_reply_filer: Error filing UW reply 1a07810d2f75fea6: (sqlite3.IntegrityError) UNIQUE constraint failed: policy_number_aliases.alias_number
+[SQL: INSERT INTO policy_number_aliases (policy_id, alias_number, alias_kind, created_at) VALUES (?, ?, ?, ?)]
+[parameters: (65, 'Ahphoo1oleiYud3eaphei8EPdie0Ohc1', 'renewal_term', '2026-09-07 23:00:49.541704')]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1969, in _exec_single_context
+    self.dialect.do_execute(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+sqlite3.IntegrityError: UNIQUE constraint failed: policy_number_aliases.alias_number
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/src/email_outreach/uw_reply_filer.py", line 512, in file_inbox_replies
+    outcome = file_single_reply(
+              ^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/src/email_outreach/uw_reply_filer.py", line 271, in file_single_reply
+    register_aliases_from_texts(
+  File "/opt/renewal-automation-system/src/database/policy_aliases.py", line 165, in register_aliases_from_texts
+    row = register_policy_alias(db, policy, token, alias_kind=alias_kind)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/src/database/policy_aliases.py", line 126, in register_policy_alias
+    db.flush()
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/session.py", line 4353, in flush
+    self._flush(objects)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/session.py", line 4488, in _flush
+    with util.safe_reraise():
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/util/langhelpers.py", line 122, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/session.py", line 4449, in _flush
+    flush_context.execute()
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/unitofwork.py", line 465, in execute
+    rec.execute(self)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/unitofwork.py", line 641, in execute
+    util.preloaded.orm_persistence.save_obj(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/persistence.py", line 94, in save_obj
+    _emit_insert_statements(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/orm/persistence.py", line 1234, in _emit_insert_statements
+    result = connection.execute(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1421, in execute
+    return meth(
+           ^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/sql/elements.py", line 526, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1643, in _execute_clauseelement
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1848, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1988, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 2365, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1969, in _exec_single_context
+    self.dialect.do_execute(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: policy_number_aliases.alias_number
+[SQL: INSERT INTO policy_number_aliases (policy_id, alias_number, alias_kind, created_at) VALUES (?, ?, ?, ?)]
+[parameters: (65, 'Ahphoo1oleiYud3eaphei8EPdie0Ohc1', 'renewal_term', '2026-09-07 23:00:49.541704')]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
+2026-09-07 23:00:49,576 [WARNING] robie_cleaner: UW reply filing skipped (cleaner continues; replies are not trashed): This Session's transaction has been rolled back due to a previous exception during flush. To begin a new transaction with this Session, first issue Session.rollback(). Original exception was: (sqlite3.IntegrityError) UNIQUE constraint failed: policy_number_aliases.alias_number
+[SQL: INSERT INTO policy_number_aliases (policy_id, alias_number, alias_kind, created_at) VALUES (?, ?, ?, ?)]
+[parameters: (65, 'Ahphoo1oleiYud3eaphei8EPdie0Ohc1', 'renewal_term', '2026-09-07 23:00:49.541704')]
+(Background on this error at: https://sqlalche.me/e/20/gkpj) (Background on this error at: https://sqlalche.me/e/20/7s2a)
+2026-09-07 23:00:55,401 [INFO] robie_cleaner: Gathered 70 authentic messages for reporting.
+2026-09-07 23:00:55,703 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a07e1a6ac0b4437)
+2026-09-07 23:00:55,861 [INFO] ezlynx_api: Successfully authenticated with Modern EZLynx OAuth2 Gateway.
+2026-09-07 23:00:56,008 [INFO] gmail_client: [EZLynx Sync] Outbound email to carlo@streetsmart.insurance ('Robie Daily Mailbox Audit & Cleanup Report - September 07, 2026 (70 active, 3 purged)') not linked to an applicant file. Skipping note filing.
+2026-09-07 23:00:56,008 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a07e1a6ac0b4437)
+
+Execution Finished: 3 noise trashed, 70 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-07_23-00-56 ===

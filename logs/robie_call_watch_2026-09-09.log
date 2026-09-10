@@ -1,0 +1,2236 @@
+2026-09-09T00:03:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:03:04,310 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:03:05,511 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:03:28,028 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:03:28,035 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:03:28,037 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:03:28,042 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+2026-09-09 00:03:39,445 [INFO] Skipping discussion 'Policy Audit Verification': latest activity is already from Robie.
+2026-09-09 00:03:39,929 [INFO] Skipping discussion 'Sun Volt Energy LLC _WC AUDIT_': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "81168616",
+    "164706131",
+    "221948543",
+    "218640559",
+    "195714182",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841",
+    "222024806",
+    "196995650"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:03:50+00:00 finish robie call label watch rc=0
+2026-09-09T00:08:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:08:03,660 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:08:04,470 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:08:23,294 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:08:23,299 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:08:23,300 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:08:23,302 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+2026-09-09 00:08:25,394 [INFO] Skipping discussion 'Policy Audit Verification': latest activity is already from Robie.
+2026-09-09 00:08:25,844 [INFO] Skipping discussion 'Sun Volt Energy LLC _WC AUDIT_': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "81168616",
+    "164706131",
+    "221948543",
+    "218640559",
+    "195714182",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841",
+    "222024806",
+    "196995650"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:08:45+00:00 finish robie call label watch rc=0
+2026-09-09T00:13:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:13:03,670 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:13:04,426 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:13:35,375 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:13:35,386 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:13:35,390 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:13:35,397 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+2026-09-09 00:13:38,722 [INFO] Skipping discussion 'Policy Audit Verification': latest activity is already from Robie.
+2026-09-09 00:13:39,338 [INFO] Skipping discussion 'Sun Volt Energy LLC _WC AUDIT_': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "81168616",
+    "164706131",
+    "221948543",
+    "218640559",
+    "195714182",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841",
+    "222024806",
+    "196995650"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:13:54+00:00 finish robie call label watch rc=0
+2026-09-09T00:18:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:18:03,738 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:18:04,480 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:18:25,409 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:18:25,414 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:18:25,416 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:18:25,418 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+2026-09-09 00:18:27,579 [INFO] Skipping discussion 'Policy Audit Verification': latest activity is already from Robie.
+2026-09-09 00:18:28,184 [INFO] Skipping discussion 'Sun Volt Energy LLC _WC AUDIT_': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "81168616",
+    "164706131",
+    "221948543",
+    "218640559",
+    "195714182",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841",
+    "222024806",
+    "196995650"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:18:46+00:00 finish robie call label watch rc=0
+2026-09-09T00:23:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:23:03,623 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:23:04,332 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:23:24,212 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:23:24,216 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:23:24,218 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:23:24,220 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 67,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "81168616",
+    "164706131",
+    "221948543",
+    "218640559",
+    "195714182",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841",
+    "222024806"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:23:40+00:00 finish robie call label watch rc=0
+2026-09-09T00:28:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:28:03,182 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:28:03,935 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:28:26,797 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:28:26,805 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:28:26,807 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:28:26,809 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 67,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "81168616",
+    "164706131",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "195714182",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841",
+    "222024806"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:28:40+00:00 finish robie call label watch rc=0
+2026-09-09T00:33:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:33:03,298 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:33:04,131 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:33:41,402 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:33:41,410 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:33:41,412 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:33:41,415 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045",
+    "96496841"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:33:50+00:00 finish robie call label watch rc=0
+2026-09-09T00:38:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:38:03,529 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:38:04,344 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:38:26,332 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:38:26,337 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:38:26,339 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:38:26,342 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "221936458",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889",
+    "221060045"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:38:47+00:00 finish robie call label watch rc=0
+2026-09-09T00:43:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:43:03,134 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:43:03,867 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:43:29,187 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:43:29,191 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:43:29,192 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:43:29,194 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "212103750",
+    "221936458",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "25486692",
+    "26356199",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994",
+    "175737887",
+    "173035077",
+    "82861889"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:43:44+00:00 finish robie call label watch rc=0
+2026-09-09T00:48:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:48:04,024 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:48:04,827 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:48:24,738 [INFO] Resolved client phone +17329953409 from applicant profile.
+2026-09-09 00:48:24,739 [INFO] [ROBIE CALL DETECTED] Applicant: 26356199 (Buster Brown) | Target: Utica First Insurance Company (+17329953409) | Policy: HOP622388400
+2026-09-09 00:48:25,717 [INFO] Matched explicitly requested discussion card: 'Phone Call by Robie' (ID 842308544)
+2026-09-09 00:48:26,329 [INFO] Successfully posted note via EZLynx REST Note API for Applicant 26356199: NoteId 1123953111 into 'Phone Call by Robie'
+2026-09-09 00:48:26,337 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:48:26,342 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:48:26,343 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:48:26,345 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "26356199",
+    "170596639",
+    "187474475",
+    "216762830",
+    "212103750",
+    "221936458",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "25486692",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994"
+  ],
+  "dispatched": [
+    {
+      "applicant_id": "26356199",
+      "discussion_title": "",
+      "phone": "+17329953409",
+      "target": "Utica First Insurance Company",
+      "call_id": "4cce7bb9-6e1f-434e-89a0-beab8317f292",
+      "status": "DISPATCHED",
+      "call_type": "client_followup",
+      "producer_name": null,
+      "requestor_name": "Carlo Ferrara",
+      "requestor_phone": "+17324622360",
+      "note_id": "1123953038",
+      "note_identity": "842311139:1123953038"
+    }
+  ],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:48:45+00:00 finish robie call label watch rc=0
+2026-09-09T00:53:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:53:03,992 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:53:04,746 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:53:23,261 [INFO] Skipping discussion '' noteId=1123953038: already processed (842311139:1123953038).
+2026-09-09 00:53:23,262 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:53:23,264 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:53:23,265 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:53:23,267 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "26356199",
+    "170596639",
+    "187474475",
+    "216762830",
+    "212103750",
+    "221936458",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "25486692",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878",
+    "175448994"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:53:43+00:00 finish robie call label watch rc=0
+2026-09-09T00:58:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 00:58:03,883 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 00:58:04,641 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 00:58:26,761 [INFO] Skipping discussion '' noteId=1123953599: already processed (842311440:1123953599).
+2026-09-09 00:58:27,822 [INFO] Skipping discussion '' noteId=1123953038: already processed (842311139:1123953038).
+2026-09-09 00:58:27,822 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 00:58:27,827 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 00:58:27,829 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 00:58:27,831 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 68,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "25486692",
+    "36427615",
+    "26356199",
+    "170596639",
+    "187474475",
+    "216762830",
+    "212103750",
+    "221936458",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "97802424",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608",
+    "85795580",
+    "89258878"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T00:58:42+00:00 finish robie call label watch rc=0
+2026-09-09T01:03:01+00:00 start robie call label watch timeout=90s extra=
+2026-09-09 01:03:03,182 [INFO] Agency-wide discovery added 50 recent active accounts to Robie watch list.
+2026-09-09 01:03:03,945 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 01:03:24,237 [INFO] Skipping discussion '' noteId=1123953599: already processed (842311440:1123953599).
+2026-09-09 01:03:25,108 [INFO] Skipping discussion '' noteId=1123953038: already processed (842311139:1123953038).
+2026-09-09 01:03:25,108 [INFO] Skipping discussion ' Robie Call': latest activity is already from Robie.
+2026-09-09 01:03:25,112 [INFO] Skipping discussion '' noteId=1123713292: already processed (842172217:1123713292).
+2026-09-09 01:03:25,113 [INFO] Skipping discussion 'Text Sent - Tuesday, September 8, 2026' noteId=1123691065: already processed (842047443:1123691065).
+2026-09-09 01:03:25,115 [INFO] Skipping discussion 'Rest': latest activity is already from Robie.
+{
+  "applicants_scanned": 66,
+  "applicant_ids": [
+    "102351931",
+    "143979332",
+    "144897143",
+    "145217363",
+    "145834411",
+    "148235525",
+    "150751441",
+    "151382204",
+    "151445306",
+    "157388228",
+    "163863318",
+    "173838508",
+    "186333470",
+    "193438339",
+    "196126698",
+    "196851140",
+    "197389903",
+    "197891661",
+    "197895504",
+    "198604342",
+    "198908859",
+    "199395147",
+    "199797602",
+    "21587333",
+    "21588091",
+    "220250093",
+    "25156187",
+    "25721447",
+    "26042781",
+    "31439734",
+    "35209713",
+    "54893172",
+    "58768907",
+    "58866127",
+    "76858853",
+    "79002334",
+    "83571357",
+    "84705043",
+    "95254866",
+    "99055770",
+    "99340932",
+    "97802424",
+    "25486692",
+    "36427615",
+    "26356199",
+    "170596639",
+    "187474475",
+    "216762830",
+    "212103750",
+    "221936458",
+    "202961940",
+    "195714182",
+    "21587605",
+    "81168616",
+    "164706131",
+    "30167694",
+    "221953526",
+    "221093705",
+    "221220308",
+    "221948543",
+    "218640559",
+    "46892067",
+    "221771213",
+    "205968987",
+    "58288714",
+    "110094608"
+  ],
+  "dispatched": [],
+  "errors": [],
+  "dry_run": false
+}
+2026-09-09T01:03:41+00:00 finish robie call label watch rc=0
+2026-09-09T06:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T06:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T06:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T06:33:01-04:00 finish robie call label watch rc=2
+2026-09-09T06:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T06:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T06:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T06:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T06:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T06:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T06:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T06:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T06:58:01-04:00 start robie call label watch timeout=90s extra=
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/renewal-automation-system/src/voice/ezlynx_label_dispatcher.py", line 16, in <module>
+    from src.ezlynx.api_client import EZLynxApiClient
+  File "/opt/renewal-automation-system/src/ezlynx/__init__.py", line 3, in <module>
+    from src.ezlynx.note_builder import EZLynxNoteBuilder
+  File "/opt/renewal-automation-system/src/ezlynx/note_builder.py", line 5, in <module>
+    from src.database.models import PolicyRenewal, ActionType
+  File "/opt/renewal-automation-system/src/database/__init__.py", line 14, in <module>
+    from src.database.session import engine, SessionLocal, init_db, get_db
+  File "/opt/renewal-automation-system/src/database/session.py", line 6, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'
+2026-09-09T06:58:01-04:00 finish robie call label watch rc=1
+2026-09-09T07:03:01-04:00 start robie call label watch timeout=90s extra=
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/renewal-automation-system/src/voice/ezlynx_label_dispatcher.py", line 16, in <module>
+    from src.ezlynx.api_client import EZLynxApiClient
+  File "/opt/renewal-automation-system/src/ezlynx/__init__.py", line 3, in <module>
+    from src.ezlynx.note_builder import EZLynxNoteBuilder
+  File "/opt/renewal-automation-system/src/ezlynx/note_builder.py", line 5, in <module>
+    from src.database.models import PolicyRenewal, ActionType
+  File "/opt/renewal-automation-system/src/database/__init__.py", line 14, in <module>
+    from src.database.session import engine, SessionLocal, init_db, get_db
+  File "/opt/renewal-automation-system/src/database/session.py", line 6, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'
+2026-09-09T07:03:02-04:00 finish robie call label watch rc=1
+2026-09-09T07:08:01-04:00 start robie call label watch timeout=90s extra=
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/renewal-automation-system/src/voice/ezlynx_label_dispatcher.py", line 16, in <module>
+    from src.ezlynx.api_client import EZLynxApiClient
+  File "/opt/renewal-automation-system/src/ezlynx/__init__.py", line 3, in <module>
+    from src.ezlynx.note_builder import EZLynxNoteBuilder
+  File "/opt/renewal-automation-system/src/ezlynx/note_builder.py", line 5, in <module>
+    from src.database.models import PolicyRenewal, ActionType
+  File "/opt/renewal-automation-system/src/database/__init__.py", line 14, in <module>
+    from src.database.session import engine, SessionLocal, init_db, get_db
+  File "/opt/renewal-automation-system/src/database/session.py", line 6, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'
+2026-09-09T07:08:02-04:00 finish robie call label watch rc=1
+2026-09-09T07:13:01-04:00 start robie call label watch timeout=90s extra=
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/renewal-automation-system/src/voice/ezlynx_label_dispatcher.py", line 16, in <module>
+    from src.ezlynx.api_client import EZLynxApiClient
+  File "/opt/renewal-automation-system/src/ezlynx/__init__.py", line 3, in <module>
+    from src.ezlynx.note_builder import EZLynxNoteBuilder
+  File "/opt/renewal-automation-system/src/ezlynx/note_builder.py", line 5, in <module>
+    from src.database.models import PolicyRenewal, ActionType
+  File "/opt/renewal-automation-system/src/database/__init__.py", line 14, in <module>
+    from src.database.session import engine, SessionLocal, init_db, get_db
+  File "/opt/renewal-automation-system/src/database/session.py", line 6, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'
+2026-09-09T07:13:03-04:00 finish robie call label watch rc=1
+2026-09-09T07:18:01-04:00 start robie call label watch timeout=90s extra=
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/renewal-automation-system/src/voice/ezlynx_label_dispatcher.py", line 16, in <module>
+    from src.ezlynx.api_client import EZLynxApiClient
+  File "/opt/renewal-automation-system/src/ezlynx/__init__.py", line 3, in <module>
+    from src.ezlynx.note_builder import EZLynxNoteBuilder
+  File "/opt/renewal-automation-system/src/ezlynx/note_builder.py", line 5, in <module>
+    from src.database.models import PolicyRenewal, ActionType
+  File "/opt/renewal-automation-system/src/database/__init__.py", line 14, in <module>
+    from src.database.session import engine, SessionLocal, init_db, get_db
+  File "/opt/renewal-automation-system/src/database/session.py", line 6, in <module>
+    from src.config import settings
+  File "/opt/renewal-automation-system/src/config.py", line 10, in <module>
+    load_dotenv(BASE_DIR / ".env")
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 435, in load_dotenv
+    return dotenv.set_as_environment_variables()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 101, in set_as_environment_variables
+    if not self.dict():
+           ^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 84, in dict
+    resolve_variables(raw_values, override=self.override)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 300, in resolve_variables
+    for name, value in values:
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 92, in parse
+    with self._get_stream() as stream:
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/dotenv/main.py", line 63, in _get_stream
+    with open(self.dotenv_path, encoding=self.encoding) as stream:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/.env'
+2026-09-09T07:18:02-04:00 finish robie call label watch rc=1
+2026-09-09T07:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T07:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T07:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T07:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:38:01-04:00 finish robie call label watch rc=2
+2026-09-09T07:43:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T07:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T07:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T07:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T07:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:08:03-04:00 finish robie call label watch rc=2
+2026-09-09T08:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T08:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T08:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:03:03-04:00 finish robie call label watch rc=2
+2026-09-09T09:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:18:01-04:00 finish robie call label watch rc=2
+2026-09-09T09:23:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:23:03-04:00 finish robie call label watch rc=2
+2026-09-09T09:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:28:01-04:00 finish robie call label watch rc=2
+2026-09-09T09:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:38:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:38:03-04:00 finish robie call label watch rc=2
+2026-09-09T09:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T09:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T09:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:23:01-04:00 finish robie call label watch rc=2
+2026-09-09T10:28:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T10:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:53:01-04:00 finish robie call label watch rc=2
+2026-09-09T10:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T10:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:03:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:03:03-04:00 finish robie call label watch rc=2
+2026-09-09T11:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:08:01-04:00 finish robie call label watch rc=2
+2026-09-09T11:13:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:23:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:28:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:43:03-04:00 finish robie call label watch rc=2
+2026-09-09T11:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T11:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T11:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:23:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:28:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:28:03-04:00 finish robie call label watch rc=2
+2026-09-09T12:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T12:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T12:58:01-04:00 finish robie call label watch rc=2
+2026-09-09T13:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:33:01-04:00 finish robie call label watch rc=2
+2026-09-09T13:38:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:43:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:48:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:48:03-04:00 finish robie call label watch rc=2
+2026-09-09T13:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T13:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T13:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:18:01-04:00 finish robie call label watch rc=2
+2026-09-09T14:23:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T14:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T14:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:23:01-04:00 finish robie call label watch rc=2
+2026-09-09T15:28:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T15:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T15:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:03:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:03:03-04:00 finish robie call label watch rc=2
+2026-09-09T16:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:13:01-04:00 finish robie call label watch rc=2
+2026-09-09T16:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:18:01-04:00 finish robie call label watch rc=2
+2026-09-09T16:23:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:28:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:33:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:48:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:48:03-04:00 finish robie call label watch rc=2
+2026-09-09T16:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T16:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T16:58:01-04:00 finish robie call label watch rc=2
+2026-09-09T17:03:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:08:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:38:01-04:00 finish robie call label watch rc=2
+2026-09-09T17:43:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:48:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:48:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:53:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T17:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T17:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:03:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:18:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:23:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:48:01-04:00 finish robie call label watch rc=2
+2026-09-09T18:53:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:53:02-04:00 finish robie call label watch rc=2
+2026-09-09T18:58:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T18:58:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:03:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:03:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:08:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:08:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:13:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:13:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:18:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:18:01-04:00 finish robie call label watch rc=2
+2026-09-09T19:23:02-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:23:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:28:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:28:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:33:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:33:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:38:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:38:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:43:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:43:02-04:00 finish robie call label watch rc=2
+2026-09-09T19:48:01-04:00 start robie call label watch timeout=90s extra=
+usage: ezlynx_label_dispatcher.py [-h] [--applicant-id APPLICANT_ID]
+                                  [--test-note TEST_NOTE] [--phone PHONE]
+                                  [--dry-run]
+ezlynx_label_dispatcher.py: error: unrecognized arguments: --scan-queue
+2026-09-09T19:48:02-04:00 finish robie call label watch rc=2

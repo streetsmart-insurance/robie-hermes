@@ -27,12 +27,7 @@ from src.config import settings
 
 logger = logging.getLogger("ezlynx_api")
 
-ROBIE_SIGNATURE = "\n\nROBIE was here"
-
-def normalize_robie_signature(text: str) -> str:
-    """Ensure text ends with the mandatory 'ROBIE was here' signature."""
-    cleaned = re.sub(r"\n*\s*(?:robie\s+was\s+here)\s*$", "", text, flags=re.IGNORECASE).rstrip()
-    return f"{cleaned}\n\nROBIE was here"
+ROBIE_SIGNATURE = "\n\nRobie was here"
 
 # Classic GET /documentlibrary/list/{applicant}/{page}/{size}/{policyId} returns a
 # paged envelope (TotalRecords + a document array). Live production rows use
@@ -315,7 +310,6 @@ DISQUALIFIED_DISCUSSION_PATTERNS = [
     "text sent",
     "text received",
     "email sent by automation center",
-    "email automation",
     "automation center",
     "submission added",
     "billing and payments",
@@ -323,20 +317,6 @@ DISQUALIFIED_DISCUSSION_PATTERNS = [
     "eva inbound call",
     "incoming call",
 ]
-
-_MANUAL_LOB_RENEWAL_TITLE_RE = re.compile(r"^manual .+ renewal$", re.I)
-
-
-def is_manual_lob_renewal_title(title: Optional[str]) -> bool:
-    """Exact agency card ``Manual {LOB} Renewal`` (Paulette HO standing rule)."""
-    return bool(_MANUAL_LOB_RENEWAL_TITLE_RE.match((title or "").strip()))
-
-
-def is_disqualified_requested_title(title: Optional[str]) -> bool:
-    t_low = (title or "").strip().lower()
-    if not t_low or t_low in {"untitled", "(untitled)", "new discussion"}:
-        return True
-    return any(pat in t_low for pat in DISQUALIFIED_DISCUSSION_PATTERNS)
 
 
 class EZLynxApiClient:
@@ -661,7 +641,7 @@ class EZLynxApiClient:
     def list_applicant_documents(
         self,
         applicant_id: str,
-        page_index: int = 1,
+        page_index: int = 0,
         page_size: int = 20,
         policy_id: int = 0
     ) -> Dict[str, Any]:
@@ -686,121 +666,6 @@ class EZLynxApiClient:
             return {"status": "error", "code": resp.status_code, "error": resp.text}
         except Exception as e:
             return {"status": "error", "error": str(e)}
-
-    def download_document_bytes(self, document_id: str) -> bytes:
-        """Classic GET /document/{id} — raw PDF bytes, or empty on failure.
-
-        Document ids are normalized (leading ``A`` stripped) before the request.
-        Does not open Preview/RadPdf.
-        """
-        from src.ezlynx.document_downloader import coerce_pdf_bytes, normalize_ezlynx_download_id
-
-        normalized = normalize_ezlynx_download_id(document_id)
-        if not normalized:
-            return b""
-        if not self.authenticate_classic():
-            logger.warning("Classic EZLynx auth failed; cannot GET /document/%s", normalized)
-            return b""
-        url = f"{self.services_url}/document/{normalized}"
-        headers = dict(self._get_classic_headers())
-        headers["Accept"] = "application/pdf, application/octet-stream, */*"
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            if resp.status_code != 200:
-                logger.warning(
-                    "Classic document download HTTP %s for id %s",
-                    resp.status_code,
-                    normalized,
-                )
-                return b""
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            if "json" in ctype:
-                try:
-                    return coerce_pdf_bytes(resp.json())
-                except Exception:
-                    return coerce_pdf_bytes(resp.content)
-            return coerce_pdf_bytes(resp.content)
-        except Exception as exc:
-            logger.warning("Classic document download error for id %s: %s", normalized, exc)
-            return b""
-
-    def download_portal_document_bytes(self, relative_url: str) -> bytes:
-        """GET an app.ezlynx.com Download path using portal cookies, then one CDP fetch.
-
-        ``relative_url`` must already be the known-good ``/Download/{numericId}``.
-        Never follows Preview/RadPdf. Empty bytes on failure.
-        """
-        from src.ezlynx.document_downloader import coerce_pdf_bytes, known_good_download_path
-
-        if not relative_url.startswith("/"):
-            relative_url = "/" + relative_url
-        # Force the corrected Download path if a caller handed us /Download/A…
-        if "/download/" in relative_url.lower():
-            relative_url = known_good_download_path(relative_url)
-        abs_url = f"https://app.ezlynx.com{relative_url}"
-        storage_file = self._portal_storage_state_path()
-        cookies = self._portal_session_cookies(storage_file)
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/pdf,application/octet-stream,*/*",
-        }
-        if cookies:
-            try:
-                resp = requests.get(abs_url, cookies=cookies, headers=headers, timeout=30)
-                if resp.status_code == 200 and resp.content:
-                    return coerce_pdf_bytes(resp.content)
-                logger.warning(
-                    "Portal Download %s HTTP %s (%s bytes)",
-                    relative_url,
-                    resp.status_code,
-                    len(resp.content or b""),
-                )
-            except Exception as exc:
-                logger.debug("Portal cookie Download failed: %s", exc)
-
-        cdp_url = getattr(settings, "ezlynx_cdp_endpoint", None) or "http://localhost:9222"
-        try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as p:
-                browser = p.chromium.connect_over_cdp(cdp_url)
-                ctx = browser.contexts[0]
-                try:
-                    ctx.storage_state(path=str(storage_file))
-                except Exception:
-                    pass
-                page = None
-                for pg in ctx.pages:
-                    if "ezlynx.com" in (pg.url or ""):
-                        page = pg
-                        break
-                if page:
-                    import base64
-
-                    b64 = page.evaluate(
-                        f"""async () => {{
-                        const r = await fetch({relative_url!r});
-                        const buf = await r.arrayBuffer();
-                        const bytes = new Uint8Array(buf);
-                        let binary = '';
-                        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-                        return btoa(binary);
-                    }}"""
-                    )
-                    if b64:
-                        return coerce_pdf_bytes(base64.b64decode(b64))
-        except Exception as exc:
-            logger.debug("Portal CDP Download failed: %s", exc)
-        return b""
-
-    def fetch_firmed_quote_pdf(self, document_id: str, dest_path: Path) -> Path:
-        """One-shot firmed-quote fetch. See ``src.ezlynx.document_downloader``."""
-        from src.ezlynx.document_downloader import fetch_firmed_quote_pdf as _fetch
-
-        return _fetch(document_id, Path(dest_path), client=self)
 
     # -------------------------------------------------------------------------
     # Quoting & Sessions Management
@@ -886,75 +751,40 @@ class EZLynxApiClient:
         }
 
     # -------------------------------------------------------------------------
-    # Portal session GETs (cookie storage_state, then Playwright CDP)
+    # Discussion Discovery & Matching
     # -------------------------------------------------------------------------
 
-    @staticmethod
-    def _portal_storage_state_path() -> Path:
-        if hasattr(settings, "ezlynx_storage_state_file") and settings.ezlynx_storage_state_file:
-            return Path(settings.ezlynx_storage_state_file)
-        return Path("data/ezlynx_storage_state.json")
-
-    @staticmethod
-    def _portal_session_cookies(storage_file: Path) -> Dict[str, str]:
-        if not storage_file.exists():
-            return {}
-        try:
-            with open(storage_file) as f:
-                state = json.load(f)
-            return {
-                c["name"]: c["value"]
-                for c in state.get("cookies", [])
-                if "ezlynx.com" in c.get("domain", "")
-            }
-        except Exception as exc:
-            logger.debug("Could not read EZLynx portal storage state: %s", exc)
-            return {}
-
-    @staticmethod
-    def _portal_json_headers() -> Dict[str, str]:
-        return {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-    def _portal_get_json(self, relative_url: str) -> Optional[Any]:
-        """GET an app.ezlynx.com JSON path using portal cookies, then CDP.
-
-        ``relative_url`` is a path + query (e.g. ``/EZLynxPortalAPI/...?...``).
-        Secrets stay in the local storage-state file / CDP session — never logged.
+    def get_applicant_discussions(self, applicant_id: str, page_size: int = 20) -> List[Dict[str, Any]]:
+        """Fetches active discussions for an applicant from EZLynx.
+        
+        First attempts fast retrieval via portal session cookies; falls back to Playwright CDP context if available.
         """
-        if not relative_url.startswith("/"):
-            relative_url = "/" + relative_url
-        abs_url = f"https://app.ezlynx.com{relative_url}"
-        storage_file = self._portal_storage_state_path()
-        cookies = self._portal_session_cookies(storage_file)
-        if cookies:
+        storage_file = Path(settings.ezlynx_storage_state_file) if hasattr(settings, "ezlynx_storage_state_file") else Path("data/ezlynx_storage_state.json")
+        if storage_file.exists():
             try:
-                resp = requests.get(
-                    abs_url,
-                    cookies=cookies,
-                    headers=self._portal_json_headers(),
-                    timeout=8,
-                )
-                if resp.status_code == 200 and resp.content:
-                    return resp.json()
-                logger.warning(
-                    "Portal GET %s returned HTTP %s; falling back to CDP",
-                    relative_url.split("?", 1)[0],
-                    resp.status_code,
-                )
-            except Exception as exc:
-                logger.debug("Portal cookie GET failed: %s", exc)
+                with open(storage_file) as f:
+                    state = json.load(f)
+                cookies = {c["name"]: c["value"] for c in state.get("cookies", []) if "ezlynx.com" in c.get("domain", "")}
+                if cookies:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                        "Accept": "application/json, text/plain, */*",
+                        "X-Requested-With": "XMLHttpRequest"
+                    }
+                    url = f"https://app.ezlynx.com/EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true"
+                    resp = requests.get(url, cookies=cookies, headers=headers, timeout=8)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        discussions = data.get("discussions", [])
+                        logger.debug(f"Retrieved {len(discussions)} discussions via portal cookie session for applicant {applicant_id}")
+                        return discussions
+            except Exception as e:
+                logger.debug(f"Cookie retrieval of discussions failed: {e}")
 
-        cdp_url = getattr(settings, "ezlynx_cdp_endpoint", None) or "http://localhost:9222"
+        # Browser CDP fallback if active
+        cdp_url = settings.ezlynx_cdp_endpoint or "http://localhost:9222"
         try:
             from playwright.sync_api import sync_playwright
-
             with sync_playwright() as p:
                 browser = p.chromium.connect_over_cdp(cdp_url)
                 ctx = browser.contexts[0]
@@ -968,107 +798,14 @@ class EZLynxApiClient:
                         page = pg
                         break
                 if page:
-                    return page.evaluate(
-                        f"""async () => {{
-                        const r = await fetch({relative_url!r});
+                    result = page.evaluate(f'''async () => {{
+                        const r = await fetch('/EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true');
                         return await r.json();
-                    }}"""
-                    )
-        except Exception as exc:
-            logger.debug("Portal CDP GET failed: %s", exc)
-        return None
+                    }}''')
+                    return result.get("discussions", [])
+        except Exception as e:
+            logger.debug(f"CDP discussion lookup failed: {e}")
 
-    @staticmethod
-    def unwrap_sales_center_opportunities(payload: Any) -> List[Dict[str, Any]]:
-        """Normalize GetOpportunitiesForApplicant JSON to a list of opportunity dicts."""
-        if isinstance(payload, list):
-            return [row for row in payload if isinstance(row, dict)]
-        if not isinstance(payload, dict):
-            return []
-        for key in ("opportunities", "Opportunities"):
-            inner = payload.get(key)
-            if isinstance(inner, list):
-                return [row for row in inner if isinstance(row, dict)]
-        data = payload.get("data") or payload.get("Data")
-        if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
-        if isinstance(data, dict):
-            nested = data.get("opportunities") or data.get("Opportunities")
-            if isinstance(nested, list):
-                return [row for row in nested if isinstance(row, dict)]
-        return []
-
-    def get_sales_center_opportunities(
-        self,
-        applicant_id: str,
-        include_lead_info: bool = True,
-    ) -> List[Dict[str, Any]]:
-        """Sales Center opportunities for an applicant (greeting ``producerName``).
-
-        Live (Buster Brown / 26356199):
-        GET /EZLynxPortalAPI/SalesCenter/Opportunity/GetOpportunitiesForApplicant
-            ?applicantID={id}&includeLeadInfo=true
-        """
-        lead_flag = "true" if include_lead_info else "false"
-        relative = (
-            "/EZLynxPortalAPI/SalesCenter/Opportunity/GetOpportunitiesForApplicant"
-            f"?applicantID={applicant_id}&includeLeadInfo={lead_flag}"
-        )
-        data = self._portal_get_json(relative)
-        opportunities = self.unwrap_sales_center_opportunities(data)
-        if opportunities:
-            logger.info(
-                "Retrieved %s Sales Center opportunities via portal for applicant %s",
-                len(opportunities),
-                applicant_id,
-            )
-        return opportunities
-
-    def get_applicant_sidebar(self, applicant_id: str) -> Optional[Dict[str, Any]]:
-        """Portal sidebar. ``Applicant.Assignment.AssignedTo`` is the full display name.
-
-        Live:
-        GET /applicantportal/ApplicantContext/GetApplicantSidebar?applicantID={id}
-
-        Classic Applicant/v2 ``AssignedTo`` is a username (e.g. Carlo1) and is a
-        different field — do not treat that Classic value as this payload.
-        """
-        relative = (
-            f"/applicantportal/ApplicantContext/GetApplicantSidebar?applicantID={applicant_id}"
-        )
-        data = self._portal_get_json(relative)
-        return data if isinstance(data, dict) else None
-
-    # -------------------------------------------------------------------------
-    # Discussion Discovery & Matching
-    # -------------------------------------------------------------------------
-
-    def get_applicant_discussions(self, applicant_id: str, page_size: int = 50) -> List[Dict[str, Any]]:
-        """Fetches active discussions for an applicant from EZLynx portal GetPagedDiscussions.
-
-        Live endpoint (hermes-poc-01):
-        GET /EZLynxPortalAPI/Discussions/GetPagedDiscussions?pageNumber=1&pageSize=50&applicantId={id}&applicantContext=true
-
-        Uses authenticated portal session cookies first; falls back to Playwright CDP if available.
-        """
-        relative = (
-            "/EZLynxPortalAPI/Discussions/GetPagedDiscussions"
-            f"?pageNumber=1&pageSize={page_size}&applicantId={applicant_id}&applicantContext=true"
-        )
-        data = self._portal_get_json(relative)
-        if isinstance(data, dict):
-            discussions = data.get("discussions")
-            if isinstance(discussions, list):
-                logger.info(
-                    "Retrieved %s discussions via portal session for applicant %s",
-                    len(discussions),
-                    applicant_id,
-                )
-                return discussions
-            logger.warning(
-                "GetPagedDiscussions for applicant %s missing discussions list",
-                applicant_id,
-            )
         return []
 
     def find_matching_discussion(
@@ -1087,18 +824,20 @@ class EZLynxApiClient:
         2. Scored match across Carrier tokens, Line of Business tokens, active team participation, and note counts.
         """
         discussions = self.get_applicant_discussions(applicant_id)
-        if not discussions:
-            return None
-
-        # Filter out disqualified auxiliary discussion threads
+        # Filter out disqualified auxiliary discussion threads (Loss Runs, COI, Texts, Billing, etc.)
+        # Note: If a CSR prefixed an existing renewal card with 'cancellation', retain it as valid for this policy.
         valid_discussions = []
         for d in discussions:
             title = d.get("title", "")
             t_low = title.lower()
             if any(disq in t_low for disq in DISQUALIFIED_DISCUSSION_PATTERNS):
-                logger.debug(f"Filtering out auxiliary discussion card: '{title}' (ID {d.get('discussionId')})")
-                continue
-            valid_discussions.append(d)
+                if "cancellation" in t_low and "renewal" in t_low:
+                    valid_discussions.append(d)
+                else:
+                    logger.debug(f"Filtering out auxiliary discussion card: '{title}' (ID {d.get('discussionId')})")
+                    continue
+            else:
+                valid_discussions.append(d)
 
         if not valid_discussions:
             return None
@@ -1204,74 +943,28 @@ class EZLynxApiClient:
         policy_numbers: Optional[List[str]] = None,
     ) -> str:
         """Resolves the authentic discussion title to ensure notes thread directly into the right card.
-
-        Prefer an existing ``{LOB} Renewal`` card (any line of business) when
-        the caller asked for a Manual/Update fallback title. Only create
-        ``Manual {LOB} Renewal`` when no matching LOB renewal discussion exists.
-
-        Substring / first-card rematch is the Paulette misfire path and is not used.
+        
+        If discussion_title is provided and already exists, it is preserved.
+        If it is a generic/fallback title or omitted, queries EZLynx to find the matching card.
+        If no existing card exists, constructs the agency standard:
+            'Renewal Manual {LOB} | {PolicyNumber} {Carrier}'
         """
-        requested = (discussion_title or "").strip()
-        if requested and is_disqualified_requested_title(requested):
-            logger.warning("Ignoring disqualified/untitled requested discussion title: '%s'", requested)
-            requested = ""
-
-        from src.ezlynx.manual_renewal_gate import (
-            is_renewal_update_title,
-            resolve_existing_lob_renewal_discussion,
-        )
-
-        # 0. Existing {LOB} Renewal wins over Manual / Renewal Update fallbacks.
-        if line_of_business and (
-            not requested
-            or is_manual_lob_renewal_title(requested)
-            or is_renewal_update_title(requested)
-        ):
-            discussions = self.get_applicant_discussions(applicant_id)
-            existing = resolve_existing_lob_renewal_discussion(discussions, line_of_business)
-            if existing:
-                logger.info(
-                    "Preferred existing {LOB} Renewal card '%s' over fallback '%s'",
-                    existing.title,
-                    requested or "Manual/Update",
-                )
-                return existing.title
-
-        # 1. Exact Manual {LOB} Renewal — never treat as a generic placeholder.
-        if requested and is_manual_lob_renewal_title(requested):
-            discussions = self.get_applicant_discussions(applicant_id)
-            want = requested.lower()
-            for d in discussions:
-                d_title = (d.get("title") or "").strip()
-                if d_title.lower() == want and not is_disqualified_requested_title(d_title):
-                    logger.info(
-                        "Matched exact Manual {LOB} Renewal card: '%s' (ID %s)",
-                        d_title,
-                        d.get("discussionId"),
-                    )
-                    return d_title
-            logger.info(
-                "Manual {LOB} Renewal '%s' not found — returning exact title so the note creates it",
-                requested,
-            )
-            return requested
-
-        # 2. Exact requested title only (no substring rematch).
-        if requested:
-            dt_clean = requested.lower()
+        # 1. If discussion_title was explicitly supplied and is not a generic 'Manual ...' placeholder, prioritize matching it
+        if discussion_title and not discussion_title.startswith("Manual "):
+            dt_clean = discussion_title.strip().lower()
             discussions = self.get_applicant_discussions(applicant_id)
             for d in discussions:
-                d_title = (d.get("title") or "").strip()
-                if d_title.lower() == dt_clean and not is_disqualified_requested_title(d_title):
-                    logger.info(
-                        "Matched explicitly requested discussion card: '%s' (ID %s)",
-                        d_title,
-                        d.get("discussionId"),
-                    )
+                d_title = d.get("title", "")
+                if d_title.strip().lower() == dt_clean:
+                    logger.info(f"Matched explicitly requested discussion card: '{d_title}' (ID {d.get('discussionId')})")
+                    return d_title
+            for d in discussions:
+                d_title = d.get("title", "")
+                if dt_clean in d_title.lower() or (len(dt_clean) > 8 and d_title.lower() in dt_clean):
+                    logger.info(f"Matched partial explicitly requested discussion card: '{d_title}' (ID {d.get('discussionId')})")
                     return d_title
 
-        # 3. If policy_number, LOB, or carrier is provided, attempt to match active card
-        #    (find_matching_discussion already drops Email Automation / aux cards).
+        # 2. If policy_number, LOB, or carrier is provided, attempt to match active card
         if policy_number or policy_numbers or line_of_business or carrier_name:
             matched = self.find_matching_discussion(
                 applicant_id=applicant_id,
@@ -1280,12 +973,12 @@ class EZLynxApiClient:
                 carrier_name=carrier_name,
                 policy_numbers=policy_numbers,
             )
-            if matched and matched.get("title") and not is_disqualified_requested_title(matched.get("title")):
+            if matched and matched.get("title"):
                 return matched["title"]
 
-        # 4. Honor a remaining explicit non-Manual title (create-if-missing).
-        if requested:
-            return requested
+        # 3. If discussion_title was explicitly supplied and not a generic fallback, use it
+        if discussion_title and not discussion_title.startswith("Manual "):
+            return discussion_title
 
         # Fallback to agency standard naming convention
         lob_clean = line_of_business or "Policy"
@@ -1314,18 +1007,13 @@ class EZLynxApiClient:
         carrier_name: Optional[str] = None,
         use_playwright_fallback: bool = True,
         require_existing_discussion: bool = False,
-        honor_explicit_title: bool = False,
         policy_numbers: Optional[List[str]] = None,
-        discussion_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Posts a note under the designated discussion title for an applicant.
 
         Mandates 'Robie was here' signature.
         Automatically resolves the authentic existing discussion card to thread directly inside it.
         Uses direct API if available, with graceful fallback to Playwright/CDP.
-
-        When ``honor_explicit_title`` is True, posts to ``discussion_title`` exactly
-        (creates that titled card if missing). Never rematches onto Email Automation.
 
         When ``require_existing_discussion`` is True (underwriter-reply filing),
         refuses to post if ``find_matching_discussion`` cannot locate an existing
@@ -1343,35 +1031,11 @@ class EZLynxApiClient:
                 header_parts.append(f"({' - '.join(details)})")
             note_text = f"{' '.join(header_parts)}\n\n{note_text.lstrip()}"
 
-        # Ensure mandatory Robie signature is normalized to uppercase ROBIE was here
-        note_text = normalize_robie_signature(note_text)
+        # Ensure mandatory Robie signature is included
+        if "Robie was here" not in note_text:
+            note_text = f"{note_text.rstrip()}{ROBIE_SIGNATURE}"
 
-        if discussion_id and not discussion_title:
-            try:
-                discs = self.get_applicant_discussions(str(applicant_id)) or []
-                matched = next((d for d in discs if str(d.get("discussionId")) == str(discussion_id)), None)
-                if matched and matched.get("title"):
-                    discussion_title = matched.get("title")
-            except Exception as d_err:
-                logger.debug(f"Failed to lookup title for discussion_id {discussion_id}: {d_err}")
-
-        if honor_explicit_title:
-            requested = (discussion_title or "").strip()
-            if not requested or is_disqualified_requested_title(requested):
-                logger.warning(
-                    "Refusing honor_explicit_title post for applicant %s: untitled/automation title '%s'",
-                    applicant_id,
-                    discussion_title,
-                )
-                return {
-                    "status": "error",
-                    "error": "disqualified_or_untitled_discussion",
-                    "applicant_id": applicant_id,
-                    "policy_number": policy_number,
-                    "discussion_title": discussion_title,
-                }
-            resolved_title = requested
-        elif require_existing_discussion:
+        if require_existing_discussion:
             matched = self.find_matching_discussion(
                 applicant_id=str(applicant_id),
                 policy_number=policy_number,
@@ -1401,20 +1065,6 @@ class EZLynxApiClient:
                 carrier_name=carrier_name,
                 policy_numbers=policy_numbers,
             )
-
-        if is_disqualified_requested_title(resolved_title):
-            logger.warning(
-                "Refusing to post onto disqualified discussion '%s' for applicant %s",
-                resolved_title,
-                applicant_id,
-            )
-            return {
-                "status": "error",
-                "error": "disqualified_or_untitled_discussion",
-                "applicant_id": applicant_id,
-                "policy_number": policy_number,
-                "discussion_title": resolved_title,
-            }
 
         # 1. Direct Classic REST Note API (Fastest and direct)
         if self.authenticate_classic():
@@ -1524,149 +1174,6 @@ class EZLynxApiClient:
             "text": note_text
         }
 
-    @staticmethod
-    def _document_data_uri(file_path: Path) -> str:
-        """Encode a local file as a data URI using the real MIME type (not PDF-only)."""
-        import base64
-
-        mime_map = {
-            ".pdf": "application/pdf",
-            ".mp3": "audio/mpeg",
-            ".wav": "audio/wav",
-            ".m4a": "audio/mp4",
-            ".mpeg": "audio/mpeg",
-            ".txt": "text/plain",
-            ".json": "application/json",
-        }
-        mime = mime_map.get(file_path.suffix.lower(), "application/octet-stream")
-        encoded = base64.b64encode(file_path.read_bytes()).decode("utf-8")
-        return f"data:{mime};base64,{encoded}"
-
-    def _upload_document_via_api(
-        self,
-        applicant_id: str,
-        file_path: Path,
-        folder_name: Optional[str],
-        description: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
-        if not (self._classic_token or self.authenticate_classic()):
-            return None
-        endpoint = f"{self.services_url}/document"
-        payload = {
-            "ApplicantId": int(applicant_id) if str(applicant_id).isdigit() else applicant_id,
-            "DocumentName": description or file_path.name,
-            "FolderPath": folder_name,
-            "Document": self._document_data_uri(file_path),
-        }
-        try:
-            resp = requests.post(endpoint, json=payload, headers=self._get_classic_headers(), timeout=30)
-            if resp.status_code in (200, 201):
-                return {"status": "success", "method": "api", "data": resp.json()}
-            logger.debug("Direct API document upload HTTP %s: %s", resp.status_code, resp.text[:200])
-        except Exception as e:
-            logger.debug(f"Direct API document upload error: {e}")
-        return None
-
-    def _upload_document_via_playwright(
-        self,
-        applicant_id: str,
-        file_path: Path,
-        folder_name: Optional[str],
-        description: Optional[str],
-        policy_number: Optional[str],
-        doc_type: str,
-        label_to_apply: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
-        try:
-            from src.ezlynx.document_uploader import EZLynxDocumentUploader
-            uploader = EZLynxDocumentUploader(cdp_url=settings.ezlynx_cdp_endpoint or "http://localhost:9222")
-
-            async def _upload():
-                return await uploader.upload_document(
-                    applicant_id=applicant_id,
-                    file_path=file_path,
-                    policy_number=policy_number,
-                    doc_type=doc_type,
-                    doc_title=description,
-                    label_to_apply=label_to_apply,
-                    target_folder=folder_name
-                )
-
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import nest_asyncio
-                    nest_asyncio.apply()
-                    res = loop.run_until_complete(_upload())
-                else:
-                    res = loop.run_until_complete(_upload())
-            except RuntimeError:
-                res = asyncio.run(_upload())
-
-            if res.get("success"):
-                logger.info(f"Successfully uploaded document via Playwright CDP for Applicant {applicant_id}.")
-                return {
-                    "status": "success",
-                    "method": "playwright",
-                    "applicant_id": applicant_id,
-                    "document_name": res.get("document_name"),
-                    "policy_number": res.get("policy_number"),
-                    "applied_label": res.get("applied_label"),
-                    "target_folder": res.get("target_folder"),
-                    "folder_created": res.get("folder_created"),
-                    "screenshot_path": res.get("screenshot_path"),
-                }
-            logger.warning(f"Playwright document uploader returned error: {res.get('error')}. Checking API/simulation.")
-        except Exception as e:
-            logger.warning(f"Playwright uploader fallback encountered exception: {e}. Checking API/simulation.")
-        return None
-
-    def validate_policy_payload(
-        self,
-        applicant_id: str,
-        policy_number: str,
-        expected_carrier: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Pre-execution validation gate.
-        Validates that policy_number exists and is active for the applicant in EZLynx,
-        and verifies that expected_carrier matches the companyName. Raises ValueError if invalid.
-        """
-        pol_res = self.get_applicant_policies(applicant_id) or []
-        policies = pol_res.get("policies", []) if isinstance(pol_res, dict) else pol_res
-        if not policies:
-            raise ValueError(f"No policies found for applicant {applicant_id} in EZLynx.")
-
-        target_pol = None
-        for pol in policies:
-            p_num = str(pol.get("policyNumber") or pol.get("PolicyNumber") or "")
-            if p_num.strip().lower() == policy_number.strip().lower():
-                target_pol = pol
-                break
-
-        if not target_pol:
-            existing = [str(p.get("policyNumber") or p.get("PolicyNumber")) for p in policies]
-            raise ValueError(
-                f"Policy '{policy_number}' not found for applicant {applicant_id}. Existing: {existing}"
-            )
-
-        if expected_carrier:
-            cname = str(
-                target_pol.get("companyName") or
-                target_pol.get("CompanyName") or
-                target_pol.get("masterCompanyName") or
-                target_pol.get("writingCompanyName") or ""
-            )
-            parts = [
-                p.lower() for p in expected_carrier.split()
-                if len(p) > 3 and p.lower() not in ("insurance", "company", "property", "casualty")
-            ]
-            if parts and not any(part in cname.lower() for part in parts):
-                raise ValueError(
-                    f"Carrier mismatch for policy '{policy_number}': Expected '{expected_carrier}', found EZLynx carrier '{cname}'."
-                )
-
-        return {"valid": True, "policy": target_pol}
-
     def upload_document(
         self,
         applicant_id: str,
@@ -1676,53 +1183,84 @@ class EZLynxApiClient:
         policy_number: Optional[str] = None,
         doc_type: str = "renewal",
         label_to_apply: Optional[str] = None,
-        use_playwright_fallback: bool = True,
-        prefer_api: bool = False,
+        use_playwright_fallback: bool = True
     ) -> Dict[str, Any]:
-        """Uploads a document to the Applicant's Document Management folder in EZLynx.
-
-        ``prefer_api=True`` tries Classic REST first (voice recordings / transcripts).
-        Playwright remains the default first path for renewal PDFs so existing
-        callers are unchanged. Playwright is fallback-only when prefer_api is set.
-        """
+        """Uploads a PDF document to the Applicant's Document Management folder in EZLynx."""
         if not file_path.exists():
             return {"status": "error", "error": f"File not found: {file_path}"}
 
-        api_result = None
-        pw_result = None
-        if prefer_api:
-            api_result = self._upload_document_via_api(applicant_id, file_path, folder_name, description)
-            if api_result and api_result.get("status") == "success":
-                return api_result
-            if use_playwright_fallback:
-                pw_result = self._upload_document_via_playwright(
-                    applicant_id, file_path, folder_name, description, policy_number, doc_type, label_to_apply
-                )
-                if pw_result and pw_result.get("status") == "success":
-                    return pw_result
-        else:
-            if use_playwright_fallback:
-                pw_result = self._upload_document_via_playwright(
-                    applicant_id, file_path, folder_name, description, policy_number, doc_type, label_to_apply
-                )
-                if pw_result and pw_result.get("status") == "success":
-                    return pw_result
-            api_result = self._upload_document_via_api(applicant_id, file_path, folder_name, description)
-            if api_result and api_result.get("status") == "success":
-                return api_result
+        # 1. Seamless Browser Fallback: Playwright / Chrome CDP Document Uploader
+        if use_playwright_fallback:
+            try:
+                from src.ezlynx.document_uploader import EZLynxDocumentUploader
+                uploader = EZLynxDocumentUploader(cdp_url=settings.ezlynx_cdp_endpoint or "http://localhost:9222")
 
-        pw_err = pw_result.get("error") if pw_result else "playwright_skipped"
-        api_err = api_result.get("error") if api_result else "api_skipped"
-        err_msg = (
-            f"Failed to upload document '{file_path.name}' to Applicant {applicant_id}. "
-            f"Playwright error: {pw_err} | API error: {api_err}"
-        )
-        logger.error(err_msg)
+                async def _upload():
+                    return await uploader.upload_document(
+                        applicant_id=applicant_id,
+                        file_path=file_path,
+                        policy_number=policy_number,
+                        doc_type=doc_type,
+                        doc_title=description,
+                        label_to_apply=label_to_apply,
+                        target_folder=folder_name
+                    )
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        import nest_asyncio
+                        nest_asyncio.apply()
+                        res = loop.run_until_complete(_upload())
+                    else:
+                        res = loop.run_until_complete(_upload())
+                except RuntimeError:
+                    res = asyncio.run(_upload())
+
+                if res.get("success"):
+                    logger.info(f"Successfully uploaded document via Playwright CDP for Applicant {applicant_id}.")
+                    return {
+                        "status": "success",
+                        "method": "playwright",
+                        "applicant_id": applicant_id,
+                        "document_name": res.get("document_name"),
+                        "policy_number": res.get("policy_number"),
+                        "applied_label": res.get("applied_label"),
+                        "screenshot_path": res.get("screenshot_path"),
+                    }
+                else:
+                    logger.warning(f"Playwright document uploader returned error: {res.get('error')}. Checking API/simulation.")
+            except Exception as e:
+                logger.warning(f"Playwright uploader fallback encountered exception: {e}. Checking API/simulation.")
+
+        # 2. Classic API Upload Attempt
+        if self._classic_token or self.authenticate_classic():
+            endpoint = f"{self.services_url}/document"
+            payload = {
+                "ApplicantId": int(applicant_id) if applicant_id.isdigit() else applicant_id,
+                "DocumentName": file_path.name,
+                "FolderPath": folder_name,
+            }
+            try:
+                with open(file_path, "rb") as f:
+                    import base64
+                    encoded = base64.b64encode(f.read()).decode("utf-8")
+                    payload["Document"] = f"data:application/pdf;base64,{encoded}"
+
+                resp = requests.post(endpoint, json=payload, headers=self._get_classic_headers(), timeout=30)
+                if resp.status_code in (200, 201):
+                    return {"status": "success", "method": "api", "data": resp.json()}
+            except Exception as e:
+                logger.debug(f"Direct API document upload error: {e}")
+
+        # 3. Fallback: Simulation record
+        logger.info(f"[SIMULATION] Document '{file_path.name}' uploaded to Applicant {applicant_id} (Folder: {folder_name})")
         return {
-            "status": "error",
-            "error": err_msg,
+            "status": "simulated",
+            "method": "simulation",
             "applicant_id": applicant_id,
-            "file_name": file_path.name
+            "file_name": file_path.name,
+            "document_id": f"sim_doc_{file_path.stem}"
         }
 
     def create_user_task(
@@ -1731,17 +1269,100 @@ class EZLynxApiClient:
         title: str,
         description: str,
         assigned_user: Optional[str] = None,
-        due_days_out: int = 3
+        due_days_out: int = 1,
+        policy_number: Optional[str] = None,
+        line_of_business: Optional[str] = None,
+        carrier_name: Optional[str] = None,
+        high_priority: bool = True,
+        use_playwright: bool = True
     ) -> Dict[str, Any]:
-        """Creates a follow-up task for the account manager in EZLynx."""
-        if assigned_user and "robie" in str(assigned_user).lower():
-            assigned_user = "Carlo Ferrara"
-        logger.info(
-            f"[TASK] EZLynx Task Created for Applicant: {applicant_id} | Title: '{title}' | Assigned: {assigned_user or 'Account Manager'}"
+        """Creates an authentic follow-up task for the CSR/AM in EZLynx via Playwright CDP.
+
+        Falls back cleanly to an audit note in the policy discussion if CDP is unavailable.
+        """
+        from datetime import datetime, timedelta
+        due_date = (datetime.now() + timedelta(days=due_days_out)).strftime("%m/%d/%Y")
+
+        # Resolve discussion title for card pinning
+        resolved_title = self.resolve_discussion_title(
+            applicant_id=str(applicant_id),
+            policy_number=policy_number,
+            line_of_business=line_of_business,
+            carrier_name=carrier_name
         )
+
+        # Prepare note body with header and mandatory signature
+        header_parts = []
+        if policy_number:
+            header_parts.append(f"Policy: #{policy_number}")
+            details = []
+            if line_of_business:
+                details.append(line_of_business)
+            if carrier_name:
+                details.append(carrier_name)
+            if details:
+                header_parts.append(f"({' - '.join(details)})")
+
+        full_note_parts = []
+        if header_parts:
+            full_note_parts.append(" ".join(header_parts))
+        full_note_parts.append(f"[{title}]")
+        full_note_parts.append(description)
+        if "Robie was here" not in description:
+            full_note_parts.append(ROBIE_SIGNATURE)
+
+        note_body = "\n\n".join(full_note_parts)
+
+        # Try Playwright CDP real task creation
+        if use_playwright:
+            try:
+                from src.ezlynx.discussion_poster import EZLynxDiscussionPoster
+                poster = EZLynxDiscussionPoster()
+                screenshot_fn = f"task_{applicant_id}_{int(time.time())}.png"
+                result = poster.create_task(
+                    applicant_id=str(applicant_id),
+                    discussion_search_text=resolved_title,
+                    title=title,
+                    note_body=note_body,
+                    assigned_user=assigned_user,
+                    due_date=due_date,
+                    high_priority=high_priority,
+                    screenshot_filename=screenshot_fn
+                )
+                if result.get("success"):
+                    logger.info(
+                        f"[TASK] EZLynx Task successfully created live for Applicant {applicant_id} | "
+                        f"Assigned: {assigned_user} | Due: {due_date}"
+                    )
+                    return {
+                        "status": "success",
+                        "method": "playwright_cdp",
+                        "applicant_id": applicant_id,
+                        "task_title": title,
+                        "assigned_user": assigned_user,
+                        "due_date": due_date,
+                        "screenshot_path": result.get("screenshot_path")
+                    }
+                else:
+                    logger.warning(f"[TASK] Playwright task creation failed ({result.get('error')}). Falling back to discussion note.")
+            except Exception as e:
+                logger.warning(f"[TASK] Playwright task creation threw exception: {e}. Falling back to discussion note.")
+
+        # Fallback to posting an audit note in discussion
+        self.add_note_to_discussion(
+            applicant_id=str(applicant_id),
+            discussion_title=resolved_title,
+            note_text=note_body,
+            policy_number=policy_number,
+            line_of_business=line_of_business,
+            carrier_name=carrier_name
+        )
+
         return {
             "status": "success",
+            "method": "note_fallback",
             "applicant_id": applicant_id,
             "task_title": title,
-            "task_id": f"task_{applicant_id[:6]}_{int(time.time())}"
+            "assigned_user": assigned_user,
+            "due_date": due_date
         }

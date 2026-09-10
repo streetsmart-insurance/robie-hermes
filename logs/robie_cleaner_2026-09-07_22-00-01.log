@@ -1,0 +1,73 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-07_22-00-01 ===
+2026-09-07 22:00:02,732 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 22:00:03,030 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 22:00:03,326 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 22:00:03,710 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-07 22:00:04,017 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-07 22:00:04,099 [INFO] robie_cleaner: Found 1 messages matching noise category: Mailer-Daemon Bounces
+2026-09-07 22:00:04,432 [INFO] robie_cleaner: Noise cleanup complete: 1 messages moved to trash.
+2026-09-07 22:00:04,492 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 22:00:05,272 [INFO] gmail_client: Downloaded email attachment: 1a07ce8390c63143_Robie_-_EZLynx_Activities_2026-09-07T1326.xlsx
+2026-09-07 22:00:05,797 [INFO] gmail_client: Downloaded email attachment: 1a07ce437dbb6352_Robie_-_EZLynx_Activities_2026-09-07T1321.xlsx
+2026-09-07 22:00:06,020 [INFO] gmail_client: Downloaded email attachment: 1a07ce415307a2fa_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1321.xlsx
+2026-09-07 22:00:06,189 [INFO] gmail_client: Downloaded email attachment: 1a07ce110ca26f68_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1318.xlsx
+2026-09-07 22:00:06,340 [INFO] gmail_client: Downloaded email attachment: 1a07cd6db0b97ceb_Robie_-_EZLynx_Activities_2026-09-07T1307.xlsx
+2026-09-07 22:00:06,518 [ERROR] gmail_client: Error downloading attachment RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0775c756130946_RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml'
+2026-09-07 22:00:06,859 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-07 22:00:07,007 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-07 22:00:07,521 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-07 22:00:07,647 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-07 22:00:08,314 [INFO] gmail_client: Downloaded email attachment: 1a07b5958ef75333_POLTRANSNOT-NJSMAR10-09-07-2026-06-10-37_(c).pdf
+2026-09-07 22:00:08,748 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-07 22:00:08,926 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-07 22:00:09,162 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-07 22:00:09,346 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-07 22:00:09,671 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-07 22:00:10,021 [INFO] gmail_client: Downloaded email attachment: 1a07aa15d49c5cb9_Policy29115152937909.Zip
+2026-09-07 22:00:10,854 [INFO] gmail_client: Downloaded email attachment: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-07 22:00:11,332 [INFO] gmail_client: Downloaded email attachment: 1a07810d2f75fea6_HAUL AZZ LLC-Binder-DSLA1000836-00.pdf.pdf
+2026-09-07 22:00:11,661 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 99340932
+2026-09-07 22:00:11,662 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-07 22:00:11,939 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 99340932
+2026-09-07 22:00:11,940 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-07 22:00:12,471 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-07 22:00:13,347 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 99340932: NoteId 1123407321 into 'Flood Renewal - Neptune'
+2026-09-07 22:00:13,407 [INFO] email_handoff: Sending immediate underwriter reply notification to daniela@streetsmart.insurance for Pol #ACT4034556
+2026-09-07 22:00:13,620 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to daniela@streetsmart.insurance (Msg ID: 1a07de2d758fe785)
+2026-09-07 22:00:13,744 [INFO] gmail_client: Marked message 1a07dd56907441ad as READ.
+2026-09-07 22:00:13,804 [INFO] policy_aliases: Aliased UCLYsI3zwsVJvMPBRZ8ACTug (renewal_term) → Pol #ACT4034556 (id=65)
+2026-09-07 22:00:14,078 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 99340932
+2026-09-07 22:00:14,078 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-07 22:00:14,312 [INFO] ezlynx_api: Retrieved 50 discussions via portal session for applicant 99340932
+2026-09-07 22:00:14,313 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-07 22:00:14,658 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 99340932: NoteId 1123407322 into 'Flood Renewal - Neptune'
+2026-09-07 22:00:14,660 [INFO] email_handoff: Sending immediate underwriter reply notification to daniela@streetsmart.insurance for Pol #ACT4034556
+2026-09-07 22:00:14,860 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to daniela@streetsmart.insurance (Msg ID: 1a07de2dd29505b2)
+2026-09-07 22:00:14,972 [INFO] gmail_client: Marked message 1a07dd505b51ac50 as READ.
+2026-09-07 22:00:15,217 [INFO] ezlynx_api: Retrieved 28 discussions via portal session for applicant 196126698
+2026-09-07 22:00:15,218 [INFO] ezlynx_api: Matched discussion by policy# 'LSP600011096': 'Manual Homeowners Renewal' (ID 841953531)
+2026-09-07 22:00:15,483 [INFO] ezlynx_api: Retrieved 28 discussions via portal session for applicant 196126698
+2026-09-07 22:00:15,486 [INFO] ezlynx_api: Matched discussion by policy# 'LSP600011096': 'Manual Homeowners Renewal' (ID 841953531)
+2026-09-07 22:00:17,131 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 196126698: NoteId 1123407324 into 'Manual Homeowners Renewal'
+2026-09-07 22:00:17,134 [INFO] email_handoff: Sending immediate underwriter reply notification to jazmin@streetsmart.insurance for Pol #LSP600011096
+2026-09-07 22:00:17,312 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to jazmin@streetsmart.insurance (Msg ID: 1a07de2e7ca4d850)
+2026-09-07 22:00:17,422 [INFO] gmail_client: Marked message 1a07dc83ce522777 as READ.
+2026-09-07 22:00:17,575 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-07 22:00:17,578 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-07 22:00:17,580 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-07 22:00:17,582 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-07 22:00:17,583 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-07 22:00:17,584 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-07 22:00:17,586 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-07 22:00:17,587 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-07 22:00:17,589 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-07 22:00:17,590 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-07 22:00:17,592 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-07 22:00:17,609 [INFO] uw_reply_filer: UW reply filing complete: filed=3 skipped=16 errors=0 dry_run=False
+2026-09-07 22:00:17,609 [INFO] robie_cleaner: UW reply filing from cleaner: filed=3 skipped=16 dry_run=False
+2026-09-07 22:00:23,509 [INFO] robie_cleaner: Gathered 67 authentic messages for reporting.
+2026-09-07 22:00:23,762 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a07de2fef279773)
+2026-09-07 22:00:23,763 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a07de2fef279773)
+
+Execution Finished: 3 noise trashed, 67 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-07_22-00-24 ===

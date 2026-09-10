@@ -21,6 +21,7 @@ from src.ezlynx.audit_email_dispatcher import (
     AuditAttachmentRequiredError,
     AuditTemplateMismatchError,
     AuditSenderSecurityError,
+    AuditSubjectMissingMetadataError,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -38,6 +39,8 @@ async def run_single(
     enforce_attachments: bool = True,
     custom_subject: str | None = None,
     custom_body: str | None = None,
+    insured_name: str | None = None,
+    policy_number: str | None = None,
 ):
     dispatcher = AuditEmailDispatcher()
     async with async_playwright() as p:
@@ -58,6 +61,23 @@ async def run_single(
                 await dispatcher.set_to_email(page, to_email)
                 await dispatcher.set_cc_emails(page, cc_emails)
                 await dispatcher.select_template(page, template_name)
+                # Resolve insured name & policy number and enforce in subject line
+                res_insured, res_policy = await dispatcher.resolve_insured_and_policy(
+                    applicant_id=applicant_id,
+                    insured_name=insured_name,
+                    policy_number=policy_number,
+                    page=page,
+                )
+                base_subj = custom_subject if custom_subject else await page.locator("#subject").input_value()
+                final_subj = dispatcher.format_subject_with_insured_and_policy(
+                    subject=base_subj,
+                    insured_name=res_insured,
+                    policy_number=res_policy,
+                )
+                subj_input = page.locator("#subject")
+                await subj_input.fill("")
+                await subj_input.fill(final_subj)
+                logger.info(f"[DRY-RUN] Hardened subject line: '{final_subj}' (Insured: {res_insured}, Policy: {res_policy})")
                 attached = await dispatcher.attach_documents(page, search_terms)
                 count = await dispatcher.count_attached_documents(page)
                 logger.info(f"[DRY-RUN] Attached matching docs: {attached} (DOM count: {count})")
@@ -66,7 +86,7 @@ async def run_single(
                         f"CRITICAL GATE: 0 documents attached for {applicant_id}."
                     )
                 logger.info(f"[DRY-RUN] SUCCESS: Preflight passed for {applicant_id}")
-                return {"applicant_id": applicant_id, "dry_run": True, "attached": attached, "count": count}
+                return {"applicant_id": applicant_id, "dry_run": True, "subject": final_subj, "insured_name": res_insured, "policy_number": res_policy, "attached": attached, "count": count}
             else:
                 res = await dispatcher.send_audit_email(
                     page=page,
@@ -79,6 +99,8 @@ async def run_single(
                     enforce_attachments=enforce_attachments,
                     custom_subject=custom_subject,
                     custom_body=custom_body,
+                    insured_name=insured_name,
+                    policy_number=policy_number,
                 )
                 logger.info(f"Successfully sent audit email for {applicant_id} with {res.get('verified_attachment_count')} attachments.")
                 return res
@@ -98,6 +120,8 @@ def main():
     parser.add_argument("--allow-unattached", action="store_true", help="Bypass attachment requirement (NOT recommended)")
     parser.add_argument("--subject", help="Custom email subject")
     parser.add_argument("--body", help="Custom email body")
+    parser.add_argument("--insured-name", help="Named insured on the policy")
+    parser.add_argument("--policy-number", help="Policy number")
 
     args = parser.parse_args()
 
@@ -115,6 +139,8 @@ def main():
                 enforce_attachments=enforce,
                 custom_subject=args.subject,
                 custom_body=args.body,
+                insured_name=args.insured_name,
+                policy_number=args.policy_number,
             )
         )
         print(json.dumps(res, indent=2))

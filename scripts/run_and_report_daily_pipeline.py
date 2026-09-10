@@ -23,6 +23,7 @@ from src.database.session import SessionLocal, init_db
 from src.database.models import PolicyRenewal, RenewalStatus, AuditNoteLog
 from src.scheduler.daily_runner import DailyRenewalOrchestrator
 from src.intake.email_ingest import ingest_reports_from_email
+from src.database.integrity_check import DatabaseIntegrityValidator
 from src.reporting.daily_handoff import DailyHandoffReporter
 from src.reporting.email_handoff import send_daily_handoff_email, HANDOFF_RECIPIENT_LIST
 
@@ -201,7 +202,17 @@ async def run_pipeline(target_date: date, skip_email: bool = False, skip_ingest:
     # 3. Build structured report data from DB
     handoff_data = build_handoff_data_from_db(target_date)
 
-    # 4. Generate Markdown report
+    # 4. Run database state & integrity check
+    try:
+        validator = DatabaseIntegrityValidator()
+        passed, health_report = validator.run_all_checks()
+        system_health = {**health_report, "passed": passed}
+        logger.info(f"Database integrity check result: passed={passed}, policies={health_report.get('policy_count')}")
+    except Exception as e:
+        logger.warning(f"Integrity check encountered error: {e}")
+        system_health = {"passed": False, "policy_count": 0, "alias_count": 0, "violations": [str(e)]}
+
+    # 5. Generate Markdown report
     os.makedirs(PROJECT_ROOT / "reports", exist_ok=True)
     report_file = PROJECT_ROOT / "reports" / f"daily_handoff_{target_date.strftime('%Y_%m_%d')}.md"
 
@@ -212,7 +223,8 @@ async def run_pipeline(target_date: date, skip_email: bool = False, skip_ingest:
         portal_logins_needed=handoff_data["portal_logins_needed"],
         upcoming_accounts=handoff_data["upcoming_accounts"],
         rolling_pipeline=handoff_data["rolling_pipeline"],
-        output_filepath=str(report_file)
+        output_filepath=str(report_file),
+        system_health=system_health
     )
     logger.info(f"Daily Handoff Report saved to {report_file}")
 

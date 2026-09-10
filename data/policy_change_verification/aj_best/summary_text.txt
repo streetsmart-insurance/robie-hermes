@@ -1,0 +1,156 @@
+search
+EVA AI
+RA
+note_add
+list
+notifications
+417
+account_tree
+help
+dashboard
+folder_shared
+folder_open
+local_atm
+insert_chart
+settings
+menu_book
+business_center
+power
+redeem
+!
+Status: Unknown
+EVA
+Client
+AJ Best Cleaning LLC
+star
+email
+textsms
+business_center
+request_page
+share
+Type: Active Client
+Since: 3/10/2020
+Assigned Producer: Sandy Santana
+CSR: Eimy Ramos
+Agency: Streetsmart Insurance
+Address
+60 SCENIC DR
+FREEHOLD, New Jersey 07728
+Map open_in_new
+Zillow open_in_new
+Google Earth open_in_new
+Google Search open_in_new
+County Assessor open_in_new
+Business Info
+Legal Entity: LimitedLiabilityCompany
+Tax ID: 84-4826055
+Business: (732) 977-2342
+ahernandez1086@gmail.com
+Primary Contact
+Adrian Hernandez
+ahernandez1086@gmail.com
+Mobile: (732) 977-2342
+Secondary Contact
+Magdalena Aragon
+Cortezmagda75@gmail.com
+Work: (732) 685-1926
+Linked Applicants
+Adrian Hernandez
+EZLynx Connect
+
+Quickly access integrations related to this applicant.
+
+power
+Integrations
+chevron_left
+Overview
+Policies
+Details
+Submissions
+Quotes
+Lead Info
+Documents
+Certificates
+Activity
+Invoices
+Policy Number: 9300301510 - Active
+Line of Business: Auto (Commercial) Term: 3/20/2026 - 3/20/2027 Carrier: Geico Full Term Premium: $4,798.00 Source: Download
+Actions 
+ 
+Forms 
+Summary
+ 
+History
+ 
+Claims
+ 
+Documents
+ 
+Notes
+Viewing Summary As Of   
+Select a Date
+Today
+5/4/2026 - PCH - $4798.00
+3/28/2026 - PCH - $4798.00
+3/28/2026 - PCH - $4798.00
+3/20/2026 - NBS - $4798.00
+    
+Click here for additional policy information.
+CUSTOMER INFORMATION
+AJ Best Cleaning LLC
+60 SCENIC DR
+FREEHOLD,NJ,07728
+POLICY INFORMATION
+Policy Number: 9300301510
+Effective Date: 03-20-2026
+Expiration Date: 03-20-2027
+Total Premium: $4798.00
+Policy Payor: Insured
+CARRIER INFORMATION
+Carrier: Geico
+Writing Company: GEICO MARINE INS CO
+NAIC: 37923
+NAMED INSURED AS LISTED ON THE POLICY
+AJ BEST CLEANING LLC
+20 Fieldcrest Way
+Freehold, NJ, 07728
+COVERAGE LIMITS
+Coverage Type	Limit	Deductible
+Liability	$500,000 Combined Single Limit	---
+Extended Medical Expense	$1,000	---
+Personal Injury Protection - Work Loss Benefit	$100 / $5,200	---
+Funeral Expense Benefit	$1,000	---
+Personal Injury Protection	---	$250
+Medical Payments	$5,000	---
+Uninsured Motorist Combined Single Limit	$500,000	---
+Uninsured Motorist Property Damage	$500,000	---
+OTHER COVERAGES
+Coverage Type	Limit	Deductible
+Emergency Roadside Assistance	---	---
+PPIP	$250,000	$250
+Childcare Expenses	$12 / $4,380	---
+VEHICLES
+Vehicle #	Year	Make	Model	Type	VIN	Value	Class	Location #	Premium
+1	2021	TOYOTA	RAV4	---	2T3P1RFV2MC169281	---	---	1	$2,508
+2	2014	TOYOTA	SIENNA	STPVN	5TDKK3DC7ES417483	---	---	1	$2,290
+COVERAGES
+Vehicle #	Vehicle Description	LIABILITY	PIP	MED PAY	UM / UIM	UM / UIM PD	COMP	FG	SCL	COLL	REI	TOWING	ROAD
+1	2021 TOYOTA RAV4	X	X	---	X	X	$500	---	---	$500	$70 / $2,100	---	X
+2	2014 TOYOTA SIENNA	X	X	X	X	X	$500	---	---	$500	$70 / $2,100	---	---
+DRIVERS
+Name	Date of Birth	DL #	DL State	# Years Experience	Excluded
+ADRIAN HERNANDEZLOPEZ	Mar 18, 1979	H27180110003797	NJ	---	---
+MAGDALENA ARAGON	Jan 14, 1974	A71535080051752	NJ	---	---
+JAVIER SALINASORDAS	Mar 24, 1974	S02793900003741	NJ	---	---
+ADDITIONAL INTERESTS
+Applies to Vehicle #	Name	Address	City / State / Zip	Interest Type	Account #	Applies to Location #
+---	---	---	---	Other
+	---	---
+GARAGE LOCATIONS
+Location #	Address	City / State / Zip
+1	20 Fieldcrest Way	Freehold, NJ 07728
+
+The summary information presented may be inaccurate. You should review your insured’s policy for specific terms, conditions and exclusions. EZLynx does not accept any responsibility or liability for the accuracy, content, completeness, legality, or reliability of the information and data contained in this summary.
+
+EZLynx Five [B05] (SSRobie)
+© EZLynx. All Rights Reserved

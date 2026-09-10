@@ -20,7 +20,7 @@ logger = logging.getLogger("policy_aliases")
 # Token that looks like a carrier policy number, excluding [RENEWAL-REQ-###].
 _POLICY_TOKEN_RE = re.compile(r"\b[A-Z0-9][A-Z0-9._/-]{5,40}\b", re.IGNORECASE)
 _SKIP_TOKEN_RE = re.compile(
-    r"^(renewal-req-\d+|https?|www|message-id|gmail_)",
+    r"^(renewal-req-\d+|https?|www|message-id|gmail_|org_)|.*(\.png|\.jpg|\.jpeg|\.gif|\.pdf|\.docx?|\.xlsx?|\.eml)$",
     re.IGNORECASE,
 )
 
@@ -113,6 +113,14 @@ def register_policy_alias(
         )
         return None
 
+    existing_alias = (
+        db.query(PolicyNumberAlias)
+        .filter(PolicyNumberAlias.alias_number == cleaned)
+        .first()
+    )
+    if existing_alias:
+        return existing_alias
+
     for alias in policy.number_aliases or []:
         if numbers_equivalent(alias.alias_number, cleaned):
             return alias
@@ -122,12 +130,17 @@ def register_policy_alias(
         alias_number=cleaned,
         alias_kind=alias_kind or "renewal_term",
     )
-    db.add(row)
-    db.flush()
-    logger.info(
-        f"Aliased {cleaned} ({alias_kind}) → Pol #{policy.policy_number} (id={policy.id})"
-    )
-    return row
+    try:
+        db.add(row)
+        db.flush()
+        logger.info(
+            f"Aliased {cleaned} ({alias_kind}) → Pol #{policy.policy_number} (id={policy.id})"
+        )
+        return row
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"Could not insert alias {cleaned} for policy {policy.id}: {exc}")
+        return None
 
 
 def harvest_policy_numbers(*texts: Optional[str]) -> List[str]:
@@ -141,7 +154,7 @@ def harvest_policy_numbers(*texts: Optional[str]) -> List[str]:
             if _SKIP_TOKEN_RE.match(token):
                 continue
             key = normalize_policy_number(token)
-            if len(key) < 6 or key in seen:
+            if len(key) < 6 or len(key) > 22 or len(token) > 25 or key in seen:
                 continue
             if not re.search(r"[A-Za-z]", key) or not re.search(r"\d", key):
                 continue

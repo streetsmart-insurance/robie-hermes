@@ -1,0 +1,46 @@
+=================================================================
+🚀 ROBIE 1.0 Scheduled Audit Calls Runner Started at: 2026-09-09_13-00-02
+=================================================================
+2026-09-09 13:00:02,998 [INFO] Starting Scheduled Carrier Audit Calls execution (dry_run=False, test_email=False)...
+2026-09-09 13:00:03,047 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 13:00:03,340 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 13:00:03,619 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 13:00:04,008 [INFO] file_cache is only supported with oauth2client<4.0.0
+2026-09-09 13:00:04,293 [INFO] ==> Initiating Carrier Call for Sun Volt Energy LLC (Policy: WC PI 2695561-001) to Pie Insurance (855-965-1840)...
+2026-09-09 13:00:05,237 [INFO] Dispatch response: {'success': True, 'mode': 'LIVE_BLAND_AI', 'call_id': '0fe2e0ae-a9c8-492d-9712-4987853db949', 'status': 'DISPATCHED', 'phone_number': '+18559651840', 'carrier': 'Pie Insurance', 'policy_number': 'WC PI 2695561-001'}
+2026-09-09 13:00:05,238 [INFO] Call successfully queued with Call ID: 0fe2e0ae-a9c8-492d-9712-4987853db949. Monitoring call progression...
+2026-09-09 13:00:16,025 [INFO] [10s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:00:26,772 [INFO] [20s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:00:37,801 [INFO] [30s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:00:48,525 [INFO] [40s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:00:59,308 [INFO] [50s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:01:10,043 [INFO] [60s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:01:20,816 [INFO] [70s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:01:31,810 [INFO] [80s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:01:42,779 [INFO] [90s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:01:53,503 [INFO] [100s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:02:04,285 [INFO] [110s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:02:15,141 [INFO] [120s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:02:25,852 [INFO] [130s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: in-progress
+2026-09-09 13:02:36,570 [INFO] [140s] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 | queue: started | status: completed
+2026-09-09 13:02:36,570 [INFO] Call 0fe2e0ae-a9c8-492d-9712-4987853db949 finished with status: completed (Duration: 2.35 min)
+2026-09-09 13:02:39,229 [INFO] Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 13:02:40,432 [INFO] Successfully posted note via EZLynx REST Note API for Applicant 164706131: NoteId 1124772622 into 'Sun Volt Energy LLC _WC AUDIT_'
+2026-09-09 13:02:40,434 [INFO] EZLynx note successfully posted to card Sun Volt Energy LLC _WC AUDIT_: Note ID 1124772622
+2026-09-09 13:02:45,435 [INFO] ==> Initiating Carrier Call for Middlesex Gutter Supply Inc. (Policy: WC PI 2419515-001) to Pie Insurance (855-965-1840)...
+2026-09-09 13:02:46,214 [INFO] Dispatch response: {'success': True, 'mode': 'LIVE_BLAND_AI', 'call_id': 'ff07ec9b-0ccb-45fe-a5ac-be47c2478d42', 'status': 'DISPATCHED', 'phone_number': '+18559651840', 'carrier': 'Pie Insurance', 'policy_number': 'WC PI 2419515-001'}
+2026-09-09 13:02:46,215 [INFO] Call successfully queued with Call ID: ff07ec9b-0ccb-45fe-a5ac-be47c2478d42. Monitoring call progression...
+2026-09-09 13:02:56,965 [INFO] [10s] Call ff07ec9b-0ccb-45fe-a5ac-be47c2478d42 | queue: started | status: in-progress
+2026-09-09 13:03:07,748 [INFO] [20s] Call ff07ec9b-0ccb-45fe-a5ac-be47c2478d42 | queue: started | status: in-progress
+2026-09-09 13:03:18,506 [INFO] [30s] Call ff07ec9b-0ccb-45fe-a5ac-be47c2478d42 | queue: started | status: in-progress
+2026-09-09 13:03:29,297 [INFO] [40s] Call ff07ec9b-0ccb-45fe-a5ac-be47c2478d42 | queue: started | status: in-progress
+2026-09-09 13:03:40,106 [INFO] [50s] Call ff07ec9b-0ccb-45fe-a5ac-be47c2478d42 | queue: started | status: completed
+2026-09-09 13:03:40,106 [INFO] Call ff07ec9b-0ccb-45fe-a5ac-be47c2478d42 finished with status: completed (Duration: 0.666666666666667 min)
+2026-09-09 13:03:43,830 [INFO] Successfully posted note via EZLynx REST Note API for Applicant 81168616: NoteId 1124773327 into 'Policy Audit Verification'
+2026-09-09 13:03:43,832 [INFO] EZLynx note successfully posted to card Policy Audit Verification: Note ID 1124773327
+2026-09-09 13:03:48,836 [INFO] Generating email report for carlo@streetsmart.insurance...
+2026-09-09 13:03:48,838 [ERROR] Failed to send email to carlo@streetsmart.insurance: GmailRenewalClient.send_email() got an unexpected keyword argument 'save_to_ezlynx'
+2026-09-09 13:03:48,838 [INFO] All scheduled audit calls and notifications completed successfully.
+=================================================================
+✅ ROBIE 1.0 Scheduled Audit Calls Runner Finished at: 2026-09-09_13-03-49
+=================================================================

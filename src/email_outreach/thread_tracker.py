@@ -15,6 +15,7 @@ from src.email_outreach.templates import get_outreach_subject, get_initial_outre
 from src.email_outreach.intent_classifier import UnderwriterIntentClassifier
 from src.ezlynx.note_builder import EZLynxNoteBuilder
 from src.ezlynx.api_client import EZLynxApiClient
+from src.intake.safety_gate import RenewalSafetyGate
 
 logger = logging.getLogger("thread_tracker")
 
@@ -44,6 +45,12 @@ CSR_EMAIL_DIRECTORY = {
     "Gabriela": "gabrielac@streetsmart.insurance",
     "Gabriela C": "gabrielac@streetsmart.insurance",
     "Ashley": "ashley@streetsmart.insurance",
+    "Cabrera, Diana": "dianac@streetsmart.insurance",
+    "Diana Cabrera": "dianac@streetsmart.insurance",
+    "Dani": "dianac@streetsmart.insurance",
+    "Flores, Ana": "ana@streetsmart.insurance",
+    "Ana Flores": "ana@streetsmart.insurance",
+    "Ana": "ana@streetsmart.insurance",
 }
 
 def resolve_outreach_cc_list(assigned_agent: Optional[str], always_cc_jake: bool = True) -> List[str]:
@@ -83,12 +90,12 @@ class OutreachCadenceManager:
         gmail_client: Optional[GmailRenewalClient] = None,
         ezlynx_api: Optional[EZLynxApiClient] = None,
         classifier: Optional[UnderwriterIntentClassifier] = None,
-        voice_dispatcher=None,
+        safety_gate: Optional[RenewalSafetyGate] = None
     ):
         self.gmail = gmail_client or GmailRenewalClient()
         self.ezlynx = ezlynx_api or EZLynxApiClient()
         self.classifier = classifier or UnderwriterIntentClassifier()
-        self.voice_dispatcher = voice_dispatcher
+        self.safety_gate = safety_gate or RenewalSafetyGate(ezlynx_client=self.ezlynx)
 
     def _calc_next_followup(self, from_date: date, min_days: int = 5, max_days: int = 7) -> date:
         """Calculates next follow-up date (skipping weekends)."""
@@ -115,6 +122,46 @@ class OutreachCadenceManager:
         sent_count = 0
         for pol in policies_to_email:
             days_to_exp = (pol.expiration_date - curr_date).days
+
+            # 0. Pre-flight Cancellation & Non-Renewal Safety Gate
+            safety_res = self.safety_gate.check_cancellation_risk(
+                applicant_id=pol.applicant_id,
+                policy_number=pol.policy_number
+            )
+            if safety_res.risk_detected:
+                logger.warning(
+                    f"Skipping email outreach for {pol.policy_number} ({pol.insured_name}): {safety_res.reason}"
+                )
+                pol.status = RenewalStatus.ESCALATED_CSR_REVIEW
+                esc_note = (
+                    f"⚠️ === [PRE-FLIGHT ESCALATION: CANCELLATION/NON-RENEWAL SIGNAL] ===\n"
+                    f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Policy #: {pol.policy_number}\n"
+                    f"Named Insured: {pol.insured_name}\n"
+                    f"Carrier / MGA: {pol.carrier_name}\n"
+                    f"Reason: {safety_res.reason}\n"
+                    f"Action Required: High-priority CSR review. Automated email outreach blocked.\n\n"
+                    f"Robie was here"
+                )
+                db.add(AuditNoteLog(
+                    policy_id=pol.id,
+                    applicant_id=pol.applicant_id,
+                    discussion_title=pol.discussion_title,
+                    action_type=ActionType.STATUS_CHANGE,
+                    note_text=esc_note
+                ))
+                self.ezlynx.create_user_task(
+                    applicant_id=pol.applicant_id,
+                    title=f"URGENT: Review Cancellation Signal for {pol.insured_name}",
+                    description=esc_note,
+                    assigned_user=pol.assigned_agent,
+                    due_days_out=1,
+                    policy_number=pol.policy_number,
+                    line_of_business=pol.line_of_business,
+                    carrier_name=pol.carrier_name,
+                    high_priority=True
+                )
+                continue
 
             # 1. Skip if outside renewal window (> 45 days)
             if days_to_exp > settings.renewal_window_max_days:
@@ -280,68 +327,46 @@ class OutreachCadenceManager:
             days_to_exp = (pol.expiration_date - curr_date).days
             next_count = thread.followup_count + 1
 
-            n_voice = int(
-                getattr(settings, "carrier_voice_after_followups", 2) or 2
-            )
-            voice_due = next_count > n_voice
-            should_escalate = (
-                next_count > settings.max_followups
-                or days_to_exp <= settings.csr_escalation_threshold_days
-            )
+            if next_count > settings.max_followups or days_to_exp <= settings.csr_escalation_threshold_days:
+                # Exceeded max follow-ups (3) OR reached 25 days before expiration -> Escalate to CSR in EZLynx
+                thread.status = ThreadStatus.EXHAUSTED
+                pol.status = RenewalStatus.ESCALATED_MANUAL
 
-            if voice_due or should_escalate:
-                # Give-up / N=2 branch: one carrier Robie Call via VoiceCallDispatcher
-                # (not a Robie Call EZLynx label). CSR escalate may still happen later.
-                if voice_due:
-                    self._place_one_carrier_voice(db, pol, thread)
-                if should_escalate:
-                    # Exceeded max follow-ups (3) OR reached 25 days before expiration
-                    thread.status = ThreadStatus.EXHAUSTED
-                    pol.status = RenewalStatus.ESCALATED_MANUAL
-
-                    esc_note = (
-                        f"⚠️ === [CSR ESCALATION - URGENT RENEWAL REVIEW] ===\n"
-                        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"Policy #: {pol.policy_number}\n"
-                        f"Named Insured: {pol.insured_name}\n"
-                        f"Carrier / MGA: {pol.carrier_name} | Underwriter: {pol.underwriter_email}\n"
-                        f"Expiration Date: {pol.expiration_date} ({days_to_exp} days remaining)\n"
-                        f"Assigned CSR: {pol.assigned_agent}\n"
-                        f"Outreach Attempts: {thread.followup_count} email follow-ups sent with no reply.\n"
-                        f"Reason: No renewal quote received by {days_to_exp} days prior to expiration (threshold: {settings.csr_escalation_threshold_days} days).\n"
-                        f"Action Required: High-priority CSR follow-up with carrier underwriter / portal.\n\n"
-                        f"Robie was here"
-                    )
-                    db.add(AuditNoteLog(
-                        policy_id=pol.id,
-                        applicant_id=pol.applicant_id,
-                        discussion_title=pol.discussion_title,
-                        action_type=ActionType.STATUS_CHANGE,
-                        note_text=esc_note
-                    ))
-                    res = self.ezlynx.add_note_to_discussion(
-                        applicant_id=pol.applicant_id,
-                        discussion_title=pol.discussion_title,
-                        note_text=esc_note,
-                        policy_number=pol.policy_number,
-                        line_of_business=pol.line_of_business,
-                        carrier_name=pol.carrier_name
-                    )
-                    if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
-                        pol.discussion_title = res.get("discussion_title")
-                    self.ezlynx.create_user_task(
-                        applicant_id=pol.applicant_id,
-                        title=f"URGENT: Review / Call Carrier for {pol.insured_name} Renewal",
-                        description=f"Automated email follow-ups ({thread.followup_count} attempts) received no response for Pol #{pol.policy_number} ({days_to_exp} days remaining).",
-                        assigned_user=pol.assigned_agent
-                    )
-                    continue
-                # N=2 voice done; do not send a 3rd quiet follow-up. Park until 25d.
-                days_until_escalate = (
-                    days_to_exp - settings.csr_escalation_threshold_days
+                esc_note = (
+                    f"⚠️ === [CSR ESCALATION - URGENT RENEWAL REVIEW] ===\n"
+                    f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Policy #: {pol.policy_number}\n"
+                    f"Named Insured: {pol.insured_name}\n"
+                    f"Carrier / MGA: {pol.carrier_name} | Underwriter: {pol.underwriter_email}\n"
+                    f"Expiration Date: {pol.expiration_date} ({days_to_exp} days remaining)\n"
+                    f"Assigned CSR: {pol.assigned_agent}\n"
+                    f"Outreach Attempts: {thread.followup_count} email follow-ups sent with no reply.\n"
+                    f"Reason: No renewal quote received by {days_to_exp} days prior to expiration (threshold: {settings.csr_escalation_threshold_days} days).\n"
+                    f"Action Required: High-priority CSR follow-up with carrier underwriter / portal.\n\n"
+                    f"Robie was here"
                 )
-                thread.next_followup_due = curr_date + timedelta(
-                    days=max(1, days_until_escalate)
+                db.add(AuditNoteLog(
+                    policy_id=pol.id,
+                    applicant_id=pol.applicant_id,
+                    discussion_title=pol.discussion_title,
+                    action_type=ActionType.STATUS_CHANGE,
+                    note_text=esc_note
+                ))
+                res = self.ezlynx.add_note_to_discussion(
+                    applicant_id=pol.applicant_id,
+                    discussion_title=pol.discussion_title,
+                    note_text=esc_note,
+                    policy_number=pol.policy_number,
+                    line_of_business=pol.line_of_business,
+                    carrier_name=pol.carrier_name
+                )
+                if isinstance(res, dict) and isinstance(res.get("discussion_title"), str):
+                    pol.discussion_title = res.get("discussion_title")
+                self.ezlynx.create_user_task(
+                    applicant_id=pol.applicant_id,
+                    title=f"URGENT: Review / Call Carrier for {pol.insured_name} Renewal",
+                    description=f"Automated email follow-ups ({thread.followup_count} attempts) received no response for Pol #{pol.policy_number} ({days_to_exp} days remaining).",
+                    assigned_user=pol.assigned_agent
                 )
                 continue
 
@@ -405,26 +430,6 @@ class OutreachCadenceManager:
 
         db.commit()
         return followups_sent
-
-    def _place_one_carrier_voice(self, db: Session, pol, thread) -> None:
-        """One carrier Robie Call after N=2. Never a client autodial."""
-        from src.voice.renewal_cadence import place_one_carrier_voice
-
-        try:
-            place_one_carrier_voice(
-                pol,
-                thread=thread,
-                dispatcher=self.voice_dispatcher,
-                ezlynx_client=self.ezlynx,
-                db=db,
-                dry_run=False,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Carrier Robie Call skipped for %s: %s",
-                getattr(pol, "policy_number", "?"),
-                exc,
-            )
 
     def process_incoming_inbox_replies(self, db: Session) -> int:
         """Polls robie@ + hello@ for underwriter replies and files them onto titled EZLynx cards.

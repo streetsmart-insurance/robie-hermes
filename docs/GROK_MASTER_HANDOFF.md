@@ -25,7 +25,7 @@ The **StreetSmart Autonomous Voice AI Engine** ("Robie Voice") is an automated, 
 
 ## 2. Trigger Methods (How to Invoke Robie)
 
-### Method A: In-App EZLynx `Robie Call` / `Robie lead follow-up` / `Robie client outreach` / pathway WF Label / Note (CSR Native Flow)
+### Method A: In-App EZLynx `Robie Call` Label / Note (CSR Native Flow)
 Account Managers and CSRs trigger Robie directly inside EZLynx without leaving the applicant profile.
 
 #### Can the API pull the label?
@@ -33,32 +33,17 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 * **Classic REST API (`services.ezlynx.com`):** The Classic REST API has **no public query endpoint for labels** (only `POST /api/note/v1`, `GET /api/Applicant/v2/{id}`, and `ZapierNoteViewModel.Labels`).
 * **Portal / Web UI (`app.ezlynx.com`):** The Activity / Discussion web UI (`/web/account/{applicant_id}/activity`) uses `/EZLynxPortalAPI/Discussions/GetPagedDiscussions`.
 * **Lean Strategy (Zero-Playwright Priority):**
-  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors **`noteLabels[].labelName`**, the **Discussion Card Title**, and the **Note Body** for `Robie Call`, `Robie lead follow-up`, `Robie client outreach`, or a pathway WF label (`Robie audit`, `Robie cancellation`, `Robie returned mail`, `Robie e-sign` / `Robie esign`, `Robie additional info`, `Robie recommendations`, `Robie unresponsive`, `Robie renewal reach-out` / `Robie renewal reachout`). Close variants accepted: spaces / hyphens / underscores, optional `robie ` prefix on labels, brackets. A standalone `Robie audit` label dispatches `client_outreach` and infers pathway `audit`. Any of those phrases/labels is immediately detected and executed.
-
-#### EZLynx Admin create list (names only — Carlo / Admin; do not invent label IDs)
-`Robie client outreach`, `Robie cancellation`, `Robie audit`, `Robie returned mail`, `Robie e-sign`, `Robie esign`, `Robie additional info`, `Robie recommendations`, `Robie unresponsive`, `Robie renewal reach-out`, `Robie renewal reachout`. Do **not** add Birthday, winback, Sales Center, new customer, etc. `Robie Call` stays carrier. `Robie lead follow-up` is unchanged (`client_followup`, requestor transfer). **Winner when both lead-follow-up and an outreach pathway label appear:** client outreach (existing `infer_call_type` order — do not invert).
+  To avoid slow, fragile browser automation as Carlo mandated, Robie monitors the **Discussion Card Title** and **Note Body** for the trigger keyword `Robie Call`. Any note or card titled or prefixed with `Robie Call` is immediately detected and executed!
 
 #### Triggering in EZLynx:
-1. **Carrier call (`Robie Call`, default):** Add a note containing `Robie Call` (or apply that org label):
+1. **Add a Note to any Discussion card** containing the keyword `Robie Call`:
    ```text
    Robie Call
    Carrier: Utica First (or leave blank to auto-detect from policy)
    Policy: HOP622388401
    What to say: Check if the renewal quote has been released and request the quote packet be emailed to robie@streetsmart.insurance.
    ```
-   `Robie Call` stays **carrier** unless the note also says `Call type: client` or who-to-call is the insured.
-2. **Client / lead follow-up (`Robie lead follow-up`):** Apply the org label **`Robie lead follow-up`** (or write that phrase in the title/note). Close variants match case-insensitively: `Robie Lead Follow-up`, `robie lead follow up`, `Robie lead followup`. This **forces `call_type=client_followup`** — do **not** write `Call type: client`. Greeting uses **first name only** (commercial accounts: CommercialDetail / PrimaryContact / Contacts[] — never “Hi Green” from an LLC); Sales Center `producerName` is quote attribution only. Warm transfer is the label invoker; voicemail asks the insured to call **732-462-8343**. If both `Robie Call` and `Robie lead follow-up` appear, lead follow-up wins (client path).
-   ```text
-   Robie lead follow-up
-   Who to call: the insured
-   What to say: Review the quote Carlo put together.
-   ```
-3. **Client outreach / cancellations (`Robie client outreach` + pathway WF labels):** Apply the org label **`Robie client outreach`** or a pathway WF label from the Admin create list (`Robie audit`, `Robie cancellation`, …). Writing that phrase in the title/note also works. Forces **`call_type=client_outreach`** — a different prompt from lead follow-up (no “quote {Sales Center producer} put together”). Dial order is locked: **primary applicant first, then secondary/co-applicant** when both have E.164 phones (`CellPhone` → `HomePhone` → `WorkPhone`). Skip anyone with no phone; never invent numbers. Same number on both people → one call. Each call greets that person by **first name only**. On a clear yes, warm-transfer to the **account Assigned Producer** (`GetApplicantSidebar` → `Applicant.Assignment.AssignedTo`, `lookup_producer` DID) — **not** Sales Center `producerName`, **not** the label invoker. Missing Assigned Producer DID skips transfer; voicemail still asks them to call **732-462-8343**. Splice scripts come **only** from Carlo's Google Doc Manual WFs (conversational, no press-1/2/4/6). Pathway is inferred from the **same** label: `Robie client outreach` → `generic` unless the note body matches a pathway; `Robie cancellation` → `cancellation`; `Robie audit` → `audit`; `Robie returned mail` → `returned_mail`; `Robie e-sign` / `Robie esign` → `esign`; `Robie additional info` → `additional_info`; `Robie recommendations` → `recommendations`; `Robie unresponsive` → `unresponsive`; `Robie renewal reach-out` / `Robie renewal reachout` → `renewal_reachout` (CSR label/note only — never the daily renewal pipeline). Not ported: Birthday, Additional Policy, Applicant Created, Welcome, Reinstatement, Policy Renewed, Upcoming Renewal/Expiration, Winback, Sales Center New/Contacted/Quoted/Won. Sales Center Reviewed Status is already **Robie lead follow-up**. **Winner if both `Robie lead follow-up` and an outreach pathway label appear:** `client_outreach` (existing order — do not invert). Buster Brown (`26356199`): primary `7329953409`, co-applicant has no cell — secondary is skipped.
-   ```text
-   Robie client outreach
-   What to say: Policy is pending cancellation — please call to keep coverage or confirm they want to cancel.
-   ```
-4. **Auto-Resolution of Phone Numbers (Multi-Tier):**
+2. **Auto-Resolution of Phone Numbers (Multi-Tier):**
    * **Tier 1 (Explicit Note):** If the CSR includes a phone number (e.g. `Phone: 800-556-5376`), Robie dials it directly.
    * **Tier 2 (Carrier Directory):** If omitted, Robie resolves the carrier from the applicant's policies and looks up the number in `KNOWN_CARRIER_PHONES` (e.g., Utica First `800-556-5376`, TIP National `800-688-8408`, Travelers `800-238-6225`, Hartford `800-555-1234`).
    * **Tier 3 (Applicant / Insured Phone):** If the target is the client/insured or Carlo, Robie pulls the `CellPhone` directly from the applicant profile (`+1 (732) 995-3409`).
@@ -71,7 +56,7 @@ Account Managers and CSRs trigger Robie directly inside EZLynx without leaving t
 
      Robie was here
      ```
-5. **Execution Commands:**
+3. **Execution Commands:**
    * **Process Applicant Notes (Live or Dry-Run):**
      ```bash
      PYTHONPATH=. .venv/bin/python3 -m src.voice.ezlynx_label_dispatcher --applicant-id 26356199 --dry-run
@@ -200,10 +185,8 @@ To start the post-call webhook listener on Hermes:
 PYTHONPATH=. .venv/bin/python3 -m src.voice.webhook_server --port 8088
 ```
 
-### Manual renewal carrier voice cadence (Carlo 2026-09-05)
-Insertion is the give-up branch of `OutreachCadenceManager.process_due_followups` (`src/email_outreach/thread_tracker.py`) — not a parallel daily-runner scan. After N=2 failed 5–7d checks (after the initial email) with no renewal in hand, place **exactly one** `VoiceCallDispatcher().dispatch(policy_number=...)`. Stop if `QUOTE_RECEIVED` / `READY_FOR_AGENT_REVIEW`, thread `RESOLVED`, or a renewal `DocumentRecord` is filed. Flag `carrier_voice_attempted` prevents a re-fire. CSR escalate may still happen later (`max_followups=3` / 25d). No client autodial. PORTAL-only with no UW email does not invent email attempts. Never invents a carrier phone. Sacred cron `0 9 * * *` on hermes-poc-01 is unchanged.
-
 ### Running Test Suite:
 ```bash
 PYTHONPATH=. .venv/bin/pytest tests/ -v
+# Output: 107 passed, 0 failed (100% green)
 ```

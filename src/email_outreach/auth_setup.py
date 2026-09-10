@@ -25,7 +25,10 @@ SCOPES = [
 
 def get_service_account_credentials(subject_email: str) -> Optional[service_account.Credentials]:
     """Attempts Domain-Wide Delegation using service_key.json for seamless background auth."""
+    project_root = Path(__file__).resolve().parent.parent.parent
     service_key_path = Path("data/credentials/service_key.json")
+    if not service_key_path.exists():
+        service_key_path = project_root / "data/credentials/service_key.json"
     if service_key_path.exists():
         try:
             creds = service_account.Credentials.from_service_account_file(

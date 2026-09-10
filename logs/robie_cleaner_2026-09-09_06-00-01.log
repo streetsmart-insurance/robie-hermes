@@ -1,0 +1,17 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-09_06-00-01 ===
+2026-09-09 06:00:02,100 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 06:00:02,399 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 06:00:02,665 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 06:00:02,987 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 06:00:03,263 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-09 06:00:03,597 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-09 06:00:03,598 [WARNING] robie_cleaner: UW reply filing skipped (cleaner continues; replies are not trashed): (sqlite3.OperationalError) attempt to write a readonly database
+[SQL: PRAGMA main.table_info("policy_renewals")]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2026-09-09 06:00:20,637 [INFO] robie_cleaner: Gathered 183 authentic messages for reporting.
+2026-09-09 06:00:20,638 [WARNING] robie_cleaner: Error querying carrier actions from db: attempt to write a readonly database
+2026-09-09 06:00:20,640 [INFO] robie_cleaner: Current time (02:00 AM America/New_York) is outside designated report hours (12, 15, 17). Mailbox cleaned and replies filed; email report suppressed.
+2026-09-09 06:00:20,640 [INFO] robie_cleaner: Report delivery skipped per schedule gate (12pm, 3pm, 5pm ET).
+
+Execution Finished: 0 noise trashed, 183 real messages found. Report sent: False
+=== Robie Daily Mailbox Audit Finished at 2026-09-09_06-00-20 ===

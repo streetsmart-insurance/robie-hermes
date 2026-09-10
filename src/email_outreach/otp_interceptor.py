@@ -91,7 +91,9 @@ class MultiInboxOTPInterceptor:
 
         # 1. Common OTP Patterns
         otp_patterns = [
-            r"(?:verification code|security code|passcode|one-time code|pin|otp|code is|code:)\s*[:#]?\s*([0-9A-Za-z]{4,8})\b",
+            r"(?:code is valid for \d+ minutes:?\s*)([0-9]{4,8})\b",
+            r"(?:verification code|security code|passcode|one-time code|pin|otp)\s*(?:is|:)\s*[:#]?\s*([0-9A-Za-z]{4,8})\b",
+            r"(?:code is|code:)\s*([0-9A-Za-z]{4,8})\b",
             r"(?:temporary code|verify your new device|device.*?code).*?([0-9]{6})\b",
             r"\b([0-9]{6})\b",  # Standard 6-digit OTP
             r"\b([0-9]{4})\b",  # 4-digit PIN

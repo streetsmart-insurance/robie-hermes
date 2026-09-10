@@ -1,0 +1,71 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-09_15-00-01 ===
+2026-09-09 15:00:02,625 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 15:00:02,988 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 15:00:03,385 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 15:00:03,715 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 15:00:03,998 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-09 15:00:04,383 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-09 15:00:04,443 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-09 15:00:04,812 [INFO] gmail_client: Downloaded email attachment: 1a08647fad6ddb25_image338767.png
+2026-09-09 15:00:05,298 [INFO] gmail_client: Downloaded email attachment: 1a085ad6ba41e2c8_Robie_-_EZLynx_Activities_2026-09-09T0605.xlsx
+2026-09-09 15:00:05,483 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_image001.png
+2026-09-09 15:00:05,576 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_image002.png
+2026-09-09 15:00:05,841 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_A4229653_09082026_210556.pdf
+2026-09-09 15:00:05,972 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_ADVANCE MARBLE & GRANITE LLC.pdf
+2026-09-09 15:00:07,009 [INFO] gmail_client: Downloaded email attachment: 1a080feb059c3c87_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-09 15:00:07,366 [INFO] gmail_client: Downloaded email attachment: 1a0808858fe7727d_Robie_-_EZLynx_Overdue_Tasks_2026-09-08T0607.xlsx
+2026-09-09 15:00:08,146 [INFO] gmail_client: Downloaded email attachment: 1a07ce8390c63143_Robie_-_EZLynx_Activities_2026-09-07T1326.xlsx
+2026-09-09 15:00:08,528 [INFO] gmail_client: Downloaded email attachment: 1a07ce437dbb6352_Robie_-_EZLynx_Activities_2026-09-07T1321.xlsx
+2026-09-09 15:00:08,801 [INFO] gmail_client: Downloaded email attachment: 1a07ce415307a2fa_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1321.xlsx
+2026-09-09 15:00:08,989 [INFO] gmail_client: Downloaded email attachment: 1a07ce110ca26f68_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1318.xlsx
+2026-09-09 15:00:09,170 [INFO] gmail_client: Downloaded email attachment: 1a07cd6db0b97ceb_Robie_-_EZLynx_Activities_2026-09-07T1307.xlsx
+2026-09-09 15:00:09,365 [INFO] gmail_client: Downloaded email attachment: 1a0775c756130946_RE_ [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request_ ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp_ 10_05_2026).eml
+2026-09-09 15:00:09,628 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-09 15:00:09,835 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-09 15:00:10,331 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-09 15:00:10,470 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-09 15:00:11,097 [INFO] gmail_client: Downloaded email attachment: 1a0877924d9a2e12_WC PI 2657110-001.pdf
+2026-09-09 15:00:11,099 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-09 15:00:11,293 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_image001.png
+2026-09-09 15:00:11,476 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_INVOICE.pdf
+2026-09-09 15:00:11,701 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_BINDER.pdf
+2026-09-09 15:00:12,008 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_TRIA.pdf
+2026-09-09 15:00:12,181 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_COE.pdf
+2026-09-09 15:00:12,182 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-09 15:00:12,188 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0867ccc2ab6f33 for Pol #CM92DC00437-001 MTC
+2026-09-09 15:00:12,190 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a08647fad6ddb25 for Pol #ACT4034556
+2026-09-09 15:00:12,203 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a083b86c1f96e99 for Pol #6S60UB A422965-3-25
+2026-09-09 15:00:12,204 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082ea1cdf077be for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 15:00:12,206 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082ea098872fec for Pol #248394-001APD-94344-SSRM APD
+2026-09-09 15:00:12,207 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082e96301431e0 for Pol #A23B8960-78760-SSRM NTL
+2026-09-09 15:00:12,212 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082daab13d9673 for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 15:00:12,213 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da98263e5b7 for Pol #A23B8960-78760-SSRM NTL
+2026-09-09 15:00:12,216 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da78d5e2400 for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 15:00:12,217 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da57871b1fb for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 15:00:12,218 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da3d9471f65 for Pol #248394-001APD-94344-SSRM APD
+2026-09-09 15:00:12,219 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0818441f191306 for Pol #67664405
+2026-09-09 15:00:12,220 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a080feb059c3c87 for Pol #106793-4-25
+2026-09-09 15:00:12,230 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07e763c98b936a for Pol #WPH5080304 001
+2026-09-09 15:00:12,232 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dd56907441ad for Pol #ACT4034556
+2026-09-09 15:00:12,233 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dc83ce522777 for Pol #LSP600011096
+2026-09-09 15:00:12,281 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-09 15:00:12,282 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-09 15:00:12,283 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-09 15:00:12,284 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-09 15:00:12,285 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-09 15:00:12,285 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-09 15:00:12,286 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-09 15:00:12,287 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-09 15:00:12,288 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-09 15:00:12,290 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-09 15:00:12,292 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-09 15:00:13,741 [WARNING] uw_reply_filer: No existing titled renewal discussion for applicant 99340932 / Pol #ACT4034556; refusing orphan card creation.
+2026-09-09 15:00:13,746 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a08572509ae6ed9 for Pol #ACT4034556
+2026-09-09 15:00:13,747 [INFO] uw_reply_filer: UW reply filing complete: filed=0 skipped=36 errors=0 dry_run=False
+2026-09-09 15:00:13,748 [INFO] robie_cleaner: UW reply filing from cleaner: filed=0 skipped=36 dry_run=False
+2026-09-09 15:00:29,691 [INFO] robie_cleaner: Gathered 189 authentic messages for reporting.
+2026-09-09 15:00:30,235 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a0878b0444a12f4)
+2026-09-09 15:00:30,236 [INFO] robie_cleaner: Successfully dispatched daily audit report to carlo@streetsmart.insurance (ID: 1a0878b0444a12f4)
+
+Execution Finished: 0 noise trashed, 189 real messages found. Report sent: True
+=== Robie Daily Mailbox Audit Finished at 2026-09-09_15-00-30 ===

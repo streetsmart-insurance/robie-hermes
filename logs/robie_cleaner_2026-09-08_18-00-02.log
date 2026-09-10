@@ -1,0 +1,81 @@
+=== Starting Robie Daily Mailbox Audit & Cleanup at 2026-09-08_18-00-02 ===
+2026-09-08 18:00:03,933 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 18:00:04,316 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 18:00:04,666 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 18:00:05,083 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-08 18:00:05,393 [INFO] robie_cleaner: Starting daily inbox audit for robie@streetsmart.insurance (dry_run=False)...
+2026-09-08 18:00:05,759 [INFO] robie_cleaner: Noise cleanup complete: 0 messages moved to trash.
+2026-09-08 18:00:05,820 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-08 18:00:06,295 [INFO] gmail_client: Downloaded email attachment: 1a080feb059c3c87_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-08 18:00:06,685 [INFO] gmail_client: Downloaded email attachment: 1a0808858fe7727d_Robie_-_EZLynx_Overdue_Tasks_2026-09-08T0607.xlsx
+2026-09-08 18:00:07,365 [INFO] gmail_client: Downloaded email attachment: 1a07ce8390c63143_Robie_-_EZLynx_Activities_2026-09-07T1326.xlsx
+2026-09-08 18:00:07,825 [INFO] gmail_client: Downloaded email attachment: 1a07ce437dbb6352_Robie_-_EZLynx_Activities_2026-09-07T1321.xlsx
+2026-09-08 18:00:08,070 [INFO] gmail_client: Downloaded email attachment: 1a07ce415307a2fa_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1321.xlsx
+2026-09-08 18:00:08,293 [INFO] gmail_client: Downloaded email attachment: 1a07ce110ca26f68_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1318.xlsx
+2026-09-08 18:00:08,551 [INFO] gmail_client: Downloaded email attachment: 1a07cd6db0b97ceb_Robie_-_EZLynx_Activities_2026-09-07T1307.xlsx
+2026-09-08 18:00:08,720 [ERROR] gmail_client: Error downloading attachment RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml: [Errno 2] No such file or directory: '/opt/renewal-automation-system/data/downloads/inbox_attachments/1a0775c756130946_RE: [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request: ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp: 10/05/2026).eml'
+2026-09-08 18:00:09,002 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-08 18:00:09,193 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-08 18:00:09,711 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-08 18:00:09,846 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-08 18:00:10,608 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_image001.png
+2026-09-08 18:00:10,795 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-08 18:00:11,022 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_INVOICE.pdf
+2026-09-08 18:00:11,193 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_Blank Affidavit - NJ.pdf
+2026-09-08 18:00:11,389 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_Blank NJ Exhibit A.pdf
+2026-09-08 18:00:11,390 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 18:00:11,747 [INFO] gmail_client: Downloaded email attachment: 1a07b5958ef75333_POLTRANSNOT-NJSMAR10-09-07-2026-06-10-37_(c).pdf
+2026-09-08 18:00:12,080 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-08 18:00:12,295 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-08 18:00:12,524 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-08 18:00:12,661 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-08 18:00:12,947 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-08 18:00:12,948 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 18:00:13,459 [INFO] gmail_client: Downloaded email attachment: 1a07aa15d49c5cb9_Policy29115152937909.Zip
+2026-09-08 18:00:14,214 [INFO] gmail_client: Downloaded email attachment: 1a078fee8dc2315b_HAUL AZZ LLC-Policy-DSLA1000836-00.pdf.pdf
+2026-09-08 18:00:14,217 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 18:00:14,669 [INFO] gmail_client: Downloaded email attachment: 1a07810d2f75fea6_HAUL AZZ LLC-Binder-DSLA1000836-00.pdf.pdf
+2026-09-08 18:00:14,670 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-08 18:00:14,685 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0818441f191306 for Pol #67664405
+2026-09-08 18:00:14,690 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a080feb059c3c87 for Pol #106793-4-25
+2026-09-08 18:00:14,740 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07e763c98b936a for Pol #WPH5080304 001
+2026-09-08 18:00:14,744 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dd56907441ad for Pol #ACT4034556
+2026-09-08 18:00:14,749 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dc83ce522777 for Pol #LSP600011096
+2026-09-08 18:00:14,914 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-08 18:00:14,915 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-08 18:00:14,917 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-08 18:00:14,919 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-08 18:00:14,920 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-08 18:00:14,922 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-08 18:00:14,924 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-08 18:00:14,926 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-08 18:00:14,928 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-08 18:00:14,929 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-08 18:00:14,931 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-08 18:00:14,932 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a08148222708144 for Pol #ACT4034556
+2026-09-08 18:00:15,132 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-08 18:00:15,372 [INFO] ezlynx_api: Matched discussion by policy# 'ACT4034556': 'Flood Renewal - Neptune' (ID 708593726)
+2026-09-08 18:00:15,894 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-08 18:00:17,954 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 99340932: NoteId 1123748442 into 'Flood Renewal - Neptune'
+2026-09-08 18:00:18,807 [INFO] ezlynx_document_uploader: Connecting to live Chrome over CDP at http://localhost:9222...
+2026-09-08 18:00:19,387 [INFO] ezlynx_document_uploader: Connected to live Chrome via CDP successfully.
+2026-09-08 18:00:19,387 [INFO] ezlynx_document_uploader: Navigating to https://app.ezlynx.com/web/account/99340932/documents for applicant 99340932...
+2026-09-08 18:00:40,548 [WARNING] ezlynx_api: Playwright document uploader returned error: Upload dialog iframe could not be located. Checking simulation.
+2026-09-08 18:00:40,548 [INFO] ezlynx_api: [SIMULATION] Document '1a07af1e52b112f2_image001.png' uploaded to Applicant 99340932 (Folder: Renewal Offers/Declarations)
+2026-09-08 18:00:40,551 [INFO] ezlynx_api: [TASK] EZLynx Task Created for Applicant: 99340932 | Title: 'Review Renewal Quote: Larry Gonzales (Neptune Insurance)' | Assigned: Daniela Aguilar
+2026-09-08 18:00:40,699 [INFO] email_handoff: Sending immediate underwriter reply notification to daniela@streetsmart.insurance for Pol #ACT4034556
+2026-09-08 18:00:40,945 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to daniela@streetsmart.insurance (Msg ID: 1a0822de4359a22c)
+2026-09-08 18:00:41,462 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-08 18:00:42,306 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 99340932: NoteId 1123748765 into 'Email sent by Robie'
+2026-09-08 18:00:42,309 [INFO] gmail_client: ✅ [EZLynx Sync] Saved outbound email to applicant 99340932 discussion 'Email sent by Robie'. Result: {'status': 'success', 'method': 'api', 'applicant_id': '99340932', 'discussion_title': 'Email sent by Robie', 'note_id': 1123748765, 'text': 'Policy: #ACT4034556 (Commercial - Direct)\nOutbound Email Sent by Robie | Date: 2026-09-08 18:00:40\n\nDetails:\n- To: daniela@streetsmart.insurance\n- Subject: [URGENT / CSR ACTION] Carrier Response Received: Larry Gonzales - Pol #ACT4034556\n- Message ID: 1a0822de4359a22c\n\nBody:\nHi Daniela Aguilar,\n\nAn underwriter response has just been received regarding upcoming renewal terms:\n\n• Named Insured: Larry Gonzales\n• Policy Number: ACT4034556\n• Carrier: Neptune Insurance\n• Expiration Date: 2026-10-23\n• Underwriter Sender: Chaithanya Gangadhar <chaithanya.gangadhar@jjins.com>\n• Status / Classification: QUOTE_ATTACHED\n• Summary: Renewal quote proposal PDF received from underwriter.\n• Attached Documents: image001.png, DP 2563394_RetailerBinder.pdf.pdf, INVOICE.pdf, Blank Affidavit - NJ.pdf, Blank NJ Exhibit A.pdf\n• Underwriter Message:\n  "Thank you for selecting J&J as your insurance service provider of choice. Attached you will find a confirmation of binding for the above listed account effective 09/07/2026 and an invoice for your records. Please be noted that the mortgagee on file is ABSOLUTE HOME MORTGAGEE, 165 PASSAIC AVE SUITE 411, FAIRFIELD, NJ 07004. To complete the underwriting file, we will require the following within 10 business days. If you have sent the following information to us, please disregard.: ••••••••• Full Payment (or JJPF Finance Agreement & Down Payment); ••••••••• Completed Affidavit You may send any required documentation to mail@jjins.com; and the gross premium to our office in any of the following methods: 1. Pay by EFT or Credit Card by logging into to www.jjins.com and locate the account in the My Policies section, then select Make a Payment and follow the prompts. Third party processing fees apply for credit cards; or 2. Pay b\n\nROBIE was here\n\nRobie was here', 'data': {'ApplicantId': 99340932, 'NoteId': 1123748765}}
+2026-09-08 18:00:42,594 [INFO] gmail_client: Marked message 1a07af1e52b112f2 as READ.
+2026-09-08 18:00:42,596 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a078fee8dc2315b for Pol #ACT4034556
+2026-09-08 18:00:42,598 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07810d2f75fea6 for Pol #ACT4034556
+2026-09-08 18:00:42,616 [INFO] uw_reply_filer: UW reply filing complete: filed=1 skipped=25 errors=0 dry_run=False
+2026-09-08 18:00:42,617 [INFO] robie_cleaner: UW reply filing from cleaner: filed=1 skipped=25 dry_run=False
+2026-09-08 18:00:55,789 [INFO] robie_cleaner: Gathered 174 authentic messages for reporting.
+2026-09-08 18:00:55,793 [INFO] robie_cleaner: Current time (02:00 PM America/New_York) is outside designated report hours (12, 15, 17). Mailbox cleaned and replies filed; email report suppressed.
+2026-09-08 18:00:55,794 [INFO] robie_cleaner: Report delivery skipped per schedule gate (12pm, 3pm, 5pm ET).
+
+Execution Finished: 0 noise trashed, 174 real messages found. Report sent: False
+=== Robie Daily Mailbox Audit Finished at 2026-09-08_18-00-56 ===

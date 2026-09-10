@@ -112,7 +112,7 @@ def run_weekly_payment_checks(dry_run: bool = False):
             logger.info(f'[DRY RUN] Would post note to disc {disc_id} and update status to {new_status}:\n{note_content}\n' + '-'*50)
         else:
             if disc_id:
-                res = api_client.post_discussion_note(str(disc_id), note_content, applicant_id=str(aid))
+                res = api_client.add_note_to_discussion(applicant_id=str(aid), discussion_title="Homeowners Renewal / Mortgage Verification", note_text=note_content, policy_number=str(pol))
                 logger.info(f'Posted weekly note to disc {disc_id} for candidate {cid}: {res.get("status")}')
             else:
                 logger.warning(f'No discussion_id bound for candidate {cid}; skipping EZLynx note.')

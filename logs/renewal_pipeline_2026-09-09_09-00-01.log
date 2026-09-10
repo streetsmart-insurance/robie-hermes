@@ -1,0 +1,71 @@
+=================================================================
+🚀 StreetSmart Renewal Daily Pipeline Started at: 2026-09-09_09-00-01
+=================================================================
+=================================================================
+🔍 [PRE-FLIGHT] Running Database State & Invariant Checks...
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1969, in _exec_single_context
+    self.dialect.do_execute(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+sqlite3.OperationalError: attempt to write a readonly database
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/src/database/integrity_check.py", line 168, in <module>
+    main()
+  File "/opt/renewal-automation-system/src/database/integrity_check.py", line 162, in main
+    passed, report = validator.run_all_checks()
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/src/database/integrity_check.py", line 34, in run_all_checks
+    init_db()
+  File "/opt/renewal-automation-system/src/database/session.py", line 24, in init_db
+    Base.metadata.create_all(bind=engine)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/sql/schema.py", line 5929, in create_all
+    bind._run_ddl_visitor(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 3270, in _run_ddl_visitor
+    conn._run_ddl_visitor(visitorcallable, element, **kwargs)
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 2469, in _run_ddl_visitor
+    ).traverse_single(element)
+      ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/sql/visitors.py", line 661, in traverse_single
+    return meth(obj, **kw)
+           ^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/sql/ddl.py", line 964, in visit_metadata
+    [t for t in tables if self._can_create_table(t)]
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/sql/ddl.py", line 929, in _can_create_table
+    return not self.checkfirst or not self.dialect.has_table(
+                                      ^^^^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 2, in has_table
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/reflection.py", line 90, in cache
+    return fn(self, con, *args, **kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/dialects/sqlite/base.py", line 2332, in has_table
+    info = self._get_table_pragma(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/dialects/sqlite/base.py", line 3024, in _get_table_pragma
+    cursor = connection.exec_driver_sql(statement)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1781, in exec_driver_sql
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1848, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1988, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 2365, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1969, in _exec_single_context
+    self.dialect.do_execute(
+  File "/opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+    cursor.execute(statement, parameters)
+sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) attempt to write a readonly database
+[SQL: PRAGMA main.table_info("policy_renewals")]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+=================================================================
+❌ CRITICAL: Pipeline crashed with exit code 1 at 2026-09-09 09:00:02
+=================================================================
+Dispatched failure alert email.

@@ -26,6 +26,7 @@ NOISE_QUERIES = [
     ("Mailer-Daemon Bounces", "from:mailer-daemon"),
     ("Postmaster Delivery Notices", "from:postmaster"),
     ("Automated Delivery Failures", "subject:\"Delivery Status Notification (Failure)\""),
+    ("Automatic Replies & Out of Office", "subject:\"Automatic reply:\" OR subject:\"Out of Office\" OR subject:\"Auto-Reply:\" OR subject:\"Auto:\" OR subject:\"Undeliverable:\""),
     ("Test Suite Remnants", "subject:\"David Clark\"")
 ]
 
@@ -53,7 +54,10 @@ def run_daily_inbox_cleanup_and_report(
     client: Optional[GmailRenewalClient] = None,
     recipient: str = "carlo@streetsmart.insurance",
     dry_run: bool = False,
-    days_to_check: int = 2
+    days_to_check: int = 2,
+    report_hours: tuple[int, ...] = (12, 15, 17),
+    force_email: bool = False,
+    timezone_str: str = "America/New_York",
 ) -> Dict[str, Any]:
     """Cleans out noise in Robie's mailbox and emails a categorized daily report."""
     if client is None:
@@ -317,11 +321,24 @@ def run_daily_inbox_cleanup_and_report(
     </div>
     """
 
-    # 4. Dispatch Email Report
+    # 4. Dispatch Email Report (Gated to 12 PM, 3 PM, and 5 PM ET)
     report_sent = False
     subject_line = f"Robie Daily Mailbox Audit & Cleanup Report - {now_str} ({len(real_messages)} active, {total_noise_trashed} purged)"
 
-    if not dry_run and recipient:
+    from zoneinfo import ZoneInfo
+    ny_now = datetime.datetime.now(ZoneInfo(timezone_str))
+    is_report_hour = ny_now.hour in report_hours
+
+    if not force_email and not is_report_hour:
+        logger.info(
+            f"Current time ({ny_now.strftime('%I:%M %p')} {timezone_str}) is outside designated report hours "
+            f"({', '.join(str(h) for h in report_hours)}). Mailbox cleaned and replies filed; email report suppressed."
+        )
+        should_send_email = False
+    else:
+        should_send_email = True
+
+    if not dry_run and recipient and should_send_email:
         try:
             send_res = client.send_email(
                 to_email=recipient,
@@ -334,7 +351,10 @@ def run_daily_inbox_cleanup_and_report(
         except Exception as e:
             logger.error(f"Failed to dispatch daily report email to {recipient}: {e}")
     else:
-        logger.info(f"Dry run enabled or no recipient; skipped emailing report.")
+        if not should_send_email:
+            logger.info("Report delivery skipped per schedule gate (12pm, 3pm, 5pm ET).")
+        else:
+            logger.info("Dry run enabled or no recipient; skipped emailing report.")
 
     return {
         "noise_trashed": total_noise_trashed,
@@ -351,12 +371,18 @@ def main():
     parser.add_argument("--recipient", default="carlo@streetsmart.insurance", help="Email recipient for daily report.")
     parser.add_argument("--dry-run", action="store_true", help="Audit without deleting or sending email.")
     parser.add_argument("--days", type=int, default=2, help="Number of days lookback for authentic emails.")
+    parser.add_argument("--force-email", action="store_true", help="Force sending report regardless of scheduled hours.")
+    parser.add_argument("--report-hours", default="12,15,17", help="Comma-separated hours in Eastern Time to allow sending report (default: 12,15,17).")
     args = parser.parse_args()
+
+    hours = tuple(int(h.strip()) for h in args.report_hours.split(",") if h.strip().isdigit())
 
     result = run_daily_inbox_cleanup_and_report(
         recipient=args.recipient,
         dry_run=args.dry_run,
-        days_to_check=args.days
+        days_to_check=args.days,
+        report_hours=hours,
+        force_email=args.force_email,
     )
     print(f"\nExecution Finished: {result['noise_trashed']} noise trashed, {result['real_messages_count']} real messages found. Report sent: {result['report_sent']}")
 

@@ -1,0 +1,478 @@
+=================================================================
+🚀 StreetSmart Renewal Daily Pipeline Started at: 2026-09-09_10-30-01
+=================================================================
+=================================================================
+🔍 [PRE-FLIGHT] Running Database State & Invariant Checks...
+
+✅ [Database State & Integrity Report] Status: PASSED
+  • SQLite PRAGMA Integrity : OK
+  • Foreign Key Invariants  : OK
+  • Total Policies Audited  : 76
+  • Active Aliases Tracked  : 42
+  • Status Breakdown:
+      - COMPLETED: 7
+      - EXCLUDED_INACTIVE_ACCOUNT: 25
+      - EMAIL_SENT_AWAITING_REPLY: 22
+      - INFO_REQUESTED: 11
+      - ESCALATED_MANUAL: 4
+      - NON_RENEWAL_CONFIRMED_DOCS_UPLOADED: 3
+      - PENDING_EVALUATION: 1
+      - READY_FOR_AGENT_REVIEW: 2
+      - OUTREACH_PENDING: 1
+
+  ⚠️ Warnings (2):
+      * Potential duplicate active policy row for applicant 84705043, LOB Auto (Commercial), exp 2026-10-16
+      * Potential duplicate active policy row for applicant 99055770, LOB Auto (Commercial), exp 2026-10-20
+
+🧪 [PRE-FLIGHT] Running Fast Automated Regression Suite...
+............................                                             [100%]
+=============================== warnings summary ===============================
+tests/test_policy_number_aliases.py: 30 warnings
+  /opt/renewal-automation-system/venv/lib/python3.12/site-packages/sqlalchemy/sql/schema.py:3627: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+28 passed, 30 warnings in 1.56s
+=================================================================
+2026-09-09 10:30:06,882 [INFO] daily_pipeline: === Starting StreetSmart Renewal Pipeline for 2026-09-09 ===
+2026-09-09 10:30:06,883 [INFO] daily_pipeline: Checking for scheduled intake reports in robie@ inbox...
+2026-09-09 10:30:06,926 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:07,203 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:07,466 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:07,798 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:08,035 [INFO] email_report_ingest: Querying robie@streetsmart.insurance for scheduled reports: '(from:(appliedsystems.com OR ezlynx.com) OR subject:(EZLynx OR Renewal OR Scheduled)) has:attachment'
+2026-09-09 10:30:09,888 [INFO] email_report_ingest: No new report attachments were downloaded.
+2026-09-09 10:30:09,888 [INFO] daily_pipeline: Report ingestion result: 0
+2026-09-09 10:30:09,933 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:10,195 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:10,472 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:10,847 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:30:11,113 [INFO] daily_orchestrator: === Starting Daily Renewal Cycle for Date: 2026-09-09 ===
+2026-09-09 10:30:11,137 [INFO] renewal_intake: Checking robie@streetsmart.insurance for scheduled reports: query='from:(appliedsystems.com OR ezlynx.com) has:attachment'
+2026-09-09 10:30:12,452 [INFO] ezlynx_report_downloader: [Robie Exporter] Launching headless browser for EZLynx export (10/04/2026 to 10/24/2026)...
+2026-09-09 10:30:13,924 [INFO] ezlynx_report_downloader: [Robie Exporter] Navigating to EZLynx login...
+2026-09-09 10:30:15,316 [INFO] ezlynx_report_downloader: [Robie Exporter] Navigating to Report 28: https://app.ezlynx.com/EZLynxReportPortal/reportwrapper.aspx?Report=BOB_PolicyExpiration_Detail&id=28...
+2026-09-09 10:30:19,060 [INFO] ezlynx_report_downloader: [Robie Exporter] Setting expiration window: 10/04/2026 to 10/24/2026...
+2026-09-09 10:30:19,093 [INFO] ezlynx_report_downloader: [Robie Exporter] Setting Current Policy Status to 'Active' only...
+2026-09-09 10:30:19,102 [INFO] ezlynx_report_downloader: [Robie Exporter] Ensuring 'Source' column is selected in Manage Columns...
+2026-09-09 10:30:19,107 [INFO] ezlynx_report_downloader: [Robie Exporter] Generating report dataset...
+2026-09-09 10:30:19,111 [INFO] ezlynx_report_downloader: [Robie Exporter] Triggering CSV export...
+2026-09-09 10:30:49,182 [WARNING] daily_orchestrator: Could not auto-download EZLynx report via UI: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("text='CSV (comma delimited)'")
+. Proceeding with existing reports.
+/opt/renewal-automation-system/venv/lib/python3.12/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-09-09 10:30:49,460 [INFO] ivans_matcher: Loaded IVANS matrix with 70 carrier records from ivans_export_1.xlsx
+2026-09-09 10:30:49,461 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,461 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 1238424-002 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,461 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,462 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,462 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,462 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WBCAT1G7C (Advanced Hair Designs Llc) - automated download active in IVANS
+2026-09-09 10:30:49,462 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Selective Insurance | Workers comp | Policy WC 9119522 (Panda Kitchen and Bath NJ Llc) - automated download active in IVANS
+2026-09-09 10:30:49,464 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,464 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 1238424-002 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,465 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,465 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,465 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,465 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WBCAT1G7C (Advanced Hair Designs Llc) - automated download active in IVANS
+2026-09-09 10:30:49,465 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Selective Insurance | Workers comp | Policy WC 9119522 (Panda Kitchen and Bath NJ Llc) - automated download active in IVANS
+2026-09-09 10:30:49,487 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00374742-00 (Family Crest Property Management Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,489 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy CPS8111489 (MJ LANDSCAPE HERNANDEZ LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,491 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,492 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,492 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,493 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,496 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,496 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,496 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,496 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,499 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,500 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,504 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,506 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,506 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,509 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,509 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,511 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,515 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,517 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,517 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,517 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,518 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,545 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00374742-00 (Family Crest Property Management Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,546 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy CPS8111489 (MJ LANDSCAPE HERNANDEZ LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,548 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,549 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,549 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,549 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,552 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,552 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,553 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,553 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,556 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,556 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,557 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Utica First Insurance Company | Business Owners Policy | Policy ART3001448680 (APLUS Home Improvements LLC) - automated download active in IVANS
+2026-09-09 10:30:49,561 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,562 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,563 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,565 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,566 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,566 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,567 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00113127-02 (Green Lion Lawn Care LLC DBA Lawn Buddies) - automated download active in IVANS
+2026-09-09 10:30:49,568 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,573 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,574 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,609 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners | Policy CBB-00113127-02 (Green Lion Lawn Care LLC DBA Lawn Buddies) - automated download active in IVANS
+2026-09-09 10:30:49,617 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAN7A7K (B&M All Inclusive LLC) - automated download active in IVANS
+2026-09-09 10:30:49,627 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,629 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,632 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,640 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,641 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,641 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,642 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,645 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,645 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,645 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,645 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,648 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,649 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,650 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Utica First Insurance Company | Business Owners Policy | Policy ART3001448680 (APLUS Home Improvements LLC) - automated download active in IVANS
+2026-09-09 10:30:49,652 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,655 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,656 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,657 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,658 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,658 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,659 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00113127-02 (Green Lion Lawn Care LLC DBA Lawn Buddies) - automated download active in IVANS
+2026-09-09 10:30:49,660 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,663 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAN7A7K (B&M All Inclusive LLC) - automated download active in IVANS
+2026-09-09 10:30:49,665 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,666 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,669 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,669 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,670 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,670 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,672 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,672 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 1238424-002 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,672 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WBCAT1G7C (Advanced Hair Designs Llc) - automated download active in IVANS
+2026-09-09 10:30:49,687 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,687 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,687 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,688 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,688 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Selective Insurance | Workers comp | Policy WC 9119522 (Panda Kitchen and Bath NJ Llc) - automated download active in IVANS
+2026-09-09 10:30:49,693 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00374742-00 (Family Crest Property Management Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,694 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy CPS8111489 (MJ LANDSCAPE HERNANDEZ LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,697 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,697 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,698 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,698 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,701 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,701 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,701 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,702 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,705 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,705 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,709 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,711 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,712 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,714 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,715 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,715 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,716 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,721 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,724 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,745 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,745 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,746 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,746 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,749 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,749 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,749 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,749 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,752 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,753 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,754 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Utica First Insurance Company | Business Owners Policy | Policy ART3001448680 (APLUS Home Improvements LLC) - automated download active in IVANS
+2026-09-09 10:30:49,756 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,759 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,760 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,761 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,762 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,762 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,763 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00113127-02 (Green Lion Lawn Care LLC DBA Lawn Buddies) - automated download active in IVANS
+2026-09-09 10:30:49,764 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,767 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAN7A7K (B&M All Inclusive LLC) - automated download active in IVANS
+2026-09-09 10:30:49,769 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,770 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,772 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,772 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,773 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,773 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,775 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,775 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ4ZNZ (Jay Vijay C Store LLC dba 6-12 Convenience Store) - automated download active in IVANS
+2026-09-09 10:30:49,775 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAD7UT5 (Cocoa Beach Tanning Lounge Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,775 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB3670968 (Riverview Properties of Edison LLC) - automated download active in IVANS
+2026-09-09 10:30:49,776 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAY8WDT (Norris Mechanical LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,776 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,778 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,778 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 1238424-002 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,778 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAZ5JUL (Milzaz Kidz Academy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,779 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WBCAT1G7C (Advanced Hair Designs Llc) - automated download active in IVANS
+2026-09-09 10:30:49,779 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Selective Insurance | Workers comp | Policy WC 9119522 (Panda Kitchen and Bath NJ Llc) - automated download active in IVANS
+2026-09-09 10:30:49,785 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00374742-00 (Family Crest Property Management Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,787 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy CPS8111489 (MJ LANDSCAPE HERNANDEZ LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,789 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,790 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,791 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,791 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,794 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,794 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,794 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,794 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,798 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,798 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,803 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,804 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,804 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,807 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,807 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,810 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,832 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00374742-00 (Family Crest Property Management Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,834 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy CPS8111489 (MJ LANDSCAPE HERNANDEZ LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,836 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,836 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,837 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,837 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,840 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,840 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,840 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,840 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,843 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,844 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,848 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,850 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,850 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,852 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,853 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,855 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,859 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,864 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00374742-00 (Family Crest Property Management Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,865 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy CPS8111489 (MJ LANDSCAPE HERNANDEZ LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,867 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,868 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,869 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,869 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,872 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,872 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,872 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,872 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,876 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,876 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,881 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,882 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,883 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,885 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,885 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,885 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,888 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,892 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,893 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,895 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 2695561-001 (Sun Volt Energy LLC) - automated download active in IVANS
+2026-09-09 10:30:49,895 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Pie Insurance | Workers comp | Policy WC PI 1238424-002 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,896 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WBCAT1G7C (Advanced Hair Designs Llc) - automated download active in IVANS
+2026-09-09 10:30:49,896 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB3J330482 (Star Fuels, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,896 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Selective Insurance | Workers comp | Policy WC 9119522 (Panda Kitchen and Bath NJ Llc) - automated download active in IVANS
+2026-09-09 10:30:49,902 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Business Owners Policy | Policy PGR973175709 (Advance Property Maintenance. Services LLC) - automated download active in IVANS
+2026-09-09 10:30:49,903 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00372186-00 (Top Green Landscaping LLC) - automated download active in IVANS
+2026-09-09 10:30:49,903 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie Insurance | Genl Liability | Policy CEG-00372027-00 (TOP NOTCH LAWN & LANDSCAPING LLC) - automated download active in IVANS
+2026-09-09 10:30:49,903 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68432818 (SHAH Brothers 786 LLC) - automated download active in IVANS
+2026-09-09 10:30:49,906 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1320391 (JUSTICE 5 LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,906 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00368848-00 (SDH Maintenance LLC) - automated download active in IVANS
+2026-09-09 10:30:49,907 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 865847509 (Pinnacle Parts and Services Corp) - automated download active in IVANS
+2026-09-09 10:30:49,907 [INFO] renewal_intake: [IVANS Auto-Download Excluded] National General Ins Co. | Auto (Commercial) | Policy 2032173365 (Middlesex Gutter Supply Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,910 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG68361034 (PITT & SONS LLC ) - automated download active in IVANS
+2026-09-09 10:30:49,911 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Philadelphia Ins Co. | Commercial Pkg | Policy PHPK2727078-000 (Patricia & Christopher Allen) - automated download active in IVANS
+2026-09-09 10:30:49,912 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Utica First Insurance Company | Business Owners Policy | Policy ART3001448680 (APLUS Home Improvements LLC) - automated download active in IVANS
+2026-09-09 10:30:49,915 [INFO] renewal_intake: [IVANS Auto-Download Excluded] AmTrust Financial Services, Inc | Workers comp | Policy TWC4700909 (Jax Truck Works Company) - automated download active in IVANS
+2026-09-09 10:30:49,916 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Liberty Mutual | Auto (Commercial) | Policy IMG66684963 (Firehouse Moving Company LLC) - automated download active in IVANS
+2026-09-09 10:30:49,917 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Genl Liability | Policy GL1316202 (AA Logistics Group, LLC) - automated download active in IVANS
+2026-09-09 10:30:49,919 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Genl Liability | Policy CEG-00354899-00 (Aquelan International LLC) - automated download active in IVANS
+2026-09-09 10:30:49,920 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UBB8711121 (The Mane Haven Salon Llc ) - automated download active in IVANS
+2026-09-09 10:30:49,920 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Johnson & Johnson, Inc.  MGA | Homeowners | Policy LSP600011096 (Paulette Fagone) - automated download active in IVANS
+2026-09-09 10:30:49,921 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Coterie | Business Owners Policy | Policy CBB-00113127-02 (Green Lion Lawn Care LLC DBA Lawn Buddies) - automated download active in IVANS
+2026-09-09 10:30:49,922 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Progressive Insurance | Auto (Commercial) | Policy 02796124 (D&C Cruz Trucking, Inc.) - automated download active in IVANS
+2026-09-09 10:30:49,926 [INFO] renewal_intake: [IVANS Auto-Download Excluded] The Hartford | Workers comp | Policy 13WECAN7A7K (B&M All Inclusive LLC) - automated download active in IVANS
+2026-09-09 10:30:49,927 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Geico | Auto (Commercial) | Policy 9300220617-00 (The Laundorist Llc) - automated download active in IVANS
+2026-09-09 10:30:49,928 [INFO] renewal_intake: [IVANS Auto-Download Excluded] Travelers | Workers comp | Policy UB-6N448514-25-42-V (ROBIE Test LLC) - automated download active in IVANS
+2026-09-09 10:30:49,949 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:49,967 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:49,988 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,001 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,024 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,043 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,063 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,080 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,098 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,121 [INFO] renewal_intake: Term-number flip for The Safe Man LLC: R2WC771037 ↔ R2WC681352 (aliased, no new row)
+2026-09-09 10:30:50,922 [INFO] ezlynx_api: Successfully authenticated with Classic EZLynx API (EZToken issued).
+2026-09-09 10:30:51,579 [WARNING] src.intake.safety_gate: SafetyGate: Error checking documents for applicant 199674126: slice(None, 25, None)
+2026-09-09 10:30:51,579 [INFO] src.intake.safety_gate: [SAFETY GATE] Applicant 199674126 (Policy ART3001774010): PASSED safety inspection.
+2026-09-09 10:30:52,633 [WARNING] src.intake.safety_gate: SafetyGate: Error checking documents for applicant 173838508: slice(None, 25, None)
+2026-09-09 10:30:52,634 [INFO] src.intake.safety_gate: [SAFETY GATE] Applicant 173838508 (Policy 9300220617-00): PASSED safety inspection.
+2026-09-09 10:30:52,655 [INFO] gmail_client: Polling inbox: robie@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-09 10:30:53,113 [INFO] gmail_client: Downloaded email attachment: 1a08647fad6ddb25_image338767.png
+2026-09-09 10:30:53,570 [INFO] gmail_client: Downloaded email attachment: 1a085ad6ba41e2c8_Robie_-_EZLynx_Activities_2026-09-09T0605.xlsx
+2026-09-09 10:30:53,769 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_image001.png
+2026-09-09 10:30:53,861 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_image002.png
+2026-09-09 10:30:54,176 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_A4229653_09082026_210556.pdf
+2026-09-09 10:30:54,314 [INFO] gmail_client: Downloaded email attachment: 1a083b86c1f96e99_ADVANCE MARBLE & GRANITE LLC.pdf
+2026-09-09 10:30:55,629 [INFO] gmail_client: Downloaded email attachment: 1a080feb059c3c87_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-09 10:30:55,928 [INFO] gmail_client: Downloaded email attachment: 1a0808858fe7727d_Robie_-_EZLynx_Overdue_Tasks_2026-09-08T0607.xlsx
+2026-09-09 10:30:56,618 [INFO] gmail_client: Downloaded email attachment: 1a07ce8390c63143_Robie_-_EZLynx_Activities_2026-09-07T1326.xlsx
+2026-09-09 10:30:57,224 [INFO] gmail_client: Downloaded email attachment: 1a07ce437dbb6352_Robie_-_EZLynx_Activities_2026-09-07T1321.xlsx
+2026-09-09 10:30:57,505 [INFO] gmail_client: Downloaded email attachment: 1a07ce415307a2fa_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1321.xlsx
+2026-09-09 10:30:57,775 [INFO] gmail_client: Downloaded email attachment: 1a07ce110ca26f68_Robie_-_EZLynx_Overdue_Tasks_2026-09-07T1318.xlsx
+2026-09-09 10:30:57,975 [INFO] gmail_client: Downloaded email attachment: 1a07cd6db0b97ceb_Robie_-_EZLynx_Activities_2026-09-07T1307.xlsx
+2026-09-09 10:30:58,249 [INFO] gmail_client: Downloaded email attachment: 1a0775c756130946_RE_ [External] [RENEWAL-REQ-63] Renewal & Loss Runs Request_ ROBIE Test LLC - Pol #UB-6N448514-25-42-V (Exp_ 10_05_2026).eml
+2026-09-09 10:30:58,587 [INFO] gmail_client: Downloaded email attachment: 1a06e418dd5c8cc2_CCP35165.pdf
+2026-09-09 10:30:58,767 [INFO] gmail_client: Downloaded email attachment: 1a06d7ed837859ad_ClaimReport_PrintAllPages_09042026135pm.pdf
+2026-09-09 10:30:59,294 [INFO] gmail_client: Downloaded email attachment: 1a06c6f6b5b7879a_WCU  Quotation - BROKER - Quote    QQ41152139 - Pol    106793 - Type  RENEWAL - Year  2026 - Acct    AA14083242 - Doc Date  8-17-2026 - DH  596452684.pdf
+2026-09-09 10:30:59,442 [INFO] gmail_client: Polling inbox: hello@streetsmart.insurance for renewal replies and incoming carrier emails...
+2026-09-09 10:31:00,148 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_image001.png
+2026-09-09 10:31:00,356 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_INVOICE.pdf
+2026-09-09 10:31:00,665 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_BINDER.pdf
+2026-09-09 10:31:01,037 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_TRIA.pdf
+2026-09-09 10:31:01,459 [INFO] gmail_client: Downloaded email attachment: 1a08572509ae6ed9_COE.pdf
+2026-09-09 10:31:01,459 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-09 10:31:01,794 [INFO] gmail_client: Downloaded email attachment: 1a084215ef93992b_image001.jpg
+2026-09-09 10:31:02,046 [INFO] gmail_client: Downloaded email attachment: 1a084215ef93992b_Attachment.pdf
+2026-09-09 10:31:02,184 [INFO] gmail_client: Downloaded email attachment: 1a084215ef93992b_Attachment(1).pdf
+2026-09-09 10:31:02,373 [INFO] gmail_client: Downloaded email attachment: 1a084215ef93992b_Attachment(2).pdf
+2026-09-09 10:31:02,373 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-09 10:31:02,752 [INFO] gmail_client: Downloaded email attachment: 1a082e1eafb4f964_Form 5C.pdf
+2026-09-09 10:31:02,891 [INFO] gmail_client: Downloaded email attachment: 1a082e1eafb4f964_CWIS-Endorsement-11-Binder-AL-ODELL LOGISTICS LLC-261435131487-2-CWH-NJ-19-S0346215-00.pdf
+2026-09-09 10:31:04,137 [INFO] gmail_client: Downloaded email attachment: 1a082e1eafb4f964_CWIS-Endorsement-11-Binder-TGL-ODELL LOGISTICS LLC-261435131487-TPM6828801-00.pdf
+2026-09-09 10:31:04,309 [INFO] gmail_client: Downloaded email attachment: 1a082e1eafb4f964_CWIS-Endorsement-11-Vehicle Release Form-ODELL LOGISTICS LLC-261435131487.pdf
+2026-09-09 10:31:04,619 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_image001.png
+2026-09-09 10:31:04,763 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-09 10:31:04,993 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_INVOICE.pdf
+2026-09-09 10:31:05,153 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_Blank Affidavit - NJ.pdf
+2026-09-09 10:31:05,302 [INFO] gmail_client: Downloaded email attachment: 1a08148222708144_Blank NJ Exhibit A.pdf
+2026-09-09 10:31:05,303 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-09 10:31:05,635 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_image001.png
+2026-09-09 10:31:05,806 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_DP 2563394_RetailerBinder.pdf.pdf
+2026-09-09 10:31:06,040 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_INVOICE.pdf
+2026-09-09 10:31:06,173 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank Affidavit - NJ.pdf
+2026-09-09 10:31:06,516 [INFO] gmail_client: Downloaded email attachment: 1a07af1e52b112f2_Blank NJ Exhibit A.pdf
+2026-09-09 10:31:06,517 [INFO] gmail_client: Matched proactive carrier email in hello@streetsmart.insurance to Policy #ACT4034556 (Larry Gonzales)
+2026-09-09 10:31:06,535 [INFO] policy_aliases: Aliased CM92DC00437-001 (renewal_term) → Pol #CM92DC00437-001 MTC (id=54)
+2026-09-09 10:31:06,545 [INFO] policy_aliases: Aliased one80.com (renewal_term) → Pol #CM92DC00437-001 MTC (id=54)
+2026-09-09 10:31:06,811 [INFO] ezlynx_api: Matched discussion by policy# 'CM92DC00437-001 MTC': 'Commercial Auto Renewal (Year Please update)' (ID 821576002)
+2026-09-09 10:31:07,009 [INFO] ezlynx_api: Matched discussion by policy# 'CM92DC00437-001 MTC': 'Commercial Auto Renewal (Year Please update)' (ID 821576002)
+2026-09-09 10:31:07,354 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 197389903: NoteId 1124627013 into 'Commercial Auto Renewal (Year Please update)'
+2026-09-09 10:31:07,356 [INFO] email_handoff: Sending immediate underwriter reply notification to maria@streetsmart.insurance for Pol #CM92DC00437-001 MTC
+2026-09-09 10:31:07,632 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to maria@streetsmart.insurance (Msg ID: 1a0869467678e119)
+2026-09-09 10:31:07,759 [INFO] gmail_client: Marked message 1a0867ccc2ab6f33 as READ.
+2026-09-09 10:31:07,761 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a08647fad6ddb25 for Pol #ACT4034556
+2026-09-09 10:31:07,772 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a083b86c1f96e99 for Pol #6S60UB A422965-3-25
+2026-09-09 10:31:07,773 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082ea1cdf077be for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 10:31:07,774 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082ea098872fec for Pol #248394-001APD-94344-SSRM APD
+2026-09-09 10:31:07,775 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082e96301431e0 for Pol #A23B8960-78760-SSRM NTL
+2026-09-09 10:31:07,778 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082daab13d9673 for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 10:31:07,779 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da98263e5b7 for Pol #A23B8960-78760-SSRM NTL
+2026-09-09 10:31:07,782 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da78d5e2400 for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 10:31:07,783 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da57871b1fb for Pol #FINFR17078371-94344-SSRM NTL
+2026-09-09 10:31:07,783 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a082da3d9471f65 for Pol #248394-001APD-94344-SSRM APD
+2026-09-09 10:31:07,784 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0818441f191306 for Pol #67664405
+2026-09-09 10:31:07,785 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a080feb059c3c87 for Pol #106793-4-25
+2026-09-09 10:31:07,795 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07e763c98b936a for Pol #WPH5080304 001
+2026-09-09 10:31:07,796 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dd56907441ad for Pol #ACT4034556
+2026-09-09 10:31:07,797 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07dc83ce522777 for Pol #LSP600011096
+2026-09-09 10:31:07,841 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a0775c756130946 for Pol #UB-6N448514-25-42-V
+2026-09-09 10:31:07,842 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a070ccac7e06094 for Pol #67664405
+2026-09-09 10:31:07,843 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06e418dd5c8cc2 for Pol #CCP35165-01
+2026-09-09 10:31:07,844 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d7ed837859ad for Pol #106793-4-25
+2026-09-09 10:31:07,845 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d45685255eae for Pol #PWC1239278
+2026-09-09 10:31:07,845 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06d39d5e1f0e53 for Pol #UB-6N448514-25-42-V
+2026-09-09 10:31:07,846 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06ca7eacf13fa4 for Pol #13332766-03
+2026-09-09 10:31:07,847 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c99ccd9d2718 for Pol #268224700A
+2026-09-09 10:31:07,848 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c6f6b5b7879a for Pol #106793-4-25
+2026-09-09 10:31:07,849 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c0972cccb3e0 for Pol #UB-6N448514-25-42-V
+2026-09-09 10:31:07,849 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a06c07264b9cf22 for Pol #PWC1239278
+2026-09-09 10:31:07,850 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a08572509ae6ed9 for Pol #ACT4034556
+2026-09-09 10:31:07,851 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a084215ef93992b for Pol #ACT4034556
+2026-09-09 10:31:07,852 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a08148222708144 for Pol #ACT4034556
+2026-09-09 10:31:07,853 [INFO] uw_reply_filer: Skipping already-filed UW reply 1a07af1e52b112f2 for Pol #ACT4034556
+2026-09-09 10:31:07,864 [INFO] uw_reply_filer: UW reply filing complete: filed=1 skipped=37 errors=0 dry_run=False
+2026-09-09 10:31:08,446 [INFO] gmail_client: Downloaded email attachment: 1a0868b4723b3872_image003.png
+2026-09-09 10:31:08,603 [INFO] gmail_client: Downloaded email attachment: 1a0868b4723b3872_32cc6985-cce4-4f04-89c7-7508280c3e7b.pdf
+2026-09-09 10:31:09,069 [INFO] gmail_client: Downloaded email attachment: 1a0861ed17c80064_image001.jpg
+2026-09-09 10:31:09,217 [INFO] gmail_client: Downloaded email attachment: 1a0861ed17c80064_image002.png
+2026-09-09 10:31:10,471 [INFO] gmail_client: Downloaded email attachment: 1a0861dca3fc82df_message_v4.rpmsg
+2026-09-09 10:31:10,724 [INFO] gmail_client: Downloaded email attachment: 1a0861bd247c7ca4_09082026.zip
+2026-09-09 10:31:11,587 [INFO] gmail_client: Downloaded email attachment: 1a0861b169ff46a5_insurance_r_d-WOA.pdf
+2026-09-09 10:31:11,743 [INFO] gmail_client: Downloaded email attachment: 1a0861b169ff46a5_2025-26_drivers_list_-_r_d_masonry__1_.xls
+2026-09-09 10:31:11,916 [INFO] gmail_client: Downloaded email attachment: 1a08613b468fdfcf_ALVARADO ENTERPRISES LLC.pdf
+2026-09-09 10:31:13,254 [INFO] gmail_client: Downloaded email attachment: 1a0860f3a9efe211_message_v4.rpmsg
+2026-09-09 10:31:13,442 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_~WRD0000.jpg
+2026-09-09 10:31:13,543 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image001.png
+2026-09-09 10:31:13,657 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image002.png
+2026-09-09 10:31:13,755 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image003.png
+2026-09-09 10:31:13,863 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image004.png
+2026-09-09 10:31:13,963 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image005.png
+2026-09-09 10:31:14,049 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image006.png
+2026-09-09 10:31:14,132 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image007.png
+2026-09-09 10:31:14,269 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_image008.png
+2026-09-09 10:31:15,255 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_insurance_r_d.pdf
+2026-09-09 10:31:15,357 [INFO] gmail_client: Downloaded email attachment: 1a08607129c184e1_2025-26_drivers_list_-_r_d_masonry__1_.xls
+2026-09-09 10:31:15,862 [INFO] gmail_client: Downloaded email attachment: 1a085af6639ce2e0_A4229653_09092026_061945.pdf
+2026-09-09 10:31:16,851 [INFO] gmail_client: Downloaded email attachment: 1a085adf6d8c248e_Robie_-_EZLynx_Sales_Center_2026-09-09T0606.xlsx
+2026-09-09 10:31:17,269 [INFO] gmail_client: Downloaded email attachment: 1a085adb69657f8d_Robie_-_EZLynx_Overdue_Tasks_2026-09-09T0606.xlsx
+2026-09-09 10:31:17,435 [INFO] gmail_client: Downloaded email attachment: 1a085ad7d444f896_Workers_Comp_Renewal_Audit_Queue_-_ROBIE_2026-09-09T0605.csv
+2026-09-09 10:31:17,779 [INFO] gmail_client: Downloaded email attachment: 1a085ad6ba41e2c8_Robie_-_EZLynx_Activities_2026-09-09T0605.xlsx
+2026-09-09 10:31:17,989 [INFO] ezlynx_api: Matched explicitly requested discussion card: 'Renewal Manual Workers comp | 106793-4-25 NJCRIB - New' (ID 841878949)
+2026-09-09 10:31:18,398 [INFO] ezlynx_api: Successfully posted note via EZLynx REST Note API for Applicant 144897143: NoteId 1124627205 into 'Renewal Manual Workers comp | 106793-4-25 NJCRIB - New'
+2026-09-09 10:31:19,221 [INFO] src.ezlynx.discussion_poster: Navigating to https://app.ezlynx.com/web/account/144897143/activity for task creation...
+2026-09-09 10:31:22,725 [INFO] src.ezlynx.discussion_poster: Locating discussion matching 'Renewal Manual Policy'...
+2026-09-09 10:31:24,320 [INFO] src.ezlynx.discussion_poster: Clicking #btnAddtask to reveal task fields...
+2026-09-09 10:31:24,530 [INFO] src.ezlynx.discussion_poster: Toggled high priority (!)
+2026-09-09 10:31:26,283 [INFO] src.ezlynx.discussion_poster: Assigned task to 'Eimy Ramos'
+2026-09-09 10:31:26,333 [INFO] src.ezlynx.discussion_poster: Set task due date to 09/10/2026
+2026-09-09 10:31:26,986 [INFO] src.ezlynx.discussion_poster: Clicked Save button for task creation...
+2026-09-09 10:31:31,113 [INFO] src.ezlynx.discussion_poster: Saved task creation screenshot to data/screenshots/task_144897143_1788964278.png
+2026-09-09 10:31:31,183 [INFO] ezlynx_api: [TASK] EZLynx Task successfully created live for Applicant 144897143 | Assigned: Eimy Ramos | Due: 09/10/2026
+2026-09-09 10:31:31,225 [INFO] daily_orchestrator: Dispatching Daily Handoff Email Report to leadership team...
+2026-09-09 10:31:31,382 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:31,711 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:31,931 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:32,233 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:32,490 [INFO] email_handoff: Dispatching Daily Handoff Report to: carlo@streetsmart.insurance, jake@streetsmart.insurance, gabrielac@streetsmart.insurance, sandy@streetsmart.insurance, ashley@streetsmart.insurance
+2026-09-09 10:31:33,077 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a08694c859faca8)
+2026-09-09 10:31:33,077 [INFO] daily_orchestrator: Daily Handoff Email successfully sent to team leads: {'id': '1a08694c859faca8', 'threadId': '1a08694c859faca8', 'labelIds': ['SENT']}
+2026-09-09 10:31:33,077 [INFO] daily_pipeline: Pipeline execution metrics: {'run_date': '2026-09-09', 'new_policies_ingested': 0, 'total_in_window': 502, 'portal_quotes_downloaded': 0, 'initial_emails_sent': 0, 'followups_sent': 0, 'inbox_replies_processed': 1, 'quotes_ready_for_review': 0, 'notes_logged_to_ezlynx': 468, 'carrier_calls_dispatched': 0, 'escalated_to_csr': 1, 'report_path': 'reports/renewal_daily_handoff_2026-09-09.md', 'rolling_pipeline_count': 51, 'report_emailed': True, 'email_delivery': {'id': '1a08694c859faca8', 'threadId': '1a08694c859faca8', 'labelIds': ['SENT']}}
+2026-09-09 10:31:33,117 [INFO] daily_pipeline: Database integrity check result: passed=True, policies=76
+2026-09-09 10:31:33,118 [INFO] daily_pipeline: Daily Handoff Report saved to /opt/renewal-automation-system/reports/daily_handoff_2026_09_09.md
+2026-09-09 10:31:33,118 [INFO] daily_pipeline: Sending Daily Handoff Email to leadership: ['carlo@streetsmart.insurance', 'jake@streetsmart.insurance', 'gabrielac@streetsmart.insurance', 'sandy@streetsmart.insurance', 'ashley@streetsmart.insurance']
+2026-09-09 10:31:33,257 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:33,477 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:33,739 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:34,090 [INFO] googleapiclient.discovery_cache: file_cache is only supported with oauth2client<4.0.0
+2026-09-09 10:31:34,329 [INFO] email_handoff: Dispatching Daily Handoff Report to: carlo@streetsmart.insurance, jake@streetsmart.insurance, gabrielac@streetsmart.insurance, sandy@streetsmart.insurance, ashley@streetsmart.insurance
+2026-09-09 10:31:34,831 [INFO] gmail_client: Email successfully sent from robie@streetsmart.insurance to carlo@streetsmart.insurance (Msg ID: 1a08694d14697b38)
+2026-09-09 10:31:34,832 [INFO] daily_pipeline: Handoff email dispatched successfully! Result: {'id': '1a08694d14697b38', 'threadId': '1a08694d14697b38', 'labelIds': ['SENT']}
+=================================================================
+📋 [REPORTING] Running Daily Policy Change & Commercial Lead Reporter...
+2026-09-09 10:31:35,917 [INFO] policy_change_lead_report: Parsing confirmation queue report: /opt/renewal-automation-system/data/input_reports/EZLynx_Scheduled_1a085aa1_Policy_Change_Request_Confirmation_Queue_-_ROBIE_2026-09-09T0603.csv
+Traceback (most recent call last):
+  File "/opt/renewal-automation-system/src/reporting/daily_policy_change_lead_report.py", line 279, in <module>
+    dispatch_daily_lead_report(skip_email=args.skip_email, custom_recipients=recips)
+  File "/opt/renewal-automation-system/src/reporting/daily_policy_change_lead_report.py", line 217, in dispatch_daily_lead_report
+    with open(out_file, "w", encoding="utf-8") as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied: '/opt/renewal-automation-system/reports/daily_policy_change_lead_report_2026_09_09.md'
+=================================================================
+❌ CRITICAL: Pipeline crashed with exit code 1 at 2026-09-09 10:31:36
+=================================================================
+Dispatched failure alert email.
