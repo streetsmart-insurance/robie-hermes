@@ -61,6 +61,7 @@ from robie_job_engine.regression_scenarios import (
     I_DID_IT_PROSE,
     PLAYWRIGHT_CDP_CHAT,
     PLAYWRIGHT_SILENT_CHAT,
+    UNVERIFIED_UNMASK_CHAT,
     SAME_DAY_RULE,
     SCENARIOS_PATH,
     close_new_failure_incident,
@@ -85,6 +86,7 @@ from robie_job_engine.regression_scenarios import (
     run_wait_spinner_scenario,
     run_zero_playwright_tool_row_scenario,
     run_cdp_json_list_fixture_scenario,
+    run_unverified_unmask_scenario,
 )
 from robie_job_engine.worker_contract import claims_unverified_destination_progress
 from robie_job_engine.test_runtime import ProductionGuardError
@@ -503,6 +505,9 @@ class ReplayGuardTests(unittest.TestCase):
             ids["playwright-silent:zero-tool-rows-1df9740b"]["outcome"], "PASS"
         )
         self.assertEqual(ids["playwright-cdp:json-list-fixture"]["outcome"], "PASS")
+        self.assertEqual(
+            ids["unverified-unmask:infra-error-not-checkpoint"]["outcome"], "PASS"
+        )
         self.assertTrue(all(item["ok"] for item in results))
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
             with self.assertRaises(ProductionGuardError):
@@ -764,6 +769,10 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             incidents["1df9740b"]["scenario"],
             "playwright-silent:zero-tool-rows-1df9740b",
         )
+        self.assertEqual(
+            incidents["d5fd2307"]["scenario"],
+            "unverified-unmask:infra-error-not-checkpoint",
+        )
         with self.assertRaises(IncidentCloseError):
             close_new_failure_incident(
                 {"id": "new-today", "new_failure_mode": True, "closed": False}
@@ -829,10 +838,15 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             cdp = run_cdp_json_list_fixture_scenario(
                 work_dir=Path(tmp) / "playwright-cdp"
             )
+            unmask = run_unverified_unmask_scenario(
+                work_dir=Path(tmp) / "unverified-unmask"
+            )
         self.assertTrue(silent["ok"], silent.get("evidence"))
         self.assertEqual(silent["id"], "playwright-silent:zero-tool-rows-1df9740b")
         self.assertTrue(cdp["ok"], cdp.get("evidence"))
         self.assertEqual(cdp["id"], "playwright-cdp:json-list-fixture")
+        self.assertTrue(unmask["ok"], unmask.get("evidence"))
+        self.assertEqual(unmask["id"], "unverified-unmask:infra-error-not-checkpoint")
         silent_text = format_new_failure_chat(
             [
                 {
@@ -857,6 +871,19 @@ class SameDayHitlAndFalseSuccessTests(unittest.TestCase):
             trigger="post-deploy",
         )
         self.assertIn(PLAYWRIGHT_CDP_CHAT, cdp_text)
+        unmask_text = format_new_failure_chat(
+            [
+                {
+                    "id": "unverified-unmask:infra-error-not-checkpoint",
+                    "outcome": "FAILED",
+                    "evidence": "UNVERIFIED checkpoint mask",
+                }
+            ],
+            trigger="post-deploy",
+        )
+        self.assertIn(UNVERIFIED_UNMASK_CHAT, unmask_text)
+        self.assertIn("d5fd2307", unmask_text)
+        self.assertNotIn("@robie", unmask_text.casefold())
 
     def test_ascend_locator_audit_scenario_is_ci_only_and_passes(self):
         with durable_temporary_directory() as tmp:

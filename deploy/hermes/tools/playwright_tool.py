@@ -23,6 +23,8 @@ _DEFAULT_TIMEOUT_S = 45
 _MAX_TIMEOUT_S = 180
 _CDP_URL = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
 _USER_CODE_SEPARATOR = "\n##ROBIE_PLAYWRIGHT_USER_CODE##\n"
+_CDP_VERSION_ATTEMPTS = 12
+_CDP_VERSION_DELAY_S = 0.5
 _ARTIFACT_FAIL_CLOSED = (
     "PLAYWRIGHT_FAIL_CLOSED: empty or missing browser artifact; "
     "do not retry the same download/screenshot/PDF parse; "
@@ -56,6 +58,126 @@ def empty_or_missing_artifact_error(detail: object) -> str | None:
 def runner_failure_error(detail: str) -> str:
     """Map a failed exec to fail-closed artifact text or PLAYWRIGHT_BLOCKED."""
     return empty_or_missing_artifact_error(detail) or f"PLAYWRIGHT_BLOCKED: {detail}"
+
+
+def wait_for_cdp_json_version(
+    cdp_url,
+    *,
+    http_get=None,
+    attempts=_CDP_VERSION_ATTEMPTS,
+    delay_s=_CDP_VERSION_DELAY_S,
+    sleeper=None,
+):
+    """Block until Chrome ``/json/version`` is healthy. Bounded retries only."""
+    import json
+    import time
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    base = str(cdp_url or "http://127.0.0.1:9222").rstrip("/")
+    url = f"{base}/json/version"
+    tries = max(1, int(attempts))
+    pause = max(0.0, float(delay_s))
+    sleep = sleeper or time.sleep
+
+    def _default_get(target):
+        request = Request(target, method="GET")
+        with urlopen(request, timeout=2.0) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            return status, response.read()
+
+    getter = http_get or _default_get
+    last = f"{url} not checked"
+    for attempt in range(1, tries + 1):
+        try:
+            status, body = getter(url)
+            if int(status) == 200:
+                raw = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and (
+                    payload.get("Browser") or payload.get("webSocketDebuggerUrl")
+                ):
+                    return {"ok": True, "url": url, "attempts": attempt}
+                last = f"{url} missing Browser/webSocketDebuggerUrl"
+            else:
+                last = f"{url} HTTP {status}"
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+            last = f"{url} {type(exc).__name__}: {exc}"
+        if attempt < tries:
+            sleep(pause)
+    raise RuntimeError(
+        f"PLAYWRIGHT_BLOCKED: CDP {url} not healthy after {tries} attempt(s): {last}"
+    )
+
+
+def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
+    """Apply playwright-stealth to attached contexts/pages. Soft-fail if missing.
+
+    Mirrors renewal-automation-system session_manager: stealth after attach
+    on the persistent Chrome CDP path only. Missing package logs and continues.
+    """
+    def _log(message):
+        if log is not None:
+            log(message)
+        else:
+            print(message, file=sys.stderr)
+
+    apply_one = stealth_apply
+    api_name = "injected"
+    if apply_one is None:
+        try:
+            from playwright_stealth import stealth_sync
+
+            apply_one = stealth_sync
+            api_name = "stealth_sync"
+        except ImportError:
+            try:
+                from playwright_stealth import Stealth
+
+                stealth = Stealth()
+                apply_sync = getattr(stealth, "apply_stealth_sync", None)
+                if not callable(apply_sync):
+                    _log(
+                        "playwright-stealth is installed but has no sync apply API; "
+                        "EZLynx Chat attach continues without stealth"
+                    )
+                    return {"ok": False, "applied": 0, "error": "no sync apply API"}
+                apply_one = apply_sync
+                api_name = "Stealth.apply_stealth_sync"
+            except ImportError as exc:
+                _log(
+                    "playwright-stealth not installed; EZLynx Chat attach "
+                    f"continues without it: {exc}"
+                )
+                return {"ok": False, "applied": 0, "error": "missing playwright-stealth"}
+            except Exception as exc:
+                _log(f"playwright-stealth unavailable; continuing without it: {exc}")
+                return {"ok": False, "applied": 0, "error": str(exc)}
+        except Exception as exc:
+            _log(f"playwright-stealth stealth_sync failed: {type(exc).__name__}: {exc}")
+            return {"ok": False, "applied": 0, "error": str(exc)}
+
+    applied = 0
+    contexts = list(getattr(browser, "contexts", None) or [])
+    for context in contexts:
+        try:
+            apply_one(context)
+            applied += 1
+        except Exception as exc:
+            _log(f"playwright-stealth skipped a context: {type(exc).__name__}: {exc}")
+        for page in list(getattr(context, "pages", None) or []):
+            try:
+                apply_one(page)
+                applied += 1
+            except Exception as exc:
+                _log(f"playwright-stealth skipped a page: {type(exc).__name__}: {exc}")
+        listener = getattr(context, "on", None)
+        if callable(listener):
+            try:
+                listener("page", apply_one)
+            except Exception:
+                pass
+    return {"ok": True, "applied": applied, "api": api_name}
 
 
 def relabel_user_exec_exception(exc: BaseException) -> None:
@@ -173,10 +295,16 @@ def _available():
 def _playwright_exec_wrapper() -> str:
     """Return the subprocess helper that installs unique-write and fail-closed artifacts."""
     helpers = (
-        f"_ARTIFACT_FAIL_CLOSED = {_ARTIFACT_FAIL_CLOSED!r}\n\n"
+        f"_ARTIFACT_FAIL_CLOSED = {_ARTIFACT_FAIL_CLOSED!r}\n"
+        f"_CDP_VERSION_ATTEMPTS = {_CDP_VERSION_ATTEMPTS!r}\n"
+        f"_CDP_VERSION_DELAY_S = {_CDP_VERSION_DELAY_S!r}\n\n"
         + inspect.getsource(empty_or_missing_artifact_error)
         + "\n"
         + inspect.getsource(relabel_user_exec_exception)
+        + "\n"
+        + inspect.getsource(wait_for_cdp_json_version)
+        + "\n"
+        + inspect.getsource(apply_playwright_stealth)
         + "\n"
     )
     return helpers + r'''
@@ -192,9 +320,11 @@ if separator not in raw:
     )
 guard_source, source = raw.split(separator, 1)
 cdp_url = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
+wait_for_cdp_json_version(cdp_url)
 pw = sync_playwright().start()
 try:
     browser = pw.chromium.connect_over_cdp(cdp_url, timeout=15000)
+    apply_playwright_stealth(browser)
     contexts = browser.contexts
     if not contexts:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: Chrome has no browser context")

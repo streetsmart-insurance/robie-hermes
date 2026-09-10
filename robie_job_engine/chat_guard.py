@@ -18,6 +18,7 @@ from .context_policy import (
 from .chat_queue import DurableChatEventQueue
 from .idempotency import DurableWorkLedger, IdempotencyError
 from .hitl import interaction_for_blocker, structured_blocker_reason
+from .worker_contract import classify_chat_close_without_checkpoint
 from .action_gate import apply_action_gate, is_action_gate_refusal
 from .job_schema import bounded_schema_hold_reason
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
@@ -1383,26 +1384,71 @@ def guard_chat_response(
         if JobStatus(current["status"]) == JobStatus.RUNNING:
             store.transition(job_id, JobStatus.VERIFYING, expected={JobStatus.RUNNING})
         current = store.get_job(job_id)
-        closed = fail_closed_zero_playwright_rows(
-            store,
-            current,
-            expected={JobStatus.VERIFYING, JobStatus.RUNNING, JobStatus.UNVERIFIED},
+        decision = classify_chat_close_without_checkpoint(
+            content,
+            action=action,
+            last_error=current.get("last_error"),
+            verifier_missing=bool(action) and verifier is None,
+            action_type=job["action_type"],
         )
-        if JobStatus(closed["status"]) == JobStatus.FAILED:
-            recordings.safe_stop(job_id, JobStatus.FAILED.value)
-        elif JobStatus(current["status"]) == JobStatus.VERIFYING:
+        if decision.status == JobStatus.AWAITING_HUMAN_INPUT.value:
+            payload = dict(current.get("payload") or {})
+            interaction = interaction_for_blocker(
+                decision.error,
+                action_type=job["action_type"],
+                requester_name=payload.get("requested_by"),
+                job_id=job_id,
+                subject_name=(
+                    payload.get("company_name")
+                    or payload.get("client_name")
+                    or payload.get("account_name")
+                ),
+            )
+            conversation_id = str(payload.get("conversation_id") or "").strip()
+            if not conversation_id:
+                store.transition(
+                    job_id,
+                    JobStatus.AWAITING_HUMAN_INPUT,
+                    expected={JobStatus.VERIFYING, JobStatus.RUNNING},
+                    error=decision.error,
+                    resume_status=JobStatus.RUNNING,
+                    release_lease=True,
+                )
+            else:
+                DurableChatEventQueue(db_path).park_direct_human_input(
+                    conversation_id=conversation_id,
+                    job_id=job_id,
+                    interaction_state=interaction,
+                    error=decision.error,
+                )
+            recordings.safe_stop(job_id, JobStatus.AWAITING_HUMAN_INPUT.value)
+            return interaction["prompt"]
+        if decision.status == JobStatus.FAILED.value:
             store.transition(
                 job_id,
-                JobStatus.UNVERIFIED,
-                expected={JobStatus.VERIFYING},
-                error=(
-                    "no structured destination action checkpoint"
-                    if not action
-                    else f"no independent verifier registered for {job['action_type']}"
-                ),
+                JobStatus.FAILED,
+                expected={JobStatus.VERIFYING, JobStatus.RUNNING},
+                error=decision.error,
                 release_lease=True,
             )
-            recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
+            recordings.safe_stop(job_id, JobStatus.FAILED.value)
+        else:
+            closed = fail_closed_zero_playwright_rows(
+                store,
+                current,
+                expected={JobStatus.VERIFYING, JobStatus.RUNNING, JobStatus.UNVERIFIED},
+            )
+            if JobStatus(closed["status"]) == JobStatus.FAILED:
+                recordings.safe_stop(job_id, JobStatus.FAILED.value)
+            elif JobStatus(current["status"]) == JobStatus.VERIFYING:
+                store.transition(
+                    job_id,
+                    JobStatus.UNVERIFIED,
+                    expected={JobStatus.VERIFYING},
+                    error=decision.error,
+                    release_lease=True,
+                )
+                recordings.safe_stop(job_id, JobStatus.UNVERIFIED.value)
     final = store.get_job(job_id)
     if JobStatus(final["status"]) == JobStatus.UNVERIFIED:
         final = fail_closed_zero_playwright_rows(

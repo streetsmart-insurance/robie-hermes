@@ -162,6 +162,14 @@
       "scenario": "playwright-silent:zero-tool-rows-1df9740b",
       "closed": true,
       "note": "Production Chat job 1df9740b-7389-4021-918a-8e65a04d61da (ROBIE Test LLC 220250093 commercial auto) went UNVERIFIED in ~90s. gateway_progress existed. attempts 0. verification_evidence 0. artifacts 0. No playwright checkpoint. post_job_audit FAIL. Recorder frozen on leftover dashboard.useascend.com/create/new. Zero playwright_exec rows. The job asked for EZLynx and never recorded a Playwright call. Fail closed; persist every playwright_exec row; snapshot CDP /json/list at start and end."
+    },
+    {
+      "id": "d5fd2307",
+      "class": "unverified-unmask",
+      "new_failure_mode": true,
+      "scenario": "unverified-unmask:infra-error-not-checkpoint",
+      "closed": true,
+      "note": "Gold Eagle Bond Chat job d5fd2307 closed UNVERIFIED with last_error 'no structured destination action checkpoint' despite 0 playwright_exec / 0 verification_evidence. Infra was PLAYWRIGHT_BLOCKED / CDP ECONNREFUSED on 127.0.0.1:9222. e51a2f2f HITL after flush_tabs_at_job_start then ECONNREFUSED. Do not mask infra as verification. COMPLETE stays blocked without destination evidence. Claimed progress without evidence stays UNVERIFIED."
     }
   ]
 }

@@ -140,6 +140,9 @@ class EzlynxSessionRefreshTests(unittest.TestCase):
         self.assertIn("--remote-debugging-address=127.0.0.1", service)
         self.assertIn("--remote-debugging-port=9222", service)
         self.assertIn("--user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx", service)
+        self.assertIn("StartLimitBurst=", service)
+        self.assertIn("StartLimitIntervalSec=", service)
+        self.assertIn("robie-chrome-refresh", service)
 
     def test_chrome_reboot_precedes_530_refresh_by_two_hours(self):
         root = Path(__file__).resolve().parents[1] / "deploy/systemd"
