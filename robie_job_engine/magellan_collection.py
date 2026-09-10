@@ -21,6 +21,7 @@ DEFAULT_PROJECT = "streetsmart-hermes-poc"
 DASHBOARD_URL = "https://app.magellan.insure/dashboard"
 LOGIN_URL = "https://app.magellan.insure/login"
 ROW_SELECTOR = 'tr[data-testid^="call-success-row-"]'
+EMPTY_RESULT_SELECTOR = '.ant-empty, [data-testid*="empty" i]'
 
 
 def _secret(name: str, project: str = DEFAULT_PROJECT) -> str:
@@ -75,6 +76,12 @@ def _seconds(value: str) -> int:
     raise ValueError(f"unsupported Magellan duration: {value!r}")
 
 
+def _mask_phone(value: str) -> str:
+    """Return a display-safe phone value while retaining only the last 4 digits."""
+    digits = re.sub(r"\D+", "", value)
+    return f"***-***-{digits[-4:]}" if len(digits) >= 4 else "unavailable"
+
+
 def _row_value(row: Any, token: str) -> str:
     locator = row.locator(f'td[data-testid*="-{token}-"]')
     if locator.count() != 1:
@@ -122,6 +129,37 @@ def _next_enabled(page: "Page") -> bool:
     return next_button.count() == 1 and next_button.is_enabled()
 
 
+def _wait_for_sad_results(page: "Page") -> bool:
+    """Wait for either at least one Sad row or Magellan's verified empty state."""
+    page.wait_for_function(
+        "([rowSelector, emptySelector]) => {"
+        " if (document.querySelector(rowSelector)) return true;"
+        " const empty = document.querySelector(emptySelector);"
+        " return Boolean(empty && /no\\s+(data|calls|records)/i.test(empty.textContent || ''));"
+        "}",
+        arg=[ROW_SELECTOR, EMPTY_RESULT_SELECTOR],
+    )
+    return page.locator(ROW_SELECTOR).count() > 0
+
+
+def _visible_row_datetimes(page: "Page") -> list[datetime]:
+    return [
+        datetime.strptime(_row_value(row, "date-time"), "%m/%d/%Y %I:%M %p")
+        for row in page.locator(ROW_SELECTOR).all()
+    ]
+
+
+def _verify_newest_first(
+    values: list[datetime], *, previous_page_oldest: datetime | None
+) -> datetime | None:
+    """Fail closed if early-stop pagination cannot rely on newest-first ordering."""
+    if any(later > earlier for earlier, later in zip(values, values[1:])):
+        raise RuntimeError("Magellan rows are not ordered newest to oldest")
+    if previous_page_oldest is not None and values and values[0] > previous_page_oldest:
+        raise RuntimeError("Magellan pages are not ordered newest to oldest")
+    return values[-1] if values else previous_page_oldest
+
+
 def _ensure_sad_filter(page: "Page") -> None:
     """Select and verify Magellan's Sad sentiment scope deterministically."""
     sad = page.get_by_role("radio", name=re.compile(r"\bSad\b", re.I))
@@ -152,40 +190,52 @@ def collect_magellan_snapshot(
         _authenticate(page, project=project)
         page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
         _ensure_sad_filter(page)
-        page.wait_for_selector(ROW_SELECTOR)
         collected: list[dict[str, Any]] = []
         older_boundary = False
-        pages_read = 0
+        pages_read = 1
         seen_ids: set[str] = set()
-        while pages_read < max_pages:
-            pages_read += 1
-            page_records, older_boundary = parse_visible_rows(page, target_date)
-            for record in page_records:
-                if record["call_id"] not in seen_ids:
-                    seen_ids.add(record["call_id"])
-                    collected.append(record)
-            if older_boundary or not _next_enabled(page):
-                break
-            first_id = page.locator(ROW_SELECTOR).first.get_attribute("data-testid")
-            page.locator("li.ant-pagination-next button, li.ant-pagination-next a").click()
-            page.wait_for_function(
-                "([selector, prior]) => { const row = document.querySelector(selector); "
-                "return row !== null && row.getAttribute('data-testid') !== prior; }",
-                arg=[ROW_SELECTOR, first_id],
-            )
-        if not older_boundary and _next_enabled(page):
-            raise RuntimeError("Magellan pagination limit reached before the target-date boundary")
+        previous_page_oldest: datetime | None = None
+        if _wait_for_sad_results(page):
+            while True:
+                visible_dates = _visible_row_datetimes(page)
+                previous_page_oldest = _verify_newest_first(
+                    visible_dates, previous_page_oldest=previous_page_oldest
+                )
+                page_records, older_boundary = parse_visible_rows(page, target_date)
+                for record in page_records:
+                    if record["call_id"] not in seen_ids:
+                        seen_ids.add(record["call_id"])
+                        collected.append(record)
+                if older_boundary or not _next_enabled(page):
+                    break
+                if pages_read >= max_pages:
+                    raise RuntimeError(
+                        "Magellan pagination limit reached before the target-date boundary"
+                    )
+                first_id = page.locator(ROW_SELECTOR).first.get_attribute("data-testid")
+                page.locator("li.ant-pagination-next button, li.ant-pagination-next a").click()
+                page.wait_for_function(
+                    "([selector, prior]) => { const row = document.querySelector(selector); "
+                    "return row !== null && row.getAttribute('data-testid') !== prior; }",
+                    arg=[ROW_SELECTOR, first_id],
+                )
+                pages_read += 1
+        collected.sort(
+            key=lambda item: (str(item.get("occurred_at") or ""), str(item.get("call_id") or "")),
+            reverse=True,
+        )
     snapshot = {
         "source_status": "available",
         "source": "Magellan authenticated dashboard",
         "target_date": target_date.isoformat(),
         "records_reviewed": len(collected),
         "at_risk_calls": len(collected),
+        "result_status": "records" if collected else "empty",
         "records": collected,
         "sad_calls": [
             {
-                **item,
-                "caller_phone_masked": item["from_number"],
+                **{key: value for key, value in item.items() if key not in {"from_number", "to_number"}},
+                "caller_phone_masked": _mask_phone(item["from_number"]),
                 "callback_status": "UNVERIFIED until RingCentral reconciliation",
             }
             for item in collected
