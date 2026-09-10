@@ -1,0 +1,10 @@
+{
+  "name": "streetsmart-carrier-proposal",
+  "version": "1.0.0",
+  "description": "Generates a branded StreetSmart Insurance client proposal from carrier quote data.",
+  "main": "generate_proposal.js",
+  "dependencies": {
+    "docx": "9.7.1"
+  },
+  "license": "UNLICENSED"
+}
