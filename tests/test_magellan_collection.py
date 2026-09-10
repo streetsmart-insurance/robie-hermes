@@ -52,7 +52,7 @@ def test_magellan_collector_selects_sad_filter_and_never_opens_details():
     source = (
         Path(__file__).resolve().parents[1] / "robie_job_engine/magellan_collection.py"
     ).read_text()
-    assert 'get_by_role("radio", name=re.compile(r"\bSad\b", re.I))' in source
+    assert 'get_by_role("radio", name=re.compile(r"\\bSad\\b", re.I))' in source
     assert "View details" not in source
     assert 'get_by_role("button", name="Mark as Handled", exact=True).click' not in source
 
