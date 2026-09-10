@@ -218,6 +218,66 @@ def check_recordings(db_path: str) -> dict:
     return {"ok": True, "segments": segments, "count": len(segments)}
 
 
+def check_login_secret_report(db_path: str) -> dict:
+    """Read-only dump of the tick's login-secret health sentinel.
+
+    The scheduler tick periodically records Secret Manager version STATES
+    (never payloads) as a checkpoint on a sentinel job. Surfacing the
+    newest ENABLED version per secret lets deploy tooling pin full
+    resource names without needing Secret Manager list grants itself.
+    States and version numbers only.
+    """
+    if not Path(db_path).is_file():
+        return {"ok": False, "error": f"db not found: {db_path}"}
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            row = con.execute(
+                "SELECT id FROM jobs WHERE idempotency_key=?"
+                " ORDER BY created_at DESC LIMIT 1",
+                ("login_secret_health",),
+            ).fetchone()
+            if not row:
+                return {"ok": True, "present": False}
+            job_id = row[0]
+            cp = con.execute(
+                "SELECT data_json, created_at FROM checkpoints"
+                " WHERE job_id=? AND kind=?",
+                (job_id, "login_secret_health"),
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if not cp:
+        return {"ok": True, "present": False, "job_id": job_id}
+    try:
+        data = json.loads(cp[0])
+    except Exception:  # noqa: BLE001
+        return {"ok": True, "present": True, "job_id": job_id,
+                "unparseable": True}
+    secrets = []
+    for item in data.get("secrets") or []:
+        secrets.append(
+            {
+                "secret_id": item.get("secret_id"),
+                "newest_enabled_version": item.get("newest_enabled_version"),
+                "newest_version": item.get("newest_version"),
+                "newest_state": item.get("newest_state"),
+                "missing_enabled": item.get("missing_enabled"),
+            }
+        )
+    return {
+        "ok": True,
+        "present": True,
+        "job_id": job_id,
+        "checked_at": cp[1],
+        "result": data.get("result"),
+        "secrets": secrets,
+    }
+
+
 def check_scheduler_tick(
     timer: str = "robie-scheduler.timer",
     service: str = "robie-scheduler.service",
@@ -339,6 +399,7 @@ def main() -> int:
         ),
         "vm_service_account": check_vm_service_account(),
         "env": check_secret_names(),
+        "login_secret_report": check_login_secret_report(args.db),
     }
     result["ok"] = all(
         [
