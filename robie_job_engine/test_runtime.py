@@ -144,6 +144,28 @@ def build_runtime_engine(
         submission_readback or SubprocessSubmissionReadback()
     )
     verifiers["ezlynx.session_refresh"] = EzlynxSessionVerifier()
+    # Daily verification workers (EZLynx reports 4247/4246/4372/4359 + digest).
+    # The policy-change worker stays kill-switched off (POLICY_CHANGE_ENABLED
+    # is False in its module) until report 4359's schema is verified.
+    from .audit_verification_worker import AuditVerificationWorker, AuditVerificationVerifier
+    from .manual_renewal_worker import ManualRenewalWorker, ManualRenewalVerifier
+    from .mortgagee_verification_worker import (
+        MortgageeVerificationWorker,
+        MortgageeVerificationVerifier,
+    )
+    from .policy_change_worker import PolicyChangeWorker, PolicyChangeVerifier
+    from .verification_digest_worker import VerificationDigestWorker, VerificationDigestVerifier
+
+    workers["manual-renewal"] = ManualRenewalWorker(store=store)
+    workers["audit-verification"] = AuditVerificationWorker(store=store)
+    workers["mortgagee-verification"] = MortgageeVerificationWorker()
+    workers["policy-change-verification"] = PolicyChangeWorker(store=store)
+    workers["verification-digest"] = VerificationDigestWorker(store=store)
+    verifiers["manual_renewal_verification"] = ManualRenewalVerifier()
+    verifiers["audit_verification"] = AuditVerificationVerifier()
+    verifiers["mortgagee_verification"] = MortgageeVerificationVerifier()
+    verifiers["policy_change_verification"] = PolicyChangeVerifier()
+    verifiers["daily_verification_digest"] = VerificationDigestVerifier()
     return JobEngine(
         store,
         workers,

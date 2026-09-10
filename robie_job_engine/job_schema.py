@@ -148,6 +148,49 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
         "the allowlisted SKILL.md path contains the exact requested bytes and hash",
         "FilesystemSkillUpdateVerifier",
     ),
+    "manual_renewal_verification": _contract(
+        "per-policy manual renewal outcomes are recorded with carrier evidence "
+        "or a pending reason, and every policy in report 4247 is accounted for",
+        "ManualRenewalVerifier",
+    ),
+    "audit_verification": _contract(
+        "per-policy audit outcomes are recorded with carrier evidence or a "
+        "pending reason, and every audit in report 4246 is accounted for",
+        "AuditVerificationVerifier",
+    ),
+    "mortgagee_verification": _contract(
+        "per-policy mortgagee outcomes are recorded with lender-delivery "
+        "evidence or a pending reason, and every item in report 4372 is "
+        "accounted for",
+        "MortgageeVerificationVerifier",
+    ),
+    "policy_change_verification": _contract(
+        "per-request policy-change outcomes are recorded with carrier evidence "
+        "or a pending reason, and every request in report 4359 is accounted for; "
+        "no request is ever closed by the worker",
+        "PolicyChangeVerifier",
+    ),
+    "daily_verification_digest": ExecutableSkillContract(
+        expected_destination_result=(
+            "the daily verification digest artifact exists and the digest email "
+            "to carlo@streetsmart.insurance is sent with per-policy "
+            "queue/status/reason/owner/next action/evidence across all five "
+            "departments"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="VerificationDigestVerifier",
+        maximum_attempts=2,
+        success_conditions=(
+            "the digest artifact is freshly reread from the configured output directory",
+            "the artifact SHA-256 matches the worker checkpoint",
+            "every Gmail delivery receipt is verified with a fresh read of the sent message",
+        ),
+        failure_conditions=(
+            "output_dir or email_sender is missing from the job payload",
+            "fresh artifact read-back or checksum verification fails",
+            "delivery receipt verification fails",
+        ),
+    ),
 }
 
 
@@ -204,6 +247,33 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": True,
         "required": ("target_path", "expected_content", "expected_sha256"),
         "identity": ("target_path",),
+    },
+    "manual_renewal_verification": {
+        "schema_verified": True,
+        "required": ("report_id",),
+        "identity": ("report_id",),
+    },
+    "audit_verification": {
+        "schema_verified": True,
+        "required": ("report_id",),
+        "identity": ("report_id",),
+    },
+    "mortgagee_verification": {
+        "schema_verified": True,
+        "required": ("report_id",),
+        "identity": ("report_id",),
+    },
+    "policy_change_verification": {
+        # Report 4359's schema is not yet verified: the worker must stay
+        # disabled (POLICY_CHANGE_ENABLED is False) and bounded jobs hold.
+        "schema_verified": False,
+        "required": ("report_id",),
+        "identity": ("report_id",),
+    },
+    "daily_verification_digest": {
+        "schema_verified": True,
+        "required": ("output_dir", "email_sender"),
+        "identity": ("output_dir",),
     },
 }
 
