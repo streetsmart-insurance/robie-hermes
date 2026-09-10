@@ -50,13 +50,16 @@ jobs:
           set -euo pipefail
           SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
           $SSH --command="hostname -s && mkdir -p '${STAGING}' && ls -ld '${STAGING}'"
-          # Fail fast if the target venv is not executable by the service user.
-          $SSH --command="sudo -u streetsmart-hermes test -x /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python"
+          # Diagnose (never fatal): which venv python can the service user execute?
+          $SSH --command="echo SSH_USER=\$(whoami); ls -la /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python || true; echo ---; sudo -u streetsmart-hermes whoami && echo SUDO_AS_USER_OK || echo SUDO_AS_USER_FAIL; sudo -u streetsmart-hermes test -x /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python && echo HOME_VENV_X_OK || echo HOME_VENV_X_FAIL; ls -la /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python 2>/dev/null || echo OPT_VENV_MISSING; echo ---; sudo systemctl show hermes-gateway -p NRestarts -p ExecMainStatus -p ActiveEnterTimestamp --no-pager || true"
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             deploy/systemd/robie-scheduler.service deploy/systemd/robie-scheduler.timer \
             scripts/audit-production-workers-readonly.py "${PRODUCTION_VM}:${STAGING}/"
           echo "--- diff of unit about to be installed ---"
           $SSH --command="diff -u /etc/systemd/system/robie-scheduler.service '${STAGING}/robie-scheduler.service' || true"
+          VENV_CHECK=$($SSH --command="sudo -u streetsmart-hermes test -x /home/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python && echo HOME_OK || echo HOME_BAD" 2>/dev/null | tail -1)
+          echo "venv check result: ${VENV_CHECK}"
+          if [ "${VENV_CHECK}" != "HOME_OK" ]; then echo "Refusing: service user cannot execute the gateway venv python" >&2; exit 1; fi
           $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.service' /etc/systemd/system/robie-scheduler.service"
           $SSH --command="sudo install -o root -g root -m 0644 '${STAGING}/robie-scheduler.timer' /etc/systemd/system/robie-scheduler.timer"
           $SSH --command="sudo systemctl daemon-reload"
