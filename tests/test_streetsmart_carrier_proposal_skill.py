@@ -56,6 +56,16 @@ class StreetSmartCarrierProposalSkillTests(unittest.TestCase):
             self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), name)
             self.assertGreater(len(data), 1000, name)
 
+    def test_test_deployer_provisions_renderer_dependencies_after_host_lock(self):
+        deployer = Path("scripts/deploy-test-carrier-proposal-skill.sh").read_text(
+            encoding="utf-8"
+        )
+        host_lock = deployer.index('hostname -s')
+        install = deployer.index('apt-get install')
+        self.assertLess(host_lock, install)
+        for package in ("nodejs", "npm", "libreoffice-writer", "poppler-utils"):
+            self.assertIn(package, deployer)
+
 
 if __name__ == "__main__":
     unittest.main()
