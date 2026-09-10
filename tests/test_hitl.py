@@ -7,6 +7,7 @@ from robie_job_engine.hitl import (
     human_reply_value,
     interaction_for_blocker,
     sanitize_hitl_chat_text,
+    structured_blocker_reason,
 )
 
 
@@ -177,6 +178,50 @@ class HumanInTheLoopContractTests(unittest.TestCase):
         interaction = {"field_name": "SSN", "accepts_value": False}
         self.assertEqual(classify_human_reply("RETRY", interaction), "ANSWER")
         self.assertEqual(classify_human_reply("123-45-6789", interaction), "INVALID")
+
+
+class StructuredBlockerTriggerTests(unittest.TestCase):
+    """The HITL trigger must catch the raw guard error, not only the
+    ROBIE_BLOCKED:-prefixed form. Workers paste raw PLAYWRIGHT_BLOCKED
+    lines; requiring the prefix was why HITL never fired (2026-09-10)."""
+
+    def test_prefixed_blocker_still_triggers(self):
+        reason = structured_blocker_reason(
+            "ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: submit control not found"
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("PLAYWRIGHT_BLOCKED", reason)
+
+    def test_bare_playwright_blocked_line_triggers(self):
+        reason = structured_blocker_reason(
+            "Tried the combobox twice.\n"
+            "PLAYWRIGHT_BLOCKED: write target matched 3 fields; refuse to guess"
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("matched 3 fields", reason)
+
+    def test_bare_missing_field_line_triggers(self):
+        reason = structured_blocker_reason(
+            "I looked through the application.\nMISSING_REQUIRED_FIELD: FEIN"
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("FEIN", reason)
+
+    def test_ordinary_prose_does_not_trigger(self):
+        self.assertIsNone(
+            structured_blocker_reason(
+                "I verified the mortgagee clause on screen. Everything looks good."
+            )
+        )
+
+    def test_mention_inside_a_sentence_does_not_trigger(self):
+        # The marker must be a full line of its own, not mid-sentence prose.
+        self.assertIsNone(
+            structured_blocker_reason(
+                "The last run ended with a PLAYWRIGHT_BLOCKED error, "
+                "but I worked around it and finished."
+            )
+        )
 
 
 if __name__ == "__main__":
