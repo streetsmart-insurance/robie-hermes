@@ -53,7 +53,7 @@ jobs:
           JOB_ID=$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="sudo python3 -c \"
           import json, sys
-          sys.path.insert(0, '/opt/streetsmart-hermes/current/robie_job_engine')
+          sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
           from store import JobStore
           store = JobStore('${JOB_DB}')
           job = store.create_job(action_type='${ACTION}', payload=json.loads('${PAYLOAD}'), idempotency_key='manual-trigger-${ACTION}-${{ github.run_id }}')
@@ -65,7 +65,7 @@ jobs:
             STATE=$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
               --command="sudo python3 -c \"
           import sys
-          sys.path.insert(0, '/opt/streetsmart-hermes/current/robie_job_engine')
+          sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
           from store import JobStore
           store = JobStore('${JOB_DB}')
           job = store.get_job('${JOB_ID}')
@@ -81,7 +81,7 @@ jobs:
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="sudo python3 -c \"
           import json, sys
-          sys.path.insert(0, '/opt/streetsmart-hermes/current/robie_job_engine')
+          sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
           from store import JobStore
           store = JobStore('${JOB_DB}')
           job = store.get_job('${JOB_ID}')
