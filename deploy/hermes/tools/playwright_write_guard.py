@@ -42,6 +42,28 @@ POSITIONAL_MARKERS = ("nth=", " >> nth", ".first", ".last")
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 HITL_OPERATOR = "Carlo"
 HITL_NO_RETRY = "ask Gemini then HITL Carlo; do not retry-loop"
+
+# Cardinal rule (Carlo 2026-09-10): ROBIE never deletes. A browser job once
+# deleted a policy. Deletion-shaped clicks are refused outright — no Gemini
+# fallback, no HITL override. Read-only verification work (mortgagee checks,
+# renewal checks, policy-change review) must never need them. If a future
+# workflow legitimately requires deletion, it must go through an explicit
+# allowlisted action type, never a generic click.
+#
+# "cancel" is included because in insurance-agency UI "Cancel policy" ends a
+# policy. It is context-gated only (see below): a bare dialog "Cancel"
+# button has no policy/account/client context and stays allowed.
+DESTRUCTIVE_CLICK_MARKERS = ("delete", "remove", "void", "terminate", "cancel")
+DESTRUCTIVE_CONTEXT_MARKERS = (
+    "policy",
+    "policies",
+    "account",
+    "client",
+    "customer",
+    "coverage",
+    "insured",
+    "applicant",
+)
 _SECRET_LABEL = re.compile(
     r"\b(password|passwd|pwd|mfa|otp|totp|one[- ]time|secret|token|ssn|fein)\b",
     re.IGNORECASE,
@@ -67,6 +89,72 @@ def locator_is_positional_guess(target: Any) -> bool:
     """True when the locator resolved ambiguity by position instead of identity."""
     text = locator_selector_text(target).casefold()
     return any(marker in text for marker in POSITIONAL_MARKERS)
+
+
+def _target_accessible_text(target: Any) -> str:
+    """Best-effort visible/accessible name of a click target. Never throws."""
+    parts: list[str] = []
+    for attr in ("aria-label", "title", "alt", "value", "name"):
+        value = _locator_attribute(target, attr)
+        if value:
+            parts.append(value)
+    for method_name in ("inner_text", "text_content"):
+        fn = getattr(target, method_name, None)
+        if callable(fn):
+            try:
+                value = fn()
+            except Exception as exc:
+                if _is_timeout_error(exc):
+                    raise
+                continue
+            if value:
+                parts.append(str(value))
+    parts.append(locator_selector_text(target))
+    return " ".join(parts)
+
+
+def destructive_action_block_reason(
+    target: Any,
+    *,
+    method_name: str,
+    selector: str | None = None,
+    key: str | None = None,
+) -> str | None:
+    """Hard refusal for deletion-shaped clicks and delete-key presses.
+
+    Cardinal rule: never delete. Unlike unique-write blocks, this is NOT
+    recoverable via Gemini or HITL. A control named Delete/Remove, a
+    destructive verb (delete/remove/void/terminate/cancel) next to a
+    policy/account/client/coverage context word, or pressing the Delete /
+    Backspace key on such a target, is refused outright.
+
+    ``key`` is only used for ``press``: other keys (Tab, Enter, Escape)
+    are never deletion-shaped.
+    """
+    if method_name == "press":
+        pressed = str(key or "").strip().casefold()
+        if pressed not in {"delete", "backspace"}:
+            return None
+    elif method_name != "click":
+        return None
+    resolved = _resolve_write_target(target, selector)
+    name = _target_accessible_text(resolved).casefold()
+    combined = f"{name} {(selector or '').casefold()}"
+    words = set(re.findall(r"[a-z]+", combined))
+    destructive = words & set(DESTRUCTIVE_CLICK_MARKERS)
+    if not destructive:
+        return None
+    context = words & set(DESTRUCTIVE_CONTEXT_MARKERS)
+    named_delete = re.search(r"\b(delete|remove)\b", combined) is not None
+    if not (context or named_delete):
+        return None
+    hit = sorted(destructive)[0]
+    action = "key press" if method_name == "press" else "click"
+    return (
+        f"{PLAYWRIGHT_BLOCKED}: cardinal rule — ROBIE never deletes. "
+        f"Refusing {action} on deletion-shaped control ({hit}); "
+        "this block cannot be overridden by Gemini or HITL."
+    )
 
 
 def unique_write_block_reason(
@@ -569,6 +657,16 @@ def _wrap_write(
     method_name = getattr(method, "__name__", "write")
 
     def wrapped(self, *args, **kwargs):
+        if method_name == "click":
+            # Cardinal rule: never delete. Hard refusal — no Gemini
+            # fallback, no HITL override.
+            destructive = destructive_action_block_reason(
+                self,
+                method_name=method_name,
+                selector=args[0] if page_level and args else None,
+            )
+            if destructive:
+                raise RuntimeError(destructive)
         selector = args[0] if page_level and args else None
         scope_reason = _ezlynx_write_scope_block_reason(
             self,
@@ -625,6 +723,42 @@ def _wrap_write(
     return wrapped
 
 
+def _wrap_destructive_press_only(
+    method: Callable[..., Any],
+    *,
+    page_level: bool,
+) -> Callable[..., Any]:
+    """Wrap press() with ONLY the cardinal no-delete check.
+
+    Unlike _wrap_write, this does not change unique-write, scope, or
+    visibility behavior for key presses — it only refuses Delete/Backspace
+    on deletion-shaped targets. ``Locator.press(key)`` takes the key as
+    args[0]; ``Page.press(selector, key)`` takes it as args[1].
+    """
+    method_name = getattr(method, "__name__", "press")
+
+    def wrapped(self, *args, **kwargs):
+        if page_level:
+            press_key = args[1] if len(args) > 1 else ""
+            press_selector = args[0] if args else None
+        else:
+            press_key = args[0] if args else ""
+            press_selector = None
+        destructive = destructive_action_block_reason(
+            self,
+            method_name="press",
+            selector=press_selector,
+            key=press_key,
+        )
+        if destructive:
+            raise RuntimeError(destructive)
+        return method(self, *args, **kwargs)
+
+    wrapped.__name__ = method_name
+    wrapped.__qualname__ = getattr(method, "__qualname__", method_name)
+    return wrapped
+
+
 def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
     """Patch Locator/Page write methods in a Playwright exec scope."""
     patched: dict[str, Any] = {}
@@ -655,6 +789,21 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
                 ),
             )
             patched[f"{name}.{method_name}"] = True
+    # Cardinal no-delete coverage for key presses. Wrapped separately from
+    # WRAP_METHODS so unique-write / scope behavior for press() is unchanged.
+    for name in ("Locator", "Page"):
+        cls = scope.get(name)
+        if cls is None:
+            continue
+        original = getattr(cls, "press", None)
+        if not callable(original):
+            continue
+        setattr(
+            cls,
+            "press",
+            _wrap_destructive_press_only(original, page_level=(name == "Page")),
+        )
+        patched[f"{name}.press-no-delete"] = True
     scope["_robie_unique_write_guard"] = True
     scope["require_unique_write_target"] = require_unique_write_target
     scope["consult_gemini_for_blocked_write"] = consult_gemini_for_blocked_write
