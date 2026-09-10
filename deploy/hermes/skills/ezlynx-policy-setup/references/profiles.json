@@ -68,8 +68,35 @@
     {
       "id": "commercial_auto_contractors", "name": "Commercial Auto — Contractors", "aliases": ["commercial auto contractors", "contractors auto"],
       "state": "Testing", "consequential_writes_enabled": false,
-      "required_fields": ["business_use", "vehicles", "drivers", "garaging", "symbols", "limits"],
-      "verification_fields": ["business_use", "vehicles", "drivers", "garaging", "symbols", "limits", "deductibles", "loss_payees"],
+      "required_fields": [
+        "business_use",
+        "vehicles",
+        "drivers",
+        "garaging",
+        "symbols",
+        "limits",
+        "vehicle_liability",
+        "vehicle_med_pay",
+        "vehicle_um_uim",
+        "policy_um_uim",
+        "comp_deductible",
+        "coll_deductible"
+      ],
+      "verification_fields": [
+        "business_use",
+        "vehicles",
+        "drivers",
+        "garaging",
+        "symbols",
+        "limits",
+        "vehicle_liability",
+        "vehicle_med_pay",
+        "vehicle_um_uim",
+        "policy_um_uim",
+        "comp_deductible",
+        "coll_deductible",
+        "loss_payees"
+      ],
       "guards": ["must not be reused for trucking"]
     },
     {
