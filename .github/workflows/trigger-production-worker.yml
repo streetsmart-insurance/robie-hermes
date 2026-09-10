@@ -54,7 +54,7 @@ jobs:
             --command="sudo python3 -c \"
           import json, sys
           sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
-          from store import JobStore
+          from robie_job_engine.store import JobStore
           store = JobStore('${JOB_DB}')
           job = store.create_job(action_type='${ACTION}', payload=json.loads('${PAYLOAD}'), idempotency_key='manual-trigger-${ACTION}-${{ github.run_id }}')
           print(job['id'] if isinstance(job, dict) else job)
@@ -66,7 +66,7 @@ jobs:
               --command="sudo python3 -c \"
           import sys
           sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
-          from store import JobStore
+          from robie_job_engine.store import JobStore
           store = JobStore('${JOB_DB}')
           job = store.get_job('${JOB_ID}')
           print(job.get('status', 'unknown') if job else 'missing')
@@ -82,7 +82,7 @@ jobs:
             --command="sudo python3 -c \"
           import json, sys
           sys.path.insert(0, '/opt/streetsmart-hermes/robie-job-engine')
-          from store import JobStore
+          from robie_job_engine.store import JobStore
           store = JobStore('${JOB_DB}')
           job = store.get_job('${JOB_ID}')
           print(json.dumps(job, indent=2, default=str)[:6000])
