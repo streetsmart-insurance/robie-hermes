@@ -143,6 +143,42 @@ def check_schedules(db_path: str) -> dict:
     }
 
 
+def check_jobs(db_path: str) -> dict:
+    """Read-only dump of every non-terminal job row (diagnoses stuck jobs)."""
+    if not Path(db_path).is_file():
+        return {"ok": False, "error": f"db not found: {db_path}"}
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+        try:
+            rows = con.execute(
+                "SELECT id, action_type, status, attempt_count, lease_owner,"
+                " lease_expires_at, created_at, updated_at,"
+                " substr(coalesce(last_error,''),1,300)"
+                " FROM jobs WHERE status NOT IN ('completed','failed','cancelled')"
+                " ORDER BY created_at"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    jobs = [
+        {
+            "id": r[0],
+            "action_type": r[1],
+            "status": r[2],
+            "attempt_count": r[3],
+            "lease_owner": r[4],
+            "lease_expires_at": r[5],
+            "created_at": r[6],
+            "updated_at": r[7],
+            "last_error": r[8],
+        }
+        for r in rows
+    ]
+    return {"ok": True, "non_terminal_jobs": jobs, "count": len(jobs)}
+
+
 def check_scheduler_tick(
     timer: str = "robie-scheduler.timer",
     service: str = "robie-scheduler.service",
@@ -257,6 +293,7 @@ def main() -> int:
         "gateway": check_gateway(),
         "job_types": check_job_types(release_root),
         "schedules": check_schedules(args.db),
+        "jobs": check_jobs(args.db),
         "scheduler_tick": check_scheduler_tick(
             release_root=str(Path(args.opt_root) / "current")
         ),
