@@ -1,8 +1,6 @@
 ---
 name: streetsmart-carrier-proposal
-description: Turns a raw commercial trucking/auto insurance carrier quote (GEICO, Progressive, Cover Whale, or any other carrier's PDF) into a clean, StreetSmart-branded client proposal — stripping out the carrier's name and letterhead, keeping only coverages/limits (no per-line premiums), listing all quoted drivers and the radius of operation, and presenting premium/payment terms with any user-authorized broker amount labeled only as "Taxes and fees." Use this whenever Jake uploads or mentions a carrier quote, proposal, or "quote PDF" and wants it turned into a proposal to send a client, even if he doesn't name the skill directly. Also use if he asks to "make a StreetSmart proposal" or "clean up this quote."
-job_type: carrier.proposal
-production_ready: true
+description: Turns a raw commercial trucking/auto insurance carrier quote (GEICO, Progressive, Cover Whale, or any other carrier's PDF) into a clean, StreetSmart-branded client proposal — stripping out the carrier's name and letterhead, keeping only coverages/limits (no per-line premiums), listing all quoted drivers and the radius of operation, and presenting premium/payment terms with StreetSmart's default $450 additional amount labeled only as "Taxes and fees" unless Jake directs otherwise. Use this whenever Jake uploads or mentions a carrier quote, proposal, or "quote PDF" and wants it turned into a proposal to send a client, even if he doesn't name the skill directly. Also use if he asks to "make a StreetSmart proposal" or "clean up this quote."
 ---
 
 # StreetSmart Carrier Proposal Generator
@@ -17,7 +15,8 @@ radius of operation, the total annual premium, the required initial (down) payme
 payment plan, and the monthly installment.
 
 This skill reads whatever carrier PDF Jake gives you, pulls out the numbers, and renders
-them into the fixed StreetSmart template via `scripts/generate_proposal.js`. The template's
+them into the fixed, Jake-approved StreetSmart **Blue Frame** template via
+`scripts/generate_proposal.js`. The template's
 branding, marketing pages, and partner pages are already built — you are only ever supplying
 the customer-specific data.
 
@@ -59,14 +58,14 @@ the customer-specific data.
      `"11 Payments, 16.67% Down"` or `"10 Monthly Payments"`.
    - `monthly_installment` — the recurring payment amount for the selected plan.
 
-5. **Apply only an explicitly authorized additional amount.** Never add a default broker,
-   agency, service, or StreetSmart fee. If Jake specifies an additional broker amount for
-   a proposal, put that amount in `taxes_and_fees`; the generator folds it into the initial
-   payment. On the client proposal, describe it **only** as `Taxes and fees` — never as an
-   agency fee, service fee, broker fee, StreetSmart fee, or similar wording. Do not expose
-   a breakdown unless Jake explicitly asks for one. If Jake says not to apply fees, omit
-   `taxes_and_fees` or set it to `$0.00`, and the initial payment must equal the carrier's
-   stated initial payment.
+5. **Apply StreetSmart's default $450 additional amount unless Jake directs otherwise.**
+   Set `taxes_and_fees` to `$450.00` on every proposal by default. The generator adds it to
+   the carrier's required initial payment, and both the Quote at a Glance page and Premium &
+   Payment Terms page must show the resulting client initial payment. If Jake specifies a
+   different amount, use that amount instead. If Jake says not to apply it, set
+   `taxes_and_fees` to `$0.00`. On the client proposal, describe the amount **only** as
+   `Taxes and fees` — never as an agency fee, service fee, broker fee, StreetSmart fee, or
+   similar wording. Do not expose a further breakdown unless Jake explicitly asks for one.
 
 6. **Write a `data.json`** matching this schema (see the full example in the header
    comment of `scripts/generate_proposal.js`):
@@ -90,7 +89,7 @@ the customer-specific data.
      ],
      "total_annual_premium": "$X,XXX.XX",
      "required_initial_payment": "$X,XXX.XX",
-    "taxes_and_fees": "$0.00",
+    "taxes_and_fees": "$450.00",
     "required_initial_payment_includes_taxes_and_fees": false,
      "payment_plan_label": "...",
      "monthly_installment": "$X,XXX.XX/month"
@@ -134,13 +133,22 @@ the customer-specific data.
 The template already contains, fully built and Jake-approved — don't regenerate or
 improvise these from scratch, don't re-derive them from the carrier PDF:
 
-- Cover page layout, StreetSmart logo/branding, and the diagonal stripe header on every page.
-- The "Your Insurance Quote" page (Jake's photo linking to
-  `https://www.streetsmart.insurance/quotevids/your-insurance-quote/`, plus a large
-  highlighted "CLICK HERE!" button).
+- The approved Blue Frame cover: deep StreetSmart-blue background, yellow rules, centered
+  client and producer details, and the large centered StreetSmart logo on a generous white field.
+- The Blue Frame interior header: StreetSmart logo on a white field at left, "COMMERCIAL
+  INSURANCE" at right, and the yellow lower rule.
+- The complete StreetSmart logo artwork, including the full light-bulb base and every radiating
+  line. Keep generous white padding around the logo so no part of "Insurance," the bulb, or its
+  rays can be clipped on the cover or in repeated headers.
+- Navy title bars, yellow section rules, pale-blue coverage accents, and the blue/yellow premium
+  table styling.
+- The Quote at a Glance page, personalized quote-fit section, and the video walkthrough page
+  with Jake's photo, direct call-to-action, and QR code linking to
+  `https://www.streetsmart.insurance/quotevids/your-insurance-quote/`.
 - The "Why do business with StreetSmart?" page, including the highlighted lead-in phrases.
-- The "Our Partners" pages (CNS Compliance Navigation Specialists, and RTS Financial for
-  factoring) — these are static marketing content, not derived from any carrier quote.
+- The Safety & Compliance page for LaShunda Wiggs at DOT Compliance Group and the RTS
+  Financial factoring page for Drew Munoz — these are static marketing content, not derived
+  from any carrier quote.
 - Binding Requirements (shown in bold red so they can't be missed) and the Legal Disclaimer.
 
 If Jake asks to change any of this static content (wording, images, new partners, sizing),
@@ -149,8 +157,9 @@ edit `scripts/generate_proposal.js` directly rather than working around it in `d
 
 ## Assets bundled with this skill
 
-`scripts/assets/` contains the StreetSmart logo, stripe graphic, Jake's photo, and the CNS
-logo — all already wired into `generate_proposal.js`. If Jake provides a real RTS Financial
+`scripts/assets/` contains the approved expanded StreetSmart logo (`logo-expanded-v2.png`),
+legacy branding assets, Jake's photo, and the quote-video QR code — all already wired into
+`generate_proposal.js`. If Jake provides a real RTS Financial
 logo file (a proper file attachment, not a pasted chat image — pasted images aren't
 accessible on disk), save it as `scripts/assets/rts_logo.png` and it will automatically
 replace the current text-only "RTS FINANCIAL" placeholder — no code change needed, the
