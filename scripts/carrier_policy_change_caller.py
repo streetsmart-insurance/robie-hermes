@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+except Exception:
+    pass
+from robie_guard import (  # noqa: E402
+    WriteNotAuthorized, add_write_gate_args, assert_write_allowed, resolve_write_gate,
+)
+
 logger = logging.getLogger("policy_change_caller")
 
 # Default voice settings
@@ -288,7 +296,7 @@ def dispatch_policy_change_call(
     phone_override: Optional[str] = None,
     submission_date: Optional[str] = None,
     custom_instructions: Optional[str] = None,
-    dry_run: bool = False,
+    dry_run: bool = True,
     api_key: Optional[str] = None,
     caller_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -420,6 +428,12 @@ Purpose: {change_summary}
 Telephony Engine: Bland AI (Call ID: {call_id})
 
 ROBIE was here"""
+                    assert_write_allowed(
+                        "add_note_to_discussion",
+                        applicant_id=str(applicant_id),
+                        policy_number=policy_number,
+                        detail="carrier call dispatch note",
+                    )
                     client.add_note_to_discussion(
                         applicant_id=str(applicant_id),
                         discussion_title=f"Policy Change Call | {policy_number} {carrier_info['name']}",
@@ -427,6 +441,8 @@ ROBIE was here"""
                         policy_number=policy_number,
                         carrier_name=carrier_info["name"],
                     )
+            except WriteNotAuthorized as gate_err:
+                logger.warning("[WRITE_GATE] EZLynx dispatch note NOT posted: %s", gate_err)
             except Exception as ez_err:
                 logger.warning(f"Failed to post caller dispatch to EZLynx: {ez_err}")
 
@@ -460,12 +476,6 @@ ROBIE was here"""
             "carrier": carrier_info["name"],
             "policy": policy_number,
             "phone": clean_phone,
-        logger.error(f"Failed to dispatch live Bland AI call: {e}")
-        return {
-            "success": False,
-            "error": "DISPATCH_EXCEPTION",
-            "details": str(e),
-            "policy": policy_number,
         }
 
 
@@ -496,10 +506,33 @@ def main():
     parser.add_argument("--submission-date", default=None, help="Date change was submitted (e.g. '08/10/2026')")
     parser.add_argument("--phone", default=None, help="Direct carrier phone override (e.g. '+18004621077')")
     parser.add_argument("--instructions", default=None, help="Additional CSR notes or instructions")
-    parser.add_argument("--dry-run", action="store_true", help="Execute simulation mode without dialing out")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="(default behaviour) Simulate without dialing out")
+    parser.add_argument("--live-voice", "--live-call", dest="live_voice", action="store_true",
+                        help="ACTUALLY DIAL a real carrier. Requires explicit authorization. "
+                             "Without this flag the caller always simulates.")
     parser.add_argument("--caller-id", default=None, help="Outbound caller ID override")
+    add_write_gate_args(parser)
 
     args = parser.parse_args()
+
+    try:
+        resolve_write_gate(args)
+        if args.live_voice:
+            assert_write_allowed(
+                "place_call",
+                policy_number=args.policy_number,
+                detail=f"live outbound call to {args.carrier}",
+            )
+    except WriteNotAuthorized as gate_err:
+        logger.error("[WRITE_GATE] %s", gate_err)
+        print(f"\nRefused: {gate_err}\n", file=sys.stderr)
+        sys.exit(2)
+
+    if args.live_voice:
+        logger.warning("[LIVE_VOICE] Placing a REAL outbound call to %s.", args.carrier)
+    else:
+        logger.info("[SIMULATION] No --live-voice flag: simulating, no call will be placed.")
 
     res = dispatch_policy_change_call(
         policy_number=args.policy_number,
@@ -509,7 +542,7 @@ def main():
         phone_override=args.phone,
         submission_date=args.submission_date,
         custom_instructions=args.instructions,
-        dry_run=args.dry_run,
+        dry_run=not args.live_voice,
         caller_id=args.caller_id,
     )
 

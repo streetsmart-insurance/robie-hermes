@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Approved destructive request signatures. SHIPS EMPTY ON PURPOSE.",
+    "The real EZLynx delete-transaction endpoint has never been observed from a",
+    "trusted capture, and it will not be guessed -- a wrong pattern here is",
+    "exactly how a policy-level endpoint gets allowed.",
+    "",
+    "To populate: run scripts/observe_destructive_request.py, have a HUMAN delete",
+    "one duplicate pending RWL shell in the UI while it records, review the",
+    "captured method+URL, then add it below with approved_by/approved_at filled in.",
+    "A rule without approved_by and approved_at is ignored."
+  ],
+  "allowed_destructive_requests": []
+}

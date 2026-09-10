@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from datetime import datetime
 try:
     from playwright.async_api import async_playwright
@@ -295,6 +296,15 @@ async def verify_policy_change(account_id, policy_number, lob_str, document_path
     
     return full_report
 
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+except Exception:
+    pass
+from robie_guard import (  # noqa: E402
+    WriteNotAuthorized, add_write_gate_args, assert_write_allowed, resolve_write_gate,
+)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StreetSmart EZLynx Policy Change Confirmation Pipeline")
     parser.add_argument("--account-id", required=True, help="EZLynx Account ID")
@@ -302,9 +312,26 @@ if __name__ == "__main__":
     parser.add_argument("--lob", required=True, help="Line of Business")
     parser.add_argument("--document-path", default="", help="Path to downloaded carrier endorsement document")
     parser.add_argument("--request-text", required=True, help="Description of original change request")
-    parser.add_argument("--post-note", action="store_true", help="Post note to EZLynx discussion if connected")
+    parser.add_argument("--post-note", action="store_true",
+                        help="Post the QC note to the EZLynx discussion. Requires "
+                             "--authorized-by. NOTE: the EZLynx write path (src/ezlynx) "
+                             "is not present in this repo, so this currently gates an "
+                             "unimplemented write.")
+    add_write_gate_args(parser)
     
     args = parser.parse_args()
+
+    try:
+        resolve_write_gate(args)
+        if args.post_note:
+            assert_write_allowed("post_note",
+                                 applicant_id=args.account_id,
+                                 policy_number=args.policy_number,
+                                 detail="policy change QC note")
+    except WriteNotAuthorized as gate_err:
+        print(f"\nRefused: {gate_err}\n", file=sys.stderr)
+        sys.exit(2)
+
     asyncio.run(verify_policy_change(
         account_id=args.account_id,
         policy_number=args.policy_number,

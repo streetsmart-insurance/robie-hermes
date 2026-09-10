@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local run artifacts and account data - never commit client data
+data/
+reports/
+*.log
+downloads/
+screenshots/
+
+# Secrets
+.env
+*.pem
+*.key
+credentials.json
+token.json
+guard_config.local.json

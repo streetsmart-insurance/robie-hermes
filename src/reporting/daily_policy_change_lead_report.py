@@ -24,6 +24,60 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.email_outreach.gmail_client import GmailRenewalClient
 
+
+# --- Carrier routing + age. Facts only: channel is a static property of the
+# carrier, age is computed from the record. Nothing here asserts case progress,
+# names an underwriter, or invents a date. If we have not verified something,
+# the report says so. ---
+
+CARRIER_CHANNEL = {
+    "progressive": "Direct portal (Progressive FAO)",
+    "national general": "Direct portal (NatGen)",
+    "guard": "Direct portal (Berkshire GUARD)",
+    "bhhc": "Direct portal (BHHC)",
+    "travelers": "Direct portal",
+    "amtrust": "Direct portal (AmTrust Online)",
+    "merchants": "Dec-less carrier - portal roster inspection required (Inv. 2)",
+    "jimcor": "Wholesale/MGA desk",
+    "rt specialty": "Wholesale/MGA desk",
+    "tapco": "Wholesale/MGA desk",
+    "burns": "Wholesale/MGA desk",
+    "jm wilson": "Wholesale/MGA desk",
+    "utica first": "Underwriter desk",
+    "geico": "Underwriter desk",
+}
+
+
+def carrier_channel(carrier):
+    """Retrieval channel for a carrier. Static routing fact, not case status."""
+    c = (carrier or "").lower()
+    for key, chan in CARRIER_CHANNEL.items():
+        if key in c:
+            return chan
+    return "Channel not classified"
+
+
+def age_status(created_date, report_date, parse_dt):
+    """Age and SLA state derived from the record. No invented dates."""
+    try:
+        days = (report_date - parse_dt(created_date)).days
+    except Exception:
+        return "age unknown"
+    if days <= 2:
+        return f"{days}d open - inside 24-48h carrier SLA (Inv. 6)"
+    if days <= 14:
+        return f"{days}d open"
+    if days <= 60:
+        return f"<b>{days}d open - aging</b>"
+    return f"<b>{days}d open - legacy backlog</b>"
+
+
+def action_cell(carrier, created_date, report_date, parse_dt):
+    return (f"{carrier_channel(carrier)} | {age_status(created_date, report_date, parse_dt)}"
+            " | <i>no verified carrier evidence on file</i>")
+
+
+
 logger = logging.getLogger("policy_change_lead_report")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -131,24 +185,7 @@ def generate_report_content(queue_rows: List[Dict[str, Any]], report_date: date)
 
     for r in recent_trucking:
         carrier = r["carrier"]
-        notes = "In carrier processing"
-        if "merchants" in carrier.lower():
-            if "family tradition" in r["account_name"].lower():
-                notes = "<b>Carrier Servicing in Progress</b>: Underwriter Caroline McMahon handling vehicle additions (Isuzu & Chevy Express). Follow-up scheduled for 09/10."
-            elif "cardone" in r["account_name"].lower():
-                notes = "<b>Underwriter Follow-up</b>: Change requested 08/25. Carrier follow-up submitted to midlanticoffice@merchantsgroup.com."
-            elif "kjsd" in r["account_name"].lower():
-                notes = "<b>Within Carrier SLA</b>: Change requested 09/03. Follow-up scheduled per 48h turnaround gate."
-            else:
-                notes = "Merchants Auto change in progress; portal inspection queued."
-        elif "progressive" in carrier.lower():
-            notes = "<b>Portal Retrieval Ready</b>: Progressive FAO inquiry queued for automatic ID card & dec download."
-        elif "geico" in carrier.lower():
-            notes = "<b>Underwriter Servicing</b>: Commercial auto vehicle/driver update submitted 08/17."
-        elif "national general" in carrier.lower():
-            notes = "<b>Portal Verified</b>: NatGen portal check active for endorsement dec & vehicle roster."
-        elif "jm wilson" in carrier.lower():
-            notes = "<b>MGA Desk Follow-Up</b>: Commercial auto change with JM Wilson wholesale desk."
+        notes = action_cell(carrier, r["created_date"], report_date, parse_dt)
 
         md.append(f"| **{r['account_name']}**<br><code>App #{r['applicant_id']}</code> | <code>{r['policy_number']}</code> | {carrier} | {r['csr']}<br>*(Prod: {r['producer']})* | {r['created_date']} | {notes} |")
 
@@ -164,15 +201,7 @@ def generate_report_content(queue_rows: List[Dict[str, Any]], report_date: date)
     for r in recent_comm[:15]:
         labels = r["policy_labels"] or "Policy Change"
         carrier = r["carrier"]
-        action_status = "Awaiting carrier endorsement dec"
-        if "tapco" in carrier.lower():
-            action_status = "<b>Wholesale Broker SLA</b>: Submitted 09/08 (Blanket AI, PANC, WOS). SLA due date 09/14."
-        elif "jimcor" in carrier.lower():
-            action_status = "<b>Preempted / UW Active</b>: Underwriter Arlene Rivera confirmed handling; voice call preempted."
-        elif "utica first" in carrier.lower():
-            action_status = "<b>Manual Desk Review</b>: Underwriter follow-up queued to cl@uticafirst.com."
-        elif "amtrust" in carrier.lower():
-            action_status = "<b>Portal Audit Active</b>: AmTrust Online dec page retrieval queued."
+        action_status = action_cell(carrier, r["created_date"], report_date, parse_dt)
 
         md.append(f"| **{r['account_name']}**<br><code>App #{r['applicant_id']}</code> | {r['lob']} | <code>{r['policy_number']}</code> | {carrier} | {r['csr']} | {r['created_date']} | <code>{labels}</code> | {action_status} |")
 
@@ -180,19 +209,21 @@ def generate_report_content(queue_rows: List[Dict[str, Any]], report_date: date)
 
     # What ROBIE is Doing
     md.append("## 4. 🤖 Autonomous ROBIE Actions & Safeguards in Flight")
-    md.append("- **Autonomous 3-Way Match Verification**: Cross-referencing requested endorsement terms (Discussion & ACORD 25) against carrier-issued schedules before allowing any transaction closure.")
-    md.append("- **Tri-Channel Document Retrieval**: Actively polling carrier portals (Progressive FAO, NatGen, AmTrust), underwriter email threads, and autonomous voice AI desk calls.")
-    md.append("- **Hardened Invariant Safeguards Active**:")
-    md.append("  - *Invariant 1 (Dec-Less Protection)*: Refuses to close open change requests without independent carrier dec confirmation.")
-    md.append("  - *Invariant 6 (Turnaround Gate)*: Suppresses premature carrier badgering within 24-48 business hours.")
-    md.append("  - *Invariant 8 (Email Preemption)*: Automatically terminates phone calls if an underwriter replies via email beforehand.")
+    md.append("- **3-Way Match Verification**: Run on demand per case via the verification pipeline. This report does not assert that any row below has been matched.")
+    md.append("- **Document Retrieval**: Portal, email and voice channels are available per the routing column above. Retrieval is not running continuously against the whole queue.")
+    md.append("- **Invariant enforcement status** (what is actually enforced in code, not aspirational):")
+    md.append("  - *Invariant 7 (Telephony Hours)*: **ENFORCED** - outbound calls gated to Mon-Fri 9:00-18:00 ET.")
+    md.append("  - *Invariant 1 (Change-Request State)*: **NOT ENFORCED IN CODE** - closure gate is procedural only.")
+    md.append("  - *Invariant 2 (Dec-Less Carrier Gate)*: **NOT ENFORCED IN CODE** - dec-less carriers flagged in the roster above.")
+    md.append("  - *Invariant 6 (Turnaround Gate)*: **NOT ENFORCED IN CODE** - age is reported, follow-up is not suppressed automatically.")
+    md.append("  - *Invariant 8 (Email Preemption)*: **NOT IMPLEMENTED** - no email watcher or call-kill path exists. Calls are not preempted by underwriter email.")
     md.append("")
 
     # Immediate Team Action Items
     md.append("## 5. ⚠️ Action Items & Team Escalations")
     md.append("1. **Merchants Insurance Group Logins**: Profile completed for Robie (`AI1434` / Agency `84409`). Verifying agency portal credentials to enable autonomous dec downloads on `files.merchantsgroup.com`.")
     md.append("2. **Legacy Policy Changes Archive**: There are legacy confirmation items from prior years in the queue. ROBIE can run an automated reconciliation to clear closed items with team approval.")
-    md.append("3. **Underwriter Replies Received**: Any underwriter responses received overnight have been logged to the corresponding EZLynx discussion cards and routed to the assigned CSRs.")
+    md.append("3. **Underwriter Replies**: Not monitored automatically. Overnight carrier and underwriter replies must be reviewed by the assigned CSR - ROBIE does not log or route them.")
 
     return "\n".join(md)
 
