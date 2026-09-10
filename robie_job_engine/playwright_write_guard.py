@@ -42,6 +42,24 @@ POSITIONAL_MARKERS = ("nth=", " >> nth", ".first", ".last")
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 HITL_OPERATOR = "Carlo"
 HITL_NO_RETRY = "ask Gemini then HITL Carlo; do not retry-loop"
+
+# Cardinal rule (Carlo 2026-09-10): ROBIE never deletes. A browser job once
+# deleted a policy. Deletion-shaped clicks are refused outright — no Gemini
+# fallback, no HITL override. Read-only verification work (mortgagee checks,
+# renewal checks, policy-change review) must never need them. If a future
+# workflow legitimately requires deletion, it must go through an explicit
+# allowlisted action type, never a generic click.
+DESTRUCTIVE_CLICK_MARKERS = ("delete", "remove", "void", "terminate")
+DESTRUCTIVE_CONTEXT_MARKERS = (
+    "policy",
+    "policies",
+    "account",
+    "client",
+    "customer",
+    "coverage",
+    "insured",
+    "applicant",
+)
 _SECRET_LABEL = re.compile(
     r"\b(password|passwd|pwd|mfa|otp|totp|one[- ]time|secret|token|ssn|fein)\b",
     re.IGNORECASE,
@@ -67,6 +85,61 @@ def locator_is_positional_guess(target: Any) -> bool:
     """True when the locator resolved ambiguity by position instead of identity."""
     text = locator_selector_text(target).casefold()
     return any(marker in text for marker in POSITIONAL_MARKERS)
+
+
+def _target_accessible_text(target: Any) -> str:
+    """Best-effort visible/accessible name of a click target. Never throws."""
+    parts: list[str] = []
+    for attr in ("aria-label", "title", "alt", "value", "name"):
+        value = _locator_attribute(target, attr)
+        if value:
+            parts.append(value)
+    for method_name in ("inner_text", "text_content"):
+        fn = getattr(target, method_name, None)
+        if callable(fn):
+            try:
+                value = fn()
+            except Exception as exc:
+                if _is_timeout_error(exc):
+                    raise
+                continue
+            if value:
+                parts.append(str(value))
+    parts.append(locator_selector_text(target))
+    return " ".join(parts)
+
+
+def destructive_action_block_reason(
+    target: Any,
+    *,
+    method_name: str,
+    selector: str | None = None,
+) -> str | None:
+    """Hard refusal for deletion-shaped clicks. Cardinal rule: never delete.
+
+    Unlike unique-write blocks, this is NOT recoverable via Gemini or HITL.
+    A control named Delete/Remove, or a destructive verb next to a
+    policy/account/client/coverage context word, is refused outright.
+    """
+    if method_name != "click":
+        return None
+    resolved = _resolve_write_target(target, selector)
+    name = _target_accessible_text(resolved).casefold()
+    combined = f"{name} {(selector or '').casefold()}"
+    words = set(re.findall(r"[a-z]+", combined))
+    destructive = words & set(DESTRUCTIVE_CLICK_MARKERS)
+    if not destructive:
+        return None
+    context = words & set(DESTRUCTIVE_CONTEXT_MARKERS)
+    named_delete = re.search(r"\b(delete|remove)\b", combined) is not None
+    if not (context or named_delete):
+        return None
+    hit = sorted(destructive)[0]
+    return (
+        f"{PLAYWRIGHT_BLOCKED}: cardinal rule — ROBIE never deletes. "
+        f"Refusing click on deletion-shaped control ({hit}); "
+        "this block cannot be overridden by Gemini or HITL."
+    )
 
 
 def unique_write_block_reason(
@@ -569,6 +642,16 @@ def _wrap_write(
     method_name = getattr(method, "__name__", "write")
 
     def wrapped(self, *args, **kwargs):
+        if method_name == "click":
+            # Cardinal rule: never delete. Hard refusal — no Gemini
+            # fallback, no HITL override.
+            destructive = destructive_action_block_reason(
+                self,
+                method_name=method_name,
+                selector=args[0] if page_level and args else None,
+            )
+            if destructive:
+                raise RuntimeError(destructive)
         selector = args[0] if page_level and args else None
         scope_reason = _ezlynx_write_scope_block_reason(
             self,
