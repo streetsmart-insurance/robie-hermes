@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -658,6 +659,49 @@ class CompleteLawAndBootstrapTests(unittest.TestCase):
         self.assertNotIn("session is fine", bootstrap)
         self.assertNotIn("systemctl restart", bootstrap)
         self.assertNotIn("print(secret(", bootstrap)
+
+
+class ParseTimestampSystemctlLocalTimezone(unittest.TestCase):
+    """systemctl prints ActiveEnterTimestamp in SYSTEM LOCAL time.
+
+    Regression test: parse_timestamp used to label that local wall-clock
+    time as UTC, so on a host in America/New_York the Production verifier
+    compared 12:02 EDT against a true-UTC 16:02 flip and rolled back good
+    deploys with "pointer-only is not live".
+    """
+
+    def setUp(self):
+        self._old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+
+    def tearDown(self):
+        if self._old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._old_tz
+        time.tzset()
+
+    def test_systemctl_edt_wall_clock_converts_to_utc(self):
+        parsed = parse_timestamp("Thu 2026-09-10 12:02:06 EDT")
+        self.assertEqual(
+            parsed, datetime(2026, 9, 10, 16, 2, 6, tzinfo=timezone.utc)
+        )
+
+    def test_gateway_after_flip_holds_with_local_systemctl_output(self):
+        result = prove_gateway_after_flip(
+            flip_at="2026-09-10T16:02:04.155056+00:00",
+            active_enter="Thu 2026-09-10 12:02:06 EDT",
+        )
+        self.assertTrue(result["ok"], result.get("evidence"))
+        self.assertIn("after flip", result["evidence"])
+
+    def test_iso_inputs_unaffected(self):
+        parsed = parse_timestamp("2026-09-10T16:02:04.155056+00:00")
+        self.assertEqual(
+            parsed,
+            datetime(2026, 9, 10, 16, 2, 4, 155056, tzinfo=timezone.utc),
+        )
 
 
 if __name__ == "__main__":
