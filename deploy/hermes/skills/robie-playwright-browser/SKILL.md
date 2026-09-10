@@ -52,9 +52,12 @@ URL-guessing.
 ## Never delete (cardinal rule)
 
 ROBIE never deletes. Do not click Delete / Remove / Void / Terminate /
-Cancel-policy controls, and do not press Delete/Backspace to clear records.
-The write guard refuses these clicks outright and the refusal cannot be
-overridden by Gemini or by HITL. If a task seems to require deletion, stop
+Cancel-policy controls, and do not press the Delete or Backspace key on a
+policy, account, client, or coverage record. The write guard refuses these
+clicks and key presses outright and the refusal cannot be overridden by
+Gemini or by HITL. (A plain dialog "Cancel" button with no policy context,
+and Backspace/Delete typed inside an ordinary text field, are not
+deletion-shaped and stay allowed.) If a task seems to require deletion, stop
 and HITL Carlo instead.
 
 ## Completion gate
