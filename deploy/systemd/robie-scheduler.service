@@ -16,6 +16,9 @@ Environment=ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=America/New_York
 Environment=ROBIE_EZLYNX_SESSION_LOCK=/opt/streetsmart-hermes/robie-job-engine/data/ezlynx-session.lock
 Environment=ROBIE_EZLYNX_LOGIN_HELPER=/opt/streetsmart-hermes/releases/current/ezlynx_login_bootstrap.py
 EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
+# EZLynx Secret Manager resource names (names only, never values), written by
+# the repair-production-scheduler-unit workflow at deploy time.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
 # Ensure the job DB directory exists and is service-owned before the
 # sandboxed tick runs (ProtectSystem=strict keeps /opt read-only).
 ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0750 /opt/streetsmart-hermes/robie-job-engine/data
