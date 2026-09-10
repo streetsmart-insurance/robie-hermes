@@ -1,0 +1,62 @@
+name: Configure EZLynx API environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CONFIGURE_EZLYNX_API_ON_HERMES_POC_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+id-token: write
+
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'CONFIGURE_EZLYNX_API_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+      - name: Write EZLynx API secret references on hermes-poc-01
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          $SSH --command="set -e
+            sudo mkdir -p /etc/streetsmart-hermes
+            sudo touch /etc/streetsmart-hermes/robie-verification.env
+            sudo sed -i '/^ROBIE_EZLYNX_API_.*_SECRET=/d' /etc/streetsmart-hermes/robie-verification.env
+            printf '%s\n' \
+              'ROBIE_EZLYNX_API_UAT_SECRET=projects/751771086524/secrets/ezlynx-api-uat/versions/latest' \
+              'ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest' \
+              | sudo tee -a /etc/streetsmart-hermes/robie-verification.env >/dev/null
+            sudo chmod 600 /etc/streetsmart-hermes/robie-verification.env
+            echo '--- env names now present ---'
+            sudo cut -d= -f1 /etc/streetsmart-hermes/robie-verification.env | grep -E 'EZLYNX_API|EZLYNX_USERNAME|EZLYNX_PASSWORD' || true
+          "
+      - name: Verify VM service account can read the new secrets
+        run: |
+          set -euo pipefail
+          for SECRET in ezlynx-api-uat ezlynx-api-prod; do
+            gcloud secrets get-iam-policy "${SECRET}" --project="${PROJECT_ID}" \
+              --format="value(bindings[].members)" | grep -q "hermes-poc@" \
+              && echo "${SECRET}: accessor grant present" \
+              || { echo "${SECRET}: accessor grant MISSING"; exit 1; }
+          done
