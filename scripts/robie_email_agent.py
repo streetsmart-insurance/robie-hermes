@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -231,6 +232,161 @@ def run_agent_task(prompt: str, job_id: str = "", db_path: str = "") -> str:
         return f"Error executing task: {exc}"
 
 
+def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments, thread_id):
+    """Bound both generic and finance execution to one cancellable process group."""
+    env = dict(os.environ, ROBIE_JOB_ID=job_id, JOB_ID=job_id, ROBIE_JOB_DB=db_path)
+    request = dict(sender=sender, subject=subject, body=body, attachments=attachments,
+                   thread_id=thread_id, job_id=job_id, db_path=db_path, context_prompt=prompt)
+    child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--execute-job'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env, start_new_session=True)
+    try:
+        stdout, _ = child.communicate(json.dumps(request), timeout=600)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.communicate(timeout=10)
+        return 'ROBIE_OUTCOME_UNKNOWN: The task timed out and its execution was stopped. Check the destination before retrying.'
+    if child.returncode:
+        return 'ROBIE_OUTCOME_UNKNOWN: The task process exited unexpectedly. Check the destination before retrying.'
+    try:
+        response = json.loads(stdout)['response']
+        if not isinstance(response, str):
+            raise ValueError('Response must be text')
+        return response
+    except (ValueError, KeyError, TypeError):
+        return 'ROBIE_OUTCOME_UNKNOWN: The task returned no usable receipt. Check the destination before retrying.'
+
+
+def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db_path, context_prompt=""):
+    """Execute either route only after the Job Engine has claimed this email."""
+    from robie_job_engine.store import JobStore
+    store = JobStore(db_path)
+    # Check active Ascend sessions for this thread
+    sessions = load_ascend_sessions()
+    existing_session = sessions.get(thread_id)
+
+    # Check if email is an Ascend request or continuation of an active session
+    combined_text = f"{subject}\n{body}".lower()
+    is_ascend_request = bool(existing_session and not existing_session.get("closed")) or any(
+        k in combined_text
+        for k in ["ascend", "finance agreement", "financing agreement", "payment agreement", "premium finance"]
+    )
+
+    response_text = ""
+    if is_ascend_request:
+        store.checkpoint(job_id, 'email_route', {'route': 'finance'})
+        try:
+            manager = AscendWorkflowManager()
+            pdf_path = next((p for _, p in attachments if p.lower().endswith(".pdf")), None)
+
+            # Extract EZLynx applicant_id if present in email text or prior session
+            applicant_id = None
+            ezlynx_match = re.search(r"ezlynx\.com/web/account/(\d+)", f"{subject}\n{body}")
+            if ezlynx_match:
+                applicant_id = ezlynx_match.group(1)
+            elif existing_session and existing_session.get("applicant_id"):
+                applicant_id = existing_session.get("applicant_id")
+
+            if existing_session and not existing_session.get("closed") and not pdf_path:
+                # Continuation reply to clarification questions without a new PDF attachment
+                clean_reply = strip_email_reply_history(body)
+                quote_fields = {f.name for f in dataclasses.fields(ExtractedQuote)}
+                cached_data = {k: v for k, v in existing_session.get("quote", {}).items() if k in quote_fields}
+                cached_quote = ExtractedQuote(**cached_data)
+
+                attempts = existing_session.get("clarification_attempts", 1) + 1
+                existing_session["clarification_attempts"] = attempts
+
+                logger.info("Resuming Ascend thread session %s (turn %d)", thread_id, attempts)
+                result = manager.resume_with_clarifications(
+                    quote=cached_quote,
+                    clarification_reply=clean_reply or body,
+                    sender_email=sender,
+                    sender_name=sender.split("@")[0].title() if sender else "",
+                    applicant_id=applicant_id,
+                    clarification_attempts=attempts,
+                )
+
+                existing_session["status"] = result.status
+                existing_session["quote"] = dataclasses.asdict(result.quote)
+                existing_session["updated_at"] = time.time()
+                if result.status in ("COMPLETED", "ESCALATED"):
+                    existing_session["closed"] = True
+                sessions[thread_id] = existing_session
+                save_ascend_sessions(sessions)
+
+                if result.reply_email_body:
+                    response_text = result.reply_email_body
+                logger.info("Resumed Ascend workflow for thread %s (status=%s)", thread_id, result.status)
+
+            else:
+                # Brand-new quote intake or email with attached quote PDF
+                quote_source = Path(pdf_path) if pdf_path else body
+                result = manager.process_quote_request(
+                    raw_text_or_pdf=quote_source,
+                    user_instruction=body,
+                    sender_email=sender,
+                    sender_name=sender.split("@")[0].title() if sender else "",
+                    applicant_id=applicant_id,
+                )
+                sessions[thread_id] = {
+                    "thread_id": thread_id,
+                    "sender": sender,
+                    "applicant_id": applicant_id,
+                    "pdf_path": str(pdf_path) if pdf_path else None,
+                    "clarification_attempts": 1 if result.status == "NEEDS_CLARIFICATION" else 0,
+                    "status": result.status,
+                    "quote": dataclasses.asdict(result.quote),
+                    "closed": result.status not in ("NEEDS_CLARIFICATION",),
+                    "created_at": time.time(),
+                    "updated_at": time.time(),
+                }
+                save_ascend_sessions(sessions)
+
+                if result.status in ("COMPLETED", "NEEDS_CLARIFICATION", "ESCALATED") and result.reply_email_body:
+                    response_text = result.reply_email_body
+                    logger.info("Handled Ascend workflow deterministically (status=%s)", result.status)
+        except Exception as exc:
+            logger.warning("Deterministic Ascend workflow outcome requires review: %s", type(exc).__name__)
+            return "ROBIE_OUTCOME_UNKNOWN: Finance execution stopped after an error. Check the destination before trying again; no automatic second execution was started."
+
+    if is_ascend_request:
+        store.checkpoint(job_id, 'email_route', {'route': 'finance', 'status': result.status})
+        if not response_text:
+            return "ROBIE_OUTCOME_UNKNOWN: Finance workflow returned no final response; review the recorded destination before retrying."
+    if not response_text:
+        attachment_lines = ""
+        if attachments:
+            attachment_lines = "\n\nAttached Files (saved locally):\n" + "\n".join(
+                f"- Filename: {name} (Local path: {path})" for name, path in attachments
+            )
+
+        task_prompt = (
+            f"You are Robie, the autonomous insurance operations AI agent at StreetSmart Insurance.\n"
+            f"You received an incoming email from {sender}.\n"
+            f"Subject: {subject}\n\n"
+            f"Email Body Content:\n{body}\n"
+            f"{attachment_lines}\n\n"
+            f"CRITICAL MANDATORY INBOUND EMAIL RULE:\n"
+            f"- ALWAYS save this communication and its details back to EZLynx via API directly to the client file.\n"
+            f"- Even if this email is internal (e.g. from StreetSmart team members/staff) and carrier-related (carrier quotes, policy changes, underwriter replies, endorsements, cancellations, certificates, or audit queries), you MUST locate the matching client account/policy in EZLynx and post a discussion note and upload any attached documents directly to the client file via the EZLynx REST API (`EZLynxApiClient` or `EZLynxAgreementPoster.post_custom_note`).\n\n"
+            f"Instructions:\n"
+            f"1. If the user is asking to create an Ascend payment agreement or finance agreement (or sending an insurance quote for agreement generation):\n"
+            f"   - Use the 'ascend-api-create-program' skill or the Ascend API Python tools (`robie_job_engine.ascend_workflow.AscendWorkflowManager` or `QuoteExtractor`).\n"
+            f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
+            f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
+            f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
+            f"2. For any other request, execute the required insurance operations skill and assist thoroughly, ensuring the communication is filed back to the EZLynx client file.\n"
+            f"3. Write a professional, concise, polished email response directly addressing {sender}."
+        )
+
+        response_text = run_agent_task(task_prompt + "\n\n" + context_prompt, job_id, db_path)
+    return response_text
+
+
 def process_inbox():
     service = get_gmail_service()
     processed_ids = load_processed_ids()
@@ -265,130 +421,18 @@ def process_inbox():
 
         logger.info("📩 Processing task email from %s: '%s' (%d attachments)", sender, subject, len(attachments))
 
-        # Check active Ascend sessions for this thread
-        sessions = load_ascend_sessions()
-        existing_session = sessions.get(thread_id)
-
-        # Check if email is an Ascend request or continuation of an active session
-        combined_text = f"{subject}\n{body}".lower()
-        is_ascend_request = bool(existing_session and not existing_session.get("closed")) or any(
-            k in combined_text
-            for k in ["ascend", "agreement", "finance agreement", "financing agreement", "payment agreement", "quote", "bind"]
-        )
-
-        response_text = ""
-        if is_ascend_request:
-            try:
-                manager = AscendWorkflowManager()
-                pdf_path = next((p for _, p in attachments if p.lower().endswith(".pdf")), None)
-
-                # Extract EZLynx applicant_id if present in email text or prior session
-                applicant_id = None
-                ezlynx_match = re.search(r"ezlynx\.com/web/account/(\d+)", f"{subject}\n{body}")
-                if ezlynx_match:
-                    applicant_id = ezlynx_match.group(1)
-                elif existing_session and existing_session.get("applicant_id"):
-                    applicant_id = existing_session.get("applicant_id")
-
-                if existing_session and not existing_session.get("closed") and not pdf_path:
-                    # Continuation reply to clarification questions without a new PDF attachment
-                    clean_reply = strip_email_reply_history(body)
-                    quote_fields = {f.name for f in dataclasses.fields(ExtractedQuote)}
-                    cached_data = {k: v for k, v in existing_session.get("quote", {}).items() if k in quote_fields}
-                    cached_quote = ExtractedQuote(**cached_data)
-
-                    attempts = existing_session.get("clarification_attempts", 1) + 1
-                    existing_session["clarification_attempts"] = attempts
-
-                    logger.info("Resuming Ascend thread session %s (turn %d)", thread_id, attempts)
-                    result = manager.resume_with_clarifications(
-                        quote=cached_quote,
-                        clarification_reply=clean_reply or body,
-                        sender_email=sender,
-                        sender_name=sender.split("@")[0].title() if sender else "",
-                        applicant_id=applicant_id,
-                        clarification_attempts=attempts,
-                    )
-
-                    existing_session["status"] = result.status
-                    existing_session["quote"] = dataclasses.asdict(result.quote)
-                    existing_session["updated_at"] = time.time()
-                    if result.status in ("COMPLETED", "ESCALATED"):
-                        existing_session["closed"] = True
-                    sessions[thread_id] = existing_session
-                    save_ascend_sessions(sessions)
-
-                    if result.reply_email_body:
-                        response_text = result.reply_email_body
-                    logger.info("Resumed Ascend workflow for thread %s (status=%s)", thread_id, result.status)
-
-                else:
-                    # Brand-new quote intake or email with attached quote PDF
-                    quote_source = Path(pdf_path) if pdf_path else body
-                    result = manager.process_quote_request(
-                        raw_text_or_pdf=quote_source,
-                        user_instruction=body,
-                        sender_email=sender,
-                        sender_name=sender.split("@")[0].title() if sender else "",
-                        applicant_id=applicant_id,
-                    )
-                    sessions[thread_id] = {
-                        "thread_id": thread_id,
-                        "sender": sender,
-                        "applicant_id": applicant_id,
-                        "pdf_path": str(pdf_path) if pdf_path else None,
-                        "clarification_attempts": 1 if result.status == "NEEDS_CLARIFICATION" else 0,
-                        "status": result.status,
-                        "quote": dataclasses.asdict(result.quote),
-                        "closed": result.status not in ("NEEDS_CLARIFICATION",),
-                        "created_at": time.time(),
-                        "updated_at": time.time(),
-                    }
-                    save_ascend_sessions(sessions)
-
-                    if result.status in ("COMPLETED", "NEEDS_CLARIFICATION", "ESCALATED") and result.reply_email_body:
-                        response_text = result.reply_email_body
-                        logger.info("Handled Ascend workflow deterministically (status=%s)", result.status)
-            except Exception as exc:
-                logger.warning("Deterministic Ascend workflow error, falling back to agent: %s", exc)
-
-        if not response_text:
-            attachment_lines = ""
-            if attachments:
-                attachment_lines = "\n\nAttached Files (saved locally):\n" + "\n".join(
-                    f"- Filename: {name} (Local path: {path})" for name, path in attachments
-                )
-
-            task_prompt = (
-                f"You are Robie, the autonomous insurance operations AI agent at StreetSmart Insurance.\n"
-                f"You received an incoming email from {sender}.\n"
-                f"Subject: {subject}\n\n"
-                f"Email Body Content:\n{body}\n"
-                f"{attachment_lines}\n\n"
-                f"CRITICAL MANDATORY INBOUND EMAIL RULE:\n"
-                f"- ALWAYS save this communication and its details back to EZLynx via API directly to the client file.\n"
-                f"- Even if this email is internal (e.g. from StreetSmart team members/staff) and carrier-related (carrier quotes, policy changes, underwriter replies, endorsements, cancellations, certificates, or audit queries), you MUST locate the matching client account/policy in EZLynx and post a discussion note and upload any attached documents directly to the client file via the EZLynx REST API (`EZLynxApiClient` or `EZLynxAgreementPoster.post_custom_note`).\n\n"
-                f"Instructions:\n"
-                f"1. If the user is asking to create an Ascend payment agreement or finance agreement (or sending an insurance quote for agreement generation):\n"
-                f"   - Use the 'ascend-api-create-program' skill or the Ascend API Python tools (`robie_job_engine.ascend_workflow.AscendWorkflowManager` or `QuoteExtractor`).\n"
-                f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
-                f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
-                f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
-                f"2. For any other request, execute the required insurance operations skill and assist thoroughly, ensuring the communication is filed back to the EZLynx client file.\n"
-                f"3. Write a professional, concise, polished email response directly addressing {sender}."
+        try:
+            response_text = run_guarded_email_task(
+                db_path=JOB_DB, gmail_message_id=msg_id,
+                prompt=f"Subject: {subject}\n\n{body}", run_agent=run_agent_task,
+                attachment_names=tuple(name for name, _ in attachments),
+                run_agent_with_context=lambda prompt, job_id, db_path: run_email_job(
+                    prompt, job_id, db_path, sender=sender, subject=subject, body=body,
+                    attachments=attachments, thread_id=thread_id),
             )
-
-            try:
-                response_text = run_guarded_email_task(
-                    db_path=JOB_DB,
-                    gmail_message_id=msg_id,
-                    prompt=task_prompt,
-                    run_agent=run_agent_task,
-                    run_agent_with_context=run_agent_task,
-                )
-            except EmailTaskPending:
-                logger.info("Durable email job is pending; leaving message unread")
-                continue
+        except EmailTaskPending:
+            logger.info("Durable email job is pending; leaving message unread")
+            continue
 
         # Send clean reply
         reply_msg = MIMEText(response_text)
@@ -417,4 +461,13 @@ def process_inbox():
 
 
 if __name__ == "__main__":
-    process_inbox()
+    if sys.argv[1:] == ['--execute-job']:
+        from contextlib import redirect_stdout
+        request = json.load(sys.stdin)
+        with redirect_stdout(sys.stderr):
+            response = execute_email_work(**request)
+        print(json.dumps({'response': response}))
+    elif sys.argv[1:]:
+        raise SystemExit('Unknown email agent arguments')
+    else:
+        process_inbox()
