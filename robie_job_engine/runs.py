@@ -30,6 +30,10 @@ class RunIsolationError(RuntimeError):
     pass
 
 
+class MessageMaintenanceDeferred(RunIsolationError):
+    """No execution was attempted; preserve the inbound retry budget."""
+
+
 class IsolatedRunStore:
     def __init__(self, db_path: str | Path) -> None:
         self.path = str(db_path)

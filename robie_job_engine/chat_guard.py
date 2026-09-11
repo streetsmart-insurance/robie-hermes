@@ -22,7 +22,7 @@ from .worker_contract import classify_chat_close_without_checkpoint
 from .action_gate import apply_action_gate, is_action_gate_refusal
 from .job_schema import bounded_schema_hold_reason
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
-from .runs import IsolatedRunStore, RunIsolationError
+from .runs import IsolatedRunStore, RunIsolationError, MessageMaintenanceDeferred
 from .operations import ingest_chat_attachments
 from .recording import RecordingManager
 from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
@@ -52,7 +52,7 @@ def require_message_execution_available(db_path: str) -> None:
     """Leave durable intake retryable while the service configuration is fenced."""
     active = IsolatedRunStore(db_path).active_run()
     if active and active.get("owner") == "message-runtime-configuration":
-        raise RunIsolationError("Message runtime maintenance is active; retry this durable event")
+        raise MessageMaintenanceDeferred("Message runtime maintenance is active; retry this durable event")
 
 
 def pre_execution_hold_reason(

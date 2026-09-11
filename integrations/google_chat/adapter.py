@@ -224,6 +224,7 @@ from robie_job_engine.action_gate import (
     format_action_gate_chat_note,
     is_action_gate_refusal,
 )
+from robie_job_engine.runs import MessageMaintenanceDeferred
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
     chat_message_is_related_only,
@@ -1344,6 +1345,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _drain_chat_queue(self) -> None:
         """Execute committed bounded Jobs outside the Pub/Sub ACK coroutine."""
+        from robie_job_engine.chat_guard import require_message_execution_available
         queue = await asyncio.to_thread(self._durable_chat_queue)
         lease_seconds = max(60, int(os.getenv("ROBIE_CHAT_QUEUE_LEASE_SECONDS", "1800")))
         while not self._shutting_down:
@@ -1375,6 +1377,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             try:
                 if not job_id:
                     raise RuntimeError("queued Chat event has no bound Job")
+                await asyncio.to_thread(require_message_execution_available, ROBIE_JOB_DB)
                 store = JobStore(ROBIE_JOB_DB)
                 await asyncio.to_thread(store.wake_due)
                 handled = await asyncio.to_thread(
@@ -1404,7 +1407,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     ).isoformat()
                     await self._stop_chat_queue_heartbeat(heartbeat)
                     await asyncio.to_thread(
-                        queue.defer,
+                        queue.defer_until_available,
                         event_id,
                         self._chat_queue_worker_id,
                         available_at=retry_at,
@@ -1482,6 +1485,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 await self._stop_chat_queue_heartbeat(heartbeat)
                 await asyncio.to_thread(
                     queue.complete, event_id, self._chat_queue_worker_id
+                )
+            except MessageMaintenanceDeferred as exc:
+                await self._stop_chat_queue_heartbeat(heartbeat)
+                await asyncio.to_thread(
+                    queue.defer_until_available, event_id, self._chat_queue_worker_id,
+                    available_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+                    error=str(exc),
                 )
             except asyncio.CancelledError:
                 # Do not release immediately: cancelling asyncio.to_thread does

@@ -685,6 +685,24 @@ class DurableChatEventQueue:
             conn.commit()
         return self.get(event_id)
 
+    def defer_until_available(self, event_id: str, owner: str, *, available_at: str, error: str) -> dict[str, Any]:
+        """Return an unexecuted claim without consuming its execution retry budget."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                """UPDATE chat_event_queue
+                   SET state='QUEUED',lease_owner=NULL,lease_expires_at=NULL,
+                       attempt_count=MAX(0,attempt_count-1),
+                       available_at=?,last_error=?,updated_at=?
+                   WHERE event_id=? AND state='INFLIGHT' AND lease_owner=?""",
+                (available_at, error, _stamp(), event_id, owner),
+            ).rowcount
+            if changed != 1:
+                conn.rollback()
+                raise RuntimeError("queue lease ownership was lost before capacity deferral")
+            conn.commit()
+        return self.get(event_id)
+
     def await_human_input(
         self,
         event_id: str,

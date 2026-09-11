@@ -534,3 +534,28 @@ class DurableChatEventQueueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ChatCapacityDeferralTests(unittest.TestCase):
+    def test_more_than_retry_budget_busy_polls_preserve_event_until_execution(self):
+        with durable_temporary_directory() as tmp:
+            queue=DurableChatEventQueue(Path(tmp)/'jobs.db')
+            queue.enqueue(event_id='busy',conversation_id='space',message_id='message',payload={'job_id':'job'})
+            for _ in range(10):
+                claimed=queue.claim_next('worker')
+                self.assertIsNotNone(claimed)
+                self.assertEqual(claimed['attempt_count'],1)
+                queued=queue.defer_until_available('busy','worker',available_at='2000-01-01T00:00:00+00:00',error='maintenance or capacity')
+                self.assertEqual(queued['state'],'QUEUED')
+                self.assertEqual(queued['attempt_count'],0)
+            claimed=queue.claim_next('worker')
+            completed=queue.complete('busy','worker')
+            self.assertEqual(completed['state'],'COMPLETE')
+            self.assertEqual(completed['attempt_count'],1)
+    def test_capacity_deferral_cannot_release_another_workers_lease(self):
+        with durable_temporary_directory() as tmp:
+            queue=DurableChatEventQueue(Path(tmp)/'jobs.db')
+            queue.enqueue(event_id='busy',conversation_id='space',message_id='message',payload={})
+            queue.claim_next('owner')
+            with self.assertRaises(RuntimeError):
+                queue.defer_until_available('busy','other',available_at='2000-01-01T00:00:00+00:00',error='busy')
+            self.assertEqual(queue.get('busy')['lease_owner'],'owner')
