@@ -268,7 +268,7 @@ def _looks_like_ascend_action(blob: str, job_type: str, declared: str) -> bool:
     if any(marker in blob for marker in STRONG_ASCEND_ACTION_MARKERS):
         return True
     if any(marker in blob for marker in CREATE_PROGRAM_MARKERS) and (
-        "finance" in blob or "ascend" in blob or "pawiva" in blob
+        "ascend" in blob or "pawiva" in blob
     ):
         return True
     # A bare name-only mention ("ascend"/"useascend") is not, on its own,

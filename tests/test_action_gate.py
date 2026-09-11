@@ -88,6 +88,35 @@ class ActionGateTests(unittest.TestCase):
         )
         self.assertEqual(action, CREATE_PROGRAM_ACTION)
 
+    def test_bare_finance_does_not_corroborate_create_program_markers(self):
+        # Corroborators are "ascend" / "pawiva" only. Bare "finance" used
+        # to hold ordinary finance-team document work as Ascend.
+        text = "please import document for the finance team review"
+        action = classify_action(
+            text,
+            payload={"text": text},
+            action_type="hermes.google_chat_task",
+        )
+        self.assertNotEqual(action, CREATE_PROGRAM_ACTION)
+        reason = hold_reason_for_job(
+            {
+                "id": "finance-team-review",
+                "action_type": "hermes.google_chat_task",
+                "payload": {"text": text},
+            },
+            env="PRODUCTION",
+        )
+        self.assertIsNone(reason)
+
+    def test_264a708f_exact_chat_phrase_is_not_ascend_create_program(self):
+        text = "Don't use Ascend, just do the EZLynx policy setup on 220250093"
+        action = classify_action(
+            text,
+            payload={"text": text},
+            action_type="hermes.google_chat_task",
+        )
+        self.assertNotEqual(action, CREATE_PROGRAM_ACTION)
+
     def test_chat_job_type_does_not_hide_ascend_create_program(self):
         action = classify_action(
             CHAT_SHAPED_ASCEND,

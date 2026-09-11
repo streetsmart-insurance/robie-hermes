@@ -198,21 +198,61 @@ def _is_browser_read(text: str) -> bool:
     return any(phrase in text for phrase in _BROWSER_READ_PHRASES)
 
 
+# Keep these marker lists byte-identical to action_gate.py. The strong/weak
+# Ascend split must stay in step so request routing and the action gate
+# cannot drift again.
+STRONG_ASCEND_ACTION_MARKERS = (
+    "app.ascend.com",
+    "dashboard.useascend.com",
+    "premium finance",
+    "premium-finance",
+    "pawiva",
+    "221398001",
+    "create a program",
+    "create program",
+    "new program",
+    "create-program",
+)
+WEAK_ASCEND_NAME_MARKERS = (
+    "ascend",
+    "useascend",
+)
+CREATE_PROGRAM_MARKERS = (
+    "create a program",
+    "create program",
+    "new program",
+    "create-program",
+    "import document",
+    "agency fee",
+)
+ASCEND_SKILL_MARKERS = (
+    "ascend-api-create-program",
+    "ascend-locator-artifact-audit",
+    "ascend.create_program",
+    "ascend.locator_artifact_audit",
+)
+
+
 def _is_ascend_request(text: str) -> bool:
-    """Recognize Ascend before generic browser or chat routing."""
-    return bool(
-        re.search(r"\bascend\b", text)
-        or any(
-            marker in text
-            for marker in (
-                "useascend",
-                "premium finance",
-                "premium-finance",
-                "pawiva",
-                "221398001",
-            )
-        )
-    )
+    """Recognize Ascend before generic browser or chat routing.
+
+    Marker lists must stay in step with action_gate.py. There is no
+    browser-read exemption: a plain read of an Ascend URL is still Ascend.
+    """
+    if any(marker in text for marker in ASCEND_SKILL_MARKERS):
+        return True
+    if any(marker in text for marker in STRONG_ASCEND_ACTION_MARKERS):
+        return True
+    # Corroborators are "ascend" / "pawiva" ONLY — bare "finance" removed
+    if any(marker in text for marker in CREATE_PROGRAM_MARKERS) and (
+        "ascend" in text or "pawiva" in text
+    ):
+        return True
+    if any(marker in text for marker in WEAK_ASCEND_NAME_MARKERS) and any(
+        marker in text for marker in CREATE_PROGRAM_MARKERS
+    ):
+        return True
+    return False
 
 
 def _is_submission_audit(text: str) -> bool:
