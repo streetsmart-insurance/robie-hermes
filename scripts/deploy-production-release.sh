@@ -182,6 +182,7 @@ for target, raw_link in ((sys.argv[1], sys.argv[3]), (sys.argv[2], sys.argv[4]))
     tmp.symlink_to(pathlib.Path(target))
     tmp.replace(link)
 PY
+  PYTHONPATH="${release_root}" python3 -m robie_job_engine.policy_skill_release restore "${OPT_ROOT}" "${release_root}"
   systemctl restart "${GATEWAY_UNIT}"
   systemctl is-active --quiet "${GATEWAY_UNIT}"
 }
@@ -229,6 +230,13 @@ while datetime.now(timezone.utc).replace(microsecond=0) <= flipped:
         raise SystemExit("could not establish a gateway timestamp after the pointer flip")
     time.sleep(0.05)
 PY
+
+# This separately reviewed skill install preserves the previous directory/link.
+# It does not modify unrelated user-owned skills.
+if ! PYTHONPATH="${release_root}" python3 -m robie_job_engine.policy_skill_release install "${OPT_ROOT}" "${release_root}"; then
+  rollback_release
+  exit 2
+fi
 
 if ! systemctl restart "${GATEWAY_UNIT}" || ! systemctl is-active --quiet "${GATEWAY_UNIT}"; then
   rollback_release
