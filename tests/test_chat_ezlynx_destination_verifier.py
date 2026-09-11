@@ -207,3 +207,10 @@ class VerifierTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class ApplicantIdentityTests(unittest.TestCase):
+    def test_policy_without_applicant_cannot_verify_bound_job(self):
+        row = real_policy_row()
+        del row['ApplicantId']
+        result = HermesChatEzlynxDestinationVerifier(FakePort(policies=[row])).verify(job(), action())
+        self.assertFalse(result.verified)

@@ -180,6 +180,7 @@ HITL_BLOCKER = (
 NAMED_SCENARIO_IDS = frozenset(
     {
         "same-day:named-scenario-before-close",
+        "message-intake:queue-during-active-work",
         "hitl-resume:re-lease-after-gateway-restart",
         "hitl-resume:no-second-job",
         "hitl-resume:no-retry-leftover-failed",
@@ -1302,6 +1303,43 @@ def run_cdp_json_list_fixture_scenario(*, work_dir: Path) -> dict[str, Any]:
             stop_generic_chat_job_heartbeat(db, job_id)
 
 
+def run_message_intake_scenario(*, work_dir: Path) -> dict[str, Any]:
+    from .engine import resolve_worker_name
+    from .email_guard import EmailTaskPending, run_guarded_email_task
+    from .runs import IsolatedRunStore, RunIsolationError
+    scenario = "message-intake:queue-during-active-work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    db = work_dir / "jobs.db"
+    runs = IsolatedRunStore(db)
+    active = None
+    try:
+        assert resolve_worker_name("audit_verification", {"worker": "audit"}) == "audit-verification"
+        active = runs.start(owner="existing-worker", job_id="existing")
+        receipt = runs.record_intake(owner="chat-intake", job_id="new-chat", payload={"message_id": "queued"})
+        assert receipt["status"] == "INTAKE"
+        assert runs.active_run()["id"] == active["id"]
+        called = []
+        try:
+            run_guarded_email_task(db_path=str(db), gmail_message_id="queued-email", prompt="work", run_agent=lambda p: called.append(p) or "done")
+        except EmailTaskPending:
+            pass
+        else:
+            raise AssertionError("busy email was acknowledged as terminal")
+        assert not called
+        try:
+            runs.start(owner="second-worker", job_id="new-chat")
+        except RunIsolationError:
+            pass
+        else:
+            raise AssertionError("concurrent execution was allowed")
+        return _result(scenario, ok=True, outcome="PASS", evidence="Legacy routing resolves; chat receipt and email queue survive active work without parallel execution")
+    except Exception as exc:
+        return _fail(scenario, f"{type(exc).__name__}: {exc}")
+    finally:
+        if active:
+            runs.terminate(active["id"], "COMPLETE")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -1309,6 +1347,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
             f"refusing named scenarios on live Hermes path: {work_dir}"
         )
     results = [run_same_day_scenario_rule()]
+    results.append(run_message_intake_scenario(work_dir=work_dir / "message-intake"))
     results.extend(run_hitl_resume_scenarios(work_dir=work_dir / "hitl"))
     results.append(run_false_success_scenario(work_dir=work_dir / "false-success"))
     ascend_runtime_present = (Path(__file__).with_name("ascend_api.py").is_file())

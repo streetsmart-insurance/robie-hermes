@@ -1318,6 +1318,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self, job_id: str | None, event: MessageEvent
     ) -> None:
         """Run Hermes Chat work while heartbeating the unleased Job ledger row."""
+        from robie_job_engine.chat_guard import require_message_execution_available
+
+        # A retryable exception leaves the durable event available after restart.
+        await asyncio.to_thread(require_message_execution_available, ROBIE_JOB_DB)
         if not job_id:
             await self.handle_message(event)
             return

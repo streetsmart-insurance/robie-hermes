@@ -267,8 +267,8 @@ def _policy_matches(
     The client wraps responses as {"status": "success", "data": <raw>}; the
     raw shape varies by tenant, so accept the common containers rather than
     assuming one. A row counts only if the policy number matches exactly
-    (case-insensitive) and, where the row carries an applicant, that matches
-    the bound applicant too.
+    (case-insensitive) and the row independently identifies the bound applicant.
+    A missing applicant cannot prove ownership.
     """
     if isinstance(result, dict) and result.get("status") == "error":
         return []
@@ -297,7 +297,7 @@ def _policy_matches(
         row_applicant = (
             row.get("ApplicantId") or row.get("applicantId") or row.get("applicant_id")
         )
-        if applicant_id and row_applicant and _norm(row_applicant) != _norm(applicant_id):
+        if applicant_id and _norm(row_applicant) != _norm(applicant_id):
             continue
         out.append(row)
     return out

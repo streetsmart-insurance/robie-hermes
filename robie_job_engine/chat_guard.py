@@ -48,6 +48,13 @@ _BOUND_POLICY_TERMS = re.compile(
 )
 
 
+def require_message_execution_available(db_path: str) -> None:
+    """Leave durable intake retryable while the service configuration is fenced."""
+    active = IsolatedRunStore(db_path).active_run()
+    if active and active.get("owner") == "message-runtime-configuration":
+        raise RunIsolationError("Message runtime maintenance is active; retry this durable event")
+
+
 def pre_execution_hold_reason(
     text: str,
     payload: dict[str, Any] | None = None,
@@ -987,6 +994,7 @@ def open_chat_job(
         job["status"] == JobStatus.PENDING
         and classification.action_type not in BOUNDED_ENGINE_ACTIONS
     ):
+        require_message_execution_available(db_path)
         store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
     staged_count = len(files) + sum(
         1 for ref in refs if ref.local_path or (ref.kind == "drive_chip" and drive_port)
