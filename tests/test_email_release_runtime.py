@@ -1,4 +1,5 @@
 """Exercise launcher context without importing Gmail clients or sending mail."""
+from durable_temp import durable_temporary_directory
 import ast
 import os
 from pathlib import Path
@@ -33,7 +34,7 @@ class EmailReleaseRuntimeTests(TestCase):
         self.assertIn('scripts/robie_email_agent.py',zip_load_shim_source(entry.zip_relpath))
     def test_new_test_email_shim_never_falls_back_to_production_before_configuration(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             root=Path(tmp)/'streetsmart-hermes-test'
             launcher=root/'.hermes/scripts/robie_email_agent.py'
             launcher.parent.mkdir(parents=True)
@@ -76,7 +77,7 @@ class EmailRoutingTests(TestCase):
     def test_quote_word_does_not_hijack_generic_task_into_finance(self):
         import tempfile
         from robie_job_engine.store import JobStore
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db=str(Path(tmp)/'jobs.db'); job=JobStore(db).create_job('hermes.email_task',{})
             manager=Mock(side_effect=AssertionError('Not a finance task'))
             ns=self.load_executor(db,manager)
@@ -88,7 +89,7 @@ class EmailRoutingTests(TestCase):
     def test_finance_exception_does_not_fall_back_and_repeat_mutations(self):
         import tempfile
         from robie_job_engine.store import JobStore
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db=str(Path(tmp)/'jobs.db'); job=JobStore(db).create_job('hermes.email_task',{})
             manager=Mock(); manager.return_value.process_quote_request.side_effect=TimeoutError('unknown result')
             ns=self.load_executor(db,manager)
@@ -128,7 +129,7 @@ class EmailProcessBoundaryTests(TestCase):
         service=Mock(); api=service.users.return_value.messages.return_value
         api.list.return_value.execute.return_value={'messages':[{'id':'m1'}]}
         api.get.return_value.execute.return_value={'id':'m1','threadId':'thread','payload':{'headers':[{'name':'from','value':'sender@example.test'},{'name':'subject','value':'Task'}]}}
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db=str(Path(tmp)/'jobs.db'); calls=[]
             def execute(prompt,job_id,db_path,**kwargs):
                 store=JobStore(db_path)

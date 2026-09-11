@@ -1297,7 +1297,7 @@ def _render_chat_terminal(
         return (
             f"ROBIE Job {job_id} — UNVERIFIED\n\n"
             "ROBIE attempted the work. The full requested outcome was not independently verified. "
-            "Confirmed facts and remaining gaps are reported below.\n\n"
+            "Confirmed facts and remaining gaps are reported below; unconfirmed success claims are suppressed.\n\n"
             f"Reason: {job.get('last_error') or 'destination verification produced no authoritative evidence'}.\n\n"
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
             + checked_note

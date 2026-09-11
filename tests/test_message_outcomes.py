@@ -1,4 +1,5 @@
 """Message receipts must retain both verified facts and honest gaps."""
+from durable_temp import durable_temporary_directory
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ from test_chat_ezlynx_destination_verifier import FakePort, real_policy_row, BON
 
 class MessageOutcomeTests(unittest.TestCase):
     def run_email(self, port, request="Create the policy and upload Bond.pdf"):
-        tmp = tempfile.TemporaryDirectory()
+        tmp = durable_temporary_directory()
         self.addCleanup(tmp.cleanup)
         db = str(Path(tmp.name) / 'jobs.db')
         calls = []
@@ -88,7 +89,7 @@ class MessageOutcomeTests(unittest.TestCase):
             self.assertEqual(verification_summary(store, job_id), '')
 
     def test_requested_attachment_cannot_be_omitted_from_worker_claim(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db=str(Path(tmp)/'jobs.db')
             def worker(prompt, job_id, db_path):
                 JobStore(db_path).add_playwright_exec(job_id, 'playwright_exec', 'ok', result={'url':f'https://app.ezlynx.com/web/account/{BOND_APPLICANT}'})
@@ -106,7 +107,7 @@ class MessageOutcomeTests(unittest.TestCase):
         self.assertEqual(store.get_job(job_id)['status'],'UNVERIFIED')
 
     def test_finance_clarification_is_a_durable_question_and_not_reexecuted(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with durable_temporary_directory() as tmp:
             db=str(Path(tmp)/'jobs.db'); calls=[]
             def worker(prompt,job_id,db_path):
                 calls.append(job_id)
