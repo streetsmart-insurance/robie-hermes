@@ -11,8 +11,9 @@ import datetime
 import html
 import logging
 import os
-import sys
+import re
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from src.email_outreach.gmail_client import GmailRenewalClient
 from src.email_outreach.uw_reply_filer import run_uw_reply_filing
@@ -21,6 +22,25 @@ logger = logging.getLogger("robie_cleaner")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 ROBIE_EMAIL = "robie@streetsmart.insurance"
+DAILY_REPORT_SUBJECT = "Robie Daily Action Required"
+
+AUTOMATED_SUBJECT_PREFIXES = (
+    "automatic reply:", "auto:", "auto reply:", "out of office:",
+    "undeliverable:", "delivery status notification", "failure notice",
+    "verification code", "your verification code",
+)
+
+ACTIONABLE_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"\baction required\b",
+    r"\b(?:urgent|deadline|due today|past due)\b",
+    r"\b(?:can|could|would) you\b",
+    r"\bplease\s+(?:provide|send|review|complete|sign|confirm|respond|call|advise)\b",
+    r"\b(?:need|needs|needed|missing|requires?|requested?)\s+(?:information|documents?|signature|response|approval|payment)\b",
+    r"\b(?:non[- ]?renewal|declin(?:e|ed|ing)|cancel(?:lation|led|ing)?|lapse[sd]?)\b",
+    r"\b(?:information|info) requested\b",
+    r"\b(?:quote|proposal|renewal terms?|renewal offer|binder|endorsement|certificate|inspection|audit)\s+(?:attached|required|request(?:ed)?)\b",
+    r"\battached\b.{0,40}\b(?:quote|proposal|renewal|binder|endorsement|certificate|inspection|audit)\b",
+))
 
 NOISE_QUERIES = [
     ("Mailer-Daemon Bounces", "from:mailer-daemon"),
@@ -50,16 +70,52 @@ def categorize_message(sender: str, subject: str) -> str:
         return "EZLynx System & Tickets"
     return "General Communications"
 
+
+def actionable_reason(sender: str, subject: str, snippet: str) -> Optional[str]:
+    """Return the concrete action signal, or ``None`` for informational mail.
+
+    This intentionally errs toward silence.  A message that merely belongs to a
+    business category is not actionable; it must contain an explicit request,
+    deadline, or coverage/policy risk signal.
+    """
+    sender_low = (sender or "").casefold()
+    subject_low = (subject or "").strip().casefold()
+    if ROBIE_EMAIL in sender_low:
+        return None
+    if "mailer-daemon" in sender_low or "postmaster" in sender_low:
+        return None
+    if any(subject_low.startswith(prefix) for prefix in AUTOMATED_SUBJECT_PREFIXES):
+        return None
+    text = f"{subject or ''}\n{snippet or ''}"
+    for pattern in ACTIONABLE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(0).strip()
+    return None
+
+
+def daily_report_already_sent(service: Any, now_et: datetime.datetime) -> bool:
+    """Check Robie's Sent mailbox so hourly retries cannot send a second digest."""
+    today = now_et.strftime("%Y/%m/%d")
+    tomorrow = (now_et.date() + datetime.timedelta(days=1)).strftime("%Y/%m/%d")
+    query = (
+        f'in:sent subject:"{DAILY_REPORT_SUBJECT}" '
+        f"after:{today} before:{tomorrow}"
+    )
+    result = service.users().messages().list(userId="me", q=query, maxResults=1).execute()
+    return bool(result.get("messages"))
+
 def run_daily_inbox_cleanup_and_report(
     client: Optional[GmailRenewalClient] = None,
     recipient: str = "carlo@streetsmart.insurance",
     dry_run: bool = False,
-    days_to_check: int = 2,
-    report_hours: tuple[int, ...] = (12, 15, 17),
+    days_to_check: int = 1,
+    daily_report_hour: int = 8,
     force_email: bool = False,
     timezone_str: str = "America/New_York",
+    now: Optional[datetime.datetime] = None,
 ) -> Dict[str, Any]:
-    """Cleans out noise in Robie's mailbox and emails a categorized daily report."""
+    """Clean the mailbox, file matched mail in EZLynx, and send one action digest."""
     if client is None:
         client = GmailRenewalClient()
 
@@ -98,7 +154,9 @@ def run_daily_inbox_cleanup_and_report(
 
     logger.info(f"Noise cleanup complete: {total_noise_trashed} messages moved to trash.")
 
-    # 1b. File underwriter replies onto titled EZLynx cards (additive — never trash)
+    # 1b. Save matched underwriter emails through the EZLynx API.  The filer is
+    # fail-closed: it reuses an existing titled discussion and approved document
+    # routing, or leaves the message unfiled for human attention.
     filing_result: Dict[str, Any] = {}
     try:
         filing_result = run_uw_reply_filing(gmail_client=client, dry_run=dry_run) or {}
@@ -115,8 +173,9 @@ def run_daily_inbox_cleanup_and_report(
     # 2. Gather Real & Actionable Messages
     real_messages: List[Dict[str, Any]] = []
     try:
-        # Check messages received within days_to_check or unread
-        q_real = f"newer_than:{days_to_check}d"
+        # Only unread inbox mail can require attention.  Previously every recent
+        # message was counted as "actionable", creating the 100+ item digests.
+        q_real = f"in:inbox is:unread newer_than:{days_to_check}d"
         res_real = service.users().messages().list(userId="me", q=q_real, maxResults=200).execute()
         candidates = res_real.get("messages", [])
 
@@ -131,20 +190,8 @@ def run_daily_inbox_cleanup_and_report(
                 date_str = headers.get("date", "")
                 snippet = msg_data.get("snippet", "")
 
-                # Filter out Robie's self-sent audit reports or noise remnants
-                if ROBIE_EMAIL.lower() in sender.lower() and "audit" in subject.lower():
-                    continue
-                if "mailer-daemon" in sender.lower() or "postmaster" in sender.lower():
-                    continue
-
-                # Filter out automatic bounce-backs / out-of-office notices
-                sub_clean = subject.strip().lower()
-                if any(sub_clean.startswith(p) for p in [
-                    "automatic reply:", "auto:", "auto reply:", "out of office:", "undeliverable:",
-                    "delivery status notification", "failure notice"
-                ]):
-                    noise_breakdown["Automated Server Auto-Replies"] = noise_breakdown.get("Automated Server Auto-Replies", 0) + 1
-                    total_noise_trashed += 1
+                reason = actionable_reason(sender, subject, snippet)
+                if not reason:
                     continue
 
                 category = categorize_message(sender, subject)
@@ -155,16 +202,18 @@ def run_daily_inbox_cleanup_and_report(
                     "subject": subject,
                     "date": date_str,
                     "category": category,
-                    "snippet": snippet
+                    "snippet": snippet,
+                    "action_reason": reason,
                 })
             except Exception as e:
                 logger.debug(f"Error fetching message details for {c['id']}: {e}")
     except Exception as e:
         logger.error(f"Error querying recent messages: {e}")
 
-    logger.info(f"Gathered {len(real_messages)} authentic messages for reporting.")
+    logger.info(f"Gathered {len(real_messages)} messages requiring human action.")
 
-    # 2b. Pull Underwriter Responses & Carrier Decisions from Database
+    # 2b. Pull only unresolved carrier decisions from the database. Historical
+    # synced rows are evidence of completed automation, not work for Carlo.
     carrier_actions = []
     try:
         db_paths = ["data/renewals.db", "/opt/renewal-automation-system/data/renewals.db"]
@@ -177,7 +226,8 @@ def run_daily_inbox_cleanup_and_report(
                 SELECT p.insured_name, p.policy_number, p.carrier_name, p.status, a.note_text, a.created_at, a.synced_to_ezlynx, p.applicant_id
                 FROM audit_note_logs a
                 JOIN policy_renewals p ON a.policy_id = p.id
-                WHERE (p.status LIKE '%NON_RENEWAL%' OR a.note_text LIKE '%UNDERWRITER%' OR a.note_text LIKE '%NON-RENEWAL%' OR a.note_text LIKE '%Carrier Response%')
+                WHERE a.synced_to_ezlynx = 0
+                  AND (p.status LIKE '%NON_RENEWAL%' OR a.note_text LIKE '%UNDERWRITER%' OR a.note_text LIKE '%NON-RENEWAL%' OR a.note_text LIKE '%Carrier Response%')
                 ORDER BY a.id DESC LIMIT 10
             """)
             for row in cur.fetchall():
@@ -196,25 +246,29 @@ def run_daily_inbox_cleanup_and_report(
         logger.warning(f"Error querying carrier actions from db: {e}")
 
     # 3. Build HTML & Text Report
-    now_str = datetime.datetime.now().strftime("%B %d, %Y")
+    ny_now = now or datetime.datetime.now(ZoneInfo(timezone_str))
+    if ny_now.tzinfo is None:
+        ny_now = ny_now.replace(tzinfo=ZoneInfo(timezone_str))
+    else:
+        ny_now = ny_now.astimezone(ZoneInfo(timezone_str))
+    now_str = ny_now.strftime("%B %d, %Y")
     
     text_lines = [
-        f"Robie Daily Mailbox Audit & Cleanup Report - {now_str}",
+        f"{DAILY_REPORT_SUBJECT} - {now_str}",
         "=" * 60,
-        f"Mailbox: {ROBIE_EMAIL}",
-        f"Noise Purged to Trash: {total_noise_trashed}",
-        f"Real Inbound Messages: {len(real_messages)}",
+        f"Items requiring action: {len(real_messages) + len(carrier_actions)}",
+        f"Emails saved to EZLynx by API: {filing_result.get('saved_to_ezlynx', filing_result.get('filed', 0))}",
         "-" * 60,
-        "Noise Categories Purged:"
+        "Action required:"
     ]
-    for label, cnt in noise_breakdown.items():
-        text_lines.append(f"  • {label}: {cnt}")
-
-    text_lines.append("-" * 60)
-    text_lines.append("Authentic Messages Ingested:")
     for m in real_messages:
         text_lines.append(f"  [{m['category']}] From: {m['from']} | Subject: {m['subject']}")
+        text_lines.append(f"    Why: {m['action_reason']}")
         text_lines.append(f"    Snippet: {m['snippet'][:120]}...")
+    for action in carrier_actions:
+        text_lines.append(
+            f"  [EZLynx filing pending] {action['insured_name']} | Pol #{action['policy_number']} | {action['status']}"
+        )
 
     text_report = "\n".join(text_lines)
 
@@ -228,6 +282,7 @@ def run_daily_inbox_cleanup_and_report(
           <td style="padding: 10px 12px; font-size: 13px; font-weight: 500;">{html.escape(m['from'])}</td>
           <td style="padding: 10px 12px; font-size: 13px;">
             <strong>{html.escape(m['subject'])}</strong><br>
+            <span style="color:#b45309; font-size:12px; font-weight:600;">Action signal: {html.escape(m['action_reason'])}</span><br>
             <span style="color: #6b7280; font-size: 12px;">{html.escape(m['snippet'][:160])}</span>
           </td>
           <td style="padding: 10px 12px; font-size: 12px; color: #6b7280; white-space: nowrap;">{html.escape(m['date'])}</td>
@@ -236,8 +291,6 @@ def run_daily_inbox_cleanup_and_report(
 
     if not rows_html:
         rows_html = "<tr><td colspan='4' style='padding:16px; text-align:center; color:#6b7280;'>No new inbound business messages in the past period.</td></tr>"
-
-    noise_items_html = "".join([f"<li><strong>{html.escape(k)}:</strong> {v} purged</li>" for k, v in noise_breakdown.items() if v > 0] or ["<li>No noise messages detected today.</li>"])
 
     carrier_actions_html = ""
     for ca in carrier_actions:
@@ -260,30 +313,23 @@ def run_daily_inbox_cleanup_and_report(
     html_report = f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; color: #1f2937;">
       <div style="background: linear-gradient(135deg, #1e3a8a, #2563eb); padding: 24px; border-radius: 8px 8px 0 0; color: white;">
-        <h2 style="margin: 0; font-size: 22px;">Robie Daily Mailbox Audit &amp; Cleanup</h2>
-        <p style="margin: 4px 0 0; opacity: 0.9; font-size: 14px;">Daily Health &amp; Inbound Report &bull; {now_str}</p>
+        <h2 style="margin: 0; font-size: 22px;">Robie Daily Action Required</h2>
+        <p style="margin: 4px 0 0; opacity: 0.9; font-size: 14px;">Only unresolved items &bull; {now_str}</p>
       </div>
 
       <div style="background: #f9fafb; padding: 18px 24px; border: 1px solid #e5e7eb; border-top: none;">
         <div style="display: flex; gap: 16px; margin-bottom: 16px;">
           <div style="flex: 1; background: white; padding: 14px; border-radius: 6px; border: 1px solid #e5e7eb;">
-            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Noise Purged (Trash)</div>
-            <div style="font-size: 24px; font-weight: bold; color: #dc2626; margin-top: 4px;">{total_noise_trashed}</div>
+            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Action Required</div>
+            <div style="font-size: 24px; font-weight: bold; color: #dc2626; margin-top: 4px;">{len(real_messages) + len(carrier_actions)}</div>
           </div>
           <div style="flex: 1; background: white; padding: 14px; border-radius: 6px; border: 1px solid #e5e7eb;">
-            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Actionable Inbound Messages</div>
-            <div style="font-size: 24px; font-weight: bold; color: #059669; margin-top: 4px;">{len(real_messages)}</div>
+            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; font-weight: 600;">Saved to EZLynx by API</div>
+            <div style="font-size: 24px; font-weight: bold; color: #059669; margin-top: 4px;">{filing_result.get('saved_to_ezlynx', filing_result.get('filed', 0))}</div>
           </div>
         </div>
 
-        <div style="background: white; padding: 16px; border-radius: 6px; border: 1px solid #e5e7eb; margin-bottom: 20px;">
-          <h4 style="margin: 0 0 8px; font-size: 14px; color: #374151;">🧹 Purge Breakdown:</h4>
-          <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #4b5563;">
-            {noise_items_html}
-          </ul>
-        </div>
-
-        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">📬 Carrier Decisions &amp; Underwriter Responses (Last 48 Hours)</h3>
+        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">Carrier emails not yet saved to EZLynx</h3>
         <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb; margin-bottom: 24px;">
           <thead>
             <tr style="background: #f3f4f6; text-align: left;">
@@ -299,7 +345,7 @@ def run_daily_inbox_cleanup_and_report(
           </tbody>
         </table>
 
-        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">📬 Genuine Inbound Messages (Last 48 Hours)</h3>
+        <h3 style="margin: 20px 0 10px; font-size: 16px; color: #111827;">Unread messages requiring action</h3>
         <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb;">
           <thead>
             <tr style="background: #f3f4f6; text-align: left;">
@@ -321,19 +367,30 @@ def run_daily_inbox_cleanup_and_report(
     </div>
     """
 
-    # 4. Dispatch Email Report (Gated to 12 PM, 3 PM, and 5 PM ET)
+    # 4. Dispatch at most once per Eastern calendar day. The hourly cleaner may
+    # continue filing/cleaning in the background without emailing Carlo.
     report_sent = False
-    subject_line = f"Robie Daily Mailbox Audit & Cleanup Report - {now_str} ({len(real_messages)} active, {total_noise_trashed} purged)"
+    subject_line = f"{DAILY_REPORT_SUBJECT} - {now_str} ({len(real_messages) + len(carrier_actions)} items)"
+    actionable_count = len(real_messages) + len(carrier_actions)
+    already_sent = False
+    if not dry_run and not force_email and ny_now.hour >= daily_report_hour:
+        try:
+            already_sent = daily_report_already_sent(service, ny_now)
+        except Exception as exc:
+            logger.error("Daily digest Sent-mail dedupe failed closed: %s", exc)
+            already_sent = True
 
-    from zoneinfo import ZoneInfo
-    ny_now = datetime.datetime.now(ZoneInfo(timezone_str))
-    is_report_hour = ny_now.hour in report_hours
-
-    if not force_email and not is_report_hour:
+    if actionable_count == 0:
+        logger.info("No unresolved actionable items; daily email suppressed.")
+        should_send_email = False
+    elif not force_email and ny_now.hour < daily_report_hour:
         logger.info(
-            f"Current time ({ny_now.strftime('%I:%M %p')} {timezone_str}) is outside designated report hours "
-            f"({', '.join(str(h) for h in report_hours)}). Mailbox cleaned and replies filed; email report suppressed."
+            f"Current time ({ny_now.strftime('%I:%M %p')} {timezone_str}) is before the "
+            f"daily {daily_report_hour:02d}:00 report window; email suppressed."
         )
+        should_send_email = False
+    elif already_sent:
+        logger.info("Today's actionable digest already exists in Sent; duplicate suppressed.")
         should_send_email = False
     else:
         should_send_email = True
@@ -352,7 +409,7 @@ def run_daily_inbox_cleanup_and_report(
             logger.error(f"Failed to dispatch daily report email to {recipient}: {e}")
     else:
         if not should_send_email:
-            logger.info("Report delivery skipped per schedule gate (12pm, 3pm, 5pm ET).")
+            logger.info("Report delivery skipped by daily/actionable gate.")
         else:
             logger.info("Dry run enabled or no recipient; skipped emailing report.")
 
@@ -362,7 +419,9 @@ def run_daily_inbox_cleanup_and_report(
         "real_messages_count": len(real_messages),
         "real_messages": real_messages,
         "report_sent": report_sent,
+        "report_already_sent": already_sent,
         "uw_replies_filed": filing_result.get("filed", 0),
+        "ezlynx_emails_saved": filing_result.get("saved_to_ezlynx", filing_result.get("filed", 0)),
         "uw_replies_skipped": filing_result.get("skipped", 0),
     }
 
@@ -370,18 +429,16 @@ def main():
     parser = argparse.ArgumentParser(description="Run Robie daily mailbox cleanup and report.")
     parser.add_argument("--recipient", default="carlo@streetsmart.insurance", help="Email recipient for daily report.")
     parser.add_argument("--dry-run", action="store_true", help="Audit without deleting or sending email.")
-    parser.add_argument("--days", type=int, default=2, help="Number of days lookback for authentic emails.")
+    parser.add_argument("--days", type=int, default=1, help="Number of days to scan for unread actionable emails.")
     parser.add_argument("--force-email", action="store_true", help="Force sending report regardless of scheduled hours.")
-    parser.add_argument("--report-hours", default="12,15,17", help="Comma-separated hours in Eastern Time to allow sending report (default: 12,15,17).")
+    parser.add_argument("--report-hour", type=int, default=8, help="Earliest Eastern hour for the once-daily report (default: 8).")
     args = parser.parse_args()
-
-    hours = tuple(int(h.strip()) for h in args.report_hours.split(",") if h.strip().isdigit())
 
     result = run_daily_inbox_cleanup_and_report(
         recipient=args.recipient,
         dry_run=args.dry_run,
         days_to_check=args.days,
-        report_hours=hours,
+        daily_report_hour=args.report_hour,
         force_email=args.force_email,
     )
     print(f"\nExecution Finished: {result['noise_trashed']} noise trashed, {result['real_messages_count']} real messages found. Report sent: {result['report_sent']}")
