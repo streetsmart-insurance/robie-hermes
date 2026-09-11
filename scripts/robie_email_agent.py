@@ -209,28 +209,9 @@ def run_agent_task(prompt: str, job_id: str = "", db_path: str = "") -> str:
     if db_path:
         env["ROBIE_JOB_DB"] = db_path
 
-    cmd = [
-        str(HERMES_HOME / "hermes-agent/venv/bin/python"),
-        "-m", "hermes_cli.main",
-        "chat",
-        "-q", prompt
-    ]
-    try:
-        res = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=600,
-            env=env,
-            cwd=str(OPT_ROOT)
-        )
-        if res.returncode:
-            return f"Error executing task: Hermes exited with status {res.returncode}"
-        return clean_hermes_output(res.stdout)
-    except Exception as exc:
-        logger.error("Error executing Hermes agent task: %s", exc)
-        return f"Error executing task: {exc}"
+    from robie_job_engine.email_agent_runner import run_scripted_email
+    return run_scripted_email(prompt, env=env, home=HERMES_HOME, cwd=OPT_ROOT,
+                              job_id=job_id, db_path=db_path)
 
 
 def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments, thread_id):
@@ -242,7 +223,7 @@ def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=env, start_new_session=True)
     try:
-        stdout, _ = child.communicate(json.dumps(request), timeout=600)
+        stdout, _ = child.communicate(json.dumps(request), timeout=930)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(child.pid, signal.SIGKILL)
@@ -250,6 +231,11 @@ def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments
             pass
         child.communicate(timeout=10)
         return 'ROBIE_OUTCOME_UNKNOWN: The task timed out and its execution was stopped. Check the destination before retrying.'
+    # The isolated task group may still contain descendants after its leader exits.
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     if child.returncode:
         return 'ROBIE_OUTCOME_UNKNOWN: The task process exited unexpectedly. Check the destination before retrying.'
     try:

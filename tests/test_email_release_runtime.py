@@ -13,21 +13,18 @@ class EmailReleaseRuntimeTests(TestCase):
     def test_child_uses_test_paths_and_durable_job_context(self):
         source=ast.parse((ROOT/'scripts/robie_email_agent.py').read_text())
         function=next(n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='run_agent_task')
-        runner=Mock(return_value=Mock(returncode=0,stdout='done'))
-        ns={'os':os,'Path':Path,'__file__':str(ROOT/'scripts/robie_email_agent.py'),'_EXPECTED_ENV':'TEST','OPT_ROOT':Path('/opt/streetsmart-hermes-test'),'HERMES_HOME':Path('/opt/streetsmart-hermes-test/.hermes'),'subprocess':subprocess,'clean_hermes_output':lambda s:s,'logger':Mock()}
+        runner=Mock(return_value='done')
+        ns={'os':os,'Path':Path,'__file__':str(ROOT/'scripts/robie_email_agent.py'),'_EXPECTED_ENV':'TEST','OPT_ROOT':Path('/opt/streetsmart-hermes-test'),'HERMES_HOME':Path('/opt/streetsmart-hermes-test/.hermes')}
         exec(compile(ast.Module(body=[function],type_ignores=[]),'launcher','exec'),ns)
-        with patch.dict(os.environ,{'ROBIE_ENV':'TEST'},clear=True),patch.object(subprocess,'run',runner):
+        with patch.dict(os.environ,{'ROBIE_ENV':'TEST'},clear=True),patch('robie_job_engine.email_agent_runner.run_scripted_email',runner):
             self.assertEqual(ns['run_agent_task']('prompt','job-123','/test/jobs.db'),'done')
         args,kwargs=runner.call_args
-        self.assertTrue(args[0][0].startswith('/opt/streetsmart-hermes-test/'))
-        self.assertEqual(kwargs['cwd'],'/opt/streetsmart-hermes-test')
+        self.assertEqual(args[0], 'prompt')
+        self.assertEqual(str(kwargs['cwd']),'/opt/streetsmart-hermes-test')
         self.assertEqual(kwargs['env']['ROBIE_JOB_ID'],'job-123')
         self.assertEqual(kwargs['env']['ROBIE_JOB_DB'],'/test/jobs.db')
         self.assertEqual(kwargs['env']['ROBIE_ENV'],'TEST')
         self.assertTrue(kwargs['env']['PYTHONPATH'].startswith(str(ROOT)))
-        runner.return_value.returncode=1
-        with patch.object(subprocess,'run',runner):
-            self.assertTrue(ns['run_agent_task']('prompt').startswith('Error executing task:'))
     def test_email_launcher_is_part_of_release_proof(self):
         entry=next(item for item in CHAT_RUNTIME_FILES if item.name=='email-agent')
         self.assertEqual(entry.dest_relpath,'scripts/robie_email_agent.py')
