@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Read-only metadata for the explicitly authorized policy acceptance test.
+
+Never emit prompts, message bodies, credentials, browser code, or token values.
+"""
+import hashlib
+import json
+import re
+import sqlite3
+from pathlib import Path
+from urllib.parse import quote
+
+JOB_ID = '8d61a9d0-15e0-4c36-9767-ea0c14c035e2'
+POLICY = 'TEST-HO-20260911-E01'
+MARKERS = ('NEEDS_SKILL', 'NEEDS_CLARIFICATION', 'PLAYWRIGHT_BLOCKED',
+           'EZLYNX_WRITE_SCOPE_REFUSED', 'ROBIE_OUTCOME_UNKNOWN',
+           'TimeoutError', 'ModuleNotFoundError', 'PermissionError',
+           'ImportError', 'AUTH_REQUIRED', 'RESOURCE_EXHAUSTED',
+           'max_iterations', 'tool_calls', 'finish_reason', 'STOP',
+           'MALFORMED_FUNCTION_CALL', 'MAX_TOKENS')
+
+
+def markers(value):
+    value = str(value or '')
+    return [key for key in MARKERS if key.casefold() in value.casefold()]
+
+
+def connect(path):
+    connection = sqlite3.connect(f'file:{quote(str(path))}?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute('PRAGMA query_only=ON')
+    return connection
+
+
+def inspect_job(path):
+    with connect(path) as db:
+        row = db.execute('SELECT * FROM jobs WHERE id=?', (JOB_ID,)).fetchone()
+        if not row:
+            return {'found': False}
+        payload = json.loads(row['payload_json'])
+        report = {key: row[key] for key in ('id', 'action_type', 'status', 'attempt_count',
+                   'verification_count', 'created_at', 'updated_at', 'completed_at')}
+        report['matches_requested_test'] = POLICY in str(payload.get('request_text', ''))
+        report['gmail_message_id'] = payload.get('gmail_message_id')
+        report['error_markers'] = markers(row['last_error'])
+        report['error_sha256'] = hashlib.sha256(str(row['last_error']).encode()).hexdigest()
+        report['checkpoints'] = []
+        for checkpoint in db.execute('SELECT kind,data_json,created_at FROM checkpoints WHERE job_id=? ORDER BY id', (JOB_ID,)):
+            data = json.loads(checkpoint['data_json'])
+            report['checkpoints'].append({'kind': checkpoint['kind'], 'created_at': checkpoint['created_at'],
+                'keys': sorted(data) if isinstance(data, dict) else [], 'markers': markers(checkpoint['data_json'])})
+        report['browser_calls'] = []
+        for call in db.execute('SELECT id,tool,status,result_json,created_at,updated_at FROM playwright_exec WHERE job_id=? ORDER BY id', (JOB_ID,)):
+            report['browser_calls'].append({key: call[key] for key in ('id','tool','status','created_at','updated_at')} | {'markers': markers(call['result_json'])})
+        report['verification'] = [dict(item) for item in db.execute('SELECT verified,method,source,authoritative,captured_at FROM verification_evidence WHERE job_id=? ORDER BY id', (JOB_ID,))]
+        return report
+
+
+def inspect_runtime(home):
+    report = {'source_files': [], 'session_metadata': {}}
+    root = home / 'hermes-agent'
+    for name in ('hermes_cli/main.py', 'cli.py', 'run_agent.py'):
+        path = root / name
+        if not path.is_file():
+            continue
+        text = path.read_text()
+        # Only API/format signatures, not raw source text or configuration values.
+        report['source_files'].append({'name': name, 'sha256': hashlib.sha256(text.encode()).hexdigest(),
+            'json_output_flag': bool(re.search(r'--(?:json|json-output|output-format)', text)),
+            'query_flag': bool(re.search(r'[\"\']-q[\"\']', text)),
+            'reasoning_output': 'reasoning' in text.casefold(),
+            'final_response': 'final_response' in text,
+            'functions': re.findall(r'^\s*(?:async )?def ([a-zA-Z_][a-zA-Z_0-9]*)\(', text, re.M)[:180]})
+    for name in ('state.db', 'sessions.db'):
+        path = home / name
+        if path.is_file():
+            with connect(path) as db:
+                tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+                report['session_metadata'][name] = {}
+                for table in tables:
+                    if re.fullmatch(r'[a-zA-Z_][a-zA-Z_0-9]*', table):
+                        report['session_metadata'][name][table] = [row[1] for row in db.execute(f'PRAGMA table_info("{table}")')]
+    return report
+
+
+if __name__ == '__main__':
+    import socket
+    if socket.gethostname().split('.')[0] != 'hermes-poc-01':
+        raise SystemExit('Production host required')
+    root = Path('/opt/streetsmart-hermes')
+    print(json.dumps({'job': inspect_job(root / 'robie-job-engine/data/jobs.db'),
+                      'runtime': inspect_runtime(root / '.hermes')}, indent=2))
