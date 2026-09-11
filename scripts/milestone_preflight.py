@@ -94,16 +94,16 @@ import hermes_cli.main as cli
 usage, mode = sys.argv[1:]
 
 def fake_chat(args):
-    import tools.playwright_tool as browser_tool
-    from tools.tool_search import classify_tools
-    if not browser_tool._available():
-        raise RuntimeError('Guarded browser tool unavailable')
-    schema = browser_tool.PLAYWRIGHT_EXEC_SCHEMA
-    if 'function' not in schema:
-        schema = {'type': 'function', 'function': schema}
-    visible, deferred = classify_tools([schema])
-    if len(visible) != 1 or deferred:
+    from model_tools import get_tool_definitions
+    # Use the real model-schema provider so availability/assembly ordering is
+    # exercised. Do not manually call _available or pin the name in this probe.
+    schemas = get_tool_definitions(enabled_toolsets=['playwright'], quiet_mode=True)
+    names = [item.get('function', {}).get('name') for item in schemas]
+    if names.count('playwright_exec') != 1:
         raise RuntimeError('Guarded browser schema is not directly visible')
+    disabled = get_tool_definitions(enabled_toolsets=['playwright'], disabled_toolsets=['playwright'], quiet_mode=True)
+    if any(item.get('function', {}).get('name') == 'playwright_exec' for item in disabled):
+        raise RuntimeError('Disabled browser tool leaked into model schemas')
     expected_resume = 'robie-interface-probe' if mode == 'resume' else None
     Path(usage).write_text(json.dumps({
         'query_matches': getattr(args, 'query', None) == 'ROBIE_INTERFACE_PROBE',
