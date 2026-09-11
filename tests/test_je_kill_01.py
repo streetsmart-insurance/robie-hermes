@@ -17,6 +17,7 @@ from pathlib import Path
 from durable_temp import durable_temporary_directory
 
 from robie_job_engine.engine import JobEngine
+from robie_job_engine.request_routing import WORKER_FOR_ACTION
 from robie_job_engine.ezlynx import (
     BoundedEzlynxWorker,
     EzlynxDestinationVerifier,
@@ -189,7 +190,7 @@ def _run_until_killed(
     )
     JobEngine(
         store,
-        {"kill-worker": worker},
+        {WORKER_FOR_ACTION[ACTION]: worker},
         {ACTION: reader},
         reconcilers={ACTION: reader},
         lease_seconds=1,
@@ -242,7 +243,7 @@ class JeKill01Tests(unittest.TestCase):
         reader = PersistentDestinationReader(self.db, str(self.root))
         return JobEngine(
             self.store,
-            {"kill-worker": worker},
+            {WORKER_FOR_ACTION[ACTION]: worker},
             {ACTION: reader},
             reconcilers={ACTION: reader},
             lease_seconds=1,
@@ -278,7 +279,7 @@ class JeKill01Tests(unittest.TestCase):
         worker = MustNotRun()
         final = JobEngine(
             self.store,
-            {"kill-worker": worker},
+            {WORKER_FOR_ACTION[ACTION]: worker},
             {},
             lease_seconds=1,
         ).run(job["id"])
@@ -316,7 +317,7 @@ class JeKill01Tests(unittest.TestCase):
         worker = MustNotRun()
         final = JobEngine(
             self.store,
-            {"kill-worker": worker},
+            {WORKER_FOR_ACTION[ACTION]: worker},
             {},
             reconcilers={ACTION: WeakReader()},
             lease_seconds=1,
@@ -348,7 +349,7 @@ class JeKill01Tests(unittest.TestCase):
         reader = PersistentDestinationReader(self.db, str(self.root))
         final = JobEngine(
             self.store,
-            {"kill-worker": worker},
+            {WORKER_FOR_ACTION[ACTION]: worker},
             {ACTION: reader},
             reconcilers={ACTION: reader},
             lease_seconds=1,

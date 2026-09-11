@@ -28,6 +28,7 @@ from robie_job_engine.complete_guard import (
     expected_postcondition_missing,
     postcondition_mismatch,
 )
+from robie_job_engine.request_routing import WORKER_FOR_ACTION
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.ezlynx import (
     BoundedEzlynxWorker,
@@ -398,7 +399,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
             "browser.read", {"worker": "probe"}, idempotency_key="e2e-skew-ok"
         )
         final = self._engine(
-            {"probe": worker},
+            {WORKER_FOR_ACTION["browser.read"]: worker},
             {
                 "browser.read": SequenceVerifier(
                     [
@@ -436,7 +437,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                 "browser.read", {"worker": "probe"}, idempotency_key=key
             )
             refused = self._engine(
-                {"probe": CountingWorker(WorkerResult(True, "browser.read", {"record_id": key}))},
+                {WORKER_FOR_ACTION["browser.read"]: CountingWorker(WorkerResult(True, "browser.read", {"record_id": key}))},
                 {
                     "browser.read": SequenceVerifier(
                         [

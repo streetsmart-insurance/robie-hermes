@@ -29,6 +29,7 @@ from .models import (
     WorkerResult,
 )
 from .recording import RecordingManager, RecordingRequiredError
+from .request_routing import BOUNDED_ENGINE_ACTIONS, WORKER_FOR_ACTION
 from .runs import IsolatedRunStore, RunIsolationError
 from .secrets import redact_exception, redact_mapping
 from .store import JobStore
@@ -85,6 +86,25 @@ def leftover_retry_hold_reason(
             "new @robie. No auto-retry."
         )
     return None
+
+
+def resolve_worker_name(action_type, payload):
+    """Authoritative worker for an action.
+
+    For a bounded action the registry decides, not the payload. Legacy or
+    conflicting payload names are advisory and cannot redirect execution.
+    A bounded action with no registry entry fails closed.
+    Unbounded actions keep the legacy payload-then-default behaviour.
+
+    Returns None when the job must be refused.
+    """
+    registry_name = WORKER_FOR_ACTION.get(action_type)
+    claimed = payload.get("worker")
+    if action_type in BOUNDED_ENGINE_ACTIONS:
+        if registry_name is None:
+            return None
+        return registry_name
+    return claimed or registry_name or "hermes-cua"
 
 
 class ComputerWorker(Protocol):
@@ -460,7 +480,18 @@ class JobEngine:
                 release_lease=True,
             )
         self.store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING, JobStatus.RUNNING})
-        worker_name = job["payload"].get("worker", "hermes-cua")
+        worker_name = resolve_worker_name(job["action_type"], job["payload"])
+        if worker_name is None:
+            return self.store.transition(
+                job["id"],
+                JobStatus.FAILED,
+                error=(
+                    f"worker resolution refused for {job['action_type']}: "
+                    f"payload names {job['payload'].get('worker')!r}, "
+                    f"registry expects {WORKER_FOR_ACTION.get(job['action_type'])!r}"
+                ),
+                release_lease=True,
+            )
         worker = self.workers.get(worker_name)
         if not worker:
             return self.store.transition(job["id"], JobStatus.FAILED, error=f"unknown worker: {worker_name}", release_lease=True)

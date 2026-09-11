@@ -15,6 +15,7 @@ from robie_job_engine.carrier_proposal import (
     MemoryProposalDestination,
 )
 from robie_job_engine.chat_guard import guard_chat_response, open_chat_job
+from robie_job_engine.request_routing import WORKER_FOR_ACTION
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.ezlynx import HermesCuaEzlynxWorker
 from robie_job_engine.models import VERIFIER_AUTHORITY, JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -139,7 +140,7 @@ class ReliabilityMvpTests(unittest.TestCase):
         )
         engine = JobEngine(
             self.store,
-            {"rogue": worker},
+            {WORKER_FOR_ACTION["carrier.proposal"]: worker},
             {"carrier.proposal": SequenceVerifier([VerificationResult(False, _evidence(False), False)])},
         )
         final = engine.run(job["id"])
