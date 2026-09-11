@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+import re
 
 from .engine import JobEngine
 from .models import ACTION_OUTCOME_UNKNOWN, JobStatus, WorkerResult
@@ -36,14 +37,15 @@ class HermesEmailWorker:
         route = self.store.get_checkpoint(job["id"], 'email_route') or {}
         if route.get('route') == 'finance':
             destination = {"gmail_message_id": job['payload']['gmail_message_id']}
-        failed = response.lstrip().lower().startswith("error executing task:")
+        blocked = response.startswith("ROBIE_EXECUTION_BLOCKED:")
+        failed = blocked or response.lstrip().lower().startswith("error executing task:")
         return WorkerResult(
             succeeded=not failed,
             action="hermes.email_task",
             destination=destination,
             detail={"response_text": response, **({"outcome": ACTION_OUTCOME_UNKNOWN} if response.startswith("ROBIE_OUTCOME_UNKNOWN:") else {})},
             retryable=True,
-            hold_status=JobStatus.NEEDS_CLARIFICATION if route.get('status') == 'NEEDS_CLARIFICATION' else None,
+            hold_status=JobStatus.NEEDS_SKILL if blocked else (JobStatus.NEEDS_CLARIFICATION if route.get('status') == 'NEEDS_CLARIFICATION' else None),
             error=response if failed or route.get('status') == 'NEEDS_CLARIFICATION' else None,
         )
 
@@ -71,16 +73,29 @@ def run_guarded_email_task(
         + "\n\nSUBMISSION CENTER SOP REFERENCE\n"
         + submission_center_sop_url()
     )
+    from .ezlynx_write_scope import requested_message_applicant
+    targets = {}
+    applicant = requested_message_applicant({'request_text': request_text})
+    if applicant:
+        targets['applicant_id'] = applicant
+    policy_numbers = set(re.findall(
+        r'\bpolicy(?:\s+number|\s*#)\s*[:=]?\s*([A-Z0-9][A-Z0-9./-]{2,})',
+        request_text, flags=re.IGNORECASE,
+    ))
+    if len(policy_numbers) == 1:
+        number = next(iter(policy_numbers)).rstrip('.')
+        if any(char.isdigit() for char in number):
+            targets['policy_number'] = number
     store = JobStore(db_path)
     job = store.create_job(
         "hermes.email_task",
-        {"worker": "hermes-cua", "gmail_message_id": gmail_message_id, "prompt": prompt, "request_text": request_text, "document_names": list(attachment_names)},
+        {"worker": "hermes-cua", "gmail_message_id": gmail_message_id, "prompt": prompt, "request_text": request_text, "document_names": list(attachment_names), **targets},
         idempotency_key=f"gmail:{gmail_message_id}",
         max_attempts=3,
     )
     engine = JobEngine(
         store, {"hermes-cua": HermesEmailWorker(run_agent, store, run_agent_with_context)},
-        _default_email_verifiers() if verifiers is None else verifiers, perform_timeout_seconds=630,
+        _default_email_verifiers() if verifiers is None else verifiers, perform_timeout_seconds=960,
     )
     final = engine.run(job["id"])
     action = store.get_checkpoint(job["id"], "action") or {}

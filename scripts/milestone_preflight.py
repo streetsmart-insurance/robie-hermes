@@ -80,6 +80,51 @@ sys.stdout.write("PROBE_JSON:" + json.dumps(out) + "\n")
 '''
 
 
+
+# Exercise the installed CLI parser and usage writer without a model, tools,
+# session mutation, or business action. The only substituted boundary is the
+# agent itself; the real -z/--resume/--usage-file dispatch remains installed code.
+SCRIPTED_AGENT_PROBE = r'''import sys
+from hermes_cli import oneshot
+
+def fake_agent(prompt, **kwargs):
+    assert prompt == 'ROBIE_INTERFACE_PROBE'
+    assert kwargs.get('resume') == 'robie-interface-probe'
+    return 'ROBIE_INTERFACE_OK', {'session_id': 'robie-interface-probe', 'completed': True, 'failed': False}
+
+oneshot._run_agent = fake_agent
+sys.argv = ['hermes', '-z', 'ROBIE_INTERFACE_PROBE', '--usage-file', sys.argv[1], '--resume', 'robie-interface-probe']
+from hermes_cli.main import main
+main()
+'''
+
+
+def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release: Path):
+    import hashlib
+    import tempfile
+    home = Path(env.get('HERMES_HOME', ''))
+    package = home / 'hermes-agent'
+    oneshot = package / 'hermes_cli/oneshot.py'
+    if not env.get('HERMES_HOME') or not oneshot.is_file():
+        return BAD, 'Installed scripted email interface is missing'
+    child_env = dict(os.environ)
+    child_env.update(env)
+    child_env['PYTHONPATH'] = str(package) + os.pathsep + _service_pythonpath(env, release)
+    try:
+        with tempfile.TemporaryDirectory(prefix='robie-interface-') as directory:
+            usage = Path(directory) / 'usage.json'
+            result = subprocess.run([interpreter, '-c', SCRIPTED_AGENT_PROBE, str(usage)],
+                capture_output=True, text=True, timeout=45, cwd=str(package), env=child_env)
+            report = json.loads(usage.read_text())
+            if result.returncode or result.stdout.strip() != 'ROBIE_INTERFACE_OK':
+                return BAD, 'Installed scripted CLI did not return its final response'
+            if report.get('session_id') != 'robie-interface-probe' or report.get('completed') is not True or report.get('failed') is not False:
+                return BAD, 'Installed scripted CLI usage receipt is incompatible'
+        return OK, 'Installed -z, --resume and --usage-file dispatch passed without model/tools; oneshot sha256=' + hashlib.sha256(oneshot.read_bytes()).hexdigest()
+    except Exception as exc:
+        return BAD, 'Installed scripted interface check failed: ' + type(exc).__name__
+
+
 def _unit_property(unit: str, prop: str) -> str:
     try:
         return subprocess.run(
@@ -407,6 +452,10 @@ def main(argv: list[str] | None = None) -> int:
         "constructed. The job then dies on the original Bond gap no matter what else is "
         "correct. Fix: deploy a release that contains it.",
     ))
+
+    state, detail = _probe_scripted_email_runtime(interpreter, unit_env, args.release)
+    results.append(('scripted email interface', state, detail,
+        'The installed Hermes CLI cannot support this email execution path. Do not promote the candidate until this compatibility check passes.'))
 
     for label, state, detail, _why in results:
         print(f"  [{state:>7}] {label}: {detail}")
