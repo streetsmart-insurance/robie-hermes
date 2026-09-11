@@ -1,0 +1,55 @@
+name: Configure verified message runtime
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: choice
+        options: [TEST, PRODUCTION]
+      sha256:
+        description: Exact deployed and QA-certified release digest
+        required: true
+        type: string
+      confirmation:
+        description: Type CONFIGURE_MESSAGE_RUNTIME
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: robie-message-config-${{ inputs.target }}
+  cancel-in-progress: false
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'CONFIGURE_MESSAGE_RUNTIME'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.target == 'TEST' && 'Test' || 'Production' }}
+    env:
+      TARGET: ${{ inputs.target }}
+      RELEASE_DIGEST: ${{ inputs.sha256 }}
+      VM: ${{ inputs.target == 'TEST' && 'hermes-test-01' || 'hermes-poc-01' }}
+      ROOT: ${{ inputs.target == 'TEST' && '/opt/streetsmart-hermes-test' || '/opt/streetsmart-hermes' }}
+    steps:
+      - name: Validate bounded request
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${TARGET}" = TEST || "${TARGET}" = PRODUCTION ]]
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.target == 'TEST' && 'projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github' || 'projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main' }}
+          service_account: ${{ inputs.target == 'TEST' && 'robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com' || 'robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com' }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Configure only the verified installed release
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${VM}" --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
+            --command="sudo python3 '${ROOT}/releases/current/scripts/configure-message-runtime.py' --environment '${TARGET}' --release-sha256 '${RELEASE_DIGEST}' --backup-dir '${ROOT}/deployments/message-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'" \
+            | tee "${RUNNER_TEMP}/message-config.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: message-runtime-${{ inputs.target }}
+          path: ${{ runner.temp }}/message-config.json

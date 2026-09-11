@@ -17,19 +17,33 @@ import dataclasses
 from google.oauth2.credentials import Credentials
 
 # Add robie_job_engine to path
-sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
-from robie_job_engine.email_guard import run_guarded_email_task
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from robie_job_engine.email_guard import EmailTaskPending, run_guarded_email_task
 from robie_job_engine.ascend_workflow import AscendWorkflowManager
 from robie_job_engine.quote_extractor import ExtractedQuote, strip_email_reply_history
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("robie_email_agent")
 
-TOKEN_PATH = "/opt/streetsmart-hermes/.hermes/robie_google_token.json"
+_release_root = next((p for p in Path(__file__).resolve().parents if p.name in {"streetsmart-hermes", "streetsmart-hermes-test"} and p.parent == Path("/opt")), None)
+if _release_root is None:
+    raise RuntimeError("Email launcher must run from an installed Test or Production release")
+OPT_ROOT = Path(os.environ.get("ROBIE_OPT_ROOT", str(_release_root)))
+if OPT_ROOT != _release_root:
+    raise RuntimeError("Email environment and installed release root disagree")
+_EXPECTED_ENV = "TEST" if OPT_ROOT.name.endswith("-test") else "PRODUCTION"
+if os.environ.get("ROBIE_ENV", _EXPECTED_ENV).upper() != _EXPECTED_ENV:
+    raise RuntimeError("Email environment and installed release disagree")
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(OPT_ROOT / ".hermes")))
+if HERMES_HOME != OPT_ROOT / ".hermes":
+    raise RuntimeError("Email Hermes home is outside its installed environment")
+TOKEN_PATH = str(HERMES_HOME / "robie_google_token.json")
 ALLOWED_SENDERS = {"carlo@streetsmart.insurance", "jake@streetsmart.insurance"}
-STATE_FILE = Path("/opt/streetsmart-hermes/.hermes/robie_processed_emails.json")
-SESSION_FILE = Path(os.environ.get("ROBIE_SESSION_FILE", "/opt/streetsmart-hermes/.hermes/robie_ascend_sessions.json"))
-JOB_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
+STATE_FILE = HERMES_HOME / "robie_processed_emails.json"
+SESSION_FILE = Path(os.environ.get("ROBIE_SESSION_FILE", str(HERMES_HOME / "robie_ascend_sessions.json")))
+JOB_DB = os.environ.get("ROBIE_JOB_DB", str(OPT_ROOT / "robie-job-engine/data/jobs.db"))
+if not Path(JOB_DB).resolve().is_relative_to(OPT_ROOT.resolve()):
+    raise RuntimeError("Email job database is outside its installed environment")
 ATTACHMENT_DIR = Path("/tmp/robie_email_attachments")
 
 
@@ -180,19 +194,21 @@ def clean_hermes_output(raw_output: str) -> str:
     return cleaned or raw_output.strip()
 
 
-def run_agent_task(prompt: str) -> str:
+def run_agent_task(prompt: str, job_id: str = "", db_path: str = "") -> str:
     """Executes prompt via Hermes Agent on the VM and returns clean response."""
     env = os.environ.copy()
-    env["HOME"] = "/opt/streetsmart-hermes"
-    env["HERMES_HOME"] = "/opt/streetsmart-hermes/.hermes"
-    env["ROBIE_ENV"] = "PRODUCTION"
-    env["ROBIE_ASCEND_API_ENABLED"] = "true"
-    env["ROBIE_ASCEND_API_PRODUCTION_ENABLED"] = "true"
-    env["ROBIE_ASCEND_API_KEY"] = "Yoo9IziU9MBws0GuzaXww4t1XWqrxrjynaGE0-vltUo"
-    env["ROBIE_ASCEND_API_BASE_URL"] = "https://api.useascend.com/v1"
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get("PYTHONPATH", "")
+    env["HOME"] = str(OPT_ROOT)
+    env["HERMES_HOME"] = str(HERMES_HOME)
+    env["ROBIE_ENV"] = _EXPECTED_ENV
+    if job_id:
+        env["ROBIE_JOB_ID"] = job_id
+        env["JOB_ID"] = job_id
+    if db_path:
+        env["ROBIE_JOB_DB"] = db_path
 
     cmd = [
-        "/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python",
+        str(HERMES_HOME / "hermes-agent/venv/bin/python"),
         "-m", "hermes_cli.main",
         "chat",
         "-q", prompt
@@ -205,8 +221,10 @@ def run_agent_task(prompt: str) -> str:
             text=True,
             timeout=600,
             env=env,
-            cwd="/opt/streetsmart-hermes"
+            cwd=str(OPT_ROOT)
         )
+        if res.returncode:
+            return f"Error executing task: Hermes exited with status {res.returncode}"
         return clean_hermes_output(res.stdout)
     except Exception as exc:
         logger.error("Error executing Hermes agent task: %s", exc)
@@ -360,12 +378,17 @@ def process_inbox():
                 f"3. Write a professional, concise, polished email response directly addressing {sender}."
             )
 
-            response_text = run_guarded_email_task(
-                db_path=JOB_DB,
-                gmail_message_id=msg_id,
-                prompt=task_prompt,
-                run_agent=run_agent_task,
-            )
+            try:
+                response_text = run_guarded_email_task(
+                    db_path=JOB_DB,
+                    gmail_message_id=msg_id,
+                    prompt=task_prompt,
+                    run_agent=run_agent_task,
+                    run_agent_with_context=run_agent_task,
+                )
+            except EmailTaskPending:
+                logger.info("Durable email job is pending; leaving message unread")
+                continue
 
         # Send clean reply
         reply_msg = MIMEText(response_text)

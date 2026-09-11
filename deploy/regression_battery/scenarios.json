@@ -1,6 +1,6 @@
 {
-  "updated": "2026-08-28",
-  "rule": "Every Production incident that was a NEW failure mode gets a named deterministic scenario in this catalog before we call the incident closed. That is how the simulator grows. Simulator passed still only means known scenarios did not regress — never that nothing is wrong.",
+  "updated": "2026-09-11",
+  "rule": "Every Production incident that was a NEW failure mode gets a named deterministic scenario in this catalog before we call the incident closed. That is how the simulator grows. Simulator passed still only means known scenarios did not regress \u2014 never that nothing is wrong.",
   "maintain": "Add a named scenario the same day a NEW Production failure mode is found. Do not mark the incident closed until the scenario id exists in the battery. Update this list when a deploy or HITL shows a new class.",
   "incidents": [
     {
@@ -170,6 +170,14 @@
       "scenario": "unverified-unmask:infra-error-not-checkpoint",
       "closed": true,
       "note": "Gold Eagle Bond Chat job d5fd2307 closed UNVERIFIED with last_error 'no structured destination action checkpoint' despite 0 playwright_exec / 0 verification_evidence. Infra was PLAYWRIGHT_BLOCKED / CDP ECONNREFUSED on 127.0.0.1:9222. e51a2f2f HITL after flush_tabs_at_job_start then ECONNREFUSED. Do not mask infra as verification. COMPLETE stays blocked without destination evidence. Claimed progress without evidence stays UNVERIFIED."
+    },
+    {
+      "id": "6a3688b6-chat-email-contention",
+      "class": "message-intake",
+      "new_failure_mode": true,
+      "scenario": "message-intake:queue-during-active-work",
+      "closed": false,
+      "note": "Chat intake failed while an email owned the execution run. Queue receipts must not acquire the execution slot, and pending emails must remain unread. Deployment and business verification tracked separately."
     }
   ]
 }

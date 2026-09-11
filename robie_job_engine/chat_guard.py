@@ -22,7 +22,7 @@ from .worker_contract import classify_chat_close_without_checkpoint
 from .action_gate import apply_action_gate, is_action_gate_refusal
 from .job_schema import bounded_schema_hold_reason
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
-from .runs import IsolatedRunStore, RunIsolationError
+from .runs import IsolatedRunStore, RunIsolationError, MessageMaintenanceDeferred
 from .operations import ingest_chat_attachments
 from .recording import RecordingManager
 from .request_routing import BOUNDED_ENGINE_ACTIONS, classify_request
@@ -46,6 +46,13 @@ _BOUND_POLICY_TERMS = re.compile(
     r"(?:renewal|endorsement|cancellation|reassignment)\b)",
     re.IGNORECASE,
 )
+
+
+def require_message_execution_available(db_path: str) -> None:
+    """Leave durable intake retryable while the service configuration is fenced."""
+    active = IsolatedRunStore(db_path).active_run()
+    if active and active.get("owner") == "message-runtime-configuration":
+        raise MessageMaintenanceDeferred("Message runtime maintenance is active; retry this durable event")
 
 
 def pre_execution_hold_reason(
@@ -987,6 +994,7 @@ def open_chat_job(
         job["status"] == JobStatus.PENDING
         and classification.action_type not in BOUNDED_ENGINE_ACTIONS
     ):
+        require_message_execution_available(db_path)
         store.transition(job["id"], JobStatus.RUNNING, expected={JobStatus.PENDING})
     staged_count = len(files) + sum(
         1 for ref in refs if ref.local_path or (ref.kind == "drive_chip" and drive_port)

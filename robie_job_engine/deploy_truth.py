@@ -53,6 +53,11 @@ class ChatRuntimeFile:
 # Chat / Playwright files Hermes loads from .hermes. Skills stay out.
 CHAT_RUNTIME_FILES: tuple[ChatRuntimeFile, ...] = (
     ChatRuntimeFile(
+        name="email-agent",
+        zip_relpath="scripts/robie_email_agent.py",
+        dest_relpath="scripts/robie_email_agent.py",
+    ),
+    ChatRuntimeFile(
         name="google-chat-adapter",
         zip_relpath="integrations/google_chat/adapter.py",
         dest_relpath="hermes-agent/plugins/platforms/google_chat/adapter.py",
@@ -120,6 +125,20 @@ def zip_load_shim_source(zip_relpath: str) -> str:
     """Hermes-facing stub that execs the zip file. Not Carlo's skill text."""
     _refuse_skill_path(zip_relpath)
     relpath_literal = json.dumps(zip_relpath)
+    if zip_relpath == "scripts/robie_email_agent.py":
+        # The receiving .hermes location determines the environment even before
+        # a newly deployed service has loaded its environment drop-in.
+        return (
+            'from pathlib import Path\n'
+            f'{ZIP_LOAD_MARKER} = {relpath_literal}\n'
+            '# ROBIE_CANONICAL_JOB_ENGINE_ROOT cannot redirect this launcher.\n'
+            '_root = Path(__file__).resolve().parents[2]\n'
+            '_src = _root / "releases/current" / ROBIE_ZIP_LOAD_PATH\n'
+            'if not _src.is_file():\n'
+            '    raise RuntimeError("refuse to run a stale .hermes copy")\n'
+            'globals()["__file__"] = str(_src.resolve())\n'
+            'exec(compile(_src.read_text(encoding="utf-8"), str(_src), "exec"), globals())\n'
+        )
     return (
         '"""Hermes load-path stub. Production code is the zip file."""\n'
         "from __future__ import annotations\n"
