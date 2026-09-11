@@ -33,7 +33,8 @@ class TestDeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("ssh-keygen -q -t rsa -b 3072 -N ''", text)
         self.assertIn("for attempt in 1 2 3; do", text)
         self.assertIn("bounded Test IAP connection failed after 3 attempts", text)
-        self.assertGreaterEqual(text.count('--ssh-key-file="${SSH_KEY}"'), 3)
+        self.assertGreaterEqual(text.count('--ssh-key-file="${SSH_KEY}"'), 2)
+        self.assertIn('python scripts/transfer-test-artifact.py', text)
         self.assertNotIn("gcloud compute config-ssh", text)
 
     def test_installer_fails_closed_and_preserves_rollback(self):
