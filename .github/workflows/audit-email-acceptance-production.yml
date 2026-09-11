@@ -23,7 +23,7 @@ jobs:
       ZONE: us-east1-b
       PRODUCTION_VM: hermes-poc-01
       JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
-      JOB_PREFIX: 8d61a9d0
+      JOB_PREFIX: bd5b832e
       STAGING: /var/tmp/robie-readonly-audit/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
           set -euo pipefail
           test "${PRODUCTION_VM}" = hermes-poc-01
           test "${JOB_DB}" = /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
-          test "${JOB_PREFIX}" = 8d61a9d0
+          test "${JOB_PREFIX}" = bd5b832e
       - name: Run redacted read-only database audit
         run: |
           set -euo pipefail

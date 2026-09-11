@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
-JOB_ID = '8d61a9d0-15e0-4c36-9767-ea0c14c035e2'
+JOB_ID = 'bd5b832e-e942-418c-a479-57d7b40262eb'
 POLICY = 'TEST-HO-20260911-E01'
 MARKERS = ('NEEDS_SKILL', 'NEEDS_CLARIFICATION', 'PLAYWRIGHT_BLOCKED',
            'EZLYNX_WRITE_SCOPE_REFUSED', 'ROBIE_OUTCOME_UNKNOWN',
@@ -18,6 +18,26 @@ MARKERS = ('NEEDS_SKILL', 'NEEDS_CLARIFICATION', 'PLAYWRIGHT_BLOCKED',
            'ImportError', 'AUTH_REQUIRED', 'RESOURCE_EXHAUSTED',
            'max_iterations', 'tool_calls', 'finish_reason', 'STOP',
            'MALFORMED_FUNCTION_CALL', 'MAX_TOKENS')
+
+TOOL_ERROR_PATTERNS = {
+    'unknown_tool': r'unknown tool|tool .{0,80}not found|no such tool|unrecognized tool',
+    'invalid_arguments': r'invalid argument|validation error|missing required|unexpected keyword',
+    'module_missing': r'ModuleNotFoundError|No module named',
+    'name_error': r'NameError|is not defined',
+    'syntax_error': r'SyntaxError|invalid syntax',
+    'attribute_error': r'AttributeError|has no attribute',
+    'permission_denied': r'PermissionError|permission denied',
+    'file_missing': r'FileNotFoundError|No such file or directory',
+    'timeout': r'TimeoutError|timed out',
+    'connection_error': r'ConnectionError|connection refused|ECONNREFUSED',
+    'tool_unavailable': r'not available|not enabled|not registered|unavailable',
+}
+
+
+def tool_error_categories(content):
+    """Fixed labels only: never return excerpts of tool output or error values."""
+    return [name for name, pattern in TOOL_ERROR_PATTERNS.items()
+            if re.search(pattern, str(content or ''), re.I)]
 
 
 def markers(value):
@@ -116,6 +136,7 @@ def inspect_acceptance_sessions(path):
                     'role': message['role'], 'tool_name': message['tool_name'],
                     'tool_call_names': names, 'finish_reason': message['finish_reason'],
                     'content_length': len(content), 'markers': markers(content),
+                    'tool_error_categories': tool_error_categories(content) if message['role'] == 'tool' else [],
                     'reasoning_length': len(str(message['reasoning'] or message['reasoning_content'] or '')),
                 })
             result.append(session)
