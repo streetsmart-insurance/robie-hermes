@@ -446,6 +446,24 @@ def _default_chat_verifiers() -> dict[str, Any]:
         logger.exception(
             "hermes.google_chat_task verifier unavailable; those jobs stay UNVERIFIED"
         )
+    # Submission Center audits driven from Chat previously found no verifier
+    # here and fell to UNVERIFIED ("no independent verifier registered") even
+    # though EzlynxSubmissionAuditVerifier existed in chat_verifiers.py. That
+    # is the RH-008 verifier gap: the independent fresh-read port
+    # (SubprocessSubmissionReadback) was built, but never wired into an
+    # actual verifier on the Chat path. Register it so verification-backed
+    # submission audits can actually complete.
+    try:
+        from .chat_verifiers import EzlynxSubmissionAuditVerifier
+        from .submission_audit import SubprocessSubmissionReadback
+
+        verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
+            SubprocessSubmissionReadback()
+        )
+    except Exception:
+        logger.exception(
+            "ezlynx.submission_audit verifier unavailable; those jobs stay UNVERIFIED"
+        )
     verifiers.update(_CHAT_VERIFIERS)
     return verifiers
 

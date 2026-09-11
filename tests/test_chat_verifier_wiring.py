@@ -20,6 +20,7 @@ from robie_job_engine import chat_guard
 from robie_job_engine.browser_read import BrowserReadVerifier
 from robie_job_engine.chat_ezlynx_destination_verifier import HermesChatEzlynxDestinationVerifier
 from robie_job_engine.chat_guard import _default_chat_verifiers, guard_chat_response, open_chat_job
+from robie_job_engine.chat_verifiers import EzlynxSubmissionAuditVerifier
 from robie_job_engine.models import JobStatus
 from robie_job_engine.store import JobStore
 
@@ -193,6 +194,122 @@ class ChatEzlynxDestinationWiringTests(unittest.TestCase):
 
 def fake_verifier_calls(verifier):
     return verifier.port.calls
+
+
+class _FakeSubmissionReadback:
+    """Stand-in for SubprocessSubmissionReadback; returns a canned fresh read."""
+
+    def __init__(self, read):
+        self.read = dict(read)
+        self.calls = 0
+
+    def fresh_authenticated_structured_read(self, scope):
+        self.calls += 1
+        return dict(self.read)
+
+
+def _submission_audit_job(db, job_key, scope, postcondition):
+    job_id = open_chat_job(
+        db,
+        job_key,
+        "Audit the EZLynx Submission Center overdue items",
+        action_payload={
+            "resource_id": "submission-center:example-producer",
+            "scope": scope,
+            "expected_postcondition": postcondition,
+        },
+    )
+    store = JobStore(db)
+    store.checkpoint(
+        job_id,
+        "action",
+        {
+            "action": "ezlynx.submission_audit",
+            "destination": {
+                "resource_id": "submission-center:example-producer",
+                "scope": scope,
+                "expected_postcondition": postcondition,
+            },
+            "detail": {},
+        },
+    )
+    return job_id
+
+
+def _default_registry_with_fake_submission_readback(read):
+    verifiers = _default_chat_verifiers()
+    verifier = verifiers["ezlynx.submission_audit"]
+    fake = _FakeSubmissionReadback(read)
+    verifier.readback = fake
+    return verifiers, fake
+
+
+class SubmissionAuditWiringTests(unittest.TestCase):
+    """RH-008: ezlynx.submission_audit jobs must verify, not auto-UNVERIFY.
+
+    EzlynxSubmissionAuditVerifier existed in chat_verifiers.py (and
+    job_schema.py named it as the required independent verifier), but it was
+    never registered in _default_chat_verifiers(), so every Chat-driven
+    submission audit fell to UNVERIFIED with "no independent verifier
+    registered".
+    """
+
+    def test_default_chat_verifiers_include_submission_audit(self):
+        verifiers = _default_chat_verifiers()
+        self.assertIn("ezlynx.submission_audit", verifiers)
+        self.assertIsInstance(
+            verifiers["ezlynx.submission_audit"], EzlynxSubmissionAuditVerifier
+        )
+
+    def test_submission_audit_chat_job_verifies_through_default_registry(self):
+        scope = {"producer": "Example Producer", "age_days": 30}
+        postcondition = {"overdue_count": 4}
+        read = {
+            "resource_id": "submission-center:example-producer",
+            "authenticated": True,
+            "scope": scope,
+            "postcondition": postcondition,
+            "engine": "playwright",
+            "fresh_navigation": True,
+        }
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = _submission_audit_job(db, "submission-audit-w1", scope, postcondition)
+            verifiers, fake = _default_registry_with_fake_submission_readback(read)
+            with patch.object(
+                chat_guard, "_default_chat_verifiers", return_value=verifiers
+            ):
+                guard_chat_response(db, job_id, "Four overdue items were found.")
+            final = JobStore(db).get_job(job_id)
+            self.assertEqual(fake.calls, 1, "the registered verifier must actually run")
+            self.assertNotIn(
+                "no independent verifier registered",
+                str(final.get("last_error") or ""),
+            )
+            self.assertEqual(final["status"], JobStatus.COMPLETE)
+
+    def test_submission_audit_chat_job_fails_closed_on_stale_read(self):
+        scope = {"producer": "Example Producer", "age_days": 30}
+        postcondition = {"overdue_count": 4}
+        # Stale read: not a fresh navigation, so the verifier must hold.
+        read = {
+            "resource_id": "submission-center:example-producer",
+            "authenticated": True,
+            "scope": scope,
+            "postcondition": postcondition,
+            "engine": "playwright",
+            "fresh_navigation": False,
+        }
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = _submission_audit_job(db, "submission-audit-w2", scope, postcondition)
+            verifiers, _ = _default_registry_with_fake_submission_readback(read)
+            with patch.object(
+                chat_guard, "_default_chat_verifiers", return_value=verifiers
+            ):
+                guard_chat_response(db, job_id, "Four overdue items were found.")
+            final = JobStore(db).get_job(job_id)
+            self.assertNotEqual(final["status"], JobStatus.COMPLETE)
 
 
 if __name__ == "__main__":
