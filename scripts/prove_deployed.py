@@ -99,28 +99,53 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(f"chat_guard.py: {label} — not present")
 
     # -- 3. is the gateway running this code? ------------------------- #
+    # The unit is named differently across boxes: robie-gateway on Test,
+    # hermes-gateway on Production. Checking one hardcoded name made this
+    # print "NOT DEPLOYED - hermes-gateway is inactive" on a Test box where
+    # that unit does not exist and robie-gateway was running fine. A
+    # confident answer about the wrong unit is worse than no answer.
     print("\n3. IS THE GATEWAY RUNNING SINCE THE DEPLOY?")
     try:
-        out = subprocess.run(
-            ["systemctl", "show", "hermes-gateway",
-             "--property=ActiveState,ActiveEnterTimestamp,MainPID"],
-            capture_output=True, text=True, timeout=15,
-        ).stdout.strip()
-        props = dict(
-            line.split("=", 1) for line in out.splitlines() if "=" in line
-        )
-        for k, v in props.items():
-            print(f"   {k:<22} {v}")
-        if props.get("ActiveState") != "active":
-            failures.append(f"hermes-gateway is {props.get('ActiveState')}, not active")
-        # A restart older than the newest deployed file means the running
-        # process predates the change and has the OLD code in memory.
-        newest = max((p.stat().st_mtime for p in found.values()), default=0)
-        stamp = props.get("ActiveEnterTimestamp", "")
-        if newest and stamp:
-            print(f"   newest module written  {time.ctime(newest)}")
-            print("   ^ if the gateway entered active BEFORE that line,")
-            print("     it is still running the old code. Restart it.")
+        unit = None
+        checked = []
+        for candidate in ("robie-gateway", "hermes-gateway"):
+            load = subprocess.run(
+                ["systemctl", "show", candidate, "-p", "LoadState", "--value"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+            if load == "loaded":
+                unit = candidate
+                break
+            checked.append(f"{candidate}={load or 'absent'}")
+        if unit is None:
+            print("   no gateway unit found - checked " + ", ".join(checked))
+            failures.append(
+                "no gateway unit found under any known name (checked "
+                + ", ".join(checked)
+                + ") - this says nothing about whether the deploy worked"
+            )
+        else:
+            print(f"   {'unit':<22} {unit}")
+            out = subprocess.run(
+                ["systemctl", "show", unit,
+                 "--property=ActiveState,ActiveEnterTimestamp,MainPID"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+            props = dict(
+                line.split("=", 1) for line in out.splitlines() if "=" in line
+            )
+            for k, v in props.items():
+                print(f"   {k:<22} {v}")
+            if props.get("ActiveState") != "active":
+                failures.append(f"{unit} is {props.get('ActiveState')}, not active")
+            # A restart older than the newest deployed file means the running
+            # process predates the change and has the OLD code in memory.
+            newest = max((p.stat().st_mtime for p in found.values()), default=0)
+            stamp = props.get("ActiveEnterTimestamp", "")
+            if newest and stamp:
+                print(f"   newest module written  {time.ctime(newest)}")
+                print("   ^ if the gateway entered active BEFORE that line,")
+                print("     it is still running the old code. Restart it.")
     except FileNotFoundError:
         print("   (systemctl not available here — check manually)")
     except Exception as exc:
