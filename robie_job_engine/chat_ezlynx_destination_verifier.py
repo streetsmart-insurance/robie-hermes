@@ -100,7 +100,7 @@ class HermesChatEzlynxDestinationVerifier:
         policy_number = str(payload.get("policy_number") or claimed.get("policy_number") or "").strip()
         expected_documents = [
             str(name).strip()
-            for name in (claimed.get("document_names") or [])
+            for name in (payload.get("document_names") or claimed.get("document_names") or [])
             if str(name).strip()
         ]
         discussion_title = str(claimed.get("discussion_title") or "").strip()
@@ -176,12 +176,13 @@ class HermesChatEzlynxDestinationVerifier:
                     "document library read failed; cannot confirm the uploaded document",
                     locator=policy_number,
                     retryable=True,
+                    authoritative=True,  # The policy read succeeded; preserve that partial evidence.
                 )
             seen = [str(r.get("name") or "") for r in rows]
             observed["documents_seen"] = seen[:25]
             missing = [
                 name for name in expected_documents
-                if not any(_norm(name) in _norm(s) for s in seen)
+                if not any(_norm(name) == _norm(s) for s in seen)
             ]
             observed["documents_missing"] = missing
             documents_ok = not missing

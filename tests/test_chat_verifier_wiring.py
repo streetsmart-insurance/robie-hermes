@@ -18,6 +18,7 @@ from durable_temp import durable_temporary_directory
 
 from robie_job_engine import chat_guard
 from robie_job_engine.browser_read import BrowserReadVerifier
+from robie_job_engine.message_verification import MessageOutcomeVerifier
 from robie_job_engine.chat_ezlynx_destination_verifier import HermesChatEzlynxDestinationVerifier
 from robie_job_engine.chat_guard import _default_chat_verifiers, guard_chat_response, open_chat_job
 from robie_job_engine.models import JobStatus
@@ -45,9 +46,8 @@ class ChatVerifierWiringTests(unittest.TestCase):
     def test_default_chat_verifiers_include_google_chat_task(self):
         verifiers = _default_chat_verifiers()
         self.assertIn("hermes.google_chat_task", verifiers)
-        self.assertIsInstance(
-            verifiers["hermes.google_chat_task"], HermesChatEzlynxDestinationVerifier
-        )
+        self.assertIsInstance(verifiers["hermes.google_chat_task"], MessageOutcomeVerifier)
+        self.assertIsInstance(verifiers["hermes.google_chat_task"].reader, HermesChatEzlynxDestinationVerifier)
 
     def test_browser_read_chat_job_verifies_without_explicit_verifiers(self):
         url = "https://example.com/policy/1"

@@ -470,9 +470,10 @@ def _default_chat_verifiers() -> dict[str, Any]:
         except Exception:
             # Register anyway. Reads fail closed if Secret Manager is absent.
             client = None
-        verifiers["hermes.google_chat_task"] = HermesChatEzlynxDestinationVerifier(
+        from .message_verification import MessageOutcomeVerifier
+        verifiers["hermes.google_chat_task"] = MessageOutcomeVerifier(HermesChatEzlynxDestinationVerifier(
             EzlynxApiClientReadPort(client)
-        )
+        ))
     except Exception as exc:
         logger.exception(
             "hermes.google_chat_task verifier unavailable; those jobs stay UNVERIFIED"
@@ -1256,6 +1257,9 @@ def _render_chat_terminal(
 ) -> str:
     job_id = job["id"]
     status = JobStatus(job["status"])
+    from .message_results import verification_summary
+    checked = verification_summary(store, job_id)
+    checked_note = f"\n\n{checked}" if checked else ""
     if status == JobStatus.COMPLETE:
         publication = store.get_checkpoint(job_id, "control_center_publication")
         completion_line = (
@@ -1269,12 +1273,13 @@ def _render_chat_terminal(
             if job.get("action_type") == "ezlynx.submission_audit"
             else ""
         )
-        worker_detail = "" if verified_summary else f"\n\n{content}"
+        worker_detail = "" if verified_summary or (checked and job.get("action_type") == "hermes.google_chat_task") else f"\n\n{content}"
         return (
             f"ROBIE Job {job_id} — COMPLETE\n\n"
             + completion_line
             + verified_summary
             + worker_detail
+            + checked_note
             + _recording_chat_note(recordings, job_id)
             + _post_job_audit_note(str(store.path), job_id, recordings)
         )
@@ -1283,6 +1288,7 @@ def _render_chat_terminal(
             f"ROBIE Job {job_id} — FAILED\n\n"
             "ROBIE could not safely finish the requested work. No success claims from the Computer Worker are being reported.\n\n"
             f"Reason: {job.get('last_error') or 'unknown error'}."
+            + checked_note
             + _recording_chat_note(recordings, job_id)
             + _login_secret_chat_note(store, job_id)
             + _post_job_audit_note(str(store.path), job_id, recordings)
@@ -1290,10 +1296,11 @@ def _render_chat_terminal(
     if status == JobStatus.UNVERIFIED:
         return (
             f"ROBIE Job {job_id} — UNVERIFIED\n\n"
-            "ROBIE attempted the work, but the destination state was not independently verified. "
-            "Any success wording produced by the Computer Worker has been suppressed.\n\n"
+            "ROBIE attempted the work. The full requested outcome was not independently verified. "
+            "Confirmed facts and remaining gaps are reported below; unconfirmed success claims are suppressed.\n\n"
             f"Reason: {job.get('last_error') or 'destination verification produced no authoritative evidence'}.\n\n"
             "Do not treat this Job as COMPLETE; it remains open for review or retry."
+            + checked_note
             + _recording_chat_note(recordings, job_id)
             + _login_secret_chat_note(store, job_id)
             + _post_job_audit_note(str(store.path), job_id, recordings)
@@ -1302,7 +1309,8 @@ def _render_chat_terminal(
         f"ROBIE Job {job_id} — {status.value}\n\n"
         "ROBIE is not treating this request as successful. "
         f"Reason: {job.get('last_error') or 'waiting for a human or destination update'}."
-        + _recording_chat_note(recordings, job_id)
+        + checked_note
+            + _recording_chat_note(recordings, job_id)
         + _login_secret_chat_note(store, job_id)
     )
 
