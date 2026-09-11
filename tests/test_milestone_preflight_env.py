@@ -1,11 +1,15 @@
-"""The pre-flight must read the gateway's real environment, not invent one.
+"""The pre-flight must describe the service, not the ssh session it runs in.
 
-milestone_preflight.py runs over an ad-hoc ssh session, which inherits none of
-the unit's Environment= or EnvironmentFile=. Two wrong answers are available:
-set our own values (green on a box that would fail in production) or set none
-(red on a box that is fine). The script reads the unit's own configuration out
-of systemd and uses exactly that, and restores os.environ afterwards so the
-overlay cannot leak into the checks that follow.
+milestone_preflight.py runs over an ad-hoc ssh session. That session is not the
+service: it inherits none of the unit's Environment= or EnvironmentFile=, and
+python3 on PATH is not necessarily the interpreter the unit runs, so it need not
+have the same libraries. Answering from this session gives confident answers
+about a box that does not exist - in both directions, green on a broken box and
+red on a working one.
+
+These tests pin the three pieces that keep the report honest: reading the unit's
+environment, resolving the unit's interpreter (and admitting when it could not),
+and noticing that the running service predates its own config.
 
 Stdlib unittest: runs without pytest.
 """
@@ -13,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,54 +105,102 @@ class ReadsTheUnitsOwnEnvironment(unittest.TestCase):
         self.assertIn("hermes-gateway=absent", detail)
 
 
-class SecretCheckAppliesAndRestores(unittest.TestCase):
-    @staticmethod
-    def _loader(sink):
-        class _Module:
-            @staticmethod
-            def load_ezlynx_api_config():
-                sink.append(os.environ.get(SECRET_KEY))
-        return _Module
+class ResolvesTheServicesInterpreter(unittest.TestCase):
+    """A venv's python has libraries this ssh session's python3 does not."""
 
-    def test_overlay_is_visible_to_the_loader(self):
-        seen = []
-        module = self._loader(seen)
-        with mock.patch.dict("sys.modules", {"robie_job_engine.ezlynx_api": module}):
-            state, detail = preflight._check_secret_manager(
-                {SECRET_KEY: "projects/1/secrets/x/versions/latest"}, ["/etc/x.env"]
-            )
-        self.assertEqual(state, preflight.OK, detail)
-        self.assertEqual(seen, ["projects/1/secrets/x/versions/latest"])
-        self.assertIn("/etc/x.env", detail)
+    def setUp(self):
+        self.venv_python = _tmpdir(self) / "python3.11"
+        self.venv_python.write_text("#!/bin/sh\n")
+        self.venv_python.chmod(0o755)
 
-    def test_environment_is_restored_afterwards(self):
-        original = os.environ.get(SECRET_KEY)
+    def test_interpreter_comes_from_exec_start_path(self):
+        props = {("robie-gateway", "ExecStart"):
+                 f"{{ path={self.venv_python} ; argv[]={self.venv_python} -m robie_job_engine ; ignore_errors=no }}"}
+        with mock.patch.object(preflight, "_unit_property", _fake_properties(props)):
+            interpreter, note = preflight._service_python("robie-gateway")
+        self.assertEqual(interpreter, str(self.venv_python))
+        self.assertIn("ExecStart", note)
 
-        def _restore():
-            if original is None:
-                os.environ.pop(SECRET_KEY, None)
-            else:
-                os.environ[SECRET_KEY] = original
+    def test_interpreter_falls_back_to_argv_when_path_is_a_wrapper(self):
+        props = {("robie-gateway", "ExecStart"):
+                 f"{{ path=/usr/bin/env ; argv[]=/usr/bin/env {self.venv_python} -m robie_job_engine ; ignore_errors=no }}"}
+        with mock.patch.object(preflight, "_unit_property", _fake_properties(props)):
+            interpreter, note = preflight._service_python("robie-gateway")
+        self.assertEqual(interpreter, str(self.venv_python))
+        self.assertIn("argv", note)
 
-        self.addCleanup(_restore)
-        os.environ.pop(SECRET_KEY, None)
-        with mock.patch.dict("sys.modules", {"robie_job_engine.ezlynx_api": self._loader([])}):
-            preflight._check_secret_manager({SECRET_KEY: "overlay"}, [])
-        self.assertNotIn(SECRET_KEY, os.environ)
+    def test_unknown_interpreter_admits_the_answer_may_be_about_this_session(self):
+        props = {("robie-gateway", "ExecStart"):
+                 "{ path=/opt/robie/bin/gateway ; argv[]=/opt/robie/bin/gateway ; ignore_errors=no }"}
+        with mock.patch.object(preflight, "_unit_property", _fake_properties(props)):
+            interpreter, note = preflight._service_python("robie-gateway")
+        self.assertEqual(interpreter, sys.executable)
+        self.assertIn("this session", note)
 
-    def test_failure_names_the_source_it_used(self):
-        class _Boom:
-            @staticmethod
-            def load_ezlynx_api_config():
-                raise RuntimeError("ROBIE_EZLYNX_API_UAT_SECRET must be configured")
+    def test_no_unit_at_all_says_which_python_it_used(self):
+        interpreter, note = preflight._service_python(None)
+        self.assertEqual(interpreter, sys.executable)
+        self.assertIn("no gateway unit", note)
 
-        with mock.patch.dict("sys.modules", {"robie_job_engine.ezlynx_api": _Boom}):
-            state, detail = preflight._check_secret_manager(
-                {}, ["/etc/streetsmart-hermes-test/accountability.env"]
-            )
-        self.assertEqual(state, preflight.BAD)
-        self.assertIn("/etc/streetsmart-hermes-test/accountability.env", detail)
-        self.assertIn("must be configured", detail)
+
+class ProbeRunsInThatInterpreter(unittest.TestCase):
+    """The probe's answers must come from the service's runtime, not ours."""
+
+    def test_probe_sees_the_unit_environment_and_the_release_on_path(self):
+        release = _tmpdir(self)
+        pkg = release / "robie_job_engine"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "ezlynx_api.py").write_text(
+            "import os\n"
+            "def load_ezlynx_api_config():\n"
+            "    if not os.environ.get('ROBIE_EZLYNX_API_UAT_SECRET'):\n"
+            "        raise RuntimeError('ROBIE_EZLYNX_API_UAT_SECRET must be configured')\n"
+        )
+        (pkg / "chat_guard.py").write_text(
+            "class _UnavailableVerifier:\n"
+            "    def __init__(self, reason):\n"
+            "        self.reason = reason\n"
+            "class Real:\n"
+            "    pass\n"
+            "def _default_chat_verifiers():\n"
+            "    return {'hermes.google_chat_task': Real(), 'browser.read': Real()}\n"
+        )
+        probe, err = preflight._probe_service_runtime(
+            sys.executable, {SECRET_KEY: "projects/1/secrets/x/versions/latest"}, release
+        )
+        self.assertEqual(err, "")
+        self.assertEqual(probe["secret"][0], preflight.OK, probe)
+        self.assertEqual(
+            sorted(row[0] for row in probe["verifiers"]),
+            ["browser.read", "hermes.google_chat_task"],
+        )
+
+    def test_missing_environment_reaches_the_probe_as_a_problem(self):
+        release = _tmpdir(self)
+        pkg = release / "robie_job_engine"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "ezlynx_api.py").write_text(
+            "import os\n"
+            "def load_ezlynx_api_config():\n"
+            "    if not os.environ.get('ROBIE_EZLYNX_API_UAT_SECRET'):\n"
+            "        raise RuntimeError('ROBIE_EZLYNX_API_UAT_SECRET must be configured')\n"
+        )
+        saved = os.environ.pop(SECRET_KEY, None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, SECRET_KEY, saved)
+        probe, err = preflight._probe_service_runtime(sys.executable, {}, release)
+        self.assertEqual(err, "")
+        self.assertEqual(probe["secret"][0], preflight.BAD)
+        self.assertIn("must be configured", probe["secret"][1])
+
+    def test_an_interpreter_that_cannot_run_is_an_error_not_a_pass(self):
+        probe, err = preflight._probe_service_runtime(
+            "/nonexistent/python", {}, _tmpdir(self)
+        )
+        self.assertIsNone(probe)
+        self.assertTrue(err)
 
 
 class RunningServiceMustHaveTheCurrentConfig(unittest.TestCase):
