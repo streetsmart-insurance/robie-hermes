@@ -1,0 +1,91 @@
+name: Why didn't the accountability report go out
+
+# Read-only diagnosis of the weekday 09:00 America/New_York accountability
+# report on hermes-poc-01. Answers one question: did it not run, did it run and
+# fail, or did it run and finish UNVERIFIED? Those look identical from the
+# outside and need completely different fixes.
+#
+# Touches nothing. systemctl and journalctl queries only; jobs.db is opened
+# read-only. The verdict is written in plain English to the job summary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_ACCOUNTABILITY_ON_HERMES_POC_01
+        required: true
+        type: string
+      days:
+        description: How many days of job history to look at
+        required: false
+        type: string
+        default: "7"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_ACCOUNTABILITY_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+      STAGING: /var/tmp/robie-accountability-diag/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+
+      - name: Diagnose
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/diagnose_accountability.py "${PRODUCTION_VM}:${STAGING}/"
+          set +e
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 ${STAGING}/diagnose_accountability.py --db-path ${JOB_DB} --days ${{ inputs.days }}" \
+            2>&1 | tee "${RUNNER_TEMP}/accountability.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "${rc}" -eq 0 ]; then
+            HEAD="## Nothing obviously wrong with scheduling"
+          else
+            HEAD="## Found something — see WHAT THIS MEANS at the bottom"
+          fi
+          {
+            echo "${HEAD}"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/accountability.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          # Reporting a problem is a successful diagnosis, not a failed run.
+          exit 0
+
+      - name: Publish output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accountability-diagnosis-${{ github.run_id }}
+          path: ${{ runner.temp }}/accountability.txt
+          if-no-files-found: warn
+          retention-days: 30
