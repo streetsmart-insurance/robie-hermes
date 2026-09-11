@@ -8,7 +8,7 @@ from pathlib import Path
 FILES = ('SKILL.md', 'references/profiles.json', 'references/selector-inventory.md')
 
 
-def install(root: Path, release: Path):
+def install(root: Path, release: Path, attempt: str = ""):
     source = release / 'deploy/hermes/skills/ezlynx-policy-setup'
     for name in FILES:
         if not (source / name).is_file():
@@ -18,7 +18,13 @@ def install(root: Path, release: Path):
     link = root / '.hermes/skills/ezlynx-policy-setup'
     receipt = release / 'policy-skill-install.json'
     if receipt.exists():
-        raise ValueError('Existing skill installation receipt; inspect before repeating')
+        record = json.loads(receipt.read_text())
+        if record['source'] != str(source) or not link.is_symlink() or link.resolve() != source.resolve():
+            raise ValueError('Previous skill installation is not intact')
+        for name in FILES:
+            if hashlib.sha256((link / name).read_bytes()).hexdigest() != record['sha256'][name]:
+                raise ValueError('Previous skill installation bytes changed')
+        return {**record, 'already_installed': True}
     previous = {'kind': 'absent'}
     if link.is_symlink():
         previous = {'kind': 'link', 'target': os.readlink(link)}
@@ -27,7 +33,7 @@ def install(root: Path, release: Path):
             raise ValueError('Existing policy skill is not a directory or link')
         backup = root / '.hermes/skill-backups' / uuid.uuid4().hex / 'ezlynx-policy-setup'
         previous = {'kind': 'directory', 'backup': str(backup)}
-    record = {'source': str(source), 'previous': previous,
+    record = {'source': str(source), 'previous': previous, 'attempt': attempt,
               'sha256': {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in FILES}}
     receipt.write_text(json.dumps(record, indent=2))
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -45,11 +51,13 @@ def install(root: Path, release: Path):
     return record
 
 
-def restore(root: Path, release: Path):
+def restore(root: Path, release: Path, attempt: str = ""):
     receipt = release / 'policy-skill-install.json'
     if not receipt.exists():
         return
     record = json.loads(receipt.read_text())
+    if record.get('attempt', '') != attempt:
+        return  # This deployment invocation did not change the skill.
     link = root / '.hermes/skills/ezlynx-policy-setup'
     previous = record['previous']
     if link.is_symlink() and os.readlink(link) == record['source']:
@@ -69,8 +77,8 @@ def restore(root: Path, release: Path):
 
 if __name__ == '__main__':
     import sys
-    action, root, release = sys.argv[1:]
+    action, root, release, attempt = sys.argv[1:]
     if action not in {'install', 'restore'}:
         raise SystemExit('Unknown policy skill release action')
-    result = (install if action == 'install' else restore)(Path(root), Path(release))
+    result = (install if action == 'install' else restore)(Path(root), Path(release), attempt)
     print(json.dumps(result or {'restored': True}))
