@@ -108,6 +108,18 @@ def _first_column(conn: sqlite3.Connection, table: str, candidates: list[str]) -
     return None
 
 
+def _present_columns(conn: sqlite3.Connection, table: str, candidates) -> list[str]:
+    """Only the candidate columns this table actually has.
+
+    The first version of this script assumed an "id" column and crashed on a
+    table that does not have one, taking the journal section down with it. A
+    diagnostic that dies on the shape of the thing it is diagnosing is worse
+    than useless: it hides the answer it had already found.
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    return [c for c in candidates if c and c in cols]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db-path", required=True, type=Path)
@@ -161,11 +173,18 @@ def main(argv: list[str] | None = None) -> int:
             )[0]["n"]
         status_col = _first_column(conn, "chat_event_queue", ["status", "state"])
         print(f"  total rows: {total}    in the last {args.hours}h: {recent_events}")
+        print("  columns: " + ", ".join(
+            r[1] for r in conn.execute("PRAGMA table_info(chat_event_queue)")
+        ))
         if status_col:
             for row in _rows(conn, f"SELECT {status_col} AS s, COUNT(*) AS n FROM chat_event_queue GROUP BY 1 ORDER BY 2 DESC"):
                 print(f"    {row['s']}: {row['n']}")
         if created:
-            cols = [c for c in ("id", status_col, "attempts", "last_error", created) if c]
+            cols = _present_columns(
+                conn, "chat_event_queue",
+                ["id", "event_id", "message_id", "name", status_col, "attempts",
+                 "last_error", "error", created],
+            ) or [created]
             newest = _rows(
                 conn,
                 f"SELECT {', '.join(cols)} FROM chat_event_queue ORDER BY {created} DESC LIMIT 5",
@@ -214,7 +233,9 @@ def main(argv: list[str] | None = None) -> int:
             for row in rows:
                 print(f"    {row['a']}  {row['s']}  x{row['n']}")
             err = _first_column(conn, "jobs", ["last_error", "error"])
-            cols = [c for c in ("id", action, status, err, created) if c]
+            cols = _present_columns(
+                conn, "jobs", ["id", "job_id", action, status, err, created]
+            ) or [created]
             for row in _rows(conn, f"SELECT {', '.join(cols)} FROM jobs ORDER BY {created} DESC LIMIT 5"):
                 parts = []
                 for c in cols:
