@@ -18,8 +18,6 @@ WORKER_FOR_ACTION = {
     "ezlynx.submission_audit": "submission-audit",
     "ezlynx.session_refresh": "session-refresh",
     "filesystem.skill_update": "hermes-cua",
-    "appsheet.smart_reward": "hermes-cua",
-    "appsheet.qa_audit": "hermes-cua",
     "hermes.plain_english": "hermes-cua",
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
@@ -44,8 +42,6 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.apply_label",
         "ezlynx.submission_audit",
         "ezlynx.session_refresh",
-        "appsheet.smart_reward",
-        "appsheet.qa_audit",
         "manual_renewal_verification",
         "audit_verification",
         "mortgagee_verification",
@@ -158,14 +154,6 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
             WORKER_FOR_ACTION["hermes.needs_clarification"],
             hold_status="NEEDS_CLARIFICATION",
         )
-    if _is_smart_reward(normalized):
-        return RequestClassification(
-            "appsheet.smart_reward", WORKER_FOR_ACTION["appsheet.smart_reward"]
-        )
-    if _is_qa_entry(normalized):
-        return RequestClassification(
-            "appsheet.qa_audit", WORKER_FOR_ACTION["appsheet.qa_audit"]
-        )
     if _is_plain_english(normalized, attachment_count):
         return RequestClassification("hermes.plain_english", WORKER_FOR_ACTION["hermes.plain_english"])
     return RequestClassification(
@@ -259,27 +247,4 @@ def _is_plain_english(text: str, attachment_count: int) -> bool:
         )
     )
 
-
-def _is_smart_reward(text: str) -> bool:
-    """Recognize staff reward, smart reward, or employee recognition commands."""
-    if "reward" in text:
-        return True
-    if "smart reward" in text or "smart-reward" in text:
-        return True
-    return any(phrase in text for phrase in ("nominate ", "nomination", "give kudos", "kudos to "))
-
-
-def _is_qa_entry(text: str) -> bool:
-    """Recognize quality assurance audit entries."""
-    return any(
-        phrase in text
-        for phrase in (
-            "quality assurance",
-            "qa audit",
-            "qa score",
-            "log qa",
-            "add qa",
-            "enter qa",
-        )
-    )
 
