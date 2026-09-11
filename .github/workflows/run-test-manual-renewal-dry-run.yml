@@ -1,0 +1,72 @@
+name: Run Manual Renewals read-only rehearsal on Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN_MANUAL_RENEWAL_DRY_RUN_ON_HERMES_TEST_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rehearse:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'RUN_MANUAL_RENEWAL_DRY_RUN_ON_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      TEST_ROOT: /opt/streetsmart-hermes-test/robie-job-engine
+      STAGING: /var/tmp/rh-023-rehearsal/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Test
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+          test "${TEST_ROOT}" = /opt/streetsmart-hermes-test/robie-job-engine
+      - name: Stage read-only Test driver
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${TEST_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          $SSH --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp scripts/run-test-manual-renewal-dry-run.py \
+            "${TEST_VM}:${STAGING}/" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap
+      - name: Create and observe dry-run job
+        run: |
+          set -euo pipefail
+          SSH="gcloud compute ssh ${TEST_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          JOB_ID=$($SSH --command="sudo python3 '${STAGING}/run-test-manual-renewal-dry-run.py' create '${{ github.run_id }}'" 2>&1 | tail -1)
+          test -n "${JOB_ID}"
+          echo "JOB_ID=${JOB_ID}" >>"${GITHUB_ENV}"
+          terminal=false
+          for _ in $(seq 1 20); do
+            STATE=$($SSH --command="sudo python3 '${STAGING}/run-test-manual-renewal-dry-run.py' status '${JOB_ID}'" 2>&1 | tail -1)
+            echo "job ${JOB_ID} status=${STATE}"
+            case "${STATE}" in
+              completed|failed|cancelled|needs_clarification) terminal=true; break ;;
+            esac
+            sleep 60
+          done
+          [[ "${terminal}" == true ]] || { echo "Test rehearsal timed out" >&2; exit 2; }
+          $SSH --command="sudo python3 '${STAGING}/run-test-manual-renewal-dry-run.py' summary '${JOB_ID}'" \
+            | tee "${RUNNER_TEMP}/rh-023-test-summary.json"
+          python3 -m json.tool "${RUNNER_TEMP}/rh-023-test-summary.json" >/dev/null
+      - name: Publish redacted Test evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rh-023-manual-renewal-readonly-${{ github.run_id }}
+          path: ${{ runner.temp }}/rh-023-test-summary.json
+          if-no-files-found: error
+          retention-days: 30
