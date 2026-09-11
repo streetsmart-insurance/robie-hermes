@@ -97,6 +97,22 @@ def build_runtime_engine(
     destination = proposal_destination
     if destination is None and current_robie_env() == TEST_ENV_NAME:
         destination = MemoryProposalDestination()
+    if destination is None:
+        # Production default: the scheduler path passes no destination.
+        # File-backed durable store co-located with the jobs database
+        # (ROBIE_PROPOSAL_DIR overrides) — the verifier re-reads the
+        # record from disk on every verification, so the worker's claim is
+        # always checked against durable state. An explicit arg still wins
+        # (tests). This also makes the carrier-proposal worker real on the
+        # scheduler path instead of _UnavailableWorker.
+        from .file_proposal_destination import (
+            FileProposalDestination,
+            default_proposals_dir,
+        )
+
+        destination = FileProposalDestination(
+            default_proposals_dir(getattr(store, "path", None))
+        )
     if ezlynx_browser is not None:
         ezlynx_worker: Any = HermesCuaEzlynxWorker(ezlynx_browser)
     elif isinstance(ezlynx_readback, MemoryEzlynxDestination):
@@ -116,9 +132,20 @@ def build_runtime_engine(
     verifiers: dict[str, Any] = {}
     if destination is not None:
         verifiers["carrier.proposal"] = CarrierProposalVerifier(destination)
-    if browser_port is not None:
-        workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
-        verifiers["browser.read"] = BrowserReadVerifier(browser_port)
+    if browser_port is None:
+        # Production default: the scheduler path (maybe_run_bounded_job)
+        # passes no browser_port. Default to the read-only CDP port over the
+        # persistent Hermes Chrome session — the same port the Chat verify
+        # path already uses — so browser.read jobs verify against a real
+        # readback instead of falling to UNVERIFIED ("no independent
+        # verifier registered"). An explicit arg still wins (tests).
+        # Construction is side-effect free (no connection); reads fail
+        # closed at verify time if Chrome is unreachable.
+        from .chat_verifier_ports import CdpReadPort
+
+        browser_port = CdpReadPort()
+    workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
+    verifiers["browser.read"] = BrowserReadVerifier(browser_port)
     if ezlynx_readback is not None:
         ezlynx_verifier = EzlynxDestinationVerifier(ezlynx_readback)
         verifiers["ezlynx.reassign"] = ezlynx_verifier
