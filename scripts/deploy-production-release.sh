@@ -126,6 +126,7 @@ from robie_job_engine.ezlynx_write_scope import (
     EZLYNX_WRITE_SCOPE_REFUSED,
     ezlynx_control_scope_block_reason,
     require_allowed_ezlynx_write_applicant,
+    requested_message_applicant,
 )
 
 allowed = "220250093"
@@ -148,9 +149,13 @@ unscoped_page = ezlynx_control_scope_block_reason(
 )
 assert wrong_page and EZLYNX_WRITE_SCOPE_REFUSED in wrong_page
 assert unscoped_page and EZLYNX_WRITE_SCOPE_REFUSED in unscoped_page
+assert requested_message_applicant({"text": "Work on https://app.ezlynx.com/web/account/440000001/overview"}) == "440000001"
+assert requested_message_applicant({"text": "applicant 440000001 and applicant 440000002"}) is None
+assert requested_message_applicant({"text": "applicant 440000001", "applicant_id": "440000002"}) is None
 print(json.dumps({
     "compiled_allowlist": [allowed],
-    "all_other_applicants_refused": True,
+    "unbound_applicants_refused": True,
+    "production_scope_requires_active_original_message": True,
     "wrong_page_refused": True,
     "unscoped_page_refused": True,
     "live_ezlynx_write_performed": False,

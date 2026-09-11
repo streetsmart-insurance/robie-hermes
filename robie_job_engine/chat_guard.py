@@ -837,6 +837,7 @@ def open_chat_job(
                     "conversation_id": context_key,
                     "worker": classification.worker,
                     **server_payload,
+                    "request_text": text,
                 }
             ),
             idempotency_key=f"gchat:{message_id}",

@@ -504,9 +504,16 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         env["ROBIE_JOB_ID"] = job_id
         env["ROBIE_CURRENT_JOB_ID"] = job_id
     payload = dict((job or {}).get("payload") or {})
+    from robie_job_engine.ezlynx_write_scope import requested_message_applicant
     env["ROBIE_EZLYNX_WRITE_APPLICANT_ID"] = str(
-        payload.get("applicant_id") or payload.get("account_id") or ""
+        payload.get("applicant_id") or payload.get("account_id") or requested_message_applicant(payload) or ""
     ).strip()
+    if bound_job_id:
+        env["ROBIE_CURRENT_JOB_ID"] = bound_job_id
+        env["ROBIE_JOB_ID"] = bound_job_id
+        env["JOB_ID"] = bound_job_id
+    if bound_db:
+        env["ROBIE_JOB_DB"] = str(bound_db)
     engine_root = _job_engine_root()
     if engine_root is not None:
         env["ROBIE_JOB_ENGINE_ROOT"] = str(engine_root)

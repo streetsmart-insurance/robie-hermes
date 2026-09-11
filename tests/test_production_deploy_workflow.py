@@ -47,10 +47,12 @@ def test_installer_stops_for_jobs_preserves_rollback_and_uses_official_path():
     assert "production-deploy-evidence.json" in text
 
 
-def test_installer_proves_exact_ezlynx_allowlist_without_live_write():
+def test_installer_proves_test_allowlist_and_bound_production_scope_without_live_write():
     text = INSTALLER.read_text(encoding="utf-8")
     assert 'ALLOWED_EZLYNX_WRITE_APPLICANT_IDS == frozenset({allowed})' in text
     assert 'allowed = "220250093"' in text
-    assert '"all_other_applicants_refused": True' in text
+    assert '"unbound_applicants_refused": True' in text
+    assert '"production_scope_requires_active_original_message": True' in text
+    assert 'requested_message_applicant' in text
     assert '"live_ezlynx_write_performed": False' in text
     assert "app.ezlynx.com/web/account/220250094/policies" in text
