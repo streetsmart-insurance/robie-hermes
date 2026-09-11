@@ -122,6 +122,8 @@ try:
     out['playwright_dependency_available'] = importlib.util.find_spec('playwright') is not None
     out['register_parameters'] = list(inspect.signature(registry.registry.register).parameters)
     import tools.playwright_tool
+    out['registered_availability'] = tools.playwright_tool._available()
+    out['playwright_in_core_after_availability'] = 'playwright_exec' in (getattr(toolsets, '_HERMES_CORE_TOOLS', None) or [])
     out['playwright_deferrable'] = tool_search.is_deferrable_tool_name('playwright_exec')
     schema = tools.playwright_tool.PLAYWRIGHT_EXEC_SCHEMA
     if 'function' not in schema:

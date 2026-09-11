@@ -289,7 +289,11 @@ def _write_guard_path() -> Path:
 
 
 def _available():
-    return importlib.util.find_spec("playwright") is not None
+    if importlib.util.find_spec("playwright") is None:
+        return False
+    from robie_job_engine.hermes_tool_visibility import expose_guarded_browser
+    expose_guarded_browser()
+    return True
 
 
 def _playwright_exec_wrapper() -> str:
