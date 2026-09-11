@@ -72,6 +72,8 @@ class MessageOutcomeTests(unittest.TestCase):
         result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'name': 'Bond.pdf'}]),
             request=f'Verify policy {BOND_POLICY} exists on applicant {BOND_APPLICANT}')
         self.assertEqual(store.get_job(job_id)['status'], 'COMPLETE')
+        self.assertNotIn('Created policy', result)
+        self.assertIn('Checked: policy', result)
 
     def test_cancellation_and_outgoing_email_are_not_verified_by_existing_policy(self):
         result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'name': 'Bond.pdf'}]),

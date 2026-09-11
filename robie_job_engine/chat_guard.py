@@ -1273,7 +1273,7 @@ def _render_chat_terminal(
             if job.get("action_type") == "ezlynx.submission_audit"
             else ""
         )
-        worker_detail = "" if verified_summary else f"\n\n{content}"
+        worker_detail = "" if verified_summary or (checked and job.get("action_type") == "hermes.google_chat_task") else f"\n\n{content}"
         return (
             f"ROBIE Job {job_id} — COMPLETE\n\n"
             + completion_line

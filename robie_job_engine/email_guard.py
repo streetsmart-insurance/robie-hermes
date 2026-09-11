@@ -92,7 +92,7 @@ def run_guarded_email_task(
     if status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.VERIFYING, JobStatus.RETRY_WAIT}:
         raise EmailTaskPending(f"ROBIE Job {job['id']} is {status.value}; keep email unread")
     if status == JobStatus.COMPLETE:
-        return f"ROBIE Job {job['id']} — COMPLETE\n\n{response}{details}"
+        return f"ROBIE Job {job['id']} — COMPLETE\n\n{summary or 'The requested result was independently verified.'}"
     return (
         f"ROBIE Job {job['id']} — {status.value}\n\n"
         f"Worker report (not proof): {response}{details}\n\n"
