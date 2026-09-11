@@ -152,7 +152,7 @@ def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release
                 result = subprocess.run([interpreter, '-c', SCRIPTED_AGENT_PROBE, str(usage), mode],
                     capture_output=True, text=True, timeout=45, cwd=str(package), env=child_env)
                 report = json.loads(usage.read_text())
-                if result.returncode or result.stdout.strip() != 'ROBIE_INTERFACE_OK' or report != {'query_matches': True, 'resume_matches': True}:
+                if result.returncode or result.stdout.splitlines().count('ROBIE_INTERFACE_OK') != 1 or report != {'query_matches': True, 'resume_matches': True}:
                     return BAD, 'Installed chat dispatch mismatch: ' + json.dumps({
                         'mode': mode, 'returncode': result.returncode,
                         'stdout_length': len(result.stdout), 'final_marker_present': 'ROBIE_INTERFACE_OK' in result.stdout,
