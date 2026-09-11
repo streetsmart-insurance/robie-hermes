@@ -113,6 +113,17 @@ class TestRuntimeGuardTests(unittest.TestCase):
             self.assertEqual(hermes, [])
             self.assertNotEqual(store.get_job(job["id"])["status"], JobStatus.COMPLETE)
 
+    def test_worker_aliases_audit_and_mortgagee(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            from robie_job_engine.test_runtime import build_runtime_engine
+            engine = build_runtime_engine(store)
+            self.assertIn("audit", engine.workers)
+            self.assertIn("mortgagee", engine.workers)
+            self.assertIs(engine.workers["audit"], engine.workers["audit-verification"])
+            self.assertIs(engine.workers["mortgagee"], engine.workers["mortgagee-verification"])
+
 
 if __name__ == "__main__":
     unittest.main()

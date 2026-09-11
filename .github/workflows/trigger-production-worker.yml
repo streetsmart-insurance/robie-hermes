@@ -46,8 +46,8 @@ jobs:
           set -euo pipefail
           case "${{ inputs.worker }}" in
             manual-renewal) ACTION=manual_renewal_verification; PAYLOAD='{"worker":"manual-renewal","report_id":"4247"}' ;;
-            audit)           ACTION=audit_verification;            PAYLOAD='{"worker":"audit","report_id":"4246"}' ;;
-            mortgagee)       ACTION=mortgagee_verification;       PAYLOAD='{"worker":"mortgagee","report_id":"4372"}' ;;
+            audit)           ACTION=audit_verification;            PAYLOAD='{"worker":"audit-verification","report_id":"4246"}' ;;
+            mortgagee)       ACTION=mortgagee_verification;       PAYLOAD='{"worker":"mortgagee-verification","report_id":"4372"}' ;;
           esac
           echo "action=${ACTION}"
           SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"

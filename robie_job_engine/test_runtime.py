@@ -161,6 +161,8 @@ def build_runtime_engine(
     workers["mortgagee-verification"] = MortgageeVerificationWorker()
     workers["policy-change-verification"] = PolicyChangeWorker(store=store)
     workers["verification-digest"] = VerificationDigestWorker(store=store)
+    workers["audit"] = workers["audit-verification"]
+    workers["mortgagee"] = workers["mortgagee-verification"]
     verifiers["manual_renewal_verification"] = ManualRenewalVerifier()
     verifiers["audit_verification"] = AuditVerificationVerifier()
     verifiers["mortgagee_verification"] = MortgageeVerificationVerifier()
