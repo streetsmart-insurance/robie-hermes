@@ -104,3 +104,17 @@ class MessageOutcomeTests(unittest.TestCase):
         result, store, job_id=self.run_email(FakePort(policies=[real_policy_row()],documents=[{'name':'Bond.pdf'}]),
             request=f'Subject: Cancel this policy and email client\n\nVerify policy {BOND_POLICY} exists on applicant {BOND_APPLICANT}')
         self.assertEqual(store.get_job(job_id)['status'],'UNVERIFIED')
+
+    def test_finance_clarification_is_a_durable_question_and_not_reexecuted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db=str(Path(tmp)/'jobs.db'); calls=[]
+            def worker(prompt,job_id,db_path):
+                calls.append(job_id)
+                JobStore(db_path).checkpoint(job_id,'email_route',{'route':'finance','status':'NEEDS_CLARIFICATION'})
+                return 'Which agency fee should I use?'
+            for _ in range(2):
+                response=email_guard.run_guarded_email_task(db_path=db,gmail_message_id='finance-question',prompt='Create finance agreement',
+                    run_agent=lambda p:self.fail(),run_agent_with_context=worker,verifiers={})
+                self.assertIn('Which agency fee should I use?',response)
+            self.assertEqual(len(calls),1)
+            self.assertEqual(JobStore(db).get_job(calls[0])['status'],'NEEDS_CLARIFICATION')
