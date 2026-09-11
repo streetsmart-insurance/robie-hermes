@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -67,6 +68,18 @@ jobs:
           echo "archive=${release_archive}" >>"${GITHUB_OUTPUT}"
           echo "checksum=${release_archive}.sha256" >>"${GITHUB_OUTPUT}"
           echo "sha256=${release_sha256}" >>"${GITHUB_OUTPUT}"
+          echo "installer_sha256=$(sha256sum scripts/deploy-test-release.sh | cut -d' ' -f1)" >>"${GITHUB_OUTPUT}"
+          mkdir -p "${RUNNER_TEMP}/test-transfer"
+          cp "${release_archive}" "${release_archive}.sha256" scripts/deploy-test-release.sh "${RUNNER_TEMP}/test-transfer/"
+
+      - name: Publish exact transfer bundle
+        id: transfer_bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-transfer/*
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Authenticate with short-lived Test identity
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
@@ -109,15 +122,15 @@ jobs:
           fi
 
       - name: Transfer exact artifact and installer
-        timeout-minutes: 2
+        timeout-minutes: 4
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.transfer_bundle.outputs.artifact-id }}
+          ARTIFACT_SHA256: ${{ steps.transfer_bundle.outputs.artifact-digest }}
+          ARCHIVE_SHA256: ${{ steps.release.outputs.sha256 }}
+          INSTALLER_SHA256: ${{ steps.release.outputs.installer_sha256 }}
         run: |
-          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --scp-flag=-O --scp-flag=-B --scp-flag=-v --scp-flag=-oConnectTimeout=20 \
-            --ssh-key-file="${SSH_KEY}" \
-            "${{ steps.release.outputs.archive }}" \
-            "${{ steps.release.outputs.checksum }}" \
-            scripts/deploy-test-release.sh \
-            "${TEST_VM}:${STAGING_DIR}/"
+          python scripts/transfer-test-artifact.py
 
       - name: Install and independently verify Test
         run: |
