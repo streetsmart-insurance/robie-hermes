@@ -1087,38 +1087,86 @@ class MortgageeVerificationWorker:
 # ---------------------------------------------------------------------------
 
 
-def _fresh_checkpoint(job: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
-    """Fresh read-back of the action checkpoint; never trust the worker snapshot."""
+class VerificationReadUnavailable(RuntimeError):
+    """An independent read-back was not possible.
+
+    Never degrade to the worker's own snapshot when this happens: a verifier
+    that falls back to the value the worker handed it is verifying the claim
+    against itself, and will report success for work that never happened.
+    engine._verify turns an exception from verify() into UNVERIFIED with the
+    reason recorded, which is the correct outcome.
+    """
+
+
+def _verification_db_path(job: dict[str, Any], store: Any | None = None) -> str | None:
     payload = dict(job.get("payload") or {})
-    db_path = payload.get("db_path") or payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
+    resolved = (
+        payload.get("db_path")
+        or payload.get("jobs_db_path")
+        or getattr(store, "path", None)
+        or os.environ.get("ROBIE_JOB_DB")
+    )
+    return str(resolved) if resolved else None
+
+
+def _fresh_checkpoint(
+    job: dict[str, Any], action: dict[str, Any], store: Any | None = None
+) -> dict[str, Any]:
+    """Fresh read-back of the action checkpoint.
+
+    Raises VerificationReadUnavailable rather than returning ``action``. The
+    previous implementation fell back to the worker's own snapshot both when
+    no db_path could be resolved and on ANY read exception (bare
+    ``except Exception: pass``), which silently turned independent
+    verification into self-report.
+    """
+    db_path = _verification_db_path(job, store)
     job_id = job.get("id")
-    if db_path and job_id:
+    if not db_path:
+        raise VerificationReadUnavailable(
+            "cannot re-read action checkpoint: no db_path in payload, no store "
+            "path, ROBIE_JOB_DB unset"
+        )
+    if not job_id:
+        raise VerificationReadUnavailable("cannot re-read action checkpoint: job has no id")
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        conn.row_factory = sqlite3.Row
         try:
-            conn = sqlite3.connect(str(db_path), timeout=30)
-            conn.row_factory = sqlite3.Row
-            try:
-                row = conn.execute(
-                    "SELECT data_json FROM checkpoints WHERE job_id=? AND kind='action'",
-                    (job_id,),
-                ).fetchone()
-            finally:
-                conn.close()
-            if row and row["data_json"]:
-                data = json.loads(row["data_json"])
-                if isinstance(data, dict):
-                    return data
-        except Exception:
-            pass
-    return dict(action)
+            row = conn.execute(
+                "SELECT data_json FROM checkpoints WHERE job_id=? AND kind='action'",
+                (job_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise VerificationReadUnavailable(
+            f"checkpoint read failed against {db_path}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not row or not row["data_json"]:
+        raise VerificationReadUnavailable(f"no action checkpoint recorded for job {job_id}")
+    try:
+        data = json.loads(row["data_json"])
+    except (TypeError, ValueError) as exc:
+        raise VerificationReadUnavailable(
+            f"action checkpoint for job {job_id} is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise VerificationReadUnavailable(f"action checkpoint for job {job_id} is not an object")
+    return data
 
 
-def _durable_policy_states(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _durable_policy_states(
+    job: dict[str, Any], store: Any | None = None
+) -> dict[str, dict[str, Any]]:
     """Fresh read-back of durable_work_items for this worker's namespace."""
-    payload = dict(job.get("payload") or {})
-    db_path = payload.get("db_path") or payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
+    db_path = _verification_db_path(job, store)
     states: dict[str, dict[str, Any]] = {}
     if not db_path:
-        return states
+        raise VerificationReadUnavailable(
+            "cannot re-read durable_work_items: no db_path in payload, no store "
+            "path, ROBIE_JOB_DB unset"
+        )
     try:
         conn = sqlite3.connect(str(db_path), timeout=30)
         conn.row_factory = sqlite3.Row
@@ -1129,8 +1177,11 @@ def _durable_policy_states(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
             ).fetchall()
         finally:
             conn.close()
-    except Exception:
-        return states
+    except Exception as exc:
+        raise VerificationReadUnavailable(
+            f"durable_work_items read failed against {db_path}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     for row in rows:
         try:
             data = json.loads(row["outcome"]) if row["outcome"] else {}
@@ -1156,11 +1207,14 @@ class MortgageeVerificationVerifier:
     that policy in ``durable_work_items``. Any violation is UNVERIFIED.
     """
 
+    def __init__(self, store: Any | None = None):
+        self._store = store
+
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> VerificationResult:
-        checkpoint = _fresh_checkpoint(job, action)
+        checkpoint = _fresh_checkpoint(job, action, store=self._store)
         detail = dict(checkpoint.get("detail") or {})
         outcomes = list(detail.get("policy_outcomes") or [])
-        durable = _durable_policy_states(job)
+        durable = _durable_policy_states(job, store=self._store)
 
         problems: list[str] = []
         checked = 0

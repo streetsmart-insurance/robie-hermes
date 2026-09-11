@@ -163,7 +163,7 @@ def build_runtime_engine(
     workers["verification-digest"] = VerificationDigestWorker(store=store)
     verifiers["manual_renewal_verification"] = ManualRenewalVerifier(store=store)
     verifiers["audit_verification"] = AuditVerificationVerifier(store=store)
-    verifiers["mortgagee_verification"] = MortgageeVerificationVerifier()
+    verifiers["mortgagee_verification"] = MortgageeVerificationVerifier(store=store)
     verifiers["policy_change_verification"] = PolicyChangeVerifier()
     verifiers["daily_verification_digest"] = VerificationDigestVerifier()
     return JobEngine(
