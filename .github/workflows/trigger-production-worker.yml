@@ -59,16 +59,30 @@ jobs:
           echo "JOB_ID=${JOB_ID}" | tee "${RUNNER_TEMP}/trigger.env"
           test -n "${JOB_ID}"
           echo "Created job ${JOB_ID}; scheduler tick picks it up within ~60s."
+          TERMINAL=0
           for i in $(seq 1 80); do
-            STATE=$($SSH --command="sudo python3 ${REMOTE_DIR}/worker_job_status.py '${JOB_ID}'" 2>&1 | head -1)
+            # NB: stderr is discarded — gcloud prints WARNING lines there, and
+            # 2>&1 used to promote the warning to the "status", so the loop
+            # never saw a terminal state. Only the script's stdout line 1 is
+            # the job status. ROBIE emits UPPERCASE statuses.
+            if ! OUT=$($SSH --command="sudo python3 ${REMOTE_DIR}/worker_job_status.py '${JOB_ID}'" 2>/dev/null); then
+              echo "[$(date -u +%H:%M:%S)] WARN: status check SSH failed (attempt ${i}); retrying" >&2
+              sleep 60
+              continue
+            fi
+            STATE=$(printf '%s' "${OUT}" | head -1 | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
             echo "[$(date -u +%H:%M:%S)] job ${JOB_ID} status=${STATE}"
             case "${STATE}" in
-              completed|failed|cancelled|missing) break ;;
+              COMPLETED|FAILED|CANCELLED|MISSING) TERMINAL=1; break ;;
             esac
             sleep 60
           done
+          if [ "${TERMINAL}" -eq 0 ]; then
+            echo "ERROR: job ${JOB_ID} did not reach a terminal state within 80 minutes" >&2
+            exit 1
+          fi
           echo "--- final job record ---"
-          $SSH --command="sudo python3 ${REMOTE_DIR}/worker_job_status.py '${JOB_ID}'" | tail -n +2 | tee "${RUNNER_TEMP}/trigger-result.json"
+          $SSH --command="sudo python3 ${REMOTE_DIR}/worker_job_status.py '${JOB_ID}'" 2>/dev/null | tail -n +2 | tee "${RUNNER_TEMP}/trigger-result.json"
       - name: Publish evidence artifact
         uses: actions/upload-artifact@v4
         with:
