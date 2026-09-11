@@ -93,8 +93,8 @@ sys.addaudithook(deny_network)
 from hermes_cli import oneshot
 
 def fake_agent(prompt, **kwargs):
-    assert prompt == 'ROBIE_INTERFACE_PROBE'
-    assert kwargs.get('resume') == 'robie-interface-probe'
+    assert prompt == 'ROBIE_INTERFACE_PROBE', 'probe-prompt-mismatch'
+    assert kwargs.get('resume') == 'robie-interface-probe', 'probe-resume-mismatch'
     return 'ROBIE_INTERFACE_OK', {'session_id': 'robie-interface-probe', 'completed': True, 'failed': False}
 
 oneshot._run_agent = fake_agent
@@ -102,6 +102,15 @@ sys.argv = ['hermes', '-z', 'ROBIE_INTERFACE_PROBE', '--usage-file', sys.argv[1]
 from hermes_cli.main import main
 main()
 '''
+
+
+def scripted_parameters(path):
+    import ast
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == 'run_oneshot':
+            return [arg.arg for arg in node.args.args + node.args.kwonlyargs]
+    return []
 
 
 def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release: Path):
@@ -126,7 +135,15 @@ def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release
                 capture_output=True, text=True, timeout=45, cwd=str(package), env=child_env)
             report = json.loads(usage.read_text())
             if result.returncode or result.stdout.strip() != 'ROBIE_INTERFACE_OK':
-                return BAD, 'Installed scripted CLI did not return its final response'
+                return BAD, 'Installed scripted CLI final-response mismatch: ' + json.dumps({
+                    'returncode': result.returncode, 'stdout_length': len(result.stdout),
+                    'final_marker_present': 'ROBIE_INTERFACE_OK' in result.stdout,
+                    'completed': report.get('completed'), 'failed': report.get('failed'),
+                    'session_matches': report.get('session_id') == 'robie-interface-probe',
+                    'prompt_mismatch': 'probe-prompt-mismatch' in str(report.get('failure', '')),
+                    'resume_mismatch': 'probe-resume-mismatch' in str(report.get('failure', '')),
+                    'oneshot_accepts_resume': 'resume' in scripted_parameters(oneshot),
+                }, sort_keys=True)
             if report.get('session_id') != 'robie-interface-probe' or report.get('completed') is not True or report.get('failed') is not False:
                 return BAD, 'Installed scripted CLI usage receipt is incompatible'
         return OK, 'Installed -z, --resume and --usage-file dispatch passed without model/tools; oneshot sha256=' + hashlib.sha256(oneshot.read_bytes()).hexdigest()
