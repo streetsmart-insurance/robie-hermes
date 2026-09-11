@@ -98,6 +98,7 @@ def run_once(db_path: str) -> dict[str, int]:
         key = f"schedule:{schedule['id']}:{schedule['next_run_at']}"
         payload = dict(schedule["parameters"])
         payload.setdefault("task_name", schedule["task_name"])
+        payload.setdefault("db_path", db_path)
         job = jobs.create_job(schedule["action_type"], payload, idempotency_key=key)
         ops.advance_recurring_job(
             schedule["id"],

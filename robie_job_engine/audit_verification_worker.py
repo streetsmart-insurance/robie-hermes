@@ -871,11 +871,14 @@ class AuditVerificationWorker:
 
     def _db_path(self, job: dict[str, Any]) -> Optional[str]:
         payload = job.get("payload") or {}
-        return (
-            payload.get("jobs_db_path")
+        p = (
+            payload.get("db_path")
+            or payload.get("jobs_db_path")
+            or getattr(self._store, "path", None)
             or os.environ.get("ROBIE_JOB_DB")
             or None
         )
+        return str(p) if p else None
 
     def _resolve_store(self, job: dict[str, Any]) -> Any:
         """JobStore for shared outcome recording.
@@ -1469,8 +1472,13 @@ class AuditVerificationWorker:
                 error=f"report {AUDIT_REPORT_ID} schema is not verified",
                 hold_status=JobStatus.NEEDS_CLARIFICATION,
             )
+        db_path = self._db_path(job)
         try:
-            rows = fetch_report_rows(report_id=AUDIT_REPORT_ID)
+            rows = fetch_report_rows(
+                report_id=AUDIT_REPORT_ID,
+                db_path=db_path,
+                session=payload.get("session"),
+            )
         except Exception as exc:
             return WorkerResult(
                 False,

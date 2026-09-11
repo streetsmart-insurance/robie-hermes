@@ -309,7 +309,11 @@ class TestNoteFormat:
 def _run_worker(rows, job, today):
     _FAKE_ROWS.extend(rows)
     worker = MortgageeVerificationWorker()
-    return worker.perform(dict(job), idempotency_key="test-key")
+    job_copy = dict(job)
+    payload = dict(job_copy.get("payload") or {})
+    payload.setdefault("as_of", today.isoformat())
+    job_copy["payload"] = payload
+    return worker.perform(job_copy, idempotency_key="test-key")
 
 class TestWorkerFlows:
     def test_full_mortgagee_path_with_authorization(self, row, job, today, durable_db):
@@ -735,3 +739,19 @@ class TestWorkerRefinements:
         assert "confirming mortgagee payment for renewal term" in outcome["reason"]
         assert outcome["evidence"]["payment"]["purpose"] == \
             "confirming mortgagee payment for renewal term"
+
+    def test_db_path_resolution(self):
+        import os
+        from unittest.mock import patch
+        worker = MortgageeVerificationWorker()
+        # 1. payload db_path
+        assert worker._db_path({"payload": {"db_path": "/tmp/test1.db"}}) == "/tmp/test1.db"
+        # 2. payload jobs_db_path
+        assert worker._db_path({"payload": {"jobs_db_path": "/tmp/test2.db"}}) == "/tmp/test2.db"
+        # 3. store path
+        store_mock = type("MockStore", (), {"path": "/tmp/store.db"})()
+        worker_with_store = MortgageeVerificationWorker(store=store_mock)
+        assert worker_with_store._db_path({"payload": {}}) == "/tmp/store.db"
+        # 4. env var
+        with patch.dict(os.environ, {"ROBIE_JOB_DB": "/tmp/env.db"}):
+            assert worker._db_path({"payload": {}}) == "/tmp/env.db"
