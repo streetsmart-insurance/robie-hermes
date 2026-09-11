@@ -9,7 +9,7 @@ production_ready: false
 
 # EZLynx Policy Setup v0.2.0-test
 
-Use this user-facing skill only in Test with sanitized fixtures. Read
+Use this user-facing skill for synthetic test-account drills with sanitized identity data. Read
 `references/profiles.json` before classifying the requested LOB. Every profile
 is `Testing`; none is Certified or Production. Only the exact synthetic
 Homeowners Test drill may perform a consequential Save.
@@ -28,8 +28,12 @@ every listed selector/page object as uncertified until QA supplies live proof.
 
 ## Test-only execution contract
 
-1. Confirm `ROBIE_ENV=TEST` and a sanitized approved fixture before opening
-   EZLynx. Stop otherwise.
+1. Confirm `ROBIE_ENV=TEST`, or the authorized Production test-account exception:
+   `ROBIE_ENV=PRODUCTION` and `production_job_applicant()` from
+   `robie_job_engine.ezlynx_write_scope` returns exactly `220250093` for the
+   current RUNNING job. That helper checks the installed Production host,
+   canonical ledger, and immutable original request. Never change environment
+   flags to pass this check. Require sanitized identity data in either case.
 2. Require account `ROBIE Test LLC`, applicant ID `220250093`, a policy number
    beginning `TEST-HO-`, an exact `$1.00` full-term premium, synthetic identity
    data, and explicit user authorization to save. Never copy a real insured,
@@ -100,7 +104,8 @@ Contractors auto profile for trucking.
 ## Consequential write lock
 
 `consequential_writes_enabled` is `true` only for the Homeowners profile when
-all exact Test constraints pass: environment `TEST`, applicant `220250093`,
+all exact synthetic drill constraints pass: Test environment or the active
+Production test-account job exception above, applicant `220250093`,
 policy prefix `TEST-HO-`, premium `$1.00`, an explicitly synthetic fixture,
 and explicit Save authorization. Every other profile remains `false`. The
 legacy `EzlynxPolicySetupPage.setup_policy_by_lob` multi-LOB save orchestrator

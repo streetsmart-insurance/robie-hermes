@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id
+from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id, production_job_applicant
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -192,8 +192,10 @@ def _guard_reasons(profile_id: str, request: Mapping[str, Any]) -> tuple[str, ..
 
 def _homeowners_test_write_reasons(request: Mapping[str, Any]) -> tuple[str, ...]:
     reasons: list[str] = []
-    if _normalized(request.get("environment")) != "test":
-        reasons.append("Homeowners consequential writes require ROBIE_ENV=TEST")
+    environment = _normalized(request.get("environment"))
+    production_drill = environment == "production" and production_job_applicant() == HOMEOWNERS_TEST_APPLICANT_ID
+    if environment != "test" and not production_drill:
+        reasons.append("Homeowners synthetic writes require Test or an active Production job bound to ROBIE Test LLC")
     if normalize_applicant_id(request.get("applicant_id")) != HOMEOWNERS_TEST_APPLICANT_ID:
         reasons.append("Homeowners consequential writes require ROBIE Test LLC 220250093")
     policy_number = str(request.get("policy_number") or "").strip().upper()

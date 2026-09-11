@@ -21,7 +21,7 @@ def _base(**extra):
     return {
         "applicant_id": "220250093",
         "carrier": "Test Carrier",
-        "policy_number": "TEST-0001",
+        "policy_number": "TEST-HO-0001",
         "effective_date": "09/01/2026",
         "expiration_date": "09/01/2027",
         **extra,
@@ -245,3 +245,20 @@ def test_reusable_evidence_redacts_generic_name_license_and_common_variants():
         "name_of_coverage": "Occurrence",
         "limit": "500000",
     }
+
+
+def test_production_synthetic_drill_requires_active_exact_job_scope(monkeypatch):
+    import robie_job_engine.ezlynx_policy_setup_profiles as profiles
+    request = _base(lob='Homeowners', property_location='SANITIZED LOCATION',
+        coverages={'A':'1200000'}, deductibles={'all_peril':'2500'},
+        replacement_cost_basis='Replacement Cost', environment='PRODUCTION',
+        premium='1.00', synthetic_fixture=True, save_authorized=True)
+    for scope in (None, '220250094'):
+        monkeypatch.setattr(profiles, 'production_job_applicant', lambda: scope)
+        assert preflight_policy_setup(request).consequential_writes_enabled is False
+    monkeypatch.setattr(profiles, 'production_job_applicant', lambda: '220250093')
+    assert preflight_policy_setup(request).consequential_writes_enabled is True
+    for change in ({'applicant_id':'220250094'}, {'premium':'2656'},
+                   {'synthetic_fixture':False}, {'save_authorized':False},
+                   {'policy_number':'REAL-0001'}):
+        assert preflight_policy_setup({**request, **change}).consequential_writes_enabled is False
