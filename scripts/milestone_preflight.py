@@ -27,27 +27,53 @@ OK = "ok"
 BAD = "PROBLEM"
 
 
-def _check_gateway_env(unit: str) -> tuple[str, str]:
+def _check_gateway_env(units: list[str]) -> tuple[str, str]:
     """What ROBIE_ENV does the gateway service itself run with?
 
     An ad-hoc ssh session does not inherit the unit's Environment=, so a
     preflight that sets its own ROBIE_ENV can pass while the real service has
     none. Read it from the unit rather than assuming.
+
+    The unit is named differently across boxes (robie-gateway on Test,
+    hermes-gateway elsewhere), so probe the candidates and say which exist. An
+    earlier version checked one hardcoded name and reported "sets no
+    Environment= at all" for a unit that simply was not there — a confident
+    answer about the wrong thing, which is worse than no answer.
     """
-    try:
-        out = subprocess.run(
-            ["systemctl", "show", unit, "-p", "Environment"],
+    seen: list[str] = []
+    for unit in units:
+        try:
+            loaded = subprocess.run(
+                ["systemctl", "show", unit, "-p", "LoadState", "--value"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+        except Exception as exc:
+            return OK, f"could not run systemctl ({type(exc).__name__}) - informational"
+        if loaded != "loaded":
+            seen.append(f"{unit}={loaded or 'absent'}")
+            continue
+        env = subprocess.run(
+            ["systemctl", "show", unit, "-p", "Environment", "--value"],
             capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        drop_ins = subprocess.run(
+            ["systemctl", "show", unit, "-p", "DropInPaths", "--value"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        for item in env.split():
+            if item.startswith("ROBIE_ENV="):
+                return OK, f"{unit} runs with {item}"
+        extra = f"; drop-ins: {drop_ins}" if drop_ins else ""
+        return BAD, (
+            f"{unit} is loaded but sets no ROBIE_ENV "
+            f"(Environment={env or 'empty'}{extra})"
         )
-    except Exception as exc:
-        return OK, f"could not read unit {unit} ({type(exc).__name__}) - informational"
-    text = (out.stdout or "").strip()
-    if not text or text == "Environment=":
-        return BAD, f"unit {unit} sets no Environment= at all"
-    for item in text.removeprefix("Environment=").split():
-        if item.startswith("ROBIE_ENV="):
-            return OK, f"unit {unit} runs with {item}"
-    return BAD, f"unit {unit} does not set ROBIE_ENV (has: {text[:120]})"
+    return BAD, (
+        "no gateway unit found under any known name — checked "
+        + ", ".join(seen)
+        + ". Either the service is named something else on this box or it is not "
+        "installed; this check cannot tell you about ROBIE_ENV either way."
+    )
 
 
 def _check_secret_manager() -> tuple[str, str]:
@@ -93,7 +119,8 @@ def _check_chat_verifiers() -> list[tuple[str, str, str]]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--release", required=True, type=Path, help="deployed release root")
-    ap.add_argument("--unit", default="hermes-gateway", help="gateway systemd unit to inspect")
+    ap.add_argument("--unit", action="append", default=None,
+                    help="gateway unit to probe; repeatable. Default: robie-gateway, hermes-gateway")
     args = ap.parse_args(argv)
 
     env_now = os.environ.get("ROBIE_ENV") or "(unset in this shell)"
@@ -104,10 +131,12 @@ def main(argv: list[str] | None = None) -> int:
     # Each entry: (label, state, detail, what it means in plain English)
     results: list[tuple[str, str, str, str]] = []
 
-    state, detail = _check_gateway_env(args.unit)
+    units = args.unit or ["robie-gateway", "hermes-gateway"]
+    state, detail = _check_gateway_env(units)
     results.append((
         "gateway unit ROBIE_ENV", state, detail,
-        f"The {args.unit} service runs with no ROBIE_ENV. Every Secret Manager read "
+        f"The gateway service ({'/'.join(units)}) runs with no ROBIE_ENV. Every Secret "
+        "Manager read "
         "fails closed without it, so nothing that needs EZLynx credentials can work — "
         "including the Chat destination verifier the milestone depends on. This is the "
         "service's own configuration, not ours: setting ROBIE_ENV in our ssh session "
