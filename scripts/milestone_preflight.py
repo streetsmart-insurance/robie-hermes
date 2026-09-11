@@ -101,6 +101,10 @@ def fake_chat(args):
     names = [item.get('function', {}).get('name') for item in schemas]
     if names.count('playwright_exec') != 1:
         raise RuntimeError('Guarded browser schema is not directly visible')
+    from tools.tool_search import classify_tools
+    visible, deferred = classify_tools(schemas)
+    if not any(item.get('function', {}).get('name') == 'playwright_exec' for item in visible) or any(item.get('function', {}).get('name') == 'playwright_exec' for item in deferred):
+        raise RuntimeError('Guarded browser schema remains deferrable after assembly')
     disabled = get_tool_definitions(enabled_toolsets=['playwright'], disabled_toolsets=['playwright'], quiet_mode=True)
     if any(item.get('function', {}).get('name') == 'playwright_exec' for item in disabled):
         raise RuntimeError('Disabled browser tool leaked into model schemas')
