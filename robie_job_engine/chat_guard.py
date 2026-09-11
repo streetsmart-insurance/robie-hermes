@@ -403,6 +403,27 @@ def clear_chat_verifiers() -> None:
     _CHAT_VERIFIERS.clear()
 
 
+class _UnavailableVerifier:
+    """Stands in for a verifier that failed to construct at registration.
+
+    Leaving the slot empty makes engine._verify report the generic
+    "no independent verifier registered", which cannot be told apart from an
+    action type nobody ever wrote a verifier for. Registering this instead
+    means the job's last_error names the real cause. engine._verify already
+    routes an exception from verify() to _verification_retry_or_unverified,
+    so the job still lands UNVERIFIED - it just says why.
+    """
+
+    def __init__(self, action_type: str, reason: str) -> None:
+        self.action_type = action_type
+        self.reason = reason
+
+    def verify(self, job: dict[str, Any], action: dict[str, Any]) -> Any:
+        raise RuntimeError(
+            f"verifier for {self.action_type} failed to register at startup: {self.reason}"
+        )
+
+
 def _default_chat_verifiers() -> dict[str, Any]:
     from .chat_verifiers import FilesystemSkillUpdateVerifier
 
@@ -427,8 +448,11 @@ def _default_chat_verifiers() -> dict[str, Any]:
         from .chat_verifier_ports import CdpReadPort
 
         verifiers["browser.read"] = BrowserReadVerifier(CdpReadPort())
-    except Exception:
+    except Exception as exc:
         logger.exception("browser.read verifier unavailable; those jobs stay UNVERIFIED")
+        verifiers["browser.read"] = _UnavailableVerifier(
+            "browser.read", f"{type(exc).__name__}: {exc}"
+        )
     try:
         from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
         from .ezlynx_api_read_port import EzlynxApiClientReadPort
@@ -442,9 +466,12 @@ def _default_chat_verifiers() -> dict[str, Any]:
         verifiers["hermes.google_chat_task"] = HermesChatEzlynxDestinationVerifier(
             EzlynxApiClientReadPort(client)
         )
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "hermes.google_chat_task verifier unavailable; those jobs stay UNVERIFIED"
+        )
+        verifiers["hermes.google_chat_task"] = _UnavailableVerifier(
+            "hermes.google_chat_task", f"{type(exc).__name__}: {exc}"
         )
     verifiers.update(_CHAT_VERIFIERS)
     return verifiers

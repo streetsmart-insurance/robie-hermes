@@ -1,0 +1,155 @@
+name: Configure EZLynx API environment on Test
+
+# The Test counterpart of configure-ezlynx-api-env.yml, which only ever
+# targeted hermes-poc-01. That asymmetry is why the EZLynx PolicyApi works on
+# Production and fails on Test with
+#
+#     EzlynxApiConfigurationError: ROBIE_EZLYNX_API_UAT_SECRET must be configured
+#
+# which in turn is why the Chat destination verifier registers on Test and then
+# fails closed on every read.
+#
+# Two modes. `inspect` is read-only and reports which env files the Test box
+# actually has and which ROBIE_* names are set in them — names only, never
+# values. Run that first: the Production path is /etc/streetsmart-hermes, and
+# guessing the Test equivalent instead of looking is how config gets written
+# somewhere nothing reads. `apply` writes the secret references to the path you
+# confirmed.
+#
+# Writes references, never secret values. The values stay in Secret Manager.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CONFIGURE_EZLYNX_API_ON_HERMES_TEST_01
+        required: true
+        type: string
+      mode:
+        description: inspect (look first) or apply (write the references)
+        required: true
+        type: choice
+        options: [inspect, apply]
+        default: inspect
+      env_file:
+        description: Env file to write in apply mode
+        required: false
+        type: string
+        default: /etc/streetsmart-hermes-test/robie-verification.env
+      uat_secret:
+        description: Full resource name of the UAT secret
+        required: false
+        type: string
+        default: projects/751771086524/secrets/ezlynx-api-uat/versions/latest
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'CONFIGURE_EZLYNX_API_ON_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Refuse every target except Test
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+
+      - name: Refuse a secret reference that is not a full resource name
+        run: |
+          set -euo pipefail
+          REF='${{ inputs.uat_secret }}'
+          case "${REF}" in
+            projects/*/versions/*) ;;
+            *) echo "refusing ${REF}: GoogleSecretManagerAccessor.access() requires"
+               echo "projects/.../secrets/.../versions/... and raises ValueError otherwise."
+               exit 1 ;;
+          esac
+          echo "reference shape ok"
+
+      - name: Inspect what the Test box already has
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-test-01
+              echo '--- candidate env files ---'
+              for f in /etc/streetsmart-hermes-test/robie-verification.env \
+                       /etc/streetsmart-hermes/robie-verification.env \
+                       /etc/streetsmart-hermes-test/robie-ezlynx.env \
+                       /etc/streetsmart-hermes/robie-ezlynx.env; do
+                if sudo test -f \"\$f\"; then
+                  echo \"present  \$f\"
+                  sudo cut -d= -f1 \"\$f\" | sed 's/^/           /'
+                else
+                  echo \"absent   \$f\"
+                fi
+              done
+              echo '--- units that might load them ---'
+              for u in robie-gateway hermes-gateway streetsmart-accountability; do
+                state=\$(systemctl show \$u -p LoadState --value 2>/dev/null || echo error)
+                echo \"\$u: \$state\"
+                if [ \"\$state\" = loaded ]; then
+                  systemctl show \$u -p EnvironmentFiles --value | sed 's/^/    /'
+                fi
+              done" 2>&1 | tee "${RUNNER_TEMP}/inspect.txt"
+          {
+            echo "## Test box EZLynx API configuration"
+            echo
+            echo "Names only — no secret values are read or printed."
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/inspect.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Write the secret references
+        if: inputs.mode == 'apply'
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -e
+              test \"\$(hostname -s)\" = hermes-test-01
+              sudo mkdir -p \$(dirname '${{ inputs.env_file }}')
+              sudo touch '${{ inputs.env_file }}'
+              sudo sed -i '/^ROBIE_EZLYNX_API_UAT_SECRET=/d' '${{ inputs.env_file }}'
+              printf '%s\n' 'ROBIE_EZLYNX_API_UAT_SECRET=${{ inputs.uat_secret }}' \
+                | sudo tee -a '${{ inputs.env_file }}' >/dev/null
+              sudo chmod 600 '${{ inputs.env_file }}'
+              echo '--- names now present ---'
+              sudo cut -d= -f1 '${{ inputs.env_file }}'" 2>&1 | tee "${RUNNER_TEMP}/apply.txt"
+          {
+            echo
+            echo "### Applied to ${{ inputs.env_file }}"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/apply.txt"
+            echo '```'
+            echo
+            echo "Writing the reference is not enough on its own. The Test VM's service"
+            echo "account also needs roles/secretmanager.secretAccessor on that secret, and"
+            echo "the unit that reads this file must list it in EnvironmentFile= and be"
+            echo "restarted. Run the milestone preflight to confirm all three."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ezlynx-api-test-${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: warn
+          retention-days: 30

@@ -44,8 +44,12 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.apply_label",
         "ezlynx.submission_audit",
         "ezlynx.session_refresh",
-        "appsheet.smart_reward",
-        "appsheet.qa_audit",
+        # appsheet.smart_reward / appsheet.qa_audit were bounded but have never
+        # had a verifier class, so every such job terminated UNVERIFIED by
+        # construction. Production jobs.db shows ZERO rows for either, all
+        # time, so nothing is losing a code path here. They fall through to the
+        # freeform handler, which is where they effectively already were. Add
+        # them back only alongside a real verifier.
         "manual_renewal_verification",
         "audit_verification",
         "mortgagee_verification",

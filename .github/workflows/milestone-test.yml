@@ -1,0 +1,194 @@
+name: Milestone on Test
+
+# The completion milestone without a human at a terminal.
+#
+# verify_engine_working.py has to run ON hermes-test-01, and interactive SSH to
+# that VM is not available: the production deployer service account correctly
+# has no access to it, which is the boundary working rather than a bug. This
+# workflow uses the Test identity deploy-test.yml and audit-test-job.yml
+# already use, so the milestone is a button instead of a shell session.
+#
+# Run order: preflight -> baseline -> (seed one Bond-like Chat job) -> evaluate.
+#
+# A GREEN evaluate run means the script printed PASS. Every other verdict fails
+# the workflow on purpose, so green is never ambiguous. Full output lands in the
+# job summary either way.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN_MILESTONE_ON_HERMES_TEST_01
+        required: true
+        type: string
+      mode:
+        description: preflight, then baseline, then evaluate after the job runs
+        required: true
+        type: choice
+        options: [preflight, baseline, evaluate]
+        default: preflight
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  milestone:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'RUN_MILESTONE_ON_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      JOB_DB: /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db
+      RELEASE: /opt/streetsmart-hermes-test/releases/current
+      STATE: /var/lib/robie-milestone/engine_baseline.json
+      STAGING: /var/tmp/robie-milestone/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Refuse every target except Test
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+          test "${JOB_DB}" = /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db
+          case "${JOB_DB}" in
+            *-test*) ;;
+            *) echo "refusing: JOB_DB is not a Test path"; exit 1 ;;
+          esac
+
+      - name: Stage scripts on the Test VM
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING}' && sudo mkdir -p /var/lib/robie-milestone"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/verify_engine_working.py scripts/prove_deployed.py scripts/milestone_preflight.py \
+            "${TEST_VM}:${STAGING}/"
+
+      - name: Pre-flight
+        if: inputs.mode == 'preflight'
+        run: |
+          set -euo pipefail
+          set +e
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="echo \"deployed release: \$(readlink -f ${RELEASE})\"; cd ${RELEASE} && sudo ROBIE_ENV=TEST PYTHONPATH=${RELEASE} python3 ${STAGING}/milestone_preflight.py --release ${RELEASE}" \
+            2>&1 | tee "${RUNNER_TEMP}/preflight.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## Pre-flight"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/preflight.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          test "${rc}" -eq 0
+
+      - name: Record baseline
+        if: inputs.mode == 'baseline'
+        run: |
+          set -euo pipefail
+          set +e
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 ${STAGING}/verify_engine_working.py --db-path ${JOB_DB} --state ${STATE} --baseline" \
+            2>&1 | tee "${RUNNER_TEMP}/baseline.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## Baseline"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/baseline.txt"
+            echo '```'
+            echo
+            echo "Next: seed ONE Bond-like Chat job against applicant 220250093, then re-run this workflow with mode=evaluate."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          test "${rc}" -eq 0
+
+      - name: Evaluate
+        if: inputs.mode == 'evaluate'
+        run: |
+          set -euo pipefail
+          set +e
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 ${STAGING}/verify_engine_working.py --db-path ${JOB_DB} --state ${STATE}" \
+            2>&1 | tee "${RUNNER_TEMP}/evaluate.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          case "${rc}" in
+            0)
+              VERDICT="PASS"
+              MEANING="Jobs completed AND wrote authoritative evidence. Something other than the worker confirmed the work reached its destination. This is the milestone: the engine is doing what it is for. Next step is deploying this same release to Production by release pointer."
+              ;;
+            1)
+              VERDICT="NOT PASS"
+              MEANING="Either PARTIAL or NO CHANGE - read the counts above to tell which. PARTIAL means evidence rows were written but nothing completed: the verifier IS running and is refusing to confirm, which is progress, and the newest job's last_error says why. NO CHANGE means jobs ran, produced no evidence, and hit engine gaps: the verifier is not being reached at all. Do NOT respond to NO CHANGE by writing more verifiers - find out which JobEngine ran those jobs first."
+              ;;
+            2)
+              VERDICT="COULD NOT RUN"
+              MEANING="The script refused before reading anything. Either the database path is wrong, or no baseline exists yet. This says nothing about the engine. Run this workflow with mode=baseline first, then seed a job, then evaluate."
+              ;;
+            3)
+              VERDICT="BLOCKED"
+              MEANING="No new jobs appeared since the baseline, so nothing is proven either way. This is the script working correctly, not a failure: it means the Bond-like Chat job never landed. Check that the message actually reached ROBIE and created a job row before reading anything into this."
+              ;;
+            *)
+              VERDICT="UNKNOWN exit ${rc}"
+              MEANING="The script exited with a code it does not define. Treat this as a bug in the harness rather than a statement about the engine."
+              ;;
+          esac
+
+          {
+            echo "## ${VERDICT}"
+            echo
+            echo "${MEANING}"
+            echo
+            echo "<details><summary>Full output</summary>"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/evaluate.txt"
+            echo '```'
+            echo
+            echo "</details>"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${rc}" -ne 0 ]; then
+            set +e
+            gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --command="sudo python3 ${STAGING}/prove_deployed.py --release ${RELEASE}" \
+              2>&1 | tee "${RUNNER_TEMP}/deployed.txt"
+            set -e
+            {
+              echo
+              echo "### Is this a code gap or a deploy gap?"
+              echo
+              echo "If prove_deployed says NOT DEPLOYED, the box is not running the code you"
+              echo "think it is and the verdict above describes an old release. If it says"
+              echo "DEPLOYED, the right code is there and the problem is in the code or the"
+              echo "job, not the deploy."
+              echo
+              echo '```'
+              cat "${RUNNER_TEMP}/deployed.txt"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          test "${rc}" -eq 0
+
+      - name: Publish output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: milestone-${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: warn
+          retention-days: 30

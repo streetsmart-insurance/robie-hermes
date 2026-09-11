@@ -116,9 +116,18 @@ def build_runtime_engine(
     verifiers: dict[str, Any] = {}
     if destination is not None:
         verifiers["carrier.proposal"] = CarrierProposalVerifier(destination)
-    if browser_port is not None:
-        workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
-        verifiers["browser.read"] = BrowserReadVerifier(browser_port)
+    if browser_port is None:
+        # The scheduler calls this with no optional args, so browser.read had a
+        # verifier class that never registered and every such job terminated
+        # UNVERIFIED. CdpReadPort is read-only by construction (navigate +
+        # snapshot, never fill or click) and is the same port the Chat path
+        # already uses, so defaulting it closes the gap without granting any
+        # new capability. Any failure raises, so the engine still fails closed.
+        from .chat_verifier_ports import CdpReadPort
+
+        browser_port = CdpReadPort()
+    workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
+    verifiers["browser.read"] = BrowserReadVerifier(browser_port)
     if ezlynx_readback is not None:
         ezlynx_verifier = EzlynxDestinationVerifier(ezlynx_readback)
         verifiers["ezlynx.reassign"] = ezlynx_verifier
@@ -158,12 +167,12 @@ def build_runtime_engine(
 
     workers["manual-renewal"] = ManualRenewalWorker(store=store)
     workers["audit-verification"] = AuditVerificationWorker(store=store)
-    workers["mortgagee-verification"] = MortgageeVerificationWorker()
+    workers["mortgagee-verification"] = MortgageeVerificationWorker(store=store)
     workers["policy-change-verification"] = PolicyChangeWorker(store=store)
     workers["verification-digest"] = VerificationDigestWorker(store=store)
-    verifiers["manual_renewal_verification"] = ManualRenewalVerifier()
-    verifiers["audit_verification"] = AuditVerificationVerifier()
-    verifiers["mortgagee_verification"] = MortgageeVerificationVerifier()
+    verifiers["manual_renewal_verification"] = ManualRenewalVerifier(store=store)
+    verifiers["audit_verification"] = AuditVerificationVerifier(store=store)
+    verifiers["mortgagee_verification"] = MortgageeVerificationVerifier(store=store)
     verifiers["policy_change_verification"] = PolicyChangeVerifier()
     verifiers["daily_verification_digest"] = VerificationDigestVerifier()
     return JobEngine(
