@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,14 @@ class FormatTests(unittest.TestCase):
 
 
 class NotifyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        logging.getLogger("robie-scheduler-alert").disabled = True
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.getLogger("robie-scheduler-alert").disabled = False
+
     def _dm_finder(self, email: str) -> str:
         return {
             "carlo@streetsmart.insurance": "spaces/dm-carlo",

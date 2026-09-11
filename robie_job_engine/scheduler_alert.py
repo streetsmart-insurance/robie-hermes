@@ -143,7 +143,7 @@ def run_scheduler_alert(
             log_path=path,
             logger_argv=logger_argv,
         )
-        logger.exception("scheduler alert Chat post failed")
+        logger.error("scheduler alert Chat post failed: %s", chat_error)
     return {
         "ok": True,
         "exit_code": 0,
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_scheduler_alert(unit=args.unit, log_path=args.log)
     except Exception:
-        logger.exception("scheduler alert oneshot failed; exiting 0 to avoid OnFailure loop")
+        logger.error("scheduler alert oneshot failed; exiting 0 to avoid OnFailure loop")
     return 0
 
 
