@@ -18,11 +18,36 @@ Exit 0 when everything needed for the milestone is in place, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 OK = "ok"
 BAD = "PROBLEM"
+
+
+def _check_gateway_env(unit: str) -> tuple[str, str]:
+    """What ROBIE_ENV does the gateway service itself run with?
+
+    An ad-hoc ssh session does not inherit the unit's Environment=, so a
+    preflight that sets its own ROBIE_ENV can pass while the real service has
+    none. Read it from the unit rather than assuming.
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", unit, "-p", "Environment"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as exc:
+        return OK, f"could not read unit {unit} ({type(exc).__name__}) - informational"
+    text = (out.stdout or "").strip()
+    if not text or text == "Environment=":
+        return BAD, f"unit {unit} sets no Environment= at all"
+    for item in text.removeprefix("Environment=").split():
+        if item.startswith("ROBIE_ENV="):
+            return OK, f"unit {unit} runs with {item}"
+    return BAD, f"unit {unit} does not set ROBIE_ENV (has: {text[:120]})"
 
 
 def _check_secret_manager() -> tuple[str, str]:
@@ -68,13 +93,16 @@ def _check_chat_verifiers() -> list[tuple[str, str, str]]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--release", required=True, type=Path, help="deployed release root")
+    ap.add_argument("--unit", default="hermes-gateway", help="gateway systemd unit to inspect")
     args = ap.parse_args(argv)
 
     problems = 0
-    print(f"release: {args.release.resolve()}")
+    print(f"release:   {args.release.resolve()}")
+    print(f"ROBIE_ENV: {os.environ.get('ROBIE_ENV') or '(unset in this shell)'}")
     print()
 
     for label, (state, detail) in (
+        ("gateway unit ROBIE_ENV", _check_gateway_env(args.unit)),
         ("Secret Manager (EZLynx PolicyApi)", _check_secret_manager()),
         ("slice 1 checkpoint writer", _check_checkpoint_writer(args.release)),
     ):
