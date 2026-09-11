@@ -1,0 +1,113 @@
+name: Why didn't the Chat message become a job (Production)
+
+# The Production twin of diagnose-chat-intake.yml. Same three hops, same
+# read-only guarantees, pointed at hermes-poc-01 instead of hermes-test-01:
+#
+#   Chat message -> chat_event_queue row -> jobs row -> worker + verifier
+#
+# On Test this proved the box had never received a single Chat message, and
+# that its gateway logs "No messaging platforms enabled" at every startup.
+# That says nothing about Production, which is the box people actually talk
+# to, so this asks Production the same question instead of assuming.
+#
+# Read-only: scripts/diagnose_chat_intake.py opens the database with
+# mode=ro and reads systemd and the journal. It writes nothing,
+# seeds nothing, retries nothing, and never touches EZLynx. The guard step
+# below fails the run if that read-only open ever disappears from the script.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_CHAT_INTAKE_ON_HERMES_POC_01
+        required: true
+        type: string
+      hours:
+        description: How far back to look
+        required: true
+        type: string
+        default: "24"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_CHAT_INTAKE_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      HOURS: ${{ inputs.hours }}
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+      STAGING: /var/tmp/robie-chat-diagnosis/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+
+      - name: Refuse every target except Production, and refuse to write
+        run: |
+          set -euo pipefail
+          [[ "${HOURS}" =~ ^[0-9]{1,3}$ ]]
+          test "${PRODUCTION_VM}" = hermes-poc-01
+          case "${JOB_DB}" in
+            *-test*) echo "refusing: this is the Production workflow, JOB_DB points at Test"; exit 1 ;;
+          esac
+          grep -q 'mode=ro' scripts/diagnose_chat_intake.py \
+            || { echo "refusing: the script no longer opens the database read-only"; exit 1; }
+
+      - name: Stage the diagnosis script
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/diagnose_chat_intake.py scripts/diagnose_message_runtime.py scripts/milestone_preflight.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Read gateway and email runtime metadata
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 ${STAGING}/diagnose_message_runtime.py" \
+            | tee "${RUNNER_TEMP}/message-runtime.txt"
+
+      - name: Read the Chat intake chain
+        run: |
+          set -euo pipefail
+          set +e
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 ${STAGING}/diagnose_chat_intake.py --db-path ${JOB_DB} --hours ${HOURS} --unit hermes-gateway" \
+            2>&1 | tee "${RUNNER_TEMP}/chat-intake-production.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            if [ "${rc}" -eq 0 ]; then
+              echo "## Intake chain looks intact on Production"
+            else
+              echo "## Found where the chain breaks on Production - see WHAT THIS MEANS at the bottom"
+            fi
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/chat-intake-production.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          test "${rc}" -eq 0
+
+      - name: Publish output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-intake-production-${{ github.run_id }}
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: warn
+          retention-days: 30

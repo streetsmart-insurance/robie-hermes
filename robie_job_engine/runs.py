@@ -117,15 +117,29 @@ class IsolatedRunStore:
         job_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Record Chat/script intake without leaving an ACTIVE execution run."""
-        run = self.start(owner=owner, job_id=job_id)
-        try:
-            self.bind(run["id"], "intake", payload)
-            return self.terminate(run["id"], "INTAKE")
-        except Exception:
-            if not self.get(run["id"]).get("terminal_event"):
-                self.terminate(run["id"], "BLOCKED")
-            raise
+        """Persist an intake receipt without acquiring the execution slot.
+
+        Intake performs no external action. Insert its already-terminal run and
+        binding atomically so a concurrent worker cannot reject queued work.
+        The one-ACTIVE-run execution constraint remains unchanged.
+        """
+        run_id = str(uuid.uuid4())
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT INTO isolated_runs
+                   (id,owner,job_id,status,terminal_event,created_at,updated_at)
+                   VALUES (?,?,?,'INTAKE','INTAKE',?,?)""",
+                (run_id, owner, job_id, now, now),
+            )
+            conn.execute(
+                """INSERT INTO isolated_run_bindings
+                   (run_id,kind,payload_json,created_at) VALUES (?,'intake',?,?)""",
+                (run_id, json.dumps(payload, sort_keys=True), now),
+            )
+            conn.commit()
+        return self.get(run_id)
 
     @staticmethod
     def _reconcile_stale_in_transaction(

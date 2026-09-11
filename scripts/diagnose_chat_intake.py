@@ -11,7 +11,7 @@ The milestone harness can only see the last hop. When it says BLOCKED it means
 broke. This prints the state of each hop so the answer is a fact rather than a
 guess, and names the next place to look.
 
-Read-only: opens the database immutably, reads systemd, reads the journal.
+Read-only: opens the live database read-only, including committed WAL records, reads systemd, reads the journal.
 Writes nothing, touches no job.
 """
 from __future__ import annotations
@@ -80,7 +80,8 @@ def _journal(unit: str, lines: int) -> list[str]:
 
 
 def _open_readonly(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=15)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=15)
+    conn.execute("PRAGMA query_only=ON")
     conn.row_factory = sqlite3.Row
     return conn
 
