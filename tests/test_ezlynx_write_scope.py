@@ -27,6 +27,11 @@ def test_every_other_applicant_refuses_without_identifier_rewriting(value):
         require_allowed_ezlynx_write_applicant(value)
 
 
+def test_uat_account_url_derives_the_same_applicant():
+    url = f"https://app.uatezlynx.com/web/account/{ALLOWED}/policies"
+    assert applicant_id_from_ezlynx_url(url) == ALLOWED
+
+
 def test_url_scope_requires_job_and_page_to_match_exact_allowed_applicant():
     url = f"https://app.ezlynx.com/web/account/{ALLOWED}/policies"
     assert applicant_id_from_ezlynx_url(url) == ALLOWED

@@ -50,6 +50,7 @@ IDENTITY_FALLBACK_KEYS = (
     "target_path",
     "destination_root",
     "destination_id",
+    "policy_number",
 )
 WEAK_ONLY_EXPECTED_KEYS = frozenset({"ok"})
 WORKFLOW_EXPECTED_KEYS = frozenset(
@@ -64,6 +65,8 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
         "title",
         "url",
         "account_id",
+        "applicant_id",
+        "policy_number",
         "document_id",
         "assignee_id",
         "assignee_name",

@@ -429,6 +429,23 @@ def _default_chat_verifiers() -> dict[str, Any]:
         verifiers["browser.read"] = BrowserReadVerifier(CdpReadPort())
     except Exception:
         logger.exception("browser.read verifier unavailable; those jobs stay UNVERIFIED")
+    try:
+        from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
+        from .ezlynx_api_read_port import EzlynxApiClientReadPort
+        from .chat_ezlynx_destination_verifier import HermesChatEzlynxDestinationVerifier
+
+        try:
+            client = EzlynxApiClient(load_ezlynx_api_config())
+        except Exception:
+            # Register anyway. Reads fail closed if Secret Manager is absent.
+            client = None
+        verifiers["hermes.google_chat_task"] = HermesChatEzlynxDestinationVerifier(
+            EzlynxApiClientReadPort(client)
+        )
+    except Exception:
+        logger.exception(
+            "hermes.google_chat_task verifier unavailable; those jobs stay UNVERIFIED"
+        )
     verifiers.update(_CHAT_VERIFIERS)
     return verifiers
 
@@ -1357,6 +1374,10 @@ def guard_chat_response(
     from .worker_contract import sanitize_worker_response
 
     store.checkpoint(job_id, "worker_response", sanitize_worker_response(store, job_id, content))
+    if store.get_checkpoint(job_id, "action") is None:
+        from .chat_destination_binding import bind_destination_for_job, claimed_from_job
+
+        bind_destination_for_job(store, job, claimed=claimed_from_job(job, content))
     action = store.get_checkpoint(job_id, "action")
     registry = dict(verifiers or _default_chat_verifiers())
     verifier = registry.get(job["action_type"])

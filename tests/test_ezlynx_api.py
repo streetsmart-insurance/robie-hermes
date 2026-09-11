@@ -18,6 +18,8 @@ from robie_job_engine.ezlynx_api import (
     EzlynxApiConfig,
     EzlynxApiConfigurationError,
     EzlynxApiError,
+    document_display_fields,
+    extract_document_records,
     load_ezlynx_api_config,
 )
 
@@ -217,6 +219,93 @@ class ClientAuthTests(unittest.TestCase):
         )
         self.assertIn("policyId=123", seen["url"])
         self.assertEqual(seen["auth"], "Bearer tok-9")
+
+
+def _classic_config() -> EzlynxApiConfig:
+    return EzlynxApiConfig(
+        token_endpoint="https://app.uatezlynx.com/auth/connect/token",
+        document_base_url="https://app.uatezlynx.com/DocumentApi/",
+        client_id="cid",
+        client_secret="csecret",
+        username="api_user",
+        integration_group_id="183",
+        scope="DocumentApi PolicyApi openid",
+        classic_base_url="https://app.uatezlynx.com/ezlynxapi/",
+        ez_token="eztok",
+        ez_app_secret="ezsecret",
+        account_username="classic_user",
+    )
+
+
+class DocumentHelperTests(unittest.TestCase):
+    def test_extracts_records_and_display_name(self):
+        payload = {
+            "Records": [
+                {"Description": "Bond - Western Surety.pdf", "PolicyId": 1},
+            ]
+        }
+        rows = extract_document_records(payload)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            document_display_fields(rows[0])["name"],
+            "Bond - Western Surety.pdf",
+        )
+
+
+class DestinationReadClientTests(unittest.TestCase):
+    def test_search_policy_uses_oauth_policyapi(self):
+        seen = {}
+
+        def fake_urlopen(url, *, data, headers, timeout):
+            if "connect/token" in url:
+                return FakeResponse(
+                    json.dumps({"access_token": "tok-p", "expires_in": 3600}).encode()
+                )
+            seen["url"] = url
+            seen["auth"] = headers.get("Authorization")
+            return FakeResponse(
+                json.dumps({"Policies": [{"PolicyNumber": "73834086"}]}).encode()
+            )
+
+        client = EzlynxApiClient(_classic_config(), urlopen=fake_urlopen)
+        result = client.search_policy_by_number("73834086")
+        self.assertEqual(result["status"], "success")
+        self.assertIn("/PolicyApi/policy/v1/search", seen["url"])
+        self.assertIn("PolicyNumber=73834086", seen["url"])
+        self.assertEqual(seen["auth"], "Bearer tok-p")
+
+    def test_list_documents_uses_classic_eztoken_not_documentapi_host(self):
+        seen = {}
+
+        def fake_urlopen(url, *, data, headers, timeout):
+            seen["url"] = url
+            seen["headers"] = headers
+            return FakeResponse(json.dumps({"Records": []}).encode())
+
+        client = EzlynxApiClient(_classic_config(), urlopen=fake_urlopen)
+        result = client.list_applicant_documents("194066748", policy_id=0)
+        self.assertEqual(result, {"Records": []})
+        self.assertIn("/ezlynxapi/api/documentlibrary/list/194066748/1/200/0", seen["url"])
+        self.assertNotIn("DocumentApi", seen["url"])
+        self.assertEqual(seen["headers"]["EZToken"], "eztok")
+        self.assertNotIn("Authorization", seen["headers"])
+
+    def test_list_documents_errors_clearly_when_classic_auth_missing(self):
+        client = EzlynxApiClient(_config(), urlopen=lambda *a, **k: FakeResponse(b"{}"))
+        with self.assertRaises(EzlynxApiConfigurationError) as ctx:
+            client.list_applicant_documents("194066748")
+        self.assertIn("classic EZLynx document library auth is not configured", str(ctx.exception))
+
+    def test_discussions_soft_empty_when_oauth_forbidden(self):
+        def fake_urlopen(url, *, data, headers, timeout):
+            if "connect/token" in url:
+                return FakeResponse(
+                    json.dumps({"access_token": "tok-d", "expires_in": 3600}).encode()
+                )
+            raise error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b""))
+
+        client = EzlynxApiClient(_classic_config(), urlopen=fake_urlopen)
+        self.assertEqual(client.get_applicant_discussions("194066748"), [])
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib import error, parse, request
+from urllib.parse import quote, urlparse
 
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .secret_manager import GoogleSecretManagerAccessor, SecretAccessor
@@ -48,6 +49,23 @@ REQUIRED_CONFIG_FIELDS = (
     "token_endpoint",
     "document_base_url",
     "scope",
+)
+# Classic documentlibrary/list auth. Optional in the Secret Manager JSON.
+# Missing values raise a clear error only when a classic list is attempted.
+CLASSIC_TOKEN_KEYS = ("ez_token", "EZToken")
+CLASSIC_SECRET_KEYS = ("ez_app_secret", "EZAppSecret")
+CLASSIC_USER_KEYS = ("account_username", "AccountUsername")
+CLASSIC_BASE_KEYS = ("classic_base_url", "classic_document_base_url")
+DOCUMENT_RECORD_KEYS = (
+    "Records",
+    "records",
+    "DocumentList",
+    "Documents",
+    "documents",
+    "Items",
+    "items",
+    "Data",
+    "data",
 )
 
 
@@ -80,13 +98,19 @@ class EzlynxApiConfig:
     username: str
     integration_group_id: str
     scope: str
+    classic_base_url: str = ""
+    ez_token: str = ""
+    ez_app_secret: str = ""
+    account_username: str = ""
 
     def __repr__(self) -> str:
         return (
             "EzlynxApiConfig(token_endpoint=<redacted>, "
             "document_base_url=<redacted>, client_id=<redacted>, "
             "client_secret=<redacted>, username=<redacted>, "
-            "integration_group_id=<redacted>, scope=<redacted>)"
+            "integration_group_id=<redacted>, scope=<redacted>, "
+            "classic_base_url=<redacted>, ez_token=<redacted>, "
+            "ez_app_secret=<redacted>, account_username=<redacted>)"
         )
 
 
@@ -136,7 +160,60 @@ def load_ezlynx_api_config(
         username=str(payload["username"]).strip(),
         integration_group_id=str(payload["integration_group_id"]).strip(),
         scope=str(payload["scope"]).strip(),
+        classic_base_url=_optional_secret_field(payload, CLASSIC_BASE_KEYS),
+        ez_token=_optional_secret_field(payload, CLASSIC_TOKEN_KEYS),
+        ez_app_secret=_optional_secret_field(payload, CLASSIC_SECRET_KEYS),
+        account_username=_optional_secret_field(payload, CLASSIC_USER_KEYS),
     )
+
+
+def _optional_secret_field(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def extract_document_records(payload: Any) -> list[dict[str, Any]]:
+    """Pull document rows out of the tenant-varying classic list envelope."""
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in DOCUMENT_RECORD_KEYS:
+        candidate = payload.get(key)
+        if isinstance(candidate, list):
+            return [row for row in candidate if isinstance(row, dict)]
+        if isinstance(candidate, dict):
+            nested = extract_document_records(candidate)
+            if nested:
+                return nested
+    return []
+
+
+def document_display_fields(row: Any) -> dict[str, str]:
+    """Normalize a classic document row to display name / description fields."""
+    if not isinstance(row, dict):
+        return {}
+    name = (
+        row.get("DocumentName")
+        or row.get("documentName")
+        or row.get("Name")
+        or row.get("name")
+        or row.get("FileName")
+        or row.get("fileName")
+        or row.get("Description")
+        or row.get("description")
+        or ""
+    )
+    return {
+        "name": str(name or "").strip(),
+        "description": str(row.get("Description") or row.get("description") or "").strip(),
+        "policy_number": str(
+            row.get("PolicyNumber") or row.get("policyNumber") or row.get("policy_number") or ""
+        ).strip(),
+    }
 
 
 def _urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int):
@@ -226,7 +303,7 @@ class EzlynxApiClient:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise EzlynxApiError(None, "EZLynx API returned non-JSON") from exc
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, (dict, list)):
             raise EzlynxApiError(None, "EZLynx API returned unexpected shape")
         return parsed
 
@@ -243,7 +320,116 @@ class EzlynxApiClient:
         if query:
             url += "?" + parse.urlencode(query, doseq=True)
         headers = {"Authorization": f"Bearer {self.get_token()}"}
-        return self._request_json("GET", url, data=None, headers=headers, timeout=timeout)
+        parsed = self._request_json("GET", url, data=None, headers=headers, timeout=timeout)
+        if not isinstance(parsed, dict):
+            raise EzlynxApiError(None, "EZLynx API returned unexpected shape")
+        return parsed
+
+    def _origin(self) -> str:
+        parsed = urlparse(self._config.document_base_url or self._config.token_endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            raise EzlynxApiConfigurationError("EZLynx API origin could not be derived")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _wrap_search(self, parsed: Any) -> dict[str, Any]:
+        if isinstance(parsed, dict) and "status" in parsed and "data" in parsed:
+            return parsed
+        return {"status": "success", "data": parsed}
+
+    def _classic_auth_headers(self) -> dict[str, str]:
+        token = self._config.ez_token
+        secret = self._config.ez_app_secret
+        username = self._config.account_username
+        if not token or not secret or not username:
+            raise EzlynxApiConfigurationError(
+                "classic EZLynx document library auth is not configured "
+                "(Secret Manager payload needs ez_token/EZToken, "
+                "ez_app_secret/EZAppSecret, and account_username/AccountUsername)"
+            )
+        return {
+            "EZToken": token,
+            "EZAppSecret": secret,
+            "AccountUsername": username,
+            "Accept": "application/json",
+        }
+
+    def search_policy_by_number(self, policy_number: str) -> dict[str, Any]:
+        """OAuth GET /PolicyApi/policy/v1/search?PolicyNumber=. Read-only."""
+        number = str(policy_number or "").strip()
+        if not number:
+            raise EzlynxApiError(None, "policy number is required")
+        url = (
+            self._origin()
+            + "/PolicyApi/policy/v1/search?"
+            + parse.urlencode({"PolicyNumber": number})
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return self._wrap_search(parsed)
+
+    def list_applicant_documents(
+        self,
+        applicant_id: str,
+        page_index: int = 1,
+        page_size: int = 200,
+        policy_id: int = 0,
+    ) -> dict[str, Any]:
+        """Classic GET documentlibrary/list. Do not use OAuth DocumentApi for list."""
+        applicant = str(applicant_id or "").strip()
+        if not applicant:
+            raise EzlynxApiError(None, "applicant id is required")
+        base = str(self._config.classic_base_url or "").strip()
+        if not base:
+            base = self._origin() + "/ezlynxapi/"
+        base = base.rstrip("/") + "/"
+        path = (
+            f"api/documentlibrary/list/{quote(applicant, safe='')}/"
+            f"{int(page_index)}/{int(page_size)}/{int(policy_id)}"
+        )
+        parsed = self._request_json(
+            "GET",
+            base + path,
+            data=None,
+            headers=self._classic_auth_headers(),
+        )
+        if isinstance(parsed, dict):
+            return parsed
+        return {"Records": parsed}
+
+    def get_applicant_discussions(
+        self,
+        applicant_id: str,
+        page_size: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Prefer DiscussionApi OAuth. Receipt only — empty list if unavailable."""
+        del page_size
+        applicant = str(applicant_id or "").strip()
+        if not applicant:
+            return []
+        url = (
+            self._origin()
+            + "/DiscussionApi/discussion/v1/applicant/"
+            + quote(applicant, safe="")
+        )
+        try:
+            parsed = self._request_json(
+                "GET",
+                url,
+                data=None,
+                headers={"Authorization": f"Bearer {self.get_token()}"},
+            )
+        except EzlynxApiError:
+            return []
+        if isinstance(parsed, list):
+            return [row for row in parsed if isinstance(row, dict)]
+        if isinstance(parsed, dict):
+            for key in ("Discussions", "discussions", "Items", "items", "Data", "data"):
+                candidate = parsed.get(key)
+                if isinstance(candidate, list):
+                    return [row for row in candidate if isinstance(row, dict)]
+            if parsed.get("Title") or parsed.get("title") or parsed.get("Subject"):
+                return [parsed]
+        return []
 
     def download_bytes(
         self,
