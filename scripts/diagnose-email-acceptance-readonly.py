@@ -83,10 +83,50 @@ def inspect_runtime(home):
     return report
 
 
+def inspect_acceptance_sessions(path):
+    """Only sessions containing this test's unique identifier; no message content output."""
+    if not path.is_file():
+        return []
+    with connect(path) as db:
+        rows = db.execute(
+            "SELECT DISTINCT s.id,s.source,s.model,s.started_at,s.ended_at,s.end_reason,"
+            "s.message_count,s.tool_call_count,s.api_call_count FROM sessions s "
+            "JOIN messages m ON m.session_id=s.id WHERE m.content LIKE ? LIMIT 5",
+            ('%' + POLICY + '%',),
+        ).fetchall()
+        result = []
+        for row in rows:
+            session = dict(row)
+            session['messages'] = []
+            for message in db.execute(
+                'SELECT role,content,tool_name,tool_calls,finish_reason,reasoning,reasoning_content '
+                'FROM messages WHERE session_id=? ORDER BY id LIMIT 100', (row['id'],)
+            ):
+                names = []
+                try:
+                    calls = json.loads(message['tool_calls'] or '[]')
+                    for call in calls if isinstance(calls, list) else []:
+                        name = (call.get('function') or {}).get('name') or call.get('name') or ''
+                        if re.fullmatch(r'[a-zA-Z_][a-zA-Z_0-9.-]{0,80}', name):
+                            names.append(name)
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                content = str(message['content'] or '')
+                session['messages'].append({
+                    'role': message['role'], 'tool_name': message['tool_name'],
+                    'tool_call_names': names, 'finish_reason': message['finish_reason'],
+                    'content_length': len(content), 'markers': markers(content),
+                    'reasoning_length': len(str(message['reasoning'] or message['reasoning_content'] or '')),
+                })
+            result.append(session)
+        return result
+
+
 if __name__ == '__main__':
     import socket
     if socket.gethostname().split('.')[0] != 'hermes-poc-01':
         raise SystemExit('Production host required')
     root = Path('/opt/streetsmart-hermes')
     print(json.dumps({'job': inspect_job(root / 'robie-job-engine/data/jobs.db'),
-                      'runtime': inspect_runtime(root / '.hermes')}, indent=2))
+                      'runtime': inspect_runtime(root / '.hermes'),
+                      'acceptance_sessions': inspect_acceptance_sessions(root / '.hermes/state.db')}, indent=2))
