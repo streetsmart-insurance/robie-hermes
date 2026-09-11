@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 EZLYNX_WRITE_SCOPE_REFUSED = "EZLYNX_WRITE_SCOPE_REFUSED"
 ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = frozenset({"220250093"})
+EZLYNX_HOSTS = frozenset({"app.ezlynx.com", "app.uatezlynx.com"})
 _ACCOUNT_PATH = re.compile(r"/web/account/([^/?#]+)(?:/|$)", re.IGNORECASE)
 _APPLICANT_PORTAL_PATH = re.compile(
     r"/applicantportal/(?:policy/actions/edit|formentry)/([^/?#]+)(?:/|$)",
@@ -57,7 +58,7 @@ def require_allowed_ezlynx_write_applicant(value: object) -> str:
 
 def applicant_id_from_ezlynx_url(url: object) -> str | None:
     parsed = urlparse(str(url or "").strip())
-    if parsed.hostname and parsed.hostname.casefold() != "app.ezlynx.com":
+    if parsed.hostname and parsed.hostname.casefold() not in EZLYNX_HOSTS:
         return None
     path = parsed.path or ""
     match = (

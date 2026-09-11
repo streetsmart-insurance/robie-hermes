@@ -514,6 +514,18 @@ class JobStore:
             conn.execute(f"UPDATE jobs SET {field}={field}+1,updated_at=? WHERE id=?", (utc_now(), job_id))
             return int(conn.execute(f"SELECT {field} FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
 
+    def update_payload(self, job_id: str, payload: dict[str, Any]) -> None:
+        """Persist identifier-only payload patches. Never used as evidence."""
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            conn.execute(
+                "UPDATE jobs SET payload_json=?, updated_at=? WHERE id=?",
+                (canonical_json(redact_mapping(payload)), now, job_id),
+            )
+
     def checkpoint(self, job_id: str, kind: str, data: dict[str, Any]) -> None:
         with self.transaction() as conn:
             conn.execute(

@@ -103,6 +103,16 @@ def t_chat_verifier_wired():
     assert isinstance(verifiers["browser.read"], BrowserReadVerifier), (
         "browser.read verifier is not a BrowserReadVerifier"
     )
+    from robie_job_engine.chat_ezlynx_destination_verifier import (
+        HermesChatEzlynxDestinationVerifier,
+    )
+
+    assert "hermes.google_chat_task" in verifiers, (
+        "hermes.google_chat_task verifier not registered"
+    )
+    assert isinstance(
+        verifiers["hermes.google_chat_task"], HermesChatEzlynxDestinationVerifier
+    ), "hermes.google_chat_task verifier is not HermesChatEzlynxDestinationVerifier"
 
 
 def t_hitl_trigger_catches_raw_guard_error():
