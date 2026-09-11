@@ -26,7 +26,7 @@ from typing import Any
 from .models import TERMINAL_STATUSES, JobStatus
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .store import JobStore
-from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id
+from .ezlynx_write_scope import applicant_is_write_allowed, normalize_applicant_id, requested_message_applicant
 
 
 REQUIRED_CLEAN_TEST_PASSES = 1
@@ -297,6 +297,7 @@ def action_hold_reason(
     env: str | None = None,
     job_id: str | None = None,
     applicant_id: str | None = None,
+    request_payload: dict[str, Any] | None = None,
 ) -> str | None:
     """Return a refuse reason when Production must not start this action."""
     environment = (env if env is not None else current_robie_env()).upper()
@@ -316,7 +317,9 @@ def action_hold_reason(
         return None
     if action_id == POLICY_SETUP_ACTION:
         applicant = normalize_applicant_id(applicant_id)
-        if applicant_is_write_allowed(applicant):
+        if applicant_is_write_allowed(applicant) or (
+            applicant and requested_message_applicant(request_payload or {}) == applicant
+        ):
             return None
         return (
             f"{REFUSAL_TOKEN}: {POLICY_SETUP_REFUSE_NOTE} "
@@ -355,7 +358,8 @@ def hold_reason_for_job(
         action_id,
         env=env,
         job_id=str(job.get("id") or ""),
-        applicant_id=str(payload.get("applicant_id") or payload.get("account_id") or ""),
+        applicant_id=str(payload.get("applicant_id") or payload.get("account_id") or requested_message_applicant(payload) or ""),
+        request_payload=payload,
     )
 
 
@@ -402,6 +406,8 @@ def apply_action_gate(
         action_id,
         env=env,
         job_id=job_id,
+        applicant_id=str(payload.get("applicant_id") or payload.get("account_id") or requested_message_applicant(payload) or ""),
+        request_payload=payload,
     )
     store.checkpoint(
         job_id,

@@ -77,6 +77,17 @@ class JobStore:
                     updated_at TEXT NOT NULL,
                     completed_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS job_intake (
+                    job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS job_intake_no_update
+                    BEFORE UPDATE ON job_intake BEGIN
+                    SELECT RAISE(ABORT, 'original job intake is immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS job_intake_no_delete
+                    BEFORE DELETE ON job_intake BEGIN
+                    SELECT RAISE(ABORT, 'original job intake is immutable'); END;
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL REFERENCES jobs(id),
@@ -152,6 +163,10 @@ class JobStore:
                 (id,idempotency_key,action_type,payload_json,status,max_attempts,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?)""",
                 (job_id, key, action_type, canonical_json(payload), JobStatus.PENDING, max_attempts, now, now),
+            )
+            conn.execute(
+                "INSERT INTO job_intake (job_id,payload_json,created_at) VALUES (?,?,?)",
+                (job_id, canonical_json(payload), now),
             )
             return self.get_job(job_id, conn=conn)
 

@@ -204,6 +204,7 @@ def run_agent_task(prompt: str, job_id: str = "", db_path: str = "") -> str:
     env["ROBIE_ENV"] = _EXPECTED_ENV
     if job_id:
         env["ROBIE_JOB_ID"] = job_id
+        env["ROBIE_CURRENT_JOB_ID"] = job_id
         env["JOB_ID"] = job_id
     if db_path:
         env["ROBIE_JOB_DB"] = db_path
@@ -234,7 +235,7 @@ def run_agent_task(prompt: str, job_id: str = "", db_path: str = "") -> str:
 
 def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments, thread_id):
     """Bound both generic and finance execution to one cancellable process group."""
-    env = dict(os.environ, ROBIE_JOB_ID=job_id, JOB_ID=job_id, ROBIE_JOB_DB=db_path)
+    env = dict(os.environ, ROBIE_CURRENT_JOB_ID=job_id, ROBIE_JOB_ID=job_id, JOB_ID=job_id, ROBIE_JOB_DB=db_path)
     request = dict(sender=sender, subject=subject, body=body, attachments=attachments,
                    thread_id=thread_id, job_id=job_id, db_path=db_path, context_prompt=prompt)
     child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--execute-job'],

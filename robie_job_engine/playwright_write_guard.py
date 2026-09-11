@@ -403,6 +403,25 @@ def attested_test_form_entry_block_reason(
     if not is_policy_form_entry_url(url):
         return f"{refused}: page is not a numeric Policy FormEntry route"
     requested = normalize_applicant_id(requested_applicant_id)
+    from robie_job_engine.ezlynx_write_scope import production_job_applicant
+    live_applicant = production_job_applicant()
+    if live_applicant == requested and requested != "220250093":
+        locator_fn = getattr(page, "locator", None)
+        if not callable(locator_fn):
+            return f"{refused}: Production FormEntry account evidence is unavailable"
+        try:
+            account = locator_fn('a[title="Go to Applicant Overview"]')
+            if int(account.count()) != 1 or not bool(account.is_visible()):
+                return f"{refused}: Production FormEntry account link is missing or ambiguous"
+            from urllib.parse import urlparse
+            linked = urlparse(str(account.get_attribute("href") or ""))
+            if ((linked.hostname or '').casefold() != 'app.ezlynx.com' or
+                    linked.path.casefold() != f'/web/account/{requested}/overview' or
+                    not str(account.inner_text() or '').strip()):
+                return f"{refused}: Production FormEntry belongs to a different or unknown client"
+        except Exception:
+            return f"{refused}: Production FormEntry account attestation failed"
+        return None
     if requested != "220250093" or not applicant_is_write_allowed(requested):
         return f"{refused}: FormEntry applicant is not the compiled Robie Test account"
     locator_fn = getattr(page, "locator", None)
