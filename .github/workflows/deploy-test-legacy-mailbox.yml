@@ -1,0 +1,148 @@
+name: Deploy legacy mailbox release to Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_commit:
+        description: Exact 40-character legacy candidate commit
+        required: true
+        type: string
+      baseline_commit:
+        description: Exact 40-character legacy rollback baseline
+        required: true
+        type: string
+      confirmation:
+        description: Type DEPLOY_LEGACY_MAILBOX_TO_HERMES_TEST_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: robie-legacy-mailbox-test-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-test:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY_LEGACY_MAILBOX_TO_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      STAGING_DIR: /var/tmp/robie-legacy-mailbox-test/${{ inputs.candidate_commit }}
+    steps:
+      - name: Validate exact revisions
+        env:
+          CANDIDATE: ${{ inputs.candidate_commit }}
+          BASELINE: ${{ inputs.baseline_commit }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${BASELINE}" =~ ^[0-9a-f]{40}$ ]]
+          test "${CANDIDATE}" != "${BASELINE}"
+
+      - name: Check out protected controller
+        uses: actions/checkout@v4
+        with:
+          path: controller
+          persist-credentials: false
+
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_commit }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out exact baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.baseline_commit }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build immutable candidate and rollback artifacts
+        id: release
+        env:
+          CANDIDATE: ${{ inputs.candidate_commit }}
+          BASELINE: ${{ inputs.baseline_commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/releases"
+          bash controller/scripts/build-legacy-mailbox-release.sh candidate "${CANDIDATE}" "${RUNNER_TEMP}/releases" | tee "${RUNNER_TEMP}/candidate.env"
+          bash controller/scripts/build-legacy-mailbox-release.sh baseline "${BASELINE}" "${RUNNER_TEMP}/releases" | tee "${RUNNER_TEMP}/baseline.env"
+          source "${RUNNER_TEMP}/candidate.env"
+          echo "archive=${legacy_archive}" >>"${GITHUB_OUTPUT}"
+          echo "checksum=${legacy_archive}.sha256" >>"${GITHUB_OUTPUT}"
+          echo "digest=${legacy_sha256}" >>"${GITHUB_OUTPUT}"
+
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        run: |
+          set -euo pipefail
+          actual="$(gcloud compute instances describe "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(name,status,zone.basename())')"
+          test "${actual}" = $'hermes-test-01\tRUNNING\tus-east1-b'
+
+      - name: Transfer exact artifacts and Test-only installer
+        env:
+          BASELINE: ${{ inputs.baseline_commit }}
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING_DIR}'"
+          baseline_short="${BASELINE:0:12}"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${{ steps.release.outputs.archive }}" \
+            "${{ steps.release.outputs.checksum }}" \
+            "${RUNNER_TEMP}/releases/robie-legacy-mailbox-${baseline_short}.tgz" \
+            "${RUNNER_TEMP}/releases/robie-legacy-mailbox-${baseline_short}.tgz.sha256" \
+            controller/scripts/deploy-test-legacy-mailbox-release.sh \
+            "${TEST_VM}:${STAGING_DIR}/"
+
+      - name: Install, verify, and rehearse rollback on Test
+        env:
+          CANDIDATE: ${{ inputs.candidate_commit }}
+          BASELINE: ${{ inputs.baseline_commit }}
+          DIGEST: ${{ steps.release.outputs.digest }}
+        run: |
+          set -euo pipefail
+          candidate_short="${CANDIDATE:0:12}"
+          baseline_short="${BASELINE:0:12}"
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --command="sudo bash '${STAGING_DIR}/deploy-test-legacy-mailbox-release.sh' --candidate-archive '${STAGING_DIR}/robie-legacy-mailbox-${candidate_short}.tgz' --candidate-checksum '${STAGING_DIR}/robie-legacy-mailbox-${candidate_short}.tgz.sha256' --candidate-commit '${CANDIDATE}' --candidate-digest '${DIGEST}' --baseline-archive '${STAGING_DIR}/robie-legacy-mailbox-${baseline_short}.tgz' --baseline-checksum '${STAGING_DIR}/robie-legacy-mailbox-${baseline_short}.tgz.sha256' --baseline-commit '${BASELINE}'"
+
+      - name: Retrieve and publish immutable Test evidence
+        env:
+          CANDIDATE: ${{ inputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/legacy-mailbox-test-evidence.json"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${TEST_VM}:/opt/renewal-automation-system-test/evidence/${CANDIDATE}.json" "${evidence}"
+          jq -e --arg commit "${CANDIDATE}" --arg digest "${{ steps.release.outputs.digest }}" \
+            '.test_verified == true and .target == "hermes-test-01" and .legacy_commit == $commit and .release_sha256 == $digest and .rollback_rehearsed == true and .external_writes == false and .failures == 0 and .errors == 0' \
+            "${evidence}"
+          cat "${evidence}" >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Preserve the exact tested artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-mailbox-${{ inputs.candidate_commit }}
+          path: |
+            ${{ steps.release.outputs.archive }}
+            ${{ steps.release.outputs.checksum }}
+            ${{ runner.temp }}/legacy-mailbox-test-evidence.json
+          if-no-files-found: error
+          retention-days: 30
