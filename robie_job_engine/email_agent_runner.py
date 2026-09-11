@@ -24,15 +24,15 @@ def session_connection(home: Path):
     return db
 
 
-def session_for_receipt(home: Path, nonce: str) -> str:
+def session_for_receipt(home: Path, nonce: str) -> tuple[str, int]:
     with session_connection(home) as db:
         rows = db.execute(
-            "SELECT DISTINCT session_id FROM messages WHERE role='user' AND instr(content,?)>0 LIMIT 2",
+            "SELECT session_id,MAX(id) FROM messages WHERE role='user' AND instr(content,?)>0 GROUP BY session_id LIMIT 2",
             (nonce,),
         ).fetchall()
     if len(rows) != 1:
         raise ValueError('Missing or ambiguous email session')
-    return str(rows[0][0])
+    return str(rows[0][0]), int(rows[0][1])
 
 
 def session_receipt(home: Path, session_id: str) -> dict:
@@ -70,7 +70,7 @@ def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
                             stdin=subprocess.DEVNULL, text=True, timeout=600 if attempt == 0 else 300,
                             env=env, cwd=str(cwd))
             if not session_id:
-                session_id = session_for_receipt(home, nonce)
+                session_id, baseline = session_for_receipt(home, nonce)
             receipt = session_receipt(home, session_id)
             if receipt.get('message_id', 0) <= baseline:
                 raise ValueError('No fresh response in the same session')

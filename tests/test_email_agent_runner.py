@@ -158,3 +158,13 @@ def test_ambiguous_session_never_returns_worker_output(runtime):
             db.execute('INSERT INTO messages (session_id,role,content,active) VALUES (?,?,?,?)', ('other','user',query,1))
         return result
     assert execute(runtime, ambiguous).startswith('ROBIE_OUTCOME_UNKNOWN:')
+
+
+def test_initial_reused_session_cannot_return_reply_before_receipt_user_message(runtime):
+    def reused(command, **kwargs):
+        query = command[command.index('-q') + 1]
+        with sqlite3.connect(runtime[1] / 'state.db') as db:
+            db.execute('INSERT INTO messages (session_id,role,content,finish_reason,active) VALUES (?,?,?,?,?)', ('reused','assistant','Old success','stop',1))
+            db.execute('INSERT INTO messages (session_id,role,content,active) VALUES (?,?,?,?)', ('reused','user',query,1))
+        return SimpleNamespace(returncode=0,stdout='Old success')
+    assert execute(runtime, reused).startswith('ROBIE_OUTCOME_UNKNOWN:')
