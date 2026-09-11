@@ -116,9 +116,18 @@ def build_runtime_engine(
     verifiers: dict[str, Any] = {}
     if destination is not None:
         verifiers["carrier.proposal"] = CarrierProposalVerifier(destination)
-    if browser_port is not None:
-        workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
-        verifiers["browser.read"] = BrowserReadVerifier(browser_port)
+    if browser_port is None:
+        # The scheduler calls this with no optional args, so browser.read had a
+        # verifier class that never registered and every such job terminated
+        # UNVERIFIED. CdpReadPort is read-only by construction (navigate +
+        # snapshot, never fill or click) and is the same port the Chat path
+        # already uses, so defaulting it closes the gap without granting any
+        # new capability. Any failure raises, so the engine still fails closed.
+        from .chat_verifier_ports import CdpReadPort
+
+        browser_port = CdpReadPort()
+    workers["browser-read"] = BoundedBrowserReadWorker(browser_port)
+    verifiers["browser.read"] = BrowserReadVerifier(browser_port)
     if ezlynx_readback is not None:
         ezlynx_verifier = EzlynxDestinationVerifier(ezlynx_readback)
         verifiers["ezlynx.reassign"] = ezlynx_verifier
