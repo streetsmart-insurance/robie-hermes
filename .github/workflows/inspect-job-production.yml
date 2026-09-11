@@ -1,0 +1,101 @@
+name: Inspect one job (Production)
+
+# Look at a single job on hermes-poc-01 before deciding whether to interrupt it.
+#
+# Written for the case where a deploy is blocked by a RUNNING job and the only
+# facts to hand are "it is running" and "the heartbeat is advancing". Those two
+# do not separate a worker doing real work from a zombie holding a lease, and
+# that difference decides whether interrupting is safe.
+#
+# Read-only: scripts/inspect_job.py opens the database with mode=ro&immutable=1.
+# It writes nothing, clears no lease and transitions no job. The guard step
+# below fails the run if that read-only open ever disappears from the script.
+#
+# Job payloads can carry client data, so the script prints payload KEYS plus a
+# small whitelist of routing fields, never free text.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type INSPECT_JOB_ON_HERMES_POC_01
+        required: true
+        type: string
+      job_id:
+        description: Job id to inspect
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'INSPECT_JOB_ON_HERMES_POC_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+      STAGING: /var/tmp/robie-job-inspect/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse a wrong target, a wrong id, or a script that can write
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = hermes-poc-01
+          case "${JOB_DB}" in
+            *-test*) echo "refusing: this is the Production workflow, JOB_DB points at Test"; exit 1 ;;
+          esac
+          printf '%s' "${JOB_ID}" | grep -Eq '^[0-9a-fA-F-]{8,64}$' \
+            || { echo "refusing: job id is not a plain hex/uuid string"; exit 1; }
+          grep -q 'mode=ro&immutable=1' scripts/inspect_job.py \
+            || { echo "refusing: the script no longer opens the database read-only"; exit 1; }
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+
+      - name: Stage the inspector
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/inspect_job.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Inspect
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          set -euo pipefail
+          set +e
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 ${STAGING}/inspect_job.py --db-path ${JOB_DB} --job-id ${JOB_ID}" \
+            2>&1 | tee "${RUNNER_TEMP}/job-${JOB_ID}.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## Job ${JOB_ID} on hermes-poc-01"
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/job-${JOB_ID}.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          test "${rc}" -eq 0
+
+      - name: Publish output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-inspection-${{ github.run_id }}
+          path: ${{ runner.temp }}/*.txt
+          if-no-files-found: warn
+          retention-days: 30
