@@ -444,6 +444,73 @@ class ManualRenewalWorkerTest(unittest.TestCase):
         self.assertTrue(attempt["portal_attempt_stub"])
         self.assertIn("login_gap", attempt)
 
+    # 10. Dry-run is a library-level stop across every outward-action branch.
+    def test_dry_run_blocks_every_external_action_branch(self):
+        global FAKE_ROWS
+
+        # Email intent: even a fully authorized job cannot send.
+        FAKE_ROWS = [make_row()]
+        email_result = self._run(make_job(self.db_path, dry_run=True))
+        self.assertEqual(SENT_EMAILS, [])
+        self.assertEqual(self.notes.notes, [])
+        self.assertIn("DRY_RUN", email_result.detail["outcomes"][0]["reason"])
+
+        # Escalation: neither its note nor task may be created.
+        FAKE_ROWS = [make_row(expiration_date=(TODAY + timedelta(days=20)).isoformat())]
+        escalation = self._run(make_job(self.db_path, dry_run=True))
+        escalated = escalation.detail["outcomes"][0]
+        self.assertEqual(self.notes.notes, [])
+        self.assertFalse(escalated["evidence"]["escalation_note"]["posted"])
+        self.assertIn("dry_run", escalated["evidence"]["escalation_note"]["reason"])
+        self.assertFalse(escalated["evidence"]["urgent_csr_task"]["created"])
+        self.assertIn("dry_run", escalated["evidence"]["urgent_csr_task"]["reason"])
+
+        # Portal stub may record internal job evidence, but no EZLynx note.
+        FAKE_ROWS = [make_row(carrier_name="Coterie")]
+        real_route = mrnw.route_carrier
+        try:
+            mrnw.route_carrier = None
+            portal = self._run(make_job(self.db_path, dry_run=True))
+        finally:
+            mrnw.route_carrier = real_route
+        self.assertEqual(self.notes.notes, [])
+        self.assertFalse(portal.detail["outcomes"][0]["evidence"]["portal_note"]["posted"])
+
+        # Voice dispatcher is never invoked, even if an injected port ignores dry_run.
+        mrnw._mirror_outcomes_local(
+            [{
+                "policy_number": "WC-100",
+                "status": "pending",
+                "reason": "follow-up #2 email sent - awaiting underwriter reply",
+                "followup_count": 2,
+                "initial_sent": True,
+                "next_followup_due": TODAY.isoformat(),
+                "carrier_voice_attempted": False,
+                "updated_at": mrnw._utcnow(),
+            }],
+            db_path=self.db_path,
+            namespace=mrnw.NAMESPACE,
+        )
+        FAKE_ROWS = [make_row(carrier_name="Acme Carriers")]
+        voice = self._run(
+            make_job(
+                self.db_path,
+                dry_run=True,
+                voice_enabled=True,
+                carrier_phone_directory={"Acme Carriers": "+15551234567"},
+            )
+        )
+        branch = voice.detail["outcomes"][0]["evidence"]["voice_branch"]
+        self.assertEqual(branch["outcome"], "deferred")
+        self.assertIn("dry_run", branch["reason"])
+        self.assertEqual(self.voice.calls, [])
+
+        # The real authorization gate also fails closed for external actions.
+        real_gate = self._saved["is_action_authorized"]
+        dry_job = make_job(self.db_path, dry_run=True)
+        for action in mrnw.MANUAL_RENEWAL_EXTERNAL_ACTIONS:
+            self.assertFalse(real_gate(dry_job, action), action)
+
 
 if __name__ == "__main__":
     unittest.main()

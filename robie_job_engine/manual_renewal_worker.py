@@ -160,6 +160,22 @@ MANUAL_RENEWAL_CONTRACT_ACTIONS = frozenset(
     }
 )
 
+MANUAL_RENEWAL_EXTERNAL_ACTIONS = frozenset(
+    {
+        "portal_retrieval",
+        "send_underwriter_email",
+        "send_followup_email",
+        "post_ezlynx_note",
+        "create_ezlynx_task",
+        "place_carrier_voice_call",
+    }
+)
+
+
+def _is_dry_run(job: dict[str, Any]) -> bool:
+    payload = (job or {}).get("payload") or {}
+    return isinstance(payload, dict) and bool(payload.get("dry_run", False))
+
 
 def is_action_authorized(job: dict[str, Any], action_name: str) -> bool:
     """True only when the job authorizes this contract action.
@@ -168,6 +184,8 @@ def is_action_authorized(job: dict[str, Any], action_name: str) -> bool:
     job payload's ``authorized_actions`` list intersected with
     MANUAL_RENEWAL_CONTRACT_ACTIONS. Fail closed: unknown -> False.
     """
+    if _is_dry_run(job) and action_name in MANUAL_RENEWAL_EXTERNAL_ACTIONS:
+        return False
     sibling = _sibling_attr("is_action_authorized")
     if sibling is not None:
         try:
@@ -1055,6 +1073,9 @@ def post_ezlynx_note_intent(
     dict with posted True/False. Never raises.
     """
     evidence: dict[str, Any] = {"posted": False, "note_text": note_text}
+    if _is_dry_run(job):
+        evidence["reason"] = "dry_run - note intent recorded only"
+        return evidence
     if not is_action_authorized(job, "post_ezlynx_note"):
         evidence["reason"] = "post_ezlynx_note not authorized - intent recorded only"
         return evidence
@@ -1107,6 +1128,9 @@ def record_task_intent(
         "assigned": assigned,
         "created": False,
     }
+    if _is_dry_run(job):
+        intent["reason"] = "dry_run - task intent recorded only"
+        return intent
     if not is_action_authorized(job, "create_ezlynx_task"):
         intent["reason"] = "create_ezlynx_task not authorized - intent recorded only"
         return intent
@@ -1476,6 +1500,10 @@ def run_voice_giveup_branch(
     if not voice_enabled:
         branch["outcome"] = "deferred"
         branch["reason"] = "voice deferred - portal+email only at launch"
+        return branch
+    if dry_run:
+        branch["outcome"] = "deferred"
+        branch["reason"] = "dry_run - carrier voice call not placed"
         return branch
     if not is_action_authorized(job, "place_carrier_voice_call"):
         branch["outcome"] = "deferred"
