@@ -1090,7 +1090,7 @@ class MortgageeVerificationWorker:
 def _fresh_checkpoint(job: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
     """Fresh read-back of the action checkpoint; never trust the worker snapshot."""
     payload = dict(job.get("payload") or {})
-    db_path = payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
+    db_path = payload.get("db_path") or payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
     job_id = job.get("id")
     if db_path and job_id:
         try:
@@ -1115,7 +1115,7 @@ def _fresh_checkpoint(job: dict[str, Any], action: dict[str, Any]) -> dict[str, 
 def _durable_policy_states(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Fresh read-back of durable_work_items for this worker's namespace."""
     payload = dict(job.get("payload") or {})
-    db_path = payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
+    db_path = payload.get("db_path") or payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
     states: dict[str, dict[str, Any]] = {}
     if not db_path:
         return states
