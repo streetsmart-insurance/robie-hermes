@@ -13,6 +13,12 @@ def test_probe_reports_markers_without_leaking_content():
     assert probe.markers(secret + ' PLAYWRIGHT_BLOCKED') == ['PLAYWRIGHT_BLOCKED']
 
 
+def test_tool_error_categories_are_fixed_labels_only():
+    content = 'Unknown tool private-tool-token. ModuleNotFoundError: No module named private-module. secret-value'
+    assert probe.tool_error_categories(content) == ['unknown_tool', 'module_missing']
+    assert probe.tool_error_categories('normal output private-data') == []
+
+
 def test_connection_is_read_only(tmp_path):
     p = tmp_path / 'test.db'
     with sqlite3.connect(p) as db:
