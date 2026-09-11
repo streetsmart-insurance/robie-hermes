@@ -109,8 +109,10 @@ jobs:
           fi
 
       - name: Transfer exact artifact and installer
+        timeout-minutes: 2
         run: |
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --scp-flag=-O --scp-flag=-B --scp-flag=-v --scp-flag=-oConnectTimeout=20 \
             --ssh-key-file="${SSH_KEY}" \
             "${{ steps.release.outputs.archive }}" \
             "${{ steps.release.outputs.checksum }}" \
