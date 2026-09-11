@@ -60,19 +60,24 @@ def restore(root: Path, release: Path, attempt: str = ""):
         return  # This deployment invocation did not change the skill.
     link = root / '.hermes/skills/ezlynx-policy-setup'
     previous = record['previous']
+    def restored():
+        receipt.rename(release / ('policy-skill-rollback-' + uuid.uuid4().hex + '.json'))
     if link.is_symlink() and os.readlink(link) == record['source']:
         link.unlink()
     elif link.exists() or link.is_symlink():
         # A failed install may not have replaced the original yet.
         if previous['kind'] == 'link' and link.is_symlink() and os.readlink(link) == previous['target']:
+            restored()
             return
         if previous['kind'] == 'directory' and not Path(previous['backup']).exists():
+            restored()
             return
         raise ValueError('Policy skill changed after installation; refuse overwrite')
     if previous['kind'] == 'link':
         link.symlink_to(previous['target'])
     elif previous['kind'] == 'directory':
         Path(previous['backup']).rename(link)
+    restored()
 
 
 if __name__ == '__main__':

@@ -78,3 +78,14 @@ rollback_release() {''' + function + '\n}\nrollback_release\n'
     result = subprocess.run(['bash', '-c', script], env={**os.environ, 'CHECK_LOG': str(log)}, capture_output=True, text=True)
     assert result.returncode == 1
     assert log.read_text().splitlines() == ['restart hermes-gateway', 'is-active --quiet hermes-gateway']
+
+
+def test_rolled_back_candidate_can_be_installed_again(tmp_path):
+    root, release = tmp_path / 'root', tmp_path / 'release'
+    source = release / 'deploy/hermes/skills/ezlynx-policy-setup'
+    shutil.copytree(Path('deploy/hermes/skills/ezlynx-policy-setup'), source)
+    install(root, release, 'first')
+    restore(root, release, 'first')
+    assert len(list(release.glob('policy-skill-rollback-*.json'))) == 1
+    assert install(root, release, 'retry')['attempt'] == 'retry'
+    assert (root / '.hermes/skills/ezlynx-policy-setup').resolve() == source
