@@ -91,10 +91,9 @@ def leftover_retry_hold_reason(
 def resolve_worker_name(action_type, payload):
     """Authoritative worker for an action.
 
-    For a bounded action the registry decides, not the payload. A payload
-    worker name is accepted only as a cross-check: if it disagrees with
-    the registry the job fails rather than running the wrong worker, and
-    a bounded action can never fall through to the freeform default.
+    For a bounded action the registry decides, not the payload. Legacy or
+    conflicting payload names are advisory and cannot redirect execution.
+    A bounded action with no registry entry fails closed.
     Unbounded actions keep the legacy payload-then-default behaviour.
 
     Returns None when the job must be refused.
@@ -103,8 +102,6 @@ def resolve_worker_name(action_type, payload):
     claimed = payload.get("worker")
     if action_type in BOUNDED_ENGINE_ACTIONS:
         if registry_name is None:
-            return None
-        if claimed is not None and claimed != registry_name:
             return None
         return registry_name
     return claimed or registry_name or "hermes-cua"

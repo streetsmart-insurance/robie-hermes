@@ -17,6 +17,7 @@ from durable_temp import durable_temporary_directory
 
 from robie_job_engine.chat_guard import guard_chat_response, open_chat_job
 from robie_job_engine.complete_guard import complete_is_prohibited
+from robie_job_engine.request_routing import WORKER_FOR_ACTION
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.fallback_audit import (
     FallbackAuditStore,
@@ -435,7 +436,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
                 def verify(self, current, action):
                     return VerificationResult(True, _evidence({"ok": True}, observed, locator=f"r{index}"))
 
-            final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(job["id"])
+            final = JobEngine(self.store, {WORKER_FOR_ACTION["browser.read"]: Worker()}, {"browser.read": Verifier()}).run(job["id"])
             self.assertNotEqual(final["status"], JobStatus.COMPLETE)
             self.assertIn(final["status"], {JobStatus.UNVERIFIED, JobStatus.WAITING, JobStatus.FAILED})
 
@@ -471,7 +472,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
             idempotency_key="boom-1",
             max_attempts=3,
         )
-        engine = JobEngine(self.store, {"boom": Boom()}, {"browser.read": Verifier()})
+        engine = JobEngine(self.store, {WORKER_FOR_ACTION["browser.read"]: Boom()}, {"browser.read": Verifier()})
         first = engine.run(job["id"])
         self.assertNotEqual(first["status"], JobStatus.COMPLETE)
         action = self.store.get_checkpoint(job["id"], "action")
@@ -585,7 +586,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         )
         engine = JobEngine(
             self.store,
-            {"slow": Slow()},
+            {WORKER_FOR_ACTION["browser.read"]: Slow()},
             {"browser.read": Verifier()},
             perform_timeout_seconds=0.05,
         )
@@ -686,7 +687,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         live = self.store.create_job(
             "browser.read", {"worker": "probe"}, idempotency_key="stale-engine"
         )
-        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+        final = JobEngine(self.store, {WORKER_FOR_ACTION["browser.read"]: Worker()}, {"browser.read": Verifier()}).run(
             live["id"]
         )
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
@@ -740,7 +741,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         live = self.store.create_job(
             "browser.read", {"worker": "probe"}, idempotency_key="future-engine"
         )
-        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+        final = JobEngine(self.store, {WORKER_FOR_ACTION["browser.read"]: Worker()}, {"browser.read": Verifier()}).run(
             live["id"]
         )
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
@@ -794,7 +795,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         live = self.store.create_job(
             "browser.read", {"worker": "probe"}, idempotency_key="empty-engine"
         )
-        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+        final = JobEngine(self.store, {WORKER_FOR_ACTION["browser.read"]: Worker()}, {"browser.read": Verifier()}).run(
             live["id"]
         )
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
@@ -848,7 +849,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
         live = self.store.create_job(
             "browser.read", {"worker": "probe"}, idempotency_key="no-ident-engine"
         )
-        final = JobEngine(self.store, {"probe": Worker()}, {"browser.read": Verifier()}).run(
+        final = JobEngine(self.store, {WORKER_FOR_ACTION["browser.read"]: Worker()}, {"browser.read": Verifier()}).run(
             live["id"]
         )
         self.assertNotEqual(final["status"], JobStatus.COMPLETE)
