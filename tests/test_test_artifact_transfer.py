@@ -121,6 +121,7 @@ class TransferTests(unittest.TestCase):
             self.assertNotIn(env['GITHUB_TOKEN'], ' '.join(command) + kwargs['input'])
             self.assertEqual(json.loads(kwargs['input'])['url'], secret_url)
             self.assertIn('--tunnel-through-iap', command)
+            self.assertIn('--ssh-key-file=/tmp/hermes-test-deploy', command)
             self.assertEqual(kwargs['timeout'], 150)
             return SimpleNamespace(returncode=0, stdout='TEST_ARTIFACT_TRANSFER_OK\n')
         with patch.object(transfer, 'artifact_url', return_value=secret_url):
