@@ -1,6 +1,14 @@
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
-from src.email_outreach.robie_inbox_cleaner import run_daily_inbox_cleanup_and_report
+from zoneinfo import ZoneInfo
+
+from src.email_outreach.robie_inbox_cleaner import (
+    DAILY_REPORT_SUBJECT,
+    actionable_reason,
+    daily_report_already_sent,
+    run_daily_inbox_cleanup_and_report,
+)
 
 class TestRobieInboxCleaner(unittest.TestCase):
 
@@ -77,9 +85,122 @@ class TestRobieInboxCleaner(unittest.TestCase):
         mock_filer.assert_called_once()
         self.assertEqual(res.get("uw_replies_filed"), 0)
         mock_client.send_email.assert_called_once()
-        args, kwargs = mock_client.send_email.call_args
+        _, kwargs = mock_client.send_email.call_args
         self.assertEqual(kwargs["to_email"], "carlo@streetsmart.insurance")
-        self.assertIn("Robie Daily Mailbox Audit", kwargs["subject"])
+        self.assertIn(DAILY_REPORT_SUBJECT, kwargs["subject"])
+
+    def test_actionable_filter_requires_a_concrete_request_or_risk(self):
+        self.assertIsNone(actionable_reason(
+            "carrier@example.com",
+            "September carrier newsletter",
+            "Here are this month's product updates and announcements.",
+        ))
+        self.assertIsNotNone(actionable_reason(
+            "underwriter@example.com",
+            "Information requested",
+            "Please provide updated driver information by Friday.",
+        ))
+        self.assertIsNotNone(actionable_reason(
+            "underwriter@example.com",
+            "Quote for Advance Marble",
+            "We have attached the renewal quote for Advance Marble.",
+        ))
+        self.assertIsNone(actionable_reason(
+            "robie@streetsmart.insurance",
+            "Action required",
+            "Please review this report.",
+        ))
+
+    def test_daily_report_dedupe_checks_sent_mail_for_eastern_date(self):
+        service = MagicMock()
+        list_request = MagicMock()
+        list_request.execute.return_value = {"messages": [{"id": "sent-1"}]}
+        service.users().messages().list.return_value = list_request
+
+        already_sent = daily_report_already_sent(
+            service,
+            datetime(2026, 9, 11, 9, 0, tzinfo=ZoneInfo("America/New_York")),
+        )
+
+        self.assertTrue(already_sent)
+        service.users().messages().list.assert_called_once_with(
+            userId="me",
+            q=f'in:sent subject:"{DAILY_REPORT_SUBJECT}" after:2026/09/11 before:2026/09/12',
+            maxResults=1,
+        )
+
+    @patch("src.email_outreach.robie_inbox_cleaner.run_uw_reply_filing")
+    def test_informational_mail_does_not_trigger_a_report(self, mock_filer):
+        mock_filer.return_value = {"filed": 0, "saved_to_ezlynx": 0, "skipped": 0}
+        client = MagicMock()
+        service = MagicMock()
+        client.inbox_services = {"robie@streetsmart.insurance": service}
+
+        def list_side_effect(userId, q, maxResults=500):
+            result = MagicMock()
+            if q.startswith("in:inbox"):
+                result.execute.return_value = {"messages": [{"id": "newsletter"}]}
+            else:
+                result.execute.return_value = {"messages": []}
+            return result
+
+        service.users().messages().list.side_effect = list_side_effect
+        service.users().messages().get().execute.return_value = {
+            "id": "newsletter",
+            "snippet": "September product news and general announcements.",
+            "payload": {"headers": [
+                {"name": "From", "value": "carrier@example.com"},
+                {"name": "Subject", "value": "Carrier newsletter"},
+                {"name": "Date", "value": "Fri, 11 Sep 2026 08:00:00 -0400"},
+            ]},
+        }
+
+        result = run_daily_inbox_cleanup_and_report(
+            client=client,
+            now=datetime(2026, 9, 11, 9, 0, tzinfo=ZoneInfo("America/New_York")),
+        )
+
+        self.assertEqual(result["real_messages_count"], 0)
+        self.assertFalse(result["report_sent"])
+        client.send_email.assert_not_called()
+
+    @patch("src.email_outreach.robie_inbox_cleaner.run_uw_reply_filing")
+    def test_second_actionable_digest_same_day_is_suppressed(self, mock_filer):
+        mock_filer.return_value = {"filed": 0, "saved_to_ezlynx": 0, "skipped": 0}
+        client = MagicMock()
+        service = MagicMock()
+        client.inbox_services = {"robie@streetsmart.insurance": service}
+
+        def list_side_effect(userId, q, maxResults=500):
+            result = MagicMock()
+            if q.startswith("in:inbox"):
+                result.execute.return_value = {"messages": [{"id": "request"}]}
+            elif q.startswith("in:sent"):
+                result.execute.return_value = {"messages": [{"id": "today-digest"}]}
+            else:
+                result.execute.return_value = {"messages": []}
+            return result
+
+        service.users().messages().list.side_effect = list_side_effect
+        service.users().messages().get().execute.return_value = {
+            "id": "request",
+            "snippet": "Please provide the signed application.",
+            "payload": {"headers": [
+                {"name": "From", "value": "underwriter@example.com"},
+                {"name": "Subject", "value": "Action required"},
+                {"name": "Date", "value": "Fri, 11 Sep 2026 08:30:00 -0400"},
+            ]},
+        }
+
+        result = run_daily_inbox_cleanup_and_report(
+            client=client,
+            now=datetime(2026, 9, 11, 10, 0, tzinfo=ZoneInfo("America/New_York")),
+        )
+
+        self.assertEqual(result["real_messages_count"], 1)
+        self.assertTrue(result["report_already_sent"])
+        self.assertFalse(result["report_sent"])
+        client.send_email.assert_not_called()
 
     def test_gmail_client_mark_read_and_trash(self):
         from src.email_outreach.gmail_client import GmailRenewalClient
@@ -113,4 +234,3 @@ class TestRobieInboxCleaner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

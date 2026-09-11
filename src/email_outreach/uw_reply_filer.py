@@ -559,6 +559,10 @@ def file_inbox_replies(
 
     summary = {
         "filed": filed,
+        "saved_to_ezlynx": sum(
+            1 for result in results
+            if result.get("status") == "filed" and result.get("note_synced") is True
+        ),
         "skipped": skipped,
         "errors": errors,
         "results": results,

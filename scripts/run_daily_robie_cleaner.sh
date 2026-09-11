@@ -30,5 +30,5 @@ except Exception as e:
 
 trap send_failure_alert ERR
 
-PYTHONPATH=. /opt/renewal-automation-system/venv/bin/python3 -m src.email_outreach.robie_inbox_cleaner --recipient carlo@streetsmart.insurance >> "$LOGFILE" 2>&1
+PYTHONPATH=. /opt/renewal-automation-system/venv/bin/python3 -m src.email_outreach.robie_inbox_cleaner --recipient carlo@streetsmart.insurance --report-hour 8 >> "$LOGFILE" 2>&1
 echo "=== Robie Daily Mailbox Audit Finished at $(date +"%Y-%m-%d_%H-%M-%S") ===" >> "$LOGFILE"

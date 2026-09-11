@@ -1,7 +1,7 @@
 """Focused tests for underwriter-reply → titled EZLynx discussion filing."""
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -187,6 +187,7 @@ def test_file_inbox_replies_posts_formatted_note_and_skips_disqualified_card(db,
     )
 
     assert summary["filed"] == 1
+    assert summary["saved_to_ezlynx"] == 1
     mock_ezlynx.find_matching_discussion.assert_called_once()
     mock_ezlynx.add_note_to_discussion.assert_called_once()
     kwargs = mock_ezlynx.add_note_to_discussion.call_args.kwargs
