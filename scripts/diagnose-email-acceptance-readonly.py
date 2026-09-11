@@ -118,10 +118,11 @@ def inspect_acceptance_sessions(path):
         for row in rows:
             session = dict(row)
             session['messages'] = []
-            for message in db.execute(
+            recent_messages = db.execute(
                 'SELECT role,content,tool_name,tool_calls,finish_reason,reasoning,reasoning_content '
-                'FROM messages WHERE session_id=? ORDER BY id LIMIT 100', (row['id'],)
-            ):
+                'FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 100', (row['id'],)
+            ).fetchall()
+            for message in reversed(recent_messages):
                 names = []
                 try:
                     calls = json.loads(message['tool_calls'] or '[]')
