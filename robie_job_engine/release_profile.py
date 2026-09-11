@@ -10,9 +10,11 @@ from .job_schema import EXECUTABLE_SKILL_CONTRACTS, BOUNDED_JOB_SCHEMAS
 from .request_routing import BOUNDED_ENGINE_ACTIONS, WORKER_FOR_ACTION, classify_request
 
 
+# Real Ascend work only. A bare "Ascend locator artifact audit" mention is
+# a weak name hit and must not hold after the strong/weak split (264a708f).
 ASCEND_REQUEST_FIXTURES = (
     "Create a program in Ascend",
-    "Run the Ascend locator artifact audit",
+    "Run ascend-locator-artifact-audit",
     "Open useascend and inspect premium finance",
     "Use PAWIVA account 221398001",
 )
