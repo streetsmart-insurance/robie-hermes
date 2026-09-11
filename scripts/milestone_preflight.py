@@ -81,74 +81,71 @@ sys.stdout.write("PROBE_JSON:" + json.dumps(out) + "\n")
 
 
 
-# Exercise the installed CLI parser and usage writer without a model, tools,
-# session mutation, or business action. The only substituted boundary is the
-# agent itself; the real -z/--resume/--usage-file dispatch remains installed code.
-SCRIPTED_AGENT_PROBE = r'''import sys
-# This interface check must never access a provider or other network service.
+# Exercise the installed chat parser with a stub at the command handler boundary.
+# Temporary HOME/HERMES_HOME and network/process denial isolate startup hooks.
+SCRIPTED_AGENT_PROBE = r'''import sys, json
+from pathlib import Path
+
 def deny_network(event, args):
     if event in {'socket.connect', 'socket.connect_ex', 'socket.bind', 'subprocess.Popen', 'os.system', 'os.exec'}:
         raise RuntimeError('Network/process access forbidden in interface probe')
 sys.addaudithook(deny_network)
-from hermes_cli import oneshot
+import hermes_cli.main as cli
+usage, mode = sys.argv[1:]
 
-def fake_agent(prompt, **kwargs):
-    assert prompt == 'ROBIE_INTERFACE_PROBE', 'probe-prompt-mismatch'
-    assert kwargs.get('resume') == 'robie-interface-probe', 'probe-resume-mismatch'
-    return 'ROBIE_INTERFACE_OK', {'session_id': 'robie-interface-probe', 'completed': True, 'failed': False}
+def fake_chat(args):
+    expected_resume = 'robie-interface-probe' if mode == 'resume' else None
+    Path(usage).write_text(json.dumps({
+        'query_matches': getattr(args, 'query', None) == 'ROBIE_INTERFACE_PROBE',
+        'resume_matches': getattr(args, 'resume', None) == expected_resume,
+    }))
+    print('ROBIE_INTERFACE_OK')
 
-oneshot._run_agent = fake_agent
-sys.argv = ['hermes', '-z', 'ROBIE_INTERFACE_PROBE', '--usage-file', sys.argv[1], '--resume', 'robie-interface-probe']
-from hermes_cli.main import main
-main()
+cli.cmd_chat = fake_chat
+sys.argv = ['hermes', 'chat']
+if mode == 'resume':
+    sys.argv += ['--resume', 'robie-interface-probe']
+sys.argv += ['-q', 'ROBIE_INTERFACE_PROBE']
+cli.main()
 '''
-
-
-def scripted_parameters(path):
-    import ast
-    tree = ast.parse(path.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == 'run_oneshot':
-            return [arg.arg for arg in node.args.args + node.args.kwonlyargs]
-    return []
 
 
 def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release: Path):
     import hashlib
+    import sqlite3
     import tempfile
+    from urllib.parse import quote
     home = Path(env.get('HERMES_HOME', ''))
     package = home / 'hermes-agent'
-    oneshot = package / 'hermes_cli/oneshot.py'
-    if not env.get('HERMES_HOME') or not oneshot.is_file():
-        return BAD, 'Installed scripted email interface is missing'
+    main = package / 'hermes_cli/main.py'
+    if not env.get('HERMES_HOME') or not main.is_file():
+        return BAD, 'Installed email interface is missing'
     child_env = dict(os.environ)
     child_env.update(env)
     child_env['PYTHONPATH'] = str(package) + os.pathsep + _service_pythonpath(env, release)
     try:
-        with tempfile.TemporaryDirectory(prefix='robie-interface-') as directory:
-            usage = Path(directory) / 'usage.json'
-            # Isolate any CLI setup/profile writes before the stubbed agent boundary.
-            child_env['HOME'] = directory
-            child_env['HERMES_HOME'] = str(Path(directory) / '.hermes')
-            Path(child_env['HERMES_HOME']).mkdir()
-            result = subprocess.run([interpreter, '-c', SCRIPTED_AGENT_PROBE, str(usage)],
-                capture_output=True, text=True, timeout=45, cwd=str(package), env=child_env)
-            report = json.loads(usage.read_text())
-            if result.returncode or result.stdout.strip() != 'ROBIE_INTERFACE_OK':
-                return BAD, 'Installed scripted CLI final-response mismatch: ' + json.dumps({
-                    'returncode': result.returncode, 'stdout_length': len(result.stdout),
-                    'final_marker_present': 'ROBIE_INTERFACE_OK' in result.stdout,
-                    'completed': report.get('completed'), 'failed': report.get('failed'),
-                    'session_matches': report.get('session_id') == 'robie-interface-probe',
-                    'prompt_mismatch': 'probe-prompt-mismatch' in str(report.get('failure', '')),
-                    'resume_mismatch': 'probe-resume-mismatch' in str(report.get('failure', '')),
-                    'oneshot_accepts_resume': 'resume' in scripted_parameters(oneshot),
-                }, sort_keys=True)
-            if report.get('session_id') != 'robie-interface-probe' or report.get('completed') is not True or report.get('failed') is not False:
-                return BAD, 'Installed scripted CLI usage receipt is incompatible'
-        return OK, 'Installed -z, --resume and --usage-file dispatch passed without model/tools; oneshot sha256=' + hashlib.sha256(oneshot.read_bytes()).hexdigest()
+        with sqlite3.connect('file:' + quote(str(home / 'state.db')) + '?mode=ro', uri=True) as db:
+            db.execute('PRAGMA query_only=ON')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(messages)')}
+            if not {'id','session_id','role','content','finish_reason','active'}.issubset(columns):
+                return BAD, 'Installed session ledger lacks final-response fields'
+        for mode in ('initial', 'resume'):
+            with tempfile.TemporaryDirectory(prefix='robie-interface-') as directory:
+                usage = Path(directory) / 'usage.json'
+                child_env['HOME'] = directory
+                child_env['HERMES_HOME'] = str(Path(directory) / '.hermes')
+                Path(child_env['HERMES_HOME']).mkdir()
+                result = subprocess.run([interpreter, '-c', SCRIPTED_AGENT_PROBE, str(usage), mode],
+                    capture_output=True, text=True, timeout=45, cwd=str(package), env=child_env)
+                report = json.loads(usage.read_text())
+                if result.returncode or result.stdout.strip() != 'ROBIE_INTERFACE_OK' or report != {'query_matches': True, 'resume_matches': True}:
+                    return BAD, 'Installed chat dispatch mismatch: ' + json.dumps({
+                        'mode': mode, 'returncode': result.returncode,
+                        'stdout_length': len(result.stdout), 'final_marker_present': 'ROBIE_INTERFACE_OK' in result.stdout,
+                        'query_matches': report.get('query_matches'), 'resume_matches': report.get('resume_matches')})
+        return OK, 'Installed chat -q / --resume dispatch and session-ledger schema passed without model/tools; main sha256=' + hashlib.sha256(main.read_bytes()).hexdigest()
     except Exception as exc:
-        return BAD, 'Installed scripted interface check failed: ' + type(exc).__name__
+        return BAD, 'Installed chat interface check failed: ' + type(exc).__name__
 
 
 def _unit_property(unit: str, prop: str) -> str:
@@ -480,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     ))
 
     state, detail = _probe_scripted_email_runtime(interpreter, unit_env, args.release)
-    results.append(('scripted email interface', state, detail,
+    results.append(('email session interface', state, detail,
         'The installed Hermes CLI cannot support this email execution path. Do not promote the candidate until this compatibility check passes.'))
 
     for label, state, detail, _why in results:

@@ -1,8 +1,6 @@
-"""Run email work through Hermes' final-response interface, with one scoped repair."""
+"""Run email work on the installed chat interface; read final replies from its ledger."""
 from __future__ import annotations
 
-import hashlib
-import json
 import sqlite3
 import subprocess
 import uuid
@@ -20,15 +18,31 @@ RECOVERY_PROMPT = (
 )
 
 
-def session_finish_reason(home: Path, session_id: str) -> str:
-    path = home / 'state.db'
-    with sqlite3.connect(f'file:{quote(str(path))}?mode=ro', uri=True, timeout=5) as db:
-        db.execute('PRAGMA query_only=ON')
+def session_connection(home: Path):
+    db = sqlite3.connect(f'file:{quote(str(home / "state.db"))}?mode=ro', uri=True, timeout=5)
+    db.execute('PRAGMA query_only=ON')
+    return db
+
+
+def session_for_receipt(home: Path, nonce: str) -> tuple[str, int]:
+    with session_connection(home) as db:
+        rows = db.execute(
+            "SELECT session_id,MAX(id) FROM messages WHERE role='user' AND instr(content,?)>0 GROUP BY session_id LIMIT 2",
+            (nonce,),
+        ).fetchall()
+    if len(rows) != 1:
+        raise ValueError('Missing or ambiguous email session')
+    return str(rows[0][0]), int(rows[0][1])
+
+
+def session_receipt(home: Path, session_id: str) -> dict:
+    with session_connection(home) as db:
         row = db.execute(
-            "SELECT finish_reason FROM messages WHERE session_id=? AND role='assistant' "
-            "AND COALESCE(active,1)=1 ORDER BY id DESC LIMIT 1", (session_id,)
+            "SELECT id,finish_reason,content FROM messages WHERE session_id=? AND role='assistant' "
+            "AND COALESCE(active,1)=1 ORDER BY id DESC LIMIT 1", (session_id,),
         ).fetchone()
-    return str(row[0] or '').casefold() if row else ''
+    return {'message_id': row[0], 'finish_reason': str(row[1] or '').casefold(),
+            'content': str(row[2] or '')} if row else {}
 
 
 def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
@@ -37,47 +51,43 @@ def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
     if not job_id or not db_path:
         return 'ROBIE_EXECUTION_BLOCKED: Email execution requires an active durable job.'
     store = JobStore(db_path)
-    if store.get_job(job_id)['status'] != 'RUNNING':
-        return 'ROBIE_EXECUTION_BLOCKED: The email job is not RUNNING.'
-    key = hashlib.sha256(job_id.encode()).hexdigest()[:24]
-    run_dir = Path(db_path).parent / 'email-runs' / key / uuid.uuid4().hex
-    run_dir.mkdir(parents=True, exist_ok=False)
+    nonce = 'ROBIE_EMAIL_RECEIPT_' + uuid.uuid4().hex
     records = []
     session_id = None
     for attempt in range(2):
         if store.get_job(job_id)['status'] != 'RUNNING':
             return 'ROBIE_EXECUTION_BLOCKED: The email job stopped before execution or recovery.'
-        usage_path = run_dir / f'usage-{attempt}.json'
-        command = [str(home / 'hermes-agent/venv/bin/python'), '-m', 'hermes_cli.main',
-                   '-z', prompt if attempt == 0 else RECOVERY_PROMPT,
-                   '--usage-file', str(usage_path)]
-        if session_id:
-            command.extend(['--resume', session_id])
+        command = [str(home / 'hermes-agent/venv/bin/python'), '-m', 'hermes_cli.main', 'chat']
         try:
+            baseline = session_receipt(home, session_id).get('message_id', 0) if session_id else 0
+            if session_id:
+                command.extend(['--resume', session_id, '-q', RECOVERY_PROMPT])
+            else:
+                command.extend(['-q', prompt + '\n\nExecution receipt identifier: ' + nonce +
+                                '. Do not include this identifier in your final reply.'])
+                store.checkpoint(job_id, 'email_agent_invocation', {'receipt_nonce': nonce})
             result = runner(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, text=True, timeout=600 if attempt == 0 else 300,
                             env=env, cwd=str(cwd))
-            usage = json.loads(usage_path.read_text())
-            reported_session = str(usage.get('session_id') or '')
-            if not reported_session or (session_id and reported_session != session_id):
-                raise ValueError('Missing or changed agent session')
-            session_id = reported_session
-            finish_reason = session_finish_reason(home, session_id)
-            record = {'attempt': attempt + 1, 'session_id': session_id,
-                      'returncode': result.returncode, 'finish_reason': finish_reason,
-                      'completed': usage.get('completed'), 'failed': usage.get('failed')}
-            records.append(record)
-            store.checkpoint(job_id, 'email_agent_runtime', {'interface': 'scripted-final-response', 'attempts': records})
+            if not session_id:
+                session_id, baseline = session_for_receipt(home, nonce)
+            receipt = session_receipt(home, session_id)
+            if receipt.get('message_id', 0) <= baseline:
+                raise ValueError('No fresh response in the same session')
+            finish_reason = receipt.get('finish_reason', '')
+            records.append({'attempt': attempt + 1, 'session_id': session_id,
+                            'returncode': result.returncode, 'finish_reason': finish_reason,
+                            'message_id': receipt['message_id'], 'mode': 'chat-resume' if attempt else 'chat'})
+            store.checkpoint(job_id, 'email_agent_runtime', {'interface': 'session-final-response', 'attempts': records})
             if finish_reason == 'malformed_function_call':
                 if attempt == 0:
                     continue
                 return ('ROBIE_EXECUTION_BLOCKED: The agent produced a malformed tool call again '
                         'after one same-session recovery. The requested result is not verified.')
-            if result.returncode or usage.get('failed') or not usage.get('completed'):
-                return 'ROBIE_OUTCOME_UNKNOWN: The agent did not finish successfully. Check saved results before retrying.'
-            if not finish_reason or finish_reason in {'tool_calls', 'length', 'max_tokens'}:
+            if result.returncode or finish_reason not in {'stop', 'end_turn'}:
                 return 'ROBIE_OUTCOME_UNKNOWN: The agent ended without a complete final turn. Check saved results before retrying.'
-            response = result.stdout.strip()
+            # Display output and separate reasoning fields are never used as the result.
+            response = receipt['content'].strip()
             if not response:
                 return 'ROBIE_OUTCOME_UNKNOWN: The agent returned no final response. Check saved results before retrying.'
             return response
