@@ -70,3 +70,12 @@ def test_session_probe_is_scoped_and_never_emits_messages(tmp_path):
     assert 'secret-message' not in rendered
     assert 'private-thought' not in rendered
     assert 'unrelated private' not in rendered
+    # Resume can append more than 100 ledger rows; inspect the latest turn.
+    with sqlite3.connect(path) as db:
+        for i in range(3, 110):
+            db.execute('INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?)', (i,'target','tool','Unknown tool private-token','terminal','[]',None,None,None))
+    recent = probe.inspect_acceptance_sessions(path)[0]['messages']
+    assert len(recent) == 100
+    assert recent[-1]['tool_error_categories'] == ['unknown_tool']
+    assert all(m['role'] == 'tool' for m in recent)
+    assert 'private-token' not in json.dumps(recent)
