@@ -79,7 +79,7 @@ jobs:
           set -euo pipefail
           set +e
           gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="echo \"deployed release: \$(readlink -f ${RELEASE})\"; cd ${RELEASE} && sudo PYTHONPATH=${RELEASE} python3 ${STAGING}/milestone_preflight.py --release ${RELEASE}" \
+            --command="echo \"deployed release: \$(readlink -f ${RELEASE})\"; cd ${RELEASE} && sudo ROBIE_ENV=TEST PYTHONPATH=${RELEASE} python3 ${STAGING}/milestone_preflight.py --release ${RELEASE}" \
             2>&1 | tee "${RUNNER_TEMP}/preflight.txt"
           rc=${PIPESTATUS[0]}
           set -e
