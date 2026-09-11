@@ -47,8 +47,10 @@ jobs:
           $SSH --command="mkdir -p '${STAGING}'"
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             scripts/probe-report-columns.py "${PRODUCTION_VM}:${STAGING}/"
-          # NB: stderr discarded (gcloud WARNING lines); only stdout is the JSON.
-          $SSH --command="sudo python3 '${STAGING}/probe-report-columns.py' '${{ inputs.report_id }}'" 2>/dev/null \
+          # NB: gcloud prints WARNING lines to stderr; filter those out but keep
+          # the remote script's own stderr (tracebacks) for debugging.
+          $SSH --command="sudo python3 '${STAGING}/probe-report-columns.py' '${{ inputs.report_id }}'" 2>&1 \
+            | grep -v "^WARNING:" \
             | tee "${RUNNER_TEMP}/report-columns.json"
           python3 -m json.tool "${RUNNER_TEMP}/report-columns.json" >/dev/null
       - name: Publish evidence artifact
