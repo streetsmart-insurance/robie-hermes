@@ -25,6 +25,7 @@ jobs:
     env:
       TARGET: ${{ inputs.target }}
       VM: ${{ inputs.target == 'TEST' && 'hermes-test-01' || 'hermes-poc-01' }}
+      GATEWAY: ${{ inputs.target == 'TEST' && 'robie-gateway' || 'hermes-gateway' }}
       ROOT: ${{ inputs.target == 'TEST' && '/opt/streetsmart-hermes-test' || '/opt/streetsmart-hermes' }}
     steps:
       - name: Validate bounded request
@@ -40,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           gcloud compute ssh "${VM}" --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
-            --command="sudo python3 '${ROOT}/releases/current/scripts/milestone_preflight.py' --release '${ROOT}/releases/current'" \
+            --command="sudo python3 '${ROOT}/releases/current/scripts/milestone_preflight.py' --release '${ROOT}/releases/current' --unit '${GATEWAY}'" \
             | tee "${RUNNER_TEMP}/message-readiness.txt"
       - uses: actions/upload-artifact@v4
         if: always()
