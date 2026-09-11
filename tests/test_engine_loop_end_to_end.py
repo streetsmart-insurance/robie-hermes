@@ -7,10 +7,14 @@ the worker confirmed the destination, and lands UNVERIFIED in every way that
 confirmation can fail. Runs entirely in-process against a temp sqlite db, so
 it needs no box, no browser and no network. Stdlib unittest.
 """
-import tempfile
 import unittest
 from datetime import datetime, timezone
+
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _durable_tmp import durable_tmpdir
 
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.models import (
@@ -68,9 +72,8 @@ class DestinationVerifier:
         )
 
 
-def _run(worker, verifier):
-    tmp = tempfile.mkdtemp()
-    store = JobStore(str(Path(tmp) / "jobs.db"))
+def _run(testcase, worker, verifier):
+    store = JobStore(str(durable_tmpdir(testcase) / "jobs.db"))
     verifiers = {ACTION: verifier} if verifier is not None else {}
     engine = JobEngine(store, {"browser-read": worker}, verifiers)
     job = store.create_job(ACTION, {"worker": "browser-read", **DESTINATION})
@@ -81,31 +84,31 @@ def _run(worker, verifier):
 class EngineLoopCompletesOnlyOnIndependentEvidence(unittest.TestCase):
     def test_worker_plus_authoritative_verifier_completes(self):
         worker, verifier = RecordingWorker(), DestinationVerifier()
-        job = _run(worker, verifier)
+        job = _run(self, worker, verifier)
         self.assertEqual(job["status"], JobStatus.COMPLETE.value, job.get("last_error"))
         self.assertEqual(worker.calls, 1)
         self.assertEqual(verifier.calls, 1, "the verifier must actually have been called")
 
     def test_no_verifier_registered_lands_unverified_not_complete(self):
-        job = _run(RecordingWorker(), None)
+        job = _run(self, RecordingWorker(), None)
         self.assertEqual(job["status"], JobStatus.UNVERIFIED.value)
         self.assertIn("verifier", (job.get("last_error") or "").lower())
 
     def test_verifier_says_no_lands_unverified(self):
-        job = _run(RecordingWorker(), DestinationVerifier(verified=False))
+        job = _run(self, RecordingWorker(), DestinationVerifier(verified=False))
         self.assertNotEqual(job["status"], JobStatus.COMPLETE.value)
 
     def test_verified_but_not_authoritative_does_not_complete(self):
         # The invariant that stops a plausible-looking receipt from passing as
         # proof: completion needs verified AND evidence.authoritative.
-        job = _run(RecordingWorker(), DestinationVerifier(verified=True, authoritative=False))
+        job = _run(self, RecordingWorker(), DestinationVerifier(verified=True, authoritative=False))
         self.assertNotEqual(
             job["status"], JobStatus.COMPLETE.value,
             "non-authoritative evidence must never complete a job",
         )
 
     def test_failed_worker_does_not_complete(self):
-        job = _run(RecordingWorker(succeeded=False), DestinationVerifier())
+        job = _run(self, RecordingWorker(succeeded=False), DestinationVerifier())
         self.assertNotEqual(job["status"], JobStatus.COMPLETE.value)
 
     def test_verifier_that_raises_lands_unverified_with_the_reason(self):
@@ -113,7 +116,7 @@ class EngineLoopCompletesOnlyOnIndependentEvidence(unittest.TestCase):
             def verify(self, job, action):
                 raise PermissionError("EPERM reading the destination")
 
-        job = _run(RecordingWorker(), Exploding())
+        job = _run(self, RecordingWorker(), Exploding())
         self.assertNotEqual(job["status"], JobStatus.COMPLETE.value)
         self.assertIn("PermissionError", job.get("last_error") or "")
 
