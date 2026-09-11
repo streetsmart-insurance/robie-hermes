@@ -84,12 +84,17 @@ def main():
         if count:
             raise SystemExit('Active jobs/leases exist; refuse service restart')
     gateway='robie-gateway' if args.environment=='TEST' else 'hermes-gateway'
-    python=root/'.hermes/hermes-agent/venv/bin/python'
-    resolver=root/'releases/current/scripts/read-login-secret-versions.py'
-    raw=run('env', 'PYTHONPATH='+str(root/'releases/current'), str(python), str(resolver))
-    refs=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
-    from milestone_preflight import _unit_environment
+    from milestone_preflight import _unit_environment, _service_python, _service_pythonpath
     prior_env, _ = _unit_environment(gateway)
+    python, interpreter_source = _service_python(gateway)
+    if 'this ssh session' in interpreter_source:
+        raise SystemExit('Cannot determine the actual gateway interpreter')
+    resolver=root/'releases/current/scripts/read-login-secret-versions.py'
+    resolver_env=dict(os.environ)
+    resolver_env.update(prior_env)
+    resolver_env['PYTHONPATH']=_service_pythonpath(prior_env,release)
+    raw=subprocess.check_output([python,str(resolver)],env=resolver_env,text=True,timeout=30)
+    refs=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
     api_key='ROBIE_EZLYNX_API_'+('UAT' if args.environment=='TEST' else 'PROD')+'_SECRET'
     values=settings(args.environment, refs, prior_env.get(api_key))
     env_path=Path('/etc')/root.name/'robie-message-runtime.env'
