@@ -437,12 +437,17 @@ def build_discussion_note(policy_number: str, lob: str, carrier: str, body: str)
 # ---------------------------------------------------------------------------
 
 
-def _ledger_for_job(job: dict[str, Any]):
+def _ledger_for_job(job: dict[str, Any], store: Any | None = None):
     """DurableWorkLedger for this job, or None when no durable DB is known."""
     from .idempotency import DurableWorkLedger
 
     payload = dict(job.get("payload") or {})
-    db_path = payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
+    db_path = (
+        payload.get("db_path")
+        or payload.get("jobs_db_path")
+        or getattr(store, "path", None)
+        or os.environ.get("ROBIE_JOB_DB")
+    )
     if not db_path:
         return None
     return DurableWorkLedger(str(db_path))
@@ -995,12 +1000,26 @@ def _process_row(
 class MortgageeVerificationWorker:
     """Work the 4372 mortgagee queue for job type ``mortgagee_verification``."""
 
+    def __init__(self, store: Any | None = None):
+        self._store = store
+
+    def _db_path(self, job: dict[str, Any]) -> Optional[str]:
+        payload = job.get("payload") or {}
+        p = (
+            payload.get("db_path")
+            or payload.get("jobs_db_path")
+            or getattr(self._store, "path", None)
+            or os.environ.get("ROBIE_JOB_DB")
+            or None
+        )
+        return str(p) if p else None
+
     def perform(self, job: dict[str, Any], *, idempotency_key: str) -> WorkerResult:
         action = str(job.get("action_type") or JOB_TYPE)
         payload = dict(job.get("payload") or {})
         report_id = str(payload.get("report_id") or REPORT_ID_4372)
         today = _parse_date(payload.get("as_of")) or date.today()
-        db_path = payload.get("jobs_db_path") or os.environ.get("ROBIE_JOB_DB")
+        db_path = self._db_path(job)
         authorized_actions = payload.get("authorized_actions")
 
         try:
@@ -1022,7 +1041,7 @@ class MortgageeVerificationWorker:
 
         ledger = None
         try:
-            ledger = _ledger_for_job(job)
+            ledger = _ledger_for_job(job, store=self._store)
         except Exception:
             ledger = None
 

@@ -760,5 +760,22 @@ class SafetyTests(unittest.TestCase):
         self.assertFalse(result.succeeded)
         self.assertFalse(result.retryable)
 
+    def test_db_path_resolution(self):
+        worker = avw.AuditVerificationWorker()
+        # 1. payload db_path
+        self.assertEqual(worker._db_path({"payload": {"db_path": "/tmp/test1.db"}}), "/tmp/test1.db")
+        # 2. payload jobs_db_path
+        self.assertEqual(worker._db_path({"payload": {"jobs_db_path": "/tmp/test2.db"}}), "/tmp/test2.db")
+        # 3. store path
+        import os
+        from unittest.mock import Mock, patch
+        store_mock = Mock(path="/tmp/store.db")
+        worker_with_store = avw.AuditVerificationWorker(store=store_mock)
+        self.assertEqual(worker_with_store._db_path({"payload": {}}), "/tmp/store.db")
+        # 4. env var
+        with patch.dict(os.environ, {"ROBIE_JOB_DB": "/tmp/env.db"}):
+            self.assertEqual(worker._db_path({"payload": {}}), "/tmp/env.db")
+
+
 if __name__ == "__main__":
     unittest.main()
