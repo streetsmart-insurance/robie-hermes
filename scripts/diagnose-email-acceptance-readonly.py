@@ -7,6 +7,9 @@ import hashlib
 import json
 import re
 import sqlite3
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -103,6 +106,52 @@ def inspect_runtime(home):
     return report
 
 
+TOOL_EXPOSURE_PROBE = r'''
+import sys, json, importlib.util, inspect
+def deny(event, args):
+    if event in {'socket.connect','socket.connect_ex','socket.bind','subprocess.Popen','os.system','os.exec'}:
+        raise RuntimeError('Network/process access forbidden')
+sys.addaudithook(deny)
+out = {}
+try:
+    import toolsets
+    from tools import registry, tool_search
+    core = getattr(toolsets, '_HERMES_CORE_TOOLS', None)
+    out['core_collection_type'] = type(core).__name__
+    out['playwright_in_core'] = 'playwright_exec' in (core or [])
+    out['playwright_dependency_available'] = importlib.util.find_spec('playwright') is not None
+    out['register_parameters'] = list(inspect.signature(registry.registry.register).parameters)
+    import tools.playwright_tool
+    out['playwright_deferrable'] = tool_search.is_deferrable_tool_name('playwright_exec')
+    schema = tools.playwright_tool.PLAYWRIGHT_EXEC_SCHEMA
+    if 'function' not in schema:
+        schema = {'type':'function','function':schema}
+    out['schema_name_matches'] = schema['function']['name'] == 'playwright_exec'
+    if hasattr(tool_search, 'classify_tools'):
+        visible, deferred = tool_search.classify_tools([schema])
+        out['visible_schema_count'] = len(visible)
+        out['deferred_schema_count'] = len(deferred)
+except Exception as exc:
+    out['error_type'] = type(exc).__name__
+print('TOOL_EXPOSURE_JSON:' + json.dumps(out))
+'''
+
+
+def inspect_tool_exposure(home):
+    """Import-only sandbox: no model, browser, network, or tool dispatch."""
+    package = home / 'hermes-agent'
+    with tempfile.TemporaryDirectory(prefix='robie-tool-exposure-') as directory:
+        env = dict(os.environ, HOME=directory, HERMES_HOME=directory,
+                   PYTHONDONTWRITEBYTECODE='1',
+                   PYTHONPATH=str(package) + os.pathsep + str(home.parent / 'releases/current'))
+        result = subprocess.run([str(package / 'venv/bin/python'), '-c', TOOL_EXPOSURE_PROBE],
+            cwd=directory, env=env, capture_output=True, text=True, timeout=30)
+        lines = [line for line in result.stdout.splitlines() if line.startswith('TOOL_EXPOSURE_JSON:')]
+        if result.returncode or len(lines) != 1:
+            return {'probe_ok': False, 'returncode': result.returncode}
+        return json.loads(lines[0].split(':', 1)[1])
+
+
 def inspect_acceptance_sessions(path):
     """Only sessions containing this test's unique identifier; no message content output."""
     if not path.is_file():
@@ -151,4 +200,5 @@ if __name__ == '__main__':
     root = Path('/opt/streetsmart-hermes')
     print(json.dumps({'job': inspect_job(root / 'robie-job-engine/data/jobs.db'),
                       'runtime': inspect_runtime(root / '.hermes'),
+                      'tool_exposure': inspect_tool_exposure(root / '.hermes'),
                       'acceptance_sessions': inspect_acceptance_sessions(root / '.hermes/state.db')}, indent=2))
