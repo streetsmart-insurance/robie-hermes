@@ -195,6 +195,38 @@ class ProbeRunsInThatInterpreter(unittest.TestCase):
         self.assertEqual(probe["secret"][0], preflight.BAD)
         self.assertIn("must be configured", probe["secret"][1])
 
+    def test_the_units_pythonpath_is_kept_not_replaced(self):
+        """The gateway's libraries live on the unit's PYTHONPATH, not in the release."""
+        release = _tmpdir(self)
+        runtime = _tmpdir(self)
+        (runtime / "only_on_the_units_path.py").write_text("VALUE = 1\n")
+        pkg = release / "robie_job_engine"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "ezlynx_api.py").write_text(
+            "import only_on_the_units_path\n"
+            "def load_ezlynx_api_config():\n"
+            "    return only_on_the_units_path.VALUE\n"
+        )
+        probe, err = preflight._probe_service_runtime(
+            sys.executable, {"PYTHONPATH": str(runtime)}, release
+        )
+        self.assertEqual(err, "")
+        self.assertEqual(probe["secret"][0], preflight.OK, probe)
+
+    def test_release_is_appended_not_duplicated(self):
+        release = _tmpdir(self)
+        runtime = "/opt/x/.gateway-runtime"
+        self.assertEqual(
+            preflight._service_pythonpath({"PYTHONPATH": runtime}, release),
+            f"{runtime}{os.pathsep}{release}",
+        )
+        already = f"{runtime}{os.pathsep}{release}"
+        self.assertEqual(
+            preflight._service_pythonpath({"PYTHONPATH": already}, release), already
+        )
+        self.assertEqual(preflight._service_pythonpath({}, release), str(release))
+
     def test_an_interpreter_that_cannot_run_is_an_error_not_a_pass(self):
         probe, err = preflight._probe_service_runtime(
             "/nonexistent/python", {}, _tmpdir(self)

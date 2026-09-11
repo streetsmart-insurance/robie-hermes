@@ -195,11 +195,27 @@ def _service_python(unit: str | None) -> tuple[str, str]:
     )
 
 
+def _service_pythonpath(env: dict[str, str], release: Path) -> str:
+    """The unit's PYTHONPATH, with the release appended if it is not already on it.
+
+    deploy-test-release.sh installs the gateway's libraries into
+    releases/current/.gateway-runtime and puts that directory on the unit's
+    PYTHONPATH through a drop-in. Replacing PYTHONPATH with the release root
+    alone would hide exactly the libraries the service can import, and the probe
+    would report them missing from a box where they are present.
+    """
+    existing = env.get("PYTHONPATH", "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if str(release) not in parts:
+        parts.append(str(release))
+    return os.pathsep.join(parts)
+
+
 def _probe_service_runtime(interpreter: str, env: dict[str, str], release: Path):
     """Run PROBE inside the service's interpreter with the service's environment."""
     child_env = dict(os.environ)
     child_env.update(env)
-    child_env["PYTHONPATH"] = str(release)
+    child_env["PYTHONPATH"] = _service_pythonpath(env, release)
     try:
         proc = subprocess.run(
             [interpreter, "-c", PROBE], capture_output=True, text=True,
@@ -289,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     unit, seen = _loaded_gateway_unit(units)
     unit_env, env_sources = _unit_environment(unit)
     interpreter, interpreter_note = _service_python(unit)
+    pythonpath = _service_pythonpath(unit_env, args.release)
     probe, probe_error = _probe_service_runtime(interpreter, unit_env, args.release)
 
     env_label = ", ".join(env_sources) if env_sources else "no EnvironmentFile or Environment="
@@ -297,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{unit_env.get('ROBIE_ENV') or '(unset)'} in {unit or 'no gateway unit'}")
     print(f"interpreter: {interpreter_note}")
     print(f"environment: {env_label}")
+    print(f"PYTHONPATH:  {pythonpath}")
     print()
 
     # Each entry: (label, state, detail, what it means in plain English)
@@ -341,8 +359,11 @@ def main(argv: list[str] | None = None) -> int:
             "verifier can register but every read it makes will fail. This ran inside the "
             "service's own interpreter with the service's own environment, so it is a "
             "failure the service really has. Fix: if the message names a missing library, "
-            "it is missing from that interpreter and belongs in the deployed release's "
-            "dependencies; if it names a variable, check the EnvironmentFile spells "
+            "it is missing from that interpreter on the PYTHONPATH printed above, and "
+            "belongs in the release's gateway runtime requirements "
+            "(deploy/requirements-test-gateway-playwright.txt, installed into "
+            ".gateway-runtime by deploy-test-release.sh); if it names a variable, check "
+            "the EnvironmentFile spells "
             "ROBIE_EZLYNX_API_UAT_SECRET as a full resource name "
             "(projects/NNN/secrets/NAME/versions/latest); if it is a permission error, "
             "this VM's service account needs roles/secretmanager.secretAccessor on it.",
