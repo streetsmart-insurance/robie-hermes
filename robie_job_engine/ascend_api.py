@@ -30,7 +30,6 @@ WORKER_NAME = "ascend-api"
 SANDBOX_API_ORIGIN = "https://sandbox.api.useascend.com"
 PRODUCTION_API_ORIGIN = "https://api.useascend.com"
 API_VERSION_PATH = "/v1"
-FORBIDDEN_ACCOUNTS = frozenset({"pawiva", "221398001"})
 
 PROGRAM_FIELDS = frozenset(
     {
@@ -146,15 +145,6 @@ def _date(value: Any, field: str) -> str:
         raise AscendPayloadError(f"{field} must use YYYY-MM-DD") from exc
 
 
-def _contains_forbidden_account(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any(_contains_forbidden_account(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_contains_forbidden_account(item) for item in value)
-    normalized = " ".join(str(value or "").casefold().split())
-    return any(marker in normalized for marker in FORBIDDEN_ACCOUNTS)
-
-
 def _allowlisted(source: dict[str, Any], allowed: frozenset[str], label: str) -> dict[str, Any]:
     unknown = sorted(set(source) - set(allowed))
     if unknown:
@@ -166,8 +156,6 @@ def validate_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a normalized API plan without credentials or network access."""
     if not isinstance(payload, dict):
         raise AscendPayloadError("payload must be an object")
-    if _contains_forbidden_account(payload):
-        raise AscendPayloadError("forbidden account: PAWIVA / 221398001")
 
     raw_program = payload.get("program")
     if not isinstance(raw_program, dict):
