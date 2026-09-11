@@ -14,21 +14,60 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 
-sys.path.insert(0, "/opt/streetsmart-hermes/robie-job-engine")
+ENGINE_CANDIDATES = [
+    "/opt/streetsmart-hermes/robie-job-engine",
+    "/opt/streetsmart-hermes/current/robie-job-engine",
+]
 
-from robie_job_engine.ezlynx_session import (  # noqa: E402
-    PlaywrightEzlynxSession,
-    ensure_ezlynx_session,
-)
-from robie_job_engine.report_fetcher import (  # noqa: E402
-    REPORT_DOWNLOAD_DIR,
-    _cdp_url,
-    _export_looker_report_csv,
-    _page_of,
-)
-from robie_job_engine.report_registry import get_report_spec  # noqa: E402
+
+def _find_engine() -> tuple[str, dict]:
+    """Locate the engine package; return (path, diagnostics)."""
+    diag: dict = {"candidates": {}}
+    for cand in ENGINE_CANDIDATES:
+        info: dict = {"exists": os.path.isdir(cand)}
+        pkg = os.path.join(cand, "robie_job_engine")
+        info["package_exists"] = os.path.isdir(pkg)
+        if info["package_exists"]:
+            try:
+                files = sorted(os.listdir(pkg))
+            except OSError as exc:
+                files = [f"listdir failed: {exc}"]
+            info["has_ezlynx_session"] = "ezlynx_session.py" in files
+            info["has_report_fetcher"] = "report_fetcher.py" in files
+            info["has_report_registry"] = "report_registry.py" in files
+            info["file_count"] = len(files)
+        diag["candidates"][cand] = info
+        if info.get("has_ezlynx_session") and info.get("has_report_fetcher"):
+            return cand, diag
+    # Fall back to the first existing candidate so the import error is informative.
+    for cand in ENGINE_CANDIDATES:
+        if diag["candidates"][cand]["exists"]:
+            return cand, diag
+    print(json.dumps({"engine_diagnostics": diag}, indent=2))
+    raise SystemExit("fail closed: no engine candidate with ezlynx_session found")
+
+
+_ENGINE_PATH, _DIAG = _find_engine()
+sys.path.insert(0, _ENGINE_PATH)
+
+try:
+    from robie_job_engine.ezlynx_session import (  # noqa: E402
+        PlaywrightEzlynxSession,
+        ensure_ezlynx_session,
+    )
+    from robie_job_engine.report_fetcher import (  # noqa: E402
+        REPORT_DOWNLOAD_DIR,
+        _cdp_url,
+        _export_looker_report_csv,
+        _page_of,
+    )
+    from robie_job_engine.report_registry import get_report_spec  # noqa: E402
+except ModuleNotFoundError as exc:
+    print(json.dumps({"engine_diagnostics": _DIAG, "import_error": str(exc)}, indent=2))
+    raise SystemExit(f"fail closed: {exc}")
 
 
 def main() -> None:
