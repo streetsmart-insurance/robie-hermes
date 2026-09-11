@@ -49,10 +49,10 @@ jobs:
             sudo mkdir -p /etc/streetsmart-hermes /etc/systemd/system/robie-scheduler.service.d '${DIGEST_DIR}'
             sudo chown streetsmart-hermes:streetsmart-hermes '${DIGEST_DIR}'
             printf '%s\n' \
-              'ROBIE_EZLYNX_USERNAME_SECRET=ezlynx-username' \
-              'ROBIE_EZLYNX_PASSWORD_SECRET=ezlynx-password' \
-              'VERIFICATION_DIGEST_OUTPUT_DIR=${DIGEST_DIR}' \
-              'VERIFICATION_DIGEST_EMAIL_SENDER=${DIGEST_SENDER}' \
+              "ROBIE_EZLYNX_USERNAME_SECRET=projects/${PROJECT_ID}/secrets/ezlynx-username/versions/latest" \
+              "ROBIE_EZLYNX_PASSWORD_SECRET=projects/${PROJECT_ID}/secrets/ezlynx-password/versions/latest" \
+              "VERIFICATION_DIGEST_OUTPUT_DIR=${DIGEST_DIR}" \
+              "VERIFICATION_DIGEST_EMAIL_SENDER=${DIGEST_SENDER}" \
               | sudo tee /etc/streetsmart-hermes/robie-verification.env >/dev/null
             sudo chmod 600 /etc/streetsmart-hermes/robie-verification.env
             printf '%s\n' '[Service]' 'EnvironmentFile=/etc/streetsmart-hermes/robie-verification.env' \
