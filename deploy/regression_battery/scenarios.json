@@ -4,6 +4,14 @@
   "maintain": "Add a named scenario the same day a NEW Production failure mode is found. Do not mark the incident closed until the scenario id exists in the battery. Update this list when a deploy or HITL shows a new class.",
   "incidents": [
     {
+      "id": "bd5b832e-browser-tool-discovery",
+      "class": "browser-tool-visibility",
+      "new_failure_mode": true,
+      "scenario": "browser-tool:direct-guarded-schema",
+      "closed": false,
+      "note": "Email acceptance repeatedly hit malformed tool calls around a deferred browser schema. Installed runtime probe confirmed playwright_exec was available but deferred. tests/test_hermes_tool_visibility.py covers narrow direct exposure, idempotency, unavailable dependencies and incompatible runtime. Live policy acceptance remains required."
+    },
+    {
       "id": "09d69760",
       "class": "hitl-resume-orphan",
       "new_failure_mode": true,

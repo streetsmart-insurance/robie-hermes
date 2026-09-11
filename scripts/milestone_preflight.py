@@ -94,6 +94,16 @@ import hermes_cli.main as cli
 usage, mode = sys.argv[1:]
 
 def fake_chat(args):
+    import tools.playwright_tool as browser_tool
+    from tools.tool_search import classify_tools
+    if not browser_tool._available():
+        raise RuntimeError('Guarded browser tool unavailable')
+    schema = browser_tool.PLAYWRIGHT_EXEC_SCHEMA
+    if 'function' not in schema:
+        schema = {'type': 'function', 'function': schema}
+    visible, deferred = classify_tools([schema])
+    if len(visible) != 1 or deferred:
+        raise RuntimeError('Guarded browser schema is not directly visible')
     expected_resume = 'robie-interface-probe' if mode == 'resume' else None
     Path(usage).write_text(json.dumps({
         'query_matches': getattr(args, 'query', None) == 'ROBIE_INTERFACE_PROBE',
@@ -143,7 +153,7 @@ def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release
                         'mode': mode, 'returncode': result.returncode,
                         'stdout_length': len(result.stdout), 'final_marker_present': 'ROBIE_INTERFACE_OK' in result.stdout,
                         'query_matches': report.get('query_matches'), 'resume_matches': report.get('resume_matches')})
-        return OK, 'Installed chat -q / --resume dispatch and session-ledger schema passed without model/tools; main sha256=' + hashlib.sha256(main.read_bytes()).hexdigest()
+        return OK, 'Installed chat -q / --resume dispatch, direct guarded browser schema, and session-ledger schema passed without model/tool execution; main sha256=' + hashlib.sha256(main.read_bytes()).hexdigest()
     except Exception as exc:
         return BAD, 'Installed chat interface check failed: ' + type(exc).__name__
 
