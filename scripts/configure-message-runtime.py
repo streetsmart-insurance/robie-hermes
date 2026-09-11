@@ -11,6 +11,7 @@ import stat
 import sys
 import sqlite3
 import subprocess
+import time
 
 REF = re.compile(r'projects/[\w-]+/secrets/[\w-]+/versions/[1-9]\d*')
 
@@ -65,6 +66,29 @@ def apply_files(files, backup_dir, activate):
 def run(*args):
     return subprocess.check_output(args, text=True, timeout=30).strip()
 
+def verify_running_environment(unit, expected, timeout=15):
+    """Wait for two matching observations of one live PID; never log values."""
+    deadline = time.monotonic() + timeout
+    previous_pid = None
+    mismatched = sorted(expected)
+    while time.monotonic() < deadline:
+        pid = run('systemctl', 'show', unit, '-p', 'MainPID', '--value')
+        try:
+            if not pid.isdigit() or int(pid) == 0:
+                raise FileNotFoundError('No main process')
+            effective = dict(item.split('=', 1) for item in
+                             Path('/proc', pid, 'environ').read_text().split('\0') if '=' in item)
+            mismatched = sorted(k for k, value in expected.items() if effective.get(k) != value)
+            if not mismatched and pid == previous_pid:
+                return
+            previous_pid = pid if not mismatched else None
+        except (FileNotFoundError, ProcessLookupError):
+            previous_pid = None
+            mismatched = sorted(expected)
+        time.sleep(0.5)
+    raise RuntimeError('Gateway environment did not stabilize; mismatched keys: ' +
+                       ', '.join(mismatched or ['MainPID stability']))
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--environment', required=True, choices=['TEST','PRODUCTION'])
@@ -111,10 +135,7 @@ def main():
         subprocess.run(['systemctl','daemon-reload'],check=True, timeout=30)
         subprocess.run(['systemctl','restart',gateway],check=True, timeout=30)
         subprocess.run(['systemctl','is-active','--quiet',gateway],check=True, timeout=30)
-        pid=run('systemctl','show',gateway,'-p','MainPID','--value')
-        effective=dict(item.split('=',1) for item in Path('/proc',pid,'environ').read_text().split('\0') if '=' in item)
-        if any(effective.get(k)!=v for k,v in values.items()):
-            raise RuntimeError('Gateway did not load the expected message environment')
+        verify_running_environment(gateway, values)
     sys.path.insert(0,str(release))
     from robie_job_engine.runs import IsolatedRunStore
     runs=IsolatedRunStore(db)

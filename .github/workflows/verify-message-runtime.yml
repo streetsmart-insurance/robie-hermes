@@ -28,6 +28,9 @@ jobs:
       GATEWAY: ${{ inputs.target == 'TEST' && 'robie-gateway' || 'hermes-gateway' }}
       ROOT: ${{ inputs.target == 'TEST' && '/opt/streetsmart-hermes-test' || '/opt/streetsmart-hermes' }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Validate bounded request
         run: |
           set -euo pipefail
@@ -40,8 +43,13 @@ jobs:
       - name: Read readiness from the actual gateway runtime
         run: |
           set -euo pipefail
+          echo "Readiness controller commit: ${GITHUB_SHA}"
+          PROBE="/var/tmp/message-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
+          PROBE_DIGEST=$(sha256sum scripts/milestone_preflight.py | cut -d' ' -f1)
+          gcloud compute scp scripts/milestone_preflight.py "${VM}:${PROBE}" \
+            --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap
           gcloud compute ssh "${VM}" --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
-            --command="sudo python3 '${ROOT}/releases/current/scripts/milestone_preflight.py' --release '${ROOT}/releases/current' --unit '${GATEWAY}'" \
+            --command="set -eu; trap 'rm -f ${PROBE}' EXIT; echo '${PROBE_DIGEST}  ${PROBE}' | sha256sum -c -; sudo python3 '${PROBE}' --release '${ROOT}/releases/current' --unit '${GATEWAY}'" \
             | tee "${RUNNER_TEMP}/message-readiness.txt"
       - uses: actions/upload-artifact@v4
         if: always()

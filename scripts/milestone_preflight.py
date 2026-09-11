@@ -124,6 +124,13 @@ def _unit_environment(unit: str | None) -> tuple[dict[str, str], list[str]]:
         return {}, []
     env: dict[str, str] = {}
     sources: list[str] = []
+    for item in shlex.split(_unit_property(unit, "Environment")):
+        if "=" in item:
+            key, value = item.split("=", 1)
+            env[key] = value
+    if _unit_property(unit, "Environment"):
+        sources.append(f"{unit} Environment=")
+    # EnvironmentFile= overrides Environment=; later files override earlier ones.
     for path in _unit_environment_files(unit):
         if not path.is_file():
             sources.append(f"{path} (missing)")
@@ -140,12 +147,6 @@ def _unit_environment(unit: str | None) -> tuple[dict[str, str], list[str]]:
             key, value = line.split("=", 1)
             env[key.strip()] = value.strip().strip('"').strip("'")
         sources.append(str(path))
-    for item in _unit_property(unit, "Environment").split():
-        if "=" in item:
-            key, value = item.split("=", 1)
-            env[key] = value
-    if _unit_property(unit, "Environment"):
-        sources.append(f"{unit} Environment=")
     return env, sources
 
 

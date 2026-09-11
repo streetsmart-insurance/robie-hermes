@@ -77,6 +77,17 @@ class ReadsTheUnitsOwnEnvironment(unittest.TestCase):
         )
         self.assertIn(str(self.env_file), sources)
 
+    def test_files_override_unit_environment_in_declared_order(self):
+        second = self.env_file.with_name('second.env')
+        self.env_file.write_text('ROBIE_ENV=FIRST\n')
+        second.write_text('ROBIE_ENV=SECOND\n')
+        self.props[("robie-gateway", "EnvironmentFiles")] = f"{self.env_file} (ignore_errors=no) {second} (ignore_errors=no)"
+        self.props[("robie-gateway", "Environment")] = 'ROBIE_ENV=INLINE "LABEL=two words"'
+        with mock.patch.object(preflight, "_unit_property", _fake_properties(self.props)):
+            env, _ = preflight._unit_environment("robie-gateway")
+        self.assertEqual(env['ROBIE_ENV'], 'SECOND')
+        self.assertEqual(env['LABEL'], 'two words')
+
     def test_missing_env_file_is_named_not_silently_skipped(self):
         props = dict(self.props)
         props[("robie-gateway", "EnvironmentFiles")] = "/etc/nope/absent.env (ignore_errors=no)"
