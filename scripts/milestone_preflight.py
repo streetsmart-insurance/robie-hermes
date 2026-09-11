@@ -85,6 +85,11 @@ sys.stdout.write("PROBE_JSON:" + json.dumps(out) + "\n")
 # session mutation, or business action. The only substituted boundary is the
 # agent itself; the real -z/--resume/--usage-file dispatch remains installed code.
 SCRIPTED_AGENT_PROBE = r'''import sys
+# This interface check must never access a provider or other network service.
+def deny_network(event, args):
+    if event in {'socket.connect', 'socket.connect_ex', 'socket.bind', 'subprocess.Popen', 'os.system', 'os.exec'}:
+        raise RuntimeError('Network/process access forbidden in interface probe')
+sys.addaudithook(deny_network)
 from hermes_cli import oneshot
 
 def fake_agent(prompt, **kwargs):
@@ -113,6 +118,10 @@ def _probe_scripted_email_runtime(interpreter: str, env: dict[str, str], release
     try:
         with tempfile.TemporaryDirectory(prefix='robie-interface-') as directory:
             usage = Path(directory) / 'usage.json'
+            # Isolate any CLI setup/profile writes before the stubbed agent boundary.
+            child_env['HOME'] = directory
+            child_env['HERMES_HOME'] = str(Path(directory) / '.hermes')
+            Path(child_env['HERMES_HOME']).mkdir()
             result = subprocess.run([interpreter, '-c', SCRIPTED_AGENT_PROBE, str(usage)],
                 capture_output=True, text=True, timeout=45, cwd=str(package), env=child_env)
             report = json.loads(usage.read_text())
