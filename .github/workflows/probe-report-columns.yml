@@ -1,0 +1,60 @@
+name: Probe EZLynx report columns (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type PROBE_REPORT_COLUMNS
+        required: true
+        type: string
+      report_id:
+        description: EZLynx report ID to probe (headers only)
+        required: true
+        default: "4359"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'PROBE_REPORT_COLUMNS'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Refuse every target except Production
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+      - name: Probe report columns (read-only, headers only)
+        run: |
+          set -euo pipefail
+          STAGING=/var/tmp/robie-report-probe/${{ github.run_id }}
+          SSH="gcloud compute ssh ${PRODUCTION_VM} --project=${PROJECT_ID} --zone=${ZONE} --tunnel-through-iap"
+          $SSH --command="mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/probe-report-columns.py "${PRODUCTION_VM}:${STAGING}/"
+          # NB: stderr discarded (gcloud WARNING lines); only stdout is the JSON.
+          $SSH --command="sudo python3 '${STAGING}/probe-report-columns.py' '${{ inputs.report_id }}'" 2>/dev/null \
+            | tee "${RUNNER_TEMP}/report-columns.json"
+          python3 -m json.tool "${RUNNER_TEMP}/report-columns.json" >/dev/null
+      - name: Publish evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-columns-${{ inputs.report_id }}
+          path: ${{ runner.temp }}/report-columns.json
+          if-no-files-found: error
+          retention-days: 30
