@@ -1,0 +1,50 @@
+name: Verify message runtime readiness
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: choice
+        options: [TEST, PRODUCTION]
+      confirmation:
+        description: Type VERIFY_MESSAGE_RUNTIME
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: robie-message-readiness-${{ inputs.target }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'VERIFY_MESSAGE_RUNTIME'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.target == 'TEST' && 'Test' || 'Production' }}
+    env:
+      TARGET: ${{ inputs.target }}
+      VM: ${{ inputs.target == 'TEST' && 'hermes-test-01' || 'hermes-poc-01' }}
+      GATEWAY: ${{ inputs.target == 'TEST' && 'robie-gateway' || 'hermes-gateway' }}
+      ROOT: ${{ inputs.target == 'TEST' && '/opt/streetsmart-hermes-test' || '/opt/streetsmart-hermes' }}
+    steps:
+      - name: Validate bounded request
+        run: |
+          set -euo pipefail
+          [[ "${TARGET}" = TEST || "${TARGET}" = PRODUCTION ]]
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ inputs.target == 'TEST' && 'projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github' || 'projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main' }}
+          service_account: ${{ inputs.target == 'TEST' && 'robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com' || 'robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com' }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Read readiness from the actual gateway runtime
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${VM}" --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
+            --command="sudo python3 '${ROOT}/releases/current/scripts/milestone_preflight.py' --release '${ROOT}/releases/current' --unit '${GATEWAY}'" \
+            | tee "${RUNNER_TEMP}/message-readiness.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: message-readiness-${{ inputs.target }}
+          path: ${{ runner.temp }}/message-readiness.txt
