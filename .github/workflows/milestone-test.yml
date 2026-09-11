@@ -125,19 +125,40 @@ jobs:
           set -e
 
           case "${rc}" in
-            0) VERDICT="PASS - jobs completed with authoritative evidence" ;;
-            1) VERDICT="NOT PASS - PARTIAL or NO CHANGE, see output" ;;
-            2) VERDICT="FAIL - the script refused to run, bad path or no baseline" ;;
-            3) VERDICT="BLOCKED - no new jobs since the baseline, the seed did not land" ;;
-            *) VERDICT="UNKNOWN exit ${rc}" ;;
+            0)
+              VERDICT="PASS"
+              MEANING="Jobs completed AND wrote authoritative evidence. Something other than the worker confirmed the work reached its destination. This is the milestone: the engine is doing what it is for. Next step is deploying this same release to Production by release pointer."
+              ;;
+            1)
+              VERDICT="NOT PASS"
+              MEANING="Either PARTIAL or NO CHANGE - read the counts above to tell which. PARTIAL means evidence rows were written but nothing completed: the verifier IS running and is refusing to confirm, which is progress, and the newest job's last_error says why. NO CHANGE means jobs ran, produced no evidence, and hit engine gaps: the verifier is not being reached at all. Do NOT respond to NO CHANGE by writing more verifiers - find out which JobEngine ran those jobs first."
+              ;;
+            2)
+              VERDICT="COULD NOT RUN"
+              MEANING="The script refused before reading anything. Either the database path is wrong, or no baseline exists yet. This says nothing about the engine. Run this workflow with mode=baseline first, then seed a job, then evaluate."
+              ;;
+            3)
+              VERDICT="BLOCKED"
+              MEANING="No new jobs appeared since the baseline, so nothing is proven either way. This is the script working correctly, not a failure: it means the Bond-like Chat job never landed. Check that the message actually reached ROBIE and created a job row before reading anything into this."
+              ;;
+            *)
+              VERDICT="UNKNOWN exit ${rc}"
+              MEANING="The script exited with a code it does not define. Treat this as a bug in the harness rather than a statement about the engine."
+              ;;
           esac
 
           {
             echo "## ${VERDICT}"
             echo
+            echo "${MEANING}"
+            echo
+            echo "<details><summary>Full output</summary>"
+            echo
             echo '```'
             cat "${RUNNER_TEMP}/evaluate.txt"
             echo '```'
+            echo
+            echo "</details>"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           if [ "${rc}" -ne 0 ]; then
@@ -148,7 +169,13 @@ jobs:
             set -e
             {
               echo
-              echo "### prove_deployed - is this a code gap or a deploy gap?"
+              echo "### Is this a code gap or a deploy gap?"
+              echo
+              echo "If prove_deployed says NOT DEPLOYED, the box is not running the code you"
+              echo "think it is and the verdict above describes an old release. If it says"
+              echo "DEPLOYED, the right code is there and the problem is in the code or the"
+              echo "job, not the deploy."
+              echo
               echo '```'
               cat "${RUNNER_TEMP}/deployed.txt"
               echo '```'

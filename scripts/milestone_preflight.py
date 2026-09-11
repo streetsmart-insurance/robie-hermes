@@ -96,29 +96,79 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--unit", default="hermes-gateway", help="gateway systemd unit to inspect")
     args = ap.parse_args(argv)
 
-    problems = 0
+    env_now = os.environ.get("ROBIE_ENV") or "(unset in this shell)"
     print(f"release:   {args.release.resolve()}")
-    print(f"ROBIE_ENV: {os.environ.get('ROBIE_ENV') or '(unset in this shell)'}")
+    print(f"ROBIE_ENV: {env_now}")
     print()
 
-    for label, (state, detail) in (
-        ("gateway unit ROBIE_ENV", _check_gateway_env(args.unit)),
-        ("Secret Manager (EZLynx PolicyApi)", _check_secret_manager()),
-        ("slice 1 checkpoint writer", _check_checkpoint_writer(args.release)),
-    ):
-        problems += state == BAD
-        print(f"  [{state:>7}] {label}: {detail}")
+    # Each entry: (label, state, detail, what it means in plain English)
+    results: list[tuple[str, str, str, str]] = []
+
+    state, detail = _check_gateway_env(args.unit)
+    results.append((
+        "gateway unit ROBIE_ENV", state, detail,
+        f"The {args.unit} service runs with no ROBIE_ENV. Every Secret Manager read "
+        "fails closed without it, so nothing that needs EZLynx credentials can work — "
+        "including the Chat destination verifier the milestone depends on. This is the "
+        "service's own configuration, not ours: setting ROBIE_ENV in our ssh session "
+        "would hide it rather than fix it. Fix: add Environment=ROBIE_ENV=TEST to the "
+        "unit and reload.",
+    ))
+
+    state, detail = _check_secret_manager()
+    results.append((
+        "Secret Manager (EZLynx PolicyApi)", state, detail,
+        "The box cannot load EZLynx API credentials, so the Chat destination verifier "
+        "can register but every read it makes will fail. Worth knowing: "
+        ".github/workflows/configure-ezlynx-api-env.yml writes these secret references "
+        "into /etc/streetsmart-hermes/robie-verification.env — but only for "
+        "hermes-poc-01. There is no Test equivalent, which is why Production works and "
+        "Test does not. Fix: configure the same references on the Test box, and confirm "
+        "the Test VM's service account can read the secret.",
+    ))
+
+    state, detail = _check_checkpoint_writer(args.release)
+    results.append((
+        "slice 1 checkpoint writer", state, detail,
+        "Without chat_destination_binding.py in the deployed release the worker never "
+        "writes a structured action checkpoint, and the verification engine is never "
+        "constructed. The job then dies on the original Bond gap no matter what else is "
+        "correct. Fix: deploy a release that contains it.",
+    ))
 
     for action, state, detail in _check_chat_verifiers():
-        problems += state == BAD
-        print(f"  [{state:>7}] verifier {action}: {detail}")
+        results.append((
+            f"verifier {action}", state, detail,
+            f"No verifier is reachable for {action}, so every such job terminates "
+            "UNVERIFIED however well the worker performed. If the detail says "
+            "'failed to register', an import raised at startup and the reason is quoted "
+            "— that is a code or dependency problem. If it says 'not registered at all', "
+            "nothing ever wired it.",
+        ))
+
+    for label, state, detail, _why in results:
+        print(f"  [{state:>7}] {label}: {detail}")
+
+    problems = [(label, why) for label, state, _d, why in results if state == BAD]
 
     print()
-    if problems:
-        print(f"PRE-FLIGHT FAILED — {problems} problem(s). Do not seed a job yet.")
-        return 1
-    print("PRE-FLIGHT OK — safe to record a baseline and seed one Bond-like job.")
-    return 0
+    print("WHAT THIS MEANS")
+    print("---------------")
+    if not problems:
+        print("  Everything the milestone depends on is in place. Record a baseline, seed")
+        print("  ONE Bond-like Chat job against test applicant 220250093, then evaluate.")
+        return 0
+
+    for n, (label, why) in enumerate(problems, 1):
+        print(f"  {n}. {label}")
+        for line in why.split(". "):
+            line = line.strip()
+            if line:
+                print(f"     {line}{'' if line.endswith('.') else '.'}")
+        print()
+    print(f"  {len(problems)} problem(s). Do not seed a job yet — a run now would fail for")
+    print("  these reasons and the verdict would look like a code fault instead.")
+    return 1
 
 
 if __name__ == "__main__":
