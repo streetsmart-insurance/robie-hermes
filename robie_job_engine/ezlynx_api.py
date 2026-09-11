@@ -33,6 +33,7 @@ from urllib.parse import quote, urlparse
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .secret_manager import GoogleSecretManagerAccessor, SecretAccessor
 from .secrets import redact_text
+from .write_markers import record_write_marker
 
 ENV_UAT_SECRET = "ROBIE_EZLYNX_API_UAT_SECRET"
 ENV_PROD_SECRET = "ROBIE_EZLYNX_API_PROD_SECRET"
@@ -305,6 +306,13 @@ class EzlynxApiClient:
             raise EzlynxApiError(None, "EZLynx API returned non-JSON") from exc
         if not isinstance(parsed, (dict, list)):
             raise EzlynxApiError(None, "EZLynx API returned unexpected shape")
+        # Slice 4: every successful API mutation records a worker-unforgeable
+        # write marker. Token acquisition is authentication, not a mutation of
+        # a system of record, so the token endpoint is excluded.
+        if method.upper() in ("POST", "PUT", "PATCH", "DELETE") and url != (
+            self._config.token_endpoint or ""
+        ):
+            record_write_marker(method=f"ezlynx_api.{method.upper()}", url=url)
         return parsed
 
     def api_get(
