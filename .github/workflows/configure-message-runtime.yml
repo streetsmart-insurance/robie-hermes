@@ -32,6 +32,9 @@ jobs:
       VM: ${{ inputs.target == 'TEST' && 'hermes-test-01' || 'hermes-poc-01' }}
       ROOT: ${{ inputs.target == 'TEST' && '/opt/streetsmart-hermes-test' || '/opt/streetsmart-hermes' }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Validate bounded request
         run: |
           set -euo pipefail
@@ -42,11 +45,21 @@ jobs:
           workload_identity_provider: ${{ inputs.target == 'TEST' && 'projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github' || 'projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main' }}
           service_account: ${{ inputs.target == 'TEST' && 'robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com' || 'robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com' }}
       - uses: google-github-actions/setup-gcloud@v3
+      - name: Stage reviewed configuration controller
+        run: |
+          set -euo pipefail
+          echo "Controller commit: ${GITHUB_SHA}"
+          sha256sum scripts/configure-message-runtime.py scripts/milestone_preflight.py
+          tar -czf "${RUNNER_TEMP}/message-controller.tgz" -C scripts configure-message-runtime.py milestone_preflight.py
+          echo "CONTROLLER_DIGEST=$(sha256sum "${RUNNER_TEMP}/message-controller.tgz" | cut -d' ' -f1)" >> "${GITHUB_ENV}"
+          gcloud compute scp "${RUNNER_TEMP}/message-controller.tgz" "${VM}:/var/tmp/message-controller-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tgz" \
+            --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap
       - name: Configure only the verified installed release
         run: |
           set -euo pipefail
+          STAGE="/var/tmp/message-controller-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gcloud compute ssh "${VM}" --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
-            --command="sudo python3 '${ROOT}/releases/current/scripts/configure-message-runtime.py' --environment '${TARGET}' --release-sha256 '${RELEASE_DIGEST}' --backup-dir '${ROOT}/deployments/message-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'" \
+            --command="set -eu; echo '${CONTROLLER_DIGEST}  ${STAGE}.tgz' | sha256sum -c -; sudo mkdir -m 700 '${STAGE}'; trap 'sudo rm -rf ${STAGE}; rm -f ${STAGE}.tgz' EXIT; sudo tar -xzf '${STAGE}.tgz' -C '${STAGE}'; sudo python3 '${STAGE}/configure-message-runtime.py' --environment '${TARGET}' --release-sha256 '${RELEASE_DIGEST}' --backup-dir '${ROOT}/deployments/message-config-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'" \
             | tee "${RUNNER_TEMP}/message-config.json"
       - uses: actions/upload-artifact@v4
         if: always()
