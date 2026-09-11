@@ -19,6 +19,27 @@ def test_tool_error_categories_are_fixed_labels_only():
     assert probe.tool_error_categories('normal output private-data') == []
 
 
+def test_exposure_probe_discards_noisy_output_and_uses_isolated_home(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    def run(command, **kwargs):
+        assert kwargs['env']['HERMES_HOME'] != str(tmp_path)
+        assert kwargs['env']['PYTHONDONTWRITEBYTECODE'] == '1'
+        assert command[0] == str(tmp_path / 'hermes-agent/venv/bin/python')
+        return SimpleNamespace(returncode=0, stdout='secret-noise\nTOOL_EXPOSURE_JSON:{"playwright_deferrable":true}\n')
+    monkeypatch.setattr(probe.subprocess, 'run', run)
+    assert probe.inspect_tool_exposure(tmp_path) == {'playwright_deferrable': True}
+
+
+def test_exposure_imports_cannot_connect_or_spawn(tmp_path):
+    import subprocess, sys
+    # The first dependency import attempts a connection before any real tool loads.
+    (tmp_path / 'toolsets.py').write_text('import socket\nsocket.create_connection(("127.0.0.1", 9))\n')
+    result = subprocess.run([sys.executable, '-c', probe.TOOL_EXPOSURE_PROBE],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert '"error_type": "RuntimeError"' in result.stdout
+    assert 'ConnectionRefusedError' not in result.stdout
+
+
 def test_connection_is_read_only(tmp_path):
     p = tmp_path / 'test.db'
     with sqlite3.connect(p) as db:
