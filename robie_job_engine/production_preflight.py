@@ -25,13 +25,13 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from .chat_app_post import DEFAULT_CHAT_SPACE, notify_operators, ops_chat_space
 from .login_secret_health import DEFAULT_PROJECT, DEFAULT_SECRETS, inspect_login_secrets
 from .models import JobStatus, TERMINAL_STATUSES
 
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DEFAULT_JOBS_DB = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
-DEFAULT_CHAT_SPACE = "spaces/AAQAZbLJO78"
 CANONICAL_JOB_ENGINE_ROOT = "/opt/streetsmart-hermes/releases/current"
 GATEWAY_UNIT = "hermes-gateway"
 AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
@@ -66,15 +66,7 @@ LISTENER_STALL_MARKERS = (
 
 
 def _chat_space() -> str:
-    for key in (
-        "ROBIE_PREFLIGHT_CHAT_SPACE",
-        "ROBIE_OPS_CHAT_SPACE",
-        "GOOGLE_CHAT_HOME_CHANNEL",
-    ):
-        value = os.environ.get(key, "").strip()
-        if value.startswith("spaces/"):
-            return value
-    return DEFAULT_CHAT_SPACE
+    return ops_chat_space()
 
 
 def _cdp_url() -> str:
@@ -647,45 +639,12 @@ def _post_failure(
 ) -> dict[str, Any]:
     """Post the Robie space message, then the same text to Carlo/Jake DMs.
 
-    Keeps the existing space post. There is no outbound email API on
-    hermes-poc-01; operator notify reuses ``post_as_chat_app`` against an
-    existing DM space from ``find_direct_message_space``. Never @robie.
+    Delegates to ``chat_app_post.notify_operators`` so scheduler OnFailure
+    and pre-flight share one space + DM path. Never @robie.
     """
     if "@robie" in text.casefold():
         raise ValueError("pre-flight Chat must not @robie")
-    from .chat_app_post import fail_notify_emails, find_direct_message_space, post_as_chat_app
-
-    send = poster if poster is not None else post_as_chat_app
-    finder = dm_finder if dm_finder is not None else find_direct_message_space
-    targets: list[str] = []
-    dm_errors: list[str] = []
-    space = _chat_space()
-    space_posted = False
-    if space.startswith("spaces/"):
-        send(space, text)
-        targets.append(space)
-        space_posted = True
-    for email in fail_notify_emails():
-        try:
-            dm_space = finder(email)
-        except Exception as exc:
-            dm_errors.append(f"{email}: {type(exc).__name__}")
-            continue
-        if not str(dm_space or "").startswith("spaces/"):
-            dm_errors.append(f"{email}: no existing DM space")
-            continue
-        if dm_space in targets:
-            continue
-        try:
-            send(dm_space, text)
-            targets.append(dm_space)
-        except Exception as exc:
-            dm_errors.append(f"{email}: {type(exc).__name__}")
-    return {
-        "space_posted": space_posted,
-        "targets": targets,
-        "dm_errors": dm_errors,
-    }
+    return notify_operators(text, poster=poster, dm_finder=dm_finder)
 
 
 def _attach_tab_flush(

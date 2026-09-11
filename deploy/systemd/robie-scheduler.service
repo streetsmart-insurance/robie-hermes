@@ -2,6 +2,7 @@
 Description=ROBIE durable Job Engine scheduler tick
 After=local-fs.target network-online.target robie-ezlynx-browser.service
 Wants=network-online.target robie-ezlynx-browser.service
+OnFailure=robie-scheduler-alert@%n.service
 
 [Service]
 Type=oneshot

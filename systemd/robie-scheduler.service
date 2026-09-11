@@ -1,6 +1,7 @@
 [Unit]
 Description=ROBIE durable Job Engine scheduler tick
 After=local-fs.target
+OnFailure=robie-scheduler-alert@%n.service
 
 [Service]
 Type=oneshot
