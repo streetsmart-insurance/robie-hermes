@@ -1,10 +1,12 @@
 name: Canary watch (L3 daily destination check)
 
-# L3 of the canary plan. Once a day (06:30 ET) it re-reads destination state
-# on applicant 220250093 from primary sources via scripts/verify_acceptance.py:
-#   - TEST-HO-20260911-E01 must stay ABSENT (until the Phase 5 gate runs)
-#   - TEST-HO-20260912-D01 must stay PRESENT with unchanged fields
-#   - the latest jobs.db job is recorded; a NEW failed job is a change
+# L3 of the canary plan. It re-reads destination state on applicant 220250093
+# from primary sources via scripts/verify_acceptance.py, on two triggers:
+#   - daily at 05:30 ET (pre-workday, so a red canary is fixed before staff),
+#   - after every successful Production deploy (highest-risk moment).
+# Watched: TEST-HO-20260911-E01 must stay ABSENT (until the Phase 5 gate
+# runs); TEST-HO-20260912-D01 must stay PRESENT with unchanged fields; the
+# latest jobs.db job is recorded, and a NEW failed job is a change.
 # scripts/diff_canary_watch.py diffs today's readings against the previous
 # snapshot artifact and emits a verdict (changed true/false + literal diff).
 # Ralph reads the verdict daily and messages Carlo ONLY on change.
@@ -17,7 +19,11 @@ name: Canary watch (L3 daily destination check)
 
 on:
   schedule:
-    - cron: "30 10 * * *"
+    - cron: "30 9 * * *"
+  workflow_run:
+    workflows: ["Deploy immutable release to Production"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       confirmation:
@@ -32,7 +38,10 @@ permissions:
 
 jobs:
   watch:
-    if: github.event_name == 'schedule' || inputs.confirmation == 'CANARY_WATCH'
+    if: >
+      github.event_name == 'schedule'
+      || inputs.confirmation == 'CANARY_WATCH'
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: Production
