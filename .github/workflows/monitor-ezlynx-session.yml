@@ -119,10 +119,12 @@ jobs:
             --why-out "${MONITOR_DIR}/why.json"
           ATTEMPT=$(python3 -c "import json; print(('true' if json.load(open('${MONITOR_DIR}/decision.json'))['attempt_login'] else 'false'))")
           FAIL_CONSEC=$(python3 -c "import json; print(('true' if json.load(open('${MONITOR_DIR}/decision.json'))['fail_consecutive'] else 'false'))")
+          CAP_STATE=$(python3 -c "import json; print(json.load(open('${MONITOR_DIR}/why.json')).get('cap_state', 'UNEVALUATED'))")
           echo "$OUTPUT"
           echo "exit_code=${STATUS}" >> "$GITHUB_OUTPUT"
           echo "attempt_login=${ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "fail_consecutive=${FAIL_CONSEC}" >> "$GITHUB_OUTPUT"
+          echo "cap_state=${CAP_STATE}" >> "$GITHUB_OUTPUT"
           echo "have_next_state=true" >> "$GITHUB_OUTPUT"
           {
             echo "### EZLynx session check (before)"
@@ -135,10 +137,21 @@ jobs:
             echo ""
             echo "logout_cause is UNVERIFIED. Do not claim a cause."
             echo ""
+            if [ "${CAP_STATE}" = "UNEVALUATED" ]; then
+              echo "### LOGIN CAP UNEVALUATED"
+              echo ""
+              echo "last-check.json was missing, empty, or unreadable (or a prior run died before writing it)."
+              echo "One login is still allowed for this check. The consecutive cap did not evaluate."
+              echo "A cap that fails open without telling anyone is not a cap."
+              echo ""
+            fi
             echo '```json'
             cat "${MONITOR_DIR}/why.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${CAP_STATE}" = "UNEVALUATED" ]; then
+            echo "::warning title=EZLynx login cap UNEVALUATED::last-check.json was missing, empty, or unreadable. One login is still allowed for this check. The consecutive cap did not evaluate. This is not a silent fail-open."
+          fi
 
       - name: Warn when the session state could not be determined
         if: steps.session.outputs.exit_code == '1'

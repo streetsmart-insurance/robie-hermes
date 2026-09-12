@@ -39,6 +39,8 @@ class MonitorEzlynxSessionWorkflowTests(unittest.TestCase):
         self.assertIn("fail_consecutive", text)
         self.assertIn("One login attempt per check", text)
         self.assertIn("logout_cause is UNVERIFIED", text)
+        self.assertIn("LOGIN CAP UNEVALUATED", text)
+        self.assertIn("cap_state", text)
         self.assertNotIn("systemctl restart", text)
         self.assertNotIn("chrome_refresh_if_idle", text)
 
@@ -74,9 +76,14 @@ class MonitorEzlynxSessionWorkflowTests(unittest.TestCase):
         self.assertIn("ezlynx-password", text)
         self.assertNotRegex(text, r"ezlynx-password['\"]?\s*[:=]\s*['\"][^'\"]+")
 
-    def test_retired_owners_are_absent_from_unit_templates(self):
-        self.assertFalse((SYSTEMD / "robie-chrome-refresh.timer").exists())
-        self.assertFalse((SYSTEMD / "robie-chrome-refresh.service").exists())
+    def test_retired_owners_in_tree_or_never_installed(self):
+        chrome_timer = (SYSTEMD / "robie-chrome-refresh.timer").read_text(encoding="utf-8")
+        chrome_service = (SYSTEMD / "robie-chrome-refresh.service").read_text(encoding="utf-8")
+        for text in (chrome_timer, chrome_service):
+            self.assertIn("RETIRED. Do not enable.", text)
+            self.assertIn("restart without a trailing login is the bug", text)
+            self.assertIn("systemctl disable --now", text)
+            self.assertIn("Do not delete the live unit", text)
         self.assertFalse((SYSTEMD / "robie-ezlynx-session.timer").exists())
         self.assertFalse((SYSTEMD / "robie-ezlynx-session.service").exists())
         scheduler = (SYSTEMD / "robie-scheduler.service").read_text(encoding="utf-8")

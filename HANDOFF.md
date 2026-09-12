@@ -144,9 +144,9 @@ ambiguity is HITL, not retry; no Production deploy; no live job.
 - **PW-05 Snapshot diffing**: `SnapshotDiffManager` / `scripts/run-snapshot-diff.py`.
 - **PW-06 Idle Chrome refresh**: `scripts/chrome_refresh_if_idle.py` refuses
   to restart while jobs are `RUNNING` or `VERIFYING`. The scheduled
-  `robie-chrome-refresh.timer` owner is retired (a restart without login
-  is the bug). Session heal is `.github/workflows/monitor-ezlynx-session.yml`.
-  Dusty will mask the live 03:30 unit separately.
+  `robie-chrome-refresh.timer` owner is retired in-tree (a restart without
+  login is the bug). The live Production copy is disabled, not removed.
+  Session heal is `.github/workflows/monitor-ezlynx-session.yml`.
 
 ## Tab leftovers, wrong host, leftover RETRY (must-call)
 

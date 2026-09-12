@@ -381,20 +381,21 @@ class UnverifiedUnmaskTests(unittest.TestCase):
 
 
 class SystemdRestartLimitTests(unittest.TestCase):
-    def test_ezlynx_browser_unit_rate_limits_restarts_without_daily_refresh(self):
+    def test_ezlynx_browser_unit_rate_limits_restarts_and_chrome_refresh_is_retired_in_tree(self):
         for path in (BROWSER_UNIT, BROWSER_TEST_UNIT):
             text = path.read_text(encoding="utf-8")
             self.assertIn("StartLimitBurst=", text)
             self.assertIn("StartLimitIntervalSec=", text)
             self.assertIn("Restart=always", text)
-            self.assertNotIn("03:30", text)
-            self.assertIn("Do not add a daily Chrome restart", text)
-            self.assertIn("monitor-ezlynx-session.yml", text)
-        self.assertFalse(CHROME_REFRESH_TIMER.exists())
-        self.assertFalse(CHROME_REFRESH_SERVICE.exists())
+            self.assertIn("3:30", text)
+            self.assertIn("robie-chrome-refresh", text)
+            self.assertIn("intentional restart", text.casefold())
+        refresh = CHROME_REFRESH_TIMER.read_text(encoding="utf-8")
+        self.assertIn("03:30:00 America/New_York", refresh)
+        self.assertIn("RETIRED. Do not enable.", refresh)
+        self.assertIn("RETIRED. Do not enable.", CHROME_REFRESH_SERVICE.read_text(encoding="utf-8"))
         root_unit = (ROOT / "robie-ezlynx-browser.service").read_text(encoding="utf-8")
         self.assertIn("StartLimitBurst=", root_unit)
-        self.assertIn("Do not add a daily Chrome restart", root_unit)
 
 
 if __name__ == "__main__":

@@ -1172,8 +1172,8 @@ def flush_tabs_at_job_start(
     keep tabs. Never close the last browser target — Chrome exits when the
     last page is gone, then ``Restart=always`` thrashes CDP. Never invoke
     systemctl against ``robie-ezlynx-browser`` from flush. Do not restart
-    Chrome here. Daily ``robie-chrome-refresh`` is retired; Dusty will
-    mask the live 03:30 unit. Session heal is
+    Chrome here. Daily ``robie-chrome-refresh`` is retired in-tree; the
+    live Production copy is disabled, not removed. Session heal is
     ``monitor-ezlynx-session.yml``.
     """
     try:

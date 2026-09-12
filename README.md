@@ -85,8 +85,10 @@ are never stored in this repository. The sole scheduled owner is
 `.github/workflows/monitor-ezlynx-session.yml` (hourly, seven days a week).
 It checks the session and runs `ezlynx_login_bootstrap.py` only when the
 check returns LOGGED_OUT. See the skill's provisioning reference for
-rotation. Do not re-enable `robie-ezlynx-session.timer` or
-`robie-chrome-refresh.timer`.
+rotation. Do not re-enable `robie-ezlynx-session.timer`.
+`robie-chrome-refresh.timer` stays in the tree as retired; the live
+Production copy is disabled, not removed. Do not enable it without a
+trailing login.
 
 Backend EZLynx workflow Skills live in `deploy/hermes/skills/` (installed to
 `.hermes/skills`) and are mirrored under `skills/` for the EZLynx skill-folder

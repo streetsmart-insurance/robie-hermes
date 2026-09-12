@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,8 @@ from typing import Any
 STATE_VERSION = 1
 LOGGED_OUT_EXIT = 2
 UNVERIFIED = "UNVERIFIED"
+CAP_EVALUATED = "EVALUATED"
+CAP_UNEVALUATED = "UNEVALUATED"
 REMOTE_STATE_PATH = "/var/tmp/robie-ezlynx-session-monitor/last-check.json"
 
 
@@ -41,6 +42,31 @@ def load_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, An
     except json.JSONDecodeError:
         return dict(default or {"exit_code": 1, "state": "UNDETERMINED", "pages": []})
     return data if isinstance(data, dict) else dict(default or {})
+
+
+def load_last_state(path: Path) -> tuple[dict[str, Any], str]:
+    """Read the prior-check file. Missing/empty/unreadable is UNEVALUATED.
+
+    A cap that fails open without telling anyone is not a cap. The caller
+    may still attempt one login, but must print cap_state=UNEVALUATED.
+    """
+    if not path.exists():
+        return {}, CAP_UNEVALUATED
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}, CAP_UNEVALUATED
+    if not raw or raw == "{}":
+        return {}, CAP_UNEVALUATED
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, CAP_UNEVALUATED
+    if not isinstance(data, dict):
+        return {}, CAP_UNEVALUATED
+    if data.get("exit_code") is None and not data.get("state"):
+        return {}, CAP_UNEVALUATED
+    return data, CAP_EVALUATED
 
 
 def parse_chrome_show(text: str) -> dict[str, str]:
@@ -87,20 +113,29 @@ def decide(
     check: dict[str, Any],
     chrome: dict[str, str],
     last: dict[str, Any] | None = None,
+    *,
+    cap_state: str = CAP_UNEVALUATED,
 ) -> dict[str, Any]:
     last = last or {}
     current_logged_out = is_logged_out(check)
-    last_logged_out = is_logged_out(last)
+    evaluated = cap_state == CAP_EVALUATED
+    last_logged_out = bool(evaluated and is_logged_out(last))
     pid = str(chrome.get("chrome_pid") or "")
-    last_pid = str(last.get("chrome_pid") or "")
+    last_pid = str(last.get("chrome_pid") or "") if evaluated else ""
     start = str(chrome.get("chrome_exec_start") or chrome.get("chrome_active_enter") or "")
-    last_start = str(last.get("chrome_exec_start") or last.get("chrome_active_enter") or "")
+    last_start = (
+        str(last.get("chrome_exec_start") or last.get("chrome_active_enter") or "")
+        if evaluated
+        else ""
+    )
     pid_changed = bool(last_pid) and pid != last_pid
     start_changed = bool(last_start) and start != last_start
     consecutive = (1 + (1 if last_logged_out else 0)) if current_logged_out else 0
-    # One login attempt per check, and never on the second consecutive LOGGED_OUT.
+    # One login attempt per check. Two consecutive LOGGED_OUT with a
+    # readable prior state stops. Missing/unreadable prior state still
+    # allows one login but is UNEVALUATED — never a silent fail-open.
     attempt_login = bool(current_logged_out and consecutive < 2)
-    fail_consecutive = bool(current_logged_out and consecutive >= 2)
+    fail_consecutive = bool(evaluated and current_logged_out and consecutive >= 2)
     why = {
         "tabs_before": tabs_from_check(check),
         "check_state": check.get("state"),
@@ -119,6 +154,7 @@ def decide(
         "consecutive_logged_out": consecutive,
         "attempt_login": attempt_login,
         "fail_consecutive": fail_consecutive,
+        "cap_state": cap_state,
         "logout_cause": UNVERIFIED,
     }
     next_state = {
@@ -130,6 +166,7 @@ def decide(
         "chrome_exec_start": chrome.get("chrome_exec_start") or "",
         "login_attempted": False,
         "consecutive_logged_out": consecutive,
+        "cap_state": cap_state,
         "logout_cause": UNVERIFIED,
         "tabs": tabs_from_check(check),
     }
@@ -187,11 +224,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "decide":
         check = load_json(args.check_json, {"exit_code": 1, "state": "UNDETERMINED", "pages": []})
-        last = load_json(args.last_state, {})
+        last, cap_state = load_last_state(args.last_state)
         chrome = parse_chrome_show(
             args.chrome_show.read_text(encoding="utf-8") if args.chrome_show.exists() else ""
         )
-        decision = decide(check, chrome, last)
+        decision = decide(check, chrome, last, cap_state=cap_state)
         _write(args.decision_out, decision)
         _write(args.next_state, decision["next_state"])
         _write(args.why_out, decision["why"])

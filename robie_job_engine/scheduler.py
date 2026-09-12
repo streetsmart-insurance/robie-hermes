@@ -27,10 +27,11 @@ def _next_daily(
 
 
 def _ensure_default_schedules(ops: OperationsStore) -> None:
-    # Retired as an owner. Default off. The hourly GitHub monitor
-    # (.github/workflows/monitor-ezlynx-session.yml) is the only healer.
-    # Keep the flag so an explicit operator opt-in still works; a Production
-    # zip must not set ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1.
+    # Repo default is off. The hourly GitHub monitor
+    # (.github/workflows/monitor-ezlynx-session.yml) is the intended healer.
+    # A Production zip must not set ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1.
+    # The live hermes-poc-01 scheduler unit still has that env =1 until a
+    # later zip Carlo has not authorized. Repo default-off is not box-off.
     if os.environ.get("ROBIE_ENABLE_EZLYNX_SESSION_REFRESH", "0") != "1":
         return
     local_time = os.environ.get("ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME", "05:30")

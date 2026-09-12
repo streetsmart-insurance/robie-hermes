@@ -11,11 +11,14 @@ from pathlib import Path
 from durable_temp import durable_temporary_directory
 
 from scripts.ezlynx_session_monitor import (
+    CAP_EVALUATED,
+    CAP_UNEVALUATED,
     REMOTE_STATE_PATH,
     UNVERIFIED,
     apply_after,
     decide,
     is_logged_out,
+    load_last_state,
     parse_chrome_show,
 )
 
@@ -67,10 +70,16 @@ class ParseChromeShowTests(unittest.TestCase):
 
 class DecideLoginCapTests(unittest.TestCase):
     def test_first_logged_out_allows_exactly_one_login(self):
-        decision = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), {})
+        decision = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            {},
+            cap_state=CAP_UNEVALUATED,
+        )
         self.assertTrue(decision["attempt_login"])
         self.assertFalse(decision["fail_consecutive"])
         self.assertEqual(decision["why"]["consecutive_logged_out"], 1)
+        self.assertEqual(decision["why"]["cap_state"], CAP_UNEVALUATED)
         self.assertIsInstance(decision["attempt_login"], bool)
 
     def test_second_consecutive_logged_out_stops_and_fails(self):
@@ -80,17 +89,33 @@ class DecideLoginCapTests(unittest.TestCase):
             "chrome_pid": "18821",
             "chrome_exec_start": "Sat 2026-09-12 06:53:16 EDT",
         }
-        decision = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), last)
+        decision = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            last,
+            cap_state=CAP_EVALUATED,
+        )
         self.assertFalse(decision["attempt_login"])
         self.assertTrue(decision["fail_consecutive"])
         self.assertEqual(decision["why"]["consecutive_logged_out"], 2)
+        self.assertEqual(decision["why"]["cap_state"], CAP_EVALUATED)
 
     def test_failed_bootstrap_recheck_counts_as_logged_out_for_next_hour(self):
-        before = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), {})
+        before = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            {},
+            cap_state=CAP_UNEVALUATED,
+        )
         after = apply_after(before["next_state"], _logged_out_check(), login_attempted=True)
         self.assertTrue(after["login_attempted"])
         self.assertTrue(is_logged_out(after))
-        next_hour = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), after)
+        next_hour = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            after,
+            cap_state=CAP_EVALUATED,
+        )
         self.assertFalse(next_hour["attempt_login"])
         self.assertTrue(next_hour["fail_consecutive"])
 
@@ -101,15 +126,43 @@ class DecideLoginCapTests(unittest.TestCase):
             "chrome_pid": "18821",
             "chrome_exec_start": "Sat 2026-09-12 06:53:16 EDT",
         }
-        decision = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), last)
+        decision = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            last,
+            cap_state=CAP_EVALUATED,
+        )
         self.assertTrue(decision["attempt_login"])
         self.assertFalse(decision["fail_consecutive"])
+        self.assertEqual(decision["why"]["cap_state"], CAP_EVALUATED)
 
     def test_undetermined_does_not_login_guess(self):
         check = {"state": "UNREACHABLE", "exit_code": 1, "pages": []}
-        decision = decide(check, parse_chrome_show(CHROME_SHOW), {})
+        decision = decide(
+            check, parse_chrome_show(CHROME_SHOW), {}, cap_state=CAP_UNEVALUATED
+        )
         self.assertFalse(decision["attempt_login"])
         self.assertFalse(decision["fail_consecutive"])
+
+    def test_missing_or_unreadable_last_state_is_unevaluated_and_still_allows_one_login(self):
+        chrome = parse_chrome_show(CHROME_SHOW)
+        with durable_temporary_directory() as td:
+            root = Path(td)
+            missing, missing_cap = load_last_state(root / "absent.json")
+            (root / "empty.json").write_text("{}\n", encoding="utf-8")
+            empty, empty_cap = load_last_state(root / "empty.json")
+            (root / "junk.json").write_text("not-json", encoding="utf-8")
+            junk, junk_cap = load_last_state(root / "junk.json")
+        for last, cap in (
+            (missing, missing_cap),
+            (empty, empty_cap),
+            (junk, junk_cap),
+        ):
+            self.assertEqual(cap, CAP_UNEVALUATED)
+            decision = decide(_logged_out_check(), chrome, last, cap_state=cap)
+            self.assertTrue(decision["attempt_login"])
+            self.assertFalse(decision["fail_consecutive"])
+            self.assertEqual(decision["why"]["cap_state"], CAP_UNEVALUATED)
 
 
 class WhyRecordTests(unittest.TestCase):
@@ -121,7 +174,12 @@ class WhyRecordTests(unittest.TestCase):
             "chrome_active_enter": "Fri 2026-09-11 03:30:00 EDT",
             "chrome_exec_start": "Fri 2026-09-11 03:30:00 EDT",
         }
-        decision = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), last)
+        decision = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            last,
+            cap_state=CAP_EVALUATED,
+        )
         why = decision["why"]
         self.assertEqual(why["tabs_before"][0]["url"], LOGIN_TAB["url"])
         self.assertEqual(why["chrome_pid"], "18821")
@@ -140,7 +198,12 @@ class WhyRecordTests(unittest.TestCase):
             "chrome_pid": "18821",
             "chrome_exec_start": "Sat 2026-09-12 06:53:16 EDT",
         }
-        why = decide(_logged_out_check(), parse_chrome_show(CHROME_SHOW), last)["why"]
+        why = decide(
+            _logged_out_check(),
+            parse_chrome_show(CHROME_SHOW),
+            last,
+            cap_state=CAP_EVALUATED,
+        )["why"]
         self.assertFalse(why["pid_changed_since_last"])
         self.assertFalse(why["start_time_changed_since_last"])
         self.assertEqual(why["logout_cause"], UNVERIFIED)
@@ -181,6 +244,7 @@ class WhyRecordTests(unittest.TestCase):
             )
             why = json.loads((root / "why.json").read_text(encoding="utf-8"))
             self.assertTrue(why["attempt_login"])
+            self.assertEqual(why["cap_state"], CAP_UNEVALUATED)
             (root / "after.json").write_text(json.dumps(_ok_check()), encoding="utf-8")
             self.assertEqual(
                 main(

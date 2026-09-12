@@ -4,8 +4,7 @@ After=network-online.target
 Wants=network-online.target
 ConditionHost=hermes-test-01.c.streetsmart-hermes-poc.internal
 # Rate-limit Restart=always so a flush/CDP race cannot thrash Chrome.
-# Do not add a daily Chrome restart. A restart without login is the bug.
-# Session heal is owned by monitor-ezlynx-session.yml.
+# Daily robie-chrome-refresh at 3:30 AM ET is the intentional restart.
 StartLimitIntervalSec=10min
 StartLimitBurst=3
 

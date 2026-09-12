@@ -142,8 +142,7 @@ class EzlynxSessionRefreshTests(unittest.TestCase):
         self.assertIn("--user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx", service)
         self.assertIn("StartLimitBurst=", service)
         self.assertIn("StartLimitIntervalSec=", service)
-        self.assertIn("Do not add a daily Chrome restart", service)
-        self.assertIn("monitor-ezlynx-session.yml", service)
+        self.assertIn("robie-chrome-refresh", service)
 
     def test_scheduler_unit_does_not_enable_session_refresh_owner(self):
         root = Path(__file__).resolve().parents[1] / "deploy/systemd"
@@ -153,10 +152,14 @@ class EzlynxSessionRefreshTests(unittest.TestCase):
         self.assertNotIn("Environment=ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=", scheduler)
         self.assertIn("monitor-ezlynx-session.yml", scheduler)
 
-    def test_retired_session_owner_units_are_absent(self):
+    def test_chrome_refresh_stays_in_tree_as_retired_and_session_timer_is_absent(self):
         root = Path(__file__).resolve().parents[1] / "deploy/systemd"
-        self.assertFalse((root / "robie-chrome-refresh.timer").exists())
-        self.assertFalse((root / "robie-chrome-refresh.service").exists())
+        timer = (root / "robie-chrome-refresh.timer").read_text(encoding="utf-8")
+        service = (root / "robie-chrome-refresh.service").read_text(encoding="utf-8")
+        self.assertIn("RETIRED. Do not enable.", timer)
+        self.assertIn("RETIRED. Do not enable.", service)
+        self.assertIn("03:30:00 America/New_York", timer)
+        self.assertIn("chrome_refresh_if_idle.py", service)
         self.assertFalse((root / "robie-ezlynx-session.timer").exists())
         self.assertFalse((root / "robie-ezlynx-session.service").exists())
 
