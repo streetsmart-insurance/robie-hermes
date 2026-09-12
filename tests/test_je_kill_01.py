@@ -43,6 +43,7 @@ DESTINATION = {
     "document_name": "renewal-test.pdf",
     "label_id": "manual-renewal",
     "label": "Manual Renewal",
+    "label_control": "add-label",
 }
 
 
