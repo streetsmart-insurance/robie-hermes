@@ -503,9 +503,39 @@ class EzlynxApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         error_label: str = "EZLynx API",
     ) -> tuple[bytes, str]:
+        raw, content_type, _status = self._request_bytes_with_status(
+            method, url, data=data, headers=headers, timeout=timeout, error_label=error_label
+        )
+        return raw, content_type
+
+    def _request_bytes_with_status(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: bytes | None,
+        headers: dict[str, str],
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        error_label: str = "EZLynx API",
+    ) -> tuple[bytes, str, int | None]:
+        """Same as _request_bytes but also returns the HTTP status code.
+
+        Returns (body_bytes, content_type, http_status). On HTTP error,
+        raises EzlynxApiError as before (status is in the exception).
+        """
         try:
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
-            return resp.read(), self._response_content_type(resp)
+            http_status = None
+            try:
+                http_status = resp.getcode()
+            except Exception:
+                pass
+            try:
+                if http_status is None and hasattr(resp, 'status'):
+                    http_status = resp.status
+            except Exception:
+                pass
+            return resp.read(), self._response_content_type(resp), http_status
         except error.HTTPError as exc:
             detail = ""
             try:
@@ -625,7 +655,9 @@ class EzlynxApiClient:
         data = json.dumps(payload).encode("utf-8")
         # The create endpoint returns the new policy id as a bare scalar
         # (string or number), not a JSON object — parse flexibly.
-        raw, _content_type = self._request_bytes(
+        # Capture raw HTTP details for fail-closed diagnostics: the caller
+        # needs the status code and raw body when no policy ID comes back.
+        raw, _content_type, http_status = self._request_bytes_with_status(
             "POST", url, data=data, headers=headers, error_label="EZLynx PolicyApi create"
         )
         text = raw.decode("utf-8", errors="replace").strip()
@@ -633,7 +665,13 @@ class EzlynxApiClient:
             parsed: Any = json.loads(text)
         except json.JSONDecodeError:
             parsed = text.strip('"')
-        return {"request_payload": payload, "response": parsed}
+        return {
+            "request_payload": payload,
+            "response": parsed,
+            "http_status": http_status,
+            "raw_body": text,
+            "url": url,
+        }
 
     def list_applicant_documents(
         self,
