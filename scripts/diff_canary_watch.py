@@ -7,6 +7,11 @@ snapshot and emits a verdict: changed true/false plus literal changes.
 Read-only, stdlib only. Exit code is always 0 — a detected change is data,
 not a failure. The caller (Ralph's daily review) decides what wakes Carlo.
 
+The arming gate lives in the workflow, not here: this script only ever runs
+when canary/ARMED.json is present, so every verdict it emits carries
+"armed": True. A not-armed run never reaches this script; the workflow
+publishes its own NOT_ARMED_NO_BASELINE verdict instead.
+
 Usage:
     diff_canary_watch.py --current-e01 E01.json --current-d01 D01.json
         [--previous snapshot.json]
@@ -138,6 +143,7 @@ def main() -> int:
     verdict = {
         "watch": "canary-watch",
         "checked_at": snapshot["checked_at"],
+        "armed": True,
         "baseline": args.previous is None,
         "changed": False,
         "changes": [],

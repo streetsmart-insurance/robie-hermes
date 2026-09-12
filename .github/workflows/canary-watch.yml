@@ -12,6 +12,15 @@ name: Canary watch (L3 daily destination check)
 # Ralph reads the verdict daily and messages Carlo ONLY on change.
 # Green is silence.
 #
+# SELF-ARMING GATE (2026-09-12): the canary does nothing until a baseline
+# successful end-to-end run has been recorded. Arming is the presence of
+# canary/ARMED.json at the checked-out ref (see canary/README.md). When the
+# file is absent the run reports NOT_ARMED_NO_BASELINE, uploads a status
+# artifact, and exits 0 — quiet. Not red, not green, no notification. The
+# file is written as a required step of recording the first real success
+# (Phase 5 gate), so the canary arms itself on that success; nobody has to
+# remember a flag. Until then every firing is a silent no-op.
+#
 # Read-only: all EZLynx calls are GETs; jobs.db is opened read-only
 # (query_only). No secret values are printed.
 # Dispatch ONLY from main: the Production environment's deployment branch
@@ -34,7 +43,8 @@ on:
 permissions:
   contents: read
   actions: read
-  id-token: write
+
+id-token: write
 
 jobs:
   watch:
@@ -57,13 +67,29 @@ jobs:
       D01_POLICY: TEST-HO-20260912-D01
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check canary arming
+        id: arming
+        run: |
+          set -euo pipefail
+          if [ -f "canary/ARMED.json" ] && python3 -c "import json,sys; sys.exit(0 if json.load(open('canary/ARMED.json')).get('armed') is True else 1)"; then
+            echo "armed=true" >> "${GITHUB_OUTPUT}"
+            echo "canary is ARMED"
+          else
+            echo "armed=false" >> "${GITHUB_OUTPUT}"
+            echo "canary is NOT ARMED — no baseline successful end-to-end run recorded"
+          fi
+
       - uses: google-github-actions/auth@v3
+        if: steps.arming.outputs.armed == 'true'
         with:
           workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
           service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v3
+        if: steps.arming.outputs.armed == 'true'
 
       - name: Validate bounded request
+        if: steps.arming.outputs.armed == 'true'
         run: |
           set -euo pipefail
           test "${PRODUCTION_VM}" = "hermes-poc-01"
@@ -74,6 +100,7 @@ jobs:
           test "${D01_POLICY}" = "TEST-HO-20260912-D01"
 
       - name: Stage scripts on Production
+        if: steps.arming.outputs.armed == 'true'
         run: |
           set -euo pipefail
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
@@ -82,6 +109,7 @@ jobs:
             scripts/verify_acceptance.py scripts/diff_canary_watch.py "${PRODUCTION_VM}:${STAGING}/"
 
       - name: Read latest job id (read-only)
+        if: steps.arming.outputs.armed == 'true'
         id: latest_job
         run: |
           set -euo pipefail
@@ -91,6 +119,7 @@ jobs:
           echo "job_id=${LATEST_JOB}" >> "${GITHUB_OUTPUT}"
 
       - name: Run verifier (E01 should be absent, D01 should be present)
+        if: steps.arming.outputs.armed == 'true'
         run: |
           set -euo pipefail
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
@@ -103,10 +132,11 @@ jobs:
           python3 -m json.tool "${RUNNER_TEMP}/watch-d01.json" >/dev/null
 
       - name: Fetch previous snapshot (if any)
+        if: steps.arming.outputs.armed == 'true'
         id: prev
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           PREV_RUN="$(gh run list --workflow canary-watch.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
@@ -125,6 +155,7 @@ jobs:
           echo "prev_file=${RUNNER_TEMP}/prev-snapshot/snapshot.json" >> "${GITHUB_OUTPUT}"
 
       - name: Diff against snapshot, emit verdict
+        if: steps.arming.outputs.armed == 'true'
         run: |
           set -euo pipefail
           ARGS=(--current-e01 "${RUNNER_TEMP}/watch-e01.json" --current-d01 "${RUNNER_TEMP}/watch-d01.json"
@@ -136,11 +167,44 @@ jobs:
           python3 -m json.tool "${RUNNER_TEMP}/verdict.json" >/dev/null
 
       - name: Publish verdict + snapshot artifacts
+        if: steps.arming.outputs.armed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: canary-watch-snapshot-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/verdict.json
             ${{ runner.temp }}/snapshot.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish not-armed status
+        if: steps.arming.outputs.armed != 'true'
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json
+          from datetime import datetime, timezone
+          verdict = {
+              "watch": "canary-watch",
+              "checked_at": datetime.now(timezone.utc).isoformat(),
+              "armed": False,
+              "status": "NOT_ARMED_NO_BASELINE",
+              "changed": False,
+              "changes": [],
+              "detail": ("No successful end-to-end run has been recorded yet "
+                         "(canary/ARMED.json absent). The canary is not armed; "
+                         "this run is a quiet no-op — not red, not green, no notification."),
+          }
+          open("${RUNNER_TEMP}/verdict.json", "w").write(json.dumps(verdict, indent=2))
+          print(json.dumps(verdict, indent=2))
+          EOF
+          python3 -m json.tool "${RUNNER_TEMP}/verdict.json" >/dev/null
+
+      - name: Upload not-armed status artifact
+        if: steps.arming.outputs.armed != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-watch-status-${{ github.run_id }}
+          path: ${{ runner.temp }}/verdict.json
           if-no-files-found: error
           retention-days: 90
