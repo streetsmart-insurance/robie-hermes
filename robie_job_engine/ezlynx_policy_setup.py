@@ -985,10 +985,30 @@ class EzlynxPolicySetupPage:
         # Robust button finding: try multiple strategies with waits.
         # Strategy 1: exact accessible name (original)
         # Strategy 2: case-insensitive partial match
-        # Strategy 3: CSS selector for common button patterns
+        # Session check FIRST: fail fast if logged out (don't burn strategies on login page)
+        # Reuse the same markers as the FormEntry-capture workflow
         button = None
         strategies_tried = []
-        
+
+        try:
+            page_url = self.page.url
+            page_content = await self.page.content()
+            logged_out_markers = ["ReturnUrl", "OverrideSessions", "txtUserName", "txtPassword", "/auth/account/login"]
+            for marker in logged_out_markers:
+                if marker in page_url or marker in page_content:
+                    report["error"] = (
+                        f"SESSION_LOGGED_OUT: Landed on login page (found marker '{marker}'). "
+                        f"URL: {page_url[:200]}. "
+                        "This is expected on weekends — the re-login job only runs Mon-Fri. "
+                        "Not a button-finding problem."
+                    )
+                    report["session_logged_out"] = True
+                    report["login_marker"] = marker
+                    return report
+        except Exception as session_check_exc:
+            # If session check fails, continue with button finding (don't block on diagnostic error)
+            strategies_tried.append(f"session_check_error_{type(session_check_exc).__name__}")
+
         # Wait for page to stabilize (increase from 2s to 5s total)
         await self.page.wait_for_timeout(3000)
         
@@ -1072,13 +1092,24 @@ class EzlynxPolicySetupPage:
         if button is None:
             try:
                 js_found = await self.page.evaluate("""() => {
-                    const els = document.querySelectorAll('button, a, div, span, input');
-                    for (const el of els) {
-                        const text = (el.innerText || el.value || '').toLowerCase();
-                        if (text.includes('save') && text.includes('continue') && text.includes('edit')) {
-                            return {tag: el.tagName, text: (el.innerText||'').substring(0,100), id: el.id};
+                    function findInRoot(root, inShadow=false) {
+                        const els = root.querySelectorAll('button, a, div, span, input');
+                        for (const el of els) {
+                            const text = (el.innerText || el.value || '').toLowerCase();
+                            if (text.includes('save') && text.includes('continue') && text.includes('edit')) {
+                                return {tag: el.tagName + (inShadow ? '_in_shadow' : ''), text: (el.innerText||'').substring(0,100), id: el.id};
+                            }
+                            // Check shadow DOM
+                            if (el.shadowRoot) {
+                                const found = findInRoot(el.shadowRoot, true);
+                                if (found) return found;
+                            }
                         }
+                        return null;
                     }
+                    // Check light DOM
+                    let result = findInRoot(document);
+                    if (result) return result;
                     // Also check iframes
                     for (const frame of document.querySelectorAll('iframe')) {
                         try {
