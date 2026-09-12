@@ -523,6 +523,7 @@ def _hard_route_policy_setup(kwargs: dict):
             POLICY_SETUP_ACTION,
             POLICY_SETUP_REQUIRED_KIND,
             PolicySetupToolMissing,
+            handler_args_from_marker,
             load_policy_setup_handler,
         )
         from robie_job_engine.store import JobStore
@@ -547,15 +548,15 @@ def _hard_route_policy_setup(kwargs: dict):
     marker = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or {}
     if not marker or marker.get("tool_called"):
         return None
-    policy_number = str(marker.get("policy_number") or "").strip()
-    if not policy_number:
+    tool_args = handler_args_from_marker(marker)
+    if not tool_args.get("policy_number"):
         return None
     try:
         handler = load_policy_setup_handler(anchor_file=__file__)
     except PolicySetupToolMissing as exc:
         return tool_error(f"ROBIE_OUTCOME_UNKNOWN: {exc}")
     try:
-        result = handler({"policy_number": policy_number})
+        result = handler(tool_args)
     except Exception as exc:  # noqa: BLE001 - tool boundary
         return tool_error(f"{type(exc).__name__}: {exc}")
     marker["tool_called"] = True

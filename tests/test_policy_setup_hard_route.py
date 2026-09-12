@@ -18,12 +18,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from robie_job_engine.policy_setup_dispatch import (
+    E01_LIMIT_DEFAULTS,
     FAIL_CLOSED_MESSAGE,
+    GOLD_EFFECTIVE_DATE,
+    GOLD_EXPIRATION_DATE,
     POLICY_SETUP_ACTION,
     POLICY_SETUP_REQUIRED_KIND,
     POLICY_SETUP_TOOL,
     PolicySetupToolMissing,
     detect_policy_setup_request,
+    extract_policy_setup_args,
+    handler_args_from_marker,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +177,58 @@ class DetectionTests(unittest.TestCase):
         )
 
 
+class ExtractArgsTests(unittest.TestCase):
+    """Dates/limits ride on the checkpoint; create never gets empty dates."""
+
+    E01_BODY = (
+        "Please create the homeowners policy TEST-HO-20260911-E01 "
+        "on applicant 220250093.\n"
+        "Use Homeowners / HO-3, term 10/02/2026 to 10/02/2027. "
+        "Dwelling $1,200,000; other structures $120,000; "
+        "personal property $600,000; loss of use $360,000; liability $500,000; "
+        "medical payments $5,000."
+    )
+
+    def test_extracts_dates_and_limits_from_body(self):
+        args = extract_policy_setup_args(self.E01_BODY)
+        self.assertEqual(args["policy_number"], "TEST-HO-20260911-E01")
+        self.assertEqual(args["effective_date"], "10/02/2026")
+        self.assertEqual(args["expiration_date"], "10/02/2027")
+        self.assertEqual(args["dwelling"], "1200000")
+        self.assertEqual(args["other_structures"], "120000")
+        self.assertEqual(args["personal_property"], "600000")
+        self.assertEqual(args["loss_of_use"], "360000")
+        self.assertEqual(args["personal_liability"], "500000")
+        self.assertEqual(args["medical_payments"], "5000")
+
+    def test_gold_defaults_when_body_has_none(self):
+        args = extract_policy_setup_args(E01_REQUEST)
+        self.assertEqual(args["effective_date"], GOLD_EFFECTIVE_DATE)
+        self.assertEqual(args["expiration_date"], GOLD_EXPIRATION_DATE)
+        self.assertEqual(GOLD_EFFECTIVE_DATE, "10/02/2026")
+        self.assertEqual(GOLD_EXPIRATION_DATE, "10/02/2027")
+        for key, default in E01_LIMIT_DEFAULTS.items():
+            self.assertEqual(args[key], default)
+
+    def test_dates_never_empty(self):
+        for text in (E01_REQUEST, self.E01_BODY):
+            args = extract_policy_setup_args(text)
+            self.assertTrue(args["effective_date"].strip())
+            self.assertTrue(args["expiration_date"].strip())
+
+    def test_returns_none_outside_job_class(self):
+        self.assertIsNone(extract_policy_setup_args("What is the status?"))
+
+    def test_sparse_marker_gets_gold_defaults(self):
+        args = handler_args_from_marker(
+            {"policy_number": "TEST-HO-20260911-E01", "tool_called": False}
+        )
+        self.assertEqual(args["effective_date"], "10/02/2026")
+        self.assertEqual(args["expiration_date"], "10/02/2027")
+        self.assertEqual(args["dwelling"], "1200000")
+        self.assertNotIn("tool_called", args)
+
+
 class RunnerClassificationTests(unittest.TestCase):
     """The runner classifies in code. It never sets up the policy itself."""
 
@@ -179,7 +236,7 @@ class RunnerClassificationTests(unittest.TestCase):
         source = (ROOT / "scripts" / "robie_email_agent.py").read_text()
         self.assertIn("POLICY_SETUP_REQUIRED_KIND", source)
         self.assertIn("policy_setup_hard_route", source)
-        self.assertIn("detect_policy_setup_request", source)
+        self.assertIn("extract_policy_setup_args", source)
 
     def test_runner_never_invokes_the_setup(self):
         source = (ROOT / "scripts" / "robie_email_agent.py").read_text()
@@ -194,11 +251,41 @@ class HardRouteTests(unittest.TestCase):
             marker={"policy_number": "TEST-HO-20260911-E01", "tool_called": False}
         )
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0], {"policy_number": "TEST-HO-20260911-E01"})
+        # The hole: the handler used to get policy_number only, so create got
+        # empty dates and 400'd. The checkpoint args now ride along.
+        self.assertEqual(calls[0]["policy_number"], "TEST-HO-20260911-E01")
+        self.assertEqual(calls[0]["effective_date"], "10/02/2026")
+        self.assertEqual(calls[0]["expiration_date"], "10/02/2027")
+        self.assertEqual(calls[0]["dwelling"], "1200000")
+        self.assertEqual(calls[0]["medical_payments"], "5000")
+        self.assertNotIn("tool_called", calls[0])
         self.assertTrue(result["ok"])
         saved = store.saved[POLICY_SETUP_REQUIRED_KIND]
         self.assertTrue(saved["tool_called"])
         self.assertEqual(saved["policy_number"], "TEST-HO-20260911-E01")
+
+    def test_route_passes_checkpoint_args_through(self):
+        marker = {
+            "policy_number": "TEST-HO-20260911-E01",
+            "effective_date": "11/01/2026",
+            "expiration_date": "11/01/2027",
+            "dwelling": "900000",
+            "other_structures": "90000",
+            "personal_property": "450000",
+            "loss_of_use": "180000",
+            "personal_liability": "300000",
+            "medical_payments": "1000",
+            "tool_called": False,
+        }
+        result, calls, _ = _make_route_test(marker=marker)
+        self.assertEqual(len(calls), 1)
+        for key in (
+            "policy_number", "effective_date", "expiration_date", "dwelling",
+            "other_structures", "personal_property", "loss_of_use",
+            "personal_liability", "medical_payments",
+        ):
+            self.assertEqual(calls[0][key], marker[key])
+        self.assertTrue(result["ok"])
 
     def test_route_fires_only_once(self):
         result, calls, _ = _make_route_test(

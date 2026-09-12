@@ -352,16 +352,18 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
     if not is_ascend_request:
         from robie_job_engine.policy_setup_dispatch import (
             POLICY_SETUP_REQUIRED_KIND,
-            detect_policy_setup_request,
+            extract_policy_setup_args,
         )
-        policy_setup_args = detect_policy_setup_request(f"{subject}\n{body}")
+        policy_setup_args = extract_policy_setup_args(f"{subject}\n{body}")
         if policy_setup_args:
             store.checkpoint(job_id, 'email_route', {
                 'route': 'policy_setup_hard_route',
                 'policy_number': policy_setup_args["policy_number"],
+                'effective_date': policy_setup_args["effective_date"],
+                'expiration_date': policy_setup_args["expiration_date"],
             })
             store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
-                'policy_number': policy_setup_args["policy_number"],
+                **policy_setup_args,
                 'tool_called': False,
             })
             logger.info(
