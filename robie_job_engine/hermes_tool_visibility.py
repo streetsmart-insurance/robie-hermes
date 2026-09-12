@@ -1,8 +1,8 @@
 """Keep the guarded browser schema direct on the installed Hermes interface.
 
-Email and Chat workers see ``playwright_exec`` and never ``execute_code``.
+Email and Chat workers see ``playwright_exec`` and never ``execute_code`` or ``terminal``.
 Interactive desktop Hermes is unchanged: this module does not strip
-``execute_code`` unless the process is an email/chat job worker.
+``execute_code`` or ``terminal`` unless the process is an email/chat job worker.
 ``expose_guarded_browser`` still pins ``playwright_exec`` for hermes-gateway.
 """
 from __future__ import annotations
@@ -12,6 +12,8 @@ import sys
 
 EMAIL_CHAT_ACTIONS = frozenset({"hermes.email_task", "hermes.google_chat_task"})
 EXECUTE_CODE_TOOLS = frozenset({"execute_code", "code_execution", "code-execution"})
+TERMINAL_TOOLS = frozenset({"terminal", "shell", "bash", "sh"})
+FORBIDDEN_WORKER_TOOLS = EXECUTE_CODE_TOOLS | TERMINAL_TOOLS
 _FILTER_MARK = "_robie_email_chat_filter"
 
 
@@ -32,8 +34,8 @@ def is_email_or_chat_worker(action_type=None, env=None, argv=None) -> bool:
 
 
 def email_chat_job_schema(tool_names):
-    """Email/chat job schema: ``playwright_exec`` in, ``execute_code`` out."""
-    names = [name for name in list(tool_names or []) if name not in EXECUTE_CODE_TOOLS]
+    """Email/chat job schema: ``playwright_exec`` in, ``execute_code`` and ``terminal`` out."""
+    names = [name for name in list(tool_names or []) if name not in FORBIDDEN_WORKER_TOOLS]
     if "playwright_exec" not in names:
         names.append("playwright_exec")
     return names
@@ -49,18 +51,18 @@ def _schema_name(item) -> str:
 
 
 def filter_email_chat_schemas(schemas):
-    """Drop execute_code from a Hermes tool-schema list."""
-    return [item for item in list(schemas or []) if _schema_name(item) not in EXECUTE_CODE_TOOLS]
+    """Drop execute_code and terminal from a Hermes tool-schema list."""
+    return [item for item in list(schemas or []) if _schema_name(item) not in FORBIDDEN_WORKER_TOOLS]
 
 
 def _hide_execute_code_from_core(core) -> None:
     if not isinstance(core, list):
         return
-    core[:] = [name for name in core if name not in EXECUTE_CODE_TOOLS]
+    core[:] = [name for name in core if name not in FORBIDDEN_WORKER_TOOLS]
 
 
 def install_email_chat_schema_filter():
-    """Wrap Hermes schema assembly so email/chat jobs never see execute_code.
+    """Wrap Hermes schema assembly so email/chat jobs never see execute_code or terminal.
 
     Safe when Hermes is absent (CI). Interactive calls are left unchanged.
     """
@@ -74,8 +76,9 @@ def install_email_chat_schema_filter():
             def wrapped(*args, **kwargs):
                 if is_email_or_chat_worker():
                     disabled = list(kwargs.get("disabled_toolsets") or [])
-                    if "code_execution" not in disabled:
-                        disabled.append("code_execution")
+                    for toolset in ("code_execution", "terminal"):
+                        if toolset not in disabled:
+                            disabled.append(toolset)
                     kwargs["disabled_toolsets"] = disabled
                 schemas = original(*args, **kwargs)
                 if is_email_or_chat_worker():
