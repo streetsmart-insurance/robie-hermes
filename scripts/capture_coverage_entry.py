@@ -54,27 +54,24 @@ ENTRY_URL = "https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/22025009
 POLICY_PATH = "/applicantportal/Policy/"
 CDP_URL = "http://127.0.0.1:9222"
 
-PRELUDE_JS = r"""
-function __vis(el) {
-  try {
-    const cs = getComputedStyle(el);
-    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse')
-      return 'HIDDEN';
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 && r.height === 0) return 'HIDDEN';
-    return 'VISIBLE';
-  } catch (e) { return 'UNKNOWN'; }
-}
-function __inPolicyRegion(el) {
-  try {
-    if (el.closest('.mat-tab-nav-bar, header, nav, .global-nav, .top-nav')) return false;
-    return !!el.closest('main, form, #content, .page-content, .policy-edit, [class*="policy"]');
-  } catch (e) { return false; }
-}
-"""
-
 ENUMERATE_JS = r"""
 () => {
+  function __vis(el) {
+    try {
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse')
+        return 'HIDDEN';
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return 'HIDDEN';
+      return 'VISIBLE';
+    } catch (e) { return 'UNKNOWN'; }
+  }
+  function __inPolicyRegion(el) {
+    try {
+      if (el.closest('.mat-tab-nav-bar, header, nav, .global-nav, .top-nav')) return false;
+      return !!el.closest('main, form, #content, .page-content, .policy-edit, [class*="policy"]');
+    } catch (e) { return false; }
+  }
   const els = [];
   const out = [];
   document.querySelectorAll('a, button, [role="tab"], [role="button"], [data-toggle], [data-bs-toggle]').forEach(function(el) {
@@ -100,6 +97,22 @@ ENUMERATE_JS = r"""
 
 REGION_TABS_JS = r"""
 () => {
+  function __vis(el) {
+    try {
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse')
+        return 'HIDDEN';
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return 'HIDDEN';
+      return 'VISIBLE';
+    } catch (e) { return 'UNKNOWN'; }
+  }
+  function __inPolicyRegion(el) {
+    try {
+      if (el.closest('.mat-tab-nav-bar, header, nav, .global-nav, .top-nav')) return false;
+      return !!el.closest('main, form, #content, .page-content, .policy-edit, [class*="policy"]');
+    } catch (e) { return false; }
+  }
   const out = [];
   (window.__regionClickables || []).forEach(function(el, i) {
     const isTab = el.getAttribute('role') === 'tab'
@@ -116,6 +129,22 @@ REGION_TABS_JS = r"""
 
 MODAL_SWEEP_JS = r"""
 () => {
+  function __vis(el) {
+    try {
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse')
+        return 'HIDDEN';
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return 'HIDDEN';
+      return 'VISIBLE';
+    } catch (e) { return 'UNKNOWN'; }
+  }
+  function __inPolicyRegion(el) {
+    try {
+      if (el.closest('.mat-tab-nav-bar, header, nav, .global-nav, .top-nav')) return false;
+      return !!el.closest('main, form, #content, .page-content, .policy-edit, [class*="policy"]');
+    } catch (e) { return false; }
+  }
   const sels = ['.repeaterEntryModal.in', '.modal.in', '.modal.show',
                  '[role="dialog"]', '.modal-dialog', '.modal-content'];
   const seen = new Set();
@@ -298,7 +327,7 @@ def main() -> int:
 
             # 1. Enumerate region clickables with literal attributes.
             try:
-                clickables = page.evaluate(PRELUDE_JS + ENUMERATE_JS)
+                clickables = page.evaluate(ENUMERATE_JS)
             except Exception as exc:
                 clickables = []
                 result["enumerate_error"] = f"{type(exc).__name__}: {exc}"
@@ -319,14 +348,14 @@ def main() -> int:
 
             # 3. Modal sweep before region tab clicks.
             try:
-                result["modal_sweep_before"] = page.evaluate(PRELUDE_JS + MODAL_SWEEP_JS)
+                result["modal_sweep_before"] = page.evaluate(MODAL_SWEEP_JS)
             except Exception as exc:
                 result["modal_sweep_before"] = {"evaluate_error": f"{type(exc).__name__}: {exc}"}
             record_step("modal_sweep_before", page)
 
             # 4. Region-scoped tab clicks only; abort if URL leaves policy path.
             try:
-                region_tabs = page.evaluate(PRELUDE_JS + REGION_TABS_JS)
+                region_tabs = page.evaluate(REGION_TABS_JS)
             except Exception:
                 region_tabs = []
             for t in region_tabs:
@@ -359,7 +388,7 @@ def main() -> int:
             # 5. Modal sweep after (only if still on the policy path).
             if not result["stopped_off_policy_path"]:
                 try:
-                    result["modal_sweep_after"] = page.evaluate(PRELUDE_JS + MODAL_SWEEP_JS)
+                    result["modal_sweep_after"] = page.evaluate(MODAL_SWEEP_JS)
                 except Exception as exc:
                     result["modal_sweep_after"] = {
                         "evaluate_error": f"{type(exc).__name__}: {exc}"}
