@@ -1005,8 +1005,35 @@ class EzlynxPolicySetupPage:
             report["error"] = (
                 "Save & Continue Edit button not found on Edit Policy header. "
                 f"Tried strategies: {', '.join(strategies_tried)}. "
-                "See page_state for URL, title, and available controls."
             )
+            # HITL escalation: Gemini first, then Carlo
+            try:
+                from .hitl_escalation import HitlRequest, escalate
+                hitl_request = HitlRequest(
+                    job_id=getattr(self, "job_id", "unknown"),
+                    phase="formentry_mint",
+                    error=report["error"],
+                    page_state=report["page_state"],
+                    attempted=strategies_tried,
+                    applicant_id=applicant_id,
+                    policy_id=policy_id,
+                )
+                deps = getattr(self, "_hitl_deps", {})
+                hitl_response = escalate(hitl_request, deps)
+                report["hitl_response"] = {
+                    "source": hitl_response.source,
+                    "suggestion": hitl_response.suggestion,
+                    "actionable": hitl_response.actionable,
+                }
+                if hitl_response.actionable:
+                    report["error"] += (
+                        f" HITL {hitl_response.source} suggested: {hitl_response.suggestion}"
+                    )
+                else:
+                    report["error"] += " HITL escalation failed; no actionable guidance."
+            except Exception as hitl_exc:  # noqa: BLE001
+                report["hitl_error"] = f"{type(hitl_exc).__name__}: {hitl_exc}"
+                report["error"] += " HITL escalation error; failing closed."
             return report
         await button.first.click()
 
