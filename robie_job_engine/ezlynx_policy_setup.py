@@ -288,6 +288,40 @@ def build_discussion_note(lob: str, policy_number: str, carrier: str, custom_sum
     return f"{summary}\n\nROBIE was here"
 
 
+def _to_iso_date(value: str) -> str:
+    """MM/DD/YYYY -> YYYY-MM-DDT00:00:00; pass through values already in ISO form."""
+    v = (value or "").strip()
+    if "T" in v:
+        return v
+    import re as _re
+
+    m = _re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", v)
+    if m:
+        mm, dd, yyyy = m.groups()
+        return f"{yyyy}-{int(mm):02d}-{int(dd):02d}T00:00:00"
+    return v
+
+
+def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, str]:
+    """Map a HomeownersCoverageItem onto Carlo's literal FormEntry labels."""
+    if ho is None:
+        return {}
+    values: dict[str, str] = {}
+    if ho.dwelling_a:
+        values["Dwelling"] = clean_currency(ho.dwelling_a)
+    if ho.other_structures_b:
+        values["Other Structures"] = clean_currency(ho.other_structures_b)
+    if ho.personal_property_c:
+        values["Personal Property"] = clean_currency(ho.personal_property_c)
+    if ho.loss_of_use_d:
+        values["Loss of Use"] = clean_currency(ho.loss_of_use_d)
+    if ho.liability_e:
+        values["Personal Liability EA OCC"] = clean_currency(ho.liability_e)
+    if ho.med_pay_f:
+        values["Medical Payments EA PER"] = clean_currency(ho.med_pay_f)
+    return values
+
+
 class EzlynxPolicySetupPage:
     """Deterministic Playwright Page Object for EZLynx APE workflows across all LOBs."""
 
@@ -711,18 +745,18 @@ class EzlynxPolicySetupPage:
 
     # Unified LOB Orchestrator
     async def setup_policy_by_lob(self, shell_input: PolicyShellInput) -> PolicySetupResult:
-        """Refuse the legacy write path while Policy Setup remains a Test draft.
+        """HOME on applicant 220250093: search-first gold create + FormEntry coverages.
 
-        The original implementation created a shell and performed multiple
-        saves without an authoritative duplicate check, durable checkpoints,
-        or reopen verification.  Keep the page-object helpers available for
-        selector-level Test work, but never enter the consequential
-        orchestrator until a later, reviewed implementation supplies those
-        controls.
+        The live lock is replaced for exactly one path: a homeowners policy on
+        the allowlisted applicant. Search-first via PolicyApi; create with the
+        gold payload (writingCompany "10048", masterCompany 13585) only when
+        absent; click Save & Continue Edit to mint the FormEntry; fill the
+        Coverages tab by literal label. Every other LOB still refuses at
+        draft_write_gate. No bind, ever.
         """
         normalized = normalize_lob(shell_input.lob)
         try:
-            require_allowed_ezlynx_write_applicant(shell_input.applicant_id)
+            applicant_id = require_allowed_ezlynx_write_applicant(shell_input.applicant_id)
         except RuntimeError as exc:
             return PolicySetupResult(
                 success=False,
@@ -735,16 +769,219 @@ class EzlynxPolicySetupPage:
                 stopped_before_bind=True,
             )
 
+        if "homeowners" not in normalized.lower() and normalized.upper() != "HOME":
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="draft_write_gate",
+                error=(
+                    "NEEDS_CLARIFICATION: EZLynx Policy Setup unlocks only the "
+                    "HOME path on the allowlisted applicant; "
+                    f"LOB {normalized} is still gated"
+                ),
+                note_added=False,
+                stopped_before_bind=True,
+            )
+
+        evidence: dict[str, Any] = {"phases": []}
+        try:
+            from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
+            from .policy_setup_proof import search_first_create
+
+            client = EzlynxApiClient(load_ezlynx_api_config())
+            api_report = search_first_create(
+                client,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                effective_date=_to_iso_date(shell_input.effective_date),
+                expiration_date=_to_iso_date(shell_input.expiration_date),
+            )
+            evidence["api"] = api_report
+            evidence["phases"].append("api_search_first_create")
+        except Exception as exc:  # noqa: BLE001 - report, don't raise
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="api_search_first_create",
+                error=f"{type(exc).__name__}: {exc}",
+                note_added=False,
+                stopped_before_bind=True,
+            )
+
+        row = api_report.get("read_back") or {}
+        policy_id = None
+        for key in ("policyId", "policyID", "id", "PolicyId"):
+            if row.get(key):
+                policy_id = str(row[key])
+                break
+        if not policy_id:
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="api_search_first_create",
+                error="no policy id in read-back; cannot open FormEntry",
+                note_added=False,
+                stopped_before_bind=True,
+            )
+
+        # FormEntry: click Save & Continue Edit on the Edit Policy header,
+        # watch validation + DOM for the FormEntry URL.
+        nav = await self._mint_formentry(policy_id)
+        evidence["formentry_nav"] = nav
+        evidence["phases"].append("formentry_mint")
+        if not nav.get("formentry_found"):
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="formentry_mint",
+                error=nav.get("error") or "FormEntry was not minted",
+                note_added=False,
+                stopped_before_bind=True,
+            )
+
+        # Coverages tab -> fill by literal label.
+        try:
+            from .formentry_coverages import COVERAGE_LABELS, afill_coverages_by_label
+
+            coverages_tab = self.page.locator("[role='tab']:has-text('Coverages')")
+            if await coverages_tab.count() > 0:
+                await coverages_tab.first.click()
+                await self.page.wait_for_timeout(1500)
+            values = _homeowners_values_by_label(shell_input.homeowners_coverage)
+            fill_report = await afill_coverages_by_label(self.page, values)
+            evidence["coverage_fill"] = fill_report
+            evidence["phases"].append("coverage_fill")
+        except Exception as exc:  # noqa: BLE001 - report, don't raise
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="coverage_fill",
+                error=f"{type(exc).__name__}: {exc}",
+                note_added=False,
+                stopped_before_bind=True,
+            )
+
         return PolicySetupResult(
-            success=False,
-            applicant_id=shell_input.applicant_id,
+            success=fill_report.get("filled_count", 0) > 0 and not fill_report.get("not_found"),
+            applicant_id=applicant_id,
             policy_number=shell_input.policy_number,
             lob=normalized,
-            phase_reached="draft_write_gate",
-            error=(
-                "NEEDS_CLARIFICATION: EZLynx Policy Setup v0.1.0-draft "
-                "does not authorize consequential writes"
-            ),
+            phase_reached="coverage_fill",
+            error=None if fill_report.get("filled_count") else "no coverage labels were filled",
             note_added=False,
             stopped_before_bind=True,
         )
+
+    async def _mint_formentry(self, policy_id: str) -> dict[str, Any]:
+        """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
+
+        The door is the green Save & Continue Edit button on the Edit Policy
+        header. The FormEntry URL is
+        /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
+        Watches DOM validation state, not networkidle and not URL-only.
+        """
+        from .ezlynx_account_nav import FORMENTRY_RE
+
+        report: dict[str, Any] = {
+            "policy_id": policy_id,
+            "formentry_found": False,
+            "formentry_url": None,
+            "validation": {},
+        }
+        applicant_id = self.applicant_id or ""
+        edit_url = (
+            f"https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/"
+            f"{applicant_id}/{policy_id}"
+        )
+        await self.page.goto(edit_url, wait_until="domcontentloaded")
+        await self.page.wait_for_timeout(2000)
+
+        # Pre-click: scan every open tab for an already-minted FormEntry.
+        for tab in self._all_tabs():
+            try:
+                url = tab.url
+            except Exception:  # noqa: BLE001
+                continue
+            if FORMENTRY_RE.search(url or ""):
+                report["formentry_found"] = True
+                report["formentry_url"] = url
+                report["via"] = "already_open_tab"
+                return report
+
+        # Capture pre-click validation state from the DOM.
+        report["validation"]["pre_click"] = await self._validation_snapshot()
+
+        button = self.page.get_by_role("button", name="Save & Continue Edit")
+        if await button.count() == 0:
+            report["error"] = "Save & Continue Edit button not found on Edit Policy header"
+            return report
+        await button.first.click()
+
+        # Watch for the FormEntry URL: poll the DOM + URL, not networkidle.
+        for _ in range(30):
+            await self.page.wait_for_timeout(1000)
+            url = self.page.url
+            if FORMENTRY_RE.search(url or ""):
+                report["formentry_found"] = True
+                report["formentry_url"] = url
+                report["via"] = "save_and_continue_edit"
+                return report
+            # Also check other tabs — the mint may open a new tab.
+            for tab in self._all_tabs():
+                try:
+                    turl = tab.url
+                except Exception:  # noqa: BLE001
+                    continue
+                if FORMENTRY_RE.search(turl or ""):
+                    report["formentry_found"] = True
+                    report["formentry_url"] = turl
+                    report["via"] = "save_and_continue_edit_new_tab"
+                    return report
+
+        # No FormEntry after 30s: capture post-click validation state.
+        report["validation"]["post_click"] = await self._validation_snapshot()
+        report["landed_url"] = self.page.url
+        report["error"] = (
+            "Save & Continue Edit clicked; no FormEntry URL after 30s. "
+            "See validation snapshot for blocking errors."
+        )
+        return report
+
+    def _all_tabs(self) -> list[Any]:
+        try:
+            ctx = self.page.context
+            return list(ctx.pages)
+        except Exception:  # noqa: BLE001
+            return [self.page]
+
+    async def _validation_snapshot(self) -> dict[str, Any]:
+        """Read validation markers from the DOM: field errors, aria-invalid, summary."""
+        js = r"""
+        () => {
+          const fieldErrors = Array.from(
+            document.querySelectorAll(".field-validation-error, .validation-message, [data-valmsg-for]")
+          ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 20);
+          const summary = Array.from(
+            document.querySelectorAll(".validation-summary-errors")
+          ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 5);
+          const ariaInvalid = Array.from(
+            document.querySelectorAll("[aria-invalid='true']")
+          ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
+          return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
+                  url: location.href};
+        }
+        """
+        try:
+            return await self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"{type(exc).__name__}: {exc}"}

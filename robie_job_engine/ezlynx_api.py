@@ -578,6 +578,63 @@ class EzlynxApiClient:
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
 
+    def create_policy(
+        self,
+        *,
+        applicant_id: str,
+        policy_number: str,
+        master_company: int = 13585,
+        writing_company: str = "10048",
+        lob: str = "HOME",
+        effective_date: str,
+        expiration_date: str,
+        written_premium: float = 1.00,
+        rating_state: str = "NJ",
+        transaction_type: str = "NBS",
+    ) -> dict[str, Any]:
+        """OAuth POST /PolicyApi/account/{applicantId}/policy/v1/create.
+
+        The gold payload: writingCompany is the string "10048" and
+        masterCompany is the int 13585. Exactly one create attempt is made
+        by the caller; this method performs exactly one POST.
+        """
+        applicant = str(applicant_id or "").strip()
+        number = str(policy_number or "").strip()
+        if not number:
+            raise EzlynxApiError(None, "policy number is required")
+        # Enforce the EZLynx write allowlist before any write leaves this box.
+        applicant = require_allowed_ezlynx_write_applicant(applicant)
+        payload = {
+            "accountId": int(applicant),
+            "policyNumber": number,
+            "writingCompany": str(writing_company),
+            "lob": str(lob),
+            "effectiveDate": str(effective_date),
+            "expirationDate": str(expiration_date),
+            "masterCompany": int(master_company),
+            "writtenPremium": float(written_premium),
+            "ratingState": str(rating_state),
+            "transactionType": str(transaction_type),
+            "acordXml": "",
+        }
+        url = self._origin() + f"/PolicyApi/account/{applicant}/policy/v1/create"
+        headers = {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Content-Type": "application/json",
+        }
+        data = json.dumps(payload).encode("utf-8")
+        # The create endpoint returns the new policy id as a bare scalar
+        # (string or number), not a JSON object — parse flexibly.
+        raw, _content_type = self._request_bytes(
+            "POST", url, data=data, headers=headers, error_label="EZLynx PolicyApi create"
+        )
+        text = raw.decode("utf-8", errors="replace").strip()
+        try:
+            parsed: Any = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = text.strip('"')
+        return {"request_payload": payload, "response": parsed}
+
     def list_applicant_documents(
         self,
         applicant_id: str,
