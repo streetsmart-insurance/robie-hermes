@@ -29,12 +29,17 @@ CANARY_APPLICANT_ID = "220250093"
 POLICY_NUMBER_PATTERN = re.compile(r"^TEST-CANARY-[0-9]{8}-[0-9]{2}$")
 
 REQUIRED_SECRET_FIELDS = (
-    "ezlynx_api_client_id",
-    "ezlynx_api_client_secret",
+    "client_id",
+    "client_secret",
+    "username",
+    "integration_group_id",
+    "token_endpoint",
+    "document_base_url",
+    "scope",
 )
 
 
-def load_secret(secret_resource: str) -> dict[str, str]:
+def load_secret(secret_resource: str) -> dict[str, Any]:
     parts = secret_resource.split("/")
     project, name = parts[1], parts[3]
     proc = subprocess.run(
@@ -62,39 +67,42 @@ def load_secret(secret_resource: str) -> dict[str, str]:
     return cfg
 
 
-def get_token(cfg: dict[str, str]) -> str:
-    conn = http.client.HTTPSConnection("app.ezlynx.com", timeout=CALL_TIMEOUT)
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "client_credentials",
-            "client_id": cfg["ezlynx_api_client_id"],
-            "client_secret": cfg["ezlynx_api_client_secret"],
-            "scope": "vendor_data_access",
-        }
-    )
+def get_token(cfg: dict[str, Any]) -> str:
+    parsed = urllib.parse.urlparse(cfg["token_endpoint"])
+    conn = http.client.HTTPSConnection(parsed.hostname, timeout=CALL_TIMEOUT)
     try:
+        body = urllib.parse.urlencode({
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "grant_type": "vendor_data_access",
+            "scope": cfg["scope"],
+            "username": cfg["username"],
+            "integration_group_id": cfg["integration_group_id"],
+        })
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
         conn.request(
             "POST",
-            "/api/1/oauth/tokens",
+            path,
             body=body,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         resp = conn.getresponse()
-        raw = resp.read().decode("utf-8", errors="replace")
-        if resp.status != 200:
-            raise RuntimeError(f"token fetch failed HTTP {resp.status}: {raw[:160]}")
-        data = json.loads(raw)
-        token = data.get("access_token")
-        if not token:
-            raise RuntimeError("no access_token in token response")
-        return str(token)
+        raw = resp.read()
     finally:
         conn.close()
+    if resp.status != 200:
+        raise RuntimeError(f"token request returned HTTP {resp.status}")
+    payload = json.loads(raw.decode("utf-8"))
+    token = payload.get("access_token") or payload.get("token")
+    if not token:
+        raise RuntimeError("token response carried no access_token")
+    return str(token)
 
 
-def origin_of(cfg: dict[str, str]) -> str:
-    raw = cfg.get("ezlynx_api_url") or "https://app.ezlynx.com"
-    parsed = urllib.parse.urlparse(raw)
+def origin_of(cfg: dict[str, Any]) -> str:
+    parsed = urllib.parse.urlparse(cfg.get("document_base_url") or cfg["token_endpoint"])
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
