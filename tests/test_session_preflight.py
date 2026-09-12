@@ -7,8 +7,18 @@ that made "the browser has tabs" look true while it showed nothing.
 """
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+from robie_job_engine.engine import JobEngine
+from robie_job_engine.models import (
+    JobStatus,
+    VerificationEvidence,
+    VerificationResult,
+    WorkerResult,
+)
 from robie_job_engine.session_preflight import (
     LOGGED_OUT,
     NO_EZLYNX_TAB,
@@ -18,6 +28,7 @@ from robie_job_engine.session_preflight import (
     check,
     classify,
 )
+from robie_job_engine.store import JobStore
 
 LOGIN_TAB = {
     "id": "E7FD9BADD6E996313D607D2BD08D00DD",
@@ -129,6 +140,101 @@ class TestCheckNeverRaises(unittest.TestCase):
     def test_unreachable_reason_names_the_endpoint(self):
         result = check("http://127.0.0.1:1", timeout=0.25)
         self.assertIn("127.0.0.1:1", result["reason"])
+
+
+class DummyWorker:
+    def __init__(self, result=None):
+        self.called = False
+        self.result = result or WorkerResult(True, "test", {})
+
+    def perform(self, job, **kwargs):
+        self.called = True
+        return self.result
+
+
+class DummyVerifier:
+    def verify(self, job, action):
+        return VerificationResult(
+            True,
+            VerificationEvidence(
+                method="TEST",
+                source="test",
+                authoritative=True,
+                expected={},
+                observed={},
+            ),
+        )
+
+
+class TestEngineWiring(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = JobStore(Path(self.tmp.name) / "jobs.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @patch("robie_job_engine.session_preflight.check")
+    def test_browser_required_job_fails_preflight_when_logged_out(self, mock_check):
+        mock_check.return_value = {
+            "state": LOGGED_OUT,
+            "blocking": True,
+            "reason": "SESSION_LOGGED_OUT: browser is on /auth/account/login",
+            "login_urls": ["https://app.ezlynx.com/auth/account/login"],
+        }
+        worker = DummyWorker()
+        engine = JobEngine(
+            self.store,
+            {"hermes-cua": worker},
+            {"ezlynx.reassign": DummyVerifier()},
+        )
+        job = self.store.create_job(
+            "ezlynx.reassign",
+            {"worker": "hermes-cua"},
+            max_attempts=3,
+        )
+
+        final = engine.run(job["id"])
+
+        self.assertFalse(worker.called, "_perform must NEVER be called when preflight blocks")
+        self.assertEqual(final["status"], JobStatus.FAILED.value)
+        self.assertEqual(final["attempt_count"], 0, "attempt_count must remain 0")
+
+        preflight_cp = self.store.get_checkpoint(job["id"], "session_preflight")
+        self.assertIsNotNone(preflight_cp)
+        self.assertEqual(preflight_cp["state"], LOGGED_OUT)
+
+        email_cp = self.store.get_checkpoint(job["id"], "email_response")
+        self.assertIsNotNone(email_cp)
+        self.assertEqual(email_cp["response_text"], mock_check.return_value["reason"])
+        self.assertEqual(email_cp["body"], mock_check.return_value["reason"])
+        self.assertEqual(email_cp["subject"], "ROBIE Blocker: EZLynx Session Logged Out")
+
+    @patch("robie_job_engine.session_preflight.check")
+    def test_non_browser_job_bypasses_preflight_and_proceeds(self, mock_check):
+        mock_check.return_value = {
+            "state": LOGGED_OUT,
+            "blocking": True,
+            "reason": "SESSION_LOGGED_OUT: should not block non-browser job",
+        }
+        worker = DummyWorker(WorkerResult(True, "robie.official_install", {"installed": True}))
+        engine = JobEngine(
+            self.store,
+            {"deploy-truth": worker},
+            {"robie.official_install": DummyVerifier()},
+        )
+        job = self.store.create_job(
+            "robie.official_install",
+            {"worker": "deploy-truth"},
+            max_attempts=3,
+        )
+
+        final = engine.run(job["id"])
+
+        mock_check.assert_not_called()
+        self.assertTrue(worker.called, "_perform must be called for non-browser job")
+        self.assertNotEqual(final["status"], JobStatus.FAILED.value)
+        self.assertIsNone(self.store.get_checkpoint(job["id"], "session_preflight"))
 
 
 if __name__ == "__main__":

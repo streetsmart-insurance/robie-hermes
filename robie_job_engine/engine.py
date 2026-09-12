@@ -330,7 +330,7 @@ class JobEngine:
                     return self.store.transition(
                         job_id,
                         JobStatus.FAILED,
-                        expected={JobStatus.RUNNING},
+                        expected={JobStatus.PENDING, JobStatus.RUNNING},
                         error=blocker_reason,
                         release_lease=True,
                     )
