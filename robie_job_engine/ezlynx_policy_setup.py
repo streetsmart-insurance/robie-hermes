@@ -1107,9 +1107,16 @@ class EzlynxPolicySetupPage:
         
         if button is None:
             report["page_state"] = await self._page_state_snapshot()
+            ps = report["page_state"] or {}
+            page_url = ps.get("url", self.page.url if hasattr(self.page, "url") else "unknown")
+            page_title = ps.get("title", "unknown")
+            visible_buttons = ps.get("buttons", [])[:10]
             report["error"] = (
                 "Save & Continue Edit button not found on Edit Policy header. "
                 f"Tried strategies: {', '.join(strategies_tried)}. "
+                f"PAGE_URL: {page_url} "
+                f"PAGE_TITLE: {page_title} "
+                f"VISIBLE_BUTTONS: {visible_buttons} "
             )
             # HITL escalation: Gemini first, then Carlo
             try:
