@@ -59,6 +59,7 @@ DOC_PAGE_SIZE = 200
 # Markers only — fixed labels, never excerpts of tool output.
 MARKERS = (
     "NEEDS_SKILL", "NEEDS_CLARIFICATION", "PLAYWRIGHT_BLOCKED",
+    "PLAYWRIGHT_TIMEOUT",
     "EZLYNX_WRITE_SCOPE_REFUSED", "ROBIE_OUTCOME_UNKNOWN",
     "TimeoutError", "ModuleNotFoundError", "PermissionError",
     "ImportError", "AUTH_REQUIRED", "RESOURCE_EXHAUSTED",

@@ -279,6 +279,15 @@ class UnverifiedUnmaskTests(unittest.TestCase):
         self.assertEqual(blocked.status, "AWAITING_HUMAN_INPUT")
         self.assertIn("PLAYWRIGHT_BLOCKED", blocked.error)
 
+        # A wait expiring is an infra failure (FAILED), not a security guard refusal (AWAITING_HUMAN_INPUT)
+        timed_out = classify_chat_close_without_checkpoint(
+            "PLAYWRIGHT_TIMEOUT: Timeout 30000ms exceeded.\nwaiting for load state \"networkidle\"",
+            action=None,
+        )
+        self.assertEqual(timed_out.status, "FAILED")
+        self.assertIn("PLAYWRIGHT_TIMEOUT", timed_out.error)
+        self.assertEqual(timed_out.reason, "infra fail without destination claim")
+
         claimed = classify_chat_close_without_checkpoint(I_DID_IT, action=None)
         self.assertTrue(claims_unverified_destination_progress(I_DID_IT))
         self.assertEqual(claimed.status, "UNVERIFIED")

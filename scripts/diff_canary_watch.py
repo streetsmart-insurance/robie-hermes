@@ -23,7 +23,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-FAILURE_MARKERS = {"PLAYWRIGHT_BLOCKED", "TimeoutError"}
+FAILURE_MARKERS = {"PLAYWRIGHT_BLOCKED", "PLAYWRIGHT_TIMEOUT", "TimeoutError"}
 
 
 def utc_now() -> str:
