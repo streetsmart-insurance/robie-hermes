@@ -247,6 +247,26 @@ def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments
         return 'ROBIE_OUTCOME_UNKNOWN: The task returned no usable receipt. Check the destination before retrying.'
 
 
+def _format_policy_setup_response(policy_number: str, report: dict, sender: str) -> str:
+    """Build the sender-facing reply from the deterministic tool report."""
+    report = report or {}
+    if report.get("success"):
+        return (
+            f"Policy {policy_number} has been set up on EZLynx applicant 220250093 "
+            f"(phase reached: {report.get('phase_reached')}). "
+            "Search-first found no duplicate; the policy shell was created with the gold "
+            "carrier payload, Save & Continue Edit minted the FormEntry, and coverages "
+            "were filled by literal label. It stops before bind — no coverage was bound. "
+            "Verify the policy in EZLynx before relying on it."
+        )
+    return (
+        f"ROBIE_OUTCOME_UNKNOWN: Policy setup for {policy_number} did not complete "
+        f"(phase reached: {report.get('phase_reached')}; error: {report.get('error')}). "
+        "Check the EZLynx destination before trying again; no automatic second "
+        "execution was started."
+    )
+
+
 def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db_path, context_prompt=""):
     """Execute either route only after the Job Engine has claimed this email."""
     from robie_job_engine.store import JobStore
@@ -344,6 +364,47 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
         store.checkpoint(job_id, 'email_route', {'route': 'finance', 'status': result.status})
         if not response_text:
             return "ROBIE_OUTCOME_UNKNOWN: Finance workflow returned no final response; review the recorded destination before retrying."
+
+    # Deterministic policy-setup routing: this job class must invoke the
+    # ezlynx_policy_setup tool as a real tool call before any playwright_exec.
+    # Prompt guidance was not enough (jobs c1ffb79a, 1cfd0f3e never called the
+    # tool and timed out). Fail closed when the tool is missing — never fall
+    # through to playwright_exec for this job class.
+    policy_setup_args = None
+    if not is_ascend_request:
+        from robie_job_engine.policy_setup_dispatch import (
+            POLICY_SETUP_REQUIRED_KIND,
+            PolicySetupToolMissing,
+            detect_policy_setup_request,
+            invoke_policy_setup_tool,
+        )
+        policy_setup_args = detect_policy_setup_request(f"{subject}\n{body}")
+    if policy_setup_args:
+        store.checkpoint(job_id, 'email_route', {
+            'route': 'policy_setup_deterministic',
+            'policy_number': policy_setup_args["policy_number"],
+        })
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+            'policy_number': policy_setup_args["policy_number"],
+            'tool_called': False,
+        })
+        try:
+            report = invoke_policy_setup_tool(policy_setup_args)
+        except PolicySetupToolMissing as exc:
+            logger.error("Policy-setup tool missing; failing closed: %s", exc)
+            return f"ROBIE_OUTCOME_UNKNOWN: {exc}"
+        except Exception as exc:  # noqa: BLE001 - deterministic branch must not hang the job
+            logger.warning("Deterministic policy-setup outcome requires review: %s", type(exc).__name__)
+            return (
+                "ROBIE_OUTCOME_UNKNOWN: Policy setup execution stopped after an error. "
+                "Check the destination before trying again; no automatic second execution was started."
+            )
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+            'policy_number': policy_setup_args["policy_number"],
+            'tool_called': True,
+        })
+        logger.info("Handled policy setup deterministically: %s", policy_setup_args["policy_number"])
+        return _format_policy_setup_response(policy_setup_args["policy_number"], report, sender)
     if not response_text:
         attachment_lines = ""
         if attachments:

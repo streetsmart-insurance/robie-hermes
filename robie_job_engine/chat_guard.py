@@ -583,6 +583,36 @@ def _submission_contract(text: str) -> list[str]:
     return lines
 
 
+def _policy_setup_contract(text: str) -> list[str]:
+    """Hard routing for the homeowners policy-setup job class.
+
+    When the Chat message asks to create/set up a homeowners policy on
+    applicant 220250093 (policy numbers TEST-HO-*), the runner must invoke
+    ezlynx_policy_setup as a real tool call before any playwright_exec. If the
+    tool is missing/unregistered, fail closed with that error — never fall
+    through to playwright_exec for this job class.
+    """
+    from .policy_setup_dispatch import FAIL_CLOSED_MESSAGE, detect_policy_setup_request
+
+    args = detect_policy_setup_request(text)
+    if not args:
+        return []
+    return [
+        "Homeowners policy-setup job class detected "
+        f"(policy {args['policy_number']} on applicant 220250093):",
+        "- You MUST call the 'ezlynx_policy_setup' tool FIRST, before any "
+        "'playwright_exec' call. It runs the Job Engine path: search-first, "
+        "gold carrier create, Save & Continue Edit, FormEntry coverages by "
+        "literal label. Pass the policy number from this request.",
+        "- If 'ezlynx_policy_setup' is not in your available tools, STOP "
+        "immediately and begin your response with exactly: "
+        f"ROBIE_OUTCOME_UNKNOWN: {FAIL_CLOSED_MESSAGE}",
+        "- Do NOT call 'playwright_exec' for this job class. The "
+        "playwright_exec tool will refuse policy-setup jobs until "
+        "ezlynx_policy_setup has been called.",
+    ]
+
+
 def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> str:
     """Add trusted, non-user-visible execution constraints for Hermes.
 
@@ -670,6 +700,19 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             lines.append(f"- {redact_text(str(field))}: {redact_text(str(value))}")
     lines.extend(execution_contract_lines())
     lines.extend(_submission_contract(text))
+    policy_setup_lines = _policy_setup_contract(text)
+    if policy_setup_lines and job_id:
+        from .policy_setup_dispatch import (
+            POLICY_SETUP_REQUIRED_KIND,
+            detect_policy_setup_request,
+        )
+
+        policy_args = detect_policy_setup_request(text) or {}
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+            "policy_number": policy_args.get("policy_number"),
+            "tool_called": False,
+        })
+    lines.extend(policy_setup_lines)
     lines.append("[END ROBIE JOB ENGINE EXECUTION CONTRACT]")
     return text + "\n".join(lines)
 

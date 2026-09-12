@@ -134,6 +134,26 @@ def _run_policy_setup(args: dict) -> dict:
     return asyncio.run(_main())
 
 
+def _mark_policy_setup_tool_called() -> None:
+    """Record that the tool ran, releasing the playwright_exec order guard."""
+    try:
+        from robie_job_engine.policy_setup_dispatch import POLICY_SETUP_REQUIRED_KIND
+        from robie_job_engine.store import JobStore
+
+        job_id = (
+            os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
+        ).strip()
+        db_path = os.environ.get("ROBIE_JOB_DB") or ""
+        if not job_id or not db_path:
+            return
+        store = JobStore(db_path)
+        marker = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or {}
+        marker["tool_called"] = True
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, marker)
+    except Exception:
+        pass
+
+
 def ezlynx_policy_setup_handler(args: dict, **kwargs):
     policy_number = str((args or {}).get("policy_number") or "").strip()
     if not policy_number:
@@ -142,6 +162,7 @@ def ezlynx_policy_setup_handler(args: dict, **kwargs):
         report = _run_policy_setup(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
         return tool_error(f"{type(exc).__name__}: {exc}")
+    _mark_policy_setup_tool_called()
     return tool_result(report)
 
 
