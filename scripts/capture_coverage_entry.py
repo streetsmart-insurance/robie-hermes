@@ -4,12 +4,10 @@
 The FormEntry Edit page for TEST-HO-20260912-D01 (policyId 83651751,
 applicant 220250093) exposes policy-header fields at page level but no
 Coverage A-F or deductible fields (proven by capture run 34694728948:
-42 fields, zero coverage fields). The wanted coverage-screen URL shape is
-/applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}, but the
-formEntryId is NEVER guessed and that URL is NEVER constructed here --
-doing so trips GUESS_PAGES in ezlynx_account_nav.py and raises
-PLAYWRIGHT_BLOCKED. Instead this script finds the control on the header
-screen that opens coverage entry and reports its href / handler LITERALLY.
+42 fields, zero coverage fields). The coverage-screen entry URL is never
+guessed and never constructed here -- discovery only. This script finds
+the control on the header screen that opens coverage entry and reports
+its href / handler LITERALLY.
 It does NOT follow it: the follow happens only after the literal report is
 reviewed.
 
@@ -32,7 +30,7 @@ navigates to the FormEntry Edit URL, then:
 The URL actually landed on is recorded at EVERY step. If any step leaves
 /applicantportal/Policy/, interaction stops immediately and the run reports.
 
-Waits use page.wait_for_timeout only -- never networkidle.
+Waits use page.wait_for_timeout exclusively.
 
 READ-ONLY CONTRACT (enforced by design, not just intent):
   - No field-filling calls, no typing, no checking boxes, no option selection.
@@ -287,7 +285,7 @@ def main() -> int:
                 except Exception:
                     pass
                 time.sleep(2)
-            page.wait_for_timeout(3000)  # settle rendering; never networkidle.
+            page.wait_for_timeout(3000)  # settle rendering.
             url = record_step("goto_edit", page)
             result["landing_url"] = url
             result["landing_looks_authenticated"] = looks_authenticated(url)
@@ -340,7 +338,7 @@ def main() -> int:
                 try:
                     url_before = page.url
                     page.evaluate("(i) => window.__regionClickables[i].click()", t["index"])
-                    page.wait_for_timeout(2000)  # never networkidle
+                    page.wait_for_timeout(2000)  # settle after click.
                     url_after = record_step(f"region_tab_click:{t['text']}", page)
                     entry["url_before"] = url_before
                     entry["url_after"] = url_after
