@@ -1,0 +1,112 @@
+name: Diagnose Test IAP/SSH + SCP SHA-256 proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type PROVE_TEST_IAP_SSH
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prove-iap-ssh:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.confirmation == 'PROVE_TEST_IAP_SSH'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      SSH_KEY: /tmp/hermes-test-iap-ssh-proof
+      SMOKE_NAME: robie-iap-ssh-smoke-${{ github.run_id }}.txt
+      OSLOGIN_SSH_KEY_TTL: 1h
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@v4
+
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = "hermes-test-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
+
+      - name: Prepare short-lived OS Login SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fresh runner: create passphrase-less key, register via OS Login with 1h TTL.
+          bash scripts/ensure-gcloud-ssh-key.sh
+          cp "${HOME}/.ssh/google_compute_engine" "${SSH_KEY}"
+          cp "${HOME}/.ssh/google_compute_engine.pub" "${SSH_KEY}.pub"
+
+      - name: SSH hostname proof
+        id: hostname
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
+            --command='hostname -s')
+          echo "hostname=${out}" >>"${GITHUB_OUTPUT}"
+          test "${out}" = "hermes-test-01"
+
+      - name: SCP smoke file and SHA-256 read-back
+        id: scp
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'robie-iap-ssh-smoke run=%s sha=%s\n' "${GITHUB_RUN_ID}" "${GITHUB_SHA}" >"/tmp/${SMOKE_NAME}"
+          (cd /tmp && sha256sum "${SMOKE_NAME}" >"${SMOKE_NAME}.sha256")
+          expected=$(cut -d' ' -f1 </tmp/${SMOKE_NAME}.sha256)
+          gcloud compute scp \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
+            "/tmp/${SMOKE_NAME}" "/tmp/${SMOKE_NAME}.sha256" \
+            "${TEST_VM}:/var/tmp/"
+          remote=$(gcloud compute ssh "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
+            --command="cd /var/tmp && sha256sum -c '${SMOKE_NAME}.sha256' && cut -d' ' -f1 '${SMOKE_NAME}.sha256' && rm -f '${SMOKE_NAME}' '${SMOKE_NAME}.sha256'")
+          echo "${remote}"
+          echo "${remote}" | grep -q "${SMOKE_NAME}: OK"
+          observed=$(echo "${remote}" | awk 'NF==1 {print; exit}')
+          test "${observed}" = "${expected}"
+          echo "sha256=${observed}" >>"${GITHUB_OUTPUT}"
+
+      - name: Publish proof
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Test IAP/SSH proof"
+            echo
+            echo "- Run: \`${GITHUB_RUN_ID}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Identity: \`robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com\`"
+            echo "- Target: \`${PROJECT_ID}/${ZONE}/${TEST_VM}\`"
+            echo "- Hostname: \`${{ steps.hostname.outputs.hostname }}\`"
+            echo "- SCP SHA-256: \`${{ steps.scp.outputs.sha256 }}\`"
+            echo "- OS Login key TTL: \`${OSLOGIN_SSH_KEY_TTL}\`"
+            echo "- SA JSON key created: \`false\`"
+            echo "- Public SSH opened: \`false\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
