@@ -1,0 +1,126 @@
+name: Capture FormEntry DOM (read-only CDP)
+
+# Ralph's DOM-capture lane (2026-09-12): replaces eight inferred selectors
+# (six #HO_CoverageA-F + two HO deductible locators) with observed facts.
+#
+# How it works: SSHes to hermes-poc-01 (Production), connects to ROBIE'S
+# EXISTING browser over CDP at 127.0.0.1:9222 (the sanctioned path — this is
+# NOT a second browser and NOT a new EZLynx login), opens a NEW tab, GETs the
+# FormEntry Edit URL for TEST-HO-20260912-D01 (policyId 83651751, applicant
+# 220250093), and dumps every input/select/textarea: id, name, type,
+# placeholder, label, value, VISIBLE/HIDDEN, iframe, tab/section. Each
+# [role=tab] is clicked once to reveal lazily-rendered sections.
+#
+# READ-ONLY: no fills, no type, no check, no select_option, no Save, no
+# submit. The only clicks are on [role=tab] elements (logged). The tab is
+# closed afterwards. Target is the write-allowlisted test applicant.
+#
+# Dispatch ONLY from main: the Production environment's deployment branch
+# policy allows main and nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CAPTURE_FORMENTRY_DOM for an on-demand capture
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  capture:
+    if: github.event_name == 'workflow_dispatch' && inputs.confirmation == 'CAPTURE_FORMENTRY_DOM'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      STAGING: /var/tmp/robie-formentry-dom/${{ github.run_id }}
+      APPLICANT_ID: "220250093"
+      POLICY_ID: "83651751"
+      ENTRY_URL: https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83651751
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Validate bounded request
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${APPLICANT_ID}" = "220250093"
+          test "${POLICY_ID}" = "83651751"
+          # the capture script may only target the allowlisted Edit URL
+          grep -q 'applicantportal/Policy/Actions/Edit/220250093/83651751' scripts/capture_formentry_dom.py
+          # read-only contract: no write-call patterns may appear in the script
+          ! grep -qE '\.(fill|type|check|select_option)\(' scripts/capture_formentry_dom.py
+          # exactly one navigation: the initial GET of the Edit URL
+          test "$(grep -c 'page.goto' scripts/capture_formentry_dom.py)" = "1"
+          echo "bounded request OK"
+
+      - name: Stage capture script on Production
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/capture_formentry_dom.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Run capture (read-only, new tab, no fills, no save)
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -euo pipefail
+              mkdir -p '${STAGING}'
+              echo '--- diagnostics (read-only) ---'
+              ps aux | grep -iE 'robie|hermes|playwright' | grep -v grep | head -8 || true
+              ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null || true
+              find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 || true
+              echo '--- end diagnostics ---'
+              PY=''
+              for cand in \$(ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null) \$(find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 | sed 's|pyvenv.cfg|bin/python|') \$(command -v python3 2>/dev/null || true); do
+                [ -x \"\$cand\" ] || continue
+                if \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
+                if sudo -n \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"sudo -n \$cand\"; break; fi
+              done
+              if [ -z \"\$PY\" ]; then echo 'NO_PLAYWRIGHT_PYTHON'; exit 1; fi
+              echo \"using python: \$PY\"
+              if ! curl -sf --max-time 10 http://127.0.0.1:9222/json/version >/dev/null; then echo 'NO_CDP_LISTENER'; exit 1; fi
+              echo 'CDP listener up'
+              \$PY '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json'"
+
+      - name: Retrieve dump
+        run: |
+          set -euo pipefail
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${PRODUCTION_VM}:${STAGING}/dump.json" "${RUNNER_TEMP}/formentry-dump.json"
+          python3 - <<'EOF'
+          import json, os
+          p = os.path.join(os.environ["RUNNER_TEMP"], "formentry-dump.json")
+          d = json.load(open(p))
+          frames = d.get("frames", [])
+          nfields = sum(len(f.get("fields", [])) for f in frames)
+          print("ok:", d.get("ok"))
+          print("landing_url:", d.get("landing_url"))
+          print("frames:", len(frames), "field_rows:", nfields)
+          print("duplicates:", len(d.get("duplicates", [])))
+          print("tab_clicks:", len(d.get("clicks", [])))
+          EOF
+
+      - name: Upload dump artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: formentry-dom-${{ github.run_id }}
+          path: ${{ runner.temp }}/formentry-dump.json
+          if-no-files-found: error
+          retention-days: 90

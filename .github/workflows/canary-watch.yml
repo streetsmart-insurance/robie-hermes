@@ -43,8 +43,7 @@ on:
 permissions:
   contents: read
   actions: read
-
-id-token: write
+  id-token: write
 
 jobs:
   watch:
@@ -182,8 +181,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'EOF'
-          import json
+          import json, os
           from datetime import datetime, timezone
+          out = os.path.join(os.environ["RUNNER_TEMP"], "verdict.json")
           verdict = {
               "watch": "canary-watch",
               "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -195,7 +195,7 @@ jobs:
                          "(canary/ARMED.json absent). The canary is not armed; "
                          "this run is a quiet no-op — not red, not green, no notification."),
           }
-          open("${RUNNER_TEMP}/verdict.json", "w").write(json.dumps(verdict, indent=2))
+          open(out, "w").write(json.dumps(verdict, indent=2))
           print(json.dumps(verdict, indent=2))
           EOF
           python3 -m json.tool "${RUNNER_TEMP}/verdict.json" >/dev/null
