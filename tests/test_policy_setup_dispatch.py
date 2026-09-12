@@ -102,7 +102,11 @@ class EmailRoutingTests(unittest.TestCase):
     def test_email_agent_fails_closed_without_fallthrough(self):
         source = (ROOT / "scripts" / "robie_email_agent.py").read_text()
         self.assertIn("except PolicySetupToolMissing as exc", source)
-        self.assertIn('return f"ROBIE_OUTCOME_UNKNOWN: {exc}"', source)
+        # Fail-closed: surfaces ROBIE_OUTCOME_UNKNOWN, persists the real error,
+        # copies policy_number onto action.destination, and does not fall through.
+        self.assertIn('ROBIE_OUTCOME_UNKNOWN', source)
+        self.assertIn('policy_api_create_error', source)
+        self.assertIn("'destination'", source)
         # The surfaced message itself carries the no-fallthrough guarantee.
         dispatch = (ROOT / "robie_job_engine" / "policy_setup_dispatch.py").read_text()
         self.assertIn(
