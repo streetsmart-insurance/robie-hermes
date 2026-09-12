@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Proof driver for Dusty's orchestrated test (Carlo 2026-09-12).
+"""Non-proof helper driver for manual / Dusty-orchestrated checks (Carlo 2026-09-12).
+
+This CLI is NOT the proof. Proof is a real Robie email/Chat job that the Job
+Engine finishes autonomously on Production via setup_policy_by_lob. This
+script exercises the same search-first + gold-create + FormEntry steps from a
+box for diagnosis only.
 
 Full build+test: search-first PolicyApi create with the gold payload, then
 FormEntry coverages by literal label. Applicant 220250093 only. Never creates
-TEST-HO-20260911-E01 by hand (the orchestrator refuses that policy number).
+TEST-HO-20260911-E01 by hand (the helper refuses that policy number; the
+engine path allows it when a Robie job asks).
 
 Usage:
   ROBIE_ENV=PRODUCTION EZLYNX_API_PROD_SECRET=projects/.../secrets/ezlynx-api-prod \\

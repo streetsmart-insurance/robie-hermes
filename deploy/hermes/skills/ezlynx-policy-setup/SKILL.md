@@ -15,7 +15,11 @@ is `Testing`; none is Certified or Production. Only the exact synthetic
 Homeowners Test drill may perform a consequential Save.
 Read `references/selector-inventory.md` before any browser-level Test and treat
 every listed selector/page object as uncertified until QA supplies live proof.
-EZLynx browser work is playwright_exec calls only, never execute_code, never a Python script wrapper.
+For a homeowners policy on applicant 220250093, call the `ezlynx_policy_setup`
+tool — never playwright_exec, never execute_code, never a Python script
+wrapper. The tool runs the Job Engine path (search-first gold create, Save &
+Continue Edit, coverages by literal label) and returns its evidence report.
+All other EZLynx browser work is playwright_exec calls only.
 
 ## Mandatory result states
 

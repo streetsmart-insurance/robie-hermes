@@ -107,7 +107,14 @@ def search_first_create(
 
 
 def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> dict[str, Any]:
-    """Land on the policy's FormEntry Coverages tab. Reports the landed URL."""
+    """Mint the FormEntry via Save & Continue Edit; watch validation + DOM.
+
+    The door is the green Save & Continue Edit button on the Edit Policy
+    header. The FormEntry URL is
+    /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
+    Polls the URL + DOM for 30s (not networkidle, not URL-only): captures
+    pre/post-click validation state from the DOM.
+    """
     from .ezlynx_account_nav import FORMENTRY_RE
 
     ensure_applicant_scope(applicant_id)
@@ -115,7 +122,7 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
         "edit_url": EDIT_URL_TEMPLATE.format(applicant=applicant_id, policy_id=policy_id),
         "landed_url": None,
         "formentry_found": False,
-        "coverages_tab": None,
+        "validation": {},
     }
     page.goto(report["edit_url"], wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
@@ -124,18 +131,8 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
         report["error"] = "left /applicantportal/Policy/; stopped"
         return report
 
-    # Scan every open tab for a FormEntry URL before clicking anything.
-    try:
-        contexts = page.context.browser.contexts if hasattr(page.context, "browser") else []
-    except Exception:  # noqa: BLE001
-        contexts = []
-    tabs = []
-    for ctx in contexts or [page.context]:
-        try:
-            tabs.extend(ctx.pages)
-        except Exception:  # noqa: BLE001
-            continue
-    for tab in tabs:
+    # Pre-click: scan every open tab for an already-minted FormEntry.
+    for tab in _all_tabs_sync(page):
         try:
             url = tab.url
         except Exception:  # noqa: BLE001
@@ -143,12 +140,72 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
         if FORMENTRY_RE.search(url or ""):
             report["formentry_found"] = True
             report["formentry_url"] = url
+            report["via"] = "already_open_tab"
+            return report
+
+    report["validation"]["pre_click"] = _validation_snapshot_sync(page)
+
+    button = page.get_by_role("button", name="Save & Continue Edit")
+    if button.count() == 0:
+        report["error"] = "Save & Continue Edit button not found on Edit Policy header"
+        return report
+    button.first.click()
+
+    for _ in range(30):
+        page.wait_for_timeout(1000)
+        url = page.url
+        if FORMENTRY_RE.search(url or ""):
+            report["formentry_found"] = True
+            report["formentry_url"] = url
+            report["via"] = "save_and_continue_edit"
+            return report
+        for tab in _all_tabs_sync(page):
             try:
-                tab.bring_to_front()
+                turl = tab.url
             except Exception:  # noqa: BLE001
-                pass
-            break
+                continue
+            if FORMENTRY_RE.search(turl or ""):
+                report["formentry_found"] = True
+                report["formentry_url"] = turl
+                report["via"] = "save_and_continue_edit_new_tab"
+                return report
+
+    report["validation"]["post_click"] = _validation_snapshot_sync(page)
+    report["landed_url"] = page.url
+    report["error"] = (
+        "Save & Continue Edit clicked; no FormEntry URL after 30s. "
+        "See validation snapshot for blocking errors."
+    )
     return report
+
+
+def _all_tabs_sync(page: Any) -> list[Any]:
+    try:
+        return list(page.context.pages)
+    except Exception:  # noqa: BLE001
+        return [page]
+
+
+def _validation_snapshot_sync(page: Any) -> dict[str, Any]:
+    js = r"""
+    () => {
+      const fieldErrors = Array.from(
+        document.querySelectorAll(".field-validation-error, .validation-message, [data-valmsg-for]")
+      ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 20);
+      const summary = Array.from(
+        document.querySelectorAll(".validation-summary-errors")
+      ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 5);
+      const ariaInvalid = Array.from(
+        document.querySelectorAll("[aria-invalid='true']")
+      ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
+      return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
+              url: location.href};
+    }
+    """
+    try:
+        return page.evaluate(js)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def run_proof(

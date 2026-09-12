@@ -146,3 +146,58 @@ def fill_coverages_by_label(
                 report["filled_count"] += 1
         report["labels"][label] = entry
     return report
+
+
+async def afind_input_for_label(page: Any, label: str) -> dict[str, Any]:
+    """Async variant of find_input_for_label for the Job Engine's async page."""
+    result = await page.evaluate(FIND_INPUT_JS, label)
+    return {"label": label, **(result or {})}
+
+
+async def afill_input_by_descriptor(
+    page: Any, descriptor: dict[str, Any], value: str
+) -> dict[str, Any]:
+    """Async variant of fill_input_by_descriptor."""
+    input_id = descriptor.get("id")
+    input_name = descriptor.get("name")
+    if input_id:
+        locator = page.locator(f"#{input_id}")
+    elif input_name:
+        locator = page.locator(f'[name="{input_name}"]')
+    else:
+        return {"filled": False, "reason": "descriptor has no id or name"}
+    tag = (descriptor.get("tag") or "").lower()
+    try:
+        if tag == "select":
+            await locator.select_option(value)
+        else:
+            await locator.fill(str(value))
+        read_back = await locator.input_value()
+    except Exception as exc:  # noqa: BLE001 - report, don't raise
+        return {"filled": False, "reason": f"{type(exc).__name__}: {exc}"}
+    return {
+        "filled": True,
+        "value_sent": str(value),
+        "value_read_back": read_back,
+        "matches": read_back == str(value),
+    }
+
+
+async def afill_coverages_by_label(
+    page: Any, values: dict[str, str]
+) -> dict[str, Any]:
+    """Async variant of fill_coverages_by_label for the Job Engine."""
+    report: dict[str, Any] = {"labels": {}, "filled_count": 0, "not_found": []}
+    for label, value in values.items():
+        found = await afind_input_for_label(page, label)
+        entry: dict[str, Any] = {"found": bool(found.get("found")), "via": found.get("via")}
+        if not found.get("found"):
+            entry["reason"] = found.get("reason")
+            report["not_found"].append(label)
+        else:
+            fill = await afill_input_by_descriptor(page, found["input"], value)
+            entry.update(fill)
+            if fill.get("filled"):
+                report["filled_count"] += 1
+        report["labels"][label] = entry
+    return report
