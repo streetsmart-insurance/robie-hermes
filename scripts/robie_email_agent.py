@@ -344,6 +344,30 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
         store.checkpoint(job_id, 'email_route', {'route': 'finance', 'status': result.status})
         if not response_text:
             return "ROBIE_OUTCOME_UNKNOWN: Finance workflow returned no final response; review the recorded destination before retrying."
+    # Hard route (code, not prompt): homeowners-create on 220250093.
+    # The runner classifies in code and checkpoints the marker. The tool layer
+    # (playwright_tool) then calls ezlynx_policy_setup in code before any
+    # playwright_exec browser code runs. The runner never sets up the policy
+    # itself and no prompt text is involved.
+    if not is_ascend_request:
+        from robie_job_engine.policy_setup_dispatch import (
+            POLICY_SETUP_REQUIRED_KIND,
+            detect_policy_setup_request,
+        )
+        policy_setup_args = detect_policy_setup_request(f"{subject}\n{body}")
+        if policy_setup_args:
+            store.checkpoint(job_id, 'email_route', {
+                'route': 'policy_setup_hard_route',
+                'policy_number': policy_setup_args["policy_number"],
+            })
+            store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+                'policy_number': policy_setup_args["policy_number"],
+                'tool_called': False,
+            })
+            logger.info(
+                "Hard-routed policy setup for %s",
+                policy_setup_args["policy_number"],
+            )
     if not response_text:
         attachment_lines = ""
         if attachments:
