@@ -46,10 +46,10 @@ class EzlynxDestinationReadPort(Protocol):
     * ``policy_by_number``  -> GET /PolicyApi/policy/v1/search?PolicyNumber=
                                (OAuth2 gateway, scope PolicyApi)
     * ``documents_for_applicant``
-                            -> GET /ezlynxapi/api/documentlibrary/list/
-                               {applicant_id}/{pageIndex}/{pageSize}/{policyId}
-                               (Classic REST). Rows carry ``Description``
-                               (the filename) and ``PolicyId``.
+                            -> GET /documentapi/documents/v1/account/
+                               {ApplicantID}/document-search
+                               Use ``results[].id``. Never ``documentUrl``.
+    * ``download_document`` -> GET /documentapi/documents/v1/{DocumentID}/download
     * ``discussions_for_applicant`` -> receipt only, never authoritative.
 
     A concrete adapter over the real client lives in
@@ -61,14 +61,14 @@ class EzlynxDestinationReadPort(Protocol):
     def documents_for_applicant(
         self, applicant_id: str, policy_id: int = 0
     ) -> list[dict[str, Any]]:
-        """NORMALIZED rows: [{"name": str, "policy_id": Any}].
+        """NORMALIZED rows: [{"id": str, "name": str}].
 
-        Normalizing is the adapter's job, not the verifier's. api_client's
-        own docstring warns the raw envelope varies by tenant ("do not
-        assume Records/DocumentList or DocumentName/PolicyNumber"), which is
-        why ``extract_document_records`` / ``document_display_fields``
-        exist. Use them in the adapter so this class never guesses a shape.
+        ``id`` is DocumentApi ``results[].id``. A row without a numeric id
+        cannot verify an upload. ``documentUrl`` is never an identifier.
         """
+
+    def download_document(self, document_id: str) -> bytes:
+        """Raw bytes from DocumentApi download. Empty body is not evidence."""
 
     def discussions_for_applicant(self, applicant_id: str) -> list[dict[str, Any]]:
         """NORMALIZED rows: [{"title": str}]. Receipt only, never evidence."""
@@ -173,18 +173,46 @@ class HermesChatEzlynxDestinationVerifier:
                 return self._fail(
                     expected,
                     observed,
-                    "document library read failed; cannot confirm the uploaded document",
+                    "DocumentApi search failed; cannot confirm the uploaded document",
                     locator=policy_number,
                     retryable=True,
                     authoritative=True,  # The policy read succeeded; preserve that partial evidence.
                 )
             seen = [str(r.get("name") or "") for r in rows]
             observed["documents_seen"] = seen[:25]
-            missing = [
-                name for name in expected_documents
-                if not any(_norm(name) == _norm(s) for s in seen)
-            ]
+            observed["documents_read_method"] = (
+                "DocumentApi/documents/v1/account/{id}/document-search"
+            )
+            missing: list[str] = []
+            downloaded_ids: list[str] = []
+            for name in expected_documents:
+                match = next(
+                    (row for row in rows if _norm(row.get("name")) == _norm(name)),
+                    None,
+                )
+                doc_id = str((match or {}).get("id") or "").strip()
+                if not match or not doc_id.isdigit():
+                    missing.append(name)
+                    continue
+                try:
+                    body = self._port.download_document(doc_id)
+                except Exception as exc:
+                    observed["documents_error"] = f"{type(exc).__name__}: {exc}"
+                    return self._fail(
+                        expected,
+                        observed,
+                        "DocumentApi download failed; cannot confirm the uploaded document",
+                        locator=policy_number,
+                        retryable=True,
+                        authoritative=True,
+                    )
+                raw = getattr(body, "body", body)
+                if not raw:
+                    missing.append(name)
+                    continue
+                downloaded_ids.append(doc_id)
             observed["documents_missing"] = missing
+            observed["document_ids"] = downloaded_ids
             documents_ok = not missing
 
         # ---- 3. The note. RECEIPT ONLY. Never gates authoritative. ------
@@ -212,8 +240,8 @@ class HermesChatEzlynxDestinationVerifier:
         error = None
         if not documents_ok:
             error = (
-                "policy confirmed but expected document(s) not found in the "
-                f"applicant document library: {observed.get('documents_missing')}"
+                "policy confirmed but expected document(s) not found in "
+                f"DocumentApi: {observed.get('documents_missing')}"
             )
         # Identity fields the Job Engine complete-guard compares expected vs observed.
         # These are the same values already proven above; they are not a second claim.
@@ -224,7 +252,7 @@ class HermesChatEzlynxDestinationVerifier:
 
         evidence = VerificationEvidence(
             method="EZLYNX_API_DESTINATION_READBACK",
-            source="ezlynx-policyapi+documentlibrary",
+            source="ezlynx-policyapi+documentapi",
             expected=expected,
             observed=observed,
             # Authoritative because every field above came from a fresh
@@ -250,7 +278,7 @@ class HermesChatEzlynxDestinationVerifier:
     ) -> VerificationResult:
         evidence = VerificationEvidence(
             method="EZLYNX_API_DESTINATION_READBACK",
-            source="ezlynx-policyapi+documentlibrary",
+            source="ezlynx-policyapi+documentapi",
             expected=expected,
             observed=observed,
             authoritative=authoritative,

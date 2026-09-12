@@ -1,23 +1,35 @@
-"""EZLynx Documents API client (DocumentApi scope).
+"""EZLynx OAuth client (DocumentApi + PolicyApi + DiscussionApi).
 
-Read-only document retrieval through the EZLynx vendor API. This is the
-operational path the verification workers use to pull renewal, audit,
-mortgagee, and policy-change documents without driving the EZLynx portal
-in a browser.
+DocumentApi is the authoritative documents list + download path for Chat
+destination verification. Classic ``documentlibrary/list`` may still list,
+but classic download is not used for dest evidence (it 500s with
+"Authorization code not run").
+
+Proven 2026-09-11 on hermes-poc-01 as agency user SSRobie against ROBIE
+Test applicant 220250093 (Freshdesk #2020636 / Applied Gazala):
+
+  GET  {host}/documentapi/documents/v1/account/{ApplicantID}/document-search
+  GET  {host}/documentapi/documents/v1/{DocumentID}/download
+  POST {host}/DocumentApi/documents/v1/account/{ApplicantID}/document
+
+Use ``results[].id``. Never ``documentUrl`` (old/wrong base URL).
+Upload is write-gated to the ROBIE Test allowlist (220250093).
 
 Authentication uses the OAuth2 ``vendor_data_access`` grant against the
-EZLynx token endpoint. Credentials are loaded only from a Secret Manager
-JSON version reference; they are never accepted in a Job payload, logged,
-or written to disk. Error messages are redacted.
+EZLynx token endpoint. The Secret Manager ``username`` field is the
+agency user (SSRobie). Never authenticate DocumentApi as vendor user
+``ssr_userPROD`` — that 403s on agency applicants. ``vendor_username``
+may exist in the JSON for other uses and is never sent on the token
+form. The JSON password is the vendor password and is not loaded here;
+classic SSRobie login stays ``ezlynx-username`` / ``ezlynx-password``.
+
+Credentials are loaded only from a Secret Manager JSON version
+reference; they are never accepted in a Job payload, logged, or written
+to disk. Error messages are redacted.
 
 Environment mapping (must match ROBIE_ENV):
   TEST        -> UAT credentials (app.uatezlynx.com)
   PRODUCTION  -> Production credentials (app.ezlynx.com)
-
-DocumentApi endpoint paths are confirmed by
-``scripts/probe_ezlynx_document_api.py`` before any worker calls them;
-until then, workers use the generic :meth:`EzlynxApiClient.api_get` with
-a probed path.
 """
 
 from __future__ import annotations
@@ -26,10 +38,12 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 from urllib import error, parse, request
 from urllib.parse import quote, urlparse
 
+from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .secret_manager import GoogleSecretManagerAccessor, SecretAccessor
 from .secrets import redact_text
@@ -52,10 +66,20 @@ REQUIRED_CONFIG_FIELDS = (
 )
 # Classic documentlibrary/list auth. Optional in the Secret Manager JSON.
 # Missing values raise a clear error only when a classic list is attempted.
+# Classic SSRobie login is ezlynx-username / ezlynx-password, not this JSON.
 CLASSIC_TOKEN_KEYS = ("ez_token", "EZToken")
 CLASSIC_SECRET_KEYS = ("ez_app_secret", "EZAppSecret")
 CLASSIC_USER_KEYS = ("account_username", "AccountUsername")
 CLASSIC_BASE_KEYS = ("classic_base_url", "classic_document_base_url")
+VENDOR_USERNAME_KEYS = ("vendor_username", "VendorUsername")
+# Vendor integration user. DocumentApi 403s on agency applicants with this.
+VENDOR_DOCUMENT_API_USERNAMES = frozenset({"ssr_userprod"})
+
+# Proven Production/UAT path shapes. Hosts: app.ezlynx.com / app.uatezlynx.com.
+DOCUMENT_API_SEARCH_PATH = "/documentapi/documents/v1/account/{applicant_id}/document-search"
+DOCUMENT_API_DOWNLOAD_PATH = "/documentapi/documents/v1/{document_id}/download"
+DOCUMENT_API_UPLOAD_PATH = "/DocumentApi/documents/v1/account/{applicant_id}/document"
+DEFAULT_POLICY_MASTER_ID = "0"
 DOCUMENT_RECORD_KEYS = (
     "Records",
     "records",
@@ -102,6 +126,7 @@ class EzlynxApiConfig:
     ez_token: str = ""
     ez_app_secret: str = ""
     account_username: str = ""
+    vendor_username: str = ""
 
     def __repr__(self) -> str:
         return (
@@ -110,7 +135,8 @@ class EzlynxApiConfig:
             "client_secret=<redacted>, username=<redacted>, "
             "integration_group_id=<redacted>, scope=<redacted>, "
             "classic_base_url=<redacted>, ez_token=<redacted>, "
-            "ez_app_secret=<redacted>, account_username=<redacted>)"
+            "ez_app_secret=<redacted>, account_username=<redacted>, "
+            "vendor_username=<redacted>)"
         )
 
 
@@ -164,6 +190,7 @@ def load_ezlynx_api_config(
         ez_token=_optional_secret_field(payload, CLASSIC_TOKEN_KEYS),
         ez_app_secret=_optional_secret_field(payload, CLASSIC_SECRET_KEYS),
         account_username=_optional_secret_field(payload, CLASSIC_USER_KEYS),
+        vendor_username=_optional_secret_field(payload, VENDOR_USERNAME_KEYS),
     )
 
 
@@ -216,6 +243,147 @@ def document_display_fields(row: Any) -> dict[str, str]:
     }
 
 
+def is_vendor_document_api_username(username: str) -> bool:
+    """True for the vendor integration user that 403s on agency DocumentApi."""
+    folded = str(username or "").strip().casefold()
+    return folded in VENDOR_DOCUMENT_API_USERNAMES or folded.startswith("ssr_user")
+
+
+def _document_api_result_rows(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    results = payload.get("results")
+    if isinstance(results, list):
+        return results
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return data["results"]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def extract_document_api_results(payload: Any) -> list[dict[str, str]]:
+    """Normalize DocumentApi search rows. Use ``results[].id`` only.
+
+    ``documentUrl`` is the old/wrong base URL and is never used as the
+    identifier, even when ``id`` is missing.
+    """
+    out: list[dict[str, str]] = []
+    for row in _document_api_result_rows(payload):
+        if not isinstance(row, dict):
+            continue
+        raw_id = row.get("id")
+        if raw_id is None or isinstance(raw_id, bool):
+            continue
+        document_id = str(raw_id).strip()
+        if not document_id or not document_id.isdigit():
+            continue
+        name = (
+            row.get("documentName")
+            or row.get("DocumentName")
+            or row.get("name")
+            or row.get("Name")
+            or row.get("fileName")
+            or row.get("FileName")
+            or row.get("description")
+            or row.get("Description")
+            or ""
+        )
+        out.append({"id": document_id, "name": str(name or "").strip()})
+    return out
+
+
+def parse_uploaded_document_id(raw: bytes) -> str:
+    """Parse a DocumentApi upload 200 body. The proven body is a numeric id."""
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise EzlynxApiError(None, "DocumentApi upload returned empty body")
+    parsed: Any
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = text
+    if isinstance(parsed, bool):
+        raise EzlynxApiError(None, "DocumentApi upload returned a non-numeric document id")
+    if isinstance(parsed, int):
+        if parsed <= 0:
+            raise EzlynxApiError(None, "DocumentApi upload returned a non-numeric document id")
+        return str(parsed)
+    if isinstance(parsed, str) and parsed.strip().isdigit():
+        return parsed.strip()
+    raise EzlynxApiError(None, "DocumentApi upload returned a non-numeric document id")
+
+
+def encode_multipart_document_upload(
+    *,
+    document_name: str,
+    filename: str,
+    file_bytes: bytes,
+    policy_master_id: str,
+    file_content_type: str = "application/octet-stream",
+) -> tuple[bytes, str]:
+    """Build multipart/form-data for DocumentApi upload. Field names are proven."""
+    boundary = "----RobieDocumentApiBoundary" + os.urandom(16).hex()
+    crlf = b"\r\n"
+
+    def _text_part(name: str, value: str) -> bytes:
+        return (
+            f"--{boundary}".encode("ascii")
+            + crlf
+            + f'Content-Disposition: form-data; name="{name}"'.encode("utf-8")
+            + crlf
+            + crlf
+            + str(value).encode("utf-8")
+            + crlf
+        )
+
+    safe_name = _safe_upload_filename(filename)
+    header = (
+        f"--{boundary}".encode("ascii")
+        + crlf
+        + (
+            f'Content-Disposition: form-data; name="File"; filename="{safe_name}"'
+        ).encode("utf-8")
+        + crlf
+        + f"Content-Type: {file_content_type}".encode("ascii")
+        + crlf
+        + crlf
+    )
+    body = (
+        _text_part("DocumentName", document_name)
+        + header
+        + file_bytes
+        + crlf
+        + _text_part("PolicyMasterId", policy_master_id)
+        + f"--{boundary}--".encode("ascii")
+        + crlf
+    )
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+def _safe_upload_filename(name: str) -> str:
+    base = Path(str(name or "").strip()).name or "document.bin"
+    return base.replace('"', "_").replace("\r", "").replace("\n", "")
+
+
+@dataclass(frozen=True, repr=False)
+class EzlynxDocumentDownload:
+    """Raw DocumentApi download. Content-Type comes from the HTTP response."""
+
+    document_id: str
+    body: bytes
+    content_type: str
+
+    def __repr__(self) -> str:
+        return (
+            f"EzlynxDocumentDownload(document_id={self.document_id!r}, "
+            f"body=<{len(self.body)} bytes>, content_type={self.content_type!r})"
+        )
+
+
 def _urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int):
     req = request.Request(url, data=data, headers=headers)
     return request.urlopen(req, timeout=timeout)
@@ -240,6 +408,17 @@ class EzlynxApiClient:
         self._token: str | None = None
         self._token_expires_at: float = 0.0
 
+    def _agency_document_api_username(self) -> str:
+        """Secret Manager ``username`` (SSRobie). Never ``vendor_username`` / ssr_userPROD."""
+        username = str(self._config.username or "").strip()
+        if is_vendor_document_api_username(username):
+            raise EzlynxApiConfigurationError(
+                "DocumentApi must authenticate as the agency username, not the vendor user"
+            )
+        if not username:
+            raise EzlynxApiConfigurationError("DocumentApi username is missing")
+        return username
+
     def get_token(self) -> str:
         """Return a cached bearer token, refreshing it when expired."""
         now = self._clock()
@@ -250,7 +429,7 @@ class EzlynxApiClient:
             "client_secret": self._config.client_secret,
             "grant_type": GRANT_TYPE,
             "scope": self._config.scope,
-            "username": self._config.username,
+            "username": self._agency_document_api_username(),
             "integration_group_id": self._config.integration_group_id,
         }
         body = self._post_form(
@@ -306,6 +485,38 @@ class EzlynxApiClient:
         if not isinstance(parsed, (dict, list)):
             raise EzlynxApiError(None, "EZLynx API returned unexpected shape")
         return parsed
+
+    def _response_content_type(self, resp: Any) -> str:
+        headers = getattr(resp, "headers", None) or {}
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            return str(getter("Content-Type") or getter("content-type") or "").strip()
+        return ""
+
+    def _request_bytes(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: bytes | None,
+        headers: dict[str, str],
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        error_label: str = "EZLynx API",
+    ) -> tuple[bytes, str]:
+        try:
+            resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
+            return resp.read(), self._response_content_type(resp)
+        except error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+            except Exception:  # noqa: BLE001 - best effort detail only
+                detail = ""
+            raise EzlynxApiError(
+                exc.code, f"{error_label} {method} failed: HTTP {exc.code} {detail}"
+            ) from exc
+        except (error.URLError, TimeoutError, OSError) as exc:
+            raise EzlynxApiError(None, f"{error_label} {method} transport failed") from exc
 
     def api_get(
         self,
@@ -374,7 +585,11 @@ class EzlynxApiClient:
         page_size: int = 200,
         policy_id: int = 0,
     ) -> dict[str, Any]:
-        """Classic GET documentlibrary/list. Do not use OAuth DocumentApi for list."""
+        """Classic GET documentlibrary/list.
+
+        Destination verification does not use this path. Authoritative docs
+        evidence is DocumentApi search + download by ``results[].id``.
+        """
         applicant = str(applicant_id or "").strip()
         if not applicant:
             raise EzlynxApiError(None, "applicant id is required")
@@ -453,3 +668,101 @@ class EzlynxApiClient:
             ) from exc
         except (error.URLError, TimeoutError, OSError) as exc:
             raise EzlynxApiError(None, "EZLynx API download transport failed") from exc
+
+    def search_applicant_documents(self, applicant_id: str) -> dict[str, Any]:
+        """OAuth GET DocumentApi document-search. Read-only.
+
+        Proven path: ``/documentapi/documents/v1/account/{ApplicantID}/document-search``.
+        Callers must use ``results[].id``, never ``documentUrl``.
+        """
+        applicant = str(applicant_id or "").strip()
+        if not applicant:
+            raise EzlynxApiError(None, "applicant id is required")
+        url = self._origin() + DOCUMENT_API_SEARCH_PATH.format(
+            applicant_id=quote(applicant, safe="")
+        )
+        headers = {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Accept": "application/json",
+        }
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"results": parsed}
+
+    def download_document(self, document_id: str) -> EzlynxDocumentDownload:
+        """OAuth GET DocumentApi download. Read-only. Returns file bytes.
+
+        Proven path: ``/documentapi/documents/v1/{DocumentID}/download``.
+        ``documentUrl`` from search is never followed.
+        """
+        doc_id = str(document_id or "").strip()
+        if not doc_id or not doc_id.isdigit():
+            raise EzlynxApiError(None, "document id is required")
+        url = self._origin() + DOCUMENT_API_DOWNLOAD_PATH.format(
+            document_id=quote(doc_id, safe="")
+        )
+        headers = {"Authorization": f"Bearer {self.get_token()}"}
+        body, content_type = self._request_bytes(
+            "GET",
+            url,
+            data=None,
+            headers=headers,
+            error_label="EZLynx DocumentApi",
+        )
+        if not body:
+            raise EzlynxApiError(None, "DocumentApi download returned empty body")
+        return EzlynxDocumentDownload(
+            document_id=doc_id, body=body, content_type=content_type
+        )
+
+    def upload_applicant_document(
+        self,
+        applicant_id: str,
+        document_name: str,
+        file_bytes: bytes,
+        *,
+        filename: str | None = None,
+        policy_master_id: str | int | None = None,
+        file_content_type: str = "application/octet-stream",
+    ) -> str:
+        """OAuth POST DocumentApi upload. Write-gated to ROBIE Test 220250093.
+
+        Proven path: ``/DocumentApi/documents/v1/account/{ApplicantID}/document``.
+        Multipart fields: DocumentName, File, PolicyMasterId (default ``0``).
+        200 body is a numeric document id. Never uploads to a live applicant.
+        """
+        applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+        name = str(document_name or "").strip()
+        if not name:
+            raise EzlynxApiError(None, "document name is required")
+        if not file_bytes:
+            raise EzlynxApiError(None, "document bytes are required")
+        master = str(
+            DEFAULT_POLICY_MASTER_ID if policy_master_id in (None, "") else policy_master_id
+        ).strip()
+        if not master:
+            master = DEFAULT_POLICY_MASTER_ID
+        url = self._origin() + DOCUMENT_API_UPLOAD_PATH.format(
+            applicant_id=quote(applicant, safe="")
+        )
+        body, content_type = encode_multipart_document_upload(
+            document_name=name,
+            filename=filename or name,
+            file_bytes=file_bytes,
+            policy_master_id=master,
+            file_content_type=file_content_type,
+        )
+        headers = {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Content-Type": content_type,
+            "Accept": "text/plain",
+        }
+        raw, _ = self._request_bytes(
+            "POST",
+            url,
+            data=body,
+            headers=headers,
+            error_label="EZLynx DocumentApi",
+        )
+        return parse_uploaded_document_id(raw)

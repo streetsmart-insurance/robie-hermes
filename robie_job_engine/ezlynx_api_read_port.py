@@ -4,14 +4,13 @@ Split out of chat_ezlynx_destination_verifier.py so the verifier stays pure
 logic and the IO lives on its own. Read-only: search, list, read. It never
 posts and never mutates.
 
-Normalization happens HERE, not in the verifier. api_client's own docstring
-warns the document envelope varies by tenant ("do not assume
-Records/DocumentList or DocumentName/PolicyNumber"), which is why
-extract_document_records / document_display_fields exist.
+Documents go through DocumentApi (proven 2026-09-11 as SSRobie):
 
-Documents go through the CLASSIC endpoint
-    GET /ezlynxapi/api/documentlibrary/list/{applicant}/{page}/{size}/{policyId}
-because the OAuth DocumentApi scope returns 403 for this integration group.
+    GET {host}/documentapi/documents/v1/account/{ApplicantID}/document-search
+    GET {host}/documentapi/documents/v1/{DocumentID}/download
+
+Use ``results[].id``. Never ``documentUrl``. Classic
+``documentlibrary/list`` and classic download are not the dest-evidence path.
 """
 
 from __future__ import annotations
@@ -44,25 +43,23 @@ class EzlynxApiClientReadPort:
     def documents_for_applicant(
         self, applicant_id: str, policy_id: int = 0
     ) -> list[dict[str, Any]]:
-        from .ezlynx_api import document_display_fields, extract_document_records
+        from .ezlynx_api import extract_document_api_results
 
-        payload = self._require_client().list_applicant_documents(
-            applicant_id, page_index=1, page_size=200, policy_id=policy_id
-        )
-        rows = extract_document_records(payload)
+        del policy_id
+        payload = self._require_client().search_applicant_documents(applicant_id)
         out: list[dict[str, Any]] = []
-        for row in rows:
-            fields = document_display_fields(row) or {}
+        for row in extract_document_api_results(payload):
             out.append(
                 {
-                    "name": fields.get("name")
-                    or fields.get("description")
-                    or row.get("Description")
-                    or "",
-                    "policy_id": row.get("PolicyId"),
+                    "id": row["id"],
+                    "name": row.get("name") or "",
                 }
             )
         return out
+
+    def download_document(self, document_id: str) -> bytes:
+        downloaded = self._require_client().download_document(document_id)
+        return downloaded.body
 
     def discussions_for_applicant(self, applicant_id: str) -> list[dict[str, Any]]:
         rows = self._require_client().get_applicant_discussions(applicant_id, page_size=50) or []
