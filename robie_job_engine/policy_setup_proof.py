@@ -86,23 +86,52 @@ def search_first_create(
         effective_date=effective_date,
         expiration_date=expiration_date,
     )
+    # The create endpoint returns the new policy ID as a bare scalar
+    # (string or number). Capture it for fallback if read-back lags.
+    create_resp = created.get("response")
+    create_policy_id = None
+    if isinstance(create_resp, (str, int)):
+        pid = str(create_resp).strip().strip('"')
+        if pid and pid.lstrip('-').isdigit():
+            create_policy_id = pid
+    elif isinstance(create_resp, dict):
+        for k in ("policyId", "policyID", "PolicyId", "id", "policy_id"):
+            if create_resp.get(k):
+                create_policy_id = str(create_resp[k])
+                break
     report["create"] = {
         "request_payload": created.get("request_payload"),
         "response": created.get("response"),
+        "policy_id": create_policy_id,
     }
     # Read back through search to prove destination state.
-    recheck = client.search_policy_by_number(policy_number)
-    rrows = recheck.get("data") if isinstance(recheck, dict) else None
+    # Retry with delay: the new policy may not be searchable immediately
+    # (eventual consistency). Up to 3 attempts, 3s apart.
+    import time as _time
     rmatch = None
-    if isinstance(rrows, list):
-        for row in rrows:
-            if isinstance(row, dict) and str(row.get("policyNumber") or row.get("PolicyNumber") or "").strip() == policy_number:
-                rmatch = row
-                break
-    elif isinstance(rrows, dict):
-        rmatch = rrows
+    for attempt in range(3):
+        recheck = client.search_policy_by_number(policy_number)
+        rrows = recheck.get("data") if isinstance(recheck, dict) else None
+        if isinstance(rrows, list):
+            for row in rrows:
+                if isinstance(row, dict) and str(row.get("policyNumber") or row.get("PolicyNumber") or "").strip() == policy_number:
+                    rmatch = row
+                    break
+        elif isinstance(rrows, dict):
+            rmatch = rrows
+        if rmatch is not None:
+            break
+        if attempt < 2:
+            _time.sleep(3)
     report["read_back"] = rmatch
-    report["verdict"] = "CREATED_AND_READ_BACK" if rmatch else "CREATED_NO_READ_BACK"
+    if rmatch:
+        report["verdict"] = "CREATED_AND_READ_BACK"
+    elif create_policy_id:
+        # Create succeeded and returned an ID, but search hasn't caught up yet.
+        # The caller can proceed with the create ID.
+        report["verdict"] = "CREATED_ID_FROM_CREATE_RESPONSE"
+    else:
+        report["verdict"] = "CREATED_NO_READ_BACK"
     return report
 
 
