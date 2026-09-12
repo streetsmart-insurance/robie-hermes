@@ -309,6 +309,78 @@ class PlaywrightArtifactFailClosedTests(unittest.TestCase):
         self.assertIn("do not retry-loop", str(timeout_raised.exception))
         self.assertNotIn("PLAYWRIGHT_FAIL_CLOSED", str(timeout_raised.exception))
 
+        # A wait expiring (e.g. networkidle, wait_for_load_state, goto) is PLAYWRIGHT_TIMEOUT, not PLAYWRIGHT_BLOCKED
+        with self.assertRaises(RuntimeError) as idle_raised:
+            self.tool.relabel_user_exec_exception(
+                PlaywrightTimeoutError(
+                    "Timeout 30000ms exceeded.\n"
+                    "waiting for load state \"networkidle\""
+                )
+            )
+        self.assertIn("PLAYWRIGHT_TIMEOUT", str(idle_raised.exception))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", str(idle_raised.exception))
+
+        with self.assertRaises(RuntimeError) as goto_raised:
+            self.tool.relabel_user_exec_exception(
+                PlaywrightTimeoutError(
+                    "page.goto: Timeout 30000ms exceeded.\n"
+                    "Call log:\n"
+                    "  - navigating to \"https://app.ezlynx.com/web/account/220250093/policies\", waiting until \"domcontentloaded\""
+                )
+            )
+        self.assertIn("PLAYWRIGHT_TIMEOUT", str(goto_raised.exception))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", str(goto_raised.exception))
+
+    def test_runner_failure_error_differentiates_timeout_from_guard_refusal(self):
+        # Networkidle timeout gets PLAYWRIGHT_TIMEOUT marker
+        idle_err = self.tool.runner_failure_error(
+            "playwright._impl._errors.TimeoutError: Timeout 30000ms exceeded.\n"
+            "waiting for load state \"networkidle\""
+        )
+        self.assertTrue(idle_err.startswith("PLAYWRIGHT_TIMEOUT:"))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", idle_err)
+
+        # Subprocess execution timeout gets PLAYWRIGHT_TIMEOUT marker
+        timeout_err = self.tool.runner_failure_error(
+            "PLAYWRIGHT_TIMEOUT: execution exceeded 90 seconds; "
+            "the runner was cancelled and the persistent browser was preserved; "
+            "the browser state was not verified"
+        )
+        self.assertTrue(timeout_err.startswith("PLAYWRIGHT_TIMEOUT:"))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", timeout_err)
+
+        # Real guard refusal gets PLAYWRIGHT_BLOCKED marker
+        guard_err = self.tool.runner_failure_error(
+            "PLAYWRIGHT_BLOCKED: write target was chosen by position, "
+            "not unique identity; .first/.nth/.last guesses are refused"
+        )
+        self.assertTrue(guard_err.startswith("PLAYWRIGHT_BLOCKED:"))
+        self.assertNotIn("PLAYWRIGHT_TIMEOUT", guard_err)
+
+    def test_subprocess_timeout_expired_returns_playwright_timeout(self):
+        timeout_exc = self.tool.subprocess.TimeoutExpired(cmd=["test"], timeout=10)
+
+        class _TimeoutProc(_FakeProc):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.calls = 0
+
+            def communicate(self, input=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise timeout_exc
+                return ("", "")
+
+        with patch.object(
+            self.tool.subprocess,
+            "Popen",
+            return_value=_TimeoutProc(1),
+        ), patch.object(self.tool.os, "killpg", return_value=None):
+            result = self.tool.playwright_exec("page.wait_for_timeout(999999)")
+        self.assertFalse(result.get("ok", True))
+        self.assertIn("PLAYWRIGHT_TIMEOUT", result["error"])
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,9 +55,44 @@ def empty_or_missing_artifact_error(detail: object) -> str | None:
     return None
 
 
+def runner_timeout_error(detail: object) -> str | None:
+    """Return PLAYWRIGHT_TIMEOUT text if this is a wait/load state expiration.
+
+    A wait expiring (e.g. networkidle, wait_for_load_state, goto timeout)
+    is not a security guard refusing.
+    """
+    text = str(detail or "")
+    if not text.strip():
+        return None
+    if "PLAYWRIGHT_BLOCKED" in text:
+        return None
+    if "PLAYWRIGHT_TIMEOUT" in text:
+        clean = text.strip()
+        return clean if clean.startswith("PLAYWRIGHT_TIMEOUT:") else f"PLAYWRIGHT_TIMEOUT: {clean}"
+    lowered = text.casefold()
+    if (
+        "networkidle" in lowered
+        or "waiting for load state" in lowered
+        or "page.goto: timeout" in lowered
+        or "page.wait_for" in lowered
+        or (
+            "timeouterror" in lowered
+            and "locator." not in lowered
+            and "attempting fill" not in lowered
+            and "combobox" not in lowered
+        )
+    ):
+        return f"PLAYWRIGHT_TIMEOUT: {text}"
+    return None
+
+
 def runner_failure_error(detail: str) -> str:
-    """Map a failed exec to fail-closed artifact text or PLAYWRIGHT_BLOCKED."""
-    return empty_or_missing_artifact_error(detail) or f"PLAYWRIGHT_BLOCKED: {detail}"
+    """Map a failed exec to fail-closed artifact text, timeout, or PLAYWRIGHT_BLOCKED."""
+    return (
+        empty_or_missing_artifact_error(detail)
+        or runner_timeout_error(detail)
+        or f"PLAYWRIGHT_BLOCKED: {detail}"
+    )
 
 
 def wait_for_cdp_json_version(
@@ -187,6 +222,8 @@ def relabel_user_exec_exception(exc: BaseException) -> None:
     fill/click/select_option/type (or a hidden / combobox control) is the
     same PLAYWRIGHT_BLOCKED class as unique-write: ask Gemini then HITL
     Carlo; do not retry-loop. Unique-write PLAYWRIGHT_BLOCKED is left intact.
+    A wait expiring (such as networkidle, wait_for_load_state, goto timeout)
+    is PLAYWRIGHT_TIMEOUT, not a guard refusing.
     """
     name = type(exc).__name__
     text = f"{name}: {exc}"
@@ -194,7 +231,7 @@ def relabel_user_exec_exception(exc: BaseException) -> None:
     mapped = empty_or_missing_artifact_error(f"{path} {text}")
     if mapped:
         raise RuntimeError(mapped) from exc
-    if "PLAYWRIGHT_BLOCKED" in text or "PLAYWRIGHT_FAIL_CLOSED" in text:
+    if "PLAYWRIGHT_BLOCKED" in text or "PLAYWRIGHT_FAIL_CLOSED" in text or "PLAYWRIGHT_TIMEOUT" in text:
         raise exc
     timeout = (
         isinstance(exc, TimeoutError)
@@ -230,6 +267,7 @@ def relabel_user_exec_exception(exc: BaseException) -> None:
                 f"PLAYWRIGHT_BLOCKED: {text}; "
                 "ask Gemini then HITL Carlo; do not retry-loop"
             ) from exc
+        raise RuntimeError(f"PLAYWRIGHT_TIMEOUT: {text}") from exc
     raise exc
 
 
@@ -555,7 +593,7 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             proc.communicate()
         return _finish(
             tool_error(
-                f"PLAYWRIGHT_BLOCKED: execution exceeded {timeout} seconds; "
+                f"PLAYWRIGHT_TIMEOUT: execution exceeded {timeout} seconds; "
                 "the runner was cancelled and the persistent browser was preserved; "
                 "the browser state was not verified"
             )
