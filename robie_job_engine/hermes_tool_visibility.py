@@ -119,10 +119,11 @@ def expose_guarded_browser(toolsets=None, *, action_type=None, env=None, argv=No
         raise RuntimeError("Unsupported Hermes direct-tool visibility interface")
     if "playwright_exec" not in core:
         core.append("playwright_exec")
-    # Email/Chat jobs that create a homeowners policy must use the engine's
-    # structured policy-setup tool, not wander with playwright_exec.
-    if "ezlynx_policy_setup" not in core:
-        core.append("ezlynx_policy_setup")
     if is_email_or_chat_worker(action_type=action_type, env=env, argv=argv):
+        # Email/Chat jobs that create a homeowners policy must use the engine's
+        # structured policy-setup tool, not wander with playwright_exec.
+        # Interactive desktop core is untouched.
+        if "ezlynx_policy_setup" not in core:
+            core.append("ezlynx_policy_setup")
         _hide_execute_code_from_core(core)
     install_email_chat_schema_filter()
