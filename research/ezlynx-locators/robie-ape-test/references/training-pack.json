@@ -1,0 +1,204 @@
+{
+  "schema_version": "1.0",
+  "name": "robie-ape-test",
+  "display_name": "Robie APE Test",
+  "description": "Train and evaluate Robie on approved Application/Policy Entry workflows in EZLynx using Test-only Playwright observation and dry runs.",
+  "status": "DRAFT",
+  "environment": "TEST",
+  "production_ready": false,
+  "target": {
+    "system": "EZLynx",
+    "approved_identity": "ROBIE Test LLC",
+    "account_id": "220250093"
+  },
+  "browser_contract": {
+    "engine": "Playwright",
+    "allowed_modes": ["observe_only", "dry_run"],
+    "requires_unique_semantic_locators": true,
+    "requires_explicit_readback": true,
+    "coordinates_allowed": false
+  },
+  "sources": [
+    {
+      "type": "google_sheet",
+      "label": "Policies-Application/Policy Entry (APE)",
+      "id": "1OTrvGJR9GlzH9b_JBkvpIVT-XZ_UQuUcIwYWtc3Bs-A",
+      "url": "https://docs.google.com/spreadsheets/d/1OTrvGJR9GlzH9b_JBkvpIVT-XZ_UQuUcIwYWtc3Bs-A/edit",
+      "tabs": [
+        {"title": "Personal Lines Policy", "gid": 1527186573},
+        {"title": "Commercial Lines Policy", "gid": 1595746460},
+        {"title": "Trucking Lines Policy", "gid": 810810458, "scope": "excluded"},
+        {"title": "Generic LOB", "gid": 418791581}
+      ],
+      "role": "workflow guidance; subordinate to approved SOP and policy fixture"
+    },
+    {
+      "type": "repository_skill",
+      "label": "EZLynx Policy Setup draft",
+      "id": "skills/ezlynx-policy-setup",
+      "role": "supported profile catalog and fail-closed policy contract"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "homeowners",
+      "lob": "Homeowners",
+      "source": {"tab": "Personal Lines Policy", "row": 6},
+      "video_urls": ["https://www.loom.com/share/f05774171d434032811b2e3eb9fd5734"],
+      "guards": ["Never infer Full Value treatment", "Mortgagee billing instruction must come from the fixture"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "dwelling-fire",
+      "lob": "Dwelling Fire",
+      "source": {"tab": "Personal Lines Policy", "row": 4},
+      "video_urls": [],
+      "guards": ["Mailing-versus-location handling must be case specific"],
+      "blockers": ["Sheet states an unapproved absolute mailing-versus-location rule"],
+      "readiness": "BLOCKED-CORRECTLY",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "businessowners-policy",
+      "lob": "Businessowners Policy",
+      "source": {"tab": "Commercial Lines Policy", "row": 3},
+      "video_urls": ["https://www.loom.com/share/dc0d74328429498183e342992fcb4aa7"],
+      "guards": ["Do not infer Special Form", "Confirm policy-level versus location-level placement"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "commercial-package",
+      "lob": "Commercial Package",
+      "source": {"tab": "Commercial Lines Policy", "row": 4},
+      "video_urls": ["https://www.loom.com/share/50e461126ea5412fa87289ab06cd3469"],
+      "guards": ["Coverage basis and aggregate basis must be explicit"],
+      "blockers": ["Sheet suggests Per Policy when aggregate basis is unclear"],
+      "readiness": "BLOCKED-CORRECTLY",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "commercial-auto-contractors",
+      "lob": "Commercial Auto - Contractors",
+      "source": {"tab": "Commercial Lines Policy", "row": 2},
+      "video_urls": ["https://www.loom.com/share/0f1a1709f5264e15939b0c048cea6028"],
+      "guards": ["Never reuse this profile for trucking"],
+      "blockers": ["Source row is generic Commercial Auto Liability and does not certify the Contractors variant"],
+      "readiness": "BLOCKED-CORRECTLY",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "commercial-property",
+      "lob": "Commercial Property",
+      "source": {"tab": "Commercial Lines Policy", "row": 5},
+      "video_urls": ["https://www.loom.com/share/48d74e22a77a481d8268fe30c6947376"],
+      "guards": ["Every location needs an explicit building or approved exception"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "commercial-umbrella",
+      "lob": "Commercial Umbrella",
+      "source": {"tab": "Commercial Lines Policy", "row": 6},
+      "video_urls": ["https://www.loom.com/share/a491c3ab97dd4f33b3a3aa8e077f230c"],
+      "guards": ["Retained limit and defense basis must be explicit", "Verify underlying policies from the fixture"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "crime",
+      "lob": "Crime",
+      "source": {"tab": "Commercial Lines Policy", "row": 7},
+      "video_urls": ["https://www.loom.com/share/69a0c734285c466da1c11f9fcf889870"],
+      "guards": ["Do not default to Discovery basis"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "errors-omissions",
+      "lob": "Errors and Omissions",
+      "source": {"tab": "Commercial Lines Policy", "row": 12},
+      "video_urls": ["https://www.loom.com/share/5bc7644048f34c02a74ef8d4812c62bc"],
+      "guards": ["Use E&O rather than generic Professional Liability", "Financial and claims fields must come from the fixture"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "garage-dealers",
+      "lob": "Garage and Dealers Policy",
+      "source": {"tab": "Commercial Lines Policy", "row": 13},
+      "video_urls": ["https://www.loom.com/share/2e53898e240a4036a0c8c63c2b796a9e"],
+      "guards": ["Operation and coverage basis must be explicit"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "general-liability",
+      "lob": "General Liability",
+      "source": {"tab": "Commercial Lines Policy", "row": 14},
+      "video_urls": ["https://www.loom.com/share/b507be54b3df45e3afcb95f37fa39015"],
+      "guards": ["Coverage basis and aggregate basis must be explicit", "If-any exposure requires clarification"],
+      "blockers": ["Sheet suggests Per Policy when aggregate basis is unclear"],
+      "readiness": "BLOCKED-CORRECTLY",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    },
+    {
+      "id": "bonds-limited",
+      "lob": "Bonds - limited variants",
+      "source": {"tab": "Generic LOB", "row": 2},
+      "video_urls": ["https://www.loom.com/share/c3f9239853414b9abeed93f432f3edfb"],
+      "guards": ["Only Employee Dishonesty and Home Improvement Bond are in scope", "Bid and Performance Bonds return NEEDS-SKILL"],
+      "blockers": [],
+      "readiness": "READY-FOR-GUIDED-TEST",
+      "mode": "observe_only",
+      "consequential_writes_enabled": false
+    }
+  ],
+  "out_of_scope": [
+    "All Trucking Lines Policy tab workflows",
+    "All APE rows outside the 12 current Policy Setup profiles",
+    "Any workflow lacking approved guidance for an ambiguous field",
+    "Any consequential browser write"
+  ],
+  "evaluation": {
+    "policy_router_understanding": {
+      "score": "PASS",
+      "evidence": "Static source reconciliation and explicit profile routing"
+    },
+    "browser_behavior": {
+      "score": "NOT-RUN",
+      "evidence": "Requires supervised Playwright observation in Robie Test"
+    },
+    "assignment_handling": {
+      "score": "NOT-RUN",
+      "evidence": "Requires sanitized APE fixture"
+    },
+    "verification_outcome": {
+      "score": "NOT-RUN",
+      "evidence": "No write or reopen verification is authorized in this draft"
+    },
+    "ambiguity_permission_boundaries": {
+      "score": "PASS",
+      "evidence": "Known source conflicts and unsupported scopes fail closed"
+    }
+  }
+}
