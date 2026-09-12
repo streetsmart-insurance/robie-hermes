@@ -178,13 +178,20 @@ class TestEngineWiring(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    @patch("robie_job_engine.session_recovery.attempt_session_recovery")
     @patch("robie_job_engine.session_preflight.check")
-    def test_browser_required_job_fails_preflight_when_logged_out(self, mock_check):
+    def test_browser_required_job_fails_preflight_when_logged_out(
+        self, mock_check, mock_recover
+    ):
         mock_check.return_value = {
             "state": LOGGED_OUT,
             "blocking": True,
             "reason": "SESSION_LOGGED_OUT: browser is on /auth/account/login",
             "login_urls": ["https://app.ezlynx.com/auth/account/login"],
+        }
+        mock_recover.return_value = {
+            "recovered": False,
+            "reason": "INTERACTIVE_AUTH_REQUIRED: EZLynx requires MFA",
         }
         worker = DummyWorker()
         engine = JobEngine(
@@ -200,6 +207,7 @@ class TestEngineWiring(unittest.TestCase):
 
         final = engine.run(job["id"])
 
+        self.assertTrue(mock_recover.called, "recovery must be attempted before failing")
         self.assertFalse(worker.called, "_perform must NEVER be called when preflight blocks")
         self.assertEqual(final["status"], JobStatus.FAILED.value)
         self.assertEqual(final["attempt_count"], 0, "attempt_count must remain 0")
@@ -208,11 +216,59 @@ class TestEngineWiring(unittest.TestCase):
         self.assertIsNotNone(preflight_cp)
         self.assertEqual(preflight_cp["state"], LOGGED_OUT)
 
+        recovery_cp = self.store.get_checkpoint(job["id"], "session_recovery")
+        self.assertIsNotNone(recovery_cp)
+        self.assertFalse(recovery_cp["recovered"])
+
         email_cp = self.store.get_checkpoint(job["id"], "email_response")
         self.assertIsNotNone(email_cp)
-        self.assertEqual(email_cp["response_text"], mock_check.return_value["reason"])
-        self.assertEqual(email_cp["body"], mock_check.return_value["reason"])
+        self.assertIn("SESSION_LOGGED_OUT", email_cp["response_text"])
+        self.assertIn("INTERACTIVE_AUTH_REQUIRED", email_cp["body"])
         self.assertEqual(email_cp["subject"], "ROBIE Blocker: EZLynx Session Logged Out")
+
+    @patch("robie_job_engine.session_recovery.attempt_session_recovery")
+    @patch("robie_job_engine.session_preflight.check")
+    def test_browser_required_job_recovers_session_and_proceeds(
+        self, mock_check, mock_recover
+    ):
+        logged_out = {
+            "state": LOGGED_OUT,
+            "blocking": True,
+            "reason": "SESSION_LOGGED_OUT: browser is on /auth/account/login",
+        }
+        session_present = {
+            "state": SESSION_PRESENT,
+            "blocking": False,
+            "reason": "An EZLynx tab is not on the login page.",
+        }
+        mock_check.side_effect = [logged_out, session_present]
+        mock_recover.return_value = {
+            "recovered": True,
+            "state": "SIGNED_IN",
+            "marker": "SESSION_RECOVERED",
+        }
+        worker = DummyWorker()
+        engine = JobEngine(
+            self.store,
+            {"hermes-cua": worker},
+            {"ezlynx.reassign": DummyVerifier()},
+        )
+        job = self.store.create_job(
+            "ezlynx.reassign",
+            {"worker": "hermes-cua"},
+            max_attempts=3,
+        )
+
+        engine.run(job["id"])
+
+        self.assertTrue(mock_recover.called, "recovery must be attempted when logged out")
+        self.assertTrue(worker.called, "_perform must be called after recovery")
+        self.assertIsNotNone(
+            self.store.get_checkpoint(job["id"], "session_preflight_recheck")
+        )
+        recheck_cp = self.store.get_checkpoint(job["id"], "session_preflight_recheck")
+        self.assertEqual(recheck_cp["state"], SESSION_PRESENT)
+        self.assertIsNone(self.store.get_checkpoint(job["id"], "email_response"))
 
     @patch("robie_job_engine.session_preflight.check")
     def test_non_browser_job_bypasses_preflight_and_proceeds(self, mock_check):
