@@ -39,6 +39,29 @@ def ensure_applicant_scope(applicant_id: str) -> None:
         )
 
 
+# Policy ID key variants seen in PolicyApi search/create responses.
+# "PolicyID" (capital P, capital ID) is the variant that broke job 4dfee5f4:
+# the pre-create search found TEST-HO-20260911-E01 (ALREADY_EXISTS) but the
+# row carried the ID under "PolicyID", which the old 5-key list missed,
+# producing the misleading "Create HTTP None" diagnostic for a create that
+# was never attempted.
+_POLICY_ID_KEYS = ("policyId", "policyID", "PolicyId", "PolicyID", "id", "policy_id")
+
+
+def _extract_policy_id(row: Any) -> str | None:
+    """Best-effort policy ID extraction from a PolicyApi row (any shape)."""
+    if not isinstance(row, dict):
+        return None
+    for key in _POLICY_ID_KEYS:
+        if row.get(key):
+            return str(row[key])
+    # Case-insensitive fallback: any key spelling "policyid".
+    for key, value in row.items():
+        if isinstance(key, str) and key.lower() == "policyid" and value:
+            return str(value)
+    return None
+
+
 def ensure_session() -> dict[str, Any]:
     """Re-auth via Secret Manager when logged out. Returns the recovery report."""
     from .session_recovery import attempt_session_recovery
@@ -63,6 +86,7 @@ def search_first_create(
         "create": None,
         "read_back": None,
         "verdict": "UNVERIFIED",
+        "policy_id": None,
     }
     search = client.search_policy_by_number(policy_number)
     rows = search.get("data") if isinstance(search, dict) else None
@@ -78,6 +102,7 @@ def search_first_create(
     if matched is not None:
         report["verdict"] = "ALREADY_EXISTS"
         report["read_back"] = matched
+        report["policy_id"] = _extract_policy_id(matched)
         return report
 
     created = client.create_policy(
@@ -95,10 +120,7 @@ def search_first_create(
         if pid and pid.lstrip('-').isdigit():
             create_policy_id = pid
     elif isinstance(create_resp, dict):
-        for k in ("policyId", "policyID", "PolicyId", "id", "policy_id"):
-            if create_resp.get(k):
-                create_policy_id = str(create_resp[k])
-                break
+        create_policy_id = _extract_policy_id(create_resp)
     report["create"] = {
         "request_payload": created.get("request_payload"),
         "response": created.get("response"),
@@ -132,10 +154,12 @@ def search_first_create(
     report["read_back"] = rmatch
     if rmatch:
         report["verdict"] = "CREATED_AND_READ_BACK"
+        report["policy_id"] = create_policy_id or _extract_policy_id(rmatch)
     elif create_policy_id:
         # Create succeeded and returned an ID, but search hasn't caught up yet.
         # The caller can proceed with the create ID.
         report["verdict"] = "CREATED_ID_FROM_CREATE_RESPONSE"
+        report["policy_id"] = create_policy_id
     else:
         # Fail closed: no ID from create, no ID from read-back.
         # Include raw HTTP details for diagnosis.

@@ -135,6 +135,43 @@ class TestSearchFirstCreate(unittest.TestCase):
         self.assertEqual(report["read_back"]["policyId"], 456)
 
 
+class TestExtractPolicyId(unittest.TestCase):
+    def test_all_key_variants(self):
+        for key in ("policyId", "policyID", "PolicyId", "PolicyID", "id", "policy_id"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    proof._extract_policy_id({key: 42, "policyNumber": "X"}), "42"
+                )
+
+    def test_case_insensitive_fallback(self):
+        self.assertEqual(proof._extract_policy_id({"POLICYID": 77}), "77")
+
+    def test_non_dict_returns_none(self):
+        self.assertIsNone(proof._extract_policy_id(None))
+        self.assertIsNone(proof._extract_policy_id("83669148"))
+
+    def test_no_id_key_returns_none(self):
+        self.assertIsNone(proof._extract_policy_id({"policyNumber": "X"}))
+
+    def test_already_exists_report_carries_policy_id(self):
+        # Regression: job 4dfee5f4 found TEST-HO-20260911-E01 via the
+        # pre-create search (ALREADY_EXISTS) but the row used "PolicyID",
+        # which the old 5-key list missed. The engine then failed with
+        # "Create HTTP None" for a create that was never attempted.
+        row = {"policyNumber": "TEST-HO-20260911-E01", "PolicyID": 83669148}
+        client = FakeTokenClient(make_config(), [row])
+        report = proof.search_first_create(
+            client,
+            applicant_id="220250093",
+            policy_number="TEST-HO-20260911-E01",
+            effective_date="2026-10-02T00:00:00",
+            expiration_date="2027-10-02T00:00:00",
+        )
+        self.assertEqual(report["verdict"], "ALREADY_EXISTS")
+        self.assertEqual(report["policy_id"], "83669148")
+        self.assertEqual(len(client.posts), 0)
+
+
 class TestCoverageLabels(unittest.TestCase):
     def test_literal_labels_match_carlo_evidence(self):
         self.assertEqual(
