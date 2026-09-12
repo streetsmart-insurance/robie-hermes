@@ -961,10 +961,26 @@ class EzlynxPolicySetupPage:
         }
         # Use passed applicant_id, fallback to self.applicant_id
         effective_applicant_id = applicant_id or self.applicant_id or ""
+        # PREVENTION: fail fast if applicant_id is empty — don't navigate to a broken URL
+        if not effective_applicant_id:
+            report["error"] = (
+                "REFUSED: applicant_id is empty, cannot construct Edit Policy URL. "
+                "This would produce a 404 (double slash). "
+                f"policy_id={policy_id}, applicant_id param='{applicant_id}', self.applicant_id='{self.applicant_id}'"
+            )
+            report["refused_empty_applicant_id"] = True
+            return report
         edit_url = (
             f"https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/"
             f"{effective_applicant_id}/{policy_id}"
         )
+        # PREVENTION: validate URL has no empty segments before navigating
+        if "//" in edit_url.replace("https://", ""):
+            report["error"] = (
+                f"REFUSED: malformed Edit Policy URL (double slash): {edit_url}"
+            )
+            report["refused_malformed_url"] = True
+            return report
         await self.page.goto(edit_url, wait_until="domcontentloaded")
         await self.page.wait_for_timeout(2000)
 
