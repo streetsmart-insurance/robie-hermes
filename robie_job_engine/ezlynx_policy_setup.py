@@ -834,13 +834,24 @@ class EzlynxPolicySetupPage:
                     if pid and pid.lstrip('-').isdigit():
                         policy_id = pid
         if not policy_id:
+            # Fail closed with raw HTTP/body details for diagnosis.
+            diagnostic = api_report.get("no_id_diagnostic")
+            if not diagnostic:
+                create_info = api_report.get("create") or {}
+                http_status = create_info.get("http_status")
+                raw_body = create_info.get("raw_body") or ""
+                body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
+                diagnostic = (
+                    f"no policy id in read-back; cannot open FormEntry. "
+                    f"Create HTTP {http_status}, body: {body_preview}"
+                )
             return PolicySetupResult(
                 success=False,
                 applicant_id=applicant_id,
                 policy_number=shell_input.policy_number,
                 lob=normalized,
                 phase_reached="api_search_first_create",
-                error="no policy id in read-back; cannot open FormEntry",
+                error=diagnostic,
                 note_added=False,
                 stopped_before_bind=True,
             )

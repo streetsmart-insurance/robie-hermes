@@ -463,8 +463,21 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
                                 break
                     if policy_id:
                         break
+        # Guard: never write an empty policy_number to the destination.
+        # If the extracted args have no policy number, fail closed instead
+        # of overwriting a valid destination with empty values.
+        dest_policy_number = (policy_setup_args.get("policy_number") or "").strip()
+        if not dest_policy_number:
+            real_error = "policy_setup_args has empty policy_number; refusing to overwrite destination"
+            logger.error(real_error)
+            store.checkpoint(job_id, 'policy_api_create_error', {
+                'policy_number': "",
+                'applicant_id': "220250093",
+                'error': real_error,
+            })
+            return f"ROBIE_OUTCOME_UNKNOWN: {real_error}"
         destination = {
-            'policy_number': policy_setup_args["policy_number"],
+            'policy_number': dest_policy_number,
             'applicant_id': "220250093",
         }
         if policy_id:
