@@ -82,17 +82,19 @@ jobs:
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="set -euo pipefail
               mkdir -p '${STAGING}'
-              CANDS=\"\$(find /opt/streetsmart-hermes -maxdepth 6 -path '*/bin/python3*' -type f 2>/dev/null | head -10)
-              \$(command -v python3 2>/dev/null || true)\"
+              VENV=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
+              echo \"venv present: \$([ -x \$VENV ] && echo yes || echo no)\"
               PY=''
-              for cand in \$CANDS; do
-                if [ -x \"\$cand\" ] && \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
+              for cand in \$VENV \$(find /opt/streetsmart-hermes -maxdepth 8 -path '*/bin/python*' -type f 2>/dev/null | head -10) \$(command -v python3 2>/dev/null || true); do
+                [ -x \"\$cand\" ] || continue
+                if \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
+                if sudo -n \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"sudo -n \$cand\"; break; fi
               done
               if [ -z \"\$PY\" ]; then echo 'NO_PLAYWRIGHT_PYTHON'; exit 1; fi
               echo \"using python: \$PY\"
               if ! curl -sf --max-time 10 http://127.0.0.1:9222/json/version >/dev/null; then echo 'NO_CDP_LISTENER'; exit 1; fi
               echo 'CDP listener up'
-              \"\$PY\" '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json'"
+              \$PY '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json'"
 
       - name: Retrieve dump
         run: |
