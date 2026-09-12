@@ -504,75 +504,8 @@ def _persist_playwright_exec_finish(db_path, row_id, result) -> None:
         pass
 
 
-def _hard_route_policy_setup(kwargs: dict):
-    """Hard route (code, not prompt) for the homeowners policy-setup job class.
-
-    When the bound job is a ``hermes.email_task`` carrying an unfulfilled
-    ``policy_setup_required`` marker (set in code by the email runner), call
-    the real ``ezlynx_policy_setup`` handler in code and return its result —
-    before any ``playwright_exec`` browser code runs. Returns None when the
-    route does not apply, so the normal path proceeds.
-
-    Fires at most once per job: after the tool has been called, the marker is
-    fulfilled and playwright_exec runs normally.
-    """
-    from tools.registry import tool_error
-
-    try:
-        from robie_job_engine.policy_setup_dispatch import (
-            POLICY_SETUP_ACTION,
-            POLICY_SETUP_REQUIRED_KIND,
-            PolicySetupToolMissing,
-            handler_args_from_marker,
-            load_policy_setup_handler,
-        )
-        from robie_job_engine.store import JobStore
-    except Exception:
-        return None
-    job_id = str(
-        kwargs.get("job_id")
-        or os.environ.get("ROBIE_JOB_ID")
-        or os.environ.get("JOB_ID")
-        or ""
-    ).strip()
-    db_path = kwargs.get("db_path") or os.environ.get("ROBIE_JOB_DB")
-    if not job_id or not db_path:
-        return None
-    try:
-        store = JobStore(str(db_path))
-        job = store.get_job(job_id) or {}
-    except Exception:
-        return None
-    if job.get("action_type") != POLICY_SETUP_ACTION:
-        return None
-    marker = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or {}
-    if not marker or marker.get("tool_called"):
-        return None
-    tool_args = handler_args_from_marker(marker)
-    if not tool_args.get("policy_number"):
-        return None
-    try:
-        handler = load_policy_setup_handler(anchor_file=__file__)
-    except PolicySetupToolMissing as exc:
-        return tool_error(f"ROBIE_OUTCOME_UNKNOWN: {exc}")
-    try:
-        result = handler(tool_args)
-    except Exception as exc:  # noqa: BLE001 - tool boundary
-        return tool_error(f"{type(exc).__name__}: {exc}")
-    marker["tool_called"] = True
-    try:
-        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, marker)
-    except Exception:
-        pass
-    return result
-
-
 def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
     from tools.registry import tool_error, tool_result
-
-    hard_routed = _hard_route_policy_setup(kwargs)
-    if hard_routed is not None:
-        return hard_routed
 
     row_id, job_id, db_path = _persist_playwright_exec_start(code, **kwargs)
 
@@ -590,6 +523,31 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             job = JobStore(bound_db).get_job(bound_job_id)
         except Exception:
             job = None
+    # Policy-setup job class: the runner must invoke ezlynx_policy_setup as a
+    # real tool call before any playwright_exec. Refuse the fall-through.
+    # (342 design; 341's _hard_route_policy_setup hijack is dropped.)
+    if bound_job_id and bound_db:
+        try:
+            from robie_job_engine.policy_setup_dispatch import (
+                POLICY_SETUP_REQUIRED_KIND,
+            )
+            from robie_job_engine.store import JobStore
+
+            marker = JobStore(bound_db).get_checkpoint(
+                bound_job_id, POLICY_SETUP_REQUIRED_KIND
+            ) or {}
+            if marker and not marker.get("tool_called"):
+                return _finish(tool_error(
+                    "POLICY_SETUP_ORDER: this job asks to create/set up a "
+                    f"homeowners policy ({marker.get('policy_number')}); "
+                    "call the 'ezlynx_policy_setup' tool first — "
+                    "playwright_exec is refused for this job class until then. "
+                    "If the tool is not in your tool list, report: "
+                    "ROBIE_OUTCOME_UNKNOWN: ezlynx_policy_setup is not "
+                    "registered; failing closed."
+                ))
+        except Exception:
+            pass
     try:
         from robie_job_engine.tab_cleanup import flush_tabs_at_job_start
 

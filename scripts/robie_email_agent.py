@@ -247,6 +247,26 @@ def run_email_job(prompt, job_id, db_path, *, sender, subject, body, attachments
         return 'ROBIE_OUTCOME_UNKNOWN: The task returned no usable receipt. Check the destination before retrying.'
 
 
+def _format_policy_setup_response(policy_number: str, report: dict, sender: str) -> str:
+    """Build the sender-facing reply from the deterministic tool report."""
+    report = report or {}
+    if report.get("success"):
+        return (
+            f"Policy {policy_number} has been set up on EZLynx applicant 220250093 "
+            f"(phase reached: {report.get('phase_reached')}). "
+            "Search-first found no duplicate; the policy shell was created with the gold "
+            "carrier payload, Save & Continue Edit minted the FormEntry, and coverages "
+            "were filled by literal label. It stops before bind — no coverage was bound. "
+            "Verify the policy in EZLynx before relying on it."
+        )
+    return (
+        f"ROBIE_OUTCOME_UNKNOWN: Policy setup for {policy_number} did not complete "
+        f"(phase reached: {report.get('phase_reached')}; error: {report.get('error')}). "
+        "Check the EZLynx destination before trying again; no automatic second "
+        "execution was started."
+    )
+
+
 def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db_path, context_prompt=""):
     """Execute either route only after the Job Engine has claimed this email."""
     from robie_job_engine.store import JobStore
@@ -344,32 +364,146 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
         store.checkpoint(job_id, 'email_route', {'route': 'finance', 'status': result.status})
         if not response_text:
             return "ROBIE_OUTCOME_UNKNOWN: Finance workflow returned no final response; review the recorded destination before retrying."
-    # Hard route (code, not prompt): homeowners-create on 220250093.
-    # The runner classifies in code and checkpoints the marker. The tool layer
-    # (playwright_tool) then calls ezlynx_policy_setup in code before any
-    # playwright_exec browser code runs. The runner never sets up the policy
-    # itself and no prompt text is involved.
+
+    # Deterministic policy-setup routing: this job class must invoke the
+    # ezlynx_policy_setup tool as a real tool call before any playwright_exec.
+    # Prompt guidance was not enough (jobs c1ffb79a, 1cfd0f3e never called the
+    # tool and timed out). Fail closed when the tool is missing — never fall
+    # through to playwright_exec for this job class.
+    policy_setup_args = None
     if not is_ascend_request:
         from robie_job_engine.policy_setup_dispatch import (
             POLICY_SETUP_REQUIRED_KIND,
+            PolicySetupToolMissing,
             extract_policy_setup_args,
+            invoke_policy_setup_tool,
         )
         policy_setup_args = extract_policy_setup_args(f"{subject}\n{body}")
-        if policy_setup_args:
-            store.checkpoint(job_id, 'email_route', {
-                'route': 'policy_setup_hard_route',
+    if policy_setup_args:
+        store.checkpoint(job_id, 'email_route', {
+            'route': 'policy_setup_deterministic',
+            'policy_number': policy_setup_args["policy_number"],
+            'effective_date': policy_setup_args["effective_date"],
+            'expiration_date': policy_setup_args["expiration_date"],
+        })
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+            'policy_number': policy_setup_args["policy_number"],
+            'tool_called': False,
+        })
+        # Invoke the real handler in code before the LLM (342 design).
+        # After invoke: copy policy_number and any policy_id onto
+        # action.destination, persist the real create error, and only set
+        # tool_called when the handler created or found the policy.
+        try:
+            report = invoke_policy_setup_tool(policy_setup_args)
+        except PolicySetupToolMissing as exc:
+            real_error = str(exc)
+            logger.error("Policy-setup tool missing; failing closed: %s", real_error)
+            store.checkpoint(job_id, 'policy_api_create_error', {
                 'policy_number': policy_setup_args["policy_number"],
-                'effective_date': policy_setup_args["effective_date"],
-                'expiration_date': policy_setup_args["expiration_date"],
+                'applicant_id': "220250093",
+                'error': real_error,
             })
-            store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
-                **policy_setup_args,
-                'tool_called': False,
+            store.checkpoint(job_id, 'action', {
+                'action': 'ezlynx_policy_setup',
+                'destination': {
+                    'policy_number': policy_setup_args["policy_number"],
+                    'applicant_id': "220250093",
+                },
+                'detail': {'error': real_error},
             })
-            logger.info(
-                "Hard-routed policy setup for %s",
-                policy_setup_args["policy_number"],
+            return f"ROBIE_OUTCOME_UNKNOWN: {real_error}"
+        except Exception as exc:  # noqa: BLE001 - deterministic branch must not hang the job
+            real_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("Deterministic policy-setup outcome requires review: %s", real_error)
+            store.checkpoint(job_id, 'policy_api_create_error', {
+                'policy_number': policy_setup_args["policy_number"],
+                'applicant_id': "220250093",
+                'error': real_error,
+            })
+            store.checkpoint(job_id, 'action', {
+                'action': 'ezlynx_policy_setup',
+                'destination': {
+                    'policy_number': policy_setup_args["policy_number"],
+                    'applicant_id': "220250093",
+                },
+                'detail': {'error': real_error},
+            })
+            return (
+                "ROBIE_OUTCOME_UNKNOWN: Policy setup execution stopped after an error. "
+                f"Error: {real_error}. "
+                "Check the destination before trying again; no automatic second execution was started."
             )
+        # Unwrap tool_result/tool_error envelope if present.
+        actual = report
+        if isinstance(report, dict):
+            # tool_result may nest under 'result' or 'data'
+            for key in ("result", "data", "report"):
+                if isinstance(report.get(key), dict):
+                    actual = report[key]
+                    break
+        success = bool(isinstance(actual, dict) and actual.get("success"))
+        # Extract policy_id when the handler surfaces one.
+        policy_id = None
+        if isinstance(actual, dict):
+            for key in ("policy_id", "policyId", "policyID", "id"):
+                val = actual.get(key)
+                if val:
+                    policy_id = str(val)
+                    break
+            # Also check nested evidence/detail.
+            if not policy_id:
+                for container_key in ("detail", "evidence", "api"):
+                    container = actual.get(container_key)
+                    if isinstance(container, dict):
+                        for key in ("policy_id", "policyId", "policyID", "id"):
+                            val = container.get(key)
+                            if val:
+                                policy_id = str(val)
+                                break
+                    if policy_id:
+                        break
+        destination = {
+            'policy_number': policy_setup_args["policy_number"],
+            'applicant_id': "220250093",
+        }
+        if policy_id:
+            destination['policy_id'] = policy_id
+        if success:
+            # Only mark tool_called when the handler created or found the policy.
+            store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+                'policy_number': policy_setup_args["policy_number"],
+                'tool_called': True,
+            })
+            store.checkpoint(job_id, 'action', {
+                'action': 'ezlynx_policy_setup',
+                'destination': destination,
+                'detail': {'report': actual},
+            })
+            logger.info("Handled policy setup deterministically: %s", policy_setup_args["policy_number"])
+        else:
+            real_error = None
+            if isinstance(actual, dict):
+                real_error = actual.get("error") or actual.get("message")
+            if not real_error:
+                real_error = "handler reported failure without an error message"
+            store.checkpoint(job_id, 'policy_api_create_error', {
+                'policy_number': policy_setup_args["policy_number"],
+                'applicant_id': "220250093",
+                'error': str(real_error),
+                'report': actual if isinstance(actual, dict) else str(actual),
+            })
+            store.checkpoint(job_id, 'action', {
+                'action': 'ezlynx_policy_setup',
+                'destination': destination,
+                'detail': {'error': str(real_error), 'report': actual if isinstance(actual, dict) else str(actual)},
+            })
+            logger.warning(
+                "Policy setup handler did not create or find %s: %s",
+                policy_setup_args["policy_number"], real_error,
+            )
+            # Do NOT set tool_called=True on failure.
+        return _format_policy_setup_response(policy_setup_args["policy_number"], actual if isinstance(actual, dict) else {}, sender)
     if not response_text:
         attachment_lines = ""
         if attachments:
