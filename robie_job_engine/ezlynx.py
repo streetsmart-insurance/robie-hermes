@@ -25,11 +25,20 @@ EZLYNX_REQUIRED_FIELDS = {
     ),
     "ezlynx.move_document": (
         "document_id",
+        "document_name",
         "account_id",
         "destination_id",
         "destination_name",
+        "move_control",
     ),
-    "ezlynx.apply_label": ("resource_id", "account_id", "label_id", "label"),
+    "ezlynx.apply_label": (
+        "resource_id",
+        "account_id",
+        "document_name",
+        "label_id",
+        "label",
+        "label_control",
+    ),
 }
 
 

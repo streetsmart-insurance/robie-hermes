@@ -97,6 +97,14 @@ def build_runtime_engine(
     destination = proposal_destination
     if destination is None and current_robie_env() == TEST_ENV_NAME:
         destination = MemoryProposalDestination()
+    if ezlynx_browser is None and ezlynx_readback is None:
+        # Test-only auto-wire when ROBIE_PLAYWRIGHT_CDP_URL / ROBIE_BROWSER_CDP_URL
+        # is set. Production stays unavailable unless a port is passed explicitly.
+        from .ezlynx_cdp_port import maybe_build_ezlynx_cdp_ports
+
+        auto_browser, auto_readback = maybe_build_ezlynx_cdp_ports()
+        ezlynx_browser = auto_browser
+        ezlynx_readback = auto_readback
     if ezlynx_browser is not None:
         ezlynx_worker: Any = HermesCuaEzlynxWorker(ezlynx_browser)
     elif isinstance(ezlynx_readback, MemoryEzlynxDestination):
