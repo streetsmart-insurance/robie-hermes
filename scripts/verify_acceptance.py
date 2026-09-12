@@ -19,7 +19,15 @@ Reads performed (all from hermes-poc-01, all GETs, all with timeouts):
        GET {classic}/api/documentlibrary/list/{applicant}/1/200/0
      Reports every document row seen (name, description, policy number,
      policy id).
-  4. jobs.db (SQLite, read-only, query_only):
+  3b. DocumentApi (OAuth, read-only):
+       GET {origin}/documentapi/documents/v1/account/{ApplicantID}/document-search
+     Proven path (PR #295). Reports every document with id, name,
+     description, and which named policy (if any) it references.
+  4. DiscussionApi (OAuth, read-only):
+       GET {origin}/DiscussionApi/discussion/v1/applicant/{applicant}
+     Reports every discussion/note with title and text excerpt, and
+     which named policy (if any) it references.
+  5. jobs.db (SQLite, read-only, query_only):
      The job's own rows for the job ID passed as --job-id (never
      hardcoded): the jobs row, checkpoints, playwright_exec calls, and
      verification_evidence.
@@ -32,10 +40,14 @@ Never prints secret values. Never writes anything.
 Usage:
   sudo python3 verify_acceptance.py \
       --applicant-id 220250093 \
-      --policy-number TEST-HO-20260911-E01 \
+      --policy-number TEST-HO-20260912-D01,TEST-HO-08312026-01 \
       --job-id 1eeda98e-eedb-4758-8867-e9ac6116ac57 \
       --db-path /opt/streetsmart-hermes/robie-job-engine/data/jobs.db \
       --secret projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+
+  --policy-number accepts a comma-separated list; every named policy is
+  read back independently. --job-id is optional; when omitted the job
+  section is skipped and noted.
 """
 
 from __future__ import annotations
@@ -384,6 +396,95 @@ def list_documents(cfg: dict, applicant_id: str, not_checked: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# DocumentApi (OAuth) + DiscussionApi (OAuth) — read-only GETs
+# ---------------------------------------------------------------------------
+
+def search_documents_oauth(origin: str, token: str, applicant_id: str,
+                           not_checked: list) -> dict:
+    """Proven path (PR #295): GET /documentapi/documents/v1/account/{id}/document-search."""
+    report: dict = {
+        "read_method": "documentapi/documents/v1/account/{applicant}/document-search",
+        "http_status": None, "documents": [], "total_count": 0,
+    }
+    url = (origin + "/documentapi/documents/v1/account/"
+           + quote(applicant_id, safe="") + "/document-search")
+    status, payload = oauth_get(url, token)
+    report["http_status"] = status
+    if status != 200 or payload is None:
+        not_checked.append(
+            f"DocumentApi document-search: returned HTTP {status}")
+        return report
+    rows = extract_document_records(payload)
+    if not rows and isinstance(payload, dict):
+        for key in ("results", "Results"):
+            cand = payload.get(key)
+            if isinstance(cand, list):
+                rows = [r for r in cand if isinstance(r, dict)]
+                break
+    for r in rows:
+        report["documents"].append({
+            "id": first(r, "id", "Id", "ID", "DocumentId", "documentId"),
+            "name": first(r, "DocumentName", "documentName", "Name", "name",
+                          "FileName", "fileName", "Title", "title"),
+            "description": first(r, "Description", "description"),
+            "policy_number": first(r, "PolicyNumber", "policyNumber",
+                                   "policy_number"),
+            "policy_id": first(r, "PolicyId", "policyId", "policy_id"),
+            "mime": first(r, "MimeType", "mimeType", "ContentType",
+                          "contentType"),
+        })
+    report["total_count"] = len(report["documents"])
+    return report
+
+
+def read_discussions_oauth(origin: str, token: str, applicant_id: str,
+                           not_checked: list) -> dict:
+    """GET /DiscussionApi/discussion/v1/applicant/{id}. Read-only."""
+    report: dict = {
+        "read_method": "DiscussionApi/discussion/v1/applicant/{applicant}",
+        "http_status": None, "notes": [], "total_count": 0,
+    }
+    url = (origin + "/DiscussionApi/discussion/v1/applicant/"
+           + quote(applicant_id, safe=""))
+    status, payload = oauth_get(url, token)
+    report["http_status"] = status
+    if status != 200 or payload is None:
+        not_checked.append(
+            f"DiscussionApi applicant discussions: returned HTTP {status}")
+        return report
+    rows: list[dict] = []
+    if isinstance(payload, list):
+        rows = [r for r in payload if isinstance(r, dict)]
+    elif isinstance(payload, dict):
+        for key in ("Discussions", "discussions", "Items", "items",
+                    "Data", "data"):
+            cand = payload.get(key)
+            if isinstance(cand, list):
+                rows = [r for r in cand if isinstance(r, dict)]
+                break
+        else:
+            if payload.get("Title") or payload.get("Subject"):
+                rows = [payload]
+    for r in rows:
+        text = first(r, "Text", "text", "Body", "body", "Message", "message",
+                     "Note", "note", "Comments", "comments")
+        report["notes"].append({
+            "title": first(r, "Title", "title", "Subject", "subject"),
+            "text_excerpt": text[:500],
+            "created": first(r, "CreatedDate", "createdDate", "Created",
+                             "created", "DateCreated", "dateCreated"),
+            "author": first(r, "CreatedBy", "createdBy", "Author", "author",
+                            "UserName", "userName"),
+        })
+    report["total_count"] = len(report["notes"])
+    return report
+
+
+def references_policy(haystack: str, policy_number: str) -> bool:
+    return policy_number.strip().casefold() in (haystack or "").casefold()
+
+
+# ---------------------------------------------------------------------------
 # jobs.db (read-only)
 # ---------------------------------------------------------------------------
 
@@ -463,13 +564,21 @@ def read_job(db_path: str, job_id: str, not_checked: list) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only acceptance verifier")
     parser.add_argument("--applicant-id", required=True)
-    parser.add_argument("--policy-number", required=True)
-    parser.add_argument("--job-id", required=True,
-                        help="Job ID passed as an input — never hardcoded.")
+    parser.add_argument("--policy-number", required=True,
+                        help="Comma-separated policy number(s) to read back")
+    parser.add_argument("--job-id", required=False, default=None,
+                        help="Job ID passed as an input — never hardcoded. "
+                             "Optional: when omitted the job section is skipped.")
     parser.add_argument("--db-path", required=True)
     parser.add_argument("--secret", required=True,
                         help="Secret Manager resource for the EZLynx API config")
     args = parser.parse_args()
+
+    policy_numbers = [p.strip() for p in args.policy_number.split(",")
+                      if p.strip()]
+    if not policy_numbers:
+        print(json.dumps({"fatal": "no policy numbers given"}))
+        return 0
 
     not_checked: list[str] = []
     report: dict = {
@@ -477,11 +586,24 @@ def main() -> int:
         "checked_at": utc_now(),
         "inputs": {
             "applicant_id": args.applicant_id,
-            "policy_number": args.policy_number,
+            "policy_numbers": policy_numbers,
             "job_id": args.job_id,
         },
         "not_checked": not_checked,
     }
+
+    # Load-bearing structural limits. These are true of every run because
+    # they are properties of the PolicyApi, not of this check.
+    not_checked.extend([
+        "PolicyApi has no applicant-scoped policy-list endpoint: "
+        "search?ApplicantId= returns unfiltered account rows.",
+        f"the verifier cannot enumerate applicant {args.applicant_id}: "
+        "only per-policy search?PolicyNumber= is supported.",
+        "the verifier cannot detect a duplicate policy created under a "
+        "different policy number: it only reads the exact numbers named.",
+        "the verifier cannot prove the account was clean before a test: "
+        "it reads current destination state, not history.",
+    ])
 
     try:
         cfg = load_secret(args.secret)
@@ -493,12 +615,41 @@ def main() -> int:
         print(json.dumps(report, indent=2, default=str))
         return 0
 
-    report["named_policy"] = search_policy_by_number(
-        origin, token, args.policy_number)
+    report["named_policies"] = [
+        search_policy_by_number(origin, token, pn)
+        for pn in policy_numbers
+    ]
     report["applicant_policies"] = list_policies_on_applicant(
         origin, token, args.applicant_id, not_checked)
     report["documents"] = list_documents(cfg, args.applicant_id, not_checked)
-    report["job"] = read_job(args.db_path, args.job_id, not_checked)
+    report["document_api"] = search_documents_oauth(
+        origin, token, args.applicant_id, not_checked)
+    report["discussions"] = read_discussions_oauth(
+        origin, token, args.applicant_id, not_checked)
+
+    # Per-policy attachment/note read-back, matched literally by policy
+    # number appearing in the document/note record.
+    for entry, pn in zip(report["named_policies"], policy_numbers):
+        docs = [d for d in report["document_api"]["documents"]
+                if references_policy(
+                    " ".join([d["name"], d["description"],
+                              d["policy_number"], d["policy_id"]]), pn)]
+        entry["pdf_attached"] = any(
+            "pdf" in d["name"].casefold() or "pdf" in d["mime"].casefold()
+            for d in docs)
+        entry["attached_documents"] = [
+            {"name": d["name"], "description": d["description"]} for d in docs]
+        notes = [n for n in report["discussions"]["notes"]
+                 if references_policy(n["title"] + " " + n["text_excerpt"], pn)]
+        entry["note_posted"] = bool(notes)
+        entry["matching_notes"] = [
+            {"title": n["title"], "text_excerpt": n["text_excerpt"][:200]}
+            for n in notes]
+
+    if args.job_id:
+        report["job"] = read_job(args.db_path, args.job_id, not_checked)
+    else:
+        not_checked.append("job rows: no --job-id given; job section skipped")
 
     print(json.dumps(report, indent=2, default=str))
     return 0
