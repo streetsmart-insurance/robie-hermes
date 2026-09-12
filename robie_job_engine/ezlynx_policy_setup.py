@@ -814,10 +814,25 @@ class EzlynxPolicySetupPage:
 
         row = api_report.get("read_back") or {}
         policy_id = None
-        for key in ("policyId", "policyID", "id", "PolicyId"):
+        for key in ("policyId", "policyID", "id", "PolicyId", "policy_id"):
             if row.get(key):
                 policy_id = str(row[key])
                 break
+        # Fallback: the create endpoint returns the new policy ID as a bare
+        # scalar. If the search read-back hasn't caught up yet (eventual
+        # consistency), use the create response ID so FormEntry can proceed.
+        if not policy_id:
+            create_info = api_report.get("create") or {}
+            fallback_id = create_info.get("policy_id")
+            if fallback_id:
+                policy_id = str(fallback_id)
+            else:
+                # Last resort: parse the raw create response scalar.
+                resp = create_info.get("response")
+                if isinstance(resp, (str, int)):
+                    pid = str(resp).strip().strip('"')
+                    if pid and pid.lstrip('-').isdigit():
+                        policy_id = pid
         if not policy_id:
             return PolicySetupResult(
                 success=False,
