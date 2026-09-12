@@ -100,27 +100,71 @@ jobs:
               \$PY '${STAGING}/capture_formentry_dom.py' --out '${STAGING}/dump.json'"
 
       - name: Retrieve dump
+        id: retrieve
         run: |
           set -euo pipefail
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             "${PRODUCTION_VM}:${STAGING}/dump.json" "${RUNNER_TEMP}/formentry-dump.json"
           python3 - <<'EOF'
-          import json, os
+          import json, os, sys
           p = os.path.join(os.environ["RUNNER_TEMP"], "formentry-dump.json")
           d = json.load(open(p))
           frames = d.get("frames", [])
           nfields = sum(len(f.get("fields", [])) for f in frames)
           print("ok:", d.get("ok"))
           print("landing_url:", d.get("landing_url"))
+          print("landing_looks_authenticated:", d.get("landing_looks_authenticated"))
           print("frames:", len(frames), "field_rows:", nfields)
           print("duplicates:", len(d.get("duplicates", [])))
           print("tab_clicks:", len(d.get("clicks", [])))
+
+          auth_ok = bool(d.get("landing_looks_authenticated", False))
+          out_gh = os.environ.get("GITHUB_OUTPUT")
+          if out_gh:
+              with open(out_gh, "a") as f:
+                  f.write(f"authenticated={'true' if auth_ok else 'false'}\n")
+
+          if not auth_ok:
+              # On refusal write a small status artifact: verdict, landing_url, landing_looks_authenticated: false.
+              # Never write the captured login DOM to this artifact.
+              status_path = os.path.join(os.environ["RUNNER_TEMP"], "formentry-capture-status.json")
+              status_payload = {
+                  "capture": "formentry-dom",
+                  "captured_at": d.get("captured_at"),
+                  "verdict": "REFUSED_UNAUTHENTICATED",
+                  "landing_url": d.get("landing_url"),
+                  "landing_looks_authenticated": False,
+                  "detail": (
+                      "Capture redirected to unauthenticated landing page. "
+                      "DOM was discarded to prevent storing login form."
+                  ),
+              }
+              with open(status_path, "w") as f:
+                  json.dump(status_payload, f, indent=2)
+              print("Written refusal status to:", status_path)
           EOF
 
       - name: Upload dump artifact
+        if: steps.retrieve.outputs.authenticated == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: formentry-dom-${{ github.run_id }}
           path: ${{ runner.temp }}/formentry-dump.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Upload refused status artifact
+        if: steps.retrieve.outputs.authenticated != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: formentry-dom-status-${{ github.run_id }}
+          path: ${{ runner.temp }}/formentry-capture-status.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Refuse unauthenticated capture
+        if: steps.retrieve.outputs.authenticated != 'true'
+        run: |
+          set -euo pipefail
+          echo "FATAL: FormEntry capture refused: landing_looks_authenticated is false" >&2
+          exit 1
