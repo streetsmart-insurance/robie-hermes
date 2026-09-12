@@ -1,0 +1,4 @@
+interface:
+  display_name: "Robie APE Test"
+  short_description: "Guided APE training in the approved Robie Test account"
+  default_prompt: "Train or evaluate Robie on an APE workflow in the approved Test account."
