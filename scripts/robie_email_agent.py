@@ -349,6 +349,16 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
     # (playwright_tool) then calls ezlynx_policy_setup in code before any
     # playwright_exec browser code runs. The runner never sets up the policy
     # itself and no prompt text is involved.
+    #
+    # Live 341 job 0b51475c showed the hard route can mark tool_called=true
+    # with gold dates/limits while TEST-HO-20260911-E01 still does not exist
+    # and action.destination.policy_number stays empty — create never landed.
+    # This runner now invokes PolicyApi create in code before the LLM,
+    # fail-closed, persisting the real create error and copying policy_number
+    # onto action.destination. Applicant 220250093 only. No bind.
+    # Do not mint E01 by hand; this code path is the governed create.
+    # Keeps the 340 job-tab selection (policy_setup_tool._select_job_page).
+    policy_setup_args = None
     if not is_ascend_request:
         from robie_job_engine.policy_setup_dispatch import (
             POLICY_SETUP_REQUIRED_KIND,
@@ -369,6 +379,69 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
             logger.info(
                 "Hard-routed policy setup for %s",
                 policy_setup_args["policy_number"],
+            )
+    # PolicyApi create in the email runner, in code, before the LLM.
+    # Fail closed: any create error is checkpointed verbatim and the LLM
+    # is never invoked for this job class.
+    if not is_ascend_request and policy_setup_args:
+        try:
+            from robie_job_engine.ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
+            from robie_job_engine.policy_setup_proof import search_first_create
+
+            applicant_id = "220250093"
+            client = EzlynxApiClient(load_ezlynx_api_config())
+            create_report = search_first_create(
+                client,
+                applicant_id=applicant_id,
+                policy_number=policy_setup_args["policy_number"],
+                effective_date=policy_setup_args["effective_date"],
+                expiration_date=policy_setup_args["expiration_date"],
+            )
+            store.checkpoint(job_id, 'action', {
+                'action': 'ezlynx_policy_create',
+                'destination': {
+                    'policy_number': policy_setup_args["policy_number"],
+                    'applicant_id': applicant_id,
+                },
+                'detail': {
+                    'policy_api_create': create_report,
+                    'effective_date': policy_setup_args["effective_date"],
+                    'expiration_date': policy_setup_args["expiration_date"],
+                },
+            })
+            logger.info(
+                "PolicyApi create in email runner for %s: verdict=%s",
+                policy_setup_args["policy_number"],
+                (create_report or {}).get("verdict"),
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed with the real error
+            real_error = f"{type(exc).__name__}: {exc}"
+            store.checkpoint(job_id, 'policy_api_create_error', {
+                'policy_number': policy_setup_args["policy_number"],
+                'applicant_id': "220250093",
+                'error': real_error,
+            })
+            existing_action = store.get_checkpoint(job_id, 'action') or {}
+            existing_dest = dict(existing_action.get('destination') or {})
+            existing_dest.setdefault('policy_number', policy_setup_args["policy_number"])
+            existing_dest.setdefault('applicant_id', "220250093")
+            store.checkpoint(job_id, 'action', {
+                'action': existing_action.get('action') or 'ezlynx_policy_create',
+                'destination': existing_dest,
+                'detail': {
+                    **(existing_action.get('detail') or {}),
+                    'policy_api_create_error': real_error,
+                },
+            })
+            logger.warning(
+                "PolicyApi create failed for %s: %s",
+                policy_setup_args["policy_number"],
+                real_error,
+            )
+            return (
+                f"ROBIE_OUTCOME_UNKNOWN: PolicyApi create failed for "
+                f"{policy_setup_args['policy_number']}: {real_error}. "
+                f"Failing closed — LLM not invoked. Check EZLynx before retrying."
             )
     if not response_text:
         attachment_lines = ""
