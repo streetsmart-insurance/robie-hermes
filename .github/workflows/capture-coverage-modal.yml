@@ -1,0 +1,172 @@
+name: Capture HO coverage modal DOM (read-only CDP)
+
+# Ralph's DOM-capture lane (2026-09-12): the FormEntry Edit page for
+# TEST-HO-20260912-D01 exposes policy-header fields at page level but no
+# Coverage A-F or deductible fields (proven by capture run 34694728948:
+# 42 fields, zero coverage fields). The auto precedent
+# (research/ezlynx-locators/diagnose_coverages_exact.py) found coverage
+# fields inside a modal via document.querySelector('.repeaterEntryModal.in,
+# .modal') -- this workflow applies the same idea to Homeowners.
+#
+# How it works: SSHes to hermes-poc-01 (Production), connects to ROBIE'S
+# EXISTING browser over CDP at 127.0.0.1:9222 (the sanctioned path -- this is
+# NOT a second browser and NOT a new EZLynx login), opens a NEW tab, GETs the
+# FormEntry Edit URL for TEST-HO-20260912-D01 (policyId 83651751, applicant
+# 220250093), sweeps for modal/dialog containers, clicks AT MOST ONE
+# coverage-ish modal trigger (buttons and data-toggle="modal" only -- real
+# navigation links are recorded, never clicked), and re-sweeps.
+#
+# READ-ONLY: no fills, no type, no check, no select_option, no Save, no
+# submit. Waits use wait_for_timeout only -- never networkidle. The tab is
+# closed afterwards. Target is the write-allowlisted test applicant.
+#
+# Dispatch ONLY from main: the Production environment's deployment branch
+# policy allows main and nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CAPTURE_COVERAGE_MODAL for an on-demand capture
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  capture:
+    if: github.event_name == 'workflow_dispatch' && inputs.confirmation == 'CAPTURE_COVERAGE_MODAL'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      STAGING: /var/tmp/robie-coverage-modal/${{ github.run_id }}
+      APPLICANT_ID: "220250093"
+      POLICY_ID: "83651751"
+      ENTRY_URL: https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83651751
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+
+      - name: Enforce bounded read-only request
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${APPLICANT_ID}" = "220250093"
+          test "${POLICY_ID}" = "83651751"
+          # the capture script may only target the allowlisted Edit URL
+          grep -q 'applicantportal/Policy/Actions/Edit/220250093/83651751' scripts/capture_coverage_modal.py
+          # read-only contract: no write-call patterns may appear in the script
+          ! grep -qE '\.(fill|type|check|select_option)\(' scripts/capture_coverage_modal.py
+          # exactly one navigation: the initial GET of the Edit URL
+          test "$(grep -c 'page.goto' scripts/capture_coverage_modal.py)" = "1"
+          # waits must never use networkidle (Carlo 2026-09-12: a networkidle
+          # timeout is its own marker, never PLAYWRIGHT_BLOCKED territory)
+          ! grep -q 'networkidle' scripts/capture_coverage_modal.py
+          # at most one click call site (the single modal-trigger click)
+          test "$(grep -c '__covCandidates\[i\].click' scripts/capture_coverage_modal.py)" = "1"
+          echo "bounded request OK"
+
+      - name: Stage capture script on Production
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/capture_coverage_modal.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Run capture (read-only, new tab, no fills, no save)
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -euo pipefail
+              mkdir -p '${STAGING}'
+              PY=''
+              for cand in \$(ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null) \$(find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 | sed 's|pyvenv.cfg|bin/python|') \$(command -v python3 2>/dev/null || true); do
+                [ -x \"\$cand\" ] || continue
+                if \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
+                if sudo -n \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"sudo -n \$cand\"; break; fi
+              done
+              if [ -z \"\$PY\" ]; then echo 'NO_PLAYWRIGHT_PYTHON'; exit 1; fi
+              echo \"using python: \$PY\"
+              if ! curl -sf --max-time 10 http://127.0.0.1:9222/json/version >/dev/null; then echo 'NO_CDP_LISTENER'; exit 1; fi
+              echo 'CDP listener up'
+              \$PY '${STAGING}/capture_coverage_modal.py' --out '${STAGING}/dump.json'"
+
+      - name: Retrieve dump
+        id: retrieve
+        run: |
+          set -euo pipefail
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${PRODUCTION_VM}:${STAGING}/dump.json" "${RUNNER_TEMP}/coverage-modal-dump.json"
+          python3 - <<'EOF'
+          import json, os
+          p = os.path.join(os.environ["RUNNER_TEMP"], "coverage-modal-dump.json")
+          d = json.load(open(p))
+          print("ok:", d.get("ok"))
+          print("landing_url:", d.get("landing_url"))
+          print("landing_looks_authenticated:", d.get("landing_looks_authenticated"))
+          print("modal_found:", d.get("modal_found"))
+          print("modal_field_count:", d.get("modal_field_count"))
+          print("coverage_candidates:", len(d.get("coverage_candidates", [])))
+          print("click:", json.dumps(d.get("click")))
+          print("duplicates:", len(d.get("duplicates", [])))
+
+          auth_ok = bool(d.get("landing_looks_authenticated", False))
+          out_gh = os.environ.get("GITHUB_OUTPUT")
+          if out_gh:
+              with open(out_gh, "a") as f:
+                  f.write(f"authenticated={'true' if auth_ok else 'false'}\n")
+
+          if not auth_ok:
+              status_path = os.path.join(os.environ["RUNNER_TEMP"], "coverage-modal-status.json")
+              status_payload = {
+                  "capture": "coverage-modal",
+                  "captured_at": d.get("captured_at"),
+                  "verdict": "REFUSED_UNAUTHENTICATED",
+                  "landing_url": d.get("landing_url"),
+                  "landing_looks_authenticated": False,
+                  "detail": (
+                      "Capture redirected to unauthenticated landing page. "
+                      "DOM was discarded to prevent storing login form."
+                  ),
+              }
+              with open(status_path, "w") as f:
+                  json.dump(status_payload, f, indent=2)
+              print("Written refusal status to:", status_path)
+          EOF
+
+      - name: Upload dump artifact
+        if: steps.retrieve.outputs.authenticated == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-modal-${{ github.run_id }}
+          path: ${{ runner.temp }}/coverage-modal-dump.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload refused status artifact
+        if: steps.retrieve.outputs.authenticated != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-modal-status-${{ github.run_id }}
+          path: ${{ runner.temp }}/coverage-modal-status.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Refuse unauthenticated capture
+        if: steps.retrieve.outputs.authenticated != 'true'
+        run: |
+          set -euo pipefail
+          echo "FATAL: Coverage-modal capture refused: landing_looks_authenticated is false" >&2
+          exit 1
