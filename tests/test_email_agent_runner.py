@@ -56,6 +56,7 @@ def test_scripted_mode_returns_only_final_response(runtime):
     assert 'chat' in command and '-z' not in command
     assert 'ROBIE_EMAIL_RECEIPT_' in command[-1]
     assert kwargs['env']['ROBIE_JOB_ID'] == runtime[3]
+    assert kwargs['env']['ROBIE_JOB_ACTION'] == 'hermes.email_task'
     assert runtime[2].get_checkpoint(runtime[3], 'email_agent_runtime')['attempts'][0]['finish_reason'] == 'stop'
 
 
