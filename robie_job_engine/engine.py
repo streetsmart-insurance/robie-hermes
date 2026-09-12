@@ -311,6 +311,29 @@ class JobEngine:
             from .playwright_observability import maybe_snapshot_and_bind
 
             maybe_snapshot_and_bind(self.store.path, job_id, phase="start")
+            if self._job_requires_browser(job):
+                from .session_preflight import check as check_session_preflight
+
+                session_check = check_session_preflight()
+                if session_check.get("blocking"):
+                    blocker_reason = session_check.get("reason") or "SESSION_LOGGED_OUT"
+                    self.store.checkpoint(job_id, "session_preflight", session_check)
+                    self.store.checkpoint(
+                        job_id,
+                        "email_response",
+                        {
+                            "response_text": blocker_reason,
+                            "body": blocker_reason,
+                            "subject": "ROBIE Blocker: EZLynx Session Logged Out",
+                        },
+                    )
+                    return self.store.transition(
+                        job_id,
+                        JobStatus.FAILED,
+                        expected={JobStatus.RUNNING},
+                        error=blocker_reason,
+                        release_lease=True,
+                    )
             action = self.store.get_checkpoint(job_id, "action")
             if action is None and not verify_only:
                 job = self._perform(job, ledger=ledger, run_id=run["id"])
@@ -851,3 +874,31 @@ class JobEngine:
         contract = get_executable_skill_contract(job["action_type"])
         configured = int(job["max_attempts"])
         return min(configured, contract.maximum_attempts) if contract else configured
+
+    @staticmethod
+    def _job_requires_browser(job: dict[str, Any] | None) -> bool:
+        if not job:
+            return False
+        from .playwright_observability import (
+            job_requires_playwright,
+            job_text,
+            PLAYWRIGHT_REQUEST_MARKERS,
+        )
+
+        if job_requires_playwright(job):
+            return True
+        action = str(job.get("action_type") or "")
+        if action in {
+            "browser.read",
+            "ezlynx.reassign",
+            "ezlynx.move_document",
+            "ezlynx.apply_label",
+            "ezlynx.submission_audit",
+            "ezlynx.session_refresh",
+        }:
+            return True
+        if action == "hermes.email_task":
+            text = " ".join(job_text(job).casefold().split())
+            return any(marker in text for marker in PLAYWRIGHT_REQUEST_MARKERS)
+        return False
+
