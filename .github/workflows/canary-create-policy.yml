@@ -1,0 +1,85 @@
+name: Canary policy create (governed single-shot)
+
+# Governed single-shot policy create on applicant 220250093 (ROBIE Test LLC).
+# Strictly limited to:
+#   - Exactly ONE create call per dispatch.
+#   - Applicant 220250093 only (refuses all other accounts).
+#   - Policy number matching TEST-CANARY-YYYYMMDD-NN.
+#   - Captures raw request and response; stops immediately on non-200.
+#   - On 200, reads back carrier value literally via PolicyApi search.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CREATE_CANARY_POLICY
+        required: true
+        type: string
+      applicant_id:
+        description: EZLynx applicant ID (locked to 220250093)
+        required: true
+        default: '220250093'
+        type: string
+      policy_number:
+        description: Policy number (TEST-CANARY-YYYYMMDD-NN)
+        required: true
+        default: 'TEST-CANARY-20260912-01'
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  canary-create:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'CREATE_CANARY_POLICY'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      SECRET_REF: projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+      STAGING: /var/tmp/robie-canary-create/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Validate bounded request
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${{ inputs.applicant_id }}" = "220250093"
+          [[ "${{ inputs.policy_number }}" =~ ^TEST-CANARY-[0-9]{8}-[0-9]{2}$ ]] || { echo "policy_number must match TEST-CANARY-YYYYMMDD-NN"; exit 1; }
+
+      - name: Execute single canary create from hermes-poc-01
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/canary_create_policy.py "${PRODUCTION_VM}:${STAGING}/"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 '${STAGING}/canary_create_policy.py' --applicant-id '${{ inputs.applicant_id }}' --policy-number '${{ inputs.policy_number }}' --secret '${SECRET_REF}'" \
+            | tee "${RUNNER_TEMP}/canary-create-result.json"
+          python3 -m json.tool "${RUNNER_TEMP}/canary-create-result.json" >/dev/null
+
+      - name: Cleanup remote staging
+        if: always()
+        run: |
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="rm -rf '${STAGING}'" || true
+
+      - name: Publish evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-create-result-${{ github.run_id }}
+          path: ${{ runner.temp }}/canary-create-result.json
+          if-no-files-found: error
+          retention-days: 90
