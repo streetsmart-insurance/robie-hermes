@@ -9,15 +9,18 @@ Reads performed (all from hermes-poc-01, all GETs, all with timeouts):
   1. PolicyApi policy search by number (OAuth):
        GET {origin}/PolicyApi/policy/v1/search?PolicyNumber=
      Reports whether the named policy exists and its field values
-     (number, id, status, effective, expiration). Carrier is NOT
-     reported: the search response returns an unverified carrier id,
-     so carrier is NOT CHECKED (see not_checked).
+     (number, id, status, effective, expiration). Carrier IS reported:
+     masterCompany and naicCode from the search row are the carrier
+     identity (run 34697115179 returned masterCompany 13585 and naicCode
+     "10048"). carrierID and writingCompany are also reported literally,
+     but both read "0" on every policy seen -- they are not the carrier
+     identity, and this note exists so nobody re-derives that conclusion.
   2. Applicant policy list attempt (OAuth):
        GET {origin}/PolicyApi/policy/v1/search?ApplicantId=
      If the endpoint answers, every returned row is listed
      (number, id, status, effective, expiration) with a rows-returned
      count — rows_returned is rows in the response, not a server total.
-     Carrier is NOT reported (see read #1).
+     Carrier is reported (see read #1).
      If it does not answer, the field is reported UNCHECKED with the
      reason — the verifier never invents a list. Only rows matching the
      requested applicant are printed; the rows-returned/honored/matching
@@ -254,13 +257,12 @@ def extract_policy_rows(payload: object) -> list[dict]:
 
 
 def policy_fields(row: dict) -> dict:
-    # NOTE: carrier is deliberately NOT extracted here. The PolicyApi
-    # search response returns an unverified carrier id ("0" for both
-    # TEST-HO-20260912-D01 and TEST-HO-08312026-01; the latter is known
-    # to be Selective while other rows return real ids), so this field
-    # cannot verify the Hyundai requirement. Carrier is reported
-    # NOT CHECKED (see not_checked) until a read path returns a carrier
-    # name or a verified id.
+    # Carrier identity: the PolicyApi search row carries masterCompany and
+    # naicCode, and those ARE the carrier identity (canary create read-back
+    # in run 34697115179: masterCompany 13585, naicCode "10048"). carrierID
+    # and writingCompany are ALSO reported literally below, but both read
+    # "0" on every policy seen so far -- they are not the carrier identity,
+    # and this note exists so nobody re-derives that wrong conclusion later.
     return {
         "policy_number": first(row, "PolicyNumber", "policyNumber", "policy_number"),
         "policy_id": first(row, "PolicyId", "policyId", "policy_id", "ID", "Id"),
@@ -271,6 +273,19 @@ def policy_fields(row: dict) -> dict:
                              "Expiration", "PolicyExpirationDate"),
         "applicant_id": first(row, "ApplicantId", "applicantId", "applicant_id",
                                "AccountId", "accountId"),
+        "master_company": first(row, "MasterCompany", "masterCompany",
+                                 "master_company"),
+        "naic_code": first(row, "NaicCode", "naicCode", "naic_code",
+                            "NAICCode", "NAICcode"),
+        "carrier_id": first(row, "CarrierID", "carrierID", "carrier_id",
+                             "CarrierId", "carrierId"),
+        "writing_company": first(row, "WritingCompany", "writingCompany",
+                                  "writing_company"),
+        "carrier_note": (
+            "masterCompany / naicCode are the carrier identity. carrierID "
+            "and writingCompany both read \"0\" on every policy seen; they "
+            "are not the carrier identity."
+        ),
     }
 
 
@@ -692,12 +707,6 @@ def main() -> int:
         "different policy number: it only reads the exact numbers named.",
         "the verifier cannot prove the account was clean before a test: "
         "it reads current destination state, not history.",
-        "carrier: the PolicyApi search response returns an unverified "
-        "carrier id (\"0\" for both TEST-HO-20260912-D01 and "
-        "TEST-HO-08312026-01; the latter is known to be Selective while "
-        "other rows return real ids), so the carrier field cannot verify "
-        "the Hyundai requirement; no read path returns a carrier name or "
-        "a verified id yet.",
     ])
 
     try:

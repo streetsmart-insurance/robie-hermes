@@ -1,0 +1,128 @@
+# Sweep for FormEntry indicators (READ-ONLY).
+#
+# Follow-up to the one approved mint write (run 34697459460): the click on
+# "Save & Continue Edit" fired but produced no navigation, so no
+# formEntryId was captured. This workflow performs ZERO writes. It
+# inventories every open tab on the CDP browser (the FormEntry may be
+# sitting in a tab the mint script never inventoried) and sweeps the D01
+# Edit page DOM for FormEntry indicators (anchors, mentions, APE links).
+#
+# Read-only contract (enforced by the gate greps below, blunt style):
+#   - No .fill(, .type(, .check(, .select_option(, .click( anywhere.
+#   - Exactly one page.goto call site (the single read-only navigation).
+#   - No networkidle. No .first / nth(.
+#   - The script must mention FormEntry.
+# If any gate fails the run goes red BEFORE staging or touching the VM.
+
+name: Sweep for FormEntry indicators (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+env:
+  PRODUCTION_VM: hermes-poc-01
+  PROJECT_ID: streetsmart-hermes-poc
+  ZONE: us-east1-b
+  STAGING: /var/tmp/robie-formentry-sweep/${{ github.run_id }}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+
+      - name: Gate the sweep script (read-only contract)
+        run: |
+          set -euo pipefail
+          S=scripts/sweep_formentry_indicators.py
+          test -f "$S" || { echo "missing $S"; exit 1; }
+          for pat in '\.fill(' '\.type(' '\.check(' 'select_option(' '\.click('; do
+            grep -q "$pat" "$S" && { echo "GATE: forbidden call site $pat"; exit 1; }
+          done
+          test "$(grep -o 'page\.goto' "$S" | wc -l)" = "1" || { echo "GATE: page.goto count != 1"; exit 1; }
+          grep -q 'networkidle' "$S" && { echo "GATE: networkidle present"; exit 1; }
+          grep -q '\.first' "$S" && { echo "GATE: .first present"; exit 1; }
+          grep -q 'nth(' "$S" && { echo "GATE: nth( present"; exit 1; }
+          grep -q 'FormEntry' "$S" || { echo "GATE: no FormEntry mention"; exit 1; }
+          echo "read-only gates passed"
+
+      - name: Set up gcloud (pinned)
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '584.0.0'
+
+      - name: Stage sweep script on Production
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/sweep_formentry_indicators.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Run sweep (read-only)
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -euo pipefail
+              mkdir -p '${STAGING}'
+              PY=''
+              for cand in \$(ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null) \$(find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 | sed 's|pyvenv.cfg|bin/python|') \$(command -v python3 2>/dev/null || true); do
+                [ -x \"\$cand\" ] || continue
+                if \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
+                if sudo -n \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"sudo -n \$cand\"; break; fi
+              done
+              if [ -z \"\$PY\" ]; then echo 'NO_PLAYWRIGHT_PYTHON'; exit 1; fi
+              echo \"using python: \$PY\"
+              if ! curl -sf --max-time 10 http://127.0.0.1:9222/json/version >/dev/null; then echo 'NO_CDP_LISTENER'; exit 1; fi
+              echo 'CDP listener up'
+              \$PY '${STAGING}/sweep_formentry_indicators.py' --out '${STAGING}/dump.json'"
+
+      - name: Retrieve dump
+        id: retrieve
+        if: always()
+        run: |
+          set -euo pipefail
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${PRODUCTION_VM}:${STAGING}/dump.json" "${RUNNER_TEMP}/formentry-sweep-dump.json"
+          python3 - <<'EOF'
+          import json, os
+          p = os.path.join(os.environ["RUNNER_TEMP"], "formentry-sweep-dump.json")
+          d = json.load(open(p))
+          print("ok:", d.get("ok"))
+          print("landing_url:", d.get("landing_url"))
+          print("landing_looks_authenticated:", d.get("landing_looks_authenticated"))
+          print("open tabs:", len(d.get("tab_inventory", [])))
+          for t in d.get("tab_inventory", []):
+              print("   tab", t["context_index"], t["page_index"], "->", (t["url"] or "")[:120])
+          print("formentry_found_in_open_tabs:", json.dumps(d.get("formentry_found_in_open_tabs")))
+          ind = d.get("indicators") or {}
+          print("formentry_anchors:", json.dumps(ind.get("formentry_anchors"), indent=2))
+          print("formentry_mentions:", len(ind.get("formentry_mentions", [])))
+          for m in ind.get("formentry_mentions", [])[:10]:
+              print("   mention:", m["text"][:120])
+          print("ape_app_links:", len(ind.get("ape_app_links", [])))
+          print("stopped_off_policy_path:", d.get("stopped_off_policy_path"))
+          print("error:", d.get("error"))
+          EOF
+
+      - name: Upload dump artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formentry-sweep-${{ github.run_id }}
+          path: ${{ runner.temp }}/formentry-sweep-dump.json
+          retention-days: 90

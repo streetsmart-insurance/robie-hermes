@@ -313,11 +313,30 @@ class JobEngine:
             maybe_snapshot_and_bind(self.store.path, job_id, phase="start")
             if self._job_requires_browser(job):
                 from .session_preflight import check as check_session_preflight
+                from .session_recovery import attempt_session_recovery, recovery_summary
 
                 session_check = check_session_preflight()
                 if session_check.get("blocking"):
-                    blocker_reason = session_check.get("reason") or "SESSION_LOGGED_OUT"
                     self.store.checkpoint(job_id, "session_preflight", session_check)
+                    # The session is provably logged out. Before failing the
+                    # job, attempt automatic re-authentication through the
+                    # Secret Manager credential path — no human in the loop,
+                    # no guard lifted. The attempt and its outcome are
+                    # checkpointed so the job's trail shows what was tried.
+                    recovery = attempt_session_recovery()
+                    self.store.checkpoint(job_id, "session_recovery", recovery)
+                    if recovery.get("recovered"):
+                        session_check = check_session_preflight()
+                        self.store.checkpoint(
+                            job_id, "session_preflight_recheck", session_check
+                        )
+                if session_check.get("blocking"):
+                    blocker_reason = session_check.get("reason") or "SESSION_LOGGED_OUT"
+                    recovery = self.store.get_checkpoint(job_id, "session_recovery")
+                    if recovery:
+                        blocker_reason = (
+                            f"{blocker_reason} ({recovery_summary(recovery)})"
+                        )
                     self.store.checkpoint(
                         job_id,
                         "email_response",

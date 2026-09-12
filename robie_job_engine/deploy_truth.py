@@ -82,6 +82,11 @@ CHAT_RUNTIME_FILES: tuple[ChatRuntimeFile, ...] = (
         zip_relpath="deploy/hermes/tools/gemini_field_tool.py",
         dest_relpath="hermes-agent/tools/gemini_field_tool.py",
     ),
+    ChatRuntimeFile(
+        name="policy-setup-tool",
+        zip_relpath="deploy/hermes/tools/policy_setup_tool.py",
+        dest_relpath="hermes-agent/tools/policy_setup_tool.py",
+    ),
 )
 
 # Zip PYTHONPATH only — Hermes does not load these from .hermes.

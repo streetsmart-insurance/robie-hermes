@@ -523,6 +523,31 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             job = JobStore(bound_db).get_job(bound_job_id)
         except Exception:
             job = None
+    # Policy-setup job class: the runner must invoke ezlynx_policy_setup as a
+    # real tool call before any playwright_exec. Refuse the fall-through.
+    # (342 design; 341's _hard_route_policy_setup hijack is dropped.)
+    if bound_job_id and bound_db:
+        try:
+            from robie_job_engine.policy_setup_dispatch import (
+                POLICY_SETUP_REQUIRED_KIND,
+            )
+            from robie_job_engine.store import JobStore
+
+            marker = JobStore(bound_db).get_checkpoint(
+                bound_job_id, POLICY_SETUP_REQUIRED_KIND
+            ) or {}
+            if marker and not marker.get("tool_called"):
+                return _finish(tool_error(
+                    "POLICY_SETUP_ORDER: this job asks to create/set up a "
+                    f"homeowners policy ({marker.get('policy_number')}); "
+                    "call the 'ezlynx_policy_setup' tool first — "
+                    "playwright_exec is refused for this job class until then. "
+                    "If the tool is not in your tool list, report: "
+                    "ROBIE_OUTCOME_UNKNOWN: ezlynx_policy_setup is not "
+                    "registered; failing closed."
+                ))
+        except Exception:
+            pass
     try:
         from robie_job_engine.tab_cleanup import flush_tabs_at_job_start
 

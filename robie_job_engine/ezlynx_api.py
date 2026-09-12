@@ -385,8 +385,74 @@ class EzlynxDocumentDownload:
 
 
 def _urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int):
-    req = request.Request(url, data=data, headers=headers)
-    return request.urlopen(req, timeout=timeout)
+    """HTTP client using http.client directly (not urllib).
+    
+    The canary script (scripts/canary_create_policy.py) proved that
+    http.client.HTTPSConnection correctly handles EZLynx API responses,
+    while urllib.request.urlopen returns empty responses with None status
+    for the PolicyApi create endpoint. This implementation matches the
+    canary's proven approach.
+    """
+    import http.client
+    import urllib.parse
+    
+    parsed = urllib.parse.urlparse(url)
+    # Use HTTPSConnection for https, HTTPConnection for http
+    if parsed.scheme == "https":
+        conn = http.client.HTTPSConnection(parsed.netloc, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(parsed.netloc, timeout=timeout)
+    
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    
+    # Determine method: POST if data, else GET
+    method = "POST" if data is not None else "GET"
+    
+    try:
+        conn.request(method, path, body=data, headers=headers)
+        resp = conn.getresponse()
+        # Read the body now; wrap in a compatible response object
+        body = resp.read()
+        status = resp.status
+        resp_headers = resp.getheaders()
+        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    
+    # Return a wrapper that provides the urllib-compatible interface
+    # (read, getcode, status, getheaders) with reliable status
+    class _HttpClientResponse:
+        def __init__(self, body_bytes, http_status, headers_list):
+            self._body = body_bytes
+            self._status = http_status
+            self._headers = headers_list
+        
+        def read(self):
+            return self._body
+        
+        def getcode(self):
+            return self._status
+        
+        @property
+        def status(self):
+            return self._status
+        
+        def getheaders(self):
+            return self._headers
+        
+        def getheader(self, name, default=None):
+            for k, v in self._headers:
+                if k.lower() == name.lower():
+                    return v
+            return default
+    
+    return _HttpClientResponse(body, status, resp_headers)
 
 
 class EzlynxApiClient:
@@ -503,9 +569,61 @@ class EzlynxApiClient:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         error_label: str = "EZLynx API",
     ) -> tuple[bytes, str]:
+        raw, content_type, _status, _diagnostics = self._request_bytes_with_status(
+            method, url, data=data, headers=headers, timeout=timeout, error_label=error_label
+        )
+        return raw, content_type
+
+    def _request_bytes_with_status(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: bytes | None,
+        headers: dict[str, str],
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        error_label: str = "EZLynx API",
+    ) -> tuple[bytes, str, int | None, dict[str, Any]]:
+        """Same as _request_bytes but also returns the HTTP status code.
+
+        Returns (body_bytes, content_type, http_status, diagnostics). The
+        diagnostics dict contains response_type, response_headers, and
+        status_source for fail-closed debugging. On HTTP error,
+        raises EzlynxApiError as before (status is in the exception).
+        """
         try:
             resp = self._urlopen(url, data=data, headers=headers, timeout=timeout)
-            return resp.read(), self._response_content_type(resp)
+            http_status = None
+            status_source = None
+            resp_type = type(resp).__name__
+            # Try multiple status attributes; validate it's a real HTTP code.
+            for attr in ("getcode", "status", "code", "status_code"):
+                try:
+                    if attr == "getcode":
+                        val = resp.getcode()
+                    else:
+                        val = getattr(resp, attr, None)
+                    if isinstance(val, int) and 100 <= val <= 599:
+                        http_status = val
+                        status_source = attr
+                        break
+                except Exception:
+                    continue
+            # Capture response headers for diagnostics.
+            resp_headers: dict[str, str] = {}
+            try:
+                if hasattr(resp, "getheaders"):
+                    resp_headers = dict(resp.getheaders())
+                elif hasattr(resp, "headers"):
+                    resp_headers = dict(resp.headers)
+            except Exception:
+                pass
+            diagnostics = {
+                "response_type": resp_type,
+                "response_headers": resp_headers,
+                "status_source": status_source,
+            }
+            return resp.read(), self._response_content_type(resp), http_status, diagnostics
         except error.HTTPError as exc:
             detail = ""
             try:
@@ -577,6 +695,74 @@ class EzlynxApiClient:
         headers = {"Authorization": f"Bearer {self.get_token()}"}
         parsed = self._request_json("GET", url, data=None, headers=headers)
         return self._wrap_search(parsed)
+
+    def create_policy(
+        self,
+        *,
+        applicant_id: str,
+        policy_number: str,
+        master_company: int = 13585,
+        writing_company: str = "10048",
+        lob: str = "HOME",
+        effective_date: str,
+        expiration_date: str,
+        written_premium: float = 1.00,
+        rating_state: str = "NJ",
+        transaction_type: str = "NBS",
+    ) -> dict[str, Any]:
+        """OAuth POST /PolicyApi/account/{applicantId}/policy/v1/create.
+
+        The gold payload: writingCompany is the string "10048" and
+        masterCompany is the int 13585. Exactly one create attempt is made
+        by the caller; this method performs exactly one POST.
+        """
+        applicant = str(applicant_id or "").strip()
+        number = str(policy_number or "").strip()
+        if not number:
+            raise EzlynxApiError(None, "policy number is required")
+        # Enforce the EZLynx write allowlist before any write leaves this box.
+        applicant = require_allowed_ezlynx_write_applicant(applicant)
+        payload = {
+            "accountId": int(applicant),
+            "policyNumber": number,
+            "writingCompany": str(writing_company),
+            "lob": str(lob),
+            "effectiveDate": str(effective_date),
+            "expirationDate": str(expiration_date),
+            "masterCompany": int(master_company),
+            "writtenPremium": float(written_premium),
+            "ratingState": str(rating_state),
+            "transactionType": str(transaction_type),
+            "acordXml": "",
+        }
+        url = self._origin() + f"/PolicyApi/account/{applicant}/policy/v1/create"
+        headers = {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Content-Type": "application/json",
+        }
+        data = json.dumps(payload).encode("utf-8")
+        # The create endpoint returns the new policy id as a bare scalar
+        # (string or number), not a JSON object — parse flexibly.
+        # Capture raw HTTP details for fail-closed diagnostics: the caller
+        # needs the status code and raw body when no policy ID comes back.
+        raw, _content_type, http_status, diagnostics = self._request_bytes_with_status(
+            "POST", url, data=data, headers=headers, error_label="EZLynx PolicyApi create"
+        )
+        text = raw.decode("utf-8", errors="replace").strip()
+        try:
+            parsed: Any = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = text.strip('"')
+        return {
+            "request_payload": payload,
+            "response": parsed,
+            "http_status": http_status,
+            "raw_body": text,
+            "url": url,
+            "response_type": diagnostics.get("response_type"),
+            "response_headers": diagnostics.get("response_headers"),
+            "status_source": diagnostics.get("status_source"),
+        }
 
     def list_applicant_documents(
         self,
