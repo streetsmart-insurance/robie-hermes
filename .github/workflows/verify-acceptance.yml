@@ -4,14 +4,22 @@ name: Acceptance verifier (read-only)
 # path. Takes an applicant ID, one or more policy numbers (comma-separated),
 # and an optional job ID as INPUTS and re-reads destination state from
 # primary sources on hermes-poc-01:
-#   - PolicyApi policy search for EACH named policy (number, status,
-#     carrier, effective, expiration)
-#   - an applicant-scoped policy list attempt (reported UNCHECKED with the
-#     reason — the PolicyApi has no applicant-scoped list endpoint)
+#   - PolicyApi policy search for EACH named policy (number, id, status,
+#     effective, expiration). Carrier is NOT CHECKED: the response
+#     returns an unverified id ("0" for both test policies), so it
+#     cannot verify the Hyundai requirement.
+#   - an applicant-scoped policy list attempt. Only rows matching the
+#     requested applicant are printed into the log/artifact (the
+#     endpoint returns other applicants' live policies); the
+#     total/honored/matching counts are the evidence the filter is
+#     not honored.
 #   - the applicant's Document Library (classic REST; UNCHECKED — classic
 #     auth not in the secret)
 #   - DocumentApi document-search (OAuth, proven PR #295): every document
-#     with id/name/description; per-policy PDF-attachment read-back
+#     with id/name/description/mime; file rows and folder-like rows
+#     (mime unknown/unknown) counted separately; per-policy
+#     PDF-attachment read-back matched literally by policy number
+#     against file rows only
 #   - DiscussionApi applicant discussions (OAuth): every note with title
 #     and text excerpt; per-policy note-posted read-back
 #   - the job's own rows from jobs.db (jobs, checkpoints, playwright_exec,

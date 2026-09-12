@@ -8,13 +8,18 @@ what is true — never what the worker claimed.
 Reads performed (all from hermes-poc-01, all GETs, all with timeouts):
   1. PolicyApi policy search by number (OAuth):
        GET {origin}/PolicyApi/policy/v1/search?PolicyNumber=
-     Reports whether the named policy exists and its field values.
+     Reports whether the named policy exists and its field values
+     (number, id, status, effective, expiration). Carrier is NOT
+     reported: the search response returns an unverified carrier id,
+     so carrier is NOT CHECKED (see not_checked).
   2. Applicant policy list attempt (OAuth):
        GET {origin}/PolicyApi/policy/v1/search?ApplicantId=
      If the endpoint answers, every policy on the applicant is listed
      (number, status, carrier, effective, expiration) with a total count.
      If it does not answer, the field is reported UNCHECKED with the
-     reason — the verifier never invents a list.
+     reason — the verifier never invents a list. Only rows matching the
+     requested applicant are printed; the total/honored/matching counts
+     are the evidence the filter is not honored.
   3. Document Library (classic REST):
        GET {classic}/api/documentlibrary/list/{applicant}/1/200/0
      Reports every document row seen (name, description, policy number,
@@ -209,12 +214,17 @@ def extract_policy_rows(payload: object) -> list[dict]:
 
 
 def policy_fields(row: dict) -> dict:
+    # NOTE: carrier is deliberately NOT extracted here. The PolicyApi
+    # search response returns an unverified carrier id ("0" for both
+    # TEST-HO-20260912-D01 and TEST-HO-08312026-01; the latter is known
+    # to be Selective while other rows return real ids), so this field
+    # cannot verify the Hyundai requirement. Carrier is reported
+    # NOT CHECKED (see not_checked) until a read path returns a carrier
+    # name or a verified id.
     return {
         "policy_number": first(row, "PolicyNumber", "policyNumber", "policy_number"),
         "policy_id": first(row, "PolicyId", "policyId", "policy_id", "ID", "Id"),
         "status": first(row, "Status", "status", "PolicyStatus", "policyStatus"),
-        "carrier": first(row, "CarrierName", "carrierName", "Carrier", "carrier",
-                         "WritingCompany", "writingCompany"),
         "effective": first(row, "EffectiveDate", "effectiveDate", "effective",
                             "Effective", "PolicyEffectiveDate"),
         "expiration": first(row, "ExpirationDate", "expirationDate", "expiration",
@@ -292,6 +302,14 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
                 report["applicant_filter_honored"] = (
                     len(matching) == len(policies) and len(policies) > 0)
                 report["policies_matching_applicant"] = len(matching)
+                # Never print other applicants' policies into the log or the
+                # artifact: the endpoint ignores the applicant parameter and
+                # returns live policies belonging to other applicants (policy
+                # numbers, ids, dates, carriers, applicant ids). Keep only
+                # the rows that actually match the requested applicant; the
+                # three counts above are the evidence that the filter is not
+                # honored.
+                report["policies"] = matching
                 # Always record which endpoints were tried, even when one
                 # won — the probe history is evidence either way.
                 report["attempts"] = attempts
@@ -434,6 +452,19 @@ def search_documents_oauth(origin: str, token: str, applicant_id: str,
                           "contentType"),
         })
     report["total_count"] = len(report["documents"])
+    # The document-search rows mix real files with folder-like rows
+    # (mime "unknown/unknown": "New Business/Application/Declarations",
+    # "Renewal Offers/Declarations", "Certificate Requests",
+    # "Proof of Insurance", "Policy Changes/Declarations", a row
+    # literally named ")", etc.). A file count that includes those is
+    # an overcount, so files and folder-like rows are counted
+    # separately. Heuristic is mime-based and labeled as such.
+    report["file_count"] = sum(
+        1 for d in report["documents"]
+        if d["mime"] not in ("", "unknown/unknown"))
+    report["folder_like_count"] = (
+        report["total_count"] - report["file_count"])
+    report["folder_heuristic"] = 'mime == "unknown/unknown"'
     return report
 
 
@@ -603,6 +634,12 @@ def main() -> int:
         "different policy number: it only reads the exact numbers named.",
         "the verifier cannot prove the account was clean before a test: "
         "it reads current destination state, not history.",
+        "carrier: the PolicyApi search response returns an unverified "
+        "carrier id (\"0\" for both TEST-HO-20260912-D01 and "
+        "TEST-HO-08312026-01; the latter is known to be Selective while "
+        "other rows return real ids), so the carrier field cannot verify "
+        "the Hyundai requirement; no read path returns a carrier name or "
+        "a verified id yet.",
     ])
 
     try:
@@ -628,9 +665,13 @@ def main() -> int:
         origin, token, args.applicant_id, not_checked)
 
     # Per-policy attachment/note read-back, matched literally by policy
-    # number appearing in the document/note record.
+    # number appearing in the document/note record. Attachment matching
+    # uses file rows only: folder-like rows (mime unknown/unknown) cannot
+    # be PDF attachments.
+    file_rows = [d for d in report["document_api"]["documents"]
+                 if d["mime"] not in ("", "unknown/unknown")]
     for entry, pn in zip(report["named_policies"], policy_numbers):
-        docs = [d for d in report["document_api"]["documents"]
+        docs = [d for d in file_rows
                 if references_policy(
                     " ".join([d["name"], d["description"],
                               d["policy_number"], d["policy_id"]]), pn)]
@@ -638,7 +679,8 @@ def main() -> int:
             "pdf" in d["name"].casefold() or "pdf" in d["mime"].casefold()
             for d in docs)
         entry["attached_documents"] = [
-            {"name": d["name"], "description": d["description"]} for d in docs]
+            {"name": d["name"], "description": d["description"],
+             "mime": d["mime"]} for d in docs]
         notes = [n for n in report["discussions"]["notes"]
                  if references_policy(n["title"] + " " + n["text_excerpt"], pn)]
         entry["note_posted"] = bool(notes)
