@@ -56,6 +56,9 @@ jobs:
         with:
           workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
           service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '584.0.0'  # Pinned 2026-09-12: runner-preinstalled gcloud 583.0.0 crashes on 'gcloud compute ssh' (TypeError: quote_from_bytes() expected bytes); 584.0.0 is the version setup-gcloud@latest resolved on run 34694728948, whose SSH staging succeeded.
 
       - name: Enforce bounded read-only request
         run: |
