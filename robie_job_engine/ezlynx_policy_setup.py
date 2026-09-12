@@ -841,9 +841,12 @@ class EzlynxPolicySetupPage:
                 http_status = create_info.get("http_status")
                 raw_body = create_info.get("raw_body") or ""
                 body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
+                resp_type = create_info.get("response_type")
+                status_src = create_info.get("status_source")
                 diagnostic = (
                     f"no policy id in read-back; cannot open FormEntry. "
-                    f"Create HTTP {http_status}, body: {body_preview}"
+                    f"Create HTTP {http_status} (via {status_src}, type {resp_type}), "
+                    f"body: {body_preview}"
                 )
             return PolicySetupResult(
                 success=False,
