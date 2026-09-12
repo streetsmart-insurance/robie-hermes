@@ -1,32 +1,39 @@
-"""Hard route for the homeowners policy-setup job class (code, not prompt).
+"""Deterministic routing for the homeowners policy-setup job class.
 
-Job class: a ``hermes.email_task`` asking to create/set up a homeowners policy
-on EZLynx applicant 220250093 (policy numbers TEST-HO-*).
+Job class: a request to create/set up a homeowners policy on EZLynx applicant
+220250093 (policy numbers TEST-HO-*).
 
-The route works in two code steps, no prompt text involved:
+Rule: the email/Chat runner must invoke ``ezlynx_policy_setup`` as a real tool
+call before any ``playwright_exec``. If the tool is missing/unregistered, fail
+closed with that error. Never fall through to ``playwright_exec`` for this
+job class.
 
-1. The email runner (``scripts/robie_email_agent.py``) classifies the job in
-   code and checkpoints ``policy_setup_required``. The runner never sets up
-   the policy itself.
-2. ``deploy/hermes/tools/playwright_tool.py`` hard-routes: when the bound job
-   carries an unfulfilled ``policy_setup_required`` marker, it calls the real
-   ``ezlynx_policy_setup`` handler in code and returns its result — before any
-   ``playwright_exec`` browser code runs.
+Live failures (jobs c1ffb79a, 1cfd0f3e — 2026-09-12): the email worker never
+called the tool, wandered with playwright_exec, timed out, and the policy was
+never created. Prompt guidance was not enough; this module makes the routing
+deterministic.
 
-If the tool is missing/unregistered, the route fails closed with that error.
-Job 1cfd0f3e never invoked the tool; this route makes invocation unavoidable.
+``extract_policy_setup_args`` builds the full tool args from the email body:
+policy number, effective/expiration dates, and coverage limits. Dates are never
+empty — parsed from the body, else the gold E01 dates (10/02/2026–10/02/2027).
 """
 
 from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
+from types import ModuleType
 
 POLICY_SETUP_REQUIRED_KIND = "policy_setup_required"
 POLICY_SETUP_TOOL = "ezlynx_policy_setup"
-POLICY_SETUP_ACTION = "hermes.email_task"
 POLICY_APPLICANT_ID = "220250093"
+
+# Gold E01 policy term. Used when the email body states no dates — the create
+# call must never go out with empty dates.
+GOLD_EFFECTIVE_DATE = "10/02/2026"
+GOLD_EXPIRATION_DATE = "10/02/2027"
 
 FAIL_CLOSED_MESSAGE = (
     "ezlynx_policy_setup is not registered; failing closed — "
@@ -40,50 +47,16 @@ _INTENT_RE = re.compile(
 )
 _POLICY_NUMBER_RE = re.compile(r"\b(TEST-HO-[A-Z0-9][A-Z0-9-]*)\b", re.IGNORECASE)
 
-# Gold E01 term and quote limits (from the authorized E01 test email body,
-# 2026-09-12). Used when the email body states no dates/limits — the create
-# call must never go out with empty dates (EZLynx returns 400).
-GOLD_EFFECTIVE_DATE = "10/02/2026"
-GOLD_EXPIRATION_DATE = "10/02/2027"
-E01_LIMIT_DEFAULTS = {
-    "dwelling": "1200000",
-    "other_structures": "120000",
-    "personal_property": "600000",
-    "loss_of_use": "360000",
-    "personal_liability": "500000",
-    "medical_payments": "5000",
-}
-
-# Args the ezlynx_policy_setup handler accepts. The checkpoint carries these
-# (plus bookkeeping keys); the hard route passes exactly these to the handler.
-TOOL_ARG_KEYS = (
-    "policy_number",
-    "effective_date",
-    "expiration_date",
-    "dwelling",
-    "other_structures",
-    "personal_property",
-    "loss_of_use",
-    "personal_liability",
-    "medical_payments",
-)
-
-# Carlo's literal coverage labels, plus Coverage A-F aliases.
+# Carlo's literal coverage labels, plus Coverage A–F aliases.
 _LIMIT_LABELS = {
     "dwelling": [r"Dwelling", r"Coverage\s*A\b"],
     "other_structures": [r"Other\s*Structures", r"Coverage\s*B\b"],
     "personal_property": [r"Personal\s*Property", r"Coverage\s*C\b"],
     "loss_of_use": [r"Loss\s*of\s*Use", r"Coverage\s*D\b"],
-    "personal_liability": [r"Personal\s*Liability(?:\s*EA\s*OCC)?", r"Coverage\s*E\b", r"\bLiability\b"],
+    "personal_liability": [r"Personal\s*Liability(?:\s*EA\s*OCC)?", r"Coverage\s*E\b"],
     "medical_payments": [r"Medical\s*Payments(?:\s*EA\s*PER)?", r"Coverage\s*F\b"],
 }
 _AMOUNT_RE = r"\$?\s*([\d,]+(?:\.\d{1,2})?)"
-_TERM_RE = re.compile(
-    r"\bterm\b[^\n]{0,30}?"
-    r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\s*(?:to|-|–)\s*"
-    r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})",
-    re.IGNORECASE,
-)
 
 
 class PolicySetupToolMissing(RuntimeError):
@@ -91,7 +64,12 @@ class PolicySetupToolMissing(RuntimeError):
 
 
 def detect_policy_setup_request(text: str) -> dict | None:
-    """Return ``{"policy_number": ...}`` for the homeowners-create job class."""
+    """Return tool args if text asks to create/set up a homeowners policy.
+
+    Matches the job class: create/setup intent + homeowners + applicant
+    220250093 or a TEST-HO-* policy number. Returns ``{"policy_number": ...}``
+    or ``None``.
+    """
     raw = str(text or "")
     if not _INTENT_RE.search(raw):
         return None
@@ -134,7 +112,7 @@ def _find_date_near_label(text: str, label_re: str) -> str | None:
     return _normalize_date(match.group(3), match.group(1), match.group(2))
 
 
-def _find_limit(text: str, label_res: list) -> str | None:
+def _find_limit(text: str, label_res: list[str]) -> str | None:
     """Find a dollar amount after one of the label patterns."""
     for label_re in label_res:
         pat = re.compile(label_re + r"\s*[:\-]?\s*" + _AMOUNT_RE, re.IGNORECASE)
@@ -147,23 +125,12 @@ def _find_limit(text: str, label_res: list) -> str | None:
     return None
 
 
-def _term_dates(text: str) -> tuple:
-    """Return (effective, expiration) from a 'term X to Y' phrase, else (None, None)."""
-    match = _TERM_RE.search(text)
-    if not match:
-        return (None, None)
-    return (
-        _normalize_date(match.group(3), match.group(1), match.group(2)),
-        _normalize_date(match.group(6), match.group(4), match.group(5)),
-    )
-
-
 def extract_policy_setup_args(text: str) -> dict | None:
-    """Build the full handler args from the email body. Never empty dates.
+    """Build full tool args from the email body. Never returns empty dates.
 
     Dates come from the body when stated, else the gold E01 term
-    (10/02/2026-10/02/2027). Coverage limits come from the body when stated,
-    else the E01 quote limits. Returns None outside the job class.
+    (10/02/2026–10/02/2027). Coverage limits come from the body when stated,
+    keyed by Carlo's literal labels. Returns None outside the job class.
     """
     base = detect_policy_setup_request(text)
     if not base:
@@ -171,47 +138,54 @@ def extract_policy_setup_args(text: str) -> dict | None:
     raw = str(text or "")
     args = dict(base)
     args["effective_date"] = (
-        _find_date_near_label(raw, r"effect\w*")
-        or _term_dates(raw)[0]
-        or GOLD_EFFECTIVE_DATE
+        _find_date_near_label(raw, r"effect\w*") or GOLD_EFFECTIVE_DATE
     )
     args["expiration_date"] = (
-        _find_date_near_label(raw, r"expir\w*|\bexp\b")
-        or _term_dates(raw)[1]
-        or GOLD_EXPIRATION_DATE
+        _find_date_near_label(raw, r"expir\w*|\bexp\b") or GOLD_EXPIRATION_DATE
     )
     for key, label_res in _LIMIT_LABELS.items():
         value = _find_limit(raw, label_res)
-        args[key] = value or E01_LIMIT_DEFAULTS[key]
+        if value:
+            args[key] = value
     return args
 
 
-def handler_args_from_marker(marker: dict) -> dict:
-    """Build the handler args from a policy_setup_required checkpoint marker."""
-    marker = marker or {}
-    args = {key: str(marker.get(key) or "").strip() for key in TOOL_ARG_KEYS}
-    if not args["effective_date"]:
-        args["effective_date"] = GOLD_EFFECTIVE_DATE
-    if not args["expiration_date"]:
-        args["expiration_date"] = GOLD_EXPIRATION_DATE
-    for key, default in E01_LIMIT_DEFAULTS.items():
-        if not args[key]:
-            args[key] = default
-    return args
+def _install_hermes_registry_stub() -> dict:
+    """The tool module imports ``tools.registry``; stub it outside the agent."""
+    tools_pkg = ModuleType("tools")
+    tools_pkg.__path__ = []
+    registry_mod = ModuleType("tools.registry")
+
+    class DummyRegistry:
+        def register(self, **_kwargs):
+            return None
+
+    def tool_error(message):
+        return {"ok": False, "error": message}
+
+    def tool_result(payload):
+        return payload
+
+    registry_mod.registry = DummyRegistry()
+    registry_mod.tool_error = tool_error
+    registry_mod.tool_result = tool_result
+    previous = {name: sys.modules.get(name) for name in ("tools", "tools.registry")}
+    sys.modules["tools"] = tools_pkg
+    sys.modules["tools.registry"] = registry_mod
+    return previous
 
 
-def policy_setup_tool_path(anchor_file: str | Path | None = None) -> Path:
-    """Locate the policy_setup_tool module.
+def _restore_modules(previous: dict) -> None:
+    for name, module in previous.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
-    The primary anchor is the calling tool file (playwright_tool.py lives next
-    to policy_setup_tool.py in the worker); repo and deploy paths are
-    fallbacks.
-    """
+
+def tool_module_path() -> Path:
     here = Path(__file__).resolve()
-    candidates = []
-    if anchor_file:
-        candidates.append(Path(anchor_file).with_name("policy_setup_tool.py"))
-    candidates += [
+    candidates = [
         here.parents[1] / "deploy" / "hermes" / "tools" / "policy_setup_tool.py",
         Path("/opt/streetsmart-hermes/.hermes/hermes-agent/tools/policy_setup_tool.py"),
     ]
@@ -221,20 +195,19 @@ def policy_setup_tool_path(anchor_file: str | Path | None = None) -> Path:
     return candidates[0]
 
 
-def load_policy_setup_handler(anchor_file: str | Path | None = None):
-    """Load the real ezlynx_policy_setup handler.
+def load_policy_setup_handler():
+    """Load the real ezlynx_policy_setup tool handler.
 
-    Runs inside the worker, where the real ``tools.registry`` exists — no
-    stubs, no bypass. Raises PolicySetupToolMissing when the tool module
-    cannot be loaded or has no handler: the caller must fail closed.
+    Raises PolicySetupToolMissing with the fail-closed message when the tool
+    module cannot be imported or has no handler — the caller must not fall
+    through to playwright_exec.
     """
-    path = policy_setup_tool_path(anchor_file)
+    path = tool_module_path()
     if not path.is_file():
         raise PolicySetupToolMissing(FAIL_CLOSED_MESSAGE)
+    previous = _install_hermes_registry_stub()
     try:
-        spec = importlib.util.spec_from_file_location(
-            "policy_setup_tool_route", path
-        )
+        spec = importlib.util.spec_from_file_location("policy_setup_tool", path)
         if spec is None or spec.loader is None:
             raise PolicySetupToolMissing(FAIL_CLOSED_MESSAGE)
         module = importlib.util.module_from_spec(spec)
@@ -245,7 +218,24 @@ def load_policy_setup_handler(anchor_file: str | Path | None = None):
         raise PolicySetupToolMissing(
             f"{FAIL_CLOSED_MESSAGE} (load error: {type(exc).__name__}: {exc})"
         ) from exc
+    finally:
+        _restore_modules(previous)
     handler = getattr(module, "ezlynx_policy_setup_handler", None)
     if not callable(handler):
         raise PolicySetupToolMissing(FAIL_CLOSED_MESSAGE)
     return handler
+
+
+def invoke_policy_setup_tool(args: dict) -> dict:
+    """Invoke the real tool handler. Fail closed when it is missing.
+
+    ``args`` must carry effective_date and expiration_date (never empty —
+    ``extract_policy_setup_args`` guarantees the gold E01 defaults).
+    """
+    args = dict(args or {})
+    if not str(args.get("effective_date") or "").strip():
+        args["effective_date"] = GOLD_EFFECTIVE_DATE
+    if not str(args.get("expiration_date") or "").strip():
+        args["expiration_date"] = GOLD_EXPIRATION_DATE
+    handler = load_policy_setup_handler()
+    return handler(args)

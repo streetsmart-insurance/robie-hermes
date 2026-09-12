@@ -135,7 +135,7 @@ def _run_policy_setup(args: dict) -> dict:
 
 
 def _mark_policy_setup_tool_called() -> None:
-    """Fulfill the hard-route marker so later playwright_exec calls proceed."""
+    """Record that the tool ran, releasing the playwright_exec order guard."""
     try:
         from robie_job_engine.policy_setup_dispatch import POLICY_SETUP_REQUIRED_KIND
         from robie_job_engine.store import JobStore
@@ -162,7 +162,10 @@ def ezlynx_policy_setup_handler(args: dict, **kwargs):
         report = _run_policy_setup(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
         return tool_error(f"{type(exc).__name__}: {exc}")
-    _mark_policy_setup_tool_called()
+    # Only mark tool_called when the handler created or found the policy.
+    # A failed create must not release the POLICY_SETUP_ORDER guard.
+    if isinstance(report, dict) and report.get("success"):
+        _mark_policy_setup_tool_called()
     return tool_result(report)
 
 
