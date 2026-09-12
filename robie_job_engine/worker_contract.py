@@ -106,11 +106,7 @@ _BLOCKER_TOKEN_RE = re.compile(
 def claims_unverified_destination_progress(content: str) -> bool:
     """True when prose claims a fill/save/identify from quote data."""
     text = str(content or "")
-    if (
-        "ROBIE_BLOCKED" in text
-        or "PLAYWRIGHT_BLOCKED" in text
-        or "PLAYWRIGHT_TIMEOUT" in text
-    ):
+    if "ROBIE_BLOCKED" in text or "PLAYWRIGHT_BLOCKED" in text:
         return False
     if "PLAYWRIGHT_FAIL_CLOSED" in text:
         return False
