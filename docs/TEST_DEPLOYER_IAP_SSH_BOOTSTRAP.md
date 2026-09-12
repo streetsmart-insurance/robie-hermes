@@ -13,29 +13,50 @@ service-account JSON key. No public SSH port.
 | Item | Value |
 | --- | --- |
 | Project | `streetsmart-hermes-poc` |
-| VM | `hermes-test-01` |
+| VM | `hermes-test-01` only |
 | Zone | `us-east1-b` |
 | Attached VM SA | `robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com` |
 | WIF provider | `projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github` |
 | WIF trust | repository ID `1343750842`, protected `refs/heads/main` |
 
-## Owner one-time grants
+## Owner one-time grants (Carlo-scoped)
 
-Requires project Owner / IAM admin. Pawel can verify instance IAM and firewall
-but cannot mutate project IAM.
+Test and Production share `streetsmart-hermes-poc`. IAP must be **instance-
+scoped** to `hermes-test-01`. Do **not** grant project-level
+`roles/iap.tunnelResourceAccessor` (that would also open `hermes-poc-01`).
 
 ```bash
 bash scripts/grant-test-deployer-iap-ssh.sh grant
-bash scripts/grant-test-deployer-iap-ssh.sh verify | tee /tmp/robie-deployer-iap-verify.json
+bash scripts/grant-test-deployer-iap-ssh.sh verify
 ```
 
-Exact roles:
+Exact roles (owner paste-equivalent):
 
-1. Instance `hermes-test-01`: `roles/compute.osAdminLogin` for the deployer SA
-2. Project: `roles/iap.tunnelResourceAccessor` for the deployer SA
-3. Project: `roles/compute.viewer` for describe / gcloud SSH metadata reads
-4. Attached SA only: `roles/iam.serviceAccountUser` for
-   `robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com`
+```bash
+PROJECT=streetsmart-hermes-poc
+ZONE=us-east1-b
+VM=hermes-test-01
+MEMBER=serviceAccount:robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+ATTACHED_SA=robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com
+
+# OS Login on the test instance
+gcloud compute instances add-iam-policy-binding "$VM" \
+  --project="$PROJECT" --zone="$ZONE" \
+  --member="$MEMBER" --role="roles/compute.osAdminLogin"
+
+# IAP tunnel — SCOPED to hermes-test-01 only
+gcloud compute instances add-iam-policy-binding "$VM" \
+  --project="$PROJECT" --zone="$ZONE" \
+  --member="$MEMBER" --role="roles/iap.tunnelResourceAccessor"
+
+# viewer for readiness describe (project-level, read-only)
+gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member="$MEMBER" --role="roles/compute.viewer" --condition=None
+
+# actAs only on the SA attached to hermes-test-01
+gcloud iam service-accounts add-iam-policy-binding "$ATTACHED_SA" \
+  --project="$PROJECT" --member="$MEMBER" --role="roles/iam.serviceAccountUser"
+```
 
 Firewall (already present; do not open `0.0.0.0/0:22`):
 
@@ -52,9 +73,12 @@ VM metadata: `enable-oslogin=TRUE`. Do not store `ssh-keys` metadata.
 bash scripts/grant-test-deployer-iap-ssh.sh rollback
 ```
 
+Removes instance `osAdminLogin`, instance-scoped IAP, and attached-SA `actAs`.
+Leaves project `compute.viewer` unless removed manually.
+
 ## Fresh-runner proof
 
-After merge to protected `main`, dispatch
+After merge to protected `main` and Owner grant, dispatch
 `.github/workflows/diagnose-test-iap-ssh.yml` with confirmation
 `PROVE_TEST_IAP_SSH`.
 
@@ -64,15 +88,6 @@ Required green outputs:
 - SCP of a harmless temp file + exact SHA-256 read-back on the VM
 
 Tell Carlo when that run ID is green.
-
-## Human laptop path (optional)
-
-```bash
-OSLOGIN_SSH_KEY_TTL=0 bash scripts/ensure-gcloud-ssh-key.sh
-gcloud compute ssh hermes-test-01 \
-  --project=streetsmart-hermes-poc --zone=us-east1-b --tunnel-through-iap \
-  --command='hostname -s'
-```
 
 ## Related
 

@@ -37,6 +37,16 @@ class EnsureGcloudSshKeyContractTests(unittest.TestCase):
         self.assertIn("rollback", text)
         self.assertNotIn("keys create", text)
         self.assertNotIn("0.0.0.0/0", text)
+        # IAP must be instance-scoped; project-level would open hermes-poc-01.
+        self.assertIn(
+            'gcloud compute instances add-iam-policy-binding "${VM}"',
+            text,
+        )
+        self.assertIn('"${VM}" != "hermes-test-01"', text)
+        for i, line in enumerate(text.splitlines()):
+            if "projects add-iam-policy-binding" in line:
+                window = "\n".join(text.splitlines()[i : i + 5])
+                self.assertNotIn("iap.tunnelResourceAccessor", window)
 
     def test_iap_ssh_proof_workflow_is_main_only(self):
         text = WORKFLOW.read_text(encoding="utf-8")
