@@ -55,11 +55,45 @@ def empty_or_missing_artifact_error(detail: object) -> str | None:
     return None
 
 
+_LOCATOR_WRITE_TOKENS = (
+    "locator.fill",
+    "locator.click",
+    "locator.dblclick",
+    "locator.check",
+    "locator.uncheck",
+    "locator.select_option",
+    "locator.set_checked",
+    "locator.type",
+    "locator.press",
+    "locator.clear",
+    ".fill(",
+    ".click(",
+    ".dblclick(",
+    ".check(",
+    ".uncheck(",
+    ".select_option(",
+    ".set_checked(",
+    ".type(",
+    ".press(",
+    ".clear(",
+    "attempting fill",
+    "attempting click",
+    "attempting check",
+    "attempting select_option",
+    "element is not visible",
+    "element is hidden",
+    "aria-hidden",
+    "combobox",
+)
+
+
 def runner_timeout_error(detail: object) -> str | None:
     """Return PLAYWRIGHT_TIMEOUT text if this is a wait/load state expiration.
 
-    A wait expiring (e.g. networkidle, wait_for_load_state, goto timeout)
-    is not a security guard refusing.
+    A wait expiring (e.g. networkidle, wait_for_load_state, goto timeout,
+    locator.wait_for, locator.text_content) is not a security guard refusing.
+    Only write/input control interactions (fill, click, select_option, combobox)
+    are treated as guard / control blockers.
     """
     text = str(detail or "")
     if not text.strip():
@@ -75,11 +109,10 @@ def runner_timeout_error(detail: object) -> str | None:
         or "waiting for load state" in lowered
         or "page.goto: timeout" in lowered
         or "page.wait_for" in lowered
+        or "locator.wait_for" in lowered
         or (
             "timeouterror" in lowered
-            and "locator." not in lowered
-            and "attempting fill" not in lowered
-            and "combobox" not in lowered
+            and not any(token in lowered for token in _LOCATOR_WRITE_TOKENS)
         )
     ):
         return f"PLAYWRIGHT_TIMEOUT: {text}"
@@ -243,25 +276,7 @@ def relabel_user_exec_exception(exc: BaseException) -> None:
     )
     if timeout:
         blob = text.casefold()
-        control = any(
-            token in blob
-            for token in (
-                "locator.fill",
-                "locator.click",
-                "locator.select_option",
-                "locator.type",
-                ".fill(",
-                ".click(",
-                ".select_option(",
-                ".type(",
-                "attempting fill",
-                "attempting click",
-                "element is not visible",
-                "element is hidden",
-                "aria-hidden",
-                "combobox",
-            )
-        )
+        control = any(token in blob for token in _LOCATOR_WRITE_TOKENS)
         if control:
             raise RuntimeError(
                 f"PLAYWRIGHT_BLOCKED: {text}; "

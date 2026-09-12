@@ -331,6 +331,16 @@ class PlaywrightArtifactFailClosedTests(unittest.TestCase):
         self.assertIn("PLAYWRIGHT_TIMEOUT", str(goto_raised.exception))
         self.assertNotIn("PLAYWRIGHT_BLOCKED", str(goto_raised.exception))
 
+        with self.assertRaises(RuntimeError) as wait_raised:
+            self.tool.relabel_user_exec_exception(
+                PlaywrightTimeoutError(
+                    "locator.wait_for: Timeout 30000ms exceeded.\n"
+                    "waiting for locator(\"div#result\") to be visible"
+                )
+            )
+        self.assertIn("PLAYWRIGHT_TIMEOUT", str(wait_raised.exception))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", str(wait_raised.exception))
+
     def test_runner_failure_error_differentiates_timeout_from_guard_refusal(self):
         # Networkidle timeout gets PLAYWRIGHT_TIMEOUT marker
         idle_err = self.tool.runner_failure_error(
@@ -339,6 +349,33 @@ class PlaywrightArtifactFailClosedTests(unittest.TestCase):
         )
         self.assertTrue(idle_err.startswith("PLAYWRIGHT_TIMEOUT:"))
         self.assertNotIn("PLAYWRIGHT_BLOCKED", idle_err)
+
+        # Read-only locator wait/text_content timeout gets PLAYWRIGHT_TIMEOUT marker
+        loc_wait_err = self.tool.runner_failure_error(
+            "playwright._impl._errors.TimeoutError: Timeout 30000ms exceeded.\n"
+            "Call log:\n"
+            "  - waiting for locator(\"input#ready\").wait_for"
+        )
+        self.assertTrue(loc_wait_err.startswith("PLAYWRIGHT_TIMEOUT:"))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", loc_wait_err)
+
+        loc_text_err = self.tool.runner_failure_error(
+            "playwright._impl._errors.TimeoutError: Timeout 30000ms exceeded.\n"
+            "Call log:\n"
+            "  - waiting for locator(\"span.status\").text_content"
+        )
+        self.assertTrue(loc_text_err.startswith("PLAYWRIGHT_TIMEOUT:"))
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", loc_text_err)
+
+        # Write verb locator timeout gets PLAYWRIGHT_BLOCKED marker
+        loc_fill_err = self.tool.runner_failure_error(
+            "playwright._impl._errors.TimeoutError: Timeout 30000ms exceeded.\n"
+            "Call log:\n"
+            "  - waiting for locator(\"input#name\")\n"
+            "  - attempting fill action"
+        )
+        self.assertTrue(loc_fill_err.startswith("PLAYWRIGHT_BLOCKED:"))
+        self.assertNotIn("PLAYWRIGHT_TIMEOUT", loc_fill_err)
 
         # Subprocess execution timeout gets PLAYWRIGHT_TIMEOUT marker
         timeout_err = self.tool.runner_failure_error(

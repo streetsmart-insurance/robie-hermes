@@ -293,6 +293,32 @@ class UnverifiedUnmaskTests(unittest.TestCase):
         self.assertEqual(claimed.status, "UNVERIFIED")
         self.assertIn("no structured destination action checkpoint", claimed.error)
 
+        # A timeout alongside a progress claim must classify as UNVERIFIED, not FAILED,
+        # so destination verifier can check whether the write landed.
+        timeout_with_save = classify_chat_close_without_checkpoint(
+            "I saved the policy in EZLynx.\nPLAYWRIGHT_TIMEOUT: Timeout 30000ms exceeded waiting for networkidle",
+            action=None,
+        )
+        self.assertTrue(
+            claims_unverified_destination_progress(
+                "I saved the policy in EZLynx.\nPLAYWRIGHT_TIMEOUT: Timeout 30000ms exceeded waiting for networkidle"
+            )
+        )
+        self.assertEqual(timeout_with_save.status, "UNVERIFIED")
+        self.assertEqual(timeout_with_save.reason, "claimed destination progress without evidence")
+
+        timeout_with_create = classify_chat_close_without_checkpoint(
+            "I created the policy.\nPLAYWRIGHT_TIMEOUT: execution exceeded 90 seconds",
+            action=None,
+        )
+        self.assertTrue(
+            claims_unverified_destination_progress(
+                "I created the policy.\nPLAYWRIGHT_TIMEOUT: execution exceeded 90 seconds"
+            )
+        )
+        self.assertEqual(timeout_with_create.status, "UNVERIFIED")
+        self.assertEqual(timeout_with_create.reason, "claimed destination progress without evidence")
+
         done = classify_chat_close_without_checkpoint("Done", action=None)
         self.assertEqual(done.status, "UNVERIFIED")
 
