@@ -58,7 +58,7 @@ jobs:
             tests/test_ezlynx_api.py
           PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
       - name: Test production job client scope
-        run: PYTHONPATH=.:tests python -m pytest -q tests/test_production_job_scope.py tests/test_ezlynx_write_scope.py tests/test_production_deploy_workflow.py tests/test_email_acceptance_audit.py tests/test_email_agent_runner.py tests/test_ezlynx_policy_setup_profiles.py tests/test_policy_skill_release.py tests/test_hermes_tool_visibility.py
+        run: PYTHONPATH=.:tests python -m pytest -q tests/test_production_job_scope.py tests/test_ezlynx_write_scope.py tests/test_production_deploy_workflow.py tests/test_email_acceptance_audit.py tests/test_email_agent_runner.py tests/test_ezlynx_policy_setup_profiles.py tests/test_policy_skill_release.py tests/test_hermes_tool_visibility.py tests/test_canary_create_policy.py
       - name: Build immutable release candidate
         run: bash scripts/build-release.sh "$RUNNER_TEMP/releases"
 
