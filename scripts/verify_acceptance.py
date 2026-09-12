@@ -238,11 +238,27 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
     report: dict = {"read_method": None, "http_status": None,
                     "policies": [], "total_count": 0}
     attempts = []
-    for param in ("ApplicantId", "ApplicantID"):
-        url = origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
-            {param: applicant_id})
+    # Candidate endpoints, all read-only GETs. The first that returns policy
+    # rows wins; every returned row's own applicant_id is then checked, so an
+    # endpoint that ignores the applicant parameter can never be mistaken
+    # for an applicant-scoped list.
+    candidates = [
+        ("PolicyApi/policy/v1/search?ApplicantId=",
+         origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
+             {"ApplicantId": applicant_id})),
+        ("PolicyApi/policy/v1/search?ApplicantID=",
+         origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
+             {"ApplicantID": applicant_id})),
+        ("PolicyApi/account/{id}/policy/v1/search",
+         origin + f"/PolicyApi/account/{applicant_id}/policy/v1/search"),
+        ("PolicyApi/account/{id}/policy/v1/list",
+         origin + f"/PolicyApi/account/{applicant_id}/policy/v1/list"),
+        ("PolicyApi/account/{id}/policies",
+         origin + f"/PolicyApi/account/{applicant_id}/policies"),
+    ]
+    for label, url in candidates:
         status, payload = oauth_get(url, token)
-        attempts.append({"param": param, "http_status": status,
+        attempts.append({"endpoint": label, "http_status": status,
                          "json": payload is not None})
         if status == 200 and payload is not None:
             rows = extract_policy_rows(payload)
@@ -250,7 +266,7 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
                 policies = [policy_fields(r) for r in rows]
                 matching = [p for p in policies
                             if str(p.get("applicant_id")) == str(applicant_id)]
-                report["read_method"] = f"PolicyApi/policy/v1/search?{param}="
+                report["read_method"] = label
                 report["http_status"] = status
                 report["policies"] = policies
                 report["total_count"] = len(policies)
