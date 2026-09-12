@@ -62,6 +62,33 @@ def _extract_policy_id(row: Any) -> str | None:
     return None
 
 
+def _find_matching_row(search: Any, policy_number: str) -> dict[str, Any] | None:
+    """Extract the matching policy row from a search response (any shape).
+
+    The API returns a paginated envelope {'pageIndex':..., 'results':[...]}
+    which _wrap_search nests under 'data'. Drill into results[] to find the
+    row whose policyNumber matches; never return the envelope itself.
+    """
+    rows = search.get('data') if isinstance(search, dict) else None
+    candidates = None
+    if isinstance(rows, list):
+        candidates = rows
+    elif isinstance(rows, dict):
+        results = rows.get('results')
+        if isinstance(results, list):
+            candidates = results
+        else:
+            # Not a paginated envelope; the dict itself is the row.
+            return rows
+    if isinstance(candidates, list):
+        for row in candidates:
+            if isinstance(row, dict) and str(
+                row.get('policyNumber') or row.get('PolicyNumber') or ''
+            ).strip() == policy_number:
+                return row
+    return None
+
+
 def ensure_session() -> dict[str, Any]:
     """Re-auth via Secret Manager when logged out. Returns the recovery report."""
     from .session_recovery import attempt_session_recovery
@@ -89,15 +116,7 @@ def search_first_create(
         "policy_id": None,
     }
     search = client.search_policy_by_number(policy_number)
-    rows = search.get("data") if isinstance(search, dict) else None
-    matched = None
-    if isinstance(rows, list):
-        for row in rows:
-            if isinstance(row, dict) and str(row.get("policyNumber") or row.get("PolicyNumber") or "").strip() == policy_number:
-                matched = row
-                break
-    elif isinstance(rows, dict):
-        matched = rows
+    matched = _find_matching_row(search, policy_number)
     report["pre_create_search"] = {"found": matched is not None, "row": matched}
     if matched is not None:
         report["verdict"] = "ALREADY_EXISTS"
@@ -139,14 +158,7 @@ def search_first_create(
     rmatch = None
     for attempt in range(3):
         recheck = client.search_policy_by_number(policy_number)
-        rrows = recheck.get("data") if isinstance(recheck, dict) else None
-        if isinstance(rrows, list):
-            for row in rrows:
-                if isinstance(row, dict) and str(row.get("policyNumber") or row.get("PolicyNumber") or "").strip() == policy_number:
-                    rmatch = row
-                    break
-        elif isinstance(rrows, dict):
-            rmatch = rrows
+        rmatch = _find_matching_row(recheck, policy_number)
         if rmatch is not None:
             break
         if attempt < 2:
