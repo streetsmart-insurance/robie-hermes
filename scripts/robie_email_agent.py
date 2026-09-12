@@ -366,6 +366,9 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
             f"   - Check if agency fee, commission rate, surplus lines tax, and terrorism coverage are clear from the email body or attached PDF quote.\n"
             f"   - If any of those 4 parameters are missing or ambiguous (e.g. quote has options with/without terrorism), ask {sender} to clarify what they want.\n"
             f"   - Once clear or if already specified, generate the program via Ascend API, post the checkout link discussion note to EZLynx, and provide {sender} the Ascend checkout link and quote breakdown.\n"
+            f"1b. If the user is asking to create, set up, or complete a homeowners policy on EZLynx (e.g. TEST-HO-20260911-E01 on applicant 220250093):\n"
+            f"   - Call the 'ezlynx_policy_setup' tool FIRST — not playwright_exec, not a hand-rolled browser script. It runs the Job Engine path: search-first, gold carrier create, Save & Continue Edit, FormEntry coverages by label.\n"
+            f"   - Pass policy_number, effective_date, expiration_date, and any coverage limits stated in the email.\n"
             f"2. For any other request, execute the required insurance operations skill and assist thoroughly, ensuring the communication is filed back to the EZLynx client file.\n"
             f"3. Write a professional, concise, polished email response directly addressing {sender}."
         )

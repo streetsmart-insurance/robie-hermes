@@ -60,6 +60,34 @@ POLICY_SETUP_SCHEMA = {
 }
 
 
+def _select_job_page(browser):
+    """Select the current job tab. Never contexts[0]/pages[0] (first-ezlynx-wins).
+
+    Uses the same recorder-hint + scored selection as playwright_exec, so the
+    tool attaches to the job-owned page even when another EZLynx tab (e.g.
+    Submission Center) is in front. Raises PLAYWRIGHT_BLOCKED instead of
+    silently driving the wrong tab.
+    """
+    from robie_job_engine.recording_tab import (
+        read_page_hint,
+        resolve_hint_file,
+        select_playwright_page,
+    )
+
+    contexts = browser.contexts
+    if not contexts:
+        raise RuntimeError("PLAYWRIGHT_BLOCKED: Chrome has no browser context")
+    pages = [page for ctx in contexts for page in ctx.pages]
+    hinted = read_page_hint(resolve_hint_file()) or {}
+    page = select_playwright_page(pages, hint_url=hinted.get("url") or None)
+    if page is None:
+        raise RuntimeError(
+            "PLAYWRIGHT_BLOCKED: could not select the current job tab; "
+            "refusing pages[0] / first-ezlynx-wins"
+        )
+    return page
+
+
 def _run_policy_setup(args: dict) -> dict:
     from playwright.async_api import async_playwright
 
@@ -68,14 +96,20 @@ def _run_policy_setup(args: dict) -> dict:
         HomeownersCoverageItem,
         PolicyShellInput,
     )
+    from robie_job_engine.recording_tab import publish_live_playwright_hint
 
     async def _main():
         cdp_url = os.environ.get("ROBIE_PLAYWRIGHT_CDP_URL", "http://127.0.0.1:9222")
         pw = await async_playwright().start()
         try:
             browser = await pw.chromium.connect_over_cdp(cdp_url, timeout=15000)
-            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            # Attach to the current job tab the same way playwright_exec does:
+            # recorder hint + scored selection. Never contexts[0]/pages[0]
+            # (first-ezlynx-wins drove the Submission Center tab in job c1ffb79a).
+            page = _select_job_page(browser)
+            publish_live_playwright_hint(
+                [tab for ctx in browser.contexts for tab in ctx.pages], page=page
+            )
             setup = EzlynxPolicySetupPage(page)
             shell = PolicyShellInput(
                 applicant_id="220250093",
