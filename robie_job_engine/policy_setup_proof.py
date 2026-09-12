@@ -105,6 +105,9 @@ def search_first_create(
         "http_status": created.get("http_status"),
         "raw_body": created.get("raw_body"),
         "url": created.get("url"),
+        "response_type": created.get("response_type"),
+        "response_headers": created.get("response_headers"),
+        "status_source": created.get("status_source"),
         "policy_id": create_policy_id,
     }
     # Read back through search to prove destination state.
@@ -139,9 +142,12 @@ def search_first_create(
         http_status = created.get("http_status")
         raw_body = created.get("raw_body") or ""
         body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
+        resp_type = created.get("response_type")
+        status_src = created.get("status_source")
         report["verdict"] = "CREATED_NO_POLICY_ID"
         report["no_id_diagnostic"] = (
-            f"PolicyApi create returned HTTP {http_status} with body: {body_preview}. "
+            f"PolicyApi create returned HTTP {http_status} (via {status_src}, "
+            f"response type {resp_type}) with body: {body_preview}. "
             f"No policy ID in create response, and read-back search found no matching policy."
         )
     return report
