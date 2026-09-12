@@ -14,12 +14,14 @@ Reads performed (all from hermes-poc-01, all GETs, all with timeouts):
      so carrier is NOT CHECKED (see not_checked).
   2. Applicant policy list attempt (OAuth):
        GET {origin}/PolicyApi/policy/v1/search?ApplicantId=
-     If the endpoint answers, every policy on the applicant is listed
-     (number, status, carrier, effective, expiration) with a total count.
+     If the endpoint answers, every returned row is listed
+     (number, id, status, effective, expiration) with a rows-returned
+     count — rows_returned is rows in the response, not a server total.
+     Carrier is NOT reported (see read #1).
      If it does not answer, the field is reported UNCHECKED with the
      reason — the verifier never invents a list. Only rows matching the
-     requested applicant are printed; the total/honored/matching counts
-     are the evidence the filter is not honored.
+     requested applicant are printed; the rows-returned/honored/matching
+     counts are the evidence the filter is not honored.
   3. Document Library (classic REST):
        GET {classic}/api/documentlibrary/list/{applicant}/1/200/0
      Reports every document row seen (name, description, policy number,
@@ -117,6 +119,44 @@ def first(mapping: dict, *keys: str) -> str:
         if value is not None and str(value).strip() != "":
             return str(value).strip()
     return ""
+
+
+def find_server_total(payload: object) -> tuple:
+    """(value, key): a server-side total from a response envelope, or
+    (None, None). Prefers explicit total* keys and falls back to count*
+    keys, reporting which envelope field the number came from — so a
+    locally counted rows_returned is never mistaken for an authoritative
+    server total. A bare-list response has no envelope: (None, None)."""
+    if not isinstance(payload, dict):
+        return None, None
+    for keys in (("totalCount", "TotalCount", "total", "Total",
+                  "totalRecords", "TotalRecords", "totalItems",
+                  "TotalItems"),
+                 ("count", "Count")):
+        for key in keys:
+            val = payload.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                return val, key
+    for nest in ("data", "Data", "result", "Result", "payload"):
+        inner = payload.get(nest)
+        if isinstance(inner, dict):
+            val, key = find_server_total(inner)
+            if val is not None:
+                return val, key
+    return None, None
+
+
+def server_total_fields(payload: object) -> dict:
+    """Report-shape fragment: the server's own total (if the envelope
+    carries one) alongside the locally counted rows, labeled as such."""
+    val, key = find_server_total(payload)
+    fields = {"server_total_count": val, "server_total_key": key}
+    if val is None:
+        fields["server_total_note"] = (
+            "response envelope carries no total; rows_returned is rows "
+            "returned in this response, not a server total — if the "
+            "endpoint paginates, the two differ silently")
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +299,8 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
                               not_checked: list) -> dict:
     """Try applicant-scoped list endpoints; report exactly what answered."""
     report: dict = {"read_method": None, "http_status": None,
-                    "policies": [], "total_count": 0}
+                    "policies": [], "rows_returned": 0,
+                    "server_total_count": None, "server_total_key": None}
     attempts = []
     # Candidate endpoints, all read-only GETs. The account-scoped candidates
     # are tried FIRST: they are the only ones that could return a truly
@@ -295,7 +336,8 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
                 report["read_method"] = label
                 report["http_status"] = status
                 report["policies"] = policies
-                report["total_count"] = len(policies)
+                report["rows_returned"] = len(policies)
+                report.update(server_total_fields(payload))
                 # The endpoint may ignore the applicant parameter and return a
                 # global list. Never claim applicant scoping without checking
                 # every returned row's own applicant_id.
@@ -307,8 +349,8 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
                 # returns live policies belonging to other applicants (policy
                 # numbers, ids, dates, carriers, applicant ids). Keep only
                 # the rows that actually match the requested applicant; the
-                # three counts above are the evidence that the filter is not
-                # honored.
+                # rows-returned/honored/matching counts above are the
+                # evidence that the filter is not honored.
                 report["policies"] = matching
                 # Always record which endpoints were tried, even when one
                 # won — the probe history is evidence either way.
@@ -377,7 +419,9 @@ def document_fields(row: dict) -> dict:
 
 
 def list_documents(cfg: dict, applicant_id: str, not_checked: list) -> dict:
-    report: dict = {"read_method": None, "documents": [], "total_count": 0}
+    report: dict = {"read_method": None, "documents": [],
+                    "rows_returned": 0, "server_total_count": None,
+                    "server_total_key": None}
     try:
         headers = classic_headers(cfg)
     except RuntimeError as exc:
@@ -409,7 +453,8 @@ def list_documents(cfg: dict, applicant_id: str, not_checked: list) -> dict:
         return report
     rows = extract_document_records(payload)
     report["documents"] = [document_fields(r) for r in rows]
-    report["total_count"] = len(report["documents"])
+    report["rows_returned"] = len(report["documents"])
+    report.update(server_total_fields(payload))
     return report
 
 
@@ -422,7 +467,8 @@ def search_documents_oauth(origin: str, token: str, applicant_id: str,
     """Proven path (PR #295): GET /documentapi/documents/v1/account/{id}/document-search."""
     report: dict = {
         "read_method": "documentapi/documents/v1/account/{applicant}/document-search",
-        "http_status": None, "documents": [], "total_count": 0,
+        "http_status": None, "documents": [], "rows_returned": 0,
+        "server_total_count": None, "server_total_key": None,
     }
     url = (origin + "/documentapi/documents/v1/account/"
            + quote(applicant_id, safe="") + "/document-search")
@@ -451,7 +497,8 @@ def search_documents_oauth(origin: str, token: str, applicant_id: str,
             "mime": first(r, "MimeType", "mimeType", "ContentType",
                           "contentType"),
         })
-    report["total_count"] = len(report["documents"])
+    report["rows_returned"] = len(report["documents"])
+    report.update(server_total_fields(payload))
     # The document-search rows mix real files with folder-like rows
     # (mime "unknown/unknown": "New Business/Application/Declarations",
     # "Renewal Offers/Declarations", "Certificate Requests",
@@ -459,12 +506,21 @@ def search_documents_oauth(origin: str, token: str, applicant_id: str,
     # literally named ")", etc.). A file count that includes those is
     # an overcount, so files and folder-like rows are counted
     # separately. Heuristic is mime-based and labeled as such.
+    # Direction: file_count is a floor and folder_like_count a ceiling,
+    # never the reverse — rows with mime "" or "unknown/unknown" are
+    # counted as folder-like, so a real file with a blank mime lands in
+    # folder_like_count.
     report["file_count"] = sum(
         1 for d in report["documents"]
         if d["mime"] not in ("", "unknown/unknown"))
     report["folder_like_count"] = (
-        report["total_count"] - report["file_count"])
+        report["rows_returned"] - report["file_count"])
     report["folder_heuristic"] = 'mime == "unknown/unknown"'
+    report["count_direction"] = (
+        "file_count is a floor and folder_like_count a ceiling, never the "
+        "reverse: rows with mime '' or 'unknown/unknown' count as "
+        "folder-like, so a real file with a blank mime lands in "
+        "folder_like_count")
     return report
 
 
@@ -473,7 +529,8 @@ def read_discussions_oauth(origin: str, token: str, applicant_id: str,
     """GET /DiscussionApi/discussion/v1/applicant/{id}. Read-only."""
     report: dict = {
         "read_method": "DiscussionApi/discussion/v1/applicant/{applicant}",
-        "http_status": None, "notes": [], "total_count": 0,
+        "http_status": None, "notes": [], "rows_returned": 0,
+        "server_total_count": None, "server_total_key": None,
     }
     url = (origin + "/DiscussionApi/discussion/v1/applicant/"
            + quote(applicant_id, safe=""))
@@ -507,7 +564,8 @@ def read_discussions_oauth(origin: str, token: str, applicant_id: str,
             "author": first(r, "CreatedBy", "createdBy", "Author", "author",
                             "UserName", "userName"),
         })
-    report["total_count"] = len(report["notes"])
+    report["rows_returned"] = len(report["notes"])
+    report.update(server_total_fields(payload))
     return report
 
 
