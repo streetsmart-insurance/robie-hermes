@@ -247,10 +247,26 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
         if status == 200 and payload is not None:
             rows = extract_policy_rows(payload)
             if rows:
+                policies = [policy_fields(r) for r in rows]
+                matching = [p for p in policies
+                            if str(p.get("applicant_id")) == str(applicant_id)]
                 report["read_method"] = f"PolicyApi/policy/v1/search?{param}="
                 report["http_status"] = status
-                report["policies"] = [policy_fields(r) for r in rows]
-                report["total_count"] = len(report["policies"])
+                report["policies"] = policies
+                report["total_count"] = len(policies)
+                # The endpoint may ignore the applicant parameter and return a
+                # global list. Never claim applicant scoping without checking
+                # every returned row's own applicant_id.
+                report["applicant_filter_honored"] = (
+                    len(matching) == len(policies) and len(policies) > 0)
+                report["policies_matching_applicant"] = len(matching)
+                if not report["applicant_filter_honored"]:
+                    not_checked.append(
+                        "policy list by applicant: the PolicyApi search "
+                        "endpoint ignored the applicant parameter and "
+                        "returned policies for other applicants; only "
+                        f"{len(matching)} of {len(policies)} rows match "
+                        f"applicant {applicant_id}")
                 return report
     report["attempts"] = attempts
     not_checked.append(

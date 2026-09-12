@@ -15,9 +15,11 @@ name: Acceptance verifier (read-only)
 # (query_only). No secret values are printed. The verdict is a JSON
 # artifact with an explicit "not_checked" list.
 #
-# Dispatchable from any ref (including the feature branch it was built on):
-# the confirmation phrase and the Production environment are the gates.
-# Read-only by construction, so there is nothing a ref could make it write.
+# Dispatch ONLY from main: the Production environment's deployment branch
+# policy allows main and nothing else (proven 2026-09-12 — dispatches from a
+# feature branch fail at job startup: no runner assigned, zero steps).
+# The confirmation phrase is the second gate. Read-only by construction,
+# so there is nothing a ref could make it write.
 
 on:
   workflow_dispatch:
