@@ -64,7 +64,7 @@ class ToolVisibilityTests(unittest.TestCase):
                 patch.dict('os.environ', {'ROBIE_JOB_ACTION': 'hermes.email_task'}, clear=False),
             ):
                 self.assertTrue(tool._available())
-                self.assertEqual(runtime._HERMES_CORE_TOOLS, ['playwright_exec', 'ezlynx_policy_setup'])
+                self.assertEqual(runtime._HERMES_CORE_TOOLS, ['playwright_exec', 'ezlynx_policy_setup', 'ezlynx_document_upload'])
         finally:
             _restore_modules(previous)
 
@@ -104,7 +104,7 @@ class ToolVisibilityTests(unittest.TestCase):
         self.assertTrue(is_email_or_chat_worker(env=env, argv=['hermes', 'chat', '-q']))
         runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['terminal', 'execute_code', 'playwright_exec'])
         expose_guarded_browser(runtime, env=env, argv=['hermes', 'chat', '-q'])
-        self.assertEqual(runtime._HERMES_CORE_TOOLS, ['playwright_exec', 'ezlynx_policy_setup'])
+        self.assertEqual(runtime._HERMES_CORE_TOOLS, ['playwright_exec', 'ezlynx_policy_setup', 'ezlynx_document_upload'])
 
     def test_schema_dicts_drop_execute_code_keep_playwright_exec(self):
         filtered = filter_email_chat_schemas([

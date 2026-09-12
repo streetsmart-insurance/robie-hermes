@@ -87,6 +87,11 @@ CHAT_RUNTIME_FILES: tuple[ChatRuntimeFile, ...] = (
         zip_relpath="deploy/hermes/tools/policy_setup_tool.py",
         dest_relpath="hermes-agent/tools/policy_setup_tool.py",
     ),
+    ChatRuntimeFile(
+        name="document-upload-tool",
+        zip_relpath="deploy/hermes/tools/ezlynx_document_tool.py",
+        dest_relpath="hermes-agent/tools/ezlynx_document_tool.py",
+    ),
 )
 
 # Zip PYTHONPATH only — Hermes does not load these from .hermes.
