@@ -1,0 +1,67 @@
+name: Build immutable release checksum
+
+# Governed helper: build the immutable release for an exact commit and report
+# its SHA-256, so the digest (commit + sha256) can be approved BEFORE the
+# Production deploy workflow runs. The deploy workflow rebuilds and verifies
+# the same checksum, so this is a dry-run of its build step — it deploys
+# nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact 40-character commit to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-checksum:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse a substituted revision
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "${REQUESTED_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "${REQUESTED_COMMIT}"
+
+      - name: Build the immutable artifact
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/releases"
+          bash scripts/build-release.sh "${RUNNER_TEMP}/releases" | tee "${RUNNER_TEMP}/release.env"
+          source "${RUNNER_TEMP}/release.env"
+          test "${release_commit}" = "${REQUESTED_COMMIT}"
+          echo "RELEASE_COMMIT=${release_commit}" >>"${GITHUB_ENV}"
+          echo "RELEASE_SHA256=${release_sha256}" >>"${GITHUB_ENV}"
+          echo "RELEASE_ARCHIVE=$(basename "${release_archive}")" >>"${GITHUB_ENV}"
+
+      - name: Report the digest
+        shell: bash
+        run: |
+          {
+            echo "## Immutable release digest"
+            echo ""
+            echo "commit: \`${RELEASE_COMMIT}\`"
+            echo "sha256: \`${RELEASE_SHA256}\`"
+            echo "archive: \`${RELEASE_ARCHIVE}\`"
+            echo ""
+            echo "Approve this exact (commit, sha256) pair, then dispatch"
+            echo "'Deploy immutable release to Production' with these inputs."
+          } >>"${GITHUB_STEP_SUMMARY}"
