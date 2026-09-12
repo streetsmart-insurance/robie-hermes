@@ -28,8 +28,16 @@ class FakePort:
 
     def documents_for_applicant(self, applicant_id, policy_id=0):
         if "documents" in self._raise_on:
-            raise ConnectionError("document library unreachable")
+            raise ConnectionError("DocumentApi search unreachable")
         return self._documents
+
+    def download_document(self, document_id):
+        if "download" in self._raise_on:
+            raise ConnectionError("DocumentApi download unreachable")
+        for doc in self._documents:
+            if str(doc.get("id") or "") == str(document_id):
+                return doc.get("body") or b"%PDF-1.4 test"
+        raise FileNotFoundError(document_id)
 
     def discussions_for_applicant(self, applicant_id):
         if "discussions" in self._raise_on:
@@ -108,7 +116,7 @@ class VerifierTests(unittest.TestCase):
     def test_bond_job_verifies_when_policy_and_document_are_real(self):
         port = FakePort(
             policies=[real_policy_row()],
-            documents=[{"name": "Bond - Western Surety.pdf", "policy_id": 1}],
+            documents=[{"id": "818921949", "name": "Bond - Western Surety.pdf"}],
             discussions=[{"title": "Bond"}],
         )
         r = HermesChatEzlynxDestinationVerifier(port).verify(
@@ -117,7 +125,36 @@ class VerifierTests(unittest.TestCase):
         self.assertTrue(r.verified)
         self.assertTrue(r.evidence.authoritative)
         self.assertEqual(r.evidence.method, "EZLYNX_API_DESTINATION_READBACK")
+        self.assertEqual(r.evidence.source, "ezlynx-policyapi+documentapi")
+        self.assertEqual(r.evidence.observed["document_ids"], ["818921949"])
         self.assertIsNone(r.error)
+
+    def test_document_url_without_id_never_verifies(self):
+        port = FakePort(
+            policies=[real_policy_row()],
+            documents=[{
+                "name": "Bond - Western Surety.pdf",
+                "documentUrl": "https://old-wrong.example/doc/1",
+            }],
+        )
+        r = HermesChatEzlynxDestinationVerifier(port).verify(
+            job(), action(document_names=["Bond - Western Surety.pdf"])
+        )
+        self.assertFalse(r.verified)
+        self.assertIn("DocumentApi", r.error)
+
+    def test_document_download_failure_is_retryable(self):
+        port = FakePort(
+            policies=[real_policy_row()],
+            documents=[{"id": "818921949", "name": "Bond - Western Surety.pdf"}],
+            raise_on={"download"},
+        )
+        r = HermesChatEzlynxDestinationVerifier(port).verify(
+            job(), action(document_names=["Bond - Western Surety.pdf"])
+        )
+        self.assertFalse(r.verified)
+        self.assertTrue(r.retryable)
+        self.assertIn("download", r.error)
 
     def test_document_claimed_but_absent_fails(self):
         port = FakePort(

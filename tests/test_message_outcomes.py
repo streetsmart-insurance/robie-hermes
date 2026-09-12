@@ -38,7 +38,7 @@ class MessageOutcomeTests(unittest.TestCase):
         return first, JobStore(db), calls[0]
 
     def test_email_reports_checked_policy_and_documents_without_overstating_coverage(self):
-        result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'name': 'Bond.pdf'}]))
+        result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'id': '818921949', 'name': 'Bond.pdf'}]))
         self.assertEqual(store.get_job(job_id)['status'], 'UNVERIFIED')
         self.assertIn(f'ROBIE Job {job_id} — UNVERIFIED', result)
         self.assertIn('Checked: documents found: Bond.pdf', result)
@@ -52,7 +52,7 @@ class MessageOutcomeTests(unittest.TestCase):
 
     def test_wrong_applicant_does_not_become_a_confirmed_fact(self):
         row = real_policy_row(); row['ApplicantId'] = 'wrong'
-        result, store, job_id = self.run_email(FakePort(policies=[row], documents=[{'name': 'Bond.pdf'}]))
+        result, store, job_id = self.run_email(FakePort(policies=[row], documents=[{'id': '818921949', 'name': 'Bond.pdf'}]))
         self.assertEqual(store.get_job(job_id)['status'], 'UNVERIFIED')
         self.assertNotIn('Checked: policy', result)
 
@@ -69,14 +69,14 @@ class MessageOutcomeTests(unittest.TestCase):
             self.assertEqual(verification_summary(store, job_id), '')
 
     def test_complete_when_entire_request_is_policy_presence_check(self):
-        result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'name': 'Bond.pdf'}]),
+        result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'id': '818921949', 'name': 'Bond.pdf'}]),
             request=f'Verify policy {BOND_POLICY} exists on applicant {BOND_APPLICANT}')
         self.assertEqual(store.get_job(job_id)['status'], 'COMPLETE')
         self.assertNotIn('Created policy', result)
         self.assertIn('Checked: policy', result)
 
     def test_cancellation_and_outgoing_email_are_not_verified_by_existing_policy(self):
-        result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'name': 'Bond.pdf'}]),
+        result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'id': '818921949', 'name': 'Bond.pdf'}]),
             request='Cancel this policy and email the client')
         self.assertEqual(store.get_job(job_id)['status'], 'UNVERIFIED')
 
@@ -104,7 +104,7 @@ class MessageOutcomeTests(unittest.TestCase):
             self.assertIn('documents missing',response)
 
     def test_subject_instructions_are_not_discarded_for_body_presence_check(self):
-        result, store, job_id=self.run_email(FakePort(policies=[real_policy_row()],documents=[{'name':'Bond.pdf'}]),
+        result, store, job_id=self.run_email(FakePort(policies=[real_policy_row()],documents=[{'id':'818921949','name':'Bond.pdf'}]),
             request=f'Subject: Cancel this policy and email client\n\nVerify policy {BOND_POLICY} exists on applicant {BOND_APPLICANT}')
         self.assertEqual(store.get_job(job_id)['status'],'UNVERIFIED')
 
