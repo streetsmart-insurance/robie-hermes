@@ -1,15 +1,26 @@
 name: Acceptance verifier (read-only)
 
 # Governed read-only acceptance verifier for the ROBIE email policy-setup
-# path. Takes an applicant ID, a policy number, and a job ID as INPUTS and
-# re-reads destination state from primary sources on hermes-poc-01:
-#   - PolicyApi policy search for the named policy (number, status, carrier,
-#     effective, expiration)
-#   - an applicant-scoped policy list attempt (every policy + total count;
-#     reported UNCHECKED with the reason if no endpoint answers)
-#   - the applicant's Document Library (classic REST)
+# path. Takes an applicant ID, one or more policy numbers (comma-separated),
+# and an optional job ID as INPUTS and re-reads destination state from
+# primary sources on hermes-poc-01:
+#   - PolicyApi policy search for EACH named policy (number, status,
+#     carrier, effective, expiration)
+#   - an applicant-scoped policy list attempt (reported UNCHECKED with the
+#     reason — the PolicyApi has no applicant-scoped list endpoint)
+#   - the applicant's Document Library (classic REST; UNCHECKED — classic
+#     auth not in the secret)
+#   - DocumentApi document-search (OAuth, proven PR #295): every document
+#     with id/name/description; per-policy PDF-attachment read-back
+#   - DiscussionApi applicant discussions (OAuth): every note with title
+#     and text excerpt; per-policy note-posted read-back
 #   - the job's own rows from jobs.db (jobs, checkpoints, playwright_exec,
-#     verification_evidence) for the PASSED job ID — nothing is hardcoded
+#     verification_evidence) for the PASSED job ID — nothing is hardcoded;
+#     skipped when no job ID is given
+#
+# Every report carries load-bearing "not_checked" limits: no
+# applicant-scoped list, no applicant enumeration, no duplicate detection
+# under another number, no proof the account was clean before a test.
 #
 # Touches nothing. All EZLynx calls are GETs; jobs.db is opened read-only
 # (query_only). No secret values are printed. The verdict is a JSON
@@ -33,12 +44,12 @@ on:
         required: true
         type: string
       policy_number:
-        description: Policy number to look up
+        description: Policy number(s) to look up (comma-separated)
         required: true
         type: string
       job_id:
-        description: jobs.db job ID to report on (passed as input, never hardcoded)
-        required: true
+        description: jobs.db job ID to report on (optional; passed as input, never hardcoded)
+        required: false
         type: string
 
 permissions:
@@ -73,8 +84,10 @@ jobs:
           test "${PROJECT_ID}" = "streetsmart-hermes-poc"
           test "${JOB_DB}" = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
           [[ "${{ inputs.applicant_id }}" =~ ^[0-9]{1,12}$ ]] || { echo "applicant_id must be digits"; exit 1; }
-          [[ "${{ inputs.policy_number }}" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "policy_number has unexpected characters"; exit 1; }
-          [[ "${{ inputs.job_id }}" =~ ^[a-f0-9-]{36}$ ]] || { echo "job_id must be a UUID"; exit 1; }
+          [[ "${{ inputs.policy_number }}" =~ ^[A-Za-z0-9._,-]{1,128}$ ]] || { echo "policy_number has unexpected characters"; exit 1; }
+          if [ -n "${{ inputs.job_id }}" ]; then
+            [[ "${{ inputs.job_id }}" =~ ^[a-f0-9-]{36}$ ]] || { echo "job_id must be a UUID"; exit 1; }
+          fi
 
       - name: Run read-only acceptance verification
         run: |
@@ -84,7 +97,7 @@ jobs:
           gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             scripts/verify_acceptance.py "${PRODUCTION_VM}:${STAGING}/"
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="sudo python3 '${STAGING}/verify_acceptance.py' --applicant-id '${{ inputs.applicant_id }}' --policy-number '${{ inputs.policy_number }}' --job-id '${{ inputs.job_id }}' --db-path '${JOB_DB}' --secret '${SECRET_REF}'" \
+            --command="sudo python3 '${STAGING}/verify_acceptance.py' --applicant-id '${{ inputs.applicant_id }}' --policy-number '${{ inputs.policy_number }}' ${{ inputs.job_id && format('--job-id ''{0}''', inputs.job_id) || '' }} --db-path '${JOB_DB}' --secret '${SECRET_REF}'" \
             | tee "${RUNNER_TEMP}/acceptance-verification.json"
           python3 -m json.tool "${RUNNER_TEMP}/acceptance-verification.json" >/dev/null
 

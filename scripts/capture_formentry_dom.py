@@ -194,7 +194,32 @@ def main() -> int:
         contexts = browser.contexts
         if not contexts:
             die("CDP connected but browser has no contexts")
-        ctx = contexts[0]
+        inventory = []
+        for ci, c in enumerate(contexts):
+            for pi, p in enumerate(c.pages):
+                try:
+                    inventory.append({"context_index": ci, "page_index": pi,
+                                      "url": p.url, "title": p.title()})
+                except Exception:
+                    pass
+        result["inventory"] = inventory
+
+        def looks_authenticated(u):
+            return bool(u) and "ezlynx.com" in u and "/auth/account/login" not in u
+
+        chosen = None
+        for ci, c in enumerate(contexts):
+            for p in c.pages:
+                try:
+                    if looks_authenticated(p.url):
+                        chosen = ci
+                        break
+                except Exception:
+                    pass
+            if chosen is not None:
+                break
+        result["chosen_context"] = chosen
+        ctx = contexts[chosen] if chosen is not None else contexts[0]
         page = ctx.new_page()
         try:
             page.goto(args.url, wait_until="domcontentloaded", timeout=60000)
@@ -212,6 +237,7 @@ def main() -> int:
                 time.sleep(2)
             time.sleep(3)
             result["landing_url"] = page.url
+            result["landing_looks_authenticated"] = looks_authenticated(page.url)
 
             # Pass 1: dump every frame as-is.
             for fi, frame in enumerate(page.frames):
