@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Execute a single governed canary policy create call and verify read-back.
+"""Governed single-shot canary policy creation and carrier read-back against live EZLynx.
 
-Strict invariants:
-1. Target applicant locked to 220250093 (ROBIE Test LLC). Any other account is refused.
-2. Exactly ONE create call per execution. No retries, no type permutations.
-3. If the create call fails (non-200), capture raw status, request body, and response body,
-   STOP immediately, and report.
-4. If the create call succeeds (200), read back via PolicyApi search, report the carrier
-   literally, and record all matched attributes.
+Strictly bounded to:
+  - Applicant 220250093 (ROBIE Test LLC) only.
+  - Policy numbers matching TEST-CANARY-YYYYMMDD-NN.
+  - Exactly ONE create call per run (no retries, no type permutations).
+  - Pre-checks enumerable LOB codes and writing company rosters (read-only).
+  - Captures raw request headers, payload, status, response headers, and raw response body.
+  - On 200, reads back carrier value literally via PolicyApi search.
+  - Supports --read-back-only to inspect created policy without issuing a create call.
 """
 
 from __future__ import annotations
@@ -23,22 +24,17 @@ import sys
 import urllib.parse
 from typing import Any
 
+CALL_TIMEOUT = 30
 CANARY_APPLICANT_ID = "220250093"
 POLICY_NUMBER_PATTERN = re.compile(r"^TEST-CANARY-[0-9]{8}-[0-9]{2}$")
-CALL_TIMEOUT = 30  # seconds
 
 REQUIRED_SECRET_FIELDS = (
-    "client_id",
-    "client_secret",
-    "username",
-    "integration_group_id",
-    "token_endpoint",
-    "document_base_url",
-    "scope",
+    "ezlynx_api_client_id",
+    "ezlynx_api_client_secret",
 )
 
 
-def load_secret(secret_resource: str) -> dict[str, Any]:
+def load_secret(secret_resource: str) -> dict[str, str]:
     parts = secret_resource.split("/")
     project, name = parts[1], parts[3]
     proc = subprocess.run(
@@ -66,42 +62,39 @@ def load_secret(secret_resource: str) -> dict[str, Any]:
     return cfg
 
 
-def get_token(cfg: dict[str, Any]) -> str:
-    parsed = urllib.parse.urlparse(cfg["token_endpoint"])
-    conn = http.client.HTTPSConnection(parsed.hostname, timeout=CALL_TIMEOUT)
+def get_token(cfg: dict[str, str]) -> str:
+    conn = http.client.HTTPSConnection("app.ezlynx.com", timeout=CALL_TIMEOUT)
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": cfg["ezlynx_api_client_id"],
+            "client_secret": cfg["ezlynx_api_client_secret"],
+            "scope": "vendor_data_access",
+        }
+    )
     try:
-        body = urllib.parse.urlencode({
-            "client_id": cfg["client_id"],
-            "client_secret": cfg["client_secret"],
-            "grant_type": "vendor_data_access",
-            "scope": cfg["scope"],
-            "username": cfg["username"],
-            "integration_group_id": cfg["integration_group_id"],
-        })
-        path = parsed.path or "/"
-        if parsed.query:
-            path += "?" + parsed.query
         conn.request(
             "POST",
-            path,
+            "/api/1/oauth/tokens",
             body=body,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         resp = conn.getresponse()
-        raw = resp.read()
+        raw = resp.read().decode("utf-8", errors="replace")
+        if resp.status != 200:
+            raise RuntimeError(f"token fetch failed HTTP {resp.status}: {raw[:160]}")
+        data = json.loads(raw)
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError("no access_token in token response")
+        return str(token)
     finally:
         conn.close()
-    if resp.status != 200:
-        raise RuntimeError(f"token request returned HTTP {resp.status}")
-    payload = json.loads(raw.decode("utf-8"))
-    token = payload.get("access_token") or payload.get("token")
-    if not token:
-        raise RuntimeError("token response carried no access_token")
-    return str(token)
 
 
-def origin_of(cfg: dict[str, Any]) -> str:
-    parsed = urllib.parse.urlparse(cfg.get("document_base_url") or cfg["token_endpoint"])
+def origin_of(cfg: dict[str, str]) -> str:
+    raw = cfg.get("ezlynx_api_url") or "https://app.ezlynx.com"
+    parsed = urllib.parse.urlparse(raw)
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
@@ -112,9 +105,8 @@ def oauth_request(
     body: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], str, Any]:
-    """Execute an HTTP request with Bearer auth and return (status, headers, raw_body, parsed_json_or_None)."""
     parsed = urllib.parse.urlparse(url)
-    conn = http.client.HTTPSConnection(parsed.hostname, timeout=CALL_TIMEOUT)
+    conn = http.client.HTTPSConnection(parsed.netloc, timeout=CALL_TIMEOUT)
     req_headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json, text/plain, */*",
@@ -144,6 +136,44 @@ def oauth_request(
     return status, resp_headers, raw_str, parsed_json
 
 
+def extract_policy_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if isinstance(payload, dict):
+        for k in ("Policies", "policies", "Results", "results", "Items", "items", "Data", "data"):
+            cand = payload.get(k)
+            if isinstance(cand, list):
+                return [r for r in cand if isinstance(r, dict)]
+        return [payload]
+    return []
+
+
+def find_policy_row(payload: Any, policy_number: str) -> dict[str, Any] | None:
+    for row in extract_policy_rows(payload):
+        r_num = str(row.get("PolicyNumber") or row.get("policyNumber") or "")
+        if r_num.strip().casefold() == policy_number.strip().casefold():
+            return row
+    return None
+
+
+def extract_carrier_info(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {"carrier_literal": None, "raw_carrier_fields": {}}
+    carrier_val = None
+    for k in ("Carrier", "carrier", "CarrierId", "carrierId", "CarrierID", "CarrierName", "carrierName"):
+        if k in row and row[k] is not None:
+            carrier_val = str(row[k])
+            break
+    raw_carrier = {
+        k: v for k, v in row.items()
+        if any(t in k.casefold() for t in ("carrier", "company", "master", "writing"))
+    }
+    return {
+        "carrier_literal": carrier_val,
+        "raw_carrier_fields": raw_carrier,
+    }
+
+
 def execute_canary_create(
     origin: str,
     token: str,
@@ -155,12 +185,37 @@ def execute_canary_create(
     effective_date: str = "2026-10-02T00:00:00",
     expiration_date: str = "2027-10-02T00:00:00",
     premium: float = 1.00,
+    read_back_only: bool = False,
 ) -> dict[str, Any]:
     """Execute pre-checks, exactly one create call, and post-create read-back."""
     if str(applicant_id).strip() != CANARY_APPLICANT_ID:
         raise ValueError(f"applicant_id must be {CANARY_APPLICANT_ID}, got {applicant_id}")
     if not POLICY_NUMBER_PATTERN.match(policy_number):
         raise ValueError(f"policy_number must match {POLICY_NUMBER_PATTERN.pattern}, got {policy_number}")
+
+    search_url = f"{origin}/PolicyApi/policy/v1/search?{urllib.parse.urlencode({'PolicyNumber': policy_number})}"
+
+    if read_back_only:
+        rb_status, _, rb_raw, rb_json = oauth_request("GET", search_url, token)
+        matched_row = find_policy_row(rb_json, policy_number) if rb_status == 200 else None
+        c_info = extract_carrier_info(matched_row)
+        return {
+            "script": "canary_create_policy.py",
+            "executed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "applicant_id": applicant_id,
+            "policy_number": policy_number,
+            "mode": "read_back_only",
+            "create_attempt_count": 0,
+            "read_back": {
+                "status": rb_status,
+                "found": matched_row is not None,
+                "carrier_literal": c_info["carrier_literal"],
+                "raw_carrier_fields": c_info["raw_carrier_fields"],
+                "matched_row": matched_row,
+                "raw_response_snippet": rb_raw[:1000] if not matched_row else None,
+            },
+            "verdict": "READ_BACK_SUCCESS" if matched_row else "READ_BACK_NOT_FOUND",
+        }
 
     report: dict[str, Any] = {
         "script": "canary_create_policy.py",
@@ -206,14 +261,17 @@ def execute_canary_create(
     }
 
     # Step 3: Pre-check duplicate via PolicyApi search (Read-only)
-    search_url = f"{origin}/PolicyApi/policy/v1/search?{urllib.parse.urlencode({'PolicyNumber': policy_number})}"
     s_status, _, s_raw, s_json = oauth_request("GET", search_url, token)
+    pre_match = find_policy_row(s_json, policy_number) if s_status == 200 else None
+    pre_c_info = extract_carrier_info(pre_match)
     report["pre_create_search"] = {
         "status": s_status,
-        "exists": False,
+        "exists": pre_match is not None,
+        "carrier_literal": pre_c_info["carrier_literal"],
+        "raw_carrier_fields": pre_c_info["raw_carrier_fields"],
+        "matched_row": pre_match,
     }
-    if s_status == 200 and isinstance(s_json, list) and len(s_json) > 0:
-        report["pre_create_search"]["exists"] = True
+    if pre_match is not None:
         report["verdict"] = "REFUSED_ALREADY_EXISTS"
         return report
 
@@ -266,30 +324,16 @@ def execute_canary_create(
 
     # Step 5: Read-Back via PolicyApi Search to report carrier literally
     rb_status, _, rb_raw, rb_json = oauth_request("GET", search_url, token)
-    matched_row = None
-    if rb_status == 200:
-        candidates = rb_json if isinstance(rb_json, list) else []
-        if isinstance(rb_json, dict) and "data" in rb_json:
-            candidates = rb_json["data"]
-        for row in candidates:
-            if isinstance(row, dict):
-                r_num = str(row.get("PolicyNumber") or row.get("policyNumber") or "")
-                if r_num.strip().casefold() == policy_number.strip().casefold():
-                    matched_row = row
-                    break
-
-    carrier_literal = None
-    if matched_row:
-        for k in ("Carrier", "carrier", "CarrierId", "carrierId", "CarrierID"):
-            if k in matched_row:
-                carrier_literal = str(matched_row[k])
-                break
+    matched_row = find_policy_row(rb_json, policy_number) if rb_status == 200 else None
+    c_info = extract_carrier_info(matched_row)
 
     report["read_back"] = {
         "status": rb_status,
         "found": matched_row is not None,
-        "carrier_literal": carrier_literal,
+        "carrier_literal": c_info["carrier_literal"],
+        "raw_carrier_fields": c_info["raw_carrier_fields"],
         "matched_row": matched_row,
+        "raw_response_snippet": rb_raw[:1000] if not matched_row else None,
     }
     report["verdict"] = "SUCCESS"
     return report
@@ -306,6 +350,11 @@ def main() -> int:
         "--policy-number",
         required=True,
         help="Policy number matching TEST-CANARY-YYYYMMDD-NN",
+    )
+    parser.add_argument(
+        "--read-back-only",
+        action="store_true",
+        help="Read back policy and carrier without issuing create call",
     )
     parser.add_argument(
         "--secret",
@@ -328,6 +377,7 @@ def main() -> int:
             token=token,
             applicant_id=args.applicant_id,
             policy_number=args.policy_number,
+            read_back_only=args.read_back_only,
         )
     except Exception as exc:
         result = {
@@ -347,7 +397,7 @@ def main() -> int:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output_str)
 
-    return 0 if result.get("verdict") in ("SUCCESS", "CREATE_FAILED") else 1
+    return 0 if result.get("verdict") in ("SUCCESS", "CREATE_FAILED", "READ_BACK_SUCCESS", "REFUSED_ALREADY_EXISTS") else 1
 
 
 if __name__ == "__main__":
