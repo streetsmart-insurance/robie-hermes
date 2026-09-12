@@ -230,7 +230,11 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
 
     button = page.get_by_role("button", name="Save & Continue Edit")
     if button.count() == 0:
-        report["error"] = "Save & Continue Edit button not found on Edit Policy header"
+        report["page_state"] = _page_state_snapshot_sync(page)
+        report["error"] = (
+            "Save & Continue Edit button not found on Edit Policy header. "
+            "See page_state for URL, title, and available controls."
+        )
         return report
     button.first.click()
 
@@ -283,6 +287,39 @@ def _validation_snapshot_sync(page: Any) -> dict[str, Any]:
       ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
       return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
               url: location.href};
+    }
+    """
+    try:
+        return page.evaluate(js)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _page_state_snapshot_sync(page: Any) -> dict[str, Any]:
+    """Capture what IS on the page: URL, title, all buttons/links by name.
+
+    Used when the expected control is absent, so the next fix is based on
+    evidence, not guesses. Read-only DOM inspection; no clicks, no writes.
+    """
+    js = r"""
+    () => {
+      const buttons = Array.from(
+        document.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn, [role='button']")
+      ).map((el) => {
+        const name = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
+        const role = el.getAttribute("role") || el.tagName.toLowerCase();
+        return name ? `${role}: ${name}` : null;
+      }).filter(Boolean).slice(0, 40);
+      const headings = Array.from(
+        document.querySelectorAll("h1, h2, .page-title, .panel-title")
+      ).map((el) => (el.innerText || "").trim().slice(0, 100)).filter(Boolean).slice(0, 10);
+      return {
+        url: location.href,
+        title: document.title,
+        buttons: buttons,
+        headings: headings,
+        body_text_sample: (document.body ? document.body.innerText : "").slice(0, 500),
+      };
     }
     """
     try:
