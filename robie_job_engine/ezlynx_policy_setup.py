@@ -788,7 +788,7 @@ class EzlynxPolicySetupPage:
         evidence: dict[str, Any] = {"phases": []}
         try:
             from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
-            from .policy_setup_proof import search_first_create
+            from .policy_setup_proof import _extract_policy_id, search_first_create
 
             client = EzlynxApiClient(load_ezlynx_api_config())
             api_report = search_first_create(
@@ -813,11 +813,9 @@ class EzlynxPolicySetupPage:
             )
 
         row = api_report.get("read_back") or {}
-        policy_id = None
-        for key in ("policyId", "policyID", "id", "PolicyId", "policy_id"):
-            if row.get(key):
-                policy_id = str(row[key])
-                break
+        # Prefer the ID search_first_create already extracted from the row
+        # (it saw the row shape); fall back to scanning the row directly.
+        policy_id = api_report.get("policy_id") or _extract_policy_id(row)
         # Fallback: the create endpoint returns the new policy ID as a bare
         # scalar. If the search read-back hasn't caught up yet (eventual
         # consistency), use the create response ID so FormEntry can proceed.
@@ -837,17 +835,25 @@ class EzlynxPolicySetupPage:
             # Fail closed with raw HTTP/body details for diagnosis.
             diagnostic = api_report.get("no_id_diagnostic")
             if not diagnostic:
-                create_info = api_report.get("create") or {}
-                http_status = create_info.get("http_status")
-                raw_body = create_info.get("raw_body") or ""
-                body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
-                resp_type = create_info.get("response_type")
-                status_src = create_info.get("status_source")
-                diagnostic = (
-                    f"no policy id in read-back; cannot open FormEntry. "
-                    f"Create HTTP {http_status} (via {status_src}, type {resp_type}), "
-                    f"body: {body_preview}"
-                )
+                if api_report.get("verdict") == "ALREADY_EXISTS":
+                    row_keys = sorted(row.keys()) if isinstance(row, dict) else []
+                    diagnostic = (
+                        "no policy id in read-back; cannot open FormEntry. "
+                        "Policy already existed (no create attempted), but the ID "
+                        f"could not be read from the search row. Row keys: {row_keys}"
+                    )
+                else:
+                    create_info = api_report.get("create") or {}
+                    http_status = create_info.get("http_status")
+                    raw_body = create_info.get("raw_body") or ""
+                    body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
+                    resp_type = create_info.get("response_type")
+                    status_src = create_info.get("status_source")
+                    diagnostic = (
+                        f"no policy id in read-back; cannot open FormEntry. "
+                        f"Create HTTP {http_status} (via {status_src}, type {resp_type}), "
+                        f"body: {body_preview}"
+                    )
             return PolicySetupResult(
                 success=False,
                 applicant_id=applicant_id,
