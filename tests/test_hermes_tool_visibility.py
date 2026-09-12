@@ -42,9 +42,29 @@ class ToolVisibilityTests(unittest.TestCase):
         tool, previous = _load_playwright_tool()
         runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['terminal'])
         try:
-            with patch.dict(sys.modules, {'toolsets': runtime}), patch.object(tool.importlib.util, 'find_spec', return_value=object()), patch.dict('os.environ', {}, clear=False):
+            with (
+                patch.dict(sys.modules, {'toolsets': runtime}),
+                patch.object(tool.importlib.util, 'find_spec', return_value=object()),
+                patch.dict('os.environ', {'ROBIE_JOB_ACTION': '', 'ROBIE_JOB_ID': '', 'HERMES_SINGLE_QUERY_SESSION': ''}, clear=False),
+            ):
                 self.assertTrue(tool._available())
                 self.assertEqual(runtime._HERMES_CORE_TOOLS, ['terminal', 'playwright_exec'])
+        finally:
+            _restore_modules(previous)
+
+    def test_registered_availability_hides_terminal_and_execute_code_in_worker(self):
+        import sys
+        from test_playwright_artifact_fail_closed import _load_playwright_tool, _restore_modules
+        tool, previous = _load_playwright_tool()
+        runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['terminal', 'execute_code'])
+        try:
+            with (
+                patch.dict(sys.modules, {'toolsets': runtime}),
+                patch.object(tool.importlib.util, 'find_spec', return_value=object()),
+                patch.dict('os.environ', {'ROBIE_JOB_ACTION': 'hermes.email_task'}, clear=False),
+            ):
+                self.assertTrue(tool._available())
+                self.assertEqual(runtime._HERMES_CORE_TOOLS, ['playwright_exec'])
         finally:
             _restore_modules(previous)
 
@@ -55,11 +75,13 @@ class ToolVisibilityTests(unittest.TestCase):
                 schema = email_chat_job_schema(offered)
                 self.assertIn('playwright_exec', schema)
                 self.assertNotIn('execute_code', schema)
+                self.assertNotIn('terminal', schema)
                 runtime = SimpleNamespace(_HERMES_CORE_TOOLS=list(offered))
                 expose_guarded_browser(runtime, action_type=action, env={}, argv=['hermes', 'chat'])
                 self.assertIn('playwright_exec', runtime._HERMES_CORE_TOOLS)
                 self.assertNotIn('execute_code', runtime._HERMES_CORE_TOOLS)
                 self.assertNotIn('code_execution', runtime._HERMES_CORE_TOOLS)
+                self.assertNotIn('terminal', runtime._HERMES_CORE_TOOLS)
 
     def test_interactive_desktop_keeps_execute_code(self):
         runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['terminal', 'execute_code'])
@@ -68,15 +90,16 @@ class ToolVisibilityTests(unittest.TestCase):
 
     def test_gateway_argv_is_chat_worker_and_hides_execute_code(self):
         self.assertTrue(is_email_or_chat_worker(env={}, argv=['hermes_cli.main', 'gateway', 'run']))
-        runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['execute_code', 'read_file'])
+        runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['terminal', 'execute_code', 'read_file'])
         expose_guarded_browser(runtime, env={}, argv=['-m', 'hermes_cli.main', 'gateway', 'run'])
         self.assertIn('playwright_exec', runtime._HERMES_CORE_TOOLS)
         self.assertNotIn('execute_code', runtime._HERMES_CORE_TOOLS)
+        self.assertNotIn('terminal', runtime._HERMES_CORE_TOOLS)
 
     def test_single_query_email_job_hides_execute_code(self):
         env = {'ROBIE_JOB_ID': 'bf4d701e', 'HERMES_SINGLE_QUERY_SESSION': '1'}
         self.assertTrue(is_email_or_chat_worker(env=env, argv=['hermes', 'chat', '-q']))
-        runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['execute_code', 'playwright_exec'])
+        runtime = SimpleNamespace(_HERMES_CORE_TOOLS=['terminal', 'execute_code', 'playwright_exec'])
         expose_guarded_browser(runtime, env=env, argv=['hermes', 'chat', '-q'])
         self.assertEqual(runtime._HERMES_CORE_TOOLS, ['playwright_exec'])
 
@@ -84,6 +107,7 @@ class ToolVisibilityTests(unittest.TestCase):
         filtered = filter_email_chat_schemas([
             {'function': {'name': 'playwright_exec'}},
             {'function': {'name': 'execute_code'}},
+            {'function': {'name': 'terminal'}},
             {'name': 'code_execution'},
             {'function': {'name': 'read_file'}},
         ])
@@ -100,16 +124,19 @@ class ToolVisibilityTests(unittest.TestCase):
     def test_security_guard_rule_requires_stop_not_negotiate(self):
         self.assertIn('NEVER ask a human to lift a security control', SECURITY_GUARD_STOP_RULE)
         self.assertIn('execute_code BLOCKED', SECURITY_GUARD_STOP_RULE)
+        self.assertIn('terminal BLOCKED', SECURITY_GUARD_STOP_RULE)
         self.assertIn('PLAYWRIGHT_BLOCKED', SECURITY_GUARD_STOP_RULE)
         self.assertIn('and stop', SECURITY_GUARD_STOP_RULE)
         self.assertIn('Do not invent passwords', SECURITY_GUARD_STOP_RULE)
         self.assertIn('Do not ask to approve execute_code', SECURITY_GUARD_STOP_RULE)
+        self.assertIn('Do not ask to approve execute_code or terminal', SECURITY_GUARD_STOP_RULE)
         self.assertNotIn('approve the bypass', SECURITY_GUARD_STOP_RULE.casefold())
 
     def test_schema_assembly_wrap_hides_execute_code_for_email_chat_only(self):
         defs = [
             {'function': {'name': 'playwright_exec'}},
             {'function': {'name': 'execute_code'}},
+            {'function': {'name': 'terminal'}},
         ]
         fake = SimpleNamespace(
             get_tool_definitions=lambda enabled_toolsets=None, quiet_mode=False, disabled_toolsets=None: list(defs)
@@ -121,7 +148,7 @@ class ToolVisibilityTests(unittest.TestCase):
             self.assertEqual(names, ['playwright_exec'])
             with patch('robie_job_engine.hermes_tool_visibility.is_email_or_chat_worker', return_value=False):
                 interactive = [item['function']['name'] for item in fake.get_tool_definitions()]
-            self.assertEqual(interactive, ['playwright_exec', 'execute_code'])
+            self.assertEqual(interactive, ['playwright_exec', 'execute_code', 'terminal'])
 
     def test_chat_bind_marks_google_chat_job_action(self):
         from robie_job_engine.playwright_observability import bind_current_playwright_job

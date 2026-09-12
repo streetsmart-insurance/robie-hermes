@@ -33,9 +33,9 @@ FORBIDDEN_CHAT_PHRASES = (
 # SESSION_LOGGED_OUT-shaped: report the blocker and stop. Do not negotiate.
 SECURITY_GUARD_STOP_RULE = (
     "NEVER ask a human to lift a security control. "
-    "On execute_code BLOCKED / PLAYWRIGHT_BLOCKED / write guard: "
+    "On execute_code BLOCKED / terminal BLOCKED / PLAYWRIGHT_BLOCKED / write guard: "
     "report the blocker and the sanctioned alternative, and stop. "
-    "Do not invent passwords. Do not ask to approve execute_code."
+    "Do not invent passwords. Do not ask to approve execute_code or terminal."
 )
 
 
