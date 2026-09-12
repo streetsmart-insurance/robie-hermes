@@ -385,8 +385,74 @@ class EzlynxDocumentDownload:
 
 
 def _urlopen(url: str, *, data: bytes | None, headers: dict[str, str], timeout: int):
-    req = request.Request(url, data=data, headers=headers)
-    return request.urlopen(req, timeout=timeout)
+    """HTTP client using http.client directly (not urllib).
+    
+    The canary script (scripts/canary_create_policy.py) proved that
+    http.client.HTTPSConnection correctly handles EZLynx API responses,
+    while urllib.request.urlopen returns empty responses with None status
+    for the PolicyApi create endpoint. This implementation matches the
+    canary's proven approach.
+    """
+    import http.client
+    import urllib.parse
+    
+    parsed = urllib.parse.urlparse(url)
+    # Use HTTPSConnection for https, HTTPConnection for http
+    if parsed.scheme == "https":
+        conn = http.client.HTTPSConnection(parsed.netloc, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(parsed.netloc, timeout=timeout)
+    
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    
+    # Determine method: POST if data, else GET
+    method = "POST" if data is not None else "GET"
+    
+    try:
+        conn.request(method, path, body=data, headers=headers)
+        resp = conn.getresponse()
+        # Read the body now; wrap in a compatible response object
+        body = resp.read()
+        status = resp.status
+        resp_headers = resp.getheaders()
+        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    
+    # Return a wrapper that provides the urllib-compatible interface
+    # (read, getcode, status, getheaders) with reliable status
+    class _HttpClientResponse:
+        def __init__(self, body_bytes, http_status, headers_list):
+            self._body = body_bytes
+            self._status = http_status
+            self._headers = headers_list
+        
+        def read(self):
+            return self._body
+        
+        def getcode(self):
+            return self._status
+        
+        @property
+        def status(self):
+            return self._status
+        
+        def getheaders(self):
+            return self._headers
+        
+        def getheader(self, name, default=None):
+            for k, v in self._headers:
+                if k.lower() == name.lower():
+                    return v
+            return default
+    
+    return _HttpClientResponse(body, status, resp_headers)
 
 
 class EzlynxApiClient:
