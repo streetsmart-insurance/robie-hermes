@@ -11,9 +11,9 @@ WorkingDirectory=/opt/streetsmart-hermes/releases/current
 Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
 Environment=ROBIE_DASHBOARD_SHEET_ID=1Qj0-i4QJuNkfWtjdfAdpQpI1JmC44KmThr_rrzGG6EQ
 Environment=ROBIE_JOB_DB=/opt/streetsmart-hermes/robie-job-engine/data/jobs.db
-Environment=ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1
-Environment=ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME=05:30
-Environment=ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=America/New_York
+# EZLynx session heal is owned by .github/workflows/monitor-ezlynx-session.yml.
+# Do not set ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1 here. A future Production
+# zip must not turn the scheduler back into a second session owner.
 Environment=ROBIE_EZLYNX_SESSION_LOCK=/opt/streetsmart-hermes/robie-job-engine/data/ezlynx-session.lock
 Environment=ROBIE_EZLYNX_LOGIN_HELPER=/opt/streetsmart-hermes/releases/current/ezlynx_login_bootstrap.py
 EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env

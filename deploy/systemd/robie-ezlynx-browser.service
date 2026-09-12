@@ -4,7 +4,10 @@ After=network-online.target
 Wants=network-online.target
 # Rate-limit Restart=always so a flush/CDP race cannot thrash Chrome
 # (hermes-poc-01 afternoon loop: restart counter ~16→23 in ~30 min).
-# Daily robie-chrome-refresh.timer at 3:30 AM ET is the intentional restart.
+# Do not add a daily Chrome restart. A restart without login is the bug.
+# Session heal is owned by monitor-ezlynx-session.yml. Dusty will mask
+# the live robie-chrome-refresh.timer separately; this tree must not
+# ship that unit.
 StartLimitIntervalSec=10min
 StartLimitBurst=3
 

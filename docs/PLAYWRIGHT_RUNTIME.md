@@ -71,8 +71,12 @@ overlay. It does not modify a live Hermes installation in place.
   that exposes the tool to CLI and Google Chat profiles.
 - `deploy/hermes/SOUL.playwright.md` is the browser invariant to merge into the
   deployed Robie identity file.
-- `deploy/systemd/robie-chrome-refresh.service` and `.timer` refresh the
-  persistent browser on a bounded daily schedule.
+- Daily `robie-chrome-refresh.timer` / `.service` are retired from this
+  tree. A Chrome restart without login is the bug. Session heal is owned
+  by `.github/workflows/monitor-ezlynx-session.yml` (hourly
+  `check_ezlynx_session.py`, then `ezlynx_login_bootstrap.py` on
+  LOGGED_OUT). Dusty will mask the live 03:30 unit separately. Do not
+  touch the live browser from a zip.
 
 ## Deployment contract
 

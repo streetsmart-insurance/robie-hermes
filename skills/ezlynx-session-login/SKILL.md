@@ -19,4 +19,12 @@ The runtime checks the persistent Chrome session first. It reads `ROBIE_EZLYNX_U
 
 Treat `SIGNED_IN` as success. If the command reports `INTERACTIVE_AUTH_REQUIRED`, tell the authorized operator that EZLynx requires MFA or another manual verification step. Never request the password in chat, expose secret payloads, solve a CAPTCHA, disable MFA, or claim that an expired session was restored.
 
-The daily timer is `robie-ezlynx-session.timer`. For initial setup or credential rotation, read [references/provisioning.md](references/provisioning.md).
+The sole scheduled owner is `.github/workflows/monitor-ezlynx-session.yml`
+(hourly, seven days a week). It checks the session and, only when the check
+returns LOGGED_OUT, runs `ezlynx_login_bootstrap.py` against the existing
+CDP at `127.0.0.1:9222`. One login attempt per check. Two consecutive
+LOGGED_OUT checks stop trying and fail loudly. Every remediation records
+the tab list, Chrome PID, and systemd start timestamps; logout cause stays
+UNVERIFIED. `robie-ezlynx-session.timer` is retired and must not be
+re-enabled. For initial setup or credential rotation, read
+[references/provisioning.md](references/provisioning.md).

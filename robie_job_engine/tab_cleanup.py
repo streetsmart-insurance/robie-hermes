@@ -1171,8 +1171,10 @@ def flush_tabs_at_job_start(
     close; one EZLynx ``/web/`` session stays. Stale live-status jobs do not
     keep tabs. Never close the last browser target — Chrome exits when the
     last page is gone, then ``Restart=always`` thrashes CDP. Never invoke
-    systemctl against ``robie-ezlynx-browser`` from flush. Daily
-    ``robie-chrome-refresh`` at 3:30 AM ET is the intentional restart.
+    systemctl against ``robie-ezlynx-browser`` from flush. Do not restart
+    Chrome here. Daily ``robie-chrome-refresh`` is retired; Dusty will
+    mask the live 03:30 unit. Session heal is
+    ``monitor-ezlynx-session.yml``.
     """
     try:
         return maybe_flush_orphaned_tabs(db_path=db_path, **kwargs)

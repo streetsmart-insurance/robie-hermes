@@ -142,15 +142,47 @@ class EzlynxSessionRefreshTests(unittest.TestCase):
         self.assertIn("--user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx", service)
         self.assertIn("StartLimitBurst=", service)
         self.assertIn("StartLimitIntervalSec=", service)
-        self.assertIn("robie-chrome-refresh", service)
+        self.assertIn("Do not add a daily Chrome restart", service)
+        self.assertIn("monitor-ezlynx-session.yml", service)
 
-    def test_chrome_reboot_precedes_530_refresh_by_two_hours(self):
+    def test_scheduler_unit_does_not_enable_session_refresh_owner(self):
         root = Path(__file__).resolve().parents[1] / "deploy/systemd"
-        reboot = (root / "robie-chrome-refresh.timer").read_text()
         scheduler = (root / "robie-scheduler.service").read_text()
-        self.assertIn("03:30:00 America/New_York", reboot)
-        self.assertIn("ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME=05:30", scheduler)
-        self.assertIn("ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=America/New_York", scheduler)
+        self.assertNotIn("Environment=ROBIE_ENABLE_EZLYNX_SESSION_REFRESH=1", scheduler)
+        self.assertNotIn("Environment=ROBIE_EZLYNX_SESSION_REFRESH_LOCAL_TIME=", scheduler)
+        self.assertNotIn("Environment=ROBIE_EZLYNX_SESSION_REFRESH_TIMEZONE=", scheduler)
+        self.assertIn("monitor-ezlynx-session.yml", scheduler)
+
+    def test_retired_session_owner_units_are_absent(self):
+        root = Path(__file__).resolve().parents[1] / "deploy/systemd"
+        self.assertFalse((root / "robie-chrome-refresh.timer").exists())
+        self.assertFalse((root / "robie-chrome-refresh.service").exists())
+        self.assertFalse((root / "robie-ezlynx-session.timer").exists())
+        self.assertFalse((root / "robie-ezlynx-session.service").exists())
+
+    def test_session_refresh_enqueue_defaults_off(self):
+        with durable_temporary_directory() as td:
+            root = Path(td)
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "ROBIE_ENABLE_EZLYNX_SESSION_REFRESH"
+            }
+            env["ROBIE_ARTIFACT_ROOT"] = str(root / "artifacts")
+            with patch.dict(os.environ, env, clear=True):
+                ops = OperationsStore(str(root / "jobs.db"))
+                _ensure_default_schedules(ops)
+                with ops._connect() as conn:
+                    row = conn.execute(
+                        "SELECT * FROM schedules WHERE action_type=?",
+                        ("ezlynx.session_refresh",),
+                    ).fetchone()
+                    recurring = conn.execute(
+                        "SELECT * FROM scheduled_jobs WHERE action_type=?",
+                        ("ezlynx.session_refresh",),
+                    ).fetchone()
+            self.assertIsNone(row)
+            self.assertIsNone(recurring)
 
     def test_gateway_and_scheduler_pin_helper_to_immutable_current_release(self):
         root = Path(__file__).resolve().parents[1] / "deploy/systemd"

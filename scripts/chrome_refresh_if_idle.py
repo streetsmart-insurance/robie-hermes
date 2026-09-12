@@ -3,6 +3,11 @@
 
 Verifies no jobs are currently RUNNING or VERIFYING before restarting the browser service,
 preventing mid-flight job disruption.
+
+Not a scheduled owner. `robie-chrome-refresh.timer` is retired from this
+tree because a restart without login is the bug. Session heal is
+`.github/workflows/monitor-ezlynx-session.yml`. Dusty will mask the live
+03:30 unit separately. Do not re-enable a daily restart from a Production zip.
 """
 
 from __future__ import annotations

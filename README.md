@@ -81,9 +81,12 @@ live Test `COMPLETE`.
 
 The optional `skills/ezlynx-session-login` skill keeps the server-owned Chrome
 profile authenticated using Google Secret Manager references. Credential values
-are never stored in this repository. Its systemd timer runs the session check at
-9:00 a.m. Eastern and stops for operator action when EZLynx requires MFA or a
-CAPTCHA. See the skill's provisioning reference for deployment and rotation.
+are never stored in this repository. The sole scheduled owner is
+`.github/workflows/monitor-ezlynx-session.yml` (hourly, seven days a week).
+It checks the session and runs `ezlynx_login_bootstrap.py` only when the
+check returns LOGGED_OUT. See the skill's provisioning reference for
+rotation. Do not re-enable `robie-ezlynx-session.timer` or
+`robie-chrome-refresh.timer`.
 
 Backend EZLynx workflow Skills live in `deploy/hermes/skills/` (installed to
 `.hermes/skills`) and are mirrored under `skills/` for the EZLynx skill-folder
