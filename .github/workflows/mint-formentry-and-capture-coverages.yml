@@ -1,0 +1,221 @@
+name: Mint FormEntry and capture coverages (ONE approved write)
+
+# ONE APPROVED WRITE -- see the 2026-09-12 direction. This workflow is the
+# only sanctioned path for minting D01's FormEntry. capture-coverage-entry.yml
+# stays read-only; do not merge them.
+#
+# Why this exists: the Edit Policy header screen for TEST-HO-20260912-D01
+# (policyId 83651751, applicant 220250093) has no coverage-entry control at
+# all, because D01 has never been through APE and no FormEntry exists for it
+# yet. Run 34696287868 proved it: clean enumeration of the header screen's
+# policy region found 12 clickables and zero coverage-entry candidates --
+# the control we spent the morning looking for does not exist on that page;
+# the screen is a step earlier than we thought.
+#
+# Carlo's Homeowners training video shows the door: the green
+# "Save & Continue Edit" button on the header screen mints the FormEntry,
+# landing on
+#   /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}
+# (video example: policy 33322876 -> formEntryId 164253324). The FormEntry
+# page then shows a tab strip -- Insured Information | Dwelling Info |
+# Coverages | Underwriting | Additional Interest -- and Coverages is a tab
+# on that page, not a separate page. On the Coverages tab, the COVERAGES /
+# LIMITS OF LIABILITY section carries plain-English row labels (Dwelling,
+# Other Structures, Personal Property, Loss of Use, Blanket, Personal
+# Liability EA OCC, Medical Payments EA PER, plus one free-text row), then
+# DEDUCTIBLES with AMOUNT / PERCENT / TYPE columns, then OPTIONAL
+# COVERAGES - ENDORSEMENTS. The #HO_CoverageA-F selectors were inventions;
+# the label fallback strategy is the right approach.
+#
+# What this run does, in order:
+#   1. GETs the allowlisted Edit URL in a new tab on ROBIE'S EXISTING CDP
+#      browser (the sanctioned path -- not a second browser, not a new login).
+#   2. Reads three runtime preconditions -- #PolicyNumber, #ApplicantID,
+#      #PolicyMasterID -- and aborts with NO click if any mismatches.
+#   3. Performs the ONE write: activates "Save & Continue Edit", resolved by
+#      EXACT accessible name (never position, never CSS).
+#   4. Asserts the FormEntry URL shape and records the formEntryId literally
+#      in the dump, so every future run navigates straight there read-only
+#      and never mints again.
+#   5. Activates the Coverages tab (exact accessible name) and sweeps the
+#      Coverages fields plus modal containers with per-container attribution.
+#   6. Closes the tab. No other header control is ever activated.
+#
+# The gate below is the blunt style: literal greps over the script. The
+# strings "Save Policy", "Save & Close" and "Submit" may not appear anywhere
+# in the script, so the one click can never be retargeted at a different
+# save control by a future edit. Note for later back-port: the read-only
+# gates forbid .fill(/.type(/.check(/.select_option( but not .click(, so a
+# click on a save control would pass them today -- the name-matched click
+# gate here is the pattern to back-port.
+#
+# Dispatch ONLY from main: the Production environment's deployment branch
+# policy allows main and nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type MINT_FORMENTRY_D01 to confirm the one approved write
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+id-token: write
+
+jobs:
+  mint:
+    if: github.event_name == 'workflow_dispatch' && inputs.confirmation == 'MINT_FORMENTRY_D01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      STAGING: /var/tmp/robie-formentry-mint/${{ github.run_id }}
+      APPLICANT_ID: "220250093"
+      POLICY_ID: "83651751"
+      ENTRY_URL: https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83651751
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '584.0.0'  # Pinned 2026-09-12: runner-preinstalled gcloud 583.0.0 crashes on 'gcloud compute ssh' (TypeError: quote_from_bytes() expected bytes); 584.0.0 is the version setup-gcloud@latest resolved on run 34694728948, whose SSH staging succeeded.
+
+      - name: Enforce single-write discipline
+        run: |
+          set -euo pipefail
+          S=scripts/mint_formentry_capture_coverages.py
+          echo "== no fill/type/check/select_option =="
+          ! grep -q '\.fill(' "$S"
+          ! grep -q '\.type(' "$S"
+          ! grep -q '\.check(' "$S"
+          ! grep -q '\.select_option(' "$S"
+          echo "== exactly one page.goto =="
+          test "$(grep -c 'page.goto' "$S")" = "1"
+          echo "== waits never use networkidle =="
+          ! grep -q 'networkidle' "$S"
+          echo "== exactly one click call site, exact-name matched =="
+          test "$(grep -c '\.click(' "$S")" = "1"
+          grep -q 'exact=True' "$S"
+          grep -q '"Save & Continue Edit"' "$S"
+          ! grep -q '\.first' "$S"
+          ! grep -q 'nth(' "$S"
+          echo "== allowlisted Edit URL present =="
+          grep -q 'applicantportal/Policy/Actions/Edit/220250093/83651751' "$S"
+          echo "== other save/submit control names absent =="
+          ! grep -q 'Save Policy' "$S"
+          ! grep -q 'Save & Close' "$S"
+          ! grep -q 'Submit' "$S"
+          echo "single-write gate OK"
+
+      - name: Stage mint script on Production
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/mint_formentry_capture_coverages.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Run mint (ONE approved write, then read-only capture)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -euo pipefail
+              mkdir -p '${STAGING}'
+              PY=''
+              for cand in \$(ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null) \$(find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 | sed 's|pyvenv.cfg|bin/python|') \$(command -v python3 2>/dev/null || true); do
+                [ -x \"\$cand\" ] || continue
+                if \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
+                if sudo -n \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"sudo -n \$cand\"; break; fi
+              done
+              if [ -z \"\$PY\" ]; then echo 'NO_PLAYWRIGHT_PYTHON'; exit 1; fi
+              echo \"using python: \$PY\"
+              if ! curl -sf --max-time 10 http://127.0.0.1:9222/json/version >/dev/null; then echo 'NO_CDP_LISTENER'; exit 1; fi
+              echo 'CDP listener up'
+              \$PY '${STAGING}/mint_formentry_capture_coverages.py' --out '${STAGING}/dump.json'"
+
+      - name: Retrieve dump
+        id: retrieve
+        if: always()
+        run: |
+          set -euo pipefail
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            "${PRODUCTION_VM}:${STAGING}/dump.json" "${RUNNER_TEMP}/formentry-mint-dump.json"
+          python3 - <<'EOF'
+          import json, os
+          p = os.path.join(os.environ["RUNNER_TEMP"], "formentry-mint-dump.json")
+          d = json.load(open(p))
+          print("ok:", d.get("ok"))
+          print("landing_url:", d.get("landing_url"))
+          print("landing_looks_authenticated:", d.get("landing_looks_authenticated"))
+          print("steps:")
+          for s in d.get("steps", []):
+              print("  ", s["step"], "->", s["url"])
+          print("preconditions:", json.dumps(d.get("preconditions"), indent=2))
+          print("write_occurred:", d.get("write_occurred"))
+          print("write_action:", json.dumps(d.get("write_action"), indent=2))
+          print("formentry_url_matched:", d.get("formentry_url_matched"))
+          print("formentry_id:", d.get("formentry_id"))
+          print("coverages_tab:", json.dumps(d.get("coverages_tab")))
+          print("coverages_field_count:", (d.get("coverages") or {}).get("field_count"))
+          print("modal_found:", d.get("modal_found"), "modal_field_count:", d.get("modal_field_count"))
+          print("stopped_off_policy_path:", d.get("stopped_off_policy_path"))
+          print("error:", d.get("error"))
+
+          auth_ok = bool(d.get("landing_looks_authenticated", False))
+          out_gh = os.environ.get("GITHUB_OUTPUT")
+          if out_gh:
+              with open(out_gh, "a") as f:
+                  f.write(f"authenticated={'true' if auth_ok else 'false'}\n")
+
+          if not auth_ok:
+              status_path = os.path.join(os.environ["RUNNER_TEMP"], "formentry-mint-status.json")
+              status_payload = {
+                  "capture": "mint-formentry-capture-coverages",
+                  "captured_at": d.get("captured_at"),
+                  "verdict": "REFUSED_UNAUTHENTICATED",
+                  "landing_url": d.get("landing_url"),
+                  "landing_looks_authenticated": False,
+                  "detail": (
+                      "Mint refused: landing page was not authenticated. "
+                      "No click was performed."
+                  ),
+              }
+              with open(status_path, "w") as f:
+                  json.dump(status_payload, f, indent=2)
+              print("Written refusal status to:", status_path)
+          EOF
+
+      - name: Upload dump artifact
+        if: steps.retrieve.outputs.authenticated == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: formentry-mint-${{ github.run_id }}
+          path: ${{ runner.temp }}/formentry-mint-dump.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload refused status artifact
+        if: steps.retrieve.outputs.authenticated != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: formentry-mint-status-${{ github.run_id }}
+          path: ${{ runner.temp }}/formentry-mint-status.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Refuse unauthenticated mint
+        if: steps.retrieve.outputs.authenticated != 'true'
+        run: |
+          set -euo pipefail
+          echo "FATAL: FormEntry mint refused: landing_looks_authenticated is false; no click was performed" >&2
+          exit 1
