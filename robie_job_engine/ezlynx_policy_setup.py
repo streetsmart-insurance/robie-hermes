@@ -325,9 +325,35 @@ def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, 
 class EzlynxPolicySetupPage:
     """Deterministic Playwright Page Object for EZLynx APE workflows across all LOBs."""
 
-    def __init__(self, page: Any) -> None:
+    def __init__(self, page: Any, job_id: str | None = None, hitl_deps: dict | None = None) -> None:
         self.page = page
         self.applicant_id: str | None = None
+        self.job_id: str | None = job_id
+        self._hitl_deps: dict = hitl_deps or {}
+        # Wire up default senders if not provided
+        if "email_sender" not in self._hitl_deps:
+            self._hitl_deps["email_sender"] = self._default_email_sender()
+        if "chat_sender" not in self._hitl_deps:
+            self._hitl_deps["chat_sender"] = self._default_chat_sender()
+
+    def _default_email_sender(self):
+        """Create an email sender using the verification mailer."""
+        def send(*, to: str, subject: str, body: str) -> None:
+            from .verification_mailer import send_verification_email
+            send_verification_email(
+                to=[to],
+                cc=[],
+                subject=subject,
+                text_body=body,
+            )
+        return send
+
+    def _default_chat_sender(self):
+        """Create a Google Chat sender using the webhook."""
+        def send(message: str) -> bool:
+            from .ascend_sync import send_google_chat_alert
+            return send_google_chat_alert(message)
+        return send
 
     async def navigate_to_policies(self, applicant_id: str) -> None:
         applicant_id = require_allowed_ezlynx_write_applicant(applicant_id)
@@ -997,7 +1023,86 @@ class EzlynxPolicySetupPage:
                 if await btn.count() > 0:
                     button = btn.first
                     break
-        
+
+        # Strategy 5: link role (it might be an <a> styled as a button)
+        if button is None:
+            strategies_tried.append("link_role")
+            link = self.page.get_by_role("link", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+            if await link.count() > 0:
+                button = link.first
+
+        # Strategy 6: search all clickable elements by text (button, a, div, span, input)
+        if button is None:
+            strategies_tried.append("all_elements")
+            try:
+                locator = self.page.locator("button, a, div, span, input[type='button'], input[type='submit']")
+                count = await locator.count()
+                for i in range(min(count, 100)):
+                    el = locator.nth(i)
+                    try:
+                        text = await el.inner_text()
+                        if text and "save" in text.lower() and "continue" in text.lower() and "edit" in text.lower():
+                            button = el
+                            strategies_tried.append(f"all_elements_idx_{i}")
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # Strategy 7: search in iframes
+        if button is None:
+            strategies_tried.append("iframe_search")
+            try:
+                for frame in self.page.frames:
+                    if frame == self.page.main_frame:
+                        continue
+                    try:
+                        btn = frame.get_by_role("button", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+                        if await btn.count() > 0:
+                            button = btn.first
+                            strategies_tried.append(f"iframe_found")
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # Strategy 8: JavaScript find and click (last resort)
+        if button is None:
+            try:
+                js_found = await self.page.evaluate("""() => {
+                    const els = document.querySelectorAll('button, a, div, span, input');
+                    for (const el of els) {
+                        const text = (el.innerText || el.value || '').toLowerCase();
+                        if (text.includes('save') && text.includes('continue') && text.includes('edit')) {
+                            return {tag: el.tagName, text: (el.innerText||'').substring(0,100), id: el.id};
+                        }
+                    }
+                    // Also check iframes
+                    for (const frame of document.querySelectorAll('iframe')) {
+                        try {
+                            const doc = frame.contentDocument;
+                            if (!doc) continue;
+                            const els2 = doc.querySelectorAll('button, a, div, span, input');
+                            for (const el of els2) {
+                                const text = (el.innerText || el.value || '').toLowerCase();
+                                if (text.includes('save') && text.includes('continue') && text.includes('edit')) {
+                                    return {tag: el.tagName+'_in_iframe', text: (el.innerText||'').substring(0,100), id: el.id};
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    return null;
+                }""")
+                if js_found:
+                    strategies_tried.append(f"js_found_{js_found.get('tag')}")
+                    report["js_element_found"] = js_found
+                else:
+                    strategies_tried.append("js_miss")
+            except Exception as js_exc:
+                strategies_tried.append(f"js_error")
+
         report["button_strategies_tried"] = strategies_tried
         
         if button is None:
