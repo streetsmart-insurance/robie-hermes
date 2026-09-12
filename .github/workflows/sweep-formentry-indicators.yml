@@ -40,6 +40,11 @@ jobs:
         with:
           ref: main
 
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+
       - name: Gate the sweep script (read-only contract)
         run: |
           set -euo pipefail
