@@ -238,23 +238,26 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
     report: dict = {"read_method": None, "http_status": None,
                     "policies": [], "total_count": 0}
     attempts = []
-    # Candidate endpoints, all read-only GETs. The first that returns policy
-    # rows wins; every returned row's own applicant_id is then checked, so an
-    # endpoint that ignores the applicant parameter can never be mistaken
-    # for an applicant-scoped list.
+    # Candidate endpoints, all read-only GETs. The account-scoped candidates
+    # are tried FIRST: they are the only ones that could return a truly
+    # applicant-scoped list. The search?ApplicantId= variants are kept as
+    # fallback because they return rows (unfiltered). The first candidate
+    # that returns policy rows wins; every returned row's own applicant_id
+    # is then checked, so an endpoint that ignores the applicant parameter
+    # can never be mistaken for an applicant-scoped list.
     candidates = [
-        ("PolicyApi/policy/v1/search?ApplicantId=",
-         origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
-             {"ApplicantId": applicant_id})),
-        ("PolicyApi/policy/v1/search?ApplicantID=",
-         origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
-             {"ApplicantID": applicant_id})),
         ("PolicyApi/account/{id}/policy/v1/search",
          origin + f"/PolicyApi/account/{applicant_id}/policy/v1/search"),
         ("PolicyApi/account/{id}/policy/v1/list",
          origin + f"/PolicyApi/account/{applicant_id}/policy/v1/list"),
         ("PolicyApi/account/{id}/policies",
          origin + f"/PolicyApi/account/{applicant_id}/policies"),
+        ("PolicyApi/policy/v1/search?ApplicantId=",
+         origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
+             {"ApplicantId": applicant_id})),
+        ("PolicyApi/policy/v1/search?ApplicantID=",
+         origin + "/PolicyApi/policy/v1/search?" + urllib.parse.urlencode(
+             {"ApplicantID": applicant_id})),
     ]
     for label, url in candidates:
         status, payload = oauth_get(url, token)
@@ -276,6 +279,9 @@ def list_policies_on_applicant(origin: str, token: str, applicant_id: str,
                 report["applicant_filter_honored"] = (
                     len(matching) == len(policies) and len(policies) > 0)
                 report["policies_matching_applicant"] = len(matching)
+                # Always record which endpoints were tried, even when one
+                # won — the probe history is evidence either way.
+                report["attempts"] = attempts
                 if not report["applicant_filter_honored"]:
                     not_checked.append(
                         "policy list by applicant: the PolicyApi search "
