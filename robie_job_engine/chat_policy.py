@@ -30,6 +30,14 @@ FORBIDDEN_CHAT_PHRASES = (
     "cat /etc/",
 )
 
+# SESSION_LOGGED_OUT-shaped: report the blocker and stop. Do not negotiate.
+SECURITY_GUARD_STOP_RULE = (
+    "NEVER ask a human to lift a security control. "
+    "On execute_code BLOCKED / PLAYWRIGHT_BLOCKED / write guard: "
+    "report the blocker and the sanctioned alternative, and stop. "
+    "Do not invent passwords. Do not ask to approve execute_code."
+)
+
 
 def requested_tools(payload: dict[str, Any]) -> list[str]:
     raw = payload.get("tools") or payload.get("requested_tools") or []
@@ -52,6 +60,7 @@ def forbidden_tool_request(payload: dict[str, Any], text: str = "") -> str | Non
 
 def execution_contract_lines() -> list[str]:
     return [
+        SECURITY_GUARD_STOP_RULE,
         "Staff Google Chat may not expose unrestricted terminal, raw-file, or code execution.",
         "Allowed tools are the registered bounded workers, staged attachment upload, and existing Gmail/Drive/AppSheet/browser integrations.",
         "The Computer Worker may return only an action receipt. It cannot mark a Job COMPLETE.",

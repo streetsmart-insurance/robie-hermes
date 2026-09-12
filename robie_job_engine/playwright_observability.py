@@ -103,6 +103,7 @@ def bind_current_playwright_job(db_path: str | Path | None, job_id: str | None) 
         return
     os.environ["ROBIE_JOB_ID"] = job_id
     os.environ["ROBIE_CURRENT_JOB_ID"] = job_id
+    os.environ.setdefault("ROBIE_JOB_ACTION", "hermes.google_chat_task")
     _ = db_path
 
 

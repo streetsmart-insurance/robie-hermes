@@ -65,6 +65,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("PLAYWRIGHT_BLOCKED", source)
         self.assertIn("/web/account/<id>/policies", source)
         self.assertIn("Do not enumerate Summary, Details, or Index", source)
+        self.assertIn("Use `playwright_exec` only.", source)
+        self.assertNotIn("tested Playwright script", source)
 
     def test_runtime_fragments_enable_tool_and_preserve_completion_authority(self):
         config = CONFIG.read_text()
@@ -79,6 +81,8 @@ class PlaywrightIntegrationTests(unittest.TestCase):
         self.assertIn("HITL Carlo", soul)
         self.assertIn("/web/account/<id>/", soul)
         self.assertIn("Do not enumerate Summary/Details/Index", soul)
+        self.assertIn("Use `playwright_exec` only.", soul)
+        self.assertNotIn("tested Playwright script", soul)
 
     def test_gemini_unique_field_tool_is_fail_closed(self):
         source = GEMINI_TOOL.read_text()

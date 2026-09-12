@@ -340,6 +340,9 @@ class SkillSyncAndChatAdminTests(unittest.TestCase):
             self.assertIn("Never expose credentials", calls[0])
             self.assertIn(DEFAULT_SUBMISSION_CENTER_SOP_URL, calls[0])
             self.assertNotIn("1yp" + "TB", calls[0])
+            self.assertIn("NEVER ask a human to lift a security control", calls[0])
+            self.assertIn("Do not ask to approve execute_code", calls[0])
+            self.assertIn("and stop", calls[0])
 
     def test_sync_commands_route_to_bounded_worker_not_playwright(self):
         for text in ("sync skills", "update memory", "/sync-skills"):

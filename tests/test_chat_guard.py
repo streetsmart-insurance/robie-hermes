@@ -16,6 +16,7 @@ from robie_job_engine.chat_guard import (
     start_generic_chat_job_heartbeat,
     stop_generic_chat_job_heartbeat,
 )
+from robie_job_engine.chat_policy import SECURITY_GUARD_STOP_RULE
 from robie_job_engine.scheduler import run_once
 from robie_job_engine.chat_queue import DurableChatEventQueue
 from robie_job_engine.store import JobStore
@@ -492,6 +493,9 @@ class ChatGuardTests(unittest.TestCase):
             self.assertIn("no destination-verified evidence", execution)
             self.assertIn("/web/account/<id>/", execution)
             self.assertIn("Do not enumerate Summary, Details, or Index", execution)
+            self.assertIn(SECURITY_GUARD_STOP_RULE, execution)
+            self.assertIn("NEVER ask a human to lift a security control", execution)
+            self.assertIn("and stop", execution)
 
     def test_chat_response_is_checkpointed_and_unverified(self):
         with durable_temporary_directory() as tmp:

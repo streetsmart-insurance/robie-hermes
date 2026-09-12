@@ -45,6 +45,8 @@ def test_repository_and_deploy_skill_packages_are_exact_mirrors():
     deploy = Path("deploy/hermes/skills/ezlynx-policy-setup")
     for relative in ("SKILL.md", "references/profiles.json", "references/selector-inventory.md"):
         assert (repository / relative).read_bytes() == (deploy / relative).read_bytes()
+    skill = (repository / "SKILL.md").read_text()
+    assert "playwright_exec calls only, never execute_code, never a Python script wrapper" in skill
 
 
 def test_duplicate_identity_is_stable_and_uses_all_business_keys():
