@@ -893,7 +893,7 @@ class EzlynxPolicySetupPage:
 
         # FormEntry: click Save & Continue Edit on the Edit Policy header,
         # watch validation + DOM for the FormEntry URL.
-        nav = await self._mint_formentry(policy_id)
+        nav = await self._mint_formentry(policy_id, applicant_id)
         evidence["formentry_nav"] = nav
         evidence["phases"].append("formentry_mint")
         if not nav.get("formentry_found"):
@@ -943,7 +943,7 @@ class EzlynxPolicySetupPage:
             stopped_before_bind=True,
         )
 
-    async def _mint_formentry(self, policy_id: str) -> dict[str, Any]:
+    async def _mint_formentry(self, policy_id: str, applicant_id: str = "") -> dict[str, Any]:
         """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
 
         The door is the green Save & Continue Edit button on the Edit Policy
@@ -959,10 +959,11 @@ class EzlynxPolicySetupPage:
             "formentry_url": None,
             "validation": {},
         }
-        applicant_id = self.applicant_id or ""
+        # Use passed applicant_id, fallback to self.applicant_id
+        effective_applicant_id = applicant_id or self.applicant_id or ""
         edit_url = (
             f"https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/"
-            f"{applicant_id}/{policy_id}"
+            f"{effective_applicant_id}/{policy_id}"
         )
         await self.page.goto(edit_url, wait_until="domcontentloaded")
         await self.page.wait_for_timeout(2000)
