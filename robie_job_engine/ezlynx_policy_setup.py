@@ -325,9 +325,35 @@ def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, 
 class EzlynxPolicySetupPage:
     """Deterministic Playwright Page Object for EZLynx APE workflows across all LOBs."""
 
-    def __init__(self, page: Any) -> None:
+    def __init__(self, page: Any, job_id: str | None = None, hitl_deps: dict | None = None) -> None:
         self.page = page
         self.applicant_id: str | None = None
+        self.job_id: str | None = job_id
+        self._hitl_deps: dict = hitl_deps or {}
+        # Wire up default senders if not provided
+        if "email_sender" not in self._hitl_deps:
+            self._hitl_deps["email_sender"] = self._default_email_sender()
+        if "chat_sender" not in self._hitl_deps:
+            self._hitl_deps["chat_sender"] = self._default_chat_sender()
+
+    def _default_email_sender(self):
+        """Create an email sender using the verification mailer."""
+        def send(*, to: str, subject: str, body: str) -> None:
+            from .verification_mailer import send_verification_email
+            send_verification_email(
+                to=[to],
+                cc=[],
+                subject=subject,
+                text_body=body,
+            )
+        return send
+
+    def _default_chat_sender(self):
+        """Create a Google Chat sender using the webhook."""
+        def send(message: str) -> bool:
+            from .ascend_sync import send_google_chat_alert
+            return send_google_chat_alert(message)
+        return send
 
     async def navigate_to_policies(self, applicant_id: str) -> None:
         applicant_id = require_allowed_ezlynx_write_applicant(applicant_id)
