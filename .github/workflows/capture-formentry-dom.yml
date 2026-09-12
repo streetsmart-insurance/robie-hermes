@@ -82,10 +82,13 @@ jobs:
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
             --command="set -euo pipefail
               mkdir -p '${STAGING}'
-              VENV=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python
-              echo \"venv present: \$([ -x \$VENV ] && echo yes || echo no)\"
+              echo '--- diagnostics (read-only) ---'
+              ps aux | grep -iE 'robie|hermes|playwright' | grep -v grep | head -8 || true
+              ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null || true
+              find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 || true
+              echo '--- end diagnostics ---'
               PY=''
-              for cand in \$VENV \$(find /opt/streetsmart-hermes -maxdepth 8 -path '*/bin/python*' -type f 2>/dev/null | head -10) \$(command -v python3 2>/dev/null || true); do
+              for cand in \$(ls -d /opt/streetsmart-hermes/.local/share/uv/python/*/bin/python3 2>/dev/null) \$(find /opt/streetsmart-hermes -maxdepth 5 -name pyvenv.cfg 2>/dev/null | head -5 | sed 's|pyvenv.cfg|bin/python|') \$(command -v python3 2>/dev/null || true); do
                 [ -x \"\$cand\" ] || continue
                 if \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"\$cand\"; break; fi
                 if sudo -n \"\$cand\" -c 'import playwright' 2>/dev/null; then PY=\"sudo -n \$cand\"; break; fi
