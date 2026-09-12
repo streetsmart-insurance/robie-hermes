@@ -195,7 +195,7 @@ def tool_module_path() -> Path:
     return candidates[0]
 
 
-def load_policy_setup_handler():
+def load_policy_setup_handler(anchor_file=None):
     """Load the real ezlynx_policy_setup tool handler.
 
     Raises PolicySetupToolMissing with the fail-closed message when the tool
@@ -239,3 +239,32 @@ def invoke_policy_setup_tool(args: dict) -> dict:
         args["expiration_date"] = GOLD_EXPIRATION_DATE
     handler = load_policy_setup_handler()
     return handler(args)
+
+
+# --- Compatibility shims for 341 callers (hijack removed, but imports may remain) ---
+
+# 341 defined this; kept so existing imports don't break.
+POLICY_SETUP_ACTION = "hermes.email_task"
+
+def handler_args_from_marker(marker: dict) -> dict:
+    """Build tool args from a policy_setup_required checkpoint marker (341 API).
+
+    Kept for compatibility; the deterministic email-runner path uses
+    extract_policy_setup_args + invoke_policy_setup_tool instead.
+    """
+    marker = dict(marker or {})
+    return {
+        "policy_number": str(marker.get("policy_number") or "").strip().upper(),
+        "effective_date": str(marker.get("effective_date") or GOLD_EFFECTIVE_DATE),
+        "expiration_date": str(marker.get("expiration_date") or GOLD_EXPIRATION_DATE),
+        "dwelling": str(marker.get("dwelling") or ""),
+        "other_structures": str(marker.get("other_structures") or ""),
+        "personal_property": str(marker.get("personal_property") or ""),
+        "loss_of_use": str(marker.get("loss_of_use") or ""),
+        "personal_liability": str(marker.get("personal_liability") or ""),
+        "medical_payments": str(marker.get("medical_payments") or ""),
+    }
+
+def policy_setup_tool_path(anchor_file=None):
+    """341 API: locate the policy_setup_tool module. Delegates to tool_module_path."""
+    return tool_module_path()
