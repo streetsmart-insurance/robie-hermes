@@ -63,7 +63,7 @@ on:
 permissions:
   contents: read
   actions: read
-id-token: write
+  id-token: write
 
 jobs:
   mint:
