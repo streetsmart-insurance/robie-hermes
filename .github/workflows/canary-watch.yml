@@ -1,0 +1,137 @@
+name: Canary watch (L3 daily destination check)
+
+# L3 of the canary plan. Once a day (06:30 ET) it re-reads destination state
+# on applicant 220250093 from primary sources via scripts/verify_acceptance.py:
+#   - TEST-HO-20260911-E01 must stay ABSENT (until the Phase 5 gate runs)
+#   - TEST-HO-20260912-D01 must stay PRESENT with unchanged fields
+#   - the latest jobs.db job is recorded; a NEW failed job is a change
+# scripts/diff_canary_watch.py diffs today's readings against the previous
+# snapshot artifact and emits a verdict (changed true/false + literal diff).
+# Ralph reads the verdict daily and messages Carlo ONLY on change.
+# Green is silence.
+#
+# Read-only: all EZLynx calls are GETs; jobs.db is opened read-only
+# (query_only). No secret values are printed.
+# Dispatch ONLY from main: the Production environment's deployment branch
+# policy allows main and nothing else.
+
+on:
+  schedule:
+    - cron: "30 10 * * *"
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type CANARY_WATCH for an on-demand run
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  watch:
+    if: github.event_name == 'schedule' || inputs.confirmation == 'CANARY_WATCH'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: hermes-poc-01
+      JOB_DB: /opt/streetsmart-hermes/robie-job-engine/data/jobs.db
+      SECRET_REF: projects/751771086524/secrets/ezlynx-api-prod/versions/latest
+      STAGING: /var/tmp/robie-canary-watch/${{ github.run_id }}-${{ github.run_attempt }}
+      APPLICANT_ID: "220250093"
+      E01_POLICY: TEST-HO-20260911-E01
+      D01_POLICY: TEST-HO-20260912-D01
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Validate bounded request
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${JOB_DB}" = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
+          test "${APPLICANT_ID}" = "220250093"
+          test "${E01_POLICY}" = "TEST-HO-20260911-E01"
+          test "${D01_POLICY}" = "TEST-HO-20260912-D01"
+
+      - name: Stage scripts on Production
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-poc-01 && mkdir -p '${STAGING}'"
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/verify_acceptance.py scripts/diff_canary_watch.py "${PRODUCTION_VM}:${STAGING}/"
+
+      - name: Read latest job id (read-only)
+        id: latest_job
+        run: |
+          set -euo pipefail
+          LATEST_JOB="$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 -c \"import sqlite3; con = sqlite3.connect('file:${JOB_DB}?mode=ro', uri=True); con.execute('PRAGMA query_only=ON'); print(con.execute('SELECT id FROM jobs ORDER BY created_at DESC LIMIT 1').fetchone()[0])\"")"
+          [[ "${LATEST_JOB}" =~ ^[a-f0-9-]{36}$ ]] || { echo "unexpected job id: ${LATEST_JOB}"; exit 1; }
+          echo "job_id=${LATEST_JOB}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run verifier (E01 should be absent, D01 should be present)
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 '${STAGING}/verify_acceptance.py' --applicant-id '${APPLICANT_ID}' --policy-number '${E01_POLICY}' --job-id '${{ steps.latest_job.outputs.job_id }}' --db-path '${JOB_DB}' --secret '${SECRET_REF}'" \
+            | tee "${RUNNER_TEMP}/watch-e01.json"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo python3 '${STAGING}/verify_acceptance.py' --applicant-id '${APPLICANT_ID}' --policy-number '${D01_POLICY}' --job-id '${{ steps.latest_job.outputs.job_id }}' --db-path '${JOB_DB}' --secret '${SECRET_REF}'" \
+            | tee "${RUNNER_TEMP}/watch-d01.json"
+          python3 -m json.tool "${RUNNER_TEMP}/watch-e01.json" >/dev/null
+          python3 -m json.tool "${RUNNER_TEMP}/watch-d01.json" >/dev/null
+
+      - name: Fetch previous snapshot (if any)
+        id: prev
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREV_RUN="$(gh run list --workflow canary-watch.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -z "${PREV_RUN}" ] || [ "${PREV_RUN}" = "${{ github.run_id }}" ]; then
+            echo "no previous successful run; this run establishes the baseline"
+            echo "has_prev=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          ART_NAME="$(gh api "repos/streetsmart-insurance/robie-hermes/actions/runs/${PREV_RUN}/artifacts" --jq '.artifacts[] | select(.name | startswith("canary-watch-snapshot-")) | .name')"
+          if [ -z "${ART_NAME}" ]; then
+            echo "has_prev=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          gh run download "${PREV_RUN}" -n "${ART_NAME}" -D "${RUNNER_TEMP}/prev-snapshot"
+          echo "has_prev=true" >> "${GITHUB_OUTPUT}"
+          echo "prev_file=${RUNNER_TEMP}/prev-snapshot/snapshot.json" >> "${GITHUB_OUTPUT}"
+
+      - name: Diff against snapshot, emit verdict
+        run: |
+          set -euo pipefail
+          ARGS=(--current-e01 "${RUNNER_TEMP}/watch-e01.json" --current-d01 "${RUNNER_TEMP}/watch-d01.json"
+                --verdict-out "${RUNNER_TEMP}/verdict.json" --snapshot-out "${RUNNER_TEMP}/snapshot.json")
+          if [ "${{ steps.prev.outputs.has_prev }}" = "true" ]; then
+            ARGS+=(--previous "${{ steps.prev.outputs.prev_file }}")
+          fi
+          python3 scripts/diff_canary_watch.py "${ARGS[@]}"
+          python3 -m json.tool "${RUNNER_TEMP}/verdict.json" >/dev/null
+
+      - name: Publish verdict + snapshot artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-watch-snapshot-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/verdict.json
+            ${{ runner.temp }}/snapshot.json
+          if-no-files-found: error
+          retention-days: 90
