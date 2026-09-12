@@ -7,10 +7,14 @@ that made "the browser has tabs" look true while it showed nothing.
 """
 from __future__ import annotations
 
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+try:
+    from durable_temp import durable_temporary_directory
+except ModuleNotFoundError:
+    from tests.durable_temp import durable_temporary_directory
 
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.models import (
@@ -168,7 +172,7 @@ class DummyVerifier:
 
 class TestEngineWiring(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = durable_temporary_directory()
         self.store = JobStore(Path(self.tmp.name) / "jobs.db")
 
     def tearDown(self):
