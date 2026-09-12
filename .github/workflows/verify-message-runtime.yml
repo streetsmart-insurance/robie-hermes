@@ -40,6 +40,8 @@ jobs:
           workload_identity_provider: ${{ inputs.target == 'TEST' && 'projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github' || 'projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main' }}
           service_account: ${{ inputs.target == 'TEST' && 'robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com' || 'robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com' }}
       - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '584.0.0'  # Pinned 2026-09-12: runner-preinstalled gcloud 583.0.0 crashes on 'gcloud compute ssh' (TypeError: quote_from_bytes() expected bytes); 584.0.0 is the version setup-gcloud@latest resolved on run 34694728948, whose SSH staging succeeded.
       - name: Read readiness from the actual gateway runtime
         timeout-minutes: 4
         run: |
