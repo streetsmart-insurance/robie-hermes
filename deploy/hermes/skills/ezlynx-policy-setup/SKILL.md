@@ -15,6 +15,7 @@ is `Testing`; none is Certified or Production. Only the exact synthetic
 Homeowners Test drill may perform a consequential Save.
 Read `references/selector-inventory.md` before any browser-level Test and treat
 every listed selector/page object as uncertified until QA supplies live proof.
+EZLynx browser work is playwright_exec calls only, never execute_code, never a Python script wrapper.
 
 ## Mandatory result states
 

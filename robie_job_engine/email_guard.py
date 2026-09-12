@@ -6,6 +6,7 @@ import re
 from .engine import JobEngine
 from .models import ACTION_OUTCOME_UNKNOWN, JobStatus, WorkerResult
 from .store import JobStore
+from .chat_policy import SECURITY_GUARD_STOP_RULE
 from .skill_sync import add_synced_context, submission_center_sop_url
 
 
@@ -70,6 +71,8 @@ def run_guarded_email_task(
     request_text = prompt
     prompt = add_synced_context(
         prompt
+        + "\n\n"
+        + SECURITY_GUARD_STOP_RULE
         + "\n\nSUBMISSION CENTER SOP REFERENCE\n"
         + submission_center_sop_url()
     )

@@ -10,7 +10,7 @@ teaches the business workflow; Robie owns the browser mechanics.
 
 ## Engine contract
 
-- Use `playwright_exec` or a task Skill's tested Playwright script.
+- Use `playwright_exec` only.
 - Do not silently substitute browser-harness, raw CDP or WebSocket commands,
   Selenium, Puppeteer, or coordinate-only clicking.
 - If Playwright cannot attach to the intended signed-in session or a required

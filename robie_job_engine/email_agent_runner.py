@@ -50,6 +50,8 @@ def run_scripted_email(prompt: str, *, env: dict, home: Path, cwd: Path,
     runner = runner or subprocess.run
     if not job_id or not db_path:
         return 'ROBIE_EXECUTION_BLOCKED: Email execution requires an active durable job.'
+    env = dict(env)
+    env.setdefault('ROBIE_JOB_ACTION', 'hermes.email_task')
     store = JobStore(db_path)
     nonce = 'ROBIE_EMAIL_RECEIPT_' + uuid.uuid4().hex
     records = []

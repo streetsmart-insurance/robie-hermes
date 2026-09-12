@@ -5,6 +5,7 @@ from pathlib import Path
 
 from durable_temp import durable_temporary_directory
 
+from robie_job_engine.chat_policy import SECURITY_GUARD_STOP_RULE
 from robie_job_engine.email_guard import run_guarded_email_task
 from robie_job_engine.store import JobStore
 
@@ -25,6 +26,8 @@ class EmailGuardTests(unittest.TestCase):
             self.assertIn("must not be treated as COMPLETE", first)
             self.assertIn("UNVERIFIED", second)
             self.assertEqual(len(calls), 1)
+            self.assertIn(SECURITY_GUARD_STOP_RULE, calls[0])
+            self.assertIn("NEVER ask a human to lift a security control", calls[0])
             self.assertEqual(JobStore(db).get_job(JobStore(db).create_job("hermes.email_task", {}, idempotency_key="gmail:m-1")["id"])["status"], "UNVERIFIED")
 
 
