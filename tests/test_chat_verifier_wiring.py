@@ -142,6 +142,9 @@ class ChatEzlynxDestinationWiringTests(unittest.TestCase):
             def documents_for_applicant(self, applicant_id, policy_id=0):
                 return []
 
+            def download_document(self, document_id):
+                return b"%PDF-1.4 test"
+
             def discussions_for_applicant(self, applicant_id):
                 return []
 

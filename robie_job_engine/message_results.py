@@ -27,7 +27,7 @@ def verification_summary(store, job_id):
         if missing:
             lines.append('Not confirmed: documents missing: ' + ', '.join(missing) + '.')
     elif documents and observed.get('documents_error'):
-        lines.append('Not checked: document library could not be read.')
+        lines.append('Not checked: DocumentApi could not be read.')
     if expected.get('discussion_title'):
         receipt = observed.get('discussion_receipt_present')
         if receipt is True:
