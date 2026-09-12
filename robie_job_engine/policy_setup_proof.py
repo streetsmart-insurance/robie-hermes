@@ -228,11 +228,41 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
 
     report["validation"]["pre_click"] = _validation_snapshot_sync(page)
 
-    button = page.get_by_role("button", name="Save & Continue Edit")
-    if button.count() == 0:
+    # Robust button finding: try multiple strategies with waits.
+    import re
+    button = None
+    strategies_tried = []
+    
+    # Wait for page to stabilize
+    page.wait_for_timeout(3000)
+    
+    # Strategy 1: exact name
+    strategies_tried.append("exact_name")
+    btn = page.get_by_role("button", name="Save & Continue Edit")
+    if btn.count() > 0:
+        button = btn.first
+    
+    # Strategy 2: partial name match (case-insensitive regex)
+    if button is None:
+        strategies_tried.append("partial_name")
+        btn = page.get_by_role("button", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+        if btn.count() > 0:
+            button = btn.first
+    
+    # Strategy 3: text content match
+    if button is None:
+        strategies_tried.append("text_content")
+        btn = page.locator("button", has_text=re.compile(r"Save & Continue Edit", re.IGNORECASE))
+        if btn.count() > 0:
+            button = btn.first
+    
+    report["button_strategies_tried"] = strategies_tried
+    
+    if button is None:
         report["page_state"] = _page_state_snapshot_sync(page)
         report["error"] = (
             "Save & Continue Edit button not found on Edit Policy header. "
+            f"Tried strategies: {', '.join(strategies_tried)}. "
             "See page_state for URL, title, and available controls."
         )
         return report

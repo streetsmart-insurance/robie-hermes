@@ -956,11 +956,55 @@ class EzlynxPolicySetupPage:
         # Capture pre-click validation state from the DOM.
         report["validation"]["pre_click"] = await self._validation_snapshot()
 
-        button = self.page.get_by_role("button", name="Save & Continue Edit")
-        if await button.count() == 0:
+        # Robust button finding: try multiple strategies with waits.
+        # Strategy 1: exact accessible name (original)
+        # Strategy 2: case-insensitive partial match
+        # Strategy 3: CSS selector for common button patterns
+        button = None
+        strategies_tried = []
+        
+        # Wait for page to stabilize (increase from 2s to 5s total)
+        await self.page.wait_for_timeout(3000)
+        
+        # Strategy 1: exact name
+        strategies_tried.append("exact_name")
+        btn = self.page.get_by_role("button", name="Save & Continue Edit")
+        if await btn.count() > 0:
+            button = btn.first
+        
+        # Strategy 2: partial name match (case-insensitive)
+        if button is None:
+            strategies_tried.append("partial_name")
+            # Try with regex for flexible matching
+            import re
+            btn = self.page.get_by_role("button", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+            if await btn.count() > 0:
+                button = btn.first
+        
+        # Strategy 3: look for button by text content
+        if button is None:
+            strategies_tried.append("text_content")
+            btn = self.page.locator("button", has_text=re.compile(r"Save & Continue Edit", re.IGNORECASE))
+            if await btn.count() > 0:
+                button = btn.first
+        
+        # Strategy 4: CSS selector for green/success buttons (the button is green in screenshots)
+        if button is None:
+            strategies_tried.append("css_green")
+            # Common patterns: .btn-success, .btn-green, button with specific classes
+            for selector in ["button.btn-success", "button.btn-green", "a.btn-success"]:
+                btn = self.page.locator(selector, has_text=re.compile(r"Continue.*Edit", re.IGNORECASE))
+                if await btn.count() > 0:
+                    button = btn.first
+                    break
+        
+        report["button_strategies_tried"] = strategies_tried
+        
+        if button is None:
             report["page_state"] = await self._page_state_snapshot()
             report["error"] = (
                 "Save & Continue Edit button not found on Edit Policy header. "
+                f"Tried strategies: {', '.join(strategies_tried)}. "
                 "See page_state for URL, title, and available controls."
             )
             return report
