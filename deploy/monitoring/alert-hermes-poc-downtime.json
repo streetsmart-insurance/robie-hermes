@@ -1,0 +1,24 @@
+{
+  "displayName": "INFRA hermes-poc-01 instance down",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "Production POC VM hermes-poc-01 stopped reporting CPU (likely stopped or unreachable). Separate from ROBIE app preflight.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "No CPU metric for 5 minutes",
+      "conditionAbsent": {
+        "filter": "resource.type = \"gce_instance\" AND resource.labels.instance_id = \"5649534881067121807\" AND metric.type = \"compute.googleapis.com/instance/cpu/utilization\"",
+        "duration": "300s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MEAN"
+          }
+        ]
+      }
+    }
+  ]
+}

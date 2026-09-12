@@ -1,0 +1,26 @@
+{
+  "displayName": "INFRA hermes-poc-01 root disk > 85%",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "Root disk pressure on hermes-poc-01. Requires Google Cloud Ops Agent on the VM.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [
+    {
+      "displayName": "Root filesystem above 85% used",
+      "conditionThreshold": {
+        "filter": "resource.type = \"gce_instance\" AND resource.labels.instance_id = \"5649534881067121807\" AND metric.type = \"agent.googleapis.com/disk/percent_used\" AND metric.labels.device = \"/dev/root\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 85,
+        "duration": "300s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MAX"
+          }
+        ]
+      }
+    }
+  ]
+}
