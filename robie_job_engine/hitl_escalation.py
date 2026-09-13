@@ -151,7 +151,7 @@ If the fix is not a code change (e.g. "wait longer", "click a different button")
 Example:
 FILE: robie_job_engine/ezlynx_policy_setup.py
 LOCATION: _fill_required_policy_fields, Billing Type dropdown
-REASON: Dropdown contains "Direct" not "Direct Bill"; exact match fails, alias needed.
+REASON: Wanted value is not an exact live option; ask Gemini which one live option to select.
 
 BEFORE:
 if text.lower() == "direct bill":

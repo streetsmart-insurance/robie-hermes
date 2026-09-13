@@ -36,21 +36,53 @@ class FieldWidget:
     forbidden_roots: tuple[str, ...] = (LOB_WIDGET_ROOT,)
 
 
-DEPARTMENT_WIDGET = FieldWidget(
+def identified_widget(
+    *,
+    name: str,
+    root: str,
+    kind: str = "native_select",
+    trigger: str | None = None,
+    option_rows: str | None = None,
+    search: str | None = None,
+    forbidden_roots: tuple[str, ...] | None = None,
+) -> FieldWidget:
+    """Describe any dropdown / select2 / combobox by identity. No option labels."""
+    if not root.startswith("#"):
+        raise ValueError(f"{name} widget root must be an id selector, got {root!r}")
+    if kind == "native_select":
+        return FieldWidget(
+            name=name,
+            root=root,
+            kind=kind,
+            trigger=trigger or root,
+            option_rows=option_rows or f"{root} option",
+            search=search,
+            forbidden_roots=forbidden_roots if forbidden_roots is not None else (),
+        )
+    if kind not in {"select2", "combobox"}:
+        raise ValueError(f"unknown widget kind {kind!r}")
+    return FieldWidget(
+        name=name,
+        root=root,
+        kind=kind,
+        trigger=trigger or f"{root} .select2-choice, {root} a.ui-select-match",
+        option_rows=option_rows or f"{root} .ui-select-choices-row",
+        search=search or f"{root} input.ui-select-search",
+        forbidden_roots=(
+            forbidden_roots if forbidden_roots is not None else (LOB_WIDGET_ROOT,)
+        ),
+    )
+
+
+DEPARTMENT_WIDGET = identified_widget(
     name="Department",
     root="#Department",
     kind="select2",
-    trigger="#Department .select2-choice, #Department a.ui-select-match",
-    option_rows="#Department .ui-select-choices-row",
-    search="#Department input.ui-select-search",
 )
 
-BILLING_TYPE_WIDGET = FieldWidget(
+BILLING_TYPE_WIDGET = identified_widget(
     name="Billing Type",
     root="#BillingType",
-    kind="native_select",
-    trigger="#BillingType",
-    option_rows="#BillingType option",
 )
 
 
@@ -244,6 +276,11 @@ async def _select_live_option(page: Any, widget: FieldWidget, option: str) -> No
     value = select_option(label=option)
     if hasattr(value, "__await__"):
         await value
+    dispatch = getattr(select, "dispatch_event", None)
+    if dispatch is not None:
+        fired = dispatch("change")
+        if hasattr(fired, "__await__"):
+            await fired
 
 
 async def _selected_visible(page: Any, widget: FieldWidget) -> str:

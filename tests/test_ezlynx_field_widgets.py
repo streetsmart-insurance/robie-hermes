@@ -13,6 +13,7 @@ from robie_job_engine.ezlynx_field_widgets import (
     FieldWidget,
     fill_identified_widget,
     fill_live_dropdown,
+    identified_widget,
 )
 from robie_job_engine.gemini_field_helper import ask_gemini_live_option, exact_live_option
 
@@ -348,6 +349,55 @@ class WidgetFillTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.selected, "Personal Lines (P/L)")
+
+        asyncio.run(_run())
+
+    def test_any_identified_dropdown_uses_the_same_helper(self) -> None:
+        async def _run() -> None:
+            widget = identified_widget(name="Writing Company", root="#WritingCompany")
+            page = EditPolicyPage(
+                department_options=["---Select---"],
+                billing_options=["Agency"],
+            )
+            page.writing_options = ["Agency Mutual", "Progressive Garden State"]
+            page.writing_selected = ""
+            real = page.locator
+
+            def locator(selector: str):
+                if selector.startswith("#WritingCompany"):
+                    select = _Node(
+                        children=[_Node(text=opt) for opt in page.writing_options],
+                        element_id="WritingCompany",
+                    )
+
+                    async def _select(label: str | None = None, value: str | None = None) -> None:
+                        page.writing_selected = label or value or ""
+                        select.selected_label = page.writing_selected
+
+                    def _child(sub: str) -> _Node:
+                        if "checked" in sub:
+                            return _Node(text=page.writing_selected)
+                        return _Node(children=[_Node(text=opt) for opt in page.writing_options])
+
+                    select.select_option = _select
+                    select.locator = _child
+                    if "option" in selector:
+                        return _child(selector)
+                    return select
+                return real(selector)
+
+            page.locator = locator
+            result = await fill_live_dropdown(
+                page,
+                widget,
+                "Progressive Insurance",
+                gemini_client=FakeGemini(
+                    json.dumps({"decision": "unique", "option": "Progressive Garden State"})
+                ),
+            )
+            self.assertEqual(result.selected, "Progressive Garden State")
+            self.assertEqual(page.writing_selected, "Progressive Garden State")
+            self.assertEqual(widget.root, "#WritingCompany")
 
         asyncio.run(_run())
 

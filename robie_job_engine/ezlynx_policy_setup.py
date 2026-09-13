@@ -221,7 +221,7 @@ class PolicyShellInput:
     effective_date: str = ""  # MM/DD/YYYY
     expiration_date: str = ""  # MM/DD/YYYY
     lob_origination_date: str = ""  # MM/DD/YYYY (mandatory)
-    billing_type: str = "Direct"  # Direct or Agency
+    billing_type: str = "Direct Bill"  # wanted value, not an EZLynx option label
     billing_company: str = ""
     rating_state_value: str = "31"  # NJ = 31
     premium: str = ""
@@ -422,29 +422,32 @@ class EzlynxPolicySetupPage:
         lob_val = normalize_lob(shell_input.lob)
         trans_val = normalize_transaction_type(shell_input.transaction_type)
 
-        # 1. Line of business
-        lob_select = self.page.locator("#mergeSplitLOB")
-        await lob_select.select_option(value=lob_val)
-        await lob_select.dispatch_event("change")
+        from .ezlynx_field_widgets import (
+            BILLING_TYPE_WIDGET,
+            DEPARTMENT_WIDGET,
+            fill_live_dropdown,
+            identified_widget,
+        )
 
-        # 2. Transaction type
-        trans_select = self.page.locator("#TransactionType")
-        await trans_select.select_option(value=trans_val)
-        await trans_select.dispatch_event("change")
+        gemini_client = (self._hitl_deps or {}).get("gemini_client")
 
-        # 3. Master company
-        master_select = self.page.locator("#MasterCompany")
-        await master_select.select_option(value=shell_input.master_company_value)
-        await master_select.dispatch_event("change")
+        async def _fill_named(name: str, root: str, wanted: str) -> None:
+            filled = await fill_live_dropdown(
+                self.page,
+                identified_widget(name=name, root=root),
+                wanted,
+                gemini_client=gemini_client,
+            )
+            if filled.hitl:
+                raise RuntimeError(filled.error or f"{name} fill HITL")
 
-        # Wait briefly for dynamic writing company population
+        # 1-4. Identified dropdowns: live options, Gemini on exact miss, retry once.
+        await _fill_named("Line of Business", "#mergeSplitLOB", lob_val)
+        await _fill_named("Transaction Type", "#TransactionType", trans_val)
+        await _fill_named("Master Company", "#MasterCompany", shell_input.master_company_value)
         await self.page.wait_for_timeout(500)
-
-        # 4. Writing company (if specified)
         if shell_input.writing_company_text:
-            writing_select = self.page.locator("#WritingCompany")
-            await writing_select.select_option(label=shell_input.writing_company_text)
-            await writing_select.dispatch_event("change")
+            await _fill_named("Writing Company", "#WritingCompany", shell_input.writing_company_text)
 
         # 5. Policy Number
         if shell_input.policy_number:
@@ -466,17 +469,20 @@ class EzlynxPolicySetupPage:
             if await orig_input.count() > 0:
                 await orig_input.fill(lob_orig)
 
-        # 7. Billing Type & Rating State
+        # 7. Billing Type & Rating State — same live-option helper.
         if shell_input.billing_type:
-            bill = self.page.locator("#BillingType")
-            await bill.select_option(value=shell_input.billing_type)
+            billing = await fill_live_dropdown(
+                self.page,
+                BILLING_TYPE_WIDGET,
+                shell_input.billing_type,
+                gemini_client=gemini_client,
+            )
+            if billing.hitl:
+                raise RuntimeError(billing.error or "Billing Type fill HITL")
         if shell_input.billing_company:
-            bill_comp = self.page.locator("#BillingCompany")
-            if await bill_comp.count() > 0:
-                await bill_comp.select_option(label=shell_input.billing_company)
+            await _fill_named("Billing Company", "#BillingCompany", shell_input.billing_company)
         if shell_input.rating_state_value:
-            state = self.page.locator("#RatingState")
-            await state.select_option(value=shell_input.rating_state_value)
+            await _fill_named("Rating State", "#RatingState", shell_input.rating_state_value)
 
         # 8. Premiums (clean unmasked numbers)
         if shell_input.premium:
@@ -494,17 +500,15 @@ class EzlynxPolicySetupPage:
         if await comm_input.count() > 0:
             await comm_input.fill(clean_currency(comm_val))
 
-        # 8b. Department: #Department widget only. Exact live match, else Gemini.
-        from .ezlynx_field_widgets import DEPARTMENT_WIDGET, fill_identified_widget
-
+        # 8b. Department: same helper. Widget is #Department, never LOB.
         dept_wanted = shell_input.department or (
             "Commercial" if is_commercial_lob(shell_input.lob) else "Personal"
         )
-        dept_fill = await fill_identified_widget(
+        dept_fill = await fill_live_dropdown(
             self.page,
             DEPARTMENT_WIDGET,
             dept_wanted,
-            gemini_client=(self._hitl_deps or {}).get("gemini_client"),
+            gemini_client=gemini_client,
         )
         if dept_fill.hitl:
             raise RuntimeError(dept_fill.error or "Department fill HITL")
@@ -539,8 +543,19 @@ class EzlynxPolicySetupPage:
                 )
             requested = vehicle.garaging_address.strip()
             if requested:
-                await dropdown.select_option(label=requested)
-                await dropdown.dispatch_event("change")
+                from .ezlynx_field_widgets import fill_live_dropdown, identified_widget
+
+                filled = await fill_live_dropdown(
+                    self.page,
+                    identified_widget(
+                        name="Garaging Address",
+                        root="#Vehicle_GaragingAddressId",
+                    ),
+                    requested,
+                    gemini_client=(self._hitl_deps or {}).get("gemini_client"),
+                )
+                if filled.hitl:
+                    raise RuntimeError(filled.error or "Garaging Address fill HITL")
                 return
             current = str(await dropdown.input_value() or "").strip()
             if current:
