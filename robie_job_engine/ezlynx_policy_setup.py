@@ -1015,11 +1015,30 @@ class EzlynxPolicySetupPage:
         if billing_select is None:
             raise RuntimeError(f"Could not find Billing Type dropdown. Tried: {[s[1] for s in strategies]}. Errors: {result['errors']}")
 
-        await billing_select.select_option(label="Direct Bill")
+        # Read actual options first (Angular may load them dynamically)
+        # then match flexibly instead of assuming exact label text
+        options = await billing_select.locator("option").all()
+        option_texts = []
+        target_value = None
+        for opt in options:
+            try:
+                text = (await opt.inner_text()).strip()
+                val = await opt.get_attribute("value")
+                option_texts.append(f"{text!r} (value={val!r})")
+                if text.lower() == "direct bill":
+                    target_value = val
+            except Exception:
+                continue
+        result["billing_options"] = option_texts
+        if target_value is None:
+            raise RuntimeError(
+                f"Option 'Direct Bill' not found in BillingType dropdown. "
+                f"Available options: {option_texts}"
+            )
+        await billing_select.select_option(value=target_value)
         # Verify
         selected = await billing_select.input_value()
         result["billing"] = selected
-        # Also check the visible text
         try:
             visible = await billing_select.locator("option:checked").inner_text()
             result["billing_visible"] = visible.strip()
@@ -1074,8 +1093,26 @@ class EzlynxPolicySetupPage:
             raise RuntimeError(f"Could not find Department dropdown. Errors: {result['errors']}")
 
         lob = (getattr(self, "lob", "") or "").upper()
-        dept_value = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
-        await dept_select.select_option(label=dept_value)
+        dept_target = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
+        options = await dept_select.locator("option").all()
+        option_texts = []
+        target_value = None
+        for opt in options:
+            try:
+                text = (await opt.inner_text()).strip()
+                val = await opt.get_attribute("value")
+                option_texts.append(f"{text!r} (value={val!r})")
+                if text.lower() == dept_target.lower():
+                    target_value = val
+            except Exception:
+                continue
+        result["department_options"] = option_texts
+        if target_value is None:
+            raise RuntimeError(
+                f"Option {dept_target!r} not found in Department dropdown. "
+                f"Available options: {option_texts}"
+            )
+        await dept_select.select_option(value=target_value)
         selected = await dept_select.input_value()
         result["department"] = selected
         try:
@@ -1329,36 +1366,43 @@ class EzlynxPolicySetupPage:
             return report
         # Fill required fields before clicking: Billing Type and Department.
         # The form validation blocks the save if these are empty.
+        # On failure, fall through to HITL instead of returning early.
+        field_fill_failed = False
         try:
             fill_result = await self._fill_required_policy_fields()
             report["field_fill"] = fill_result
         except Exception as fill_exc:
+            field_fill_failed = True
             report["field_fill_error"] = f"{type(fill_exc).__name__}: {fill_exc}"
             report["error"] = f"Failed to fill required fields: {fill_exc}"
-            return report
 
-        await button.first.click()
+        if not field_fill_failed:
+            await button.first.click()
 
         # Watch for the FormEntry URL: poll the DOM + URL, not networkidle.
-        for _ in range(30):
-            await self.page.wait_for_timeout(1000)
-            url = self.page.url
-            if FORMENTRY_RE.search(url or ""):
-                report["formentry_found"] = True
-                report["formentry_url"] = url
-                report["via"] = "save_and_continue_edit"
-                return report
-            # Also check other tabs — the mint may open a new tab.
-            for tab in self._all_tabs():
-                try:
-                    turl = tab.url
-                except Exception:  # noqa: BLE001
-                    continue
-                if FORMENTRY_RE.search(turl or ""):
+        # Skip the poll if field fill already failed — go straight to HITL.
+        if field_fill_failed:
+            report["error"] += " (skipped Save & Continue Edit click due to field fill failure)"
+        else:
+            for _ in range(30):
+                await self.page.wait_for_timeout(1000)
+                url = self.page.url
+                if FORMENTRY_RE.search(url or ""):
                     report["formentry_found"] = True
-                    report["formentry_url"] = turl
-                    report["via"] = "save_and_continue_edit_new_tab"
+                    report["formentry_url"] = url
+                    report["via"] = "save_and_continue_edit"
                     return report
+                # Also check other tabs — the mint may open a new tab.
+                for tab in self._all_tabs():
+                    try:
+                        turl = tab.url
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if FORMENTRY_RE.search(turl or ""):
+                        report["formentry_found"] = True
+                        report["formentry_url"] = turl
+                        report["via"] = "save_and_continue_edit_new_tab"
+                        return report
 
         # No FormEntry after 30s: capture post-click validation state.
         report["validation"]["post_click"] = await self._validation_snapshot()
@@ -1367,42 +1411,42 @@ class EzlynxPolicySetupPage:
         # Surface validation errors in the error message so they reach the email
         val_errors = val.get("errors", val.get("validation_errors", []))
         if isinstance(val_errors, list):
-            val_errors = val_errors[:5]
+                val_errors = val_errors[:5]
         report["error"] = (
-            "Save & Continue Edit clicked; no FormEntry URL after 30s. "
-            f"VALIDATION_ERRORS: {val_errors} "
-            f"LANDED_URL: {self.page.url} "
+                "Save & Continue Edit clicked; no FormEntry URL after 30s. "
+                f"VALIDATION_ERRORS: {val_errors} "
+                f"LANDED_URL: {self.page.url} "
         )
         return report
 
     def _all_tabs(self) -> list[Any]:
         try:
-            ctx = self.page.context
-            return list(ctx.pages)
+                ctx = self.page.context
+                return list(ctx.pages)
         except Exception:  # noqa: BLE001
-            return [self.page]
+                return [self.page]
 
     async def _validation_snapshot(self) -> dict[str, Any]:
         """Read validation markers from the DOM: field errors, aria-invalid, summary."""
         js = r"""
         () => {
           const fieldErrors = Array.from(
-            document.querySelectorAll(".field-validation-error, .validation-message, [data-valmsg-for]")
+                document.querySelectorAll(".field-validation-error, .validation-message, [data-valmsg-for]")
           ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 20);
           const summary = Array.from(
-            document.querySelectorAll(".validation-summary-errors")
+                document.querySelectorAll(".validation-summary-errors")
           ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 5);
           const ariaInvalid = Array.from(
-            document.querySelectorAll("[aria-invalid='true']")
+                document.querySelectorAll("[aria-invalid='true']")
           ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
           return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
                   url: location.href};
         }
         """
         try:
-            return await self.page.evaluate(js)
+                return await self.page.evaluate(js)
         except Exception as exc:  # noqa: BLE001
-            return {"error": f"{type(exc).__name__}: {exc}"}
+                return {"error": f"{type(exc).__name__}: {exc}"}
 
     async def _page_state_snapshot(self) -> dict[str, Any]:
         """Capture what IS on the page: URL, title, all buttons/links by name.
@@ -1413,25 +1457,25 @@ class EzlynxPolicySetupPage:
         js = r"""
         () => {
           const buttons = Array.from(
-            document.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn, [role='button']")
+                document.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn, [role='button']")
           ).map((el) => {
-            const name = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
-            const role = el.getAttribute("role") || el.tagName.toLowerCase();
-            return name ? `${role}: ${name}` : null;
+                const name = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
+                const role = el.getAttribute("role") || el.tagName.toLowerCase();
+                return name ? `${role}: ${name}` : null;
           }).filter(Boolean).slice(0, 40);
           const headings = Array.from(
-            document.querySelectorAll("h1, h2, .page-title, .panel-title")
+                document.querySelectorAll("h1, h2, .page-title, .panel-title")
           ).map((el) => (el.innerText || "").trim().slice(0, 100)).filter(Boolean).slice(0, 10);
           return {
-            url: location.href,
-            title: document.title,
-            buttons: buttons,
-            headings: headings,
-            body_text_sample: (document.body ? document.body.innerText : "").slice(0, 500),
+                url: location.href,
+                title: document.title,
+                buttons: buttons,
+                headings: headings,
+                body_text_sample: (document.body ? document.body.innerText : "").slice(0, 500),
           };
         }
         """
         try:
-            return await self.page.evaluate(js)
+                return await self.page.evaluate(js)
         except Exception as exc:  # noqa: BLE001
-            return {"error": f"{type(exc).__name__}: {exc}"}
+                return {"error": f"{type(exc).__name__}: {exc}"}
