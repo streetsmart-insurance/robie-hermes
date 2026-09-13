@@ -12,6 +12,12 @@ full definition, its ExecStart target (with symlinks resolved), the first
 200 lines of the target plus any hourly/time-gating logic, and a names-only
 listing of the hermes home directories that may hold the audit logic.
 
+The deployed watcher script turned out to be a 9-line ROBIE_ZIP_LOAD_PATH
+launcher that exec()s the real agent from releases/current — section 8
+follows that indirection and captures the REAL file, since the hourly
+"Mailbox Audit & Cleanup" trigger and the duplicate-note bug live in the
+deployed code, not in the repo's scripts/robie_email_agent.py.
+
 Touches nothing:
 - systemctl/journalctl/crontab/ls/readlink/file/sed/grep are read-only;
   no enable/start/stop, no file writes anywhere (stdout only).
@@ -142,6 +148,35 @@ def _execstart_target(execstart_line: str) -> str:
     return args[0]
 
 
+_LOADER_LOAD_PATH_RE = re.compile(
+    r"""ROBIE_ZIP_LOAD_PATH\s*=\s*["']([^"']+)["']""")
+
+
+def _resolve_loader_target(launcher_text: str, launcher_real_path: str,
+                           parents_up: int = 2) -> str:
+    """Follow the ROBIE_ZIP_LOAD_PATH launcher indirection (pure, testable).
+
+    The deployed watcher script is a tiny launcher (<50 lines) that exec()s
+    the real agent from ``<_root>/releases/current/<load_path>`` where
+    ``_root`` is ``parents_up`` levels above the launcher file itself
+    (the launcher's own ``Path(__file__).resolve().parents[2]``).
+    Returns the resolved real path, or "" when the text is not such a
+    launcher (50+ lines, or no ROBIE_ZIP_LOAD_PATH assignment).
+    """
+    lines = launcher_text.splitlines()
+    if len(lines) >= 50:
+        return ""
+    m = _LOADER_LOAD_PATH_RE.search(launcher_text)
+    if not m:
+        return ""
+    load_path = m.group(1).lstrip("/")
+    try:
+        root = Path(launcher_real_path).parents[parents_up]
+    except IndexError:
+        return ""
+    return str(root / "releases" / "current" / load_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hours", type=int, default=3,
@@ -269,36 +304,47 @@ def main(argv: list[str] | None = None) -> int:
     print("  " + (execstart.replace("\n", "\n  ") if execstart else "  <n/a>"))
     target = _execstart_target(execstart) if execstart else ""
     real = ""
+
+    def _dump_script_file(path: str, label: str) -> tuple[str, str]:
+        """Read-only capture of one script file.
+
+        Prints wc/md5/first-200-lines plus the hourly-cadence/dedupe
+        keyword grep (with line numbers) and a names-only sibling listing.
+        Returns (head_text, keyword_hit_text).
+        """
+        print(f"  --- {label}: {path} ---")
+        wc = _sh_shell(f"wc -l '{path}'")
+        print(f"  wc -l: {wc or '<n/a>'}")
+        md5 = _sh_shell(f"md5sum '{path}'")
+        print(f"  md5sum: {md5 or '<n/a>'}")
+        head = _sh_shell(f"sed -n '1,200p' '{path}'")
+        print("  --- first 200 lines ---")
+        print("  " + (head.replace("\n", "\n  ")
+                      if head else "  <empty>"))
+        gate = _sh_shell(
+            "grep -inE 'hour|3600|minute\\s*==\\s*0|timedelta|schedule|"
+            "audit|URGENT|cleanup|mailbox|Mailbox Audit|ACTIONABLE|"
+            "NOISE PURGED|send_message|dedupe|dedup|processed_ids|"
+            "already|note' "
+            f"'{path}' | head -100"
+        )
+        print("  --- keyword hits (hourly cadence / dedupe logic) ---")
+        print("  " + (gate.replace("\n", "\n  ")
+                      if gate else "  <none>"))
+        script_dir = str(Path(path).parent)
+        sibs = _sh_shell(f"ls -1 '{script_dir}' 2>/dev/null")
+        print(f"  --- sibling files in {script_dir} (names only) ---")
+        print("  " + (sibs.replace("\n", "\n  ")
+                      if sibs else "  <not listable>"))
+        return head, gate
+
     if target:
         resolved = _sh_shell(f"readlink -f '{target}'").splitlines()
         real = resolved[0] if resolved else ""
         print(f"  --- resolved script target: {target} -> "
               f"{real or '<unresolvable>'}")
         if real and real.endswith((".py", ".sh", ".pl", ".rb")):
-            wc = _sh_shell(f"wc -l '{real}'")
-            print(f"  wc -l: {wc or '<n/a>'}")
-            md5 = _sh_shell(f"md5sum '{real}'")
-            print(f"  md5sum: {md5 or '<n/a>'}")
-            head = _sh_shell(f"sed -n '1,200p' '{real}'")
-            print("  --- first 200 lines of the script ---")
-            print("  " + (head.replace("\n", "\n  ")
-                          if head else "  <empty>"))
-            gate = _sh_shell(
-                "grep -inE 'hour|3600|timedelta\\(hours|minute\\s*==\\s*0|"
-                "schedule|audit|URGENT|cleanup|mailbox|Mailbox Audit|"
-                "send_message|actionable|dedupe|dedup|already|processed|"
-                "note' "
-                f"'{real}' | head -80"
-            )
-            print("  --- keyword hits in the script "
-                  "(hourly cadence / dedupe logic) ---")
-            print("  " + (gate.replace("\n", "\n  ")
-                          if gate else "  <none>"))
-            script_dir = str(Path(real).parent)
-            sibs = _sh_shell(f"ls -1 '{script_dir}' 2>/dev/null")
-            print(f"  --- sibling files in {script_dir} (names only) ---")
-            print("  " + (sibs.replace("\n", "\n  ")
-                          if sibs else "  <not listable>"))
+            head, gate = _dump_script_file(real, "ExecStart script")
             if gate:
                 findings.append(
                     "The email-watcher's ExecStart script "
@@ -308,8 +354,64 @@ def main(argv: list[str] | None = None) -> int:
                     "logic live — there is no separate hourly timer on "
                     "this box."
                 )
+            # The deployed watcher is a tiny ROBIE_ZIP_LOAD_PATH launcher
+            # (<50 lines) that exec()s the real agent from
+            # <root>/releases/current/<load_path>. The hourly "Mailbox
+            # Audit & Cleanup" trigger and the duplicate-note bug live in
+            # the deployed code, so follow the indirection and capture the
+            # REAL file too.
+            loader_primary = _resolve_loader_target(head, real)
+            if loader_primary:
+                loader_alt = _resolve_loader_target(head, real,
+                                                    parents_up=1)
+                print("  --- ROBIE_ZIP_LOAD_PATH launcher detected ---")
+                print(f"  primary candidate (parents[2]): {loader_primary}")
+                print(f"  fallback candidate (parents[1]): {loader_alt}")
+                real2 = ""
+                for cand in (loader_primary, loader_alt):
+                    ok = _sh_shell(
+                        f"test -f '{cand}' && echo YES || echo NO").strip()
+                    print(f"  exists: {cand} -> {ok}")
+                    if ok == "YES":
+                        real2 = cand
+                        break
+                if real2:
+                    _, gate2 = _dump_script_file(
+                        real2, "REAL agent script (via ROBIE_ZIP_LOAD_PATH)")
+                    if gate2:
+                        findings.append(
+                            "The watcher's real agent code "
+                            f"({real2}, loaded via ROBIE_ZIP_LOAD_PATH) "
+                            "contains hourly/dedupe keyword hits (shown in "
+                            "section 8). The hourly mailbox-audit/URGENT "
+                            "cadence and the duplicate-note logic live there."
+                        )
+                else:
+                    findings.append(
+                        "The watcher script is a ROBIE_ZIP_LOAD_PATH "
+                        "launcher but neither candidate real path exists "
+                        f"({loader_primary} / {loader_alt}). The deployed "
+                        "releases layout differs from the launcher's "
+                        "assumption — inspect releases/current manually."
+                    )
         else:
             print("  <target is not a script file — contents not dumped>")
+    # Filenames-only hunt for the report generator under releases/current,
+    # in case the audit email is built by a different deployed file.
+    rel_current = "/opt/streetsmart-hermes/.hermes/releases/current"
+    print(f"  --- files under {rel_current} containing 'Mailbox Audit' "
+          "(names only) ---")
+    audit_hits = _sh_shell(
+        f"grep -rl 'Mailbox Audit' '{rel_current}' 2>/dev/null | head -30"
+    )
+    print("  " + (audit_hits.replace("\n", "\n  ")
+                  if audit_hits else "  <none>"))
+    if audit_hits:
+        findings.append(
+            "Files under releases/current containing the string "
+            "'Mailbox Audit' (names only, section 8):\n    " +
+            "\n    ".join(audit_hits.splitlines()[:10])
+        )
     _absent = ("not found", "no files found", "could not be found",
                "no such file", "<could not run")
     if unit_body and not any(m in unit_body.lower() for m in _absent):
