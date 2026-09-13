@@ -100,9 +100,11 @@ class MintFormentryFieldFillTests(unittest.TestCase):
             setup._fill_required_policy_fields = _fill_boom  # type: ignore[method-assign]
             captured_nav: dict = {}
 
-            async def _spy_mint(policy_id: str, applicant_id: str = "") -> dict:
+            async def _spy_mint(
+                policy_id: str, applicant_id: str = "", **kwargs
+            ) -> dict:
                 nav = await EzlynxPolicySetupPage._mint_formentry(
-                    setup, policy_id, applicant_id
+                    setup, policy_id, applicant_id, **kwargs
                 )
                 captured_nav.update(nav)
                 return nav
