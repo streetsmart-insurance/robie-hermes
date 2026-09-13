@@ -1,7 +1,7 @@
 """Keep the guarded browser schema direct on the installed Hermes interface.
 
-Email and Chat workers see ``playwright_exec`` and ``ezlynx_policy_setup``
-and never ``execute_code`` or ``terminal``.
+Email and Chat workers see ``playwright_exec``, ``ezlynx_policy_setup`` and
+``ezlynx_document_upload`` and never ``execute_code`` or ``terminal``.
 Interactive desktop Hermes is unchanged: this module does not strip
 ``execute_code`` or ``terminal`` unless the process is an email/chat job worker.
 ``expose_guarded_browser`` still pins ``playwright_exec`` for hermes-gateway.
@@ -35,13 +35,15 @@ def is_email_or_chat_worker(action_type=None, env=None, argv=None) -> bool:
 
 
 def email_chat_job_schema(tool_names):
-    """Email/chat job schema: ``playwright_exec`` + ``ezlynx_policy_setup`` in,
-    ``execute_code`` and ``terminal`` out."""
+    """Email/chat job schema: ``playwright_exec`` + ``ezlynx_policy_setup`` +
+    ``ezlynx_document_upload`` in, ``execute_code`` and ``terminal`` out."""
     names = [name for name in list(tool_names or []) if name not in FORBIDDEN_WORKER_TOOLS]
     if "playwright_exec" not in names:
         names.append("playwright_exec")
     if "ezlynx_policy_setup" not in names:
         names.append("ezlynx_policy_setup")
+    if "ezlynx_document_upload" not in names:
+        names.append("ezlynx_document_upload")
     return names
 
 
@@ -122,8 +124,11 @@ def expose_guarded_browser(toolsets=None, *, action_type=None, env=None, argv=No
     if is_email_or_chat_worker(action_type=action_type, env=env, argv=argv):
         # Email/Chat jobs that create a homeowners policy must use the engine's
         # structured policy-setup tool, not wander with playwright_exec.
-        # Interactive desktop core is untouched.
+        # Document uploads go through the engine's DocumentApi tool, which
+        # enforces the write-allowlist. Interactive desktop core is untouched.
         if "ezlynx_policy_setup" not in core:
             core.append("ezlynx_policy_setup")
+        if "ezlynx_document_upload" not in core:
+            core.append("ezlynx_document_upload")
         _hide_execute_code_from_core(core)
     install_email_chat_schema_filter()
