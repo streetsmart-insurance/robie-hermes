@@ -191,7 +191,9 @@ class ChatPolicySetupInvokeTests(unittest.TestCase):
             self.assertFalse(marker["tool_called"])
             self.assertIn(FAIL_CLOSED_MESSAGE, execution)
             self.assertTrue(posted)
-            self.assertIn("STOP AND ASK", posted[0][1])
+            self.assertIn("setup tool is not available", posted[0][1].casefold())
+            self.assertIn("Reply in this Chat thread", posted[0][1])
+            self.assertNotIn("STOP AND ASK", posted[0][1])
             self.assertNotIn("accepted the request and is still working", posted[0][1].casefold())
 
 
@@ -226,7 +228,9 @@ class FailClosedHitlHonestyTests(unittest.TestCase):
                 store.get_job(job_id)["status"],
                 JobStatus.AWAITING_HUMAN_INPUT.value,
             )
-            self.assertIn("STOP AND ASK", response)
+            self.assertIn("setup tool is not available", response.casefold())
+            self.assertIn("Reply in this Chat thread", response)
+            self.assertNotIn("STOP AND ASK", response)
             self.assertNotIn("accepted the request and is still working", response.casefold())
             self.assertNotIn("RUNNING", response)
             self.assertTrue(posted)
@@ -323,8 +327,10 @@ class EmailAndMintMissTests(unittest.TestCase):
                 JobStatus.AWAITING_HUMAN_INPUT.value,
             )
             self.assertFalse(chat_hermes_should_run(db, job_id))
-            self.assertIn("STOP AND ASK", response)
-            self.assertIn("FormEntry does not exist", response)
+            self.assertIn("coverage page did not open", response.casefold())
+            self.assertIn("Reply in this Chat thread", response)
+            self.assertNotIn("STOP AND ASK", response)
+            self.assertNotIn("FormEntry does not exist", response)
             self.assertNotIn("accepted the request and is still working", response.casefold())
             self.assertNotIn("RUNNING", response)
             self.assertTrue(posted)
@@ -407,10 +413,11 @@ class EmailAndMintMissTests(unittest.TestCase):
             None,
         )
         blob = notice["subject"] + notice["body"] + notice["chat"]
-        self.assertIn("gemini did not handle this", blob.casefold())
-        self.assertIn("formentry does not exist", blob.casefold())
+        self.assertIn("coverage page did not open", blob.casefold())
+        self.assertNotIn("gemini did not handle this", blob.casefold())
         self.assertNotIn("gemini handled", blob.casefold())
         self.assertNotIn("job is continuing", blob.casefold())
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", notice["body"])
 
 
 if __name__ == "__main__":

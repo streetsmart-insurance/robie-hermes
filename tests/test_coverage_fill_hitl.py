@@ -54,12 +54,12 @@ class CoverageFillDetectTests(unittest.TestCase):
         self.assertTrue(is_coverage_fill_miss(NO_LABELS))
         self.assertTrue(is_coverage_fill_miss(NO_AMOUNTS))
         self.assertTrue(is_policy_setup_honest_hitl(NO_LABELS))
-        text = coverage_fill_miss_hitl_text(detail=NO_LABELS)
-        self.assertIn("ROBIE HITL: STOP AND ASK", text)
-        self.assertIn("not guessed", text.casefold())
+        text = coverage_fill_miss_hitl_text(detail=NO_LABELS, channel="email")
+        self.assertIn("I opened the homeowners coverage page", text)
+        self.assertIn("will not invent", text.casefold())
         self.assertNotIn("Gemini already handled", text)
-        self.assertNotIn("job is still working", text.casefold())
-        self.assertIn("not still working", text.casefold())
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", text)
+        self.assertNotIn("Chat thread", text)
 
     def test_worker_contract_parks_awaiting_not_unverified(self) -> None:
         decision = classify_chat_close_without_checkpoint(
@@ -83,10 +83,11 @@ class CoverageFillDetectTests(unittest.TestCase):
             )
         )
         blob = notice["subject"] + notice["body"] + notice["chat"]
-        self.assertIn("not guessed", blob.casefold())
-        self.assertIn("gemini did not handle this", blob.casefold())
+        self.assertIn("will not invent", blob.casefold())
+        self.assertNotIn("gemini did not handle this", blob.casefold())
         self.assertNotIn("FormEntry does not exist", blob)
         self.assertNotIn("job is continuing", blob.casefold())
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", notice["body"])
 
 
 class _MintedPage:
@@ -283,7 +284,7 @@ class EmailWorkerCoverageHitlTests(unittest.TestCase):
             result = worker.perform(job, idempotency_key=job["idempotency_key"])
             self.assertEqual(result.hold_status, JobStatus.AWAITING_HUMAN_INPUT)
             self.assertFalse(result.succeeded)
-            self.assertIn("ROBIE HITL", result.error or "")
+            self.assertIn("will not invent", (result.error or "").casefold())
             self.assertEqual(
                 result.destination.get("policy_number"), "TEST-HO-20260911-E01"
             )

@@ -266,6 +266,7 @@ def _format_policy_setup_response(policy_number: str, report: dict, sender: str)
     )
     from robie_job_engine.hitl import (
         coverage_fill_miss_hitl_text,
+        dry_playwright_hitl_text,
         formentry_mint_miss_hitl_text,
     )
 
@@ -273,17 +274,15 @@ def _format_policy_setup_response(policy_number: str, report: dict, sender: str)
         report.get("phase_reached") == "formentry_mint"
         and not report.get("success")
     ):
-        return formentry_mint_miss_hitl_text(detail=error)
+        return formentry_mint_miss_hitl_text(detail=error, channel="email")
     if is_coverage_fill_miss(error) or (
         report.get("phase_reached") == "coverage_fill"
         and not report.get("success")
     ):
-        return coverage_fill_miss_hitl_text(detail=error)
-    return (
-        f"ROBIE_OUTCOME_UNKNOWN: Policy setup for {policy_number} did not complete "
-        f"(phase reached: {report.get('phase_reached')}; error: {error}). "
-        "Check the EZLynx destination before trying again; no automatic second "
-        "execution was started."
+        return coverage_fill_miss_hitl_text(detail=error, channel="email")
+    return dry_playwright_hitl_text(
+        reason=error or "homeowners policy setup did not complete",
+        channel="email",
     )
 
 

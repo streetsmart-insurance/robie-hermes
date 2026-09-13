@@ -791,8 +791,12 @@ def run_unique_listbox_option_scenario() -> dict[str, Any]:
     missing = classify_listbox_options(
         field="Coverage type", intended="", options=("Commercial Auto",), exact=True
     )
-    if not missing.get("hitl_required") or "PLAYWRIGHT_BLOCKED" not in str(
-        missing.get("hitl_text") or ""
+    hitl = str(missing.get("hitl_text") or "")
+    if (
+        not missing.get("hitl_required")
+        or "PLAYWRIGHT_BLOCKED" in hitl
+        or "RETRY" not in hitl
+        or "Listen up" in hitl
     ):
         errors.append("missing intended option must dry HITL")
     if missing.get("blocked_field") != "Coverage type":

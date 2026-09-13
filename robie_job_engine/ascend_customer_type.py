@@ -209,8 +209,12 @@ def run_customer_type_lob_scenario() -> dict[str, Any]:
     if package.get("resolved") != COMMERCIAL:
         errors.append("commercial package (PAWIVA account context) should be commercial")
     missing = resolve_customer_type({})
-    if not missing.get("hitl_required") or "PLAYWRIGHT_BLOCKED" not in str(
-        missing.get("hitl_text") or ""
+    hitl = str(missing.get("hitl_text") or "")
+    if (
+        not missing.get("hitl_required")
+        or "PLAYWRIGHT_BLOCKED" in hitl
+        or "RETRY" not in hitl
+        or "Listen up" in hitl
     ):
         errors.append("missing LOB must HITL")
     name_only = resolve_customer_type({"insured": "PAWIVA INVESTMENT LLC", "name": "Jane Smith"})

@@ -41,9 +41,11 @@ class CustomerTypeFromLobTests(unittest.TestCase):
         decision = resolve_customer_type({})
         self.assertTrue(decision["hitl_required"])
         self.assertIsNone(decision["resolved"])
-        self.assertIn("PLAYWRIGHT_BLOCKED", decision["hitl_text"])
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", decision["hitl_text"])
+        self.assertIn("RETRY", decision["hitl_text"])
         self.assertNotIn("Listen up", decision["hitl_text"])
-        self.assertIn("PLAYWRIGHT_BLOCKED", unknown_lob_hitl())
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", unknown_lob_hitl())
+        self.assertIn("RETRY", unknown_lob_hitl())
 
     def test_llc_or_person_name_is_not_the_decider(self):
         for name in (

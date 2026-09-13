@@ -611,11 +611,15 @@ class EzlynxPolicySetupPage:
         """Create an email sender using the verification mailer."""
         def send(*, to: str, subject: str, body: str) -> None:
             from .verification_mailer import send_verification_email
+            from .hitl_copy import sanitize_plain_text
+
             send_verification_email(
                 to=[to],
                 cc=[],
-                subject=subject,
-                text_body=body,
+                subject=sanitize_plain_text(subject).replace("\n", " "),
+                text_body=sanitize_plain_text(body),
+                html_body=None,
+                plain_only=True,
             )
         return send
 

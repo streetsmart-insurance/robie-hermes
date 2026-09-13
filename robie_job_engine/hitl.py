@@ -93,9 +93,6 @@ _NICKNAME_VOICE = re.compile(
     re.IGNORECASE,
 )
 HITL_TONE_SCENARIO_ID = "hitl-tone:dry-playwright-blocked"
-DRY_HITL_ASK = (
-    "Reply RETRY after the page is corrected, or reply with the needed correction."
-)
 _NAICS_REPLY = re.compile(
     r"^(?:NAICS(?:\s+code)?\s*[:#-]?\s*)?\d{2,6}$",
     re.IGNORECASE,
@@ -110,16 +107,6 @@ _DATE_REPLY = re.compile(
 def _friendly_field_label(field_name: str) -> str:
     normalized = re.sub(r"\s+", " ", field_name.strip()).casefold()
     return _FIELD_LABELS.get(normalized, field_name.replace("_", " ").strip())
-
-
-def _friendly_greeting(requester_name: str | None) -> str:
-    clean = redact_text(str(requester_name or "")).strip()
-    return f"Hey {clean}, I need a quick hand! 👋" if clean else "Hey, I need a quick hand! 👋"
-
-
-def _job_note(job_id: str | None) -> str:
-    clean = str(job_id or "").strip()
-    return f"\n\nJob ID: `{clean[:8]}`" if clean else ""
 
 
 def hitl_text_is_slang_or_blame(text: str) -> bool:
@@ -161,18 +148,14 @@ def dry_playwright_hitl_text(
     artifact_path: str = "",
     job_id: str = "",
     robie_blocked: bool = False,
+    channel: str = "chat",
 ) -> str:
-    detail = str(reason or "browser step blocked").strip() or "browser step blocked"
-    lines = [f"PLAYWRIGHT_BLOCKED: {detail}"]
+    from .hitl_copy import generic_stuck_human_text, sanitize_plain_text
+
+    body = generic_stuck_human_text(channel=channel, what_happened=reason)
     if artifact_path:
-        lines.append(f"Path: {artifact_path}")
-    if job_id:
-        lines.append(f"Job ID: {job_id}")
-    lines.append(DRY_HITL_ASK)
-    body = "\n".join(lines)
-    if robie_blocked:
-        return f"ROBIE_BLOCKED: {body}"
-    return body
+        body = f"{body}\nThe file is at {artifact_path}."
+    return sanitize_plain_text(body)
 
 
 def sanitize_hitl_chat_text(
@@ -181,10 +164,11 @@ def sanitize_hitl_chat_text(
     artifact_path: str = "",
     job_id: str = "",
 ) -> str:
-    """Rewrite cowboy/slang HITL to dry PLAYWRIGHT_BLOCKED + path + ask.
+    """Rewrite cowboy/slang HITL to plain English + path + ask.
 
-    Templates stay plain English (HITL Carlo). Model ad-libs such as
+    Templates stay human (HITL Carlo). Model ad-libs such as
     "Listen up, Jake!" / "it ain't my fault" are rewritten before send.
+    Never lead with PLAYWRIGHT_BLOCKED.
     """
     raw = str(text or "")
     if not hitl_text_is_slang_or_blame(raw):
@@ -226,57 +210,33 @@ def policy_setup_fail_closed_reason(text: str) -> str | None:
     return FAIL_CLOSED_MESSAGE
 
 
-def policy_setup_fail_closed_hitl_text(*, job_id: str = "", detail: str = "") -> str:
+def policy_setup_fail_closed_hitl_text(
+    *, job_id: str = "", detail: str = "", channel: str = "chat"
+) -> str:
     """Honest HITL for a missing/unregistered ezlynx_policy_setup handler."""
-    from .policy_setup_dispatch import FAIL_CLOSED_MESSAGE
+    from .hitl_copy import fail_closed_human_text, sanitize_plain_text
 
-    reason = str(detail or "").strip() or FAIL_CLOSED_MESSAGE
-    lines = [
-        f"ROBIE HITL: STOP AND ASK. {reason}",
-        "This Chat job is not still working. The ezlynx_policy_setup tool "
-        "was not callable, so ROBIE failed closed and will not use "
-        "playwright_exec for policy setup.",
-        DRY_HITL_ASK,
-    ]
-    if job_id:
-        lines.append(f"Job ID: {job_id}")
-    return "\n".join(lines)
+    return sanitize_plain_text(fail_closed_human_text(channel=channel))
 
 
-def formentry_mint_miss_hitl_text(*, job_id: str = "", detail: str = "") -> str:
+def formentry_mint_miss_hitl_text(
+    *, job_id: str = "", detail: str = "", channel: str = "chat"
+) -> str:
     """Honest HITL for job c75aab5c: Save clicked, Edit URL, no FormEntry."""
-    reason = (
-        str(detail or "").strip()
-        or "Save & Continue Edit clicked; no FormEntry URL after 30s."
-    )
-    lines = [
-        f"ROBIE HITL: STOP AND ASK. {reason}",
-        "FormEntry does not exist. The page stayed on Policy/Actions/Edit. "
-        "Gemini did not handle this. ROBIE will not wander with playwright_exec. "
-        "This job is not still working.",
-        DRY_HITL_ASK,
-    ]
-    if job_id:
-        lines.append(f"Job ID: {job_id}")
-    return "\n".join(lines)
+    from .hitl_copy import mint_miss_human_text, sanitize_plain_text
+
+    return sanitize_plain_text(mint_miss_human_text(channel=channel))
 
 
-def coverage_fill_miss_hitl_text(*, job_id: str = "", detail: str = "") -> str:
-    """Honest HITL for job 2b30d293: FormEntry opened, coverages not filled."""
-    reason = (
-        str(detail or "").strip()
-        or "no coverage labels were filled"
+def coverage_fill_miss_hitl_text(
+    *, job_id: str = "", detail: str = "", channel: str = "email"
+) -> str:
+    """Honest HITL when coverage amounts are missing or labels did not fill."""
+    from .hitl_copy import coverage_fill_human_text, sanitize_plain_text
+
+    return sanitize_plain_text(
+        coverage_fill_human_text(channel=channel, detail=detail)
     )
-    lines = [
-        f"ROBIE HITL: STOP AND ASK. {reason}",
-        "FormEntry opened. Coverage amounts that were not on the job were "
-        "not guessed. Gemini did not handle this. ROBIE will not wander "
-        "with playwright_exec. This job is not still working.",
-        DRY_HITL_ASK,
-    ]
-    if job_id:
-        lines.append(f"Job ID: {job_id}")
-    return "\n".join(lines)
 
 
 def interaction_for_blocker(
@@ -287,8 +247,13 @@ def interaction_for_blocker(
     job_id: str | None = None,
     subject_name: str | None = None,
     artifact_path: str | None = None,
+    channel: str = "chat",
 ) -> dict[str, Any]:
     """Convert a bounded Playwright blocker into a resumable public prompt."""
+    from .hitl_copy import missing_field_human_text, sanitize_plain_text
+
+    if channel == "chat" and action_type == "hermes.email_task":
+        channel = "email"
     safe = redact_text(str(error or "PLAYWRIGHT_BLOCKED"))[:1_000]
     match = _MISSING_FIELD.search(safe)
     if match:
@@ -301,21 +266,13 @@ def interaction_for_blocker(
             if subject
             else "this application"
         )
-        if accepts_value:
-            prompt = (
-                f"{_friendly_greeting(requester_name)}\n\n"
-                f"I'm working on {work_context}, but I'm missing the {field_label}.\n\n"
-                f"Please reply in this thread with the {field_label} so I can continue."
-                f"{_job_note(job_id)}"
-            )
-        else:
-            prompt = (
-                f"{_friendly_greeting(requester_name)}\n\n"
-                f"I'm working on {work_context}, but a sensitive required field is missing: "
-                f"{field_label}.\n\nFor security, enter it directly in EZLynx, then reply "
-                f"RETRY here so I can continue. Do not send the value in Chat."
-                f"{_job_note(job_id)}"
-            )
+        prompt = missing_field_human_text(
+            channel=channel,
+            field_label=field_label,
+            work_context=work_context,
+            requester_name=requester_name,
+            sensitive=not accepts_value,
+        )
         checkpoint = f"required_field:{field_name}"
     else:
         detail = safe.split(":", 1)[-1].strip() or "browser step blocked"
@@ -326,10 +283,13 @@ def interaction_for_blocker(
             reason=detail,
             artifact_path=path,
             job_id=str(job_id or "").strip(),
+            channel=channel,
         )
         checkpoint = f"playwright_blocked:{detail}"
-    prompt = sanitize_hitl_chat_text(
-        prompt, artifact_path=str(artifact_path or ""), job_id=str(job_id or "")
+    prompt = sanitize_plain_text(
+        sanitize_hitl_chat_text(
+            prompt, artifact_path=str(artifact_path or ""), job_id=str(job_id or "")
+        )
     )
     return {
         "awaiting": "human_input",

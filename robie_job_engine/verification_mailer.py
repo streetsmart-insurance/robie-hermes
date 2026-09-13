@@ -16,9 +16,11 @@ import base64
 import logging
 import os
 from email.message import EmailMessage
+from email.policy import SMTP
 from typing import Any
 
 from . import accountability_delivery
+from .hitl_copy import sanitize_plain_text
 
 logger = logging.getLogger("robie.verification_mailer")
 
@@ -48,6 +50,38 @@ def _redacted_log_context(to: list[str], cc: list[str], subject: str) -> dict[st
     }
 
 
+def build_plain_email_message(
+    *,
+    sender: str,
+    to: list[str],
+    cc: list[str],
+    subject: str,
+    text_body: str,
+    html_body: str | None = None,
+    plain_only: bool = False,
+) -> EmailMessage:
+    """text/plain 8bit. No HTML unless explicitly asked. No QP mid-word wraps."""
+    body_text = sanitize_plain_text(text_body)
+    subject_text = sanitize_plain_text(subject).replace("\n", " ")
+    # Unlimited lines only for plain HITL. HTML alternatives still need a
+    # real max_line_length or quoprimime raises (maxlinelen must be >= 4).
+    policy = SMTP.clone(max_line_length=0) if plain_only else SMTP
+    message = EmailMessage(policy=policy)
+    message["To"] = ", ".join(to)
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    message["From"] = sender
+    message["Subject"] = subject_text
+    message.set_content(body_text, subtype="plain", charset="utf-8", cte="8bit")
+    if html_body and not plain_only:
+        html = str(html_body)
+        if "letter-spacing" in html.casefold() or "zwsp" in html.casefold():
+            html = ""
+        if html.strip():
+            message.add_alternative(html, subtype="html")
+    return message
+
+
 def send_verification_email(
     *,
     to: list[str],
@@ -55,6 +89,7 @@ def send_verification_email(
     subject: str,
     text_body: str,
     html_body: str | None = None,
+    plain_only: bool = False,
 ) -> dict[str, Any]:
     """Send one verification email from robie@streetsmart.insurance.
 
@@ -65,8 +100,8 @@ def send_verification_email(
     """
     recipients = [str(item).strip() for item in (to or []) if str(item).strip()]
     cc_list = [str(item).strip() for item in (cc or []) if str(item).strip()]
-    subject_text = str(subject or "").strip()
-    body_text = str(text_body or "")
+    subject_text = sanitize_plain_text(subject).replace("\n", " ")
+    body_text = sanitize_plain_text(text_body)
     if not recipients or not all("@" in item for item in recipients):
         raise ValueError("verification email requires at least one valid recipient")
     if not all("@" in item for item in cc_list):
@@ -86,15 +121,15 @@ def send_verification_email(
             "ROBIE_VERIFICATION_GMAIL_DELEGATED_SERVICE_ACCOUNT)"
         )
 
-    message = EmailMessage()
-    message["To"] = ", ".join(recipients)
-    if cc_list:
-        message["Cc"] = ", ".join(cc_list)
-    message["From"] = sender
-    message["Subject"] = subject_text
-    message.set_content(body_text)
-    if html_body:
-        message.add_alternative(str(html_body), subtype="html")
+    message = build_plain_email_message(
+        sender=sender,
+        to=recipients,
+        cc=cc_list,
+        subject=subject_text,
+        text_body=body_text,
+        html_body=html_body,
+        plain_only=plain_only,
+    )
 
     context = _redacted_log_context(recipients, cc_list, subject_text)
     try:
