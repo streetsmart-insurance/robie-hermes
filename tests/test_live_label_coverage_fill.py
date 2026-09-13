@@ -16,6 +16,7 @@ from robie_job_engine.ezlynx_policy_setup import (
     EzlynxPolicySetupPage,
     HomeownersCoverageItem,
     PolicyShellInput,
+    coverages_tab_stuck_error,
     homeowners_amounts_by_letter,
     merge_homeowners_coverage_from_text,
     stated_live_coverage_names,
@@ -24,6 +25,7 @@ from robie_job_engine.formentry_coverages import (
     COVERAGES_LIVE_NAV_CLICK,
     COVERAGES_TAB_LOCATOR,
     HOME_LIVE_COVERAGE_LABELS,
+    PLACEHOLDER_NAV_LOCATOR,
     coverages_fields_unreadable,
     filter_coverage_candidate_labels,
     is_location_section_labels,
@@ -272,6 +274,44 @@ class EmptyLabelsStuckPage(EmptyLabelsThenCoveragesPage):
 
         loc.click = AsyncMock(side_effect=_click)
         return loc
+
+
+NO_COVERAGE_NAV = [
+    "Insured Information",
+    "Location",
+    "Address",
+    "Underwriting",
+]
+
+
+class LocationNoCoverageNavPage(LocationThenCoveragesPage):
+    """Location fields. Live nav has no Coverages/Coverage — live ed4d84d9."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        async def _evaluate(script=None, *_a, **_k):
+            src = str(script or "")
+            if "nav-link" in src or ".k-link" in src:
+                return list(NO_COVERAGE_NAV)
+            return list(LIVE_LOCATION_LABELS)
+
+        self.evaluate = _evaluate
+
+
+class EmptyNavLocationPage(LocationThenCoveragesPage):
+    """Location fields and an empty live nav list."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        async def _evaluate(script=None, *_a, **_k):
+            src = str(script or "")
+            if "nav-link" in src or ".k-link" in src:
+                return []
+            return list(LIVE_LOCATION_LABELS)
+
+        self.evaluate = _evaluate
 
 
 class LiveLabelMappingTests(unittest.TestCase):
@@ -876,6 +916,245 @@ class LiveLabelFillSetupTests(unittest.TestCase):
             self.assertNotIn("I need the Coverage A", body)
             self.assertNotIn("They were not on the email", body)
             self.assertIn("link:Coverages", page.clicked_tabs)
+            self.assertIn("live_nav=", error)
+            self.assertIn("Coverages", error)
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, error)
+            self.assertNotIn("name=<live nav coverage text>", req.error)
+            self.assertIn('name="Coverages"', error)
+
+        asyncio.run(_run())
+
+    def test_location_nav_with_coverages_clicks_real_name_then_fills(self) -> None:
+        async def _run() -> None:
+            page = LocationThenCoveragesPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="ed4d84d9-real-nav-click",
+                hitl_deps={
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: True,
+                },
+            )
+
+            async def _already_minted(policy_id, applicant_id="", **_k):
+                return {
+                    "formentry_found": True,
+                    "formentry_url": REAL_FORMENTRY_URL,
+                    "policy_id": policy_id,
+                }
+
+            setup._mint_formentry = _already_minted  # type: ignore[method-assign]
+            captured: list[dict] = []
+
+            async def fake_fill(_page, values, **_k):
+                self.assertEqual(page.section, "coverages")
+                captured.append(dict(values))
+                return {
+                    "filled_count": len(values),
+                    "not_found": [],
+                    "labels": {
+                        label: {"found": True, "filled": True} for label in values
+                    },
+                }
+
+            with (
+                patch(
+                    "robie_job_engine.hitl_escalation.escalate",
+                    side_effect=AssertionError(
+                        "must not HITL when live nav has Coverages and labels change"
+                    ),
+                ),
+                patch("robie_job_engine.ezlynx_api.EzlynxApiClient"),
+                patch("robie_job_engine.ezlynx_api.load_ezlynx_api_config"),
+                patch(
+                    "robie_job_engine.policy_setup_proof.search_first_create",
+                    return_value={
+                        "policy_id": "83669533",
+                        "verdict": "ALREADY_EXISTS",
+                        "read_back": {"policyId": "83669533"},
+                    },
+                ),
+                patch(
+                    "robie_job_engine.formentry_coverages.afill_coverages_by_label",
+                    side_effect=fake_fill,
+                ),
+            ):
+                result = await setup.setup_policy_by_lob(
+                    PolicyShellInput(
+                        applicant_id="220250093",
+                        lob="HOME",
+                        policy_number="TEST-HO-20260911-E01",
+                        effective_date="10/02/2026",
+                        expiration_date="10/02/2027",
+                        homeowners_coverage=FULL_AMOUNTS,
+                        request_text=COLON_EMAIL,
+                    )
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(page.clicked_tabs[0], "link:Coverages")
+            self.assertEqual(page.section, "coverages")
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["Coverage A"], "1200000")
+            self.assertEqual(captured[0]["Coverage F"], "10000")
+            self.assertNotIn("#HO_CoverageA", str(captured[0]))
+            self.assertNotIn("Dwelling", captured[0])
+            self.assertFalse(result.hitl_posted)
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, result.error or "")
+
+        asyncio.run(_run())
+
+    def test_location_nav_without_coverages_hitl_names_live_nav(self) -> None:
+        async def _run() -> None:
+            page = LocationNoCoverageNavPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="ed4d84d9-no-coverage-nav",
+                hitl_deps={
+                    "gemini_client": FakeGemini('{"decision":"unsure"}'),
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: True,
+                },
+            )
+
+            async def _already_minted(policy_id, applicant_id="", **_k):
+                return {
+                    "formentry_found": True,
+                    "formentry_url": REAL_FORMENTRY_URL,
+                    "policy_id": policy_id,
+                }
+
+            setup._mint_formentry = _already_minted  # type: ignore[method-assign]
+            filled: list[dict] = []
+
+            async def fake_fill(_page, values, **_k):
+                filled.append(dict(values))
+                raise AssertionError("must not fill when live nav has no Coverages")
+
+            with (
+                patch(
+                    "robie_job_engine.hitl_escalation.escalate",
+                    return_value=HitlResponse(
+                        source="system",
+                        suggestion="STOP AND ASK",
+                        actionable=False,
+                        hitl_posted=True,
+                    ),
+                ) as mock_escalate,
+                patch("robie_job_engine.ezlynx_api.EzlynxApiClient"),
+                patch("robie_job_engine.ezlynx_api.load_ezlynx_api_config"),
+                patch(
+                    "robie_job_engine.policy_setup_proof.search_first_create",
+                    return_value={
+                        "policy_id": "83669533",
+                        "verdict": "ALREADY_EXISTS",
+                        "read_back": {"policyId": "83669533"},
+                    },
+                ),
+                patch(
+                    "robie_job_engine.formentry_coverages.afill_coverages_by_label",
+                    side_effect=fake_fill,
+                ),
+            ):
+                result = await setup.setup_policy_by_lob(
+                    PolicyShellInput(
+                        applicant_id="220250093",
+                        lob="HOME",
+                        policy_number="TEST-HO-20260911-E01",
+                        effective_date="10/02/2026",
+                        expiration_date="10/02/2027",
+                        homeowners_coverage=FULL_AMOUNTS,
+                        request_text=COLON_EMAIL,
+                    )
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(filled, [])
+            self.assertEqual(page.clicked_tabs, [])
+            error = result.error or ""
+            self.assertIn("live_nav=", error)
+            self.assertIn("Location", error)
+            self.assertIn("Address", error)
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, error)
+            self.assertNotIn("name=<live nav coverage text>", error)
+            self.assertNotIn("still need Coverage", error)
+            self.assertTrue(result.hitl_posted)
+            req = mock_escalate.call_args[0][0]
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, req.error)
+            self.assertIn("live_nav=", req.error)
+            body = coverage_fill_human_text(channel="email", detail=req.error)
+            self.assertIn("I see Location / Address and cannot find Coverages", body)
+            self.assertNotIn("I still need Coverage A", body)
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, body)
+            self.assertIn("Reply to this email", body)
+
+        asyncio.run(_run())
+
+    def test_empty_live_nav_hitl_includes_empty_list_not_placeholder(self) -> None:
+        async def _run() -> None:
+            page = EmptyNavLocationPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="ed4d84d9-empty-nav",
+                hitl_deps={
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: True,
+                },
+            )
+
+            async def _already_minted(policy_id, applicant_id="", **_k):
+                return {
+                    "formentry_found": True,
+                    "formentry_url": REAL_FORMENTRY_URL,
+                    "policy_id": policy_id,
+                }
+
+            setup._mint_formentry = _already_minted  # type: ignore[method-assign]
+
+            with (
+                patch(
+                    "robie_job_engine.hitl_escalation.escalate",
+                    return_value=HitlResponse(
+                        source="system",
+                        suggestion="STOP AND ASK",
+                        actionable=False,
+                        hitl_posted=True,
+                    ),
+                ) as mock_escalate,
+                patch("robie_job_engine.ezlynx_api.EzlynxApiClient"),
+                patch("robie_job_engine.ezlynx_api.load_ezlynx_api_config"),
+                patch(
+                    "robie_job_engine.policy_setup_proof.search_first_create",
+                    return_value={
+                        "policy_id": "83669533",
+                        "verdict": "ALREADY_EXISTS",
+                        "read_back": {"policyId": "83669533"},
+                    },
+                ),
+                patch(
+                    "robie_job_engine.formentry_coverages.afill_coverages_by_label",
+                    side_effect=AssertionError("must not fill without a live nav name"),
+                ),
+            ):
+                result = await setup.setup_policy_by_lob(
+                    PolicyShellInput(
+                        applicant_id="220250093",
+                        lob="HOME",
+                        policy_number="TEST-HO-20260911-E01",
+                        effective_date="10/02/2026",
+                        expiration_date="10/02/2027",
+                        homeowners_coverage=FULL_AMOUNTS,
+                    )
+                )
+
+            error = result.error or ""
+            self.assertIn("live_nav=[]", error.replace(" ", ""))
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, error)
+            req = mock_escalate.call_args[0][0]
+            body = coverage_fill_human_text(channel="email", detail=req.error)
+            self.assertIn("cannot find Coverages on this page", body)
+            self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, body)
+            self.assertNotIn("I still need Coverage A", body)
 
         asyncio.run(_run())
 
@@ -1142,6 +1421,37 @@ class LocationTabHitlCopyTests(unittest.TestCase):
         )
         self.assertNotIn("I have Coverage F", email)
         self.assertIn("A, B, C, D, E, and F", email)
+
+    def test_stuck_error_persists_live_nav_not_placeholder(self) -> None:
+        error = coverages_tab_stuck_error(
+            live_labels=LIVE_LOCATION_LABELS,
+            locators_tried=[COVERAGES_LIVE_NAV_CLICK, 'name="Coverages"'],
+            live_nav=NO_COVERAGE_NAV,
+        )
+        self.assertIn("live_nav=", error)
+        self.assertIn("Location", error)
+        self.assertIn("Address", error)
+        self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, error)
+        self.assertNotIn("name=<live nav coverage text>", error)
+        email = coverage_fill_human_text(channel="email", detail=error)
+        self.assertIn("I see Location / Address and cannot find Coverages", email)
+        self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, email)
+
+    def test_clicked_coverages_still_location_is_address_tab_with_live_nav(
+        self,
+    ) -> None:
+        error = coverages_tab_stuck_error(
+            live_labels=LIVE_LOCATION_LABELS,
+            locators_tried=['get_by_role("link", name="Coverages", exact=True)'],
+            live_nav=["Insured Information", "Location", "Coverages", "Underwriting"],
+        )
+        self.assertIn("live_nav=", error)
+        self.assertIn("Coverages", error)
+        self.assertIn('name="Coverages"', error)
+        self.assertNotIn(PLACEHOLDER_NAV_LOCATOR, error)
+        email = coverage_fill_human_text(channel="email", detail=error)
+        self.assertEqual(email, COVERAGE_TAB_STUCK_EMAIL)
+        self.assertNotIn("I still need Coverage A", email)
 
 
 if __name__ == "__main__":

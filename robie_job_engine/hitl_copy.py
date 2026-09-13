@@ -14,6 +14,7 @@ plain sentences and strips those characters. The mailer sends text/plain
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
 
@@ -81,6 +82,8 @@ COVERAGE_TAB_STUCK_CHAT = (
     "Reply in this Chat thread and say RETRY after Coverages is open."
 )
 
+_LIVE_NAV_RE = re.compile(r"live_nav=(\[[^\]]*\])")
+
 
 def normalize_hitl_channel(channel: str | None) -> str:
     raw = str(channel or CHANNEL_CHAT).strip().casefold()
@@ -139,8 +142,80 @@ def still_on_location_tab(error: str | None) -> bool:
         or "i am on the address tab" in folded
         or "cannot open coverages" in folded
         or "cannot read the coverage fields" in folded
+        or "cannot find coverages on this page" in folded
+        or "no coverages name on the live formentry nav" in folded
         or "live_labels=[]" in compact
         or ("live_labels=" in folded and "location #" in folded)
+    )
+
+
+def live_nav_from_detail(detail: str) -> list[str]:
+    """Parse ``live_nav=['Location', ...]`` from a checkpoint error."""
+    match = _LIVE_NAV_RE.search(str(detail or ""))
+    if not match:
+        return []
+    try:
+        parsed = ast.literal_eval(match.group(1))
+    except (SyntaxError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def format_seen_live_nav(live_nav: list[str]) -> str:
+    """Name the live nav the worker actually saw. Never a placeholder."""
+    from .formentry_coverages import normalize_coverage_label
+
+    preferred: list[str] = []
+    for want in ("location", "address"):
+        for item in live_nav:
+            folded = normalize_coverage_label(item)
+            if folded == want or folded.startswith(want + " "):
+                label = "Address" if folded.startswith("address") else item
+                if label not in preferred:
+                    preferred.append(label)
+                break
+    if preferred:
+        return " / ".join(preferred[:3])
+    if live_nav:
+        return " / ".join(live_nav[:4])
+    return "no section names"
+
+
+def live_nav_missing_coverages(detail: str | None) -> bool:
+    """True when the live nav list had no Coverages/Coverage name."""
+    from .formentry_coverages import live_nav_coverage_name
+
+    folded = " ".join(str(detail or "").casefold().split())
+    if (
+        "cannot find coverages on this page" in folded
+        or "no coverages name on the live formentry nav" in folded
+    ):
+        return True
+    nav = live_nav_from_detail(str(detail or ""))
+    if "live_nav=" not in folded:
+        return False
+    return live_nav_coverage_name(nav) is None
+
+
+def coverage_nav_missing_human_text(
+    *,
+    channel: str = CHANNEL_EMAIL,
+    live_nav: list[str] | None = None,
+    detail: str = "",
+) -> str:
+    """HITL when the live nav list has no Coverages name."""
+    email = normalize_hitl_channel(channel) == CHANNEL_EMAIL
+    nav = list(live_nav or []) or live_nav_from_detail(detail)
+    seen = format_seen_live_nav(nav)
+    ask = reply_instruction(channel)
+    where = "email" if email else "job"
+    return (
+        f"I see {seen} and cannot find Coverages on this page.\n"
+        "I stopped so I would not fill the wrong page. "
+        f"The Coverage A through F amounts were already on the {where}.\n"
+        f"{ask} and say RETRY after Coverages is open."
     )
 
 
@@ -218,6 +293,8 @@ def missing_coverage_letters_human_text(
 def coverage_fill_human_text(*, channel: str = CHANNEL_EMAIL, detail: str = "") -> str:
     """Plain-English coverage HITL. Never dumps PLAYWRIGHT_BLOCKED."""
     email = normalize_hitl_channel(channel) == CHANNEL_EMAIL
+    if live_nav_missing_coverages(detail):
+        return coverage_nav_missing_human_text(channel=channel, detail=detail)
     if still_on_location_tab(detail):
         return COVERAGE_TAB_STUCK_EMAIL if email else COVERAGE_TAB_STUCK_CHAT
     # Amounts already on the email/prompt: never ask for A–F again when
