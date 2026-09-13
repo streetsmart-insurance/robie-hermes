@@ -549,9 +549,11 @@ def build_gemini_live_option_prompt(
     wanted_text = _safe_label(wanted) or "(empty)"
     widget = _safe_label(widget_name) or "dropdown"
     return (
-        f"A Playwright fill on the {widget} widget has no exact match for "
-        f"the wanted value {wanted_text!r}. Unique-write stays fail-closed. "
-        "Do not guess. Do not invent a label that is not in the live list.\n\n"
+        f"The {widget} widget has no exact text match for {wanted_text!r}. "
+        "That is expected. Do not answer unsure just because the wanted "
+        "value is not copied verbatim in the list.\n"
+        "Pick the ONE live option that is the same choice as the wanted "
+        "value. Copy that option's text exactly. Do not invent a label.\n\n"
         f"Widget: {widget}\n"
         f"Wanted value: {wanted_text}\n"
         "Live options from THAT widget only:\n"
@@ -560,10 +562,38 @@ def build_gemini_live_option_prompt(
         "Reply with JSON only, no markdown:\n"
         '{"decision":"unique","option":"<exact live option text>"}\n'
         "or\n"
-        '{"decision":"unsure","reason":"<why no unique option>"}\n'
+        '{"decision":"unsure","reason":"<why you cannot name exactly one>"}\n'
         "option must be copied exactly from Live options. "
-        "If zero or more than one option could match, decision must be unsure."
+        "Use unsure only when you cannot name exactly one option from the list."
     )
+
+
+def named_live_option_from_gemini(raw: str, live_options: Iterable[str]) -> str | None:
+    """Return a live option Gemini named, or None. Never invent."""
+    options = [str(item).strip() for item in live_options if str(item).strip()]
+    if not options:
+        return None
+    text = redact_text(str(raw or "")).strip()
+    if not text:
+        return None
+    payload = _parse_gemini_payload(text)
+    candidates: list[str] = []
+    if payload:
+        for key in ("option", "field_label", "choice"):
+            value = _safe_label(str(payload.get(key) or ""))
+            if value:
+                candidates.append(value)
+    stripped = text.strip().strip("\"'")
+    if stripped:
+        candidates.append(stripped)
+        first_line = stripped.splitlines()[0].strip().strip("\"'")
+        if first_line:
+            candidates.append(first_line)
+    for candidate in candidates:
+        hit = exact_live_option(candidate, options)
+        if hit is not None:
+            return hit
+    return None
 
 
 def ask_gemini_live_option(
@@ -599,41 +629,64 @@ def ask_gemini_live_option(
         wanted=wanted,
         live_options=options,
     )
+    raw = ""
     try:
         raw = active.generate_unique_field(prompt)
-    except Exception as exc:
-        return _option_hitl(
-            f"Gemini request failed ({type(exc).__name__}); HITL Carlo",
+    except Exception:
+        generate_content = getattr(active, "generate_content", None)
+        if generate_content is None:
+            return _option_hitl(
+                "Gemini request failed; HITL Carlo",
+                gemini_asked=True,
+            )
+        try:
+            raw = generate_content(prompt)
+        except Exception as exc:
+            return _option_hitl(
+                f"Gemini request failed ({type(exc).__name__}); HITL Carlo",
+                gemini_asked=True,
+            )
+    live = named_live_option_from_gemini(raw, options)
+    if live is not None:
+        return LiveOptionDecision(
+            action="APPLY",
+            option=live,
+            reason="Gemini named one live option",
             gemini_asked=True,
         )
+    generate_content = getattr(active, "generate_content", None)
+    if generate_content is not None and raw:
+        retry_prompt = (
+            f"Wanted: {wanted}\n"
+            "Name exactly one option from this live list. Reply with that "
+            "option text only.\n"
+            + "\n".join(f"- {option}" for option in options)
+        )
+        try:
+            retry_raw = generate_content(retry_prompt)
+        except Exception:
+            retry_raw = ""
+        live = named_live_option_from_gemini(retry_raw, options)
+        if live is not None:
+            return LiveOptionDecision(
+                action="APPLY",
+                option=live,
+                reason="Gemini named one live option",
+                gemini_asked=True,
+            )
     payload = _parse_gemini_payload(raw)
-    if not payload:
-        return _option_hitl(
-            "Gemini returned an unreadable option suggestion; HITL Carlo",
-            gemini_asked=True,
-        )
-    decision = str(payload.get("decision") or "").strip().casefold()
-    if decision in {"unsure", "hitl", "unknown", ""}:
+    if payload and str(payload.get("decision") or "").strip().casefold() in {
+        "unsure",
+        "hitl",
+        "unknown",
+        "",
+    }:
+        extra = payload.get("options") or payload.get("alternates")
+        if extra:
+            return _option_hitl("Gemini named more than one option; HITL Carlo", gemini_asked=True)
         detail = redact_text(str(payload.get("reason") or "Gemini is unsure"))
         return _option_hitl(f"{detail}; HITL Carlo", gemini_asked=True)
-    if decision != "unique":
-        return _option_hitl(
-            "Gemini did not name exactly one unique option; HITL Carlo",
-            gemini_asked=True,
-        )
-    named = _safe_label(str(payload.get("option") or payload.get("field_label") or ""))
-    live = exact_live_option(named or "", options)
-    if not named or live is None:
-        return _option_hitl(
-            "Gemini option was not one of the live options; HITL Carlo",
-            gemini_asked=True,
-        )
-    extra = payload.get("options") or payload.get("alternates")
-    if extra:
-        return _option_hitl("Gemini named more than one option; HITL Carlo", gemini_asked=True)
-    return LiveOptionDecision(
-        action="APPLY",
-        option=live,
-        reason="Gemini named one live option",
+    return _option_hitl(
+        "Gemini did not name one live option; HITL Carlo",
         gemini_asked=True,
     )
