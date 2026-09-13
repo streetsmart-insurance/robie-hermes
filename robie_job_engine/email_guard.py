@@ -124,12 +124,33 @@ def run_guarded_email_task(
         if any(char.isdigit() for char in number):
             targets['policy_number'] = number
     store = JobStore(db_path)
-    job = store.create_job(
-        "hermes.email_task",
-        {"worker": "hermes-cua", "gmail_message_id": gmail_message_id, "prompt": prompt, "request_text": request_text, "document_names": list(attachment_names), **targets},
-        idempotency_key=f"gmail:{gmail_message_id}",
-        max_attempts=3,
+    from .email_hitl import (
+        _subject_from_prompt,
+        find_parked_email_hitl_job,
+        ingest_email_hitl_reply,
     )
+
+    parked = find_parked_email_hitl_job(
+        store,
+        subject=_subject_from_prompt(request_text),
+        body=request_text,
+    )
+    if parked:
+        ingest_email_hitl_reply(
+            store,
+            job_id=parked["id"],
+            gmail_message_id=gmail_message_id,
+            subject=_subject_from_prompt(request_text),
+            body=request_text,
+        )
+        job = store.get_job(parked["id"])
+    else:
+        job = store.create_job(
+            "hermes.email_task",
+            {"worker": "hermes-cua", "gmail_message_id": gmail_message_id, "prompt": prompt, "request_text": request_text, "document_names": list(attachment_names), **targets},
+            idempotency_key=f"gmail:{gmail_message_id}",
+            max_attempts=3,
+        )
     engine = JobEngine(
         store, {"hermes-cua": HermesEmailWorker(run_agent, store, run_agent_with_context)},
         _default_email_verifiers() if verifiers is None else verifiers, perform_timeout_seconds=960,

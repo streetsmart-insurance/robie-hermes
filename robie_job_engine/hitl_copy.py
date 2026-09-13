@@ -120,9 +120,78 @@ def coverage_labels_empty(error: str | None) -> bool:
     return "no coverage labels were filled" in folded
 
 
+def coverage_letters_from_detail(detail: str) -> list[str]:
+    """Letters named after 'still need' / 'missing Coverage X'."""
+    folded = str(detail or "")
+    letters: list[str] = []
+    for match in re.finditer(
+        r"(?:still need(?: the)? coverage|missing coverage)\s+([A-F](?:\s*,\s*[A-F])*)",
+        folded,
+        re.IGNORECASE,
+    ):
+        for letter in re.findall(r"[A-F]", match.group(1).upper()):
+            if letter not in letters:
+                letters.append(letter)
+    if not letters:
+        for match in re.finditer(r"\bCoverage\s+([A-F])\b", folded, re.IGNORECASE):
+            letter = match.group(1).upper()
+            if "still need" in folded.casefold() and letter not in letters:
+                letters.append(letter)
+    return letters
+
+
+def missing_coverage_letters_human_text(
+    *,
+    channel: str = CHANNEL_EMAIL,
+    missing: list[str],
+    have: list[str] | None = None,
+) -> str:
+    """Ask again for only the omitted letter(s). Do not invent them."""
+    ask = reply_instruction(channel)
+    need = [str(item).upper() for item in missing if str(item).strip()]
+    if not need:
+        return coverage_fill_human_text(channel=channel)
+    have_list = [str(item).upper() for item in (have or []) if str(item).strip()]
+    need_text = ", ".join(need[:-1] + ([f"and {need[-1]}"] if len(need) > 1 else need))
+    if len(need) == 1:
+        need_text = need[0]
+    lines = []
+    if have_list:
+        have_text = ", ".join(
+            have_list[:-1] + ([f"and {have_list[-1]}"] if len(have_list) > 1 else have_list)
+        )
+        lines.append(f"I have Coverage {have_text}.")
+    else:
+        lines.append("I opened the homeowners coverage page.")
+    if len(need) == 1:
+        lines.append(
+            f"I still need the Coverage {need_text} dollar amount. I will not invent it."
+        )
+        lines.append(f"{ask} with that number.")
+    else:
+        lines.append(
+            f"I still need Coverage {need_text} dollar amounts. I will not invent them."
+        )
+        lines.append(f"{ask} with those numbers.")
+    return "\n".join(lines)
+
+
 def coverage_fill_human_text(*, channel: str = CHANNEL_EMAIL, detail: str = "") -> str:
     """Plain-English coverage HITL. Never dumps PLAYWRIGHT_BLOCKED."""
     email = normalize_hitl_channel(channel) == CHANNEL_EMAIL
+    missing = coverage_letters_from_detail(detail)
+    if missing and (
+        "still need" in str(detail or "").casefold()
+        or "will not invent it" in str(detail or "").casefold()
+    ):
+        have = [
+            letter
+            for letter in ("A", "B", "C", "D", "E", "F")
+            if letter not in missing
+        ]
+        return missing_coverage_letters_human_text(
+            channel=channel, missing=missing, have=have
+        )
     if coverage_labels_empty(detail) and not coverage_amounts_missing(detail):
         return COVERAGE_LABELS_EMPTY_EMAIL if email else COVERAGE_LABELS_EMPTY_CHAT
     return COVERAGE_AMOUNTS_MISSING_EMAIL if email else COVERAGE_AMOUNTS_MISSING_CHAT

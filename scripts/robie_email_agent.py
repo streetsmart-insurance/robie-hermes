@@ -390,6 +390,7 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
     # tool and timed out). Fail closed when the tool is missing — never fall
     # through to playwright_exec for this job class.
     policy_setup_args = None
+    hitl_resume = False
     if not is_ascend_request:
         from robie_job_engine.policy_setup_dispatch import (
             POLICY_SETUP_REQUIRED_KIND,
@@ -397,6 +398,14 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
             extract_policy_setup_args,
             invoke_policy_setup_tool,
         )
+
+        job_row = store.get_job(job_id)
+        payload = dict(job_row.get("payload") or {})
+        hitl_resume = bool(payload.get("hitl_resume"))
+        if hitl_resume:
+            from robie_job_engine.email_hitl import apply_hitl_coverage_fill
+
+            return apply_hitl_coverage_fill(store, job_id)
         policy_setup_args = extract_policy_setup_args(f"{subject}\n{body}")
     if policy_setup_args:
         store.checkpoint(job_id, 'email_route', {
