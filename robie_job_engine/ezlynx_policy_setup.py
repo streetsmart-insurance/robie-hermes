@@ -1,11 +1,5 @@
 """EZLynx Policy Setup (APE) automation engine and Playwright Page Object.
 
-
-# Code version marker - updated on every deploy. The job report includes this
-# so we can correlate any run to the exact code that executed.
-# Set by the deploy workflow; fallback is the commit this file was last changed in.
-CODE_VERSION = "712cdb0a4af2dafdfa38cb5406084b5279fd5f60"  # PR #370 merge commit
-
 Strict invariants:
 1. Stop before bind: Never binds coverage or authorizes COMPLETE without manual gate.
 2. No shell-only policies: Must execute Add & Edit Policy (#AddAndEditPolicyBtn) to complete vehicles, drivers, coverages, locations, and schedules.
@@ -22,6 +16,10 @@ from typing import Any, Sequence
 
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
+
+# Code version marker from PR 371. The job report includes this so we can
+# correlate any run to the exact code that executed. Do not remove.
+CODE_VERSION = "712cdb0a4af2dafdfa38cb5406084b5279fd5f60"  # PR #370 merge commit
 
 EZLYNX_BASE_URL = "https://app.ezlynx.com"
 
@@ -246,6 +244,19 @@ class PolicyShellInput:
     discussion_note_body: str = ""
 
 
+# Keys copied from _mint_formentry onto the outer PolicySetupResult / email
+# report. Without these, the checkpoint only kept the 8 dataclass defaults
+# and Carlo never saw field_fill_error / HITL / landed_url / code_version.
+FORMENTRY_NAV_EVIDENCE_KEYS = (
+    "field_fill",
+    "field_fill_error",
+    "hitl_response",
+    "validation",
+    "landed_url",
+    "code_version",
+)
+
+
 @dataclass(frozen=True)
 class PolicySetupResult:
     success: bool
@@ -256,9 +267,15 @@ class PolicySetupResult:
     error: str | None = None
     note_added: bool = False
     stopped_before_bind: bool = True
+    field_fill: dict[str, Any] | None = None
+    field_fill_error: str | None = None
+    hitl_response: dict[str, Any] | None = None
+    validation: dict[str, Any] | None = None
+    landed_url: str | None = None
+    code_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "success": self.success,
             "applicant_id": self.applicant_id,
             "policy_number": self.policy_number,
@@ -268,6 +285,33 @@ class PolicySetupResult:
             "note_added": self.note_added,
             "stopped_before_bind": self.stopped_before_bind,
         }
+        for key in FORMENTRY_NAV_EVIDENCE_KEYS:
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+
+def policy_setup_result_from_formentry_nav(
+    *,
+    applicant_id: str,
+    policy_number: str,
+    lob: str,
+    nav: dict[str, Any],
+) -> PolicySetupResult:
+    """Fail-closed FormEntry result that keeps mint evidence on the outer report."""
+    extras = {key: nav.get(key) for key in FORMENTRY_NAV_EVIDENCE_KEYS}
+    return PolicySetupResult(
+        success=False,
+        applicant_id=applicant_id,
+        policy_number=policy_number,
+        lob=lob,
+        phase_reached="formentry_mint",
+        error=nav.get("error") or "FormEntry was not minted",
+        note_added=False,
+        stopped_before_bind=True,
+        **extras,
+    )
 
 
 def normalize_lob(lob_input: str) -> str:
@@ -903,15 +947,11 @@ class EzlynxPolicySetupPage:
         evidence["formentry_nav"] = nav
         evidence["phases"].append("formentry_mint")
         if not nav.get("formentry_found"):
-            return PolicySetupResult(
-                success=False,
+            return policy_setup_result_from_formentry_nav(
                 applicant_id=applicant_id,
                 policy_number=shell_input.policy_number,
                 lob=normalized,
-                phase_reached="formentry_mint",
-                error=nav.get("error") or "FormEntry was not minted",
-                note_added=False,
-                stopped_before_bind=True,
+                nav=nav,
             )
 
         # Coverages tab -> fill by literal label.
@@ -1129,6 +1169,79 @@ class EzlynxPolicySetupPage:
 
         return result
 
+    async def _escalate_formentry_hitl(
+        self,
+        report: dict[str, Any],
+        *,
+        attempted: list[str],
+        applicant_id: str,
+        policy_id: str,
+    ) -> None:
+        """Gemini-then-Carlo HITL. Fail closed. Append source/reason to report['error'].
+
+        Shared by missing-button, field-fill failure, and a true 30s no-FormEntry
+        timeout after an actual Save & Continue Edit click.
+        """
+        if "page_state" not in report:
+            try:
+                report["page_state"] = await self._page_state_snapshot()
+            except Exception:  # noqa: BLE001
+                report["page_state"] = {}
+        try:
+            from .hitl_escalation import HitlRequest, escalate
+
+            screenshot_path = None
+            try:
+                import os
+                import time
+
+                screenshot_dir = "/tmp/robie-hitl-screenshots"
+                os.makedirs(screenshot_dir, exist_ok=True)
+                screenshot_path = os.path.join(
+                    screenshot_dir,
+                    f"hitl-{getattr(self, 'job_id', 'unknown')}-{int(time.time())}.png",
+                )
+                await self.page.screenshot(path=screenshot_path)
+            except Exception:
+                screenshot_path = None
+            hitl_request = HitlRequest(
+                job_id=getattr(self, "job_id", "unknown"),
+                phase="formentry_mint",
+                error=report.get("error") or "FormEntry mint failed",
+                page_state=report.get("page_state") or {},
+                attempted=attempted,
+                applicant_id=applicant_id,
+                policy_id=policy_id,
+                screenshot_path=screenshot_path,
+            )
+            deps = getattr(self, "_hitl_deps", {})
+            hitl_response = escalate(hitl_request, deps)
+            report["hitl_response"] = {
+                "source": hitl_response.source,
+                "suggestion": hitl_response.suggestion,
+                "actionable": hitl_response.actionable,
+            }
+            if hitl_response.actionable:
+                report["error"] = (
+                    (report.get("error") or "")
+                    + f" HITL {hitl_response.source} suggested: {hitl_response.suggestion}"
+                )
+            else:
+                reason = hitl_response.suggestion or "no actionable guidance"
+                report["error"] = (
+                    (report.get("error") or "")
+                    + f" HITL escalation failed ({hitl_response.source}): {reason}."
+                )
+                if screenshot_path:
+                    report["error"] += f" Screenshot: {screenshot_path}."
+        except Exception as hitl_exc:  # noqa: BLE001
+            err_msg = f"{type(hitl_exc).__name__}: {hitl_exc}"
+            report["hitl_error"] = err_msg
+            report["error"] = (
+                (report.get("error") or "")
+                + f" HITL escalation error ({err_msg}); failing closed."
+            )
+
     async def _mint_formentry(self, policy_id: str, applicant_id: str = "") -> dict[str, Any]:
         """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
 
@@ -1322,58 +1435,15 @@ class EzlynxPolicySetupPage:
                 f"PAGE_TITLE: {page_title} "
                 f"VISIBLE_BUTTONS: {visible_buttons} "
             )
-            # HITL escalation: Gemini first, then Carlo
-            try:
-                from .hitl_escalation import HitlRequest, escalate
-                # Capture screenshot of the stuck state for the HITL email
-                screenshot_path = None
-                try:
-                    import os, time
-                    screenshot_dir = "/tmp/robie-hitl-screenshots"
-                    os.makedirs(screenshot_dir, exist_ok=True)
-                    screenshot_path = os.path.join(
-                        screenshot_dir,
-                        f"hitl-{getattr(self, 'job_id', 'unknown')}-{int(time.time())}.png"
-                    )
-                    await self.page.screenshot(path=screenshot_path)
-                except Exception:
-                    screenshot_path = None
-                hitl_request = HitlRequest(
-                    job_id=getattr(self, "job_id", "unknown"),
-                    phase="formentry_mint",
-                    error=report["error"],
-                    page_state=report["page_state"],
-                    attempted=strategies_tried,
-                    applicant_id=applicant_id,
-                    policy_id=policy_id,
-                    screenshot_path=screenshot_path,
-                )
-                deps = getattr(self, "_hitl_deps", {})
-                hitl_response = escalate(hitl_request, deps)
-                report["hitl_response"] = {
-                    "source": hitl_response.source,
-                    "suggestion": hitl_response.suggestion,
-                    "actionable": hitl_response.actionable,
-                }
-                if hitl_response.actionable:
-                    report["error"] += (
-                        f" HITL {hitl_response.source} suggested: {hitl_response.suggestion}"
-                    )
-                else:
-                    # Include the reason so it's visible in the job report
-                    reason = hitl_response.suggestion or "no actionable guidance"
-                    report["error"] += f" HITL escalation failed ({hitl_response.source}): {reason}."
-                    # Include screenshot path if captured
-                    if screenshot_path:
-                        report["error"] += f" Screenshot: {screenshot_path}."
-            except Exception as hitl_exc:  # noqa: BLE001
-                err_msg = f"{type(hitl_exc).__name__}: {hitl_exc}"
-                report["hitl_error"] = err_msg
-                report["error"] += f" HITL escalation error ({err_msg}); failing closed."
+            await self._escalate_formentry_hitl(
+                report,
+                attempted=strategies_tried,
+                applicant_id=applicant_id,
+                policy_id=policy_id,
+            )
             return report
         # Fill required fields before clicking: Billing Type and Department.
         # The form validation blocks the save if these are empty.
-        # On failure, fall through to HITL instead of returning early.
         field_fill_failed = False
         try:
             fill_result = await self._fill_required_policy_fields()
@@ -1383,46 +1453,61 @@ class EzlynxPolicySetupPage:
             report["field_fill_error"] = f"{type(fill_exc).__name__}: {fill_exc}"
             report["error"] = f"Failed to fill required fields: {fill_exc}"
 
-        if not field_fill_failed:
-            await button.first.click()
+        if field_fill_failed:
+            # Keep the field-fill error. Do not claim a click or a 30s wait.
+            report["error"] += (
+                " (skipped Save & Continue Edit click due to field fill failure)"
+            )
+            report["landed_url"] = getattr(self.page, "url", None)
+            await self._escalate_formentry_hitl(
+                report,
+                attempted=["field_fill"] + list(strategies_tried),
+                applicant_id=applicant_id,
+                policy_id=policy_id,
+            )
+            return report
+
+        await button.first.click()
 
         # Watch for the FormEntry URL: poll the DOM + URL, not networkidle.
-        # Skip the poll if field fill already failed — go straight to HITL.
-        if field_fill_failed:
-            report["error"] += " (skipped Save & Continue Edit click due to field fill failure)"
-        else:
-            for _ in range(30):
-                await self.page.wait_for_timeout(1000)
-                url = self.page.url
-                if FORMENTRY_RE.search(url or ""):
+        for _ in range(30):
+            await self.page.wait_for_timeout(1000)
+            url = self.page.url
+            if FORMENTRY_RE.search(url or ""):
+                report["formentry_found"] = True
+                report["formentry_url"] = url
+                report["via"] = "save_and_continue_edit"
+                return report
+            # Also check other tabs — the mint may open a new tab.
+            for tab in self._all_tabs():
+                try:
+                    turl = tab.url
+                except Exception:  # noqa: BLE001
+                    continue
+                if FORMENTRY_RE.search(turl or ""):
                     report["formentry_found"] = True
-                    report["formentry_url"] = url
-                    report["via"] = "save_and_continue_edit"
+                    report["formentry_url"] = turl
+                    report["via"] = "save_and_continue_edit_new_tab"
                     return report
-                # Also check other tabs — the mint may open a new tab.
-                for tab in self._all_tabs():
-                    try:
-                        turl = tab.url
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if FORMENTRY_RE.search(turl or ""):
-                        report["formentry_found"] = True
-                        report["formentry_url"] = turl
-                        report["via"] = "save_and_continue_edit_new_tab"
-                        return report
 
-        # No FormEntry after 30s: capture post-click validation state.
+        # True 30s timeout after an actual click.
         report["validation"]["post_click"] = await self._validation_snapshot()
         report["landed_url"] = self.page.url
         val = report["validation"]["post_click"] or {}
-        # Surface validation errors in the error message so they reach the email
         val_errors = val.get("errors", val.get("validation_errors", []))
         if isinstance(val_errors, list):
-                val_errors = val_errors[:5]
+            val_errors = val_errors[:5]
         report["error"] = (
-                "Save & Continue Edit clicked; no FormEntry URL after 30s. "
-                f"VALIDATION_ERRORS: {val_errors} "
-                f"LANDED_URL: {self.page.url} "
+            "Save & Continue Edit clicked; no FormEntry URL after 30s. "
+            f"VALIDATION_ERRORS: {val_errors} "
+            f"LANDED_URL: {self.page.url} "
+        )
+        await self._escalate_formentry_hitl(
+            report,
+            attempted=["save_and_continue_edit", "formentry_url_poll_30s"]
+            + list(strategies_tried),
+            applicant_id=applicant_id,
+            policy_id=policy_id,
         )
         return report
 
