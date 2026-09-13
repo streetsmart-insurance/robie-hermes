@@ -198,7 +198,7 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
     Polls the URL + DOM for 30s (not networkidle, not URL-only): captures
     pre/post-click validation state from the DOM.
     """
-    from .ezlynx_account_nav import FORMENTRY_RE
+    from .ezlynx_policy_setup import url_is_minted_formentry
 
     ensure_applicant_scope(applicant_id)
     report: dict[str, Any] = {
@@ -220,7 +220,7 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
             url = tab.url
         except Exception:  # noqa: BLE001
             continue
-        if FORMENTRY_RE.search(url or ""):
+        if url_is_minted_formentry(url):
             report["formentry_found"] = True
             report["formentry_url"] = url
             report["via"] = "already_open_tab"
@@ -271,7 +271,7 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
     for _ in range(30):
         page.wait_for_timeout(1000)
         url = page.url
-        if FORMENTRY_RE.search(url or ""):
+        if url_is_minted_formentry(url):
             report["formentry_found"] = True
             report["formentry_url"] = url
             report["via"] = "save_and_continue_edit"
@@ -281,7 +281,7 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
                 turl = tab.url
             except Exception:  # noqa: BLE001
                 continue
-            if FORMENTRY_RE.search(turl or ""):
+            if url_is_minted_formentry(turl):
                 report["formentry_found"] = True
                 report["formentry_url"] = turl
                 report["via"] = "save_and_continue_edit_new_tab"

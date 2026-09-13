@@ -10,16 +10,61 @@ Strict invariants:
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Sequence
 
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
 
-# Code version marker from PR 371. The job report includes this so we can
-# correlate any run to the exact code that executed. Do not remove.
-CODE_VERSION = "c6d216cec99662b945d81a69b2a2c2d55eeee7b3"  # PR #370 merge commit
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def running_code_version() -> str:
+    """SHA of the running tree or release. Never a leftover hardcoded commit."""
+    for key in ("ROBIE_CODE_VERSION", "ROBIE_RELEASE_COMMIT"):
+        value = (os.environ.get(key) or "").strip()
+        if _SHA_RE.fullmatch(value):
+            return value
+    repo = Path(__file__).resolve().parents[1]
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        sha = (out.stdout or "").strip()
+        if out.returncode == 0 and _SHA_RE.fullmatch(sha):
+            return sha
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for raw in (
+        os.environ.get("ROBIE_CANONICAL_JOB_ENGINE_ROOT"),
+        "/opt/streetsmart-hermes/releases/current",
+        "/opt/streetsmart-hermes/current",
+        str(Path(__file__).resolve()),
+    ):
+        if not raw:
+            continue
+        path = Path(raw)
+        try:
+            text = str(path.resolve() if path.exists() else path)
+        except OSError:
+            text = str(path)
+        match = re.search(r"(?:^|/)([0-9a-f]{12,40})(?:/|$)", text)
+        if match:
+            return match.group(1)
+    return "unknown"
+
+
+# Job reports include this so a run can be correlated to the code that
+# executed. Read from the running tree/release — do not hardcode a SHA.
+CODE_VERSION = running_code_version()
 
 EZLYNX_BASE_URL = "https://app.ezlynx.com"
 
@@ -39,6 +84,8 @@ LINE_OF_BUSINESS_MAP = {
     "commercial_umbrella": "Umbrella (Commercial)",
     "personal_umbrella": "Umbrella (Personal)",
     "homeowners": "Homeowners",
+    "home": "Homeowners",
+    "ho": "Homeowners",
     "dwelling_fire": "Dwelling Fire",
     "inland_marine": "Inland Marine (Commercial)",
     "crime": "Crime",
@@ -319,12 +366,41 @@ def normalize_lob(lob_input: str) -> str:
     return LINE_OF_BUSINESS_MAP.get(cleaned.lower().replace(" ", "_"), cleaned)
 
 
+def url_is_minted_formentry(url: object) -> bool:
+    """True after Save & Continue Edit lands on a FormEntry page.
+
+    The live door is
+    /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
+    The older /applicantportal/FormEntry/{accountId} tab also counts.
+    Do not use account-nav FORMENTRY_RE alone — that pattern misses the
+    Policy/.../FormEntry/Index/... URL and would HITL a successful mint.
+    """
+    from .ezlynx_account_nav import FORMENTRY_RE
+    from .ezlynx_write_scope import is_policy_form_entry_url
+
+    text = str(url or "").strip()
+    if not text:
+        return False
+    if is_policy_form_entry_url(text):
+        return True
+    return FORMENTRY_RE.search(text) is not None
+
+
 def is_commercial_lob(lob_input: str) -> bool:
+    """HOME / homeowners / personal lines are not commercial.
+
+    The official Job Engine path uses lob='HOME'. That token must stay
+    personal so Department wanted is Personal, not Commercial.
+    """
+    raw = (lob_input or "").strip().lower().replace(" ", "_")
+    if raw in {"home", "ho"}:
+        return False
     normalized = normalize_lob(lob_input).lower()
     return not (
         "personal" in normalized
         or "homeowners" in normalized
         or "dwelling" in normalized
+        or normalized in {"home", "ho"}
     )
 
 
@@ -386,6 +462,21 @@ class EzlynxPolicySetupPage:
             self._hitl_deps["email_sender"] = self._default_email_sender()
         if "chat_sender" not in self._hitl_deps:
             self._hitl_deps["chat_sender"] = self._default_chat_sender()
+        if "gemini_client" not in self._hitl_deps:
+            from .gemini_field_helper import default_gemini_field_client
+
+            client = default_gemini_field_client()
+            if client is not None:
+                self._hitl_deps["gemini_client"] = client
+
+    def _gemini_client(self) -> Any:
+        """#388 live-option client. Never invent labels; Gemini names one live option."""
+        client = (self._hitl_deps or {}).get("gemini_client")
+        if client is not None:
+            return client
+        from .gemini_field_helper import default_gemini_field_client
+
+        return default_gemini_field_client()
 
     def _default_email_sender(self):
         """Create an email sender using the verification mailer."""
@@ -425,21 +516,14 @@ class EzlynxPolicySetupPage:
         from .ezlynx_field_widgets import (
             BILLING_TYPE_WIDGET,
             DEPARTMENT_WIDGET,
-            fill_live_dropdown,
             identified_widget,
         )
 
-        gemini_client = (self._hitl_deps or {}).get("gemini_client")
-
         async def _fill_named(name: str, root: str, wanted: str) -> None:
-            filled = await fill_live_dropdown(
-                self.page,
+            await self._fill_identified_dropdown(
                 identified_widget(name=name, root=root),
                 wanted,
-                gemini_client=gemini_client,
             )
-            if filled.hitl:
-                raise RuntimeError(filled.error or f"{name} fill HITL")
 
         # 1-4. Identified dropdowns: live options, Gemini on exact miss, retry once.
         await _fill_named("Line of Business", "#mergeSplitLOB", lob_val)
@@ -471,14 +555,10 @@ class EzlynxPolicySetupPage:
 
         # 7. Billing Type & Rating State — same live-option helper.
         if shell_input.billing_type:
-            billing = await fill_live_dropdown(
-                self.page,
+            await self._fill_identified_dropdown(
                 BILLING_TYPE_WIDGET,
                 shell_input.billing_type,
-                gemini_client=gemini_client,
             )
-            if billing.hitl:
-                raise RuntimeError(billing.error or "Billing Type fill HITL")
         if shell_input.billing_company:
             await _fill_named("Billing Company", "#BillingCompany", shell_input.billing_company)
         if shell_input.rating_state_value:
@@ -504,14 +584,7 @@ class EzlynxPolicySetupPage:
         dept_wanted = shell_input.department or (
             "Commercial" if is_commercial_lob(shell_input.lob) else "Personal"
         )
-        dept_fill = await fill_live_dropdown(
-            self.page,
-            DEPARTMENT_WIDGET,
-            dept_wanted,
-            gemini_client=gemini_client,
-        )
-        if dept_fill.hitl:
-            raise RuntimeError(dept_fill.error or "Department fill HITL")
+        await self._fill_identified_dropdown(DEPARTMENT_WIDGET, dept_wanted)
 
         # 9. Submit action (Add & Edit vs Add Policy)
         if save_and_edit:
@@ -1001,6 +1074,24 @@ class EzlynxPolicySetupPage:
             stopped_before_bind=True,
         )
 
+    async def _fill_identified_dropdown(self, widget: Any, wanted: str) -> Any:
+        """Exact miss → #388 helper names ONE live option → apply → retry once.
+
+        HITL only if Gemini is still unsure or the retry fails. No alias maps.
+        Never hardcode EZLynx option labels.
+        """
+        from .ezlynx_field_widgets import fill_identified_widget
+
+        filled = await fill_identified_widget(
+            self.page,
+            widget,
+            wanted,
+            gemini_client=self._gemini_client(),
+        )
+        if filled.hitl:
+            raise RuntimeError(filled.error or f"{widget.name} fill HITL")
+        return filled
+
     async def _fill_required_policy_fields(self) -> dict[str, Any]:
         """Set Billing Type and Department before Save & Continue Edit.
 
@@ -1008,41 +1099,35 @@ class EzlynxPolicySetupPage:
         Read that widget's live options. Exact match, else Gemini names one
         live option, apply, retry once. No alias maps. Never scan other
         selects (Line of Business is #mergeSplitLOB, not Department).
+        HOME / homeowners wanted Department is Personal, not Commercial.
         """
         from .ezlynx_field_widgets import (
             BILLING_TYPE_WIDGET,
             DEPARTMENT_WIDGET,
-            fill_identified_widget,
         )
 
-        gemini_client = (self._hitl_deps or {}).get("gemini_client")
         result: dict[str, Any] = {"billing": None, "department": None, "errors": []}
 
-        billing = await fill_identified_widget(
-            self.page,
+        billing = await self._fill_identified_dropdown(
             BILLING_TYPE_WIDGET,
             "Direct Bill",
-            gemini_client=gemini_client,
         )
         result["billing_fill"] = billing.to_dict()
         result["billing_options"] = billing.live_options
-        if billing.hitl:
-            raise RuntimeError(billing.error or "Billing Type fill HITL")
         result["billing"] = billing.selected
         result["billing_visible"] = billing.selected
         result["billing_via"] = billing.via
 
-        dept_wanted = "Commercial" if is_commercial_lob(getattr(self, "lob", "") or "") else "Personal"
-        department = await fill_identified_widget(
-            self.page,
+        dept_wanted = (
+            "Commercial" if is_commercial_lob(getattr(self, "lob", "") or "") else "Personal"
+        )
+        result["department_wanted"] = dept_wanted
+        department = await self._fill_identified_dropdown(
             DEPARTMENT_WIDGET,
             dept_wanted,
-            gemini_client=gemini_client,
         )
         result["department_fill"] = department.to_dict()
         result["department_options"] = department.live_options
-        if department.hitl:
-            raise RuntimeError(department.error or "Department fill HITL")
         result["department"] = department.selected
         result["department_visible"] = department.selected
         result["department_via"] = department.via
@@ -1138,8 +1223,6 @@ class EzlynxPolicySetupPage:
         /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
         Watches DOM validation state, not networkidle and not URL-only.
         """
-        from .ezlynx_account_nav import FORMENTRY_RE
-
         report: dict[str, Any] = {
             "code_version": CODE_VERSION,
             "policy_id": policy_id,
@@ -1178,7 +1261,7 @@ class EzlynxPolicySetupPage:
                 url = tab.url
             except Exception:  # noqa: BLE001
                 continue
-            if FORMENTRY_RE.search(url or ""):
+            if url_is_minted_formentry(url):
                 report["formentry_found"] = True
                 report["formentry_url"] = url
                 report["via"] = "already_open_tab"
@@ -1361,7 +1444,7 @@ class EzlynxPolicySetupPage:
         for _ in range(30):
             await self.page.wait_for_timeout(1000)
             url = self.page.url
-            if FORMENTRY_RE.search(url or ""):
+            if url_is_minted_formentry(url):
                 report["formentry_found"] = True
                 report["formentry_url"] = url
                 report["via"] = "save_and_continue_edit"
@@ -1372,7 +1455,7 @@ class EzlynxPolicySetupPage:
                     turl = tab.url
                 except Exception:  # noqa: BLE001
                     continue
-                if FORMENTRY_RE.search(turl or ""):
+                if url_is_minted_formentry(turl):
                     report["formentry_found"] = True
                     report["formentry_url"] = turl
                     report["via"] = "save_and_continue_edit_new_tab"
@@ -1459,3 +1542,7 @@ class EzlynxPolicySetupPage:
                 return await self.page.evaluate(js)
         except Exception as exc:  # noqa: BLE001
                 return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+# Job Engine name used by callers. Same page object; one HOME mint path.
+EzlynxPolicySetup = EzlynxPolicySetupPage
