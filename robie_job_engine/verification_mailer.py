@@ -63,7 +63,9 @@ def build_plain_email_message(
     """text/plain 8bit. No HTML unless explicitly asked. No QP mid-word wraps."""
     body_text = sanitize_plain_text(text_body)
     subject_text = sanitize_plain_text(subject).replace("\n", " ")
-    policy = SMTP.clone(max_line_length=0)
+    # Unlimited lines only for plain HITL. HTML alternatives still need a
+    # real max_line_length or quoprimime raises (maxlinelen must be >= 4).
+    policy = SMTP.clone(max_line_length=0) if plain_only else SMTP
     message = EmailMessage(policy=policy)
     message["To"] = ", ".join(to)
     if cc:
