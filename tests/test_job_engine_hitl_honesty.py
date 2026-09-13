@@ -225,10 +225,11 @@ class MintStopAndAskTests(unittest.TestCase):
             self.assertTrue(chats)
             blob = chats[0].casefold()
             self.assertIn("named a live option", blob)
-            self.assertIn("nothing was applied", blob)
-            self.assertIn("stop and ask", blob)
+            self.assertIn("could not apply", blob)
+            self.assertIn("reply in this chat thread", blob)
             self.assertNotIn("resolved", blob)
             self.assertNotIn("continuing", blob)
+            self.assertNotIn("playwright_blocked", blob)
             block = policy_setup_hitl_blocks_continue(result.to_dict())
             self.assertIsNotNone(block)
             self.assertIn("PLAYWRIGHT_BLOCKED", block or "")
@@ -309,6 +310,7 @@ class MintStopAndAskTests(unittest.TestCase):
                 gemini_applied=True,
                 gemini_named_option="Direct",
                 live_control_shows="Direct",
+                formentry_exists=True,
             )
         )
         escalate(
@@ -340,7 +342,8 @@ class MintStopAndAskTests(unittest.TestCase):
                 save_skipped=False,
             )
         ))
-        self.assertIn("live control shows", notice["body"].casefold())
+        self.assertIn("the page shows", notice["body"].casefold())
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", notice["body"])
         self.assertEqual(chats, [])
 
 
@@ -352,8 +355,10 @@ class SourceContractTests(unittest.TestCase):
         self.assertNotIn("Personal Lines (P/L)", text)
         self.assertNotIn("ALIAS", text)
         hitl = HITL_MODULE.read_text(encoding="utf-8")
-        self.assertIn("STOP AND ASK", hitl)
         self.assertIn("hitl_posted", hitl)
+        copy = Path("robie_job_engine/hitl_copy.py").read_text(encoding="utf-8")
+        self.assertIn("Reply to this email", copy)
+        self.assertIn("Reply in this Chat thread", copy)
 
 
 if __name__ == "__main__":
