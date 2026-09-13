@@ -128,6 +128,60 @@ class HomeRequiredFieldFillTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_gemini_unsure_then_named_live_option_on_retry_is_applied(self) -> None:
+        async def _run() -> None:
+            page = EditPolicyPage(
+                department_options=["---Select---", "Personal Lines (P/L)"],
+                billing_options=["---Select---", "Agency", "Direct"],
+            )
+
+            class _RetryGemini:
+                def __init__(self) -> None:
+                    self.unique_prompts: list[str] = []
+                    self.content_prompts: list[str] = []
+                    self._unique = [
+                        json.dumps(
+                            {
+                                "decision": "unsure",
+                                "reason": "wanted value is not an exact live option",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "decision": "unsure",
+                                "reason": "wanted value is not an exact live option",
+                            }
+                        ),
+                    ]
+                    self._content = ["Direct", "Personal Lines (P/L)"]
+
+                def generate_unique_field(self, prompt: str) -> str:
+                    self.unique_prompts.append(prompt)
+                    return self._unique.pop(0)
+
+                def generate_content(self, prompt: str) -> str:
+                    self.content_prompts.append(prompt)
+                    return self._content.pop(0)
+
+            client = _RetryGemini()
+            setup = EzlynxPolicySetupPage(
+                page,
+                hitl_deps={"gemini_client": client},
+            )
+            setup.lob = "HOME"
+            result = await setup._fill_required_policy_fields()
+            self.assertEqual(result["department_wanted"], "Personal")
+            self.assertEqual(result["billing"], "Direct")
+            self.assertEqual(result["department"], "Personal Lines (P/L)")
+            self.assertEqual(page.billing_selected, "Direct")
+            self.assertEqual(page.dept_selected, "Personal Lines (P/L)")
+            self.assertEqual(len(client.unique_prompts), 2)
+            self.assertEqual(len(client.content_prompts), 2)
+            self.assertFalse(result["billing_fill"]["hitl"])
+            self.assertFalse(result["department_fill"]["hitl"])
+
+        asyncio.run(_run())
+
     def test_gemini_still_unsure_is_hitl_no_select(self) -> None:
         async def _run() -> None:
             page = EditPolicyPage(
