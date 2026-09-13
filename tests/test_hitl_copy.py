@@ -19,7 +19,14 @@ from robie_job_engine.hitl_copy import (
     sanitize_plain_text,
 )
 from robie_job_engine.hitl_escalation import HitlRequest, build_hitl_notice
-from robie_job_engine.verification_mailer import build_plain_email_message
+
+from _sibling_fakes import ensure_real_module
+
+# Unittest discover imports sibling worker tests first; those install a
+# fake robie_job_engine.verification_mailer with only send_verification_email.
+# Bind the real module so build_plain_email_message exists.
+_vm = ensure_real_module("robie_job_engine.verification_mailer")
+build_plain_email_message = _vm.build_plain_email_message
 
 
 class CoverageHitlEmailBodyTests(unittest.TestCase):
