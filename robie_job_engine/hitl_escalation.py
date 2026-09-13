@@ -228,6 +228,14 @@ def build_hitl_notice(
     shown = str(request.live_control_shows or "").strip()
     applied = bool(request.gemini_applied) and live_control_shows_named_option(request)
     facts: list[str] = []
+    mint_miss = (
+        request.phase == "formentry_mint"
+        and not request.formentry_exists
+        and (
+            "no FormEntry URL after 30s" in (request.error or "")
+            or "FormEntry was not minted" in (request.error or "")
+        )
+    )
     if applied:
         facts.append(
             f"Gemini named {named!r} and the live control shows {shown!r}."
@@ -236,6 +244,12 @@ def build_hitl_notice(
         facts.append(
             f"Gemini named a live option {named!r}. Nothing was applied. "
             f"Live control shows {(shown or '(empty)')!r}."
+        )
+    elif mint_miss:
+        facts.append(
+            "Save & Continue Edit did not mint FormEntry. "
+            "The page stayed on Policy/Actions/Edit. "
+            "Gemini did not handle this."
         )
     elif gemini_text and "unsure" in (request.error or "").casefold():
         facts.append("Gemini is still unsure after one retry. HITL, no select.")
@@ -247,7 +261,7 @@ def build_hitl_notice(
     elif gemini_response and gemini_response.source == "gemini":
         facts.append("Gemini was asked and did not name a usable live option. Nothing was applied.")
     else:
-        facts.append("Gemini was not able to help. Nothing was applied.")
+        facts.append("Gemini was not asked to mint FormEntry. Nothing was applied.")
     if request.save_skipped:
         facts.append("The fill still failed. Save was skipped.")
     facts.append("STOP AND ASK. The script/job stopped.")

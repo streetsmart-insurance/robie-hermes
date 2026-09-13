@@ -23,6 +23,11 @@ _STRUCTURED_BLOCKER = re.compile(
     r"((?:MISSING_REQUIRED_FIELD|PLAYWRIGHT_BLOCKED)\s*:\s*[^\r\n]+)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+_POLICY_SETUP_FAIL_CLOSED = re.compile(
+    r"(?:ROBIE_OUTCOME_UNKNOWN:\s*)?"
+    r"(ezlynx_policy_setup is not registered; failing closed[^\r\n]*)",
+    re.IGNORECASE,
+)
 _SENSITIVE_FIELD = re.compile(
     r"\b(SSN|tax id|password|MFA|one[- ]time code|payment|card number|bank account|routing number)\b",
     re.IGNORECASE,
@@ -197,8 +202,63 @@ def sanitize_hitl_chat_text(
 def structured_blocker_reason(text: str) -> str | None:
     """Return only an explicit machine-readable worker blocker."""
     safe = redact_text(str(text or ""))
+    fail_closed = policy_setup_fail_closed_reason(safe)
+    if fail_closed:
+        return fail_closed
+    from .policy_setup_dispatch import is_formentry_mint_miss
+
+    if is_formentry_mint_miss(safe):
+        return (safe.split("\n", 1)[0].strip() or safe)[:1_000]
     match = _STRUCTURED_BLOCKER.search(safe)
     return match.group(1).strip()[:1_000] if match else None
+
+
+def policy_setup_fail_closed_reason(text: str) -> str | None:
+    """Return the fail-closed line from job c282de98 / FAIL_CLOSED_MESSAGE."""
+    from .policy_setup_dispatch import FAIL_CLOSED_MESSAGE, is_policy_setup_fail_closed
+
+    safe = redact_text(str(text or ""))
+    if not is_policy_setup_fail_closed(safe):
+        return None
+    match = _POLICY_SETUP_FAIL_CLOSED.search(safe)
+    if match:
+        return match.group(1).strip()[:1_000]
+    return FAIL_CLOSED_MESSAGE
+
+
+def policy_setup_fail_closed_hitl_text(*, job_id: str = "", detail: str = "") -> str:
+    """Honest HITL for a missing/unregistered ezlynx_policy_setup handler."""
+    from .policy_setup_dispatch import FAIL_CLOSED_MESSAGE
+
+    reason = str(detail or "").strip() or FAIL_CLOSED_MESSAGE
+    lines = [
+        f"ROBIE HITL: STOP AND ASK. {reason}",
+        "This Chat job is not still working. The ezlynx_policy_setup tool "
+        "was not callable, so ROBIE failed closed and will not use "
+        "playwright_exec for policy setup.",
+        DRY_HITL_ASK,
+    ]
+    if job_id:
+        lines.append(f"Job ID: {job_id}")
+    return "\n".join(lines)
+
+
+def formentry_mint_miss_hitl_text(*, job_id: str = "", detail: str = "") -> str:
+    """Honest HITL for job c75aab5c: Save clicked, Edit URL, no FormEntry."""
+    reason = (
+        str(detail or "").strip()
+        or "Save & Continue Edit clicked; no FormEntry URL after 30s."
+    )
+    lines = [
+        f"ROBIE HITL: STOP AND ASK. {reason}",
+        "FormEntry does not exist. The page stayed on Policy/Actions/Edit. "
+        "Gemini did not handle this. ROBIE will not wander with playwright_exec. "
+        "This job is not still working.",
+        DRY_HITL_ASK,
+    ]
+    if job_id:
+        lines.append(f"Job ID: {job_id}")
+    return "\n".join(lines)
 
 
 def interaction_for_blocker(

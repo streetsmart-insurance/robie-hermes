@@ -40,6 +40,53 @@ FAIL_CLOSED_MESSAGE = (
     "will not fall through to playwright_exec for policy setup."
 )
 
+# OpenAI-style function schema. Chat/email workers must offer this as a
+# callable tool, not only the name string in a list.
+POLICY_SETUP_SCHEMA = {
+    "name": POLICY_SETUP_TOOL,
+    "description": (
+        "Create a homeowners policy on EZLynx applicant 220250093 and fill its "
+        "FormEntry Coverages tab. USE THIS TOOL — not playwright_exec — whenever "
+        "the job asks to create, set up, or complete a homeowners policy. "
+        "The engine runs search-first (no duplicate), creates with the gold "
+        "carrier payload only when absent, mints the FormEntry via Save & "
+        "Continue Edit, and fills coverages by literal label (Dwelling, Other "
+        "Structures, Personal Property, Loss of Use, Blanket, Personal "
+        "Liability EA OCC, Medical Payments EA PER). Applicant 220250093 only. "
+        "Never binds. Returns the engine's evidence report."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "policy_number": {
+                "type": "string",
+                "description": "Policy number to create (e.g. TEST-HO-20260911-E01).",
+            },
+            "effective_date": {
+                "type": "string",
+                "description": "MM/DD/YYYY or ISO.",
+            },
+            "expiration_date": {
+                "type": "string",
+                "description": "MM/DD/YYYY or ISO.",
+            },
+            "dwelling": {"type": "string", "description": "Coverage A limit."},
+            "other_structures": {"type": "string", "description": "Coverage B limit."},
+            "personal_property": {"type": "string", "description": "Coverage C limit."},
+            "loss_of_use": {"type": "string", "description": "Coverage D limit."},
+            "personal_liability": {
+                "type": "string",
+                "description": "Personal Liability EA OCC limit.",
+            },
+            "medical_payments": {
+                "type": "string",
+                "description": "Medical Payments EA PER limit.",
+            },
+        },
+        "required": ["policy_number", "effective_date", "expiration_date"],
+    },
+}
+
 _INTENT_RE = re.compile(
     r"\b(creat\w*|set\s*up|setup|complet\w*|mint\w*|generat\w*)\b"
     r".{0,80}?\b(homeowners?|home\s*owners?|\bHO\b|home\s*policy)\b",
@@ -61,6 +108,70 @@ _AMOUNT_RE = r"\$?\s*([\d,]+(?:\.\d{1,2})?)"
 
 class PolicySetupToolMissing(RuntimeError):
     """The ezlynx_policy_setup tool could not be loaded. Fail closed."""
+
+
+def is_policy_setup_fail_closed(text: str) -> bool:
+    """True when the worker printed the fail-closed contract (job c282de98)."""
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if FAIL_CLOSED_MESSAGE in raw:
+        return True
+    folded = " ".join(raw.casefold().split())
+    return (
+        "ezlynx_policy_setup is not registered" in folded
+        and "failing closed" in folded
+        and "will not fall through to playwright_exec" in folded
+    )
+
+
+def is_formentry_mint_miss(text: str) -> bool:
+    """True for job c75aab5c: Save clicked, Edit URL, FormEntry never minted."""
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if "no FormEntry URL after 30s" in raw:
+        return True
+    if "FormEntry was not minted" in raw:
+        return True
+    folded = " ".join(raw.casefold().split())
+    landed_edit = "policy/actions/edit/" in folded and "landed_url" in folded
+    return landed_edit and "formentry" in folded
+
+
+def is_policy_setup_honest_hitl(text: str) -> bool:
+    """Fail-closed missing tool or FormEntry mint-miss — park HITL, not RUNNING."""
+    return is_policy_setup_fail_closed(text) or is_formentry_mint_miss(text)
+
+
+def policy_setup_openai_schema() -> dict:
+    """Schema dict Hermes ``get_tool_definitions`` understands."""
+    return {"type": "function", "function": dict(POLICY_SETUP_SCHEMA)}
+
+
+def register_policy_setup_handler(registry=None):
+    """Register the real callable handler on a Hermes tool registry.
+
+    Name-only lists (``email_chat_job_schema`` / ``_HERMES_CORE_TOOLS``) are
+    not enough — the Chat worker must be able to *call* this function.
+    Raises ``PolicySetupToolMissing`` when the handler cannot be loaded.
+    """
+    handler = load_policy_setup_handler()
+    if registry is None:
+        try:
+            from tools.registry import registry as registry
+        except ImportError:
+            return handler
+    register_fn = getattr(registry, "register", None)
+    if callable(register_fn):
+        register_fn(
+            name=POLICY_SETUP_TOOL,
+            toolset="playwright",
+            schema=POLICY_SETUP_SCHEMA,
+            handler=handler,
+            check_fn=lambda: True,
+        )
+    return handler
 
 
 def detect_policy_setup_request(text: str) -> dict | None:

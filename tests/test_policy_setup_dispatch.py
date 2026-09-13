@@ -93,6 +93,8 @@ class EmailRoutingTests(unittest.TestCase):
         source = (ROOT / "scripts" / "robie_email_agent.py").read_text()
         self.assertIn("invoke_policy_setup_tool(policy_setup_args)", source)
         self.assertIn("policy_setup_deterministic", source)
+        self.assertIn("'tool_called': True", source)
+        self.assertIn("'setup_complete': bool(success)", source)
         # The deterministic branch must come before the generic LLM fallback.
         self.assertLess(
             source.index("policy_setup_deterministic"),
@@ -123,6 +125,16 @@ class ChatRoutingTests(unittest.TestCase):
         self.assertIn("'ezlynx_policy_setup' tool FIRST", joined)
         self.assertIn("before any", joined)
         self.assertIn("ROBIE_OUTCOME_UNKNOWN", joined)
+
+    def test_chat_guard_invokes_callable_handler_not_prompt_only(self):
+        source = (ROOT / "robie_job_engine" / "chat_guard.py").read_text()
+        self.assertIn("invoke_policy_setup_tool(policy_args)", source)
+        self.assertIn("register_policy_setup_callable", source)
+        self.assertIn("park_policy_setup_fail_closed", source)
+        self.assertLess(
+            source.index("register_policy_setup_callable"),
+            source.index("invoke_policy_setup_tool(policy_args)"),
+        )
 
     def test_chat_contract_empty_for_other_messages(self):
         from robie_job_engine.chat_guard import _policy_setup_contract

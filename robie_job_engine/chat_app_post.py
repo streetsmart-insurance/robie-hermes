@@ -17,21 +17,40 @@ from typing import Any
 
 
 CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot"
+# Production Robie home space (CURRENT_STATE / regression_battery). Email
+# jobs have no originating Chat thread; HITL still belongs here, not a
+# new space and not signBlob email.
+DEFAULT_ROBIE_HOME_SPACE = "spaces/AAQAZbLJO78"
 DEFAULT_FAIL_NOTIFY_EMAILS = (
     "carlo@streetsmart.insurance",
     "jake@streetsmart.insurance",
 )
 
 
+def robie_home_space() -> str | None:
+    """Existing Robie Chat space. Never creates a space."""
+    raw = str(os.environ.get("ROBIE_CHAT_HOME_SPACE") or "").strip()
+    name = raw or DEFAULT_ROBIE_HOME_SPACE
+    if name.startswith("spaces/"):
+        return name
+    return None
+
+
 def conversation_target(job: dict[str, Any]) -> tuple[str, str | None] | None:
     payload = dict(job.get("payload") or {})
     conversation_id = str(payload.get("conversation_id") or "").strip()
-    if not conversation_id.startswith("spaces/"):
-        return None
-    thread_id = str(payload.get("thread_id") or payload.get("thread_name") or "").strip() or None
-    if thread_id and not thread_id.startswith("spaces/"):
-        thread_id = f"{conversation_id}/threads/{thread_id}"
-    return conversation_id, thread_id
+    if conversation_id.startswith("spaces/"):
+        thread_id = str(payload.get("thread_id") or payload.get("thread_name") or "").strip() or None
+        if thread_id and not thread_id.startswith("spaces/"):
+            thread_id = f"{conversation_id}/threads/{thread_id}"
+        return conversation_id, thread_id
+    # Email jobs have no @robie thread. Post HITL to the existing Robie
+    # home space (job c75aab5c: hitl_posted=false / signBlob 403).
+    if str(job.get("action_type") or "").strip() == "hermes.email_task":
+        home = robie_home_space()
+        if home:
+            return home, None
+    return None
 
 
 def fail_notify_emails() -> list[str]:

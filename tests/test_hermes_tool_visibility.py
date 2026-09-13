@@ -10,6 +10,7 @@ from robie_job_engine.hermes_tool_visibility import (
     filter_email_chat_schemas,
     install_email_chat_schema_filter,
     is_email_or_chat_worker,
+    register_policy_setup_callable,
 )
 
 
@@ -147,11 +148,32 @@ class ToolVisibilityTests(unittest.TestCase):
         with patch.dict(sys.modules, {'model_tools': fake}):
             install_email_chat_schema_filter()
             with patch('robie_job_engine.hermes_tool_visibility.is_email_or_chat_worker', return_value=True):
-                names = [item['function']['name'] for item in fake.get_tool_definitions()]
-            self.assertEqual(names, ['playwright_exec'])
+                schemas = fake.get_tool_definitions()
+                names = [item['function']['name'] for item in schemas]
+            self.assertEqual(names, ['playwright_exec', 'ezlynx_policy_setup'])
+            setup = next(item for item in schemas if item['function']['name'] == 'ezlynx_policy_setup')
+            self.assertEqual(
+                setup['function']['parameters']['required'],
+                ['policy_number', 'effective_date', 'expiration_date'],
+            )
             with patch('robie_job_engine.hermes_tool_visibility.is_email_or_chat_worker', return_value=False):
                 interactive = [item['function']['name'] for item in fake.get_tool_definitions()]
             self.assertEqual(interactive, ['playwright_exec', 'execute_code', 'terminal'])
+
+    def test_register_policy_setup_callable_returns_handler(self):
+        class Registry:
+            def __init__(self):
+                self.handler = None
+
+            def register(self, **kwargs):
+                self.handler = kwargs["handler"]
+                self.toolset = kwargs["toolset"]
+
+        registry = Registry()
+        handler = register_policy_setup_callable(registry)
+        self.assertTrue(callable(handler))
+        self.assertTrue(callable(registry.handler))
+        self.assertEqual(registry.toolset, "playwright")
 
     def test_chat_bind_marks_google_chat_job_action(self):
         from robie_job_engine.playwright_observability import bind_current_playwright_job
