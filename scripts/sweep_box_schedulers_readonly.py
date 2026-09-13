@@ -18,6 +18,11 @@ follows that indirection and captures the REAL file, since the hourly
 "Mailbox Audit & Cleanup" trigger and the duplicate-note bug live in the
 deployed code, not in the repo's scripts/robie_email_agent.py.
 
+Section 10 covers the remaining suspect for the hourly report: the Hermes
+agent framework's own scheduler (the .hermes/cron/ directories on the box).
+It lists cron job definitions (JSON contents, redacted) and hooks, plus
+any long-running hermes/cron/scheduler processes.
+
 Touches nothing:
 - systemctl/journalctl/crontab/ls/readlink/file/sed/grep are read-only;
   no enable/start/stop, no file writes anywhere (stdout only).
@@ -175,6 +180,27 @@ def _resolve_loader_target(launcher_text: str, launcher_real_path: str,
     except IndexError:
         return ""
     return str(root / "releases" / "current" / load_path)
+
+
+HERMES_CRON_DIRS = (
+    "/home/streetsmart-hermes/.hermes/cron",
+    "/opt/streetsmart-hermes/.hermes/cron",
+)
+HERMES_HOOKS_DIR = "/opt/streetsmart-hermes/.hermes/hooks"
+
+
+def _json_files_in_listing(lines: list[str]) -> list[str]:
+    """Pure: pull .json file paths out of `find -printf` listing lines.
+
+    Each line is "<path>\\t<size>\\t<mtime>"; paths may contain spaces,
+    so the path is everything before the first tab.
+    """
+    paths = []
+    for line in lines:
+        path = line.split("\t")[0].strip()
+        if path.endswith(".json"):
+            paths.append(path)
+    return paths
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -430,6 +456,58 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  --- ls -la {subp} (names only) ---")
         out = _sh("ls", "-la", subp)
         print("  " + (out.replace("\n", "\n  ") if out else "  <absent>"))
+
+    section("10. Hermes framework cron dirs, hooks, and agent processes "
+            "(read-only)")
+    # The hourly "Mailbox Audit & Cleanup" report is not a systemd timer,
+    # not a cron, and not in the watcher's script — the Hermes agent
+    # framework's own scheduler (.hermes/cron/) is the remaining suspect.
+    cron_json_total = 0
+    for d in HERMES_CRON_DIRS:
+        print(f"  --- recursive names-only listing of {d} ---")
+        listing = _sh_shell(
+            f"find '{d}' -type f "
+            r"-printf '%p\t%s bytes\t%TY-%Tm-%Td %TH:%TM\n' "
+            "2>/dev/null | sort"
+        )
+        print("  " + (listing.replace("\n", "\n  ")
+                      if listing else "  <absent or empty>"))
+        json_files = _json_files_in_listing(listing.splitlines())
+        cron_json_total += len(json_files)
+        for jf in json_files[:20]:
+            print(f"  --- cron job definition: {jf} (redacted) ---")
+            body = _sh("cat", jf)
+            print("  " + (body.replace("\n", "\n  ")
+                          if body else "  <empty>"))
+            if _matches_keywords(body):
+                findings.append(
+                    f"Hermes cron job definition {jf} matches the inbox "
+                    "keywords (section 10). Its schedule/prompt above is "
+                    "the hourly mailbox-audit trigger candidate."
+                )
+    if cron_json_total:
+        findings.append(
+            f"{cron_json_total} Hermes cron JSON definition(s) printed in "
+            "section 10 (contents redacted). Check their schedule fields "
+            "for the hourly mailbox-audit cadence."
+        )
+    print(f"  --- names-only listing of {HERMES_HOOKS_DIR} ---")
+    hooks = _sh("ls", "-la", HERMES_HOOKS_DIR)
+    print("  " + (hooks.replace("\n", "\n  ")
+                  if hooks else "  <absent>"))
+    if _matches_keywords(hooks):
+        findings.append(
+            "A Hermes hook name matches the inbox keywords (section 10). "
+            "The listing above shows it."
+        )
+    print("  --- long-running hermes/cron/scheduler processes "
+          "(names/args only) ---")
+    procs = _sh_shell(
+        "ps aux 2>/dev/null | grep -i -E 'hermes|cron|schedul' | "
+        "grep -v grep | head -30"
+    )
+    print("  " + (procs.replace("\n", "\n  ")
+                  if procs else "  <no matching processes>"))
 
     section("WHAT THIS MEANS")
     if not findings:
