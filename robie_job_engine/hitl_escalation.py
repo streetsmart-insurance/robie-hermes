@@ -52,8 +52,8 @@ def ask_gemini(request: HitlRequest, gemini_client: Any = None) -> HitlResponse:
     if gemini_client is None:
         # Try to get the default client from gemini_field_helper
         try:
-            from .gemini_field_helper import get_default_client
-            gemini_client = get_default_client()
+            from .gemini_field_helper import default_gemini_field_client
+            gemini_client = default_gemini_field_client()
         except Exception:
             return HitlResponse(
                 source="gemini",
@@ -165,11 +165,16 @@ To continue the job, reply with one of:
         if request.original_requester not in recipients:
             recipients.append(request.original_requester)
     
-    # Send via email
+    # Send via email (handle both callable functions and objects with .send())
     if email_sender and recipients:
         for recipient in recipients:
             try:
-                email_sender.send(to=recipient, subject=subject, body=body)
+                if hasattr(email_sender, "send") and callable(email_sender.send):
+                    email_sender.send(to=recipient, subject=subject, body=body)
+                elif callable(email_sender):
+                    email_sender(to=recipient, subject=subject, body=body)
+                else:
+                    continue
                 sent = True
             except Exception:
                 pass
