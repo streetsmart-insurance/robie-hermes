@@ -76,18 +76,21 @@ LOCATION_EXCLUDE_LABELS = LOCATION_SECTION_HINTS + (
     "line of business",
 )
 COVERAGE_TAB_NAMES = ("Coverages", "Coverage")
-# FormEntry Index (/Policy/.../FormEntry/Index/...) is a section nav of
-# links (Insured Information | Coverages | ...), not an ARIA tab strip.
-# 405 used role=tab / get_by_text only; live job 45b09dee never left Location.
-COVERAGES_TAB_LOCATOR = 'get_by_role("link", name="Coverages", exact=True)'
-COVERAGES_TAB_RETRY_ROLES = ("tab", "button")
-COVERAGES_TAB_FIRST_ROLES = ("link",)
+# Click only a name that is on the live FormEntry nav. Do not invent
+# "Coverages" when the page shows "Coverage" (or another live wording).
+# Unique link first: get_by_role("link", name=<live nav text>, exact=True).
+COVERAGES_LIVE_NAV_CLICK = (
+    'get_by_role("link", name=<live nav coverage text>, exact=True)'
+)
+COVERAGES_TAB_LOCATOR = COVERAGES_LIVE_NAV_CLICK
+COVERAGES_NAV_ROLES = ("link", "tab", "button")
 
 LIST_LIVE_NAV_JS = r"""
 () => {
   const norm = (s) => (s || "").trim().replace(/\s+/g, " ");
-  const els = Array.from(document.querySelectorAll(
-    '[role="tab"], [role="link"], a, button, [role="button"], .nav-link, .nav-item'
+    const els = Array.from(document.querySelectorAll(
+    '[role="tab"], [role="link"], a, button, [role="button"], '
+    + '.nav-link, .nav-item, .k-link, .k-item, li'
   ));
   const out = [];
   const seen = new Set();
@@ -283,6 +286,76 @@ def filter_coverage_candidate_labels(live_labels: list[str]) -> list[str]:
     ]
 
 
+def looks_like_coverage_nav(name: str) -> bool:
+    """True when a live nav label is the coverage section. Not Location."""
+    if is_location_or_address_label(name):
+        return False
+    folded = normalize_coverage_label(name)
+    return "coverage" in folded
+
+
+def live_nav_coverage_name(nav_labels: list[str]) -> str | None:
+    """Return the live nav text for the coverage section, or None.
+
+    Prefers exact Coverages, then Coverage, then any live item whose text
+    contains coverage. Never invents a name that is not on the list.
+    """
+    coverage_items = [
+        str(item).strip()
+        for item in nav_labels
+        if str(item).strip() and looks_like_coverage_nav(item)
+    ]
+    for item in coverage_items:
+        if normalize_coverage_label(item) == "coverages":
+            return item
+    for item in coverage_items:
+        if normalize_coverage_label(item) == "coverage":
+            return item
+    if coverage_items:
+        return coverage_items[0]
+    return None
+
+
+def pick_live_coverage_nav(
+    nav_labels: list[str],
+    *,
+    gemini_client: Any | None = None,
+    exclude: list[str] | None = None,
+) -> tuple[str | None, bool]:
+    """Pick one live nav name. Gemini only among the live list."""
+    leftover = [
+        item
+        for item in nav_labels
+        if normalize_coverage_label(item)
+        not in {normalize_coverage_label(x) for x in (exclude or [])}
+    ]
+    name = live_nav_coverage_name(leftover)
+    if name:
+        return name, False
+    if not leftover:
+        return None, False
+    from .gemini_field_helper import ask_gemini_live_option
+
+    decision = ask_gemini_live_option(
+        widget_name="FormEntry section",
+        wanted="Coverages",
+        live_options=leftover,
+        client=gemini_client,
+    )
+    option = str(decision.option or "").strip()
+    if (
+        decision.action == "APPLY"
+        and option
+        and looks_like_coverage_nav(option)
+        and any(
+            normalize_coverage_label(item) == normalize_coverage_label(option)
+            for item in leftover
+        )
+    ):
+        return option, bool(decision.gemini_asked)
+    return None, bool(decision.gemini_asked)
+
+
 def map_letter_amounts_to_live_labels(
     amounts_by_letter: dict[str, str],
     live_labels: list[str],
@@ -440,9 +513,9 @@ async def aclick_unique_named(
     page: Any,
     name: str,
     *,
-    roles: tuple[str, ...],
+    roles: tuple[str, ...] = COVERAGES_NAV_ROLES,
 ) -> str | None:
-    """Click only when the locator is unique. No .first / .nth / .last."""
+    """Click a live nav name only when the locator is unique."""
     for role in roles:
         loc = page.get_by_role(role, name=name, exact=True)
         try:
@@ -473,93 +546,91 @@ async def _await_section_settle(page: Any) -> None:
         pass
 
 
+def _coverages_tab_proven(live: list[str]) -> bool:
+    """True only after field labels include Coverage A–F, not Location."""
+    return has_live_coverage_letter(live) and not is_location_section_labels(live)
+
+
 async def aensure_coverages_tab(
     page: Any,
     *,
     gemini_client: Any | None = None,
 ) -> CoveragesTabResult:
-    """Leave Location/Address. Fill only after Coverages labels are live.
+    """Leave Location/Address using a live nav name. Prove the click.
 
-    Live miss 45b09dee: role=tab never switched FormEntry Index. Click the
-    unique Coverages *link*, re-read labels, and do not fill while the page
-    still shows Name/Address/City/State/Zip. One Gemini retry on live nav
-    options uses a different locator. Same live-label path for any LOB.
+    Live miss c6873406: hardcoded Coverages link did not change FormEntry
+    Index. Read live nav texts first. Click only a name from that list
+    (Coverages, Coverage, or Gemini's live pick). Re-read field labels.
+    Fill only when they stop looking like Name/Address/City/Zip/Location #.
     """
     clicked: list[str] = []
     tried: list[str] = []
     gemini_asked = False
     live = await alist_live_coverage_labels(page)
-    if has_live_coverage_letter(live):
+    if _coverages_tab_proven(live):
         return CoveragesTabResult(
             live_labels=live,
             on_coverages=True,
             still_on_location=False,
         )
-    if not is_location_section_labels(live):
+
+    nav = await alist_live_nav_labels(page)
+    if not is_location_section_labels(live) and not live_nav_coverage_name(nav):
         return CoveragesTabResult(
             live_labels=live,
             on_coverages=False,
             still_on_location=False,
+            locators_tried=tried,
         )
 
-    used = await aclick_unique_named(
-        page, "Coverages", roles=COVERAGES_TAB_FIRST_ROLES
-    )
-    if used:
-        clicked.append("Coverages")
-        tried.append(used)
-        await _await_section_settle(page)
-        live = await alist_live_coverage_labels(page)
-        if has_live_coverage_letter(live):
-            return CoveragesTabResult(
-                live_labels=live,
-                on_coverages=True,
-                still_on_location=False,
-                clicked=clicked,
-                locators_tried=tried,
-            )
+    name, asked = pick_live_coverage_nav(nav, gemini_client=gemini_client)
+    gemini_asked = gemini_asked or asked
+    if name:
+        used = await aclick_unique_named(page, name)
+        if used:
+            clicked.append(name)
+            tried.append(used)
+            await _await_section_settle(page)
+            live = await alist_live_coverage_labels(page)
+            if _coverages_tab_proven(live):
+                return CoveragesTabResult(
+                    live_labels=live,
+                    on_coverages=True,
+                    still_on_location=False,
+                    clicked=clicked,
+                    locators_tried=tried,
+                    gemini_asked=gemini_asked,
+                )
 
     nav = await alist_live_nav_labels(page)
-    from .gemini_field_helper import ask_gemini_live_option
-
-    decision = ask_gemini_live_option(
-        widget_name="FormEntry section",
-        wanted="Coverages",
-        live_options=nav or list(COVERAGE_TAB_NAMES),
-        client=gemini_client,
+    retry_name, asked = pick_live_coverage_nav(
+        nav, gemini_client=gemini_client, exclude=clicked
     )
-    gemini_asked = bool(decision.gemini_asked)
-    retry_name = "Coverages"
-    if decision.action == "APPLY" and decision.option:
-        option = str(decision.option).strip()
-        if option and "coverage" in option.casefold():
-            retry_name = option
-    used = await aclick_unique_named(
-        page, retry_name, roles=COVERAGES_TAB_RETRY_ROLES
-    )
-    if used:
-        clicked.append(retry_name)
-        tried.append(used)
-        await _await_section_settle(page)
-        live = await alist_live_coverage_labels(page)
-        if has_live_coverage_letter(live):
-            return CoveragesTabResult(
-                live_labels=live,
-                on_coverages=True,
-                still_on_location=False,
-                clicked=clicked,
-                locators_tried=tried,
-                gemini_asked=gemini_asked,
-            )
+    gemini_asked = gemini_asked or asked
+    if retry_name:
+        used = await aclick_unique_named(page, retry_name)
+        if used:
+            clicked.append(retry_name)
+            tried.append(used)
+            await _await_section_settle(page)
+            live = await alist_live_coverage_labels(page)
+            if _coverages_tab_proven(live):
+                return CoveragesTabResult(
+                    live_labels=live,
+                    on_coverages=True,
+                    still_on_location=False,
+                    clicked=clicked,
+                    locators_tried=tried,
+                    gemini_asked=gemini_asked,
+                )
 
     live = await alist_live_coverage_labels(page)
-    still = is_location_section_labels(live) or not has_live_coverage_letter(live)
     return CoveragesTabResult(
         live_labels=live,
-        on_coverages=has_live_coverage_letter(live),
-        still_on_location=still,
+        on_coverages=_coverages_tab_proven(live),
+        still_on_location=is_location_section_labels(live),
         clicked=clicked,
-        locators_tried=tried or [COVERAGES_TAB_LOCATOR],
+        locators_tried=tried or [COVERAGES_LIVE_NAV_CLICK],
         gemini_asked=gemini_asked,
     )
 

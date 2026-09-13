@@ -16,6 +16,7 @@ from robie_job_engine.hitl_copy import (
     COVERAGE_AMOUNTS_MISSING_CHAT,
     COVERAGE_AMOUNTS_MISSING_EMAIL,
     COVERAGE_LABELS_EMPTY_EMAIL,
+    COVERAGE_TAB_STUCK_EMAIL,
     human_hitl_notice,
     sanitize_plain_text,
     worker_report_human_text,
@@ -232,9 +233,10 @@ class WorkerReportEmailTests(unittest.TestCase):
             "'Country', 'Location #']. HITL posted to the email. STOP AND ASK.",
             channel="email",
         )
-        self.assertEqual(text, COVERAGE_LABELS_EMPTY_EMAIL)
+        self.assertEqual(text, COVERAGE_TAB_STUCK_EMAIL)
         self.assertNotIn("They were not on the email", text)
-        self.assertIn("could not match the coverage labels", text.casefold())
+        self.assertIn("I am on the address tab and cannot open Coverages", text)
+        self.assertNotIn("I need the Coverage A", text)
         self.assertIn("Reply to this email", text)
         self.assertNotIn("Chat thread", text)
 
