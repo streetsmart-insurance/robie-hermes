@@ -123,6 +123,135 @@ If you cannot provide a specific actionable suggestion, respond with exactly: UN
         )
 
 
+_PHASE_GOALS = {
+    "formentry_mint": (
+        "open the coverage form on this EZLynx policy so I can fill "
+        "limits and deductibles"
+    ),
+    "hitl_isolation_test": "confirm I can reach you when a job is stuck",
+}
+
+_ATTEMPT_PLAIN = {
+    "field_fill": "filling the required policy fields",
+    "save_and_continue_edit": "clicking Save & Continue Edit",
+    "formentry_url_poll_30s": "waiting for the coverage form to open",
+    "css_selector": "finding the button by CSS",
+    "xpath": "finding the button by XPath",
+    "text_content": "finding the button by its text",
+    "role_button": "finding the button by its role",
+    "all_elements": "scanning the page for the button",
+}
+
+_SELECTOR_STRATEGY_KEYS = frozenset(
+    {
+        "css_selector",
+        "xpath",
+        "text_content",
+        "role_button",
+        "all_elements",
+        "css",
+        "id",
+        "name",
+    }
+)
+
+
+def _what_robie_is_trying_to_do(request: HitlRequest) -> str:
+    return _PHASE_GOALS.get(request.phase, "finish this EZLynx policy step")
+
+
+def _one_sentence_error(error: str) -> str:
+    text = " ".join((error or "").split())
+    if not text:
+        return "I got stuck and could not finish."
+    for sep in (". ", ".\n"):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+            break
+    if len(text) > 240:
+        text = text[:237].rstrip() + "..."
+    return text
+
+
+def _humanize_attempt(item: str) -> str:
+    raw = (item or "").strip()
+    if not raw:
+        return ""
+    mapped = _ATTEMPT_PLAIN.get(raw.casefold())
+    if mapped:
+        return mapped
+    return raw
+
+
+def _already_tried_lines(attempted: list[str]) -> list[str]:
+    cleaned = [_humanize_attempt(item) for item in attempted]
+    cleaned = [item for item in cleaned if item]
+    if not cleaned:
+        return ["I have not gotten a clean retry yet."]
+    keys = [item.strip().casefold() for item in attempted if item.strip()]
+    if keys and all(key in _SELECTOR_STRATEGY_KEYS for key in keys):
+        return ["several ways to find the control on the page"]
+    return cleaned
+
+
+def _applicant_policy_line(request: HitlRequest) -> str:
+    policy = request.policy_id or "unknown"
+    return f"Applicant {request.applicant_id}. Policy {policy}."
+
+
+def build_hitl_email(request: HitlRequest) -> tuple[str, str]:
+    """Plain-English HITL email. Coworker tone. No phase-name subject."""
+    subject = f"Robie needs a hand — applicant {request.applicant_id}"
+    tried = _already_tried_lines(request.attempted)
+    if len(tried) == 1:
+        tried_block = tried[0]
+    else:
+        tried_block = "\n".join(f"{i}. {item}" for i, item in enumerate(tried, start=1))
+    extras: list[str] = []
+    title = (request.page_state or {}).get("title")
+    url = (request.page_state or {}).get("url")
+    if title or url:
+        extras.append(f"I was on {title or 'the page'}" + (f" ({url})" if url else "") + ".")
+    if request.screenshot_path:
+        extras.append(f"I saved a screenshot: {request.screenshot_path}")
+    extra_block = ("\n".join(extras) + "\n\n") if extras else ""
+    body = f"""Hey Carlo — Robie needs a hand.
+
+I'm trying to {_what_robie_is_trying_to_do(request)}.
+
+What went wrong: {_one_sentence_error(request.error)}
+
+I already tried:
+{tried_block}
+
+{_applicant_policy_line(request)}
+
+Reply with what I should try next, SKIP to skip this step, or ABORT to stop the job. I'll wait 30 minutes, then stop.
+
+{extra_block}Job {request.job_id}
+"""
+    return subject, body
+
+
+def build_hitl_chat(request: HitlRequest) -> str:
+    """Plain-English Google Chat HITL. Coworker tone. Job id is not the lead."""
+    tried = _already_tried_lines(request.attempted)
+    if len(tried) == 1:
+        tried_line = f"I already tried {tried[0]}."
+    else:
+        tried_line = "I already tried: " + "; ".join(tried) + "."
+    return (
+        "Hey Carlo — Robie needs a hand.\n"
+        f"\nI'm trying to {_what_robie_is_trying_to_do(request)}.\n"
+        f"\nWhat went wrong: {_one_sentence_error(request.error)}\n"
+        f"\n{tried_line}\n"
+        f"\n{_applicant_policy_line(request)}\n"
+        "\nReply with what I should try, SKIP, or ABORT. "
+        "I'll wait 30 minutes, then stop.\n"
+        f"\nJob {request.job_id}"
+    )
+
+
 def ping_carlo(request: HitlRequest, deps: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Send HITL notifications via Email and Google Chat.
     
@@ -134,44 +263,7 @@ def ping_carlo(request: HitlRequest, deps: dict[str, Any] | None = None) -> tupl
     email_sender = deps.get("email_sender")
     chat_sender = deps.get("chat_sender")  # Function that sends Google Chat messages
     
-    # Build the message
-    subject = f"[ROBIE HITL] Job {request.job_id} stuck at {request.phase}"
-    
-    body = f"""Robie needs your help.
-
-Job ID: {request.job_id}
-Phase: {request.phase}
-Error: {request.error}
-
-What was tried:
-{chr(10).join(f"  - {a}" for a in request.attempted)}
-
-Page state:
-- URL: {request.page_state.get('url', 'unknown')}
-- Title: {request.page_state.get('title', 'unknown')}
-- Buttons: {', '.join(request.page_state.get('buttons', [])[:15])}
-
-Applicant: {request.applicant_id}
-Policy: {request.policy_id or 'unknown'}
-
-Gemini was asked first but could not resolve this.
-
-What the job is trying to do:
-- Click "Save & Continue Edit" on the Edit Policy page to mint a FormEntry URL
-- Then fill coverage limits and deductibles in the FormEntry
-
-What was tried (in order):
-{chr(10).join(f"  {i+1}. {a}" for i, a in enumerate(request.attempted))}
-
-{f"Screenshot captured: {request.screenshot_path}" if request.screenshot_path else "No screenshot captured."}
-
-Reply with guidance, or the job will fail closed after 30 minutes.
-
-To continue the job, reply with one of:
-- A specific selector or button name to try
-- "SKIP" to skip this phase and continue
-- "ABORT" to stop the job
-"""
+    subject, body = build_hitl_email(request)
     
     sent = False
     
@@ -203,15 +295,10 @@ To continue the job, reply with one of:
     elif not recipients:
         email_error = "no recipients"
     
-    # Send via Google Chat (shorter format)
+    # Send via Google Chat (plain-English coworker copy)
     chat_error = ""
     if chat_sender:
-        chat_msg = (
-            f"🚨 ROBIE HITL: Job {request.job_id} stuck at {request.phase}\n"
-            f"Error: {request.error[:200]}\n"
-            f"Tried: {', '.join(request.attempted[:3])}\n"
-            f"Reply with guidance or job fails in 30 min."
-        )
+        chat_msg = build_hitl_chat(request)
         try:
             if chat_sender(chat_msg):
                 sent = True

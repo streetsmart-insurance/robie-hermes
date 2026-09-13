@@ -14,12 +14,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from .code_version import resolve_code_version
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
 
-# Code version marker from PR 371. The job report includes this so we can
-# correlate any run to the exact code that executed. Do not remove.
-CODE_VERSION = "712cdb0a4af2dafdfa38cb5406084b5279fd5f60"  # PR #370 merge commit
+# Derived from the loaded release path, the current pointer, or git HEAD.
+# Do not replace this with a hand-edited SHA — that is how 370 (712cdb0a)
+# stayed in the report after 375 (c166a9bb) was live.
+CODE_VERSION = resolve_code_version(source_file=__file__)
 
 EZLYNX_BASE_URL = "https://app.ezlynx.com"
 
