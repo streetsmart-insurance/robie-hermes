@@ -110,7 +110,10 @@ def _run_policy_setup(args: dict) -> dict:
             publish_live_playwright_hint(
                 [tab for ctx in browser.contexts for tab in ctx.pages], page=page
             )
-            setup = EzlynxPolicySetupPage(page)
+            job_id = (
+                os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
+            ).strip() or None
+            setup = EzlynxPolicySetupPage(page, job_id=job_id)
             shell = PolicyShellInput(
                 applicant_id="220250093",
                 lob="HOME",
@@ -162,6 +165,11 @@ def ezlynx_policy_setup_handler(args: dict, **kwargs):
         report = _run_policy_setup(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
         return tool_error(f"{type(exc).__name__}: {exc}")
+    from robie_job_engine.ezlynx_policy_setup import policy_setup_hitl_blocks_continue
+
+    block = policy_setup_hitl_blocks_continue(report if isinstance(report, dict) else None)
+    if block:
+        return tool_error(block)
     # Only mark tool_called when the handler created or found the policy.
     # A failed create must not release the POLICY_SETUP_ORDER guard.
     if isinstance(report, dict) and report.get("success"):

@@ -34,6 +34,8 @@ class HitlRequest:
     notify_requester: bool = True  # Also notify the original requester
     screenshot_path: str | None = None  # Path to screenshot of the stuck state
     gemini_applied: bool = False
+    gemini_named_option: str | None = None
+    live_control_shows: str | None = None
     formentry_exists: bool = False
     job_still_running: bool = False
     save_skipped: bool = False
@@ -45,7 +47,8 @@ class HitlResponse:
     """Response from Gemini or Carlo."""
     source: str  # "gemini" or "carlo"
     suggestion: str  # What to try next (structured diff format when from Gemini)
-    actionable: bool  # Can the job act on this?
+    actionable: bool  # Can the job act on this? HITL is always False (STOP AND ASK).
+    hitl_posted: bool = False
     raw: dict[str, Any] | None = None
     # Structured fix fields (populated when Gemini returns diff format):
     fix_file: str | None = None  # e.g. "robie_job_engine/ezlynx_policy_setup.py"
@@ -199,14 +202,20 @@ If you cannot provide a specific actionable suggestion, respond with exactly: UN
         )
 
 
+def live_control_shows_named_option(request: HitlRequest) -> bool:
+    """True only when the live control actually shows Gemini's named option."""
+    named = str(request.gemini_named_option or "").strip()
+    shown = str(request.live_control_shows or "").strip()
+    if not named or not shown:
+        return False
+    from .ezlynx_field_widgets import normalize_option_text
+
+    return normalize_option_text(named) == normalize_option_text(shown)
+
+
 def gemini_resolved_and_job_continuing(request: HitlRequest) -> bool:
-    """True only when FormEntry exists and a Job Engine job is still running."""
-    return bool(
-        request.gemini_applied
-        and request.formentry_exists
-        and request.job_still_running
-        and not request.script_or_job_stopped
-    )
+    """Always False. Honest HITL is STOP AND ASK; never continue after posting."""
+    return False
 
 
 def build_hitl_notice(
@@ -215,44 +224,33 @@ def build_hitl_notice(
 ) -> dict[str, str]:
     """Carlo-facing HITL text. Never claim resolved/continuing without proof."""
     gemini_text = (gemini_response.suggestion if gemini_response else "") or ""
-    gemini_answered = bool(
-        gemini_response
-        and gemini_response.source == "gemini"
-        and gemini_text
-        and "not available" not in gemini_text.casefold()
-        and "not configured" not in gemini_text.casefold()
-        and "could not provide" not in gemini_text.casefold()
-    )
-    if gemini_resolved_and_job_continuing(request):
-        subject = f"[ROBIE HITL] Job {request.job_id}: Gemini applied {request.phase}"
-        body = (
-            f"Gemini named a live option and it was applied.\n"
-            f"FormEntry exists. A Job Engine job is still running.\n\n"
-            f"Job ID: {request.job_id}\n"
-            f"Phase: {request.phase}\n"
-            f"Error: {request.error}\n"
-            f"Applicant: {request.applicant_id}\n"
-            f"Policy: {request.policy_id or 'unknown'}\n"
-        )
-        chat = (
-            f"ROBIE HITL: Job {request.job_id} at {request.phase}. "
-            f"Gemini applied a live option. FormEntry exists. Job still running."
-        )
-        return {"subject": subject, "body": body, "chat": chat}
-
+    named = str(request.gemini_named_option or "").strip()
+    shown = str(request.live_control_shows or "").strip()
+    applied = bool(request.gemini_applied) and live_control_shows_named_option(request)
     facts: list[str] = []
-    if gemini_answered and not request.gemini_applied:
-        facts.append("Gemini answered. Nothing was applied.")
-    elif gemini_answered and request.gemini_applied:
-        facts.append("Gemini answered and a fill was applied.")
+    if applied:
+        facts.append(
+            f"Gemini named {named!r} and the live control shows {shown!r}."
+        )
+    elif named and not applied:
+        facts.append(
+            f"Gemini named a live option {named!r}. Nothing was applied. "
+            f"Live control shows {(shown or '(empty)')!r}."
+        )
+    elif gemini_text and "unsure" in (request.error or "").casefold():
+        facts.append("Gemini is still unsure after one retry. HITL, no select.")
+    elif gemini_response and gemini_response.source == "gemini" and gemini_text:
+        if request.gemini_applied:
+            facts.append("Gemini answered and a fill was applied.")
+        else:
+            facts.append("Gemini answered. Nothing was applied.")
     elif gemini_response and gemini_response.source == "gemini":
-        facts.append("Gemini was asked and did not name a usable live option.")
+        facts.append("Gemini was asked and did not name a usable live option. Nothing was applied.")
     else:
-        facts.append("Gemini was not able to help.")
+        facts.append("Gemini was not able to help. Nothing was applied.")
     if request.save_skipped:
         facts.append("The fill still failed. Save was skipped.")
-    if request.script_or_job_stopped or not request.job_still_running:
-        facts.append("The script/job stopped.")
+    facts.append("STOP AND ASK. The script/job stopped.")
     if not request.formentry_exists:
         facts.append("FormEntry does not exist.")
     subject = f"[ROBIE HITL] Job {request.job_id} stuck at {request.phase}"
@@ -266,9 +264,11 @@ def build_hitl_notice(
         "What was tried:\n"
         + "\n".join(f"  - {a}" for a in request.attempted)
         + "\n\n"
-        f"Gemini suggestion (not applied unless stated above):\n{gemini_text or '(none)'}\n\n"
+        f"Gemini suggestion (not applied unless the live control shows it):\n"
+        f"{gemini_text or named or '(none)'}\n\n"
         f"Applicant: {request.applicant_id}\n"
         f"Policy: {request.policy_id or 'unknown'}\n"
+        "Reply RETRY in this same Chat thread after the page is corrected.\n"
     )
     chat = (
         f"ROBIE HITL: Job {request.job_id} stuck at {request.phase}. "
@@ -320,14 +320,20 @@ def _deliver_hitl(
         try:
             if chat_sender(notice["chat"]):
                 chat_sent = True
+            else:
+                chat_error = chat_error or "chat_sender returned false"
         except Exception as exc:
             chat_error = f"{type(exc).__name__}: {exc}"
+    else:
+        chat_error = chat_error or "no chat_sender in deps"
     return {
         "email_sent": email_sent,
         "chat_sent": chat_sent,
         "email_error": email_error,
         "chat_error": chat_error,
-        "sent": email_sent or chat_sent,
+        # Email HITL is dead (signBlob 403). Chat thread is the HITL channel.
+        "sent": chat_sent,
+        "hitl_posted": chat_sent,
     }
 
 
@@ -336,34 +342,17 @@ def notify_carlo_gemini_success(
     gemini_response: HitlResponse,
     deps: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """Inform Carlo only when Gemini was applied and the job is still running.
-
-    A Gemini suggestion that was not applied is not a resolution. Email
-    signBlob can fail; this function does not claim email worked.
-    """
-    if not gemini_resolved_and_job_continuing(request):
-        delivery = _deliver_hitl(request, build_hitl_notice(request, gemini_response), deps)
-        error = ""
-        if not delivery["sent"]:
-            parts = []
-            if delivery["email_error"]:
-                parts.append(f"email: {delivery['email_error']}")
-            if delivery["chat_error"]:
-                parts.append(f"chat: {delivery['chat_error']}")
-            error = "; ".join(parts) or "unknown failure"
-        return (bool(delivery["sent"]), error)
-
-    notice = build_hitl_notice(request, gemini_response)
-    delivery = _deliver_hitl(request, notice, deps)
+    """Post honest HITL. Never treat this as a continue/resolved signal."""
+    delivery = _deliver_hitl(request, build_hitl_notice(request, gemini_response), deps)
     error = ""
-    if not delivery["sent"]:
+    if not delivery["hitl_posted"]:
         parts = []
         if delivery["email_error"]:
             parts.append(f"email: {delivery['email_error']}")
         if delivery["chat_error"]:
             parts.append(f"chat: {delivery['chat_error']}")
-        error = "; ".join(parts) or "unknown failure"
-    return (bool(delivery["sent"]), error)
+        error = "; ".join(parts) or "HITL posted=false"
+    return (bool(delivery["hitl_posted"]), error)
 
 
 def ping_carlo(
@@ -371,10 +360,10 @@ def ping_carlo(
     deps: dict[str, Any] | None = None,
     gemini_response: HitlResponse | None = None,
 ) -> tuple[bool, str]:
-    """Send HITL notifications via Email and Google Chat.
+    """Send HITL into the originating Chat thread. Email is best-effort only.
 
-    Honest about Gemini and job state. Does not claim email worked unless
-    send succeeded.
+    Honest about Gemini and job state. Chat failure is HITL posted=false.
+    Email signBlob 403 is not a HITL post and does not authorize continue.
     """
     notice = build_hitl_notice(request, gemini_response)
     delivery = _deliver_hitl(request, notice, deps)
@@ -383,7 +372,9 @@ def ping_carlo(
         parts.append(f"email: {delivery['email_error']}")
     if not delivery["chat_sent"] and delivery["chat_error"]:
         parts.append(f"chat: {delivery['chat_error']}")
-    return (bool(delivery["sent"]), "; ".join(parts))
+    if not delivery["chat_sent"] and not delivery["chat_error"]:
+        parts.append("chat: HITL posted=false")
+    return (bool(delivery["hitl_posted"]), "; ".join(parts))
 
 
 def wait_for_carlo_response(
@@ -417,49 +408,38 @@ def wait_for_carlo_response(
 
 
 def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlResponse:
-    """Gemini first, then Carlo. Never claim resolved unless FormEntry exists
-    and a Job Engine job is still running.
+    """STOP AND ASK. Post HITL to the originating Chat thread. Do not continue.
+
+    Field-fill already asked Gemini once and retried once. A second Gemini
+    JSON/code-diff answer is not a dropdown apply and must not look resolved.
+    Email HITL is not the channel. If Chat ping fails, HITL posted=false.
     """
     deps = deps or {}
-    gemini_response = ask_gemini(request, deps.get("gemini_client"))
-    resolved = gemini_resolved_and_job_continuing(request) and gemini_response.actionable
-
+    notice = build_hitl_notice(request, None)
     if request.notify_carlo:
-        if resolved:
-            notify_carlo_gemini_success(request, gemini_response, deps)
-            return gemini_response
-        email_sent, email_error = ping_carlo(request, deps, gemini_response)
-        if not email_sent and not request.job_still_running:
-            notice = build_hitl_notice(request, gemini_response)
-            return HitlResponse(
-                source="system",
-                suggestion=notice["body"],
-                actionable=False,
-                raw={"email_error": email_error, "gemini": gemini_response.suggestion},
-            )
-        if not email_sent:
-            return HitlResponse(
-                source="system",
-                suggestion=f"Could not send HITL notification to Carlo ({email_error})",
-                actionable=False,
-            )
-
-    if resolved:
-        return gemini_response
-
-    if request.job_still_running and not request.script_or_job_stopped:
-        carlo_response = wait_for_carlo_response(
-            request.job_id,
-            timeout_seconds=deps.get("hitl_timeout", 1800),
-            email_checker=deps.get("email_checker"),
+        chat_posted, post_error = ping_carlo(request, deps, None)
+    else:
+        chat_posted, post_error = False, "notify_carlo=false"
+    raw = {
+        "hitl_posted": chat_posted,
+        "continue_after_hitl": False,
+        "error": post_error,
+    }
+    if not chat_posted:
+        return HitlResponse(
+            source="system",
+            suggestion=(
+                notice["body"]
+                + f" HITL posted=false ({post_error or 'Chat ping failed'})."
+            ),
+            actionable=False,
+            hitl_posted=False,
+            raw=raw,
         )
-        if carlo_response and carlo_response.actionable:
-            return carlo_response
-
-    notice = build_hitl_notice(request, gemini_response)
     return HitlResponse(
         source="system",
         suggestion=notice["body"],
         actionable=False,
-        raw={"gemini": gemini_response.suggestion},
+        hitl_posted=True,
+        raw=raw,
     )

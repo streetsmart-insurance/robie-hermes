@@ -95,6 +95,8 @@ class WidgetFillResult:
     via: str | None = None
     gemini_asked: bool = False
     gemini_applied: bool = False
+    named_option: str | None = None
+    live_visible: str | None = None
     hitl: bool = False
     error: str | None = None
     attempts: int = 0
@@ -108,6 +110,8 @@ class WidgetFillResult:
             "via": self.via,
             "gemini_asked": self.gemini_asked,
             "gemini_applied": self.gemini_applied,
+            "named_option": self.named_option,
+            "live_visible": self.live_visible,
             "hitl": self.hitl,
             "error": self.error,
             "attempts": self.attempts,
@@ -121,6 +125,8 @@ def _hitl_result(
     reason: str,
     *,
     gemini_asked: bool,
+    named_option: str | None = None,
+    live_visible: str | None = None,
 ) -> WidgetFillResult:
     options = [str(item).strip() for item in live_options if str(item).strip()]
     return WidgetFillResult(
@@ -129,6 +135,8 @@ def _hitl_result(
         live_options=options,
         gemini_asked=gemini_asked,
         gemini_applied=False,
+        named_option=named_option,
+        live_visible=live_visible,
         hitl=True,
         error=(
             f"{reason} Live options on {widget.root}: {options}. "
@@ -347,6 +355,8 @@ async def fill_identified_widget(
                     via="exact" if not decision.gemini_asked else "gemini",
                     gemini_asked=decision.gemini_asked,
                     gemini_applied=decision.gemini_asked,
+                    named_option=decision.option,
+                    live_visible=selected_visible,
                     hitl=False,
                     attempts=attempt,
                 )
@@ -367,6 +377,8 @@ async def fill_identified_widget(
         live_options,
         f"retry still failed after applying {decision.option!r}: {last_error}",
         gemini_asked=decision.gemini_asked,
+        named_option=decision.option,
+        live_visible=selected_visible or None,
     )
 
 

@@ -90,9 +90,11 @@ class HitlHonestyTests(unittest.TestCase):
         self.assertTrue(sent)
         self.assertIn("signBlob", error)
 
-    def test_resolved_wording_requires_formentry_and_running_job(self) -> None:
+    def test_live_control_match_still_stop_and_ask_never_continuing(self) -> None:
         request = _request(
             gemini_applied=True,
+            gemini_named_option="Personal Lines (P/L)",
+            live_control_shows="Personal Lines (P/L)",
             formentry_exists=True,
             job_still_running=True,
             script_or_job_stopped=False,
@@ -102,8 +104,52 @@ class HitlHonestyTests(unittest.TestCase):
             request,
             HitlResponse(source="gemini", suggestion="picked live option", actionable=True),
         )
-        self.assertIn("still running", notice["chat"].casefold())
-        self.assertTrue(gemini_resolved_and_job_continuing(request))
+        blob = notice["subject"] + notice["body"] + notice["chat"]
+        self.assertIn("live control shows", blob.casefold())
+        self.assertIn("stop and ask", blob.casefold())
+        self.assertNotIn("job is continuing", blob.casefold())
+        self.assertNotIn("job continuing", blob.casefold())
+        self.assertFalse(gemini_resolved_and_job_continuing(request))
+
+    def test_named_option_without_apply_is_not_resolved(self) -> None:
+        request = _request(
+            gemini_applied=False,
+            gemini_named_option="Personal Lines (P/L)",
+            live_control_shows="",
+        )
+        notice = build_hitl_notice(request, None)
+        blob = notice["subject"] + notice["body"] + notice["chat"]
+        self.assertIn("named a live option", blob.casefold())
+        self.assertIn("nothing was applied", blob.casefold())
+        self.assertNotIn("resolved", blob.casefold())
+        self.assertIn("stop and ask", blob.casefold())
+
+    def test_chat_failure_is_fail_closed_even_if_email_sends(self) -> None:
+        sent, error = ping_carlo(
+            _request(),
+            {
+                "email_sender": lambda **_k: None,
+                "chat_sender": lambda _m: False,
+            },
+        )
+        self.assertFalse(sent)
+        self.assertIn("chat", error.casefold())
+
+    def test_escalate_never_returns_actionable_continue(self) -> None:
+        response = escalate(
+            _request(
+                gemini_applied=True,
+                gemini_named_option="Direct",
+                live_control_shows="Direct",
+                formentry_exists=True,
+                job_still_running=True,
+                script_or_job_stopped=False,
+            ),
+            {"chat_sender": lambda _m: True, "email_sender": None},
+        )
+        self.assertFalse(response.actionable)
+        self.assertTrue(response.hitl_posted)
+        self.assertEqual(response.source, "system")
 
 
 if __name__ == "__main__":
