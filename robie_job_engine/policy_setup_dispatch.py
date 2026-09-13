@@ -125,6 +125,18 @@ def is_policy_setup_fail_closed(text: str) -> bool:
     )
 
 
+def is_coverage_fill_miss(text: str) -> bool:
+    """True for job 2b30d293: FormEntry opened, no coverage labels filled."""
+    folded = " ".join(str(text or "").casefold().split())
+    if not folded:
+        return False
+    return (
+        "no coverage labels were filled" in folded
+        or "coverage amounts not on the job" in folded
+        or "will not guess coverage amounts" in folded
+    )
+
+
 def is_formentry_mint_miss(text: str) -> bool:
     """True for job c75aab5c: Save clicked, Edit URL, FormEntry never minted."""
     raw = str(text or "")
@@ -140,8 +152,12 @@ def is_formentry_mint_miss(text: str) -> bool:
 
 
 def is_policy_setup_honest_hitl(text: str) -> bool:
-    """Fail-closed missing tool or FormEntry mint-miss — park HITL, not RUNNING."""
-    return is_policy_setup_fail_closed(text) or is_formentry_mint_miss(text)
+    """Fail-closed, mint-miss, or empty coverage fill — park HITL, not UNVERIFIED."""
+    return (
+        is_policy_setup_fail_closed(text)
+        or is_formentry_mint_miss(text)
+        or is_coverage_fill_miss(text)
+    )
 
 
 def policy_setup_openai_schema() -> dict:

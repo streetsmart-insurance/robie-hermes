@@ -205,9 +205,9 @@ def structured_blocker_reason(text: str) -> str | None:
     fail_closed = policy_setup_fail_closed_reason(safe)
     if fail_closed:
         return fail_closed
-    from .policy_setup_dispatch import is_formentry_mint_miss
+    from .policy_setup_dispatch import is_coverage_fill_miss, is_formentry_mint_miss
 
-    if is_formentry_mint_miss(safe):
+    if is_formentry_mint_miss(safe) or is_coverage_fill_miss(safe):
         return (safe.split("\n", 1)[0].strip() or safe)[:1_000]
     match = _STRUCTURED_BLOCKER.search(safe)
     return match.group(1).strip()[:1_000] if match else None
@@ -254,6 +254,24 @@ def formentry_mint_miss_hitl_text(*, job_id: str = "", detail: str = "") -> str:
         "FormEntry does not exist. The page stayed on Policy/Actions/Edit. "
         "Gemini did not handle this. ROBIE will not wander with playwright_exec. "
         "This job is not still working.",
+        DRY_HITL_ASK,
+    ]
+    if job_id:
+        lines.append(f"Job ID: {job_id}")
+    return "\n".join(lines)
+
+
+def coverage_fill_miss_hitl_text(*, job_id: str = "", detail: str = "") -> str:
+    """Honest HITL for job 2b30d293: FormEntry opened, coverages not filled."""
+    reason = (
+        str(detail or "").strip()
+        or "no coverage labels were filled"
+    )
+    lines = [
+        f"ROBIE HITL: STOP AND ASK. {reason}",
+        "FormEntry opened. Coverage amounts that were not on the job were "
+        "not guessed. Gemini did not handle this. ROBIE will not wander "
+        "with playwright_exec. This job is not still working.",
         DRY_HITL_ASK,
     ]
     if job_id:

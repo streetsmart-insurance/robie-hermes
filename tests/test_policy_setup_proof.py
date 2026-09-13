@@ -224,7 +224,9 @@ class FakePage:
         self._label_map = label_map
         self.filled: dict[str, str] = {}
 
-    def evaluate(self, _js, label):
+    def evaluate(self, _js, label=None):
+        if label is None:
+            return list(self._label_map.keys())
         desc = self._label_map.get(label)
         if not desc:
             return {"found": False, "reason": "label text not found"}
@@ -251,6 +253,22 @@ class TestFillCoveragesByLabel(unittest.TestCase):
         self.assertFalse(entry["found"])
         self.assertIn("Dwelling", report["not_found"])
         self.assertEqual(report["filled_count"], 0)
+
+    def test_live_prefixed_label_matches_job_dwelling(self):
+        self.assertEqual(
+            fc.match_wanted_to_live_label(
+                "Dwelling",
+                ["Coverage A - Dwelling", "Other Structures"],
+            ),
+            "Coverage A - Dwelling",
+        )
+        page = FakePage(
+            {"Coverage A - Dwelling": {"id": "liveA", "tag": "input", "name": "a"}}
+        )
+        report = fc.fill_coverages_by_label(page, {"Dwelling": "250000"})
+        self.assertEqual(report["filled_count"], 1)
+        self.assertTrue(report["labels"]["Dwelling"]["filled"])
+        self.assertNotIn("HO_CoverageA", str(report))
 
 
 if __name__ == "__main__":

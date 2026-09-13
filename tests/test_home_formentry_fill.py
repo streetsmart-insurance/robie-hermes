@@ -303,7 +303,10 @@ class HomeSetupPolicyByLobTests(unittest.TestCase):
 
             from unittest.mock import patch
 
-            from robie_job_engine.ezlynx_policy_setup import PolicyShellInput
+            from robie_job_engine.ezlynx_policy_setup import (
+                HomeownersCoverageItem,
+                PolicyShellInput,
+            )
 
             with patch("robie_job_engine.ezlynx_api.EzlynxApiClient"), patch(
                 "robie_job_engine.ezlynx_api.load_ezlynx_api_config"
@@ -325,6 +328,9 @@ class HomeSetupPolicyByLobTests(unittest.TestCase):
                         policy_number="TEST-HO-20260911-E01",
                         effective_date="10/02/2026",
                         expiration_date="10/02/2027",
+                        homeowners_coverage=HomeownersCoverageItem(
+                            dwelling_a="250000"
+                        ),
                     )
                 )
 

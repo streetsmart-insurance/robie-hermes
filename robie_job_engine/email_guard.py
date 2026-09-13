@@ -34,12 +34,24 @@ class HermesEmailWorker:
             for key, value in binding.payload_patch().items():
                 payload.setdefault(key, value)
             self.store.update_payload(job["id"], payload)
+        existing = self.store.get_checkpoint(job["id"], "action") or {}
+        existing_dest = dict(existing.get("destination") or {})
+        payload = dict(job.get("payload") or {})
+        for key in ("policy_number", "policy_id", "applicant_id"):
+            value = str(existing_dest.get(key) or payload.get(key) or "").strip()
+            if value:
+                destination[key] = value
+                payload.setdefault(key, value)
+        if any(destination.get(k) for k in ("policy_number", "policy_id")):
+            self.store.update_payload(job["id"], payload)
         self.store.checkpoint(job["id"], "email_response", {"response_text": response})
         route = self.store.get_checkpoint(job["id"], 'email_route') or {}
         if route.get('route') == 'finance':
             destination = {"gmail_message_id": job['payload']['gmail_message_id']}
         blocked = response.startswith("ROBIE_EXECUTION_BLOCKED:")
         failed = blocked or response.lstrip().lower().startswith("error executing task:")
+        from .hitl import structured_blocker_reason
+        from .hitl_ladder import stamp_hitl_posted_at
         from .policy_setup_dispatch import is_policy_setup_honest_hitl
 
         hold = (
@@ -47,12 +59,21 @@ class HermesEmailWorker:
             else (JobStatus.NEEDS_CLARIFICATION if route.get('status') == 'NEEDS_CLARIFICATION' else None)
         )
         error = response if failed or route.get('status') == 'NEEDS_CLARIFICATION' else None
-        # Job c75aab5c: mint-miss became UNVERIFIED via the destination
-        # verifier. Park HITL instead of a 20-minute RUNNING / UNVERIFIED.
-        if is_policy_setup_honest_hitl(response) or response.startswith("ROBIE HITL:"):
+        # Job 2b30d293 / c75aab5c: empty fill or mint-miss became UNVERIFIED.
+        # Park HITL instead of a 20-minute RUNNING / UNVERIFIED.
+        if (
+            is_policy_setup_honest_hitl(response)
+            or response.startswith("ROBIE HITL:")
+            or structured_blocker_reason(response)
+        ):
             hold = JobStatus.AWAITING_HUMAN_INPUT
             error = response
             failed = True
+            payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
+            for key in ("policy_number", "policy_id", "applicant_id"):
+                if destination.get(key):
+                    payload.setdefault(key, destination[key])
+            self.store.update_payload(job["id"], payload)
         return WorkerResult(
             succeeded=not failed,
             action="hermes.email_task",

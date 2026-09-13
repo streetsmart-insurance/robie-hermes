@@ -52,7 +52,7 @@ class HitlHonestyTests(unittest.TestCase):
         self.assertIn("stopped", notice["body"].casefold())
         self.assertFalse(gemini_resolved_and_job_continuing(request))
 
-    def test_escalate_one_shot_does_not_return_gemini_as_continuing(self) -> None:
+    def test_escalate_gemini_actionable_continues_without_carlo(self) -> None:
         chats: list[str] = []
 
         def chat_sender(message: str) -> bool:
@@ -60,12 +60,41 @@ class HitlHonestyTests(unittest.TestCase):
             return True
 
         response = escalate(
-            _request(),
+            _request(gemini_asked=False, gemini_named_option=None, gemini_applied=False),
             {
                 "gemini_client": type(
                     "C",
                     (),
-                    {"generate_content": lambda self, _p: "truncated suggestion only"},
+                    {
+                        "generate_content": lambda self, _p: (
+                            "FILE: robie_job_engine/ezlynx_policy_setup.py\n"
+                            "AFTER: apply the live Department option"
+                        )
+                    },
+                )(),
+                "chat_sender": chat_sender,
+                "email_sender": None,
+            },
+        )
+        self.assertTrue(response.actionable)
+        self.assertEqual(response.source, "gemini")
+        self.assertFalse(response.hitl_posted)
+        self.assertEqual(chats, [])
+
+    def test_escalate_gemini_miss_loops_carlo(self) -> None:
+        chats: list[str] = []
+
+        def chat_sender(message: str) -> bool:
+            chats.append(message)
+            return True
+
+        response = escalate(
+            _request(gemini_asked=False, gemini_named_option=None, gemini_applied=False),
+            {
+                "gemini_client": type(
+                    "C",
+                    (),
+                    {"generate_content": lambda self, _p: "UNSURE"},
                 )(),
                 "chat_sender": chat_sender,
                 "email_sender": None,
@@ -73,10 +102,11 @@ class HitlHonestyTests(unittest.TestCase):
         )
         self.assertFalse(response.actionable)
         self.assertEqual(response.source, "system")
+        self.assertTrue(response.hitl_posted)
         self.assertTrue(chats)
         self.assertNotIn("resolved", chats[0].casefold())
-        self.assertNotIn("continuing", chats[0].casefold())
-        self.assertIn("Nothing was applied", chats[0])
+        self.assertNotIn("job is continuing", chats[0].casefold())
+        self.assertIn("stop and ask", chats[0].casefold())
 
     def test_ping_carlo_does_not_claim_email_when_send_fails(self) -> None:
         def boom(**_kwargs):
@@ -135,7 +165,8 @@ class HitlHonestyTests(unittest.TestCase):
         self.assertFalse(sent)
         self.assertIn("chat", error.casefold())
 
-    def test_escalate_never_returns_actionable_continue(self) -> None:
+    def test_escalate_gemini_applied_still_running_continues(self) -> None:
+        chats: list[str] = []
         response = escalate(
             _request(
                 gemini_applied=True,
@@ -145,11 +176,31 @@ class HitlHonestyTests(unittest.TestCase):
                 job_still_running=True,
                 script_or_job_stopped=False,
             ),
-            {"chat_sender": lambda _m: True, "email_sender": None},
+            {"chat_sender": lambda m: chats.append(m) or True, "email_sender": None},
+        )
+        self.assertTrue(response.actionable)
+        self.assertFalse(response.hitl_posted)
+        self.assertEqual(response.source, "gemini")
+        self.assertEqual(chats, [])
+
+    def test_escalate_applied_retry_failed_loops_carlo(self) -> None:
+        chats: list[str] = []
+        response = escalate(
+            _request(
+                gemini_applied=True,
+                gemini_asked=True,
+                gemini_named_option="Direct",
+                live_control_shows="Direct",
+                applied_retry_failed=True,
+                script_or_job_stopped=True,
+                job_still_running=False,
+            ),
+            {"chat_sender": lambda m: chats.append(m) or True, "email_sender": None},
         )
         self.assertFalse(response.actionable)
         self.assertTrue(response.hitl_posted)
         self.assertEqual(response.source, "system")
+        self.assertTrue(chats)
 
 
 if __name__ == "__main__":
