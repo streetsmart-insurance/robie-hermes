@@ -2,8 +2,8 @@
 
 When the job gets stuck, this module implements the escalation path:
 1. Ask Gemini for a suggestion (fast, automated)
-2. If Gemini can't help, ping Carlo via email (slower, human)
-3. Wait for Carlo's response with timeout
+2. ALWAYS notify Carlo (informational if Gemini succeeded, blocking if not)
+3. If Gemini couldn't help, wait for Carlo's response with timeout
 4. Continue with guidance or fail closed
 
 This is the REAL HITL — not the dry marker. It actually sends notifications.
@@ -121,6 +121,94 @@ If you cannot provide a specific actionable suggestion, respond with exactly: UN
             suggestion=f"Gemini request failed: {type(exc).__name__}: {exc}",
             actionable=False,
         )
+
+
+def notify_carlo_gemini_success(
+    request: HitlRequest,
+    gemini_response: HitlResponse,
+    deps: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Inform Carlo that Gemini resolved a stuck job (no response needed).
+
+    This is the visibility fix: previously, when Gemini provided actionable
+    guidance, escalate() returned silently and Carlo never heard about it.
+    Now Carlo gets an informational ping every time HITL fires, even when
+    Gemini handles it. The job continues without waiting.
+
+    Returns (sent, error_reason) like ping_carlo.
+    """
+    deps = deps or {}
+    email_sender = deps.get("email_sender")
+    chat_sender = deps.get("chat_sender")
+
+    subject = f"[ROBIE HITL] Job {request.job_id}: Gemini resolved {request.phase} (no action needed)"
+
+    body = f"""Robie hit a snag and Gemini resolved it. No action needed — this is for visibility.
+
+Job ID: {request.job_id}
+Phase: {request.phase}
+Error: {request.error}
+
+What was tried:
+{chr(10).join(f"  - {a}" for a in request.attempted)}
+
+Gemini's suggestion: {gemini_response.suggestion}
+
+The job is continuing with Gemini's guidance. If you want to override,
+reply to this email.
+
+Applicant: {request.applicant_id}
+Policy: {request.policy_id or 'unknown'}
+"""
+
+    sent = False
+    recipients = []
+    if request.notify_carlo:
+        recipients.append("carlo@streetsmart.insurance")
+    if request.notify_requester and request.original_requester:
+        if request.original_requester not in recipients:
+            recipients.append(request.original_requester)
+
+    email_error = ""
+    if email_sender and recipients:
+        for recipient in recipients:
+            try:
+                if hasattr(email_sender, "send") and callable(email_sender.send):
+                    email_sender.send(to=recipient, subject=subject, body=body)
+                elif callable(email_sender):
+                    email_sender(to=recipient, subject=subject, body=body)
+                else:
+                    email_error = "email_sender is neither callable nor has .send"
+                    continue
+                sent = True
+            except Exception as e:
+                email_error = f"{type(e).__name__}: {e}"
+    elif not email_sender:
+        email_error = "no email_sender in deps"
+
+    chat_error = ""
+    if chat_sender:
+        chat_msg = (
+            f"✅ ROBIE HITL: Job {request.job_id} hit '{request.error[:100]}' "
+            f"at {request.phase}\n"
+            f"Gemini resolved it: {gemini_response.suggestion[:200]}\n"
+            f"No action needed — job continuing."
+        )
+        try:
+            if chat_sender(chat_msg):
+                sent = True
+        except Exception as e:
+            chat_error = f"{type(e).__name__}: {e}"
+
+    error_reason = ""
+    if not sent:
+        parts = []
+        if email_error:
+            parts.append(f"email: {email_error}")
+        if chat_error:
+            parts.append(f"chat: {chat_error}")
+        error_reason = "; ".join(parts) or "unknown failure"
+    return (sent, error_reason)
 
 
 def ping_carlo(request: HitlRequest, deps: dict[str, Any] | None = None) -> tuple[bool, str]:
@@ -269,10 +357,16 @@ def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlRe
     
     # Step 1: Ask Gemini
     gemini_response = ask_gemini(request, deps.get("gemini_client"))
-    if gemini_response.actionable:
+
+    # Step 2: ALWAYS notify Carlo (not just when Gemini fails).
+    # If Gemini succeeded: informational ping, job continues without waiting.
+    # If Gemini failed: blocking ping, wait for Carlo's response below.
+    if request.notify_carlo and gemini_response.actionable:
+        notify_carlo_gemini_success(request, gemini_response, deps)
         return gemini_response
-    
-    # Step 2: Ping Carlo (and original requester) via Email + Google Chat
+
+    # Step 3: Ping Carlo (and original requester) via Email + Google Chat
+    # (only reached when Gemini could not help)
     email_sent, email_error = ping_carlo(request, deps)
     if not email_sent:
         return HitlResponse(
@@ -281,7 +375,7 @@ def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlRe
             actionable=False,
         )
     
-    # Step 3: Wait for Carlo
+    # Step 4: Wait for Carlo (only when Gemini couldn't help)
     carlo_response = wait_for_carlo_response(
         request.job_id,
         timeout_seconds=deps.get("hitl_timeout", 1800),
@@ -291,7 +385,7 @@ def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlRe
     if carlo_response and carlo_response.actionable:
         return carlo_response
     
-    # Step 4: Fail closed
+    # Step 5: Fail closed
     return HitlResponse(
         source="system",
         suggestion="HITL timeout: neither Gemini nor Carlo provided actionable guidance",
