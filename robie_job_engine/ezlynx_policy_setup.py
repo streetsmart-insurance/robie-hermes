@@ -1316,10 +1316,16 @@ class EzlynxPolicySetupPage:
                         f" HITL {hitl_response.source} suggested: {hitl_response.suggestion}"
                     )
                 else:
-                    report["error"] += " HITL escalation failed; no actionable guidance."
+                    # Include the reason so it's visible in the job report
+                    reason = hitl_response.suggestion or "no actionable guidance"
+                    report["error"] += f" HITL escalation failed ({hitl_response.source}): {reason}."
+                    # Include screenshot path if captured
+                    if screenshot_path:
+                        report["error"] += f" Screenshot: {screenshot_path}."
             except Exception as hitl_exc:  # noqa: BLE001
-                report["hitl_error"] = f"{type(hitl_exc).__name__}: {hitl_exc}"
-                report["error"] += " HITL escalation error; failing closed."
+                err_msg = f"{type(hitl_exc).__name__}: {hitl_exc}"
+                report["hitl_error"] = err_msg
+                report["error"] += f" HITL escalation error ({err_msg}); failing closed."
             return report
         # Fill required fields before clicking: Billing Type and Department.
         # The form validation blocks the save if these are empty.
