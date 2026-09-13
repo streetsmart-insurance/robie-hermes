@@ -13,50 +13,43 @@ service-account JSON key. No public SSH port.
 | Item | Value |
 | --- | --- |
 | Project | `streetsmart-hermes-poc` |
-| VM | `hermes-test-01` only |
+| VM | `hermes-test-01` only (id `6971056864475829887`) |
 | Zone | `us-east1-b` |
 | Attached VM SA | `robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com` |
 | WIF provider | `projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github` |
 | WIF trust | repository ID `1343750842`, protected `refs/heads/main` |
 
-## Owner one-time grants (Carlo-scoped)
+## Owner one-time grants
 
-Test and Production share `streetsmart-hermes-poc`. IAP must be **instance-
-scoped** to `hermes-test-01`. Do **not** grant project-level
-`roles/iap.tunnelResourceAccessor` (that would also open `hermes-poc-01`).
+Test and Production share `streetsmart-hermes-poc`. IAP must stay locked to
+`hermes-test-01`.
+
+**Do not** grant unbound project-level `roles/iap.tunnelResourceAccessor`
+(that would also open `hermes-poc-01`).
+
+**Do not** use `gcloud compute instances add-iam-policy-binding ... roles/iap.tunnelResourceAccessor`
+— that role is not supported on Compute instance IAM and returns HTTP 400.
+
+Correct IAP scope (Google "Grant access to a specific VM"):
+
+- IAP tunnel instance IAM via
+  `https://iap.googleapis.com/v1/projects/PROJECT_NUMBER/iap_tunnel/zones/ZONE/instances/INSTANCE`
+- Or an Owner-managed project conditional binding titled
+  `github-test-deployer-ssh` that resolves only to instance id
+  `6971056864475829887` / `hermes-test-01`
 
 ```bash
 bash scripts/grant-test-deployer-iap-ssh.sh grant
 bash scripts/grant-test-deployer-iap-ssh.sh verify
 ```
 
-Exact roles (owner paste-equivalent):
+Exact roles:
 
-```bash
-PROJECT=streetsmart-hermes-poc
-ZONE=us-east1-b
-VM=hermes-test-01
-MEMBER=serviceAccount:robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
-ATTACHED_SA=robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com
-
-# OS Login on the test instance
-gcloud compute instances add-iam-policy-binding "$VM" \
-  --project="$PROJECT" --zone="$ZONE" \
-  --member="$MEMBER" --role="roles/compute.osAdminLogin"
-
-# IAP tunnel — SCOPED to hermes-test-01 only
-gcloud compute instances add-iam-policy-binding "$VM" \
-  --project="$PROJECT" --zone="$ZONE" \
-  --member="$MEMBER" --role="roles/iap.tunnelResourceAccessor"
-
-# viewer for readiness describe (project-level, read-only)
-gcloud projects add-iam-policy-binding "$PROJECT" \
-  --member="$MEMBER" --role="roles/compute.viewer" --condition=None
-
-# actAs only on the SA attached to hermes-test-01
-gcloud iam service-accounts add-iam-policy-binding "$ATTACHED_SA" \
-  --project="$PROJECT" --member="$MEMBER" --role="roles/iam.serviceAccountUser"
-```
+1. Instance `hermes-test-01`: `roles/compute.osAdminLogin` for the deployer SA
+2. IAP tunnel instance `hermes-test-01`: `roles/iap.tunnelResourceAccessor`
+3. Project: `roles/compute.viewer` for describe / gcloud SSH metadata reads
+4. Attached SA only: `roles/iam.serviceAccountUser` for
+   `robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com`
 
 Firewall (already present; do not open `0.0.0.0/0:22`):
 
@@ -73,21 +66,24 @@ VM metadata: `enable-oslogin=TRUE`. Do not store `ssh-keys` metadata.
 bash scripts/grant-test-deployer-iap-ssh.sh rollback
 ```
 
-Removes instance `osAdminLogin`, instance-scoped IAP, and attached-SA `actAs`.
-Leaves project `compute.viewer` unless removed manually.
+Removes instance `osAdminLogin`, IAP tunnel-instance binding, and attached-SA
+`actAs`. Leaves project `compute.viewer` unless removed manually. If an Owner
+also created project conditional binding `github-test-deployer-ssh`, remove that
+manually.
 
 ## Fresh-runner proof
 
-After merge to protected `main` and Owner grant, dispatch
-`.github/workflows/diagnose-test-iap-ssh.yml` with confirmation
-`PROVE_TEST_IAP_SSH`.
+Dispatch `.github/workflows/diagnose-test-iap-ssh.yml` with confirmation
+`PROVE_TEST_IAP_SSH` from protected `main`.
 
 Required green outputs:
 
 - `hostname -s` → `hermes-test-01`
 - SCP of a harmless temp file + exact SHA-256 read-back on the VM
 
-Tell Carlo when that run ID is green.
+Verified green run: `34745695554`
+(https://github.com/streetsmart-insurance/robie-hermes/actions/runs/34745695554)
+— SHA-256 `e262566c57a3f65ac08c09286239500c95fcf659480bb4f50ace605ed37bb923`.
 
 ## Related
 
