@@ -166,3 +166,45 @@ def test_json_files_in_listing_ignores_non_json(sweep):
     assert sweep._json_files_in_listing(
         ["  <absent or empty>", "/x/cron/job.yaml\t10 bytes\t2026-01-01 00:00"]
     ) == []
+
+
+# Section 11 helper: pick robie-*/hermes-* units out of
+# `systemctl list-unit-files --type=timer,service` output.
+UNIT_FILES_SAMPLE = """\
+UNIT FILE                              STATE
+hermes-email-watcher.service           enabled
+hermes-email-watcher.timer             enabled
+robie-production-preflight.service     enabled
+robie-production-preflight.timer       enabled
+robie-ascend-sync.timer                disabled
+robie-health-check.service             static
+sshd.service                           enabled
+cron.service                           enabled
+"""
+
+
+def test_robie_hermes_units_picks_robie_and_hermes(sweep):
+    assert sweep._robie_hermes_units(UNIT_FILES_SAMPLE) == [
+        "hermes-email-watcher.service",
+        "hermes-email-watcher.timer",
+        "robie-production-preflight.service",
+        "robie-production-preflight.timer",
+        "robie-ascend-sync.timer",
+        "robie-health-check.service",
+    ]
+
+
+def test_robie_hermes_units_empty_input(sweep):
+    assert sweep._robie_hermes_units("") == []
+
+
+def test_robie_hermes_units_skips_header_and_unrelated(sweep):
+    assert sweep._robie_hermes_units(
+        "UNIT FILE  STATE\nsshd.service  enabled\n") == []
+
+
+def test_robie_hermes_units_dedupes_repeated_rows(sweep):
+    assert sweep._robie_hermes_units(
+        "robie-health-check.timer enabled\n"
+        "robie-health-check.timer enabled\n") == [
+            "robie-health-check.timer"]
