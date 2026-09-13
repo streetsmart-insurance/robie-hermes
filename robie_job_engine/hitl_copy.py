@@ -67,6 +67,20 @@ COVERAGE_LABELS_EMPTY_CHAT = (
     "Reply in this Chat thread with Coverage A, B, C, D, E, and F, or attach a quote/dec PDF and say RETRY."
 )
 
+COVERAGE_TAB_STUCK_EMAIL = (
+    "I am on the address tab and cannot open Coverages.\n"
+    "I stopped so I would not fill the wrong page. "
+    "The Coverage A through F amounts were already on the email.\n"
+    "Reply to this email and say RETRY after Coverages is open."
+)
+
+COVERAGE_TAB_STUCK_CHAT = (
+    "I am on the address tab and cannot open Coverages.\n"
+    "I stopped so I would not fill the wrong page. "
+    "The Coverage A through F amounts were already on the job.\n"
+    "Reply in this Chat thread and say RETRY after Coverages is open."
+)
+
 
 def normalize_hitl_channel(channel: str | None) -> str:
     raw = str(channel or CHANNEL_CHAT).strip().casefold()
@@ -112,6 +126,17 @@ def coverage_amounts_missing(error: str | None) -> bool:
         "coverage amounts not on the job" in folded
         or "will not guess coverage amounts" in folded
         or "will not invent them" in folded
+    )
+
+
+def still_on_location_tab(error: str | None) -> bool:
+    """True when FormEntry is still Location/Address after a Coverages click."""
+    folded = " ".join(str(error or "").casefold().split())
+    return (
+        "still on the formentry location" in folded
+        or "could not open coverages" in folded
+        or "i am on the address tab" in folded
+        or "cannot open coverages" in folded
     )
 
 
@@ -184,6 +209,8 @@ def missing_coverage_letters_human_text(
 def coverage_fill_human_text(*, channel: str = CHANNEL_EMAIL, detail: str = "") -> str:
     """Plain-English coverage HITL. Never dumps PLAYWRIGHT_BLOCKED."""
     email = normalize_hitl_channel(channel) == CHANNEL_EMAIL
+    if still_on_location_tab(detail):
+        return COVERAGE_TAB_STUCK_EMAIL if email else COVERAGE_TAB_STUCK_CHAT
     missing = coverage_letters_from_detail(detail)
     if missing and (
         "still need" in str(detail or "").casefold()
@@ -244,6 +271,7 @@ def worker_report_human_text(text: str, *, channel: str = CHANNEL_EMAIL) -> str:
         is_coverage_fill_miss(raw)
         or coverage_labels_empty(raw)
         or coverage_amounts_missing(raw)
+        or still_on_location_tab(raw)
     ):
         return coverage_fill_human_text(channel=channel, detail=raw)
     if is_formentry_mint_miss(raw):
@@ -383,6 +411,7 @@ def human_hitl_notice(request: Any, gemini_response: Any = None) -> dict[str, st
         phase == "coverage_fill"
         or coverage_amounts_missing(error)
         or coverage_labels_empty(error)
+        or still_on_location_tab(error)
         or is_coverage_fill_miss(error)
     ):
         return {

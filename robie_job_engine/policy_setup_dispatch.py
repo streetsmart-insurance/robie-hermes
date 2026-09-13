@@ -138,6 +138,9 @@ def is_coverage_fill_miss(text: str) -> bool:
         or "coverage a, b, c, d, e, and f" in folded
         or "i still need the coverage" in folded
         or "i still need coverage" in folded
+        or "could not open coverages" in folded
+        or "still on the formentry location" in folded
+        or "i am on the address tab" in folded
     )
 
 

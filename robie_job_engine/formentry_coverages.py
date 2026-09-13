@@ -20,6 +20,7 @@ Every fill is read back and reported.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 # What HOME FormEntry actually shows. Filler uses the live page text, not
@@ -75,6 +76,32 @@ LOCATION_EXCLUDE_LABELS = LOCATION_SECTION_HINTS + (
     "line of business",
 )
 COVERAGE_TAB_NAMES = ("Coverages", "Coverage")
+# FormEntry Index (/Policy/.../FormEntry/Index/...) is a section nav of
+# links (Insured Information | Coverages | ...), not an ARIA tab strip.
+# 405 used role=tab / get_by_text only; live job 45b09dee never left Location.
+COVERAGES_TAB_LOCATOR = 'get_by_role("link", name="Coverages", exact=True)'
+COVERAGES_TAB_RETRY_ROLES = ("tab", "button")
+COVERAGES_TAB_FIRST_ROLES = ("link",)
+
+LIST_LIVE_NAV_JS = r"""
+() => {
+  const norm = (s) => (s || "").trim().replace(/\s+/g, " ");
+  const els = Array.from(document.querySelectorAll(
+    '[role="tab"], [role="link"], a, button, [role="button"], .nav-link, .nav-item'
+  ));
+  const out = [];
+  const seen = new Set();
+  for (const el of els) {
+    const t = norm(el.getAttribute("aria-label") || el.innerText);
+    if (!t || t.length > 48) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out.slice(0, 40);
+}
+"""
 
 LIST_LIVE_LABELS_JS = r"""
 () => {
@@ -386,47 +413,155 @@ async def alist_live_coverage_labels(page: Any) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
-async def aclick_unique_tab(page: Any, name: str) -> bool:
-    """Click a tab only when the locator is unique. No .first / .nth / .last."""
-    tab = page.get_by_role("tab", name=name, exact=True)
-    count = await tab.count()
-    target = tab
-    if count != 1:
-        text_tab = page.get_by_text(name, exact=True)
-        count = await text_tab.count()
-        if count != 1:
-            return False
-        target = text_tab
+@dataclass
+class CoveragesTabResult:
+    live_labels: list[str]
+    on_coverages: bool
+    still_on_location: bool
+    clicked: list[str] = field(default_factory=list)
+    locators_tried: list[str] = field(default_factory=list)
+    gemini_asked: bool = False
+
+
+async def alist_live_nav_labels(page: Any) -> list[str]:
+    """Visible FormEntry section names. Never guesses invented A-F ids."""
     try:
-        await target.click(timeout=8000)
+        raw = await page.evaluate(LIST_LIVE_NAV_JS)
+    except TypeError:
+        raw = await page.evaluate(LIST_LIVE_NAV_JS, None)
     except Exception:
-        return False
-    return True
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
-async def aensure_coverages_tab(page: Any) -> list[str]:
-    """Leave Location/Address. Fill only after Coverages labels are live.
-
-    If live labels look like Name/Address/City/State/Zip/Country/Location #,
-    click the unique Coverages (or Coverage) tab and read labels again.
-    Same live-label path for any LOB — no Dwelling/HO alias list.
-    """
-    live = await alist_live_coverage_labels(page)
-    if has_live_coverage_letter(live):
-        return live
-    if not is_location_section_labels(live):
-        return live
-    for name in COVERAGE_TAB_NAMES:
-        if not await aclick_unique_tab(page, name):
+async def aclick_unique_named(
+    page: Any,
+    name: str,
+    *,
+    roles: tuple[str, ...],
+) -> str | None:
+    """Click only when the locator is unique. No .first / .nth / .last."""
+    for role in roles:
+        loc = page.get_by_role(role, name=name, exact=True)
+        try:
+            count = await loc.count()
+        except Exception:
+            continue
+        if count != 1:
             continue
         try:
-            await page.wait_for_timeout(1500)
+            await loc.click(timeout=8000)
         except Exception:
-            pass
+            continue
+        return f'get_by_role("{role}", name="{name}", exact=True)'
+    try:
+        text = page.get_by_text(name, exact=True)
+        if await text.count() == 1:
+            await text.click(timeout=8000)
+            return f'get_by_text("{name}", exact=True)'
+    except Exception:
+        return None
+    return None
+
+
+async def _await_section_settle(page: Any) -> None:
+    try:
+        await page.wait_for_timeout(1500)
+    except Exception:
+        pass
+
+
+async def aensure_coverages_tab(
+    page: Any,
+    *,
+    gemini_client: Any | None = None,
+) -> CoveragesTabResult:
+    """Leave Location/Address. Fill only after Coverages labels are live.
+
+    Live miss 45b09dee: role=tab never switched FormEntry Index. Click the
+    unique Coverages *link*, re-read labels, and do not fill while the page
+    still shows Name/Address/City/State/Zip. One Gemini retry on live nav
+    options uses a different locator. Same live-label path for any LOB.
+    """
+    clicked: list[str] = []
+    tried: list[str] = []
+    gemini_asked = False
+    live = await alist_live_coverage_labels(page)
+    if has_live_coverage_letter(live):
+        return CoveragesTabResult(
+            live_labels=live,
+            on_coverages=True,
+            still_on_location=False,
+        )
+    if not is_location_section_labels(live):
+        return CoveragesTabResult(
+            live_labels=live,
+            on_coverages=False,
+            still_on_location=False,
+        )
+
+    used = await aclick_unique_named(
+        page, "Coverages", roles=COVERAGES_TAB_FIRST_ROLES
+    )
+    if used:
+        clicked.append("Coverages")
+        tried.append(used)
+        await _await_section_settle(page)
         live = await alist_live_coverage_labels(page)
-        if has_live_coverage_letter(live) or not is_location_section_labels(live):
-            return live
-    return live
+        if has_live_coverage_letter(live):
+            return CoveragesTabResult(
+                live_labels=live,
+                on_coverages=True,
+                still_on_location=False,
+                clicked=clicked,
+                locators_tried=tried,
+            )
+
+    nav = await alist_live_nav_labels(page)
+    from .gemini_field_helper import ask_gemini_live_option
+
+    decision = ask_gemini_live_option(
+        widget_name="FormEntry section",
+        wanted="Coverages",
+        live_options=nav or list(COVERAGE_TAB_NAMES),
+        client=gemini_client,
+    )
+    gemini_asked = bool(decision.gemini_asked)
+    retry_name = "Coverages"
+    if decision.action == "APPLY" and decision.option:
+        option = str(decision.option).strip()
+        if option and "coverage" in option.casefold():
+            retry_name = option
+    used = await aclick_unique_named(
+        page, retry_name, roles=COVERAGES_TAB_RETRY_ROLES
+    )
+    if used:
+        clicked.append(retry_name)
+        tried.append(used)
+        await _await_section_settle(page)
+        live = await alist_live_coverage_labels(page)
+        if has_live_coverage_letter(live):
+            return CoveragesTabResult(
+                live_labels=live,
+                on_coverages=True,
+                still_on_location=False,
+                clicked=clicked,
+                locators_tried=tried,
+                gemini_asked=gemini_asked,
+            )
+
+    live = await alist_live_coverage_labels(page)
+    still = is_location_section_labels(live) or not has_live_coverage_letter(live)
+    return CoveragesTabResult(
+        live_labels=live,
+        on_coverages=has_live_coverage_letter(live),
+        still_on_location=still,
+        clicked=clicked,
+        locators_tried=tried or [COVERAGES_TAB_LOCATOR],
+        gemini_asked=gemini_asked,
+    )
 
 
 async def afind_input_for_label(page: Any, label: str) -> dict[str, Any]:
