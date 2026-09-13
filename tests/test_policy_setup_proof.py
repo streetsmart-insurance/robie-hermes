@@ -175,17 +175,17 @@ class TestExtractPolicyId(unittest.TestCase):
 class TestCoverageLabels(unittest.TestCase):
     def test_literal_labels_match_carlo_evidence(self):
         self.assertEqual(
-            list(fc.COVERAGE_LABELS),
+            list(fc.HOME_LIVE_COVERAGE_LABELS),
             [
-                "Dwelling",
-                "Other Structures",
-                "Personal Property",
-                "Loss of Use",
-                "Blanket",
-                "Personal Liability EA OCC",
-                "Medical Payments EA PER",
+                "Coverage A",
+                "Coverage B",
+                "Coverage C",
+                "Coverage D",
+                "Coverage E",
+                "Coverage F",
             ],
         )
+        self.assertEqual(list(fc.COVERAGE_AMOUNT_LABELS), list(fc.HOME_LIVE_COVERAGE_LABELS))
 
     def test_no_invented_ho_selectors_anywhere(self):
         import pathlib
@@ -254,20 +254,21 @@ class TestFillCoveragesByLabel(unittest.TestCase):
         self.assertIn("Dwelling", report["not_found"])
         self.assertEqual(report["filled_count"], 0)
 
-    def test_live_prefixed_label_matches_job_dwelling(self):
+    def test_live_coverage_a_fills_without_dwelling_alias(self):
         self.assertEqual(
-            fc.match_wanted_to_live_label(
-                "Dwelling",
-                ["Coverage A - Dwelling", "Other Structures"],
+            fc.live_label_for_coverage_letter(
+                "A",
+                ["Coverage A", "Coverage B", "Coverage C"],
             ),
-            "Coverage A - Dwelling",
+            "Coverage A",
         )
         page = FakePage(
-            {"Coverage A - Dwelling": {"id": "liveA", "tag": "input", "name": "a"}}
+            {"Coverage A": {"id": "liveA", "tag": "input", "name": "a"}}
         )
-        report = fc.fill_coverages_by_label(page, {"Dwelling": "250000"})
+        report = fc.fill_coverages_by_label(page, {"Coverage A": "1200000"})
         self.assertEqual(report["filled_count"], 1)
-        self.assertTrue(report["labels"]["Dwelling"]["filled"])
+        self.assertTrue(report["labels"]["Coverage A"]["filled"])
+        self.assertNotIn("Dwelling", str(report))
         self.assertNotIn("HO_CoverageA", str(report))
 
 

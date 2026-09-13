@@ -10,7 +10,6 @@ import signal
 import subprocess
 import sys
 import time
-from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Tuple
 from googleapiclient.discovery import build
@@ -252,12 +251,9 @@ def _format_policy_setup_response(policy_number: str, report: dict, sender: str)
     report = report or {}
     if report.get("success"):
         return (
-            f"Policy {policy_number} has been set up on EZLynx applicant 220250093 "
-            f"(phase reached: {report.get('phase_reached')}). "
-            "Search-first found no duplicate; the policy shell was created with the gold "
-            "carrier payload, Save & Continue Edit minted the FormEntry, and coverages "
-            "were filled by literal label. It stops before bind — no coverage was bound. "
-            "Verify the policy in EZLynx before relying on it."
+            f"Policy {policy_number} is on EZLynx applicant 220250093.\n"
+            "Coverages were filled from the live FormEntry labels.\n"
+            "I stopped before bind. Verify the policy in EZLynx before relying on it."
         )
     error = str(report.get("error") or "").strip()
     from robie_job_engine.policy_setup_dispatch import (
@@ -635,11 +631,21 @@ def process_inbox():
             logger.info("Durable email job is pending; leaving message unread")
             continue
 
-        # Send clean reply
-        reply_msg = MIMEText(response_text)
-        reply_msg["to"] = sender
-        reply_msg["from"] = "Robie AI <robie@streetsmart.insurance>"
-        reply_msg["subject"] = f"Re: {subject}" if not subject.startswith("Re:") else subject
+        # Send clean reply: short plain sentences, text/plain 8bit.
+        # MIMEText quoted-printable wraps mid-word and smashes Gmail mobile.
+        from robie_job_engine.hitl_copy import worker_report_human_text
+        from robie_job_engine.verification_mailer import build_plain_email_message
+
+        reply_body = worker_report_human_text(response_text, channel="email")
+        reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
+        reply_msg = build_plain_email_message(
+            sender="Robie AI <robie@streetsmart.insurance>",
+            to=[sender],
+            cc=[],
+            subject=reply_subject,
+            text_body=reply_body,
+            plain_only=True,
+        )
         reply_msg["In-Reply-To"] = headers.get("message-id", "")
         reply_msg["References"] = headers.get("message-id", "")
 

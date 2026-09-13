@@ -551,29 +551,48 @@ def _to_iso_date(value: str) -> str:
     return v
 
 
-def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, str]:
-    """Map a HomeownersCoverageItem onto Carlo's literal FormEntry labels."""
+def homeowners_amounts_by_letter(
+    ho: HomeownersCoverageItem | None,
+) -> dict[str, str]:
+    """Stated Coverage A–F amounts. Omit any letter the human did not send."""
     if ho is None:
         return {}
     values: dict[str, str] = {}
     if ho.dwelling_a:
-        values["Dwelling"] = clean_currency(ho.dwelling_a)
+        values["A"] = clean_currency(ho.dwelling_a)
     if ho.other_structures_b:
-        values["Other Structures"] = clean_currency(ho.other_structures_b)
+        values["B"] = clean_currency(ho.other_structures_b)
     if ho.personal_property_c:
-        values["Personal Property"] = clean_currency(ho.personal_property_c)
+        values["C"] = clean_currency(ho.personal_property_c)
     if ho.loss_of_use_d:
-        values["Loss of Use"] = clean_currency(ho.loss_of_use_d)
+        values["D"] = clean_currency(ho.loss_of_use_d)
     if ho.liability_e:
-        values["Personal Liability EA OCC"] = clean_currency(ho.liability_e)
+        values["E"] = clean_currency(ho.liability_e)
     if ho.med_pay_f:
-        values["Medical Payments EA PER"] = clean_currency(ho.med_pay_f)
+        values["F"] = clean_currency(ho.med_pay_f)
     return values
+
+
+def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, str]:
+    """Map stated amounts onto live HOME names (Coverage A–F), not Dwelling aliases."""
+    return {
+        f"Coverage {letter}": amount
+        for letter, amount in homeowners_amounts_by_letter(ho).items()
+    }
 
 
 def homeowners_coverage_amounts_missing(ho: HomeownersCoverageItem | None) -> bool:
     """True when the job stated no Coverage A-F amounts. Do not guess."""
-    return not _homeowners_values_by_label(ho)
+    return not homeowners_amounts_by_letter(ho)
+
+
+def stated_live_coverage_names(amounts_by_letter: dict[str, str] | None) -> list[str]:
+    """Live HOME names for letters the human stated. Never adds omitted E."""
+    return [
+        f"Coverage {letter}"
+        for letter in ("A", "B", "C", "D", "E", "F")
+        if str((amounts_by_letter or {}).get(letter) or "").strip()
+    ]
 
 
 class EzlynxPolicySetupPage:
@@ -1183,11 +1202,13 @@ class EzlynxPolicySetupPage:
                 policy_id=str(policy_id or ""),
             )
 
-        # Coverages tab -> fill by live label from the job payload.
-        # Do not invent #HO_CoverageA-F. Do not guess amounts.
+        # Coverages tab -> fill from LIVE FormEntry labels (Coverage A–F).
+        # Do not invent #HO_CoverageA-F. Do not search Dwelling aliases.
+        # Do not guess amounts or invent an omitted letter.
+        amounts = homeowners_amounts_by_letter(shell_input.homeowners_coverage)
         values = _homeowners_values_by_label(shell_input.homeowners_coverage)
         evidence["phases"].append("coverage_fill")
-        if not values:
+        if not amounts:
             report = {
                 "error": (
                     "PLAYWRIGHT_BLOCKED: coverage amounts not on the job; "
@@ -1222,15 +1243,26 @@ class EzlynxPolicySetupPage:
             )
 
         try:
-            from .formentry_coverages import afill_coverages_by_label
+            from .formentry_coverages import (
+                afill_coverages_by_label,
+                alist_live_coverage_labels,
+                map_letter_amounts_to_live_labels,
+            )
 
             coverages_tab = self.page.locator("[role='tab']:has-text('Coverages')")
             if await coverages_tab.count() > 0:
                 await coverages_tab.first.click()
                 await self.page.wait_for_timeout(1500)
+            live_labels = await alist_live_coverage_labels(self.page)
+            values = map_letter_amounts_to_live_labels(
+                amounts, live_labels, gemini_client=self._gemini_client()
+            )
+            evidence["live_coverage_labels"] = list(live_labels)
             fill_report = await afill_coverages_by_label(
                 self.page, values, gemini_client=self._gemini_client()
             )
+            fill_report.setdefault("live_labels_seen", list(live_labels))
+            fill_report.setdefault("looked_for", list(values))
             evidence["coverage_fill"] = fill_report
         except Exception as exc:  # noqa: BLE001 - report, don't raise
             return PolicySetupResult(
@@ -1246,10 +1278,12 @@ class EzlynxPolicySetupPage:
             )
 
         if fill_report.get("filled_count", 0) <= 0:
+            looked = list(values) or stated_live_coverage_names(amounts)
             report = {
                 "error": (
                     "PLAYWRIGHT_BLOCKED: no coverage labels were filled. "
-                    f"Looked for {list(values)}. "
+                    f"Looked for {looked}. "
+                    f"live_labels={live_labels}. "
                     f"not_found={fill_report.get('not_found')}"
                 ),
                 "coverage_fill": fill_report,
@@ -1265,9 +1299,15 @@ class EzlynxPolicySetupPage:
             )
             if report.get("continue_after_hitl"):
                 try:
+                    live_labels = await alist_live_coverage_labels(self.page)
+                    values = map_letter_amounts_to_live_labels(
+                        amounts, live_labels, gemini_client=self._gemini_client()
+                    )
                     fill_report = await afill_coverages_by_label(
                         self.page, values, gemini_client=self._gemini_client()
                     )
+                    fill_report.setdefault("live_labels_seen", list(live_labels))
+                    fill_report.setdefault("looked_for", list(values))
                     evidence["coverage_fill"] = fill_report
                 except Exception as exc:  # noqa: BLE001
                     fill_report = {
@@ -1289,11 +1329,13 @@ class EzlynxPolicySetupPage:
                         field_fill=fill_report,
                         continue_after_hitl=True,
                     )
+                looked = list(values) or stated_live_coverage_names(amounts)
                 report = {
                     "error": (
                         "PLAYWRIGHT_BLOCKED: no coverage labels were filled "
                         "after Gemini apply + retry. "
-                        f"Looked for {list(values)}. "
+                        f"Looked for {looked}. "
+                        f"live_labels={live_labels}. "
                         f"not_found={fill_report.get('not_found')}"
                     ),
                     "coverage_fill": fill_report,
