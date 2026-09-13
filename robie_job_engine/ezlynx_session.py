@@ -191,6 +191,20 @@ class PlaywrightEzlynxSession:
         pages = [page for context in self._browser.contexts for page in context.pages]
         ezlynx_pages = [page for page in pages if "ezlynx.com" in page.url.casefold()]
         self._page = (ezlynx_pages or pages or [self._context.new_page()])[0]
+        self._dismiss_blocking_chrome()
+
+    @property
+    def page(self) -> object:
+        return self._page
+
+    def _dismiss_blocking_chrome(self) -> None:
+        """Close leftover Add Note / collapse the applicant rail. Attach-only."""
+        try:
+            from .ezlynx_chrome import dismiss_ezlynx_chrome
+
+            dismiss_ezlynx_chrome(self._page)
+        except Exception:
+            return
 
     def close(self) -> None:
         # Disconnect from CDP without closing the server-owned Chrome process.
