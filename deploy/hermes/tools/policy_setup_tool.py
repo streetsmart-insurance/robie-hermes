@@ -157,10 +157,34 @@ def _mark_policy_setup_tool_called() -> None:
         pass
 
 
+def _mark_policy_setup_complete() -> None:
+    """Release playwright_exec only after a successful setup (not a mint-miss)."""
+    try:
+        from robie_job_engine.policy_setup_dispatch import POLICY_SETUP_REQUIRED_KIND
+        from robie_job_engine.store import JobStore
+
+        job_id = (
+            os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
+        ).strip()
+        db_path = os.environ.get("ROBIE_JOB_DB") or ""
+        if not job_id or not db_path:
+            return
+        store = JobStore(db_path)
+        marker = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or {}
+        marker["tool_called"] = True
+        marker["setup_complete"] = True
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, marker)
+    except Exception:
+        pass
+
+
 def ezlynx_policy_setup_handler(args: dict, **kwargs):
     policy_number = str((args or {}).get("policy_number") or "").strip()
     if not policy_number:
         return tool_error("policy_number is required")
+    # The worker called the handler. Job c75aab5c left tool_called=false
+    # even after Save & Continue Edit because this only ran on success.
+    _mark_policy_setup_tool_called()
     try:
         report = _run_policy_setup(args or {})
     except Exception as exc:  # noqa: BLE001 - tool boundary
@@ -170,10 +194,8 @@ def ezlynx_policy_setup_handler(args: dict, **kwargs):
     block = policy_setup_hitl_blocks_continue(report if isinstance(report, dict) else None)
     if block:
         return tool_error(block)
-    # Only mark tool_called when the handler created or found the policy.
-    # A failed create must not release the POLICY_SETUP_ORDER guard.
     if isinstance(report, dict) and report.get("success"):
-        _mark_policy_setup_tool_called()
+        _mark_policy_setup_complete()
     return tool_result(report)
 
 

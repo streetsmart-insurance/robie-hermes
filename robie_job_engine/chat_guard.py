@@ -18,6 +18,7 @@ from .context_policy import (
 from .chat_queue import DurableChatEventQueue
 from .idempotency import DurableWorkLedger, IdempotencyError
 from .hitl import (
+    formentry_mint_miss_hitl_text,
     interaction_for_blocker,
     policy_setup_fail_closed_hitl_text,
     policy_setup_fail_closed_reason,
@@ -407,6 +408,10 @@ def _looks_in_progress(content: str) -> bool:
     # "still working" because this helper treated it as in-progress.
     if policy_setup_fail_closed_reason(text):
         return False
+    from .policy_setup_dispatch import is_formentry_mint_miss
+
+    if is_formentry_mint_miss(text):
+        return False
     if text.casefold().lstrip().startswith("robie_outcome_unknown:"):
         return False
     normalized = " ".join(text.casefold().split())
@@ -437,12 +442,17 @@ def park_policy_setup_fail_closed(
     store = store or JobStore(db_path)
     job = store.get_job(job_id)
     recordings = recordings or RecordingManager(db_path)
+    from .policy_setup_dispatch import is_formentry_mint_miss
+
     error = (
         policy_setup_fail_closed_reason(content)
         or str(content or "").strip()
         or "ezlynx_policy_setup is not registered; failing closed"
     )
-    prompt = policy_setup_fail_closed_hitl_text(job_id=job_id, detail=error)
+    if is_formentry_mint_miss(content):
+        prompt = formentry_mint_miss_hitl_text(job_id=job_id, detail=error)
+    else:
+        prompt = policy_setup_fail_closed_hitl_text(job_id=job_id, detail=error)
     payload = dict(job.get("payload") or {})
     interaction = {
         "awaiting": "human_input",
@@ -731,6 +741,7 @@ def _bind_chat_policy_setup(
         PolicySetupToolMissing,
         extract_policy_setup_args,
         invoke_policy_setup_tool,
+        is_policy_setup_honest_hitl,
     )
 
     contract = _policy_setup_contract(text)
@@ -776,7 +787,7 @@ def _bind_chat_policy_setup(
     if not policy_args.get("policy_number"):
         return extra + contract
     try:
-        invoke_policy_setup_tool(policy_args)
+        report = invoke_policy_setup_tool(policy_args)
     except PolicySetupToolMissing as exc:
         park_policy_setup_fail_closed(
             db_path,
@@ -798,11 +809,23 @@ def _bind_chat_policy_setup(
             "Do not call playwright_exec for policy setup."
         )
         return extra + contract
-    refreshed = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or marker
-    if refreshed.get("tool_called"):
+    marker["tool_called"] = True
+    store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, marker)
+    extra.append(
+        "- Job Engine invoked the callable ezlynx_policy_setup handler "
+        "in-process (tool_called=true). Do not call playwright_exec for "
+        "this job class."
+    )
+    blob = ""
+    if isinstance(report, dict):
+        blob = str(report.get("error") or report.get("message") or report)
+    else:
+        blob = str(report or "")
+    if is_policy_setup_honest_hitl(blob) or "PLAYWRIGHT_BLOCKED" in blob:
+        park_policy_setup_fail_closed(db_path, job_id, blob, store=store)
         extra.append(
-            "- Job Engine invoked the callable ezlynx_policy_setup handler "
-            "in-process. Do not call playwright_exec for this job class."
+            "- STOP AND ASK. FormEntry was not minted. Job is "
+            "AWAITING_HUMAN_INPUT (not still working)."
         )
     return extra + contract
 
@@ -1565,7 +1588,9 @@ def guard_chat_response(
     store = JobStore(db_path)
     job = store.get_job(job_id)
     recordings = recordings or RecordingManager(db_path)
-    if policy_setup_fail_closed_reason(content) and JobStatus(job["status"]) in {
+    from .policy_setup_dispatch import is_policy_setup_honest_hitl
+
+    if is_policy_setup_honest_hitl(content) and JobStatus(job["status"]) in {
         JobStatus.PENDING,
         JobStatus.RUNNING,
         JobStatus.VERIFYING,

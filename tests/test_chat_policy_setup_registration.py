@@ -23,6 +23,7 @@ from robie_job_engine.chat_guard import (
     open_chat_job,
 )
 from robie_job_engine.hermes_tool_visibility import (
+    email_chat_job_schema,
     expose_guarded_browser,
     inject_email_chat_job_schemas,
     install_email_chat_schema_filter,
@@ -34,6 +35,7 @@ from robie_job_engine.policy_setup_dispatch import (
     POLICY_SETUP_REQUIRED_KIND,
     POLICY_SETUP_TOOL,
     PolicySetupToolMissing,
+    is_formentry_mint_miss,
 )
 from robie_job_engine.store import JobStore
 
@@ -106,7 +108,7 @@ class ChatPolicySetupRegistrationTests(unittest.TestCase):
     def test_tool_file_registers_playwright_toolset(self):
         source = (ROOT / "deploy" / "hermes" / "tools" / "policy_setup_tool.py").read_text()
         self.assertIn('toolset="playwright"', source)
-        self.assertNotIn('toolset="ezlynx"', source)
+        self.assertIn("\n    toolset=\"playwright\",", source)
 
 
 class ChatPolicySetupInvokeTests(unittest.TestCase):
@@ -190,7 +192,7 @@ class ChatPolicySetupInvokeTests(unittest.TestCase):
             self.assertIn(FAIL_CLOSED_MESSAGE, execution)
             self.assertTrue(posted)
             self.assertIn("STOP AND ASK", posted[0][1])
-            self.assertNotIn("still working", posted[0][1].casefold())
+            self.assertNotIn("accepted the request and is still working", posted[0][1].casefold())
 
 
 class FailClosedHitlHonestyTests(unittest.TestCase):
@@ -225,7 +227,7 @@ class FailClosedHitlHonestyTests(unittest.TestCase):
                 JobStatus.AWAITING_HUMAN_INPUT.value,
             )
             self.assertIn("STOP AND ASK", response)
-            self.assertNotIn("still working", response.casefold())
+            self.assertNotIn("accepted the request and is still working", response.casefold())
             self.assertNotIn("RUNNING", response)
             self.assertTrue(posted)
             self.assertEqual(posted[0][0], "spaces/ROBIE")
@@ -252,6 +254,163 @@ class FailClosedHitlHonestyTests(unittest.TestCase):
                 )
 
                 load_policy_setup_handler()
+
+
+MINT_MISS = (
+    "PLAYWRIGHT_BLOCKED: Save & Continue Edit clicked; no FormEntry URL after 30s. "
+    "VALIDATION_ERRORS: [] LANDED_URL: "
+    "https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83669533"
+)
+
+
+class EmailAndMintMissTests(unittest.TestCase):
+    def test_tool_callable_on_chat_and_email_actions(self):
+        registry = _RecordingRegistry()
+        handler = register_policy_setup_callable(registry)
+        self.assertTrue(callable(handler))
+        self.assertTrue(callable(registry.tools[POLICY_SETUP_TOOL]["handler"]))
+        for action in ("hermes.google_chat_task", "hermes.email_task"):
+            schema = email_chat_job_schema(["playwright_exec"])
+            self.assertIn(POLICY_SETUP_TOOL, schema)
+            runtime = SimpleNamespace(_HERMES_CORE_TOOLS=["playwright_exec"])
+            expose_guarded_browser(
+                runtime, action_type=action, env={}, argv=["hermes", "chat"]
+            )
+            self.assertIn(POLICY_SETUP_TOOL, runtime._HERMES_CORE_TOOLS)
+
+    def test_mint_miss_is_detected_and_not_in_progress(self):
+        self.assertTrue(is_formentry_mint_miss(MINT_MISS))
+        self.assertFalse(_looks_in_progress(MINT_MISS))
+        from robie_job_engine.ezlynx_policy_setup import url_is_minted_formentry
+
+        self.assertFalse(
+            url_is_minted_formentry(
+                "https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/"
+                "220250093/83669533"
+            )
+        )
+        self.assertTrue(
+            url_is_minted_formentry(
+                "https://app.ezlynx.com/applicantportal/Policy/83669533/"
+                "FormEntry/Index/480541001"
+            )
+        )
+
+    def test_mint_miss_parks_hitl_not_running(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "msg-c75aab5c",
+                "Please finish the EZLynx form",
+                requested_by="Carlo",
+                conversation_id="spaces/ROBIE",
+            )
+            posted = []
+
+            def poster(space, message, thread_name=None):
+                posted.append((space, message, thread_name))
+                return {"name": "ok"}
+
+            with patch(
+                "robie_job_engine.chat_app_post.post_as_chat_app",
+                side_effect=poster,
+            ):
+                response = guard_chat_response(db, job_id, MINT_MISS)
+            store = JobStore(db)
+            self.assertEqual(
+                store.get_job(job_id)["status"],
+                JobStatus.AWAITING_HUMAN_INPUT.value,
+            )
+            self.assertFalse(chat_hermes_should_run(db, job_id))
+            self.assertIn("STOP AND ASK", response)
+            self.assertIn("FormEntry does not exist", response)
+            self.assertNotIn("accepted the request and is still working", response.casefold())
+            self.assertNotIn("RUNNING", response)
+            self.assertTrue(posted)
+
+    def test_email_worker_parks_mint_miss_not_unverified(self):
+        from robie_job_engine.email_guard import HermesEmailWorker
+        from robie_job_engine.models import JobStatus as Status
+
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            job = store.create_job(
+                "hermes.email_task",
+                {
+                    "prompt": E01,
+                    "gmail_message_id": "c75aab5c",
+                    "request_text": E01,
+                },
+            )
+            worker = HermesEmailWorker(lambda _prompt: MINT_MISS, store)
+            result = worker.perform(job, idempotency_key=job["idempotency_key"])
+            self.assertEqual(result.hold_status, Status.AWAITING_HUMAN_INPUT)
+            self.assertFalse(result.succeeded)
+            self.assertIn("no FormEntry URL after 30s", result.error)
+
+    def test_email_job_hitl_uses_robie_home_space(self):
+        from robie_job_engine.chat_app_post import (
+            DEFAULT_ROBIE_HOME_SPACE,
+            conversation_target,
+            post_hitl_to_originating_thread,
+        )
+
+        posted = []
+
+        def poster(space, message, thread_name=None):
+            posted.append((space, message, thread_name))
+            return {"name": "ok"}
+
+        store = type("S", (), {})()
+        store.get_job = lambda _id: {
+            "id": "c75aab5c",
+            "action_type": "hermes.email_task",
+            "payload": {},
+        }
+        self.assertEqual(
+            conversation_target(store.get_job("c75aab5c")),
+            (DEFAULT_ROBIE_HOME_SPACE, None),
+        )
+        ok = post_hitl_to_originating_thread(
+            "ROBIE HITL: STOP AND ASK. FormEntry does not exist.",
+            job_id="c75aab5c",
+            store=store,
+            poster=poster,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(posted[0][0], DEFAULT_ROBIE_HOME_SPACE)
+
+    def test_playwright_still_refused_after_tool_called_without_complete(self):
+        source = (
+            ROOT / "deploy" / "hermes" / "tools" / "playwright_tool.py"
+        ).read_text()
+        self.assertIn("setup_complete", source)
+        self.assertIn("did not complete FormEntry", source)
+        self.assertIn("playwright_exec is refused", source)
+
+    def test_mint_miss_notice_does_not_claim_gemini_handled_it(self):
+        from robie_job_engine.hitl_escalation import HitlRequest, build_hitl_notice
+
+        notice = build_hitl_notice(
+            HitlRequest(
+                job_id="c75aab5c",
+                phase="formentry_mint",
+                error=MINT_MISS,
+                page_state={},
+                attempted=["save_and_continue_edit"],
+                applicant_id="220250093",
+                policy_id="83669533",
+                formentry_exists=False,
+            ),
+            None,
+        )
+        blob = notice["subject"] + notice["body"] + notice["chat"]
+        self.assertIn("gemini did not handle this", blob.casefold())
+        self.assertIn("formentry does not exist", blob.casefold())
+        self.assertNotIn("gemini handled", blob.casefold())
+        self.assertNotIn("job is continuing", blob.casefold())
 
 
 if __name__ == "__main__":

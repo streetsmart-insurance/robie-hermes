@@ -536,15 +536,21 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
             marker = JobStore(bound_db).get_checkpoint(
                 bound_job_id, POLICY_SETUP_REQUIRED_KIND
             ) or {}
-            if marker and not marker.get("tool_called"):
+            if marker and not marker.get("setup_complete"):
+                if not marker.get("tool_called"):
+                    return _finish(tool_error(
+                        "POLICY_SETUP_ORDER: this job asks to create/set up a "
+                        f"homeowners policy ({marker.get('policy_number')}); "
+                        "call the 'ezlynx_policy_setup' tool first — "
+                        "playwright_exec is refused for this job class until then. "
+                        "If the tool is not in your tool list, report: "
+                        "ROBIE_OUTCOME_UNKNOWN: ezlynx_policy_setup is not "
+                        "registered; failing closed."
+                    ))
                 return _finish(tool_error(
-                    "POLICY_SETUP_ORDER: this job asks to create/set up a "
-                    f"homeowners policy ({marker.get('policy_number')}); "
-                    "call the 'ezlynx_policy_setup' tool first — "
-                    "playwright_exec is refused for this job class until then. "
-                    "If the tool is not in your tool list, report: "
-                    "ROBIE_OUTCOME_UNKNOWN: ezlynx_policy_setup is not "
-                    "registered; failing closed."
+                    "POLICY_SETUP_ORDER: ezlynx_policy_setup already ran and "
+                    "did not complete FormEntry; playwright_exec is refused "
+                    "for this job class. STOP AND ASK. Do not wander."
                 ))
         except Exception:
             pass

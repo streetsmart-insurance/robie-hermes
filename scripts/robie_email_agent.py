@@ -259,9 +259,18 @@ def _format_policy_setup_response(policy_number: str, report: dict, sender: str)
             "were filled by literal label. It stops before bind — no coverage was bound. "
             "Verify the policy in EZLynx before relying on it."
         )
+    error = str(report.get("error") or "").strip()
+    from robie_job_engine.policy_setup_dispatch import is_formentry_mint_miss
+    from robie_job_engine.hitl import formentry_mint_miss_hitl_text
+
+    if is_formentry_mint_miss(error) or (
+        report.get("phase_reached") == "formentry_mint"
+        and not report.get("success")
+    ):
+        return formentry_mint_miss_hitl_text(detail=error)
     return (
         f"ROBIE_OUTCOME_UNKNOWN: Policy setup for {policy_number} did not complete "
-        f"(phase reached: {report.get('phase_reached')}; error: {report.get('error')}). "
+        f"(phase reached: {report.get('phase_reached')}; error: {error}). "
         "Check the EZLynx destination before trying again; no automatic second "
         "execution was started."
     )
@@ -482,12 +491,14 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
         }
         if policy_id:
             destination['policy_id'] = policy_id
+        # Handler was invoked. Job c75aab5c left tool_called=false after a
+        # real Save & Continue Edit click because this only ran on success.
+        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
+            'policy_number': policy_setup_args["policy_number"],
+            'tool_called': True,
+            'setup_complete': bool(success),
+        })
         if success:
-            # Only mark tool_called when the handler created or found the policy.
-            store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
-                'policy_number': policy_setup_args["policy_number"],
-                'tool_called': True,
-            })
             store.checkpoint(job_id, 'action', {
                 'action': 'ezlynx_policy_setup',
                 'destination': destination,
@@ -515,7 +526,6 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
                 "Policy setup handler did not create or find %s: %s",
                 policy_setup_args["policy_number"], real_error,
             )
-            # Do NOT set tool_called=True on failure.
         return _format_policy_setup_response(policy_setup_args["policy_number"], actual if isinstance(actual, dict) else {}, sender)
     if not response_text:
         attachment_lines = ""

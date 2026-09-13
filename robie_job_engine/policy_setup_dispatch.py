@@ -125,6 +125,25 @@ def is_policy_setup_fail_closed(text: str) -> bool:
     )
 
 
+def is_formentry_mint_miss(text: str) -> bool:
+    """True for job c75aab5c: Save clicked, Edit URL, FormEntry never minted."""
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if "no FormEntry URL after 30s" in raw:
+        return True
+    if "FormEntry was not minted" in raw:
+        return True
+    folded = " ".join(raw.casefold().split())
+    landed_edit = "policy/actions/edit/" in folded and "landed_url" in folded
+    return landed_edit and "formentry" in folded
+
+
+def is_policy_setup_honest_hitl(text: str) -> bool:
+    """Fail-closed missing tool or FormEntry mint-miss — park HITL, not RUNNING."""
+    return is_policy_setup_fail_closed(text) or is_formentry_mint_miss(text)
+
+
 def policy_setup_openai_schema() -> dict:
     """Schema dict Hermes ``get_tool_definitions`` understands."""
     return {"type": "function", "function": dict(POLICY_SETUP_SCHEMA)}

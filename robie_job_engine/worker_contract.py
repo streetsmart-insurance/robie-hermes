@@ -188,7 +188,11 @@ def classify_chat_close_without_checkpoint(
             error="no structured destination action checkpoint",
             reason="claimed destination progress without evidence",
         )
-    from .policy_setup_dispatch import FAIL_CLOSED_MESSAGE, is_policy_setup_fail_closed
+    from .policy_setup_dispatch import (
+        FAIL_CLOSED_MESSAGE,
+        is_formentry_mint_miss,
+        is_policy_setup_fail_closed,
+    )
 
     if is_policy_setup_fail_closed(content) or is_policy_setup_fail_closed(
         last_error or ""
@@ -197,6 +201,13 @@ def classify_chat_close_without_checkpoint(
             status="AWAITING_HUMAN_INPUT",
             error=FAIL_CLOSED_MESSAGE,
             reason="policy setup tool missing; fail-closed",
+        )
+    if is_formentry_mint_miss(content) or is_formentry_mint_miss(last_error or ""):
+        return ChatCloseDecision(
+            status="AWAITING_HUMAN_INPUT",
+            error=(str(content or last_error or "")[:1_000]
+                   or "Save & Continue Edit clicked; no FormEntry URL after 30s."),
+            reason="formentry mint-miss; fail-closed HITL",
         )
     infra = extract_infra_close_error(content, last_error)
     if infra:

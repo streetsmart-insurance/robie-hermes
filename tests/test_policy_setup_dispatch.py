@@ -93,6 +93,8 @@ class EmailRoutingTests(unittest.TestCase):
         source = (ROOT / "scripts" / "robie_email_agent.py").read_text()
         self.assertIn("invoke_policy_setup_tool(policy_setup_args)", source)
         self.assertIn("policy_setup_deterministic", source)
+        self.assertIn("'tool_called': True", source)
+        self.assertIn("'setup_complete': bool(success)", source)
         # The deterministic branch must come before the generic LLM fallback.
         self.assertLess(
             source.index("policy_setup_deterministic"),

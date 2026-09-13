@@ -40,14 +40,27 @@ class HermesEmailWorker:
             destination = {"gmail_message_id": job['payload']['gmail_message_id']}
         blocked = response.startswith("ROBIE_EXECUTION_BLOCKED:")
         failed = blocked or response.lstrip().lower().startswith("error executing task:")
+        from .policy_setup_dispatch import is_policy_setup_honest_hitl
+
+        hold = (
+            JobStatus.NEEDS_SKILL if blocked
+            else (JobStatus.NEEDS_CLARIFICATION if route.get('status') == 'NEEDS_CLARIFICATION' else None)
+        )
+        error = response if failed or route.get('status') == 'NEEDS_CLARIFICATION' else None
+        # Job c75aab5c: mint-miss became UNVERIFIED via the destination
+        # verifier. Park HITL instead of a 20-minute RUNNING / UNVERIFIED.
+        if is_policy_setup_honest_hitl(response) or response.startswith("ROBIE HITL:"):
+            hold = JobStatus.AWAITING_HUMAN_INPUT
+            error = response
+            failed = True
         return WorkerResult(
             succeeded=not failed,
             action="hermes.email_task",
             destination=destination,
             detail={"response_text": response, **({"outcome": ACTION_OUTCOME_UNKNOWN} if response.startswith("ROBIE_OUTCOME_UNKNOWN:") else {})},
             retryable=True,
-            hold_status=JobStatus.NEEDS_SKILL if blocked else (JobStatus.NEEDS_CLARIFICATION if route.get('status') == 'NEEDS_CLARIFICATION' else None),
-            error=response if failed or route.get('status') == 'NEEDS_CLARIFICATION' else None,
+            hold_status=hold,
+            error=error,
         )
 
 
