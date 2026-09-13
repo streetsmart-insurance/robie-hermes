@@ -123,11 +123,12 @@ If you cannot provide a specific actionable suggestion, respond with exactly: UN
         )
 
 
-def ping_carlo(request: HitlRequest, deps: dict[str, Any] | None = None) -> bool:
+def ping_carlo(request: HitlRequest, deps: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Send HITL notifications via Email and Google Chat.
     
     Notifies Carlo and optionally the original requester.
-    Returns True if at least one notification was sent successfully.
+    Returns (sent, error_reason): sent=True if at least one notification
+    was sent successfully, error_reason describes the failure if not.
     """
     deps = deps or {}
     email_sender = deps.get("email_sender")
@@ -183,6 +184,7 @@ To continue the job, reply with one of:
             recipients.append(request.original_requester)
     
     # Send via email (handle both callable functions and objects with .send())
+    email_error = ""
     if email_sender and recipients:
         for recipient in recipients:
             try:
@@ -191,12 +193,18 @@ To continue the job, reply with one of:
                 elif callable(email_sender):
                     email_sender(to=recipient, subject=subject, body=body)
                 else:
+                    email_error = "email_sender is neither callable nor has .send"
                     continue
                 sent = True
-            except Exception:
-                pass
+            except Exception as e:
+                email_error = f"{type(e).__name__}: {e}"
+    elif not email_sender:
+        email_error = "no email_sender in deps"
+    elif not recipients:
+        email_error = "no recipients"
     
     # Send via Google Chat (shorter format)
+    chat_error = ""
     if chat_sender:
         chat_msg = (
             f"🚨 ROBIE HITL: Job {request.job_id} stuck at {request.phase}\n"
@@ -207,10 +215,18 @@ To continue the job, reply with one of:
         try:
             if chat_sender(chat_msg):
                 sent = True
-        except Exception:
-            pass
+        except Exception as e:
+            chat_error = f"{type(e).__name__}: {e}"
     
-    return sent
+    error_reason = ""
+    if not sent:
+        parts = []
+        if email_error:
+            parts.append(f"email: {email_error}")
+        if chat_error:
+            parts.append(f"chat: {chat_error}")
+        error_reason = "; ".join(parts) or "unknown failure"
+    return (sent, error_reason)
 
 
 def wait_for_carlo_response(
@@ -257,11 +273,11 @@ def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlRe
         return gemini_response
     
     # Step 2: Ping Carlo (and original requester) via Email + Google Chat
-    email_sent = ping_carlo(request, deps)
+    email_sent, email_error = ping_carlo(request, deps)
     if not email_sent:
         return HitlResponse(
             source="system",
-            suggestion="Could not send HITL email to Carlo",
+            suggestion=f"Could not send HITL notification to Carlo ({email_error})",
             actionable=False,
         )
     
