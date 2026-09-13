@@ -1,5 +1,11 @@
 """EZLynx Policy Setup (APE) automation engine and Playwright Page Object.
 
+
+# Code version marker - updated on every deploy. The job report includes this
+# so we can correlate any run to the exact code that executed.
+# Set by the deploy workflow; fallback is the commit this file was last changed in.
+CODE_VERSION = "712cdb0a4af2dafdfa38cb5406084b5279fd5f60"  # PR #370 merge commit
+
 Strict invariants:
 1. Stop before bind: Never binds coverage or authorizes COMPLETE without manual gate.
 2. No shell-only policies: Must execute Add & Edit Policy (#AddAndEditPolicyBtn) to complete vehicles, drivers, coverages, locations, and schedules.
@@ -1134,6 +1140,7 @@ class EzlynxPolicySetupPage:
         from .ezlynx_account_nav import FORMENTRY_RE
 
         report: dict[str, Any] = {
+            "code_version": CODE_VERSION,
             "policy_id": policy_id,
             "formentry_found": False,
             "formentry_url": None,
