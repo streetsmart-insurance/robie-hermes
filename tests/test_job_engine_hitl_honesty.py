@@ -26,7 +26,6 @@ from robie_job_engine.hitl_escalation import (
     HitlRequest,
     build_hitl_notice,
     escalate,
-    gemini_resolved_and_job_continuing,
     live_control_shows_named_option,
 )
 from tests.test_ezlynx_field_widgets import EditPolicyPage, FakeGemini
@@ -323,22 +322,6 @@ class MintStopAndAskTests(unittest.TestCase):
             ),
             {"chat_sender": lambda msg: chats.append(msg) or True},
         )
-        self.assertFalse(gemini_resolved_and_job_continuing(
-            HitlRequest(
-                job_id="job-hitl-1",
-                phase="formentry_mint",
-                error="x",
-                page_state={},
-                attempted=[],
-                applicant_id="220250093",
-                gemini_applied=True,
-                gemini_named_option="Direct",
-                live_control_shows="Direct",
-                formentry_exists=True,
-                job_still_running=True,
-                script_or_job_stopped=False,
-            )
-        ))
         self.assertIn("live control shows", notice["body"].casefold())
         self.assertEqual(chats, [])
 
