@@ -29,6 +29,8 @@ jobs:
       RUN_ROOT: /opt/streetsmart-hermes-test/je-kill/runs
       STAGING_ROOT: /var/tmp/robie-je-kill
       ROBIE_ENV: TEST
+      SSH_KEY: /tmp/hermes-test-je-kill
+      OSLOGIN_SSH_KEY_TTL: 1h
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate with short-lived Test identity
@@ -38,6 +40,13 @@ jobs:
           service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
       - name: Install Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v3
+      - name: Prepare short-lived OS Login SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ensure-gcloud-ssh-key.sh
+          cp "${HOME}/.ssh/google_compute_engine" "${SSH_KEY}"
+          cp "${HOME}/.ssh/google_compute_engine.pub" "${SSH_KEY}.pub"
       - name: Refuse every target except the protected Test runtime
         shell: bash
         run: |
@@ -58,9 +67,11 @@ jobs:
           staging="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${staging}'"
           gcloud compute scp \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             scripts/run-je-kill-test-remote.sh \
             "${TEST_VM}:${staging}/"
       - name: Run guarded process-death proof on Test
@@ -72,6 +83,7 @@ jobs:
           remote_log="${RUNNER_TEMP}/je-kill-remote.log"
           if ! gcloud compute ssh "${TEST_VM}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --ssh-key-file="${SSH_KEY}" \
             --command="sudo env ROBIE_ENV=TEST EXPECTED_SHA='${short}' TEST_ROOT='${TEST_ROOT}' FIXTURE='${FIXTURE}' RUN_ROOT='${RUN_ROOT}' bash -c 'cd \"${TEST_ROOT}\" && bash \"${staging}/run-je-kill-test-remote.sh\"'" \
             2>&1 | tee "${remote_log}"; then
             echo "JE-KILL FAILED: remote runner exited nonzero" >&2
