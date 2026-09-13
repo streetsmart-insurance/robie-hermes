@@ -943,6 +943,37 @@ class EzlynxPolicySetupPage:
             stopped_before_bind=True,
         )
 
+    async def _fill_required_policy_fields(self) -> None:
+        """Set Billing Type and Department before Save & Continue Edit.
+
+        The Edit Policy form requires these fields; empty values block
+        the save with client-side validation ("Billing Type is required").
+        Billing Type is always "Direct Bill". Department is "Personal" for
+        personal lines (HO) and "Commercial" for commercial lines.
+        """
+        # Billing Type -> Direct Bill
+        try:
+            billing = self.page.locator("select").filter(has_text="Billing Type").first
+            # Fallback: find by label association
+            if await billing.count() == 0:
+                billing = self.page.locator("label:has-text('Billing Type') + select, label:has-text('Billing Type') ~ select").first
+            if await billing.count() > 0:
+                await billing.select_option(label="Direct Bill")
+        except Exception:
+            pass
+        # Department -> Personal for HO/personal, Commercial for commercial
+        try:
+            dept = self.page.locator("select").filter(has_text="Department").first
+            if await dept.count() == 0:
+                dept = self.page.locator("label:has-text('DEPARTMENT') + select, label:has-text('DEPARTMENT') ~ select").first
+            if await dept.count() > 0:
+                # Determine LOB from stored context; default to Personal
+                lob = (getattr(self, "lob", "") or "").upper()
+                dept_value = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC", "AUTO") else "Personal"
+                await dept.select_option(label=dept_value)
+        except Exception:
+            pass
+
     async def _mint_formentry(self, policy_id: str, applicant_id: str = "") -> dict[str, Any]:
         """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
 
@@ -1164,6 +1195,10 @@ class EzlynxPolicySetupPage:
                 report["hitl_error"] = f"{type(hitl_exc).__name__}: {hitl_exc}"
                 report["error"] += " HITL escalation error; failing closed."
             return report
+        # Fill required fields before clicking: Billing Type and Department.
+        # The form validation blocks the save if these are empty.
+        await self._fill_required_policy_fields()
+
         await button.first.click()
 
         # Watch for the FormEntry URL: poll the DOM + URL, not networkidle.
