@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import URLError
@@ -14,6 +15,53 @@ REQUIRED_PHASES = ("before_action", "after_action", "during_verification")
 APPROVER = "Carlo Ferrara"
 APPROVAL_SCOPE = "JE-KILL-01"
 MAX_APPROVAL_AGE_SECONDS = 7 * 24 * 60 * 60
+ACTIVE_STATUSES = ("RUNNING", "VERIFYING")
+
+
+def job_inventory_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Split Test Jobs into lease-holding blockers and unleased parked rows.
+
+    Only a worker that claimed a lease can be driving the shared Test Chrome.
+    A RUNNING/VERIFYING row with an empty ``lease_owner`` is orphaned or
+    parked for HITL (for example generic Chat Jobs that JobEngine never
+    claims, such as c282de98) and must not block the disposable kill proof.
+    """
+    blocking: list[str] = []
+    unleased: list[str] = []
+    for row in rows:
+        job_id = str(row.get("id") or "").strip()
+        status = str(row.get("status") or "").strip().upper()
+        lease_owner = str(row.get("lease_owner") or "").strip()
+        if lease_owner:
+            blocking.append(f"{job_id} {status} lease={lease_owner}")
+        elif status in ACTIVE_STATUSES:
+            unleased.append(f"{job_id} {status}")
+    return {"blocking": blocking, "unleased": unleased}
+
+
+def job_inventory_errors(rows: list[dict[str, Any]]) -> list[str]:
+    report = job_inventory_report(rows)
+    if not report["blocking"]:
+        return []
+    return [
+        f"{len(report['blocking'])} active Test Job lease(s): "
+        + "; ".join(report["blocking"])
+    ]
+
+
+def read_job_inventory(db_path: str) -> list[dict[str, Any]]:
+    """Read-only snapshot of non-terminal Jobs and every lease holder."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """SELECT id, status, lease_owner FROM jobs
+               WHERE status IN ('RUNNING','VERIFYING')
+                  OR (lease_owner IS NOT NULL AND lease_owner <> '')"""
+        ).fetchall()
+    finally:
+        con.close()
+    return [dict(row) for row in rows]
 
 
 def fixture_approval_errors(data: dict[str, Any], *, now: datetime | None = None) -> list[str]:

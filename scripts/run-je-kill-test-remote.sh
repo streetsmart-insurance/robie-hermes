@@ -31,18 +31,42 @@ test -f "${FIXTURE}" || {
 
 job_db="${TEST_ROOT}/robie-job-engine/data/jobs.db"
 test -f "${job_db}"
+# Only a lease holder can be driving the shared Test Chrome. An unleased
+# RUNNING/VERIFYING row (orphaned or parked for HITL, e.g. Chat job
+# c282de98) owns no worker and must not block the disposable proof.
+# Mirrors robie_job_engine.je_kill_preflight.job_inventory_report.
 python3 - "${job_db}" <<'PY'
 import sqlite3
 import sys
 
 con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-blocking = con.execute(
-    """SELECT COUNT(*) FROM jobs
-       WHERE status IN ('RUNNING','VERIFYING') OR lease_owner IS NOT NULL"""
-).fetchone()[0]
+con.row_factory = sqlite3.Row
+rows = con.execute(
+    """SELECT id, status, lease_owner FROM jobs
+       WHERE status IN ('RUNNING','VERIFYING')
+          OR (lease_owner IS NOT NULL AND lease_owner <> '')"""
+).fetchall()
 con.close()
+blocking = [
+    f"{r['id']} {r['status']} lease={r['lease_owner']}"
+    for r in rows
+    if str(r["lease_owner"] or "").strip()
+]
+unleased = [
+    f"{r['id']} {r['status']}"
+    for r in rows
+    if not str(r["lease_owner"] or "").strip()
+]
 if blocking:
-    raise SystemExit(f"JE-KILL REFUSED: {blocking} active Test Job(s) or lease(s)")
+    raise SystemExit(
+        f"JE-KILL REFUSED: {len(blocking)} active Test Job lease(s): "
+        + "; ".join(blocking)
+    )
+if unleased:
+    print(
+        f"JE-KILL Test inventory: {len(unleased)} unleased RUNNING/VERIFYING "
+        "Job(s) ignored (no worker lease): " + "; ".join(unleased)
+    )
 print("JE-KILL Test inventory: 0 blocking Jobs/leases")
 PY
 

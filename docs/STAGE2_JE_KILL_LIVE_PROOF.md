@@ -38,6 +38,30 @@ Then Pawel will:
 - dispatch `RUN_JE_KILL_01_ON_HERMES_TEST_01`
 - report the green run ID
 
+## Round 3 (2026-09-13): both blockers cleared, inventory gate relaxed
+
+Carlo re-stamped the fixture (`approved_at=2026-09-13T15:07:06Z`) and left
+one authenticated SSRobie tab on `https://app.ezlynx.com/web/dashboard`.
+
+Remaining trap: Chat job `c282de98` is `RUNNING` with **no lease**
+(`lease_owner` empty). Carlo parks it later (step 4), not now. The old
+inventory gate refused on any `RUNNING`/`VERIFYING` row, so round 3 would
+have died with `JE-KILL REFUSED: 1 active Test Job(s) or lease(s)`.
+
+Now (`scripts/run-je-kill-test-remote.sh` +
+`robie_job_engine.je_kill_preflight.job_inventory_report`):
+
+- **blocks** only on rows holding a `lease_owner` (any status) — only a
+  lease holder can be driving the shared Test Chrome
+- **ignores** unleased `RUNNING`/`VERIFYING` rows, printing them as
+  `JE-KILL Test inventory: N unleased RUNNING/VERIFYING Job(s) ignored (no worker lease): c282de98 RUNNING`
+- still emits `JE-KILL Test inventory: 0 blocking Jobs/leases` before the
+  fixture/EZLynx preflight
+
+Covered by `tests/test_je_kill_preflight.py::JeKillJobInventoryTests`,
+which executes the exact heredoc from the remote runner against a seeded
+SQLite `jobs.db`.
+
 ## Non-negotiables
 
 - No PAWIVA / `221398001`
