@@ -117,7 +117,12 @@ def coverage_amounts_missing(error: str | None) -> bool:
 
 def coverage_labels_empty(error: str | None) -> bool:
     folded = " ".join(str(error or "").casefold().split())
-    return "no coverage labels were filled" in folded
+    return (
+        "no coverage labels were filled" in folded
+        or "could not match the coverage labels" in folded
+        or "looked for ['address']" in folded
+        or ("live_labels=" in folded and "location #" in folded)
+    )
 
 
 def coverage_letters_from_detail(detail: str) -> list[str]:
@@ -192,8 +197,19 @@ def coverage_fill_human_text(*, channel: str = CHANNEL_EMAIL, detail: str = "") 
         return missing_coverage_letters_human_text(
             channel=channel, missing=missing, have=have
         )
-    if coverage_labels_empty(detail) and not coverage_amounts_missing(detail):
+    if coverage_labels_empty(detail):
+        if missing:
+            have = [
+                letter
+                for letter in ("A", "B", "C", "D", "E", "F")
+                if letter not in missing
+            ]
+            return missing_coverage_letters_human_text(
+                channel=channel, missing=missing, have=have
+            )
         return COVERAGE_LABELS_EMPTY_EMAIL if email else COVERAGE_LABELS_EMPTY_CHAT
+    if coverage_amounts_missing(detail):
+        return COVERAGE_AMOUNTS_MISSING_EMAIL if email else COVERAGE_AMOUNTS_MISSING_CHAT
     return COVERAGE_AMOUNTS_MISSING_EMAIL if email else COVERAGE_AMOUNTS_MISSING_CHAT
 
 

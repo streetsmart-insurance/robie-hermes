@@ -112,6 +112,9 @@ class _MintedPage:
     def get_by_role(self, *_a, **_k):
         return self.locator()
 
+    def get_by_text(self, *_a, **_k):
+        return self.locator()
+
 
 class CoverageFillSetupTests(unittest.TestCase):
     def test_no_job_amounts_is_hitl_and_persists_policy_id(self) -> None:

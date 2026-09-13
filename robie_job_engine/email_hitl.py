@@ -119,7 +119,11 @@ def missing_coverage_letters(amounts: dict[str, Any] | None) -> list[str]:
 
 def policy_setup_args_from_hitl_payload(payload: dict[str, Any]) -> dict[str, str]:
     """Build ezlynx_policy_setup args from the parked job + HITL amounts."""
-    from .policy_setup_dispatch import GOLD_EFFECTIVE_DATE, GOLD_EXPIRATION_DATE
+    from .policy_setup_dispatch import (
+        GOLD_EFFECTIVE_DATE,
+        GOLD_EXPIRATION_DATE,
+        parse_coverage_amounts_from_reply,
+    )
 
     payload = dict(payload or {})
     human = dict(payload.get("human_input_values") or {})
@@ -135,10 +139,25 @@ def policy_setup_args_from_hitl_payload(payload: dict[str, Any]) -> dict[str, st
             payload.get("expiration_date") or GOLD_EXPIRATION_DATE
         ).strip(),
     }
+
+    parsed = parse_coverage_amounts_from_reply(
+        "\n".join(
+            [
+                str(payload.get("request_text") or ""),
+                str(payload.get("prompt") or ""),
+                str(human.get("reply_text") or ""),
+            ]
+        )
+    )
     for key in COVERAGE_KEYS:
-        value = str(coverage.get(key) or payload.get(key) or "").strip()
+        value = str(
+            coverage.get(key) or payload.get(key) or parsed.get(key) or ""
+        ).strip()
         if value:
             args[key] = value
+    source = str(payload.get("request_text") or payload.get("prompt") or "").strip()
+    if source:
+        args["request_text"] = source
     return args
 
 

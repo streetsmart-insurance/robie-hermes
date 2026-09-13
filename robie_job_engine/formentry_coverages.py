@@ -56,6 +56,26 @@ _LIVE_LETTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# FormEntry Location/Address section. Not coverage fields. Never fill these
+# as Coverage A–F and never let Gemini pick them.
+LOCATION_SECTION_HINTS = (
+    "name",
+    "address",
+    "address 1",
+    "address 2",
+    "city",
+    "state",
+    "zip",
+    "country",
+    "location #",
+    "location",
+)
+LOCATION_EXCLUDE_LABELS = LOCATION_SECTION_HINTS + (
+    "actions",
+    "line of business",
+)
+COVERAGE_TAB_NAMES = ("Coverages", "Coverage")
+
 LIST_LIVE_LABELS_JS = r"""
 () => {
   const norm = (s) => (s || "").trim().replace(/\s+/g, " ");
@@ -186,6 +206,49 @@ def live_label_for_coverage_letter(
     return None
 
 
+def has_live_coverage_letter(live_labels: list[str]) -> bool:
+    """True when the live page already shows a Coverage A–F label."""
+    return any(
+        live_label_for_coverage_letter(letter, live_labels)
+        for letter in COVERAGE_LETTERS
+    )
+
+
+def is_location_or_address_label(label: str) -> bool:
+    """True for Location/Address chrome. Address is never a coverage field."""
+    folded = normalize_coverage_label(label)
+    if not folded:
+        return False
+    if folded in LOCATION_EXCLUDE_LABELS:
+        return True
+    return folded.startswith("address ")
+
+
+def is_location_section_labels(live_labels: list[str]) -> bool:
+    """True when FormEntry is on Location/Address, not Coverages.
+
+    Live miss 44928e33 started on FormEntry Location (Name, Address, City,
+    State, Zip, Country, Location #). That is the wrong tab.
+    """
+    if has_live_coverage_letter(live_labels):
+        return False
+    hits = 0
+    for label in live_labels:
+        folded = normalize_coverage_label(label)
+        if folded in LOCATION_SECTION_HINTS or folded.startswith("address "):
+            hits += 1
+    return hits >= 3
+
+
+def filter_coverage_candidate_labels(live_labels: list[str]) -> list[str]:
+    """Drop Location/Address chrome so Gemini cannot map a letter onto Address."""
+    return [
+        str(item).strip()
+        for item in live_labels
+        if str(item).strip() and not is_location_or_address_label(item)
+    ]
+
+
 def map_letter_amounts_to_live_labels(
     amounts_by_letter: dict[str, str],
     live_labels: list[str],
@@ -194,11 +257,12 @@ def map_letter_amounts_to_live_labels(
 ) -> dict[str, str]:
     """Map stated A–F amounts onto live labels. Never invent a letter.
 
-    Gemini may pick among the live labels when the page is not literally
-    Coverage A–F. It cannot invent Coverage E if E was omitted.
+    Gemini may pick among coverage live labels when the page is not literally
+    Coverage A–F. It cannot invent Coverage E if E was omitted. It cannot
+    pick Address, City, State, Zip, or other Location-tab chrome.
     """
     mapped: dict[str, str] = {}
-    leftover = [str(item).strip() for item in live_labels if str(item).strip()]
+    leftover = filter_coverage_candidate_labels(live_labels)
     for letter in COVERAGE_LETTERS:
         amount = str((amounts_by_letter or {}).get(letter) or "").strip()
         if not amount:
@@ -313,6 +377,49 @@ async def alist_live_coverage_labels(page: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(item).strip() for item in raw if str(item).strip()]
+
+
+async def aclick_unique_tab(page: Any, name: str) -> bool:
+    """Click a tab only when the locator is unique. No .first / .nth / .last."""
+    tab = page.get_by_role("tab", name=name, exact=True)
+    count = await tab.count()
+    target = tab
+    if count != 1:
+        text_tab = page.get_by_text(name, exact=True)
+        count = await text_tab.count()
+        if count != 1:
+            return False
+        target = text_tab
+    try:
+        await target.click(timeout=8000)
+    except Exception:
+        return False
+    return True
+
+
+async def aensure_coverages_tab(page: Any) -> list[str]:
+    """Leave Location/Address. Fill only after Coverages labels are live.
+
+    If live labels look like Name/Address/City/State/Zip/Country/Location #,
+    click the unique Coverages (or Coverage) tab and read labels again.
+    Same live-label path for any LOB — no Dwelling/HO alias list.
+    """
+    live = await alist_live_coverage_labels(page)
+    if has_live_coverage_letter(live):
+        return live
+    if not is_location_section_labels(live):
+        return live
+    for name in COVERAGE_TAB_NAMES:
+        if not await aclick_unique_tab(page, name):
+            continue
+        try:
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+        live = await alist_live_coverage_labels(page)
+        if has_live_coverage_letter(live) or not is_location_section_labels(live):
+            return live
+    return live
 
 
 async def afind_input_for_label(page: Any, label: str) -> dict[str, Any]:
