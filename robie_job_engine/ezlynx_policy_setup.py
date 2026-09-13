@@ -298,6 +298,8 @@ FORMENTRY_NAV_EVIDENCE_KEYS = (
     "field_fill",
     "field_fill_error",
     "hitl_response",
+    "hitl_posted",
+    "continue_after_hitl",
     "validation",
     "landed_url",
     "code_version",
@@ -317,6 +319,8 @@ class PolicySetupResult:
     field_fill: dict[str, Any] | None = None
     field_fill_error: str | None = None
     hitl_response: dict[str, Any] | None = None
+    hitl_posted: bool | None = None
+    continue_after_hitl: bool | None = None
     validation: dict[str, Any] | None = None
     landed_url: str | None = None
     code_version: str | None = None
@@ -337,6 +341,35 @@ class PolicySetupResult:
             if value is not None:
                 payload[key] = value
         return payload
+
+
+class FieldFillHitlError(RuntimeError):
+    """Field fill stopped for HITL. Do not click Save. Do not continue."""
+
+    def __init__(self, filled: Any) -> None:
+        super().__init__(filled.error or f"{getattr(filled, 'widget', 'field')} fill HITL")
+        self.filled = filled
+
+
+def policy_setup_hitl_blocks_continue(result: dict[str, Any] | None) -> str | None:
+    """If HITL fired, return PLAYWRIGHT_BLOCKED text. Caller must not continue."""
+    if not isinstance(result, dict) or result.get("success"):
+        return None
+    error = str(result.get("error") or "").strip()
+    hitl = result.get("hitl_response") or {}
+    posted = result.get("hitl_posted")
+    blocked = (
+        posted is False
+        or bool(hitl)
+        or "HITL" in error
+        or "PLAYWRIGHT_BLOCKED" in error
+    )
+    if not blocked:
+        return None
+    text = error or "HITL STOP AND ASK"
+    if "PLAYWRIGHT_BLOCKED" not in text:
+        text = f"PLAYWRIGHT_BLOCKED: {text}"
+    return text
 
 
 def policy_setup_result_from_formentry_nav(
@@ -491,10 +524,14 @@ class EzlynxPolicySetupPage:
         return send
 
     def _default_chat_sender(self):
-        """Create a Google Chat sender using the webhook."""
+        """Post HITL into the same Chat thread as the @robie. Not a webhook."""
+        job_id = self.job_id
+
         def send(message: str) -> bool:
-            from .ascend_sync import send_google_chat_alert
-            return send_google_chat_alert(message)
+            from .chat_app_post import post_hitl_to_originating_thread
+
+            return post_hitl_to_originating_thread(message, job_id=job_id)
+
         return send
 
     async def navigate_to_policies(self, applicant_id: str) -> None:
@@ -1089,7 +1126,7 @@ class EzlynxPolicySetupPage:
             gemini_client=self._gemini_client(),
         )
         if filled.hitl:
-            raise RuntimeError(filled.error or f"{widget.name} fill HITL")
+            raise FieldFillHitlError(filled)
         return filled
 
     async def _fill_required_policy_fields(self) -> dict[str, Any]:
@@ -1168,19 +1205,26 @@ class EzlynxPolicySetupPage:
                 await self.page.screenshot(path=screenshot_path)
             except Exception:
                 screenshot_path = None
-            fill_applied = bool((report.get("field_fill") or {}).get("department")) and bool(
-                (report.get("field_fill") or {}).get("billing")
-            )
+            fill = report.get("field_fill") or {}
+            named = str(fill.get("named_option") or "").strip() or None
+            visible = str(fill.get("live_visible") or fill.get("selected") or "").strip() or None
+            gemini_applied = bool(fill.get("gemini_applied")) and bool(named) and bool(visible)
+            error_text = report.get("error") or "FormEntry mint failed"
+            if "PLAYWRIGHT_BLOCKED" not in error_text:
+                error_text = f"PLAYWRIGHT_BLOCKED: {error_text}"
+                report["error"] = error_text
             hitl_request = HitlRequest(
-                job_id=getattr(self, "job_id", "unknown"),
+                job_id=getattr(self, "job_id", None) or "unknown",
                 phase="formentry_mint",
-                error=report.get("error") or "FormEntry mint failed",
+                error=error_text,
                 page_state=report.get("page_state") or {},
                 attempted=attempted,
                 applicant_id=applicant_id,
                 policy_id=policy_id,
                 screenshot_path=screenshot_path,
-                gemini_applied=fill_applied,
+                gemini_applied=gemini_applied,
+                gemini_named_option=named,
+                live_control_shows=visible,
                 formentry_exists=bool(report.get("formentry_found")),
                 job_still_running=False,
                 save_skipped=bool(report.get("field_fill_error"))
@@ -1189,27 +1233,32 @@ class EzlynxPolicySetupPage:
             )
             deps = getattr(self, "_hitl_deps", {})
             hitl_response = escalate(hitl_request, deps)
+            report["continue_after_hitl"] = False
+            report["hitl_posted"] = bool(hitl_response.hitl_posted)
             report["hitl_response"] = {
                 "source": hitl_response.source,
                 "suggestion": hitl_response.suggestion,
-                "actionable": hitl_response.actionable,
+                "actionable": False,
+                "hitl_posted": bool(hitl_response.hitl_posted),
             }
-            if hitl_response.actionable:
+            if hitl_response.hitl_posted:
                 report["error"] = (
                     (report.get("error") or "")
-                    + f" HITL {hitl_response.source} suggested: {hitl_response.suggestion}"
+                    + " HITL posted to the originating Chat thread. STOP AND ASK."
                 )
             else:
-                reason = hitl_response.suggestion or "no actionable guidance"
+                reason = hitl_response.suggestion or "Chat ping failed"
                 report["error"] = (
                     (report.get("error") or "")
-                    + f" HITL escalation failed ({hitl_response.source}): {reason}."
+                    + f" HITL posted=false ({hitl_response.source}): {reason}."
                 )
                 if screenshot_path:
                     report["error"] += f" Screenshot: {screenshot_path}."
         except Exception as hitl_exc:  # noqa: BLE001
             err_msg = f"{type(hitl_exc).__name__}: {hitl_exc}"
             report["hitl_error"] = err_msg
+            report["hitl_posted"] = False
+            report["continue_after_hitl"] = False
             report["error"] = (
                 (report.get("error") or "")
                 + f" HITL escalation error ({err_msg}); failing closed."
@@ -1419,10 +1468,19 @@ class EzlynxPolicySetupPage:
         try:
             fill_result = await self._fill_required_policy_fields()
             report["field_fill"] = fill_result
+        except FieldFillHitlError as fill_exc:
+            field_fill_failed = True
+            report["field_fill"] = fill_exc.filled.to_dict()
+            report["field_fill_error"] = f"{type(fill_exc).__name__}: {fill_exc}"
+            report["error"] = (
+                f"PLAYWRIGHT_BLOCKED: Failed to fill required fields: {fill_exc}"
+            )
         except Exception as fill_exc:
             field_fill_failed = True
             report["field_fill_error"] = f"{type(fill_exc).__name__}: {fill_exc}"
-            report["error"] = f"Failed to fill required fields: {fill_exc}"
+            report["error"] = (
+                f"PLAYWRIGHT_BLOCKED: Failed to fill required fields: {fill_exc}"
+            )
 
         if field_fill_failed:
             # Keep the field-fill error. Do not claim a click or a 30s wait.

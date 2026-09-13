@@ -146,7 +146,7 @@ class MintFormentryFieldFillTests(unittest.TestCase):
             hitl_req = mock_escalate.call_args[0][0]
             self.assertEqual(hitl_req.phase, "formentry_mint")
             self.assertIn("Failed to fill required fields", hitl_req.error)
-            self.assertIn("HITL escalation failed (system)", nav["error"])
+            self.assertIn("HITL posted=false", nav["error"])
             self.assertEqual(nav.get("code_version"), CODE_VERSION)
 
             outer = result.to_dict()

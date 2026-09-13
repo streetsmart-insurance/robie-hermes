@@ -112,3 +112,50 @@ def maybe_post_audit_as_chat_app(job: dict[str, Any], message: str) -> dict[str,
         return None
     space, thread = target
     return post_as_chat_app(space, message, thread_name=thread)
+
+
+def post_hitl_to_originating_thread(
+    message: str,
+    *,
+    job_id: str | None = None,
+    store: Any | None = None,
+    poster: Any | None = None,
+    db_path: str | None = None,
+) -> bool:
+    """Post HITL into the same Chat thread as the @robie. Not a second channel.
+
+    Fail closed when the job has no conversation_id/thread. Never uses a
+    webhook. RETRY lives in that originating thread.
+    """
+    job_key = str(
+        job_id or os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
+    ).strip()
+    path = str(db_path or os.environ.get("ROBIE_JOB_DB") or "").strip()
+    if not job_key:
+        return False
+    if store is None:
+        if not path:
+            return False
+        from .store import JobStore
+
+        store = JobStore(path)
+    try:
+        job = store.get_job(job_key)
+    except Exception:
+        return False
+    target = conversation_target(job)
+    if target is None:
+        return False
+    space, thread = target
+    send = poster if poster is not None else post_as_chat_app
+    try:
+        send(space, message, thread_name=thread)
+        return True
+    except TypeError:
+        try:
+            send(space, message)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
