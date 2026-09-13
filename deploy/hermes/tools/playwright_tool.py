@@ -410,6 +410,11 @@ try:
             "PLAYWRIGHT_BLOCKED: could not select the current job tab; "
             "refusing pages[0] / first-ezlynx-wins"
         )
+    try:
+        from robie_job_engine.ezlynx_chrome import dismiss_ezlynx_chrome
+        dismiss_ezlynx_chrome(page)
+    except Exception:
+        pass
     scope = {
         "playwright": pw,
         "browser": browser,

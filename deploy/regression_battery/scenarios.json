@@ -180,6 +180,14 @@
       "note": "Gold Eagle Bond Chat job d5fd2307 closed UNVERIFIED with last_error 'no structured destination action checkpoint' despite 0 playwright_exec / 0 verification_evidence. Infra was PLAYWRIGHT_BLOCKED / CDP ECONNREFUSED on 127.0.0.1:9222. e51a2f2f HITL after flush_tabs_at_job_start then ECONNREFUSED. Do not mask infra as verification. COMPLETE stays blocked without destination evidence. Claimed progress without evidence stays UNVERIFIED."
     },
     {
+      "id": "2026-09-13-ezlynx-edit-chrome",
+      "class": "ezlynx-chrome",
+      "new_failure_mode": true,
+      "scenario": "ezlynx-chrome:dismiss-add-note-and-left-rail",
+      "closed": false,
+      "note": "Production Edit Policy (applicant 220250093 / policy 83669533) stayed covered by the Add Note drawer and the wide left applicant rail. Dusty closing them on the already-open hermes-poc-01 Chrome does not persist. tests/test_ezlynx_chrome_dismiss.py proves the attach helper. Live attach proof is still required before close. Chrome is never launched or killed."
+    },
+    {
       "id": "6a3688b6-chat-email-contention",
       "class": "message-intake",
       "new_failure_mode": true,

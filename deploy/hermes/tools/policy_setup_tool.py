@@ -110,6 +110,12 @@ def _run_policy_setup(args: dict) -> dict:
             publish_live_playwright_hint(
                 [tab for ctx in browser.contexts for tab in ctx.pages], page=page
             )
+            try:
+                from robie_job_engine.ezlynx_chrome import adismiss_ezlynx_chrome
+
+                await adismiss_ezlynx_chrome(page)
+            except Exception:
+                pass
             setup = EzlynxPolicySetupPage(page)
             shell = PolicyShellInput(
                 applicant_id="220250093",

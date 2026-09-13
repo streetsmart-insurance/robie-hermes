@@ -386,6 +386,23 @@ class EzlynxPolicySetupPage:
         if "chat_sender" not in self._hitl_deps:
             self._hitl_deps["chat_sender"] = self._default_chat_sender()
 
+    async def _prepare_edit_surface(self) -> dict[str, Any]:
+        """Dismiss leftover Add Note / collapse the applicant rail before form work.
+
+        Called after attach and after landing on Edit Policy, before the first
+        fill, screenshot, or Save. Never launches or kills Chrome.
+        """
+        from .ezlynx_chrome import adismiss_ezlynx_chrome
+
+        try:
+            return await adismiss_ezlynx_chrome(self.page)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "add_note": "skipped",
+                "left_rail": "skipped",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
     def _default_email_sender(self):
         """Create an email sender using the verification mailer."""
         def send(*, to: str, subject: str, body: str) -> None:
@@ -418,6 +435,7 @@ class EzlynxPolicySetupPage:
         await self.page.wait_for_load_state("domcontentloaded")
 
     async def fill_policy_shell(self, shell_input: PolicyShellInput, save_and_edit: bool = True) -> bool:
+        await self._prepare_edit_surface()
         lob_val = normalize_lob(shell_input.lob)
         trans_val = normalize_transaction_type(shell_input.transaction_type)
 
@@ -1289,6 +1307,7 @@ class EzlynxPolicySetupPage:
             return report
         await self.page.goto(edit_url, wait_until="domcontentloaded")
         await self.page.wait_for_timeout(2000)
+        await self._prepare_edit_surface()
 
         # Pre-click: scan every open tab for an already-minted FormEntry.
         for tab in self._all_tabs():
