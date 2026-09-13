@@ -5,6 +5,11 @@ Email and Chat workers see ``playwright_exec``, ``ezlynx_policy_setup`` and
 Interactive desktop Hermes is unchanged: this module does not strip
 ``execute_code`` or ``terminal`` unless the process is an email/chat job worker.
 ``expose_guarded_browser`` still pins ``playwright_exec`` for hermes-gateway.
+
+Appending a name to ``_HERMES_CORE_TOOLS`` is not registration. Chat workers
+must also get a callable handler and a schema entry in
+``get_tool_definitions``. Job c282de98 fail-closed because the live Chat
+schema had the name-pin without a handler.
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ EXECUTE_CODE_TOOLS = frozenset({"execute_code", "code_execution", "code-executio
 TERMINAL_TOOLS = frozenset({"terminal", "shell", "bash", "sh"})
 FORBIDDEN_WORKER_TOOLS = EXECUTE_CODE_TOOLS | TERMINAL_TOOLS
 _FILTER_MARK = "_robie_email_chat_filter"
+_HANDLER_MARK = "_robie_policy_setup_registered"
 
 
 def is_email_or_chat_worker(action_type=None, env=None, argv=None) -> bool:
@@ -61,6 +67,46 @@ def filter_email_chat_schemas(schemas):
     return [item for item in list(schemas or []) if _schema_name(item) not in FORBIDDEN_WORKER_TOOLS]
 
 
+def register_policy_setup_callable(registry=None):
+    """Register the real ``ezlynx_policy_setup`` handler (callable, not a name).
+
+    Returns the handler, or None when the tool file cannot be loaded. Callers
+    that must fail closed should treat None as ``PolicySetupToolMissing``.
+    """
+    from robie_job_engine.policy_setup_dispatch import (
+        PolicySetupToolMissing,
+        register_policy_setup_handler,
+    )
+
+    try:
+        handler = register_policy_setup_handler(registry=registry)
+    except PolicySetupToolMissing:
+        return None
+    if registry is not None:
+        setattr(registry, _HANDLER_MARK, True)
+    return handler if callable(handler) else None
+
+
+def inject_email_chat_job_schemas(schemas):
+    """Filter forbidden tools and inject the callable policy-setup schema.
+
+    ``filter_email_chat_schemas`` only drops names. Chat job c282de98 proved
+    that a name pin without a schema/handler is not enough — the model never
+    saw ``ezlynx_policy_setup`` in available tools.
+    """
+    items = filter_email_chat_schemas(schemas)
+    names = {_schema_name(item) for item in items}
+    from robie_job_engine.policy_setup_dispatch import (
+        POLICY_SETUP_TOOL,
+        policy_setup_openai_schema,
+    )
+
+    if POLICY_SETUP_TOOL not in names:
+        items.append(policy_setup_openai_schema())
+    register_policy_setup_callable()
+    return items
+
+
 def _hide_execute_code_from_core(core) -> None:
     if not isinstance(core, list):
         return
@@ -70,7 +116,9 @@ def _hide_execute_code_from_core(core) -> None:
 def install_email_chat_schema_filter():
     """Wrap Hermes schema assembly so email/chat jobs never see execute_code or terminal.
 
-    Safe when Hermes is absent (CI). Interactive calls are left unchanged.
+    Also injects the ``ezlynx_policy_setup`` schema and registers the handler
+    so the Chat worker can call it. Safe when Hermes is absent (CI).
+    Interactive calls are left unchanged.
     """
     try:
         import model_tools
@@ -88,7 +136,7 @@ def install_email_chat_schema_filter():
                     kwargs["disabled_toolsets"] = disabled
                 schemas = original(*args, **kwargs)
                 if is_email_or_chat_worker():
-                    return filter_email_chat_schemas(schemas)
+                    return inject_email_chat_job_schemas(schemas)
                 return schemas
 
             setattr(wrapped, _FILTER_MARK, True)
@@ -105,7 +153,7 @@ def install_email_chat_schema_filter():
         visible, deferred = classify(*args, **kwargs)
         if not is_email_or_chat_worker():
             return visible, deferred
-        return filter_email_chat_schemas(visible), filter_email_chat_schemas(deferred)
+        return inject_email_chat_job_schemas(visible), filter_email_chat_schemas(deferred)
 
     setattr(classified, _FILTER_MARK, True)
     tool_search.classify_tools = classified
@@ -131,4 +179,6 @@ def expose_guarded_browser(toolsets=None, *, action_type=None, env=None, argv=No
         if "ezlynx_document_upload" not in core:
             core.append("ezlynx_document_upload")
         _hide_execute_code_from_core(core)
+        # Name pin is not a handler. Register the callable on the live registry.
+        register_policy_setup_callable()
     install_email_chat_schema_filter()

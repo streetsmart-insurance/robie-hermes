@@ -227,6 +227,7 @@ from robie_job_engine.action_gate import (
 from robie_job_engine.runs import MessageMaintenanceDeferred
 from robie_job_engine.chat_guard import (
     build_chat_execution_text,
+    chat_hermes_should_run,
     chat_message_is_related_only,
     guard_chat_response,
     open_chat_job,
@@ -1323,6 +1324,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # A retryable exception leaves the durable event available after restart.
         await asyncio.to_thread(require_message_execution_available, ROBIE_JOB_DB)
+        if job_id and not chat_hermes_should_run(ROBIE_JOB_DB, job_id):
+            # Fail-closed policy setup already parked HITL. Do not start a
+            # google_chat_task worker that would sit in RUNNING / still working.
+            return
         if not job_id:
             await self.handle_message(event)
             return

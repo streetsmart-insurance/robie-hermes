@@ -191,7 +191,10 @@ def _available() -> bool:
 
 registry.register(
     name="ezlynx_policy_setup",
-    toolset="ezlynx",
+    # Chat/email workers enable the playwright toolset (see milestone_preflight
+    # get_tool_definitions(enabled_toolsets=['playwright'])). toolset="ezlynx"
+    # left the handler on disk but off the live Chat schema (job c282de98).
+    toolset="playwright",
     schema=POLICY_SETUP_SCHEMA,
     handler=ezlynx_policy_setup_handler,
     check_fn=_available,

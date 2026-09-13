@@ -17,7 +17,12 @@ from .context_policy import (
 )
 from .chat_queue import DurableChatEventQueue
 from .idempotency import DurableWorkLedger, IdempotencyError
-from .hitl import interaction_for_blocker, structured_blocker_reason
+from .hitl import (
+    interaction_for_blocker,
+    policy_setup_fail_closed_hitl_text,
+    policy_setup_fail_closed_reason,
+    structured_blocker_reason,
+)
 from .worker_contract import classify_chat_close_without_checkpoint
 from .action_gate import apply_action_gate, is_action_gate_refusal
 from .job_schema import bounded_schema_hold_reason
@@ -396,8 +401,105 @@ def _retarget_bounded_correction(
 
 
 def _looks_in_progress(content: str) -> bool:
-    normalized = " ".join(str(content or "").casefold().split())
+    text = str(content or "")
+    # FAIL_CLOSED_MESSAGE contains the substring "playwright_exec". Job
+    # c282de98 stored that exact fail-closed line and Chat rendered
+    # "still working" because this helper treated it as in-progress.
+    if policy_setup_fail_closed_reason(text):
+        return False
+    if text.casefold().lstrip().startswith("robie_outcome_unknown:"):
+        return False
+    normalized = " ".join(text.casefold().split())
     return any(marker in normalized for marker in _IN_PROGRESS_MARKERS)
+
+
+def chat_hermes_should_run(db_path: str, job_id: str | None) -> bool:
+    """False when Chat already parked HITL / left a non-RUNNING state.
+
+    After fail-closed policy setup, do not start a google_chat_task worker
+    that will sit in RUNNING with a "still working" bubble.
+    """
+    if not job_id:
+        return True
+    job = JobStore(db_path).get_job(job_id)
+    return JobStatus(job["status"]) in {JobStatus.PENDING, JobStatus.RUNNING}
+
+
+def park_policy_setup_fail_closed(
+    db_path: str,
+    job_id: str,
+    content: str,
+    *,
+    recordings: RecordingManager | None = None,
+    store: JobStore | None = None,
+) -> str:
+    """Fail closed AND post honest HITL. Leave AWAITING_HUMAN_INPUT, not RUNNING."""
+    store = store or JobStore(db_path)
+    job = store.get_job(job_id)
+    recordings = recordings or RecordingManager(db_path)
+    error = (
+        policy_setup_fail_closed_reason(content)
+        or str(content or "").strip()
+        or "ezlynx_policy_setup is not registered; failing closed"
+    )
+    prompt = policy_setup_fail_closed_hitl_text(job_id=job_id, detail=error)
+    payload = dict(job.get("payload") or {})
+    interaction = {
+        "awaiting": "human_input",
+        "action_type": job["action_type"],
+        "field_name": "operator_response",
+        "field_label": "RETRY",
+        "checkpoint": "policy_setup_tool_missing",
+        "blocked_reason": error,
+        "prompt": prompt,
+        "accepts_value": True,
+    }
+    from .chat_app_post import post_hitl_to_originating_thread
+
+    post_hitl_to_originating_thread(
+        prompt, job_id=job_id, store=store, db_path=db_path
+    )
+    if JobStatus(job["status"]) in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        parked = False
+        if conversation_id:
+            try:
+                DurableChatEventQueue(db_path).park_direct_human_input(
+                    conversation_id=conversation_id,
+                    job_id=job_id,
+                    interaction_state=interaction,
+                    error=error,
+                )
+                parked = True
+            except Exception:
+                parked = False
+        if not parked:
+            store.transition(
+                job_id,
+                JobStatus.AWAITING_HUMAN_INPUT,
+                expected={
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.VERIFYING,
+                },
+                error=error,
+                resume_status=(
+                    JobStatus.PENDING
+                    if JobStatus(job["status"]) == JobStatus.PENDING
+                    else JobStatus.RUNNING
+                ),
+                release_lease=True,
+            )
+    recordings.safe_stop(job_id, JobStatus.AWAITING_HUMAN_INPUT.value)
+    try:
+        stop_generic_chat_job_heartbeat(db_path, job_id)
+    except Exception:
+        pass
+    return prompt
 
 
 def register_chat_verifier(action_type: str, verifier: Any) -> None:
@@ -613,6 +715,98 @@ def _policy_setup_contract(text: str) -> list[str]:
     ]
 
 
+def _bind_chat_policy_setup(
+    store: JobStore, job: dict[str, Any], text: str, db_path: str
+) -> list[str]:
+    """Register + invoke ezlynx_policy_setup for Chat, like the email runner.
+
+    Prompt-only routing left job c282de98 at tool_called=false. The Chat
+    worker must get a callable handler. When the handler is missing, fail
+    closed and park honest HITL — never fall through to playwright_exec.
+    """
+    from .hermes_tool_visibility import register_policy_setup_callable
+    from .policy_setup_dispatch import (
+        FAIL_CLOSED_MESSAGE,
+        POLICY_SETUP_REQUIRED_KIND,
+        PolicySetupToolMissing,
+        extract_policy_setup_args,
+        invoke_policy_setup_tool,
+    )
+
+    contract = _policy_setup_contract(text)
+    if not contract:
+        return []
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return contract
+    policy_args = extract_policy_setup_args(text) or {}
+    existing = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or {}
+    handler = register_policy_setup_callable()
+    marker = {
+        "policy_number": policy_args.get("policy_number")
+        or existing.get("policy_number"),
+        "tool_called": bool(existing.get("tool_called")),
+        "handler_registered": bool(handler),
+    }
+    store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, marker)
+    extra: list[str] = []
+    if not handler:
+        park_policy_setup_fail_closed(
+            db_path, job_id, f"ROBIE_OUTCOME_UNKNOWN: {FAIL_CLOSED_MESSAGE}",
+            store=store,
+        )
+        extra.extend(
+            [
+                f"ROBIE_OUTCOME_UNKNOWN: {FAIL_CLOSED_MESSAGE}",
+                "- STOP. Do not call playwright_exec. The job is parked "
+                "AWAITING_HUMAN_INPUT (not still working).",
+            ]
+        )
+        return contract + extra
+    extra.append(
+        "- ezlynx_policy_setup is registered as a callable Chat worker tool "
+        "(toolset=playwright). Call it — do not fall through to playwright_exec."
+    )
+    if marker["tool_called"]:
+        extra.append(
+            "- ezlynx_policy_setup already ran for this job (tool_called=true). "
+            "Do not call playwright_exec for policy setup."
+        )
+        return extra + contract
+    if not policy_args.get("policy_number"):
+        return extra + contract
+    try:
+        invoke_policy_setup_tool(policy_args)
+    except PolicySetupToolMissing as exc:
+        park_policy_setup_fail_closed(
+            db_path,
+            job_id,
+            f"ROBIE_OUTCOME_UNKNOWN: {exc}",
+            store=store,
+        )
+        extra.extend(
+            [
+                f"ROBIE_OUTCOME_UNKNOWN: {exc}",
+                "- STOP. Do not call playwright_exec. The job is parked "
+                "AWAITING_HUMAN_INPUT (not still working).",
+            ]
+        )
+        return extra + contract
+    except Exception as exc:  # noqa: BLE001 - do not wander with playwright_exec
+        extra.append(
+            f"- Job Engine invoke raised {type(exc).__name__}: {exc}. "
+            "Do not call playwright_exec for policy setup."
+        )
+        return extra + contract
+    refreshed = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or marker
+    if refreshed.get("tool_called"):
+        extra.append(
+            "- Job Engine invoked the callable ezlynx_policy_setup handler "
+            "in-process. Do not call playwright_exec for this job class."
+        )
+    return extra + contract
+
+
 def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> str:
     """Add trusted, non-user-visible execution constraints for Hermes.
 
@@ -700,18 +894,7 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
             lines.append(f"- {redact_text(str(field))}: {redact_text(str(value))}")
     lines.extend(execution_contract_lines())
     lines.extend(_submission_contract(text))
-    policy_setup_lines = _policy_setup_contract(text)
-    if policy_setup_lines and job_id:
-        from .policy_setup_dispatch import (
-            POLICY_SETUP_REQUIRED_KIND,
-            detect_policy_setup_request,
-        )
-
-        policy_args = detect_policy_setup_request(text) or {}
-        store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {
-            "policy_number": policy_args.get("policy_number"),
-            "tool_called": False,
-        })
+    policy_setup_lines = _bind_chat_policy_setup(store, job, text, db_path)
     lines.extend(policy_setup_lines)
     lines.append("[END ROBIE JOB ENGINE EXECUTION CONTRACT]")
     return text + "\n".join(lines)
@@ -1382,6 +1565,14 @@ def guard_chat_response(
     store = JobStore(db_path)
     job = store.get_job(job_id)
     recordings = recordings or RecordingManager(db_path)
+    if policy_setup_fail_closed_reason(content) and JobStatus(job["status"]) in {
+        JobStatus.PENDING,
+        JobStatus.RUNNING,
+        JobStatus.VERIFYING,
+    }:
+        return park_policy_setup_fail_closed(
+            db_path, job_id, content, recordings=recordings, store=store
+        )
     blocker = structured_blocker_reason(content)
     if blocker and JobStatus(job["status"]) in {
         JobStatus.PENDING,
