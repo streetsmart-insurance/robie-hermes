@@ -56,6 +56,7 @@ def _park_coverage_hitl(store: JobStore) -> dict:
             "applicant_id": "220250093",
             "effective_date": "10/02/2026",
             "expiration_date": "10/02/2027",
+            "gmail_thread_id": "thread-28bff7c8",
         },
         idempotency_key="gmail:orig-28bff7c8",
     )
@@ -139,6 +140,9 @@ class FindParkedHitlJobTests(unittest.TestCase):
             )
 
 
+RETRY_GMAIL_ID = "1a09c697edabe8be"
+
+
 class ResumeSameJobTests(unittest.TestCase):
     def test_reply_resumes_same_job_and_does_not_create_intake(self) -> None:
         with durable_temporary_directory() as tmp:
@@ -182,6 +186,90 @@ class ResumeSameJobTests(unittest.TestCase):
                 after["payload"]["human_input_values"]["coverage"]["medical_payments"],
                 "10000",
             )
+
+    def test_retry_resumes_waiting_job_and_never_creates_a_second_task(self) -> None:
+        """Live miss 44928e33: RETRY resumed, then inbox minted 508d1619."""
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            parked = _park_coverage_hitl(store)
+            prompt = (
+                f"Subject: Re: [ROBIE HITL] Job {parked['id'][:8]} "
+                f"stuck at coverage_fill\n\nRETRY\n\n"
+                "A $1,200,000 B $120,000 C $500,000 D $500,000 E $10,000 F $10,000"
+            )
+            seen: list[str] = []
+
+            def worker(prompt_text, job_id, db_path):
+                seen.append(job_id)
+                payload = JobStore(db_path).get_job(job_id)["payload"]
+                self.assertTrue(payload.get("hitl_resume"))
+                coverage = payload["human_input_values"]["coverage"]
+                self.assertEqual(coverage["dwelling"], "1200000")
+                self.assertEqual(coverage["personal_liability"], "10000")
+                self.assertEqual(coverage["medical_payments"], "10000")
+                return "HITL resume applied Coverage A-F through ezlynx_policy_setup."
+
+            first = run_guarded_email_task(
+                db_path=db,
+                gmail_message_id=RETRY_GMAIL_ID,
+                prompt=prompt,
+                run_agent=lambda _p: self.fail("must use context callback"),
+                run_agent_with_context=worker,
+                verifiers={},
+                thread_id="thread-28bff7c8",
+            )
+            self.assertEqual(seen, [parked["id"]])
+            self.assertIn(parked["id"], first)
+            self.assertEqual(_job_count(store), 1)
+            keys = [
+                row["idempotency_key"]
+                for row in store.list_jobs_by_status(set(JobStatus))
+            ]
+            self.assertNotIn(f"gmail:{RETRY_GMAIL_ID}", keys)
+
+            second = run_guarded_email_task(
+                db_path=db,
+                gmail_message_id=RETRY_GMAIL_ID,
+                prompt=prompt,
+                run_agent=lambda _p: self.fail("must not mint a sibling job"),
+                run_agent_with_context=lambda *_a: "already resumed",
+                verifiers={},
+                thread_id="thread-28bff7c8",
+            )
+            self.assertEqual(_job_count(store), 1)
+            self.assertIn(parked["id"], second)
+            self.assertEqual(
+                [
+                    row["id"]
+                    for row in store.list_jobs_by_status(set(JobStatus))
+                    if str(row.get("idempotency_key") or "").startswith("gmail:")
+                ],
+                [parked["id"]],
+            )
+
+    def test_retry_on_same_thread_without_hitl_token_still_resumes(self) -> None:
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            parked = _park_coverage_hitl(store)
+            seen: list[str] = []
+
+            def worker(prompt_text, job_id, db_path):
+                seen.append(job_id)
+                return "resumed same thread"
+
+            run_guarded_email_task(
+                db_path=db,
+                gmail_message_id=RETRY_GMAIL_ID,
+                prompt="Subject: Re: Please create the homeowners policy\n\nRETRY",
+                run_agent=lambda _p: self.fail("must use context callback"),
+                run_agent_with_context=worker,
+                verifiers={},
+                thread_id="thread-28bff7c8",
+            )
+            self.assertEqual(seen, [parked["id"]])
+            self.assertEqual(_job_count(store), 1)
 
     def test_new_email_still_creates_a_job(self) -> None:
         with durable_temporary_directory() as tmp:

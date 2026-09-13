@@ -222,6 +222,22 @@ class WorkerReportEmailTests(unittest.TestCase):
         self.assertGreaterEqual(len(lines), 2)
         self.assertTrue(all(len(line) <= 160 for line in lines))
 
+    def test_address_label_miss_does_not_say_amounts_were_not_on_the_email(
+        self,
+    ) -> None:
+        text = worker_report_human_text(
+            "PLAYWRIGHT_BLOCKED: no coverage labels were filled after "
+            "Gemini apply + retry. Looked for ['Address']. "
+            "live_labels=['Name', 'Address', 'City', 'State', 'Zip', "
+            "'Country', 'Location #']. HITL posted to the email. STOP AND ASK.",
+            channel="email",
+        )
+        self.assertEqual(text, COVERAGE_LABELS_EMPTY_EMAIL)
+        self.assertNotIn("They were not on the email", text)
+        self.assertIn("could not match the coverage labels", text.casefold())
+        self.assertIn("Reply to this email", text)
+        self.assertNotIn("Chat thread", text)
+
     def test_worker_report_mail_is_text_plain_8bit(self) -> None:
         body = worker_report_human_text(
             "PLAYWRIGHT_BLOCKED: no coverage labels were filled after Gemini apply + retry.",

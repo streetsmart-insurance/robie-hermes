@@ -113,6 +113,30 @@ def _run_policy_setup(args: dict) -> dict:
                 os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID") or ""
             ).strip() or None
             setup = EzlynxPolicySetupPage(page, job_id=job_id)
+            from robie_job_engine.policy_setup_dispatch import (
+                parse_coverage_amounts_from_reply,
+            )
+
+            source_text = str(
+                args.get("request_text") or args.get("prompt") or ""
+            )
+            parsed = parse_coverage_amounts_from_reply(source_text)
+            dwelling = str(args.get("dwelling") or parsed.get("dwelling") or "")
+            other_structures = str(
+                args.get("other_structures") or parsed.get("other_structures") or ""
+            )
+            personal_property = str(
+                args.get("personal_property") or parsed.get("personal_property") or ""
+            )
+            loss_of_use = str(
+                args.get("loss_of_use") or parsed.get("loss_of_use") or ""
+            )
+            personal_liability = str(
+                args.get("personal_liability") or parsed.get("personal_liability") or ""
+            )
+            medical_payments = str(
+                args.get("medical_payments") or parsed.get("medical_payments") or ""
+            )
             shell = PolicyShellInput(
                 applicant_id="220250093",
                 lob="HOME",
@@ -120,13 +144,14 @@ def _run_policy_setup(args: dict) -> dict:
                 effective_date=str(args.get("effective_date") or ""),
                 expiration_date=str(args.get("expiration_date") or ""),
                 homeowners_coverage=HomeownersCoverageItem(
-                    dwelling_a=str(args.get("dwelling") or ""),
-                    other_structures_b=str(args.get("other_structures") or ""),
-                    personal_property_c=str(args.get("personal_property") or ""),
-                    loss_of_use_d=str(args.get("loss_of_use") or ""),
-                    liability_e=str(args.get("personal_liability") or ""),
-                    med_pay_f=str(args.get("medical_payments") or ""),
+                    dwelling_a=dwelling,
+                    other_structures_b=other_structures,
+                    personal_property_c=personal_property,
+                    loss_of_use_d=loss_of_use,
+                    liability_e=personal_liability,
+                    med_pay_f=medical_payments,
                 ),
+                request_text=source_text,
             )
             result = await setup.setup_policy_by_lob(shell)
             return result.to_dict()

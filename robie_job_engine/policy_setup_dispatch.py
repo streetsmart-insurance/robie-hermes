@@ -296,8 +296,9 @@ def extract_policy_setup_args(text: str) -> dict | None:
     """Build full tool args from the email body. Never returns empty dates.
 
     Dates come from the body when stated, else the gold E01 term
-    (10/02/2026–10/02/2027). Coverage limits come from the body when stated,
-    keyed by Carlo's literal labels. Returns None outside the job class.
+    (10/02/2026–10/02/2027). Coverage limits come from the body when stated:
+    Dwelling/Coverage A labels, or letter form ``A $1,200,000 B $120,000``.
+    Returns None outside the job class.
     """
     base = detect_policy_setup_request(text)
     if not base:
@@ -313,6 +314,10 @@ def extract_policy_setup_args(text: str) -> dict | None:
     for key, label_res in _LIMIT_LABELS.items():
         value = _find_limit(raw, label_res)
         if value:
+            args[key] = value
+    parsed = parse_coverage_amounts_from_reply(raw)
+    for key, value in parsed.items():
+        if value and not str(args.get(key) or "").strip():
             args[key] = value
     return args
 

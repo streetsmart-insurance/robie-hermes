@@ -623,6 +623,7 @@ def process_inbox():
                 db_path=JOB_DB, gmail_message_id=msg_id,
                 prompt=f"Subject: {subject}\n\n{body}", run_agent=run_agent_task,
                 attachment_names=tuple(name for name, _ in attachments),
+                thread_id=thread_id,
                 run_agent_with_context=lambda prompt, job_id, db_path: run_email_job(
                     prompt, job_id, db_path, sender=sender, subject=subject, body=body,
                     attachments=attachments, thread_id=thread_id),

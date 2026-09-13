@@ -208,6 +208,20 @@ class ExtractArgsTests(unittest.TestCase):
                     "loss_of_use", "personal_liability", "medical_payments"):
             self.assertNotIn(key, args)
 
+    def test_letter_form_amounts_are_consumed(self):
+        text = (
+            "Please create the homeowners policy TEST-HO-20260911-E01 "
+            "on applicant 220250093.\n"
+            "A $1,200,000 B $120,000 C $500,000 D $500,000 E $10,000 F $10,000"
+        )
+        args = extract_policy_setup_args(text)
+        self.assertEqual(args["dwelling"], "1200000")
+        self.assertEqual(args["other_structures"], "120000")
+        self.assertEqual(args["personal_property"], "500000")
+        self.assertEqual(args["loss_of_use"], "500000")
+        self.assertEqual(args["personal_liability"], "10000")
+        self.assertEqual(args["medical_payments"], "10000")
+
     def test_returns_none_outside_job_class(self):
         self.assertIsNone(extract_policy_setup_args("What is the status?"))
 
