@@ -451,11 +451,17 @@ def park_policy_setup_fail_closed(
         or "ezlynx_policy_setup is not registered; failing closed"
     )
     if is_formentry_mint_miss(content):
-        prompt = formentry_mint_miss_hitl_text(job_id=job_id, detail=error)
+        prompt = formentry_mint_miss_hitl_text(
+            job_id=job_id, detail=error, channel="chat"
+        )
     elif is_coverage_fill_miss(content):
-        prompt = coverage_fill_miss_hitl_text(job_id=job_id, detail=error)
+        prompt = coverage_fill_miss_hitl_text(
+            job_id=job_id, detail=error, channel="chat"
+        )
     else:
-        prompt = policy_setup_fail_closed_hitl_text(job_id=job_id, detail=error)
+        prompt = policy_setup_fail_closed_hitl_text(
+            job_id=job_id, detail=error, channel="chat"
+        )
     from .hitl_ladder import stamp_hitl_posted_at
 
     payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))

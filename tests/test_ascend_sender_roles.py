@@ -132,7 +132,8 @@ class SenderAgentResolverTests(unittest.TestCase):
                 self.assertTrue(roles["hitl_required"])
                 self.assertIsNone(roles["producer"])
                 self.assertFalse(roles["write_robie_ai"])
-                self.assertIn("PLAYWRIGHT_BLOCKED", roles["hitl_text"])
+                self.assertNotIn("PLAYWRIGHT_BLOCKED", roles["hitl_text"])
+                self.assertIn("RETRY", roles["hitl_text"])
                 self.assertNotIn("Listen up", roles["hitl_text"])
                 leak = refuse_robie_ai_when_sender_known(
                     requested_by=raw,
@@ -236,9 +237,11 @@ class ExistingGuardsStillHoldTests(unittest.TestCase):
         rewritten = sanitize_hitl_chat_text(cowboy)
         self.assertNotIn("Listen up", rewritten)
         self.assertNotIn("ain't", rewritten)
-        self.assertIn("PLAYWRIGHT_BLOCKED", rewritten)
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", rewritten)
+        self.assertIn("RETRY", rewritten)
         hitl = unknown_sender_hitl(requested_by="Google Chat user")
-        self.assertIn("PLAYWRIGHT_BLOCKED", hitl)
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", hitl)
+        self.assertIn("RETRY", hitl)
         self.assertNotIn("Listen up", hitl)
 
 

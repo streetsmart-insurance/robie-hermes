@@ -248,10 +248,11 @@ class ChatGuardTests(unittest.TestCase):
                 release_lease=True,
             )
             response = guard_chat_response(db, job["id"], "technical fallback")
-            self.assertIn("Hey Carlo, I need a quick hand!", response)
+            self.assertIn("Carlo, I need a quick hand.", response)
             self.assertIn("Federal Employer Identification Number (FEIN)", response)
             self.assertIn("Example Company", response)
-            self.assertIn(f"Job ID: `{job['id'][:8]}`", response)
+            self.assertIn("Reply in this Chat thread", response)
+            self.assertNotIn("Job ID:", response)
             self.assertNotIn("AWAITING_HUMAN_INPUT", response)
 
     def test_structured_direct_blocker_parks_and_resumes_same_job(self):

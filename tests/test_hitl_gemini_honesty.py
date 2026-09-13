@@ -47,9 +47,9 @@ class HitlHonestyTests(unittest.TestCase):
         self.assertNotIn("job is continuing", blob.casefold())
         self.assertNotIn("job continuing", blob.casefold())
         self.assertIn("Gemini answered", notice["body"])
-        self.assertIn("Nothing was applied", notice["body"])
-        self.assertIn("Save was skipped", notice["body"])
-        self.assertIn("stopped", notice["body"].casefold())
+        self.assertIn("could not apply", notice["body"].casefold())
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", notice["body"])
+        self.assertNotIn("Job ID:", notice["body"])
         self.assertFalse(gemini_resolved_and_job_continuing(request))
 
     def test_escalate_gemini_actionable_continues_without_carlo(self) -> None:
@@ -106,7 +106,8 @@ class HitlHonestyTests(unittest.TestCase):
         self.assertTrue(chats)
         self.assertNotIn("resolved", chats[0].casefold())
         self.assertNotIn("job is continuing", chats[0].casefold())
-        self.assertIn("stop and ask", chats[0].casefold())
+        self.assertIn("reply in this chat thread", chats[0].casefold())
+        self.assertNotIn("playwright_blocked", chats[0].casefold())
 
     def test_ping_carlo_does_not_claim_email_when_send_fails(self) -> None:
         def boom(**_kwargs):
@@ -135,10 +136,10 @@ class HitlHonestyTests(unittest.TestCase):
             HitlResponse(source="gemini", suggestion="picked live option", actionable=True),
         )
         blob = notice["subject"] + notice["body"] + notice["chat"]
-        self.assertIn("live control shows", blob.casefold())
-        self.assertIn("stop and ask", blob.casefold())
+        self.assertIn("the page shows", blob.casefold())
         self.assertNotIn("job is continuing", blob.casefold())
         self.assertNotIn("job continuing", blob.casefold())
+        self.assertNotIn("playwright_blocked", blob.casefold())
         self.assertTrue(gemini_resolved_and_job_continuing(request))
 
     def test_named_option_without_apply_is_not_resolved(self) -> None:
@@ -150,9 +151,9 @@ class HitlHonestyTests(unittest.TestCase):
         notice = build_hitl_notice(request, None)
         blob = notice["subject"] + notice["body"] + notice["chat"]
         self.assertIn("named a live option", blob.casefold())
-        self.assertIn("nothing was applied", blob.casefold())
+        self.assertIn("could not apply", blob.casefold())
         self.assertNotIn("resolved", blob.casefold())
-        self.assertIn("stop and ask", blob.casefold())
+        self.assertNotIn("playwright_blocked", blob.casefold())
 
     def test_chat_failure_is_fail_closed_even_if_email_sends(self) -> None:
         sent, error = ping_carlo(

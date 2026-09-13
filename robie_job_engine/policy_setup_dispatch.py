@@ -134,6 +134,9 @@ def is_coverage_fill_miss(text: str) -> bool:
         "no coverage labels were filled" in folded
         or "coverage amounts not on the job" in folded
         or "will not guess coverage amounts" in folded
+        or "will not invent them" in folded
+        or "will not invent dollar amounts" in folded
+        or "coverage a, b, c, d, e, and f" in folded
     )
 
 

@@ -29,7 +29,8 @@ class HumanInTheLoopContractTests(unittest.TestCase):
         )
         self.assertEqual(state["field_name"], "operator_response")
         self.assertIn("RETRY", state["prompt"])
-        self.assertIn("PLAYWRIGHT_BLOCKED", state["prompt"])
+        self.assertIn("Reply in this Chat thread", state["prompt"])
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", state["prompt"])
         self.assertNotIn("Listen up", state["prompt"])
         self.assertNotIn("ain't", state["prompt"])
 
@@ -42,7 +43,7 @@ class HumanInTheLoopContractTests(unittest.TestCase):
         )
         rewritten = sanitize_hitl_chat_text(cowboy)
         self.assertNotEqual(rewritten, cowboy)
-        self.assertIn("PLAYWRIGHT_BLOCKED", rewritten)
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", rewritten)
         self.assertIn("/artifacts/", rewritten)
         self.assertIn("RETRY", rewritten)
         self.assertNotIn("Listen up", rewritten)
@@ -77,7 +78,7 @@ class HumanInTheLoopContractTests(unittest.TestCase):
 
         post_as_chat_app("spaces/hitl", cowboy, chat=_Chat())
         self.assertEqual(len(posted), 1)
-        self.assertIn("PLAYWRIGHT_BLOCKED", posted[0])
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", posted[0])
         self.assertNotIn("Listen up", posted[0])
         self.assertNotIn("ain't", posted[0])
 
@@ -91,7 +92,7 @@ class HumanInTheLoopContractTests(unittest.TestCase):
             job = store.create_job("hermes.google_chat_task", {"text": "retry"})
             payload = sanitize_worker_response(store, job["id"], cowboy)
         self.assertTrue(payload["rewritten"])
-        self.assertIn("PLAYWRIGHT_BLOCKED", payload["response_text"])
+        self.assertNotIn("PLAYWRIGHT_BLOCKED", payload["response_text"])
         self.assertNotIn("Listen up", payload["response_text"])
         self.assertNotIn("ain't", payload["response_text"])
 
@@ -108,10 +109,10 @@ class HumanInTheLoopContractTests(unittest.TestCase):
             state["field_label"],
             "Federal Employer Identification Number (FEIN)",
         )
-        self.assertIn("Hey Carlo, I need a quick hand!", state["prompt"])
+        self.assertIn("Carlo, I need a quick hand.", state["prompt"])
         self.assertIn("Example Company", state["prompt"])
-        self.assertIn("Please reply in this thread", state["prompt"])
-        self.assertIn("Job ID: `50b9e6a1`", state["prompt"])
+        self.assertIn("Reply in this Chat thread", state["prompt"])
+        self.assertNotIn("Job ID:", state["prompt"])
 
     def test_other_sensitive_field_values_are_never_requested_in_chat(self):
         for field_name in (
@@ -129,7 +130,7 @@ class HumanInTheLoopContractTests(unittest.TestCase):
                     action_type="ezlynx.form_setup",
                 )
                 self.assertFalse(state["accepts_value"])
-                self.assertIn("Do not send the value in Chat", state["prompt"])
+                self.assertIn("Do not send that value in Chat", state["prompt"])
 
     def test_empty_reply_is_rejected(self):
         with self.assertRaises(ValueError):

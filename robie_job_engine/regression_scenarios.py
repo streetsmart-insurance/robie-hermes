@@ -616,10 +616,11 @@ def run_hitl_tone_scenario() -> dict[str, Any]:
         rewritten != cowboy
         and "listen up" not in rewritten.casefold()
         and "ain't" not in rewritten.casefold()
-        and "PLAYWRIGHT_BLOCKED" in rewritten
+        and "PLAYWRIGHT_BLOCKED" not in rewritten
         and "/artifacts/" in rewritten
         and "RETRY" in rewritten
         and "listen up" not in dry.casefold()
+        and "PLAYWRIGHT_BLOCKED" not in dry
     )
     return {
         "id": HITL_TONE_SCENARIO_ID,
@@ -627,7 +628,7 @@ def run_hitl_tone_scenario() -> dict[str, Any]:
         "ok": ok,
         "outcome": "PASS" if ok else "FAILED",
         "evidence": (
-            "cowboy HITL rewritten to PLAYWRIGHT_BLOCKED + path + ask"
+            "cowboy HITL rewritten to plain English + path + ask"
             if ok
             else f"cowboy HITL was not rewritten: {rewritten!r}"
         ),

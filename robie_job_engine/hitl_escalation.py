@@ -234,80 +234,15 @@ def build_hitl_notice(
     request: HitlRequest,
     gemini_response: HitlResponse | None = None,
 ) -> dict[str, str]:
-    """Carlo-facing HITL text. Never claim resolved/continuing without proof."""
-    gemini_text = (gemini_response.suggestion if gemini_response else "") or ""
-    named = str(request.gemini_named_option or "").strip()
-    shown = str(request.live_control_shows or "").strip()
-    applied = bool(request.gemini_applied) and live_control_shows_named_option(request)
-    facts: list[str] = []
-    mint_miss = (
-        request.phase == "formentry_mint"
-        and not request.formentry_exists
-        and (
-            "no FormEntry URL after 30s" in (request.error or "")
-            or "FormEntry was not minted" in (request.error or "")
-        )
-    )
-    if applied:
-        facts.append(
-            f"Gemini named {named!r} and the live control shows {shown!r}."
-        )
-    elif named and not applied:
-        facts.append(
-            f"Gemini named a live option {named!r}. Nothing was applied. "
-            f"Live control shows {(shown or '(empty)')!r}."
-        )
-    elif mint_miss:
-        facts.append(
-            "Save & Continue Edit did not mint FormEntry. "
-            "The page stayed on Policy/Actions/Edit. "
-            "Gemini did not handle this."
-        )
-    elif request.phase == "coverage_fill":
-        facts.append(
-            "FormEntry opened. Coverage labels were not filled from the job "
-            "payload. Amounts that were not on the job were not guessed. "
-            "Gemini did not handle this."
-        )
-    elif gemini_text and "unsure" in (request.error or "").casefold():
-        facts.append("Gemini is still unsure after one retry. HITL, no select.")
-    elif gemini_response and gemini_response.source == "gemini" and gemini_text:
-        if request.gemini_applied:
-            facts.append("Gemini answered and a fill was applied.")
-        else:
-            facts.append("Gemini answered. Nothing was applied.")
-    elif gemini_response and gemini_response.source == "gemini":
-        facts.append("Gemini was asked and did not name a usable live option. Nothing was applied.")
-    else:
-        facts.append("Gemini was not asked to mint FormEntry. Nothing was applied.")
-    if request.save_skipped:
-        facts.append("The fill still failed. Save was skipped.")
-    facts.append("STOP AND ASK. The script/job stopped.")
-    if not request.formentry_exists and request.phase != "coverage_fill":
-        facts.append("FormEntry does not exist.")
-    subject = f"[ROBIE HITL] Job {request.job_id} stuck at {request.phase}"
-    body = (
-        "Robie needs your help.\n\n"
-        + " ".join(facts)
-        + "\n\n"
-        f"Job ID: {request.job_id}\n"
-        f"Phase: {request.phase}\n"
-        f"Error: {request.error}\n\n"
-        "What was tried:\n"
-        + "\n".join(f"  - {a}" for a in request.attempted)
-        + "\n\n"
-        f"Gemini suggestion (not applied unless the live control shows it):\n"
-        f"{gemini_text or named or '(none)'}\n\n"
-        f"Applicant: {request.applicant_id}\n"
-        f"Policy: {request.policy_id or 'unknown'}\n"
-        "Reply RETRY in this same Chat thread after the page is corrected.\n"
-    )
-    chat = (
-        f"ROBIE HITL: Job {request.job_id} stuck at {request.phase}. "
-        + " ".join(facts)
-        + f" Error: {request.error[:160]}"
-    )
-    return {"subject": subject, "body": body, "chat": chat}
+    """Human HITL for email and Chat. No PLAYWRIGHT_BLOCKED dumps as the lead."""
+    from .hitl_copy import human_hitl_notice, sanitize_plain_text
+
+    notice = human_hitl_notice(request, gemini_response)
+    return {
+        "subject": sanitize_plain_text(notice["subject"]),
+        "body": sanitize_plain_text(notice["body"]),
+        "chat": sanitize_plain_text(notice["chat"]),
+    }
 
 
 def _deliver_hitl(
