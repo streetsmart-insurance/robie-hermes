@@ -92,6 +92,13 @@ class LocationThenCoveragesPage(_MintedPage):
         self.section = "location"
         self.clicked_tabs: list[str] = []
 
+        async def _evaluate(*_a, **_k):
+            if self.section == "location":
+                return list(LIVE_LOCATION_LABELS)
+            return list(LIVE_HOME_LABELS)
+
+        self.evaluate = _evaluate
+
     def get_by_role(self, role, name=None, exact=False):
         loc = MagicMock()
         match = role == "tab" and name in ("Coverages", "Coverage") and exact
@@ -104,11 +111,6 @@ class LocationThenCoveragesPage(_MintedPage):
 
         loc.click = AsyncMock(side_effect=_click)
         return loc
-
-    async def evaluate(self, *_a, **_k):
-        if self.section == "location":
-            return list(LIVE_LOCATION_LABELS)
-        return list(LIVE_HOME_LABELS)
 
 
 class LiveLabelMappingTests(unittest.TestCase):
