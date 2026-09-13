@@ -59,6 +59,43 @@ class TestSetupPolicyByLobGates(unittest.TestCase):
 
 
 class TestHomeownersLabelMapping(unittest.TestCase):
+    def test_already_exists_without_readable_id_gives_honest_diagnostic(self):
+        # The policy already existed (no create attempted) but the search row
+        # carried no recognizable ID key. The error must say the policy
+        # existed — never "Create HTTP None" for a create that never ran.
+        from unittest.mock import patch
+
+        import robie_job_engine.ezlynx_api as api_mod
+        import robie_job_engine.policy_setup_proof as proof_mod
+
+        row = {"policyNumber": "TEST-HO-20260911-E01", "SomeOtherKey": "x"}
+        fake_report = {
+            "policy_number": "TEST-HO-20260911-E01",
+            "verdict": "ALREADY_EXISTS",
+            "read_back": row,
+            "create": None,
+            "policy_id": None,
+            "no_id_diagnostic": None,
+        }
+        setup = eps.EzlynxPolicySetupPage(FakePage())
+        shell = eps.PolicyShellInput(
+            applicant_id="220250093",
+            lob="HOME",
+            policy_number="TEST-HO-20260911-E01",
+            effective_date="10/02/2026",
+            expiration_date="10/02/2027",
+        )
+        with (
+            patch.object(api_mod, "load_ezlynx_api_config", return_value=object()),
+            patch.object(api_mod, "EzlynxApiClient", return_value=object()),
+            patch.object(proof_mod, "search_first_create", return_value=fake_report),
+        ):
+            result = run(setup.setup_policy_by_lob(shell))
+        self.assertFalse(result.success)
+        self.assertEqual(result.phase_reached, "api_search_first_create")
+        self.assertIn("already existed", result.error)
+        self.assertNotIn("Create HTTP None", result.error)
+
     def test_maps_to_carlo_literal_labels(self):
         ho = eps.HomeownersCoverageItem(
             dwelling_a="250000",

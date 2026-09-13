@@ -39,6 +39,56 @@ def ensure_applicant_scope(applicant_id: str) -> None:
         )
 
 
+# Policy ID key variants seen in PolicyApi search/create responses.
+# "PolicyID" (capital P, capital ID) is the variant that broke job 4dfee5f4:
+# the pre-create search found TEST-HO-20260911-E01 (ALREADY_EXISTS) but the
+# row carried the ID under "PolicyID", which the old 5-key list missed,
+# producing the misleading "Create HTTP None" diagnostic for a create that
+# was never attempted.
+_POLICY_ID_KEYS = ("policyId", "policyID", "PolicyId", "PolicyID", "id", "policy_id")
+
+
+def _extract_policy_id(row: Any) -> str | None:
+    """Best-effort policy ID extraction from a PolicyApi row (any shape)."""
+    if not isinstance(row, dict):
+        return None
+    for key in _POLICY_ID_KEYS:
+        if row.get(key):
+            return str(row[key])
+    # Case-insensitive fallback: any key spelling "policyid".
+    for key, value in row.items():
+        if isinstance(key, str) and key.lower() == "policyid" and value:
+            return str(value)
+    return None
+
+
+def _find_matching_row(search: Any, policy_number: str) -> dict[str, Any] | None:
+    """Extract the matching policy row from a search response (any shape).
+
+    The API returns a paginated envelope {'pageIndex':..., 'results':[...]}
+    which _wrap_search nests under 'data'. Drill into results[] to find the
+    row whose policyNumber matches; never return the envelope itself.
+    """
+    rows = search.get('data') if isinstance(search, dict) else None
+    candidates = None
+    if isinstance(rows, list):
+        candidates = rows
+    elif isinstance(rows, dict):
+        results = rows.get('results')
+        if isinstance(results, list):
+            candidates = results
+        else:
+            # Not a paginated envelope; the dict itself is the row.
+            return rows
+    if isinstance(candidates, list):
+        for row in candidates:
+            if isinstance(row, dict) and str(
+                row.get('policyNumber') or row.get('PolicyNumber') or ''
+            ).strip() == policy_number:
+                return row
+    return None
+
+
 def ensure_session() -> dict[str, Any]:
     """Re-auth via Secret Manager when logged out. Returns the recovery report."""
     from .session_recovery import attempt_session_recovery
@@ -63,21 +113,15 @@ def search_first_create(
         "create": None,
         "read_back": None,
         "verdict": "UNVERIFIED",
+        "policy_id": None,
     }
     search = client.search_policy_by_number(policy_number)
-    rows = search.get("data") if isinstance(search, dict) else None
-    matched = None
-    if isinstance(rows, list):
-        for row in rows:
-            if isinstance(row, dict) and str(row.get("policyNumber") or row.get("PolicyNumber") or "").strip() == policy_number:
-                matched = row
-                break
-    elif isinstance(rows, dict):
-        matched = rows
+    matched = _find_matching_row(search, policy_number)
     report["pre_create_search"] = {"found": matched is not None, "row": matched}
     if matched is not None:
         report["verdict"] = "ALREADY_EXISTS"
         report["read_back"] = matched
+        report["policy_id"] = _extract_policy_id(matched)
         return report
 
     created = client.create_policy(
@@ -95,10 +139,7 @@ def search_first_create(
         if pid and pid.lstrip('-').isdigit():
             create_policy_id = pid
     elif isinstance(create_resp, dict):
-        for k in ("policyId", "policyID", "PolicyId", "id", "policy_id"):
-            if create_resp.get(k):
-                create_policy_id = str(create_resp[k])
-                break
+        create_policy_id = _extract_policy_id(create_resp)
     report["create"] = {
         "request_payload": created.get("request_payload"),
         "response": created.get("response"),
@@ -117,14 +158,7 @@ def search_first_create(
     rmatch = None
     for attempt in range(3):
         recheck = client.search_policy_by_number(policy_number)
-        rrows = recheck.get("data") if isinstance(recheck, dict) else None
-        if isinstance(rrows, list):
-            for row in rrows:
-                if isinstance(row, dict) and str(row.get("policyNumber") or row.get("PolicyNumber") or "").strip() == policy_number:
-                    rmatch = row
-                    break
-        elif isinstance(rrows, dict):
-            rmatch = rrows
+        rmatch = _find_matching_row(recheck, policy_number)
         if rmatch is not None:
             break
         if attempt < 2:
@@ -132,10 +166,12 @@ def search_first_create(
     report["read_back"] = rmatch
     if rmatch:
         report["verdict"] = "CREATED_AND_READ_BACK"
+        report["policy_id"] = create_policy_id or _extract_policy_id(rmatch)
     elif create_policy_id:
         # Create succeeded and returned an ID, but search hasn't caught up yet.
         # The caller can proceed with the create ID.
         report["verdict"] = "CREATED_ID_FROM_CREATE_RESPONSE"
+        report["policy_id"] = create_policy_id
     else:
         # Fail closed: no ID from create, no ID from read-back.
         # Include raw HTTP details for diagnosis.
@@ -192,9 +228,43 @@ def open_formentry_coverages(page: Any, applicant_id: str, policy_id: str) -> di
 
     report["validation"]["pre_click"] = _validation_snapshot_sync(page)
 
-    button = page.get_by_role("button", name="Save & Continue Edit")
-    if button.count() == 0:
-        report["error"] = "Save & Continue Edit button not found on Edit Policy header"
+    # Robust button finding: try multiple strategies with waits.
+    import re
+    button = None
+    strategies_tried = []
+    
+    # Wait for page to stabilize
+    page.wait_for_timeout(3000)
+    
+    # Strategy 1: exact name
+    strategies_tried.append("exact_name")
+    btn = page.get_by_role("button", name="Save & Continue Edit")
+    if btn.count() > 0:
+        button = btn.first
+    
+    # Strategy 2: partial name match (case-insensitive regex)
+    if button is None:
+        strategies_tried.append("partial_name")
+        btn = page.get_by_role("button", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+        if btn.count() > 0:
+            button = btn.first
+    
+    # Strategy 3: text content match
+    if button is None:
+        strategies_tried.append("text_content")
+        btn = page.locator("button", has_text=re.compile(r"Save & Continue Edit", re.IGNORECASE))
+        if btn.count() > 0:
+            button = btn.first
+    
+    report["button_strategies_tried"] = strategies_tried
+    
+    if button is None:
+        report["page_state"] = _page_state_snapshot_sync(page)
+        report["error"] = (
+            "Save & Continue Edit button not found on Edit Policy header. "
+            f"Tried strategies: {', '.join(strategies_tried)}. "
+            "See page_state for URL, title, and available controls."
+        )
         return report
     button.first.click()
 
@@ -247,6 +317,39 @@ def _validation_snapshot_sync(page: Any) -> dict[str, Any]:
       ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
       return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
               url: location.href};
+    }
+    """
+    try:
+        return page.evaluate(js)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _page_state_snapshot_sync(page: Any) -> dict[str, Any]:
+    """Capture what IS on the page: URL, title, all buttons/links by name.
+
+    Used when the expected control is absent, so the next fix is based on
+    evidence, not guesses. Read-only DOM inspection; no clicks, no writes.
+    """
+    js = r"""
+    () => {
+      const buttons = Array.from(
+        document.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn, [role='button']")
+      ).map((el) => {
+        const name = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
+        const role = el.getAttribute("role") || el.tagName.toLowerCase();
+        return name ? `${role}: ${name}` : null;
+      }).filter(Boolean).slice(0, 40);
+      const headings = Array.from(
+        document.querySelectorAll("h1, h2, .page-title, .panel-title")
+      ).map((el) => (el.innerText || "").trim().slice(0, 100)).filter(Boolean).slice(0, 10);
+      return {
+        url: location.href,
+        title: document.title,
+        buttons: buttons,
+        headings: headings,
+        body_text_sample: (document.body ? document.body.innerText : "").slice(0, 500),
+      };
     }
     """
     try:
