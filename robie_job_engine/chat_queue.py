@@ -848,7 +848,7 @@ class DurableChatEventQueue:
                 (conversation_id, job_id),
             ).fetchone()
             job = conn.execute(
-                "SELECT payload_json,status,resume_status,created_at,updated_at FROM jobs WHERE id=?",
+                "SELECT payload_json,status,resume_status,created_at,updated_at,last_error FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
             if job is None or job["status"] != "AWAITING_HUMAN_INPUT":
@@ -872,6 +872,24 @@ class DurableChatEventQueue:
             values = dict(payload.get("human_input_values") or {})
             values[clean_field] = clean_value
             payload["human_input_values"] = values
+            from .policy_setup_dispatch import (
+                is_coverage_fill_miss,
+                parse_coverage_amounts_from_reply,
+            )
+
+            amounts = parse_coverage_amounts_from_reply(clean_value)
+            if amounts:
+                coverage = dict(values.get("coverage") or {})
+                coverage.update(amounts)
+                values["coverage"] = coverage
+                payload["human_input_values"] = values
+                payload["hitl_resume"] = True
+                payload["hitl_reply_text"] = clean_value
+            elif is_retry_text(clean_value) and is_coverage_fill_miss(
+                str(job["last_error"] or "")
+            ):
+                payload["hitl_resume"] = True
+                payload["hitl_reply_text"] = clean_value
             now = _stamp()
             value_hash = hashlib.sha256(clean_value.encode("utf-8")).hexdigest()
             conn.execute(

@@ -216,12 +216,21 @@ def apply_hitl_coverage_fill(store: JobStore, job_id: str) -> str:
 
     job = store.get_job(job_id)
     payload = dict(job.get("payload") or {})
+    channel = (
+        "email"
+        if str(job.get("action_type") or "") == "hermes.email_task"
+        else "chat"
+    )
     action = store.get_checkpoint(job_id, "action") or {}
     dest = dict(action.get("destination") or {})
     args = policy_setup_args_from_hitl_payload(payload)
     if not args.get("policy_number"):
         args["policy_number"] = str(dest.get("policy_number") or "").strip()
     coverage = dict((payload.get("human_input_values") or {}).get("coverage") or {})
+    coverage_sig = [[key, str(coverage.get(key) or "")] for key in COVERAGE_KEYS]
+    existing_fill = store.get_checkpoint(job_id, "hitl_coverage_fill") or {}
+    if existing_fill.get("coverage_sig") == coverage_sig and existing_fill.get("text"):
+        return str(existing_fill["text"])
     try:
         report = invoke_policy_setup_tool(args)
     except PolicySetupToolMissing as exc:
@@ -274,19 +283,31 @@ def apply_hitl_coverage_fill(store: JobStore, job_id: str) -> str:
     missing = missing_coverage_letters(coverage)
     if missing and not is_formentry_mint_miss(fail_text) and not is_policy_setup_fail_closed(fail_text):
         have = [letter for key, letter in LETTER_FOR_KEY.items() if coverage.get(key)]
-        return missing_coverage_letters_human_text(
-            channel="email", missing=missing, have=have
+        text = missing_coverage_letters_human_text(
+            channel=channel, missing=missing, have=have
         )
-    if success:
-        return (
+    elif success:
+        text = (
             f"Policy {destination.get('policy_number')} coverage fill used the "
             "amounts from the HITL reply. Verify the FormEntry before relying on it."
         )
-    return (
-        f"ROBIE_OUTCOME_UNKNOWN: Coverage fill after HITL reply did not complete "
-        f"({fail_text or 'handler reported failure'}). "
-        "Check the EZLynx destination before trying again."
+    else:
+        text = (
+            f"ROBIE_OUTCOME_UNKNOWN: Coverage fill after HITL reply did not complete "
+            f"({fail_text or 'handler reported failure'}). "
+            "Check the EZLynx destination before trying again."
+        )
+    store.checkpoint(
+        job_id,
+        "hitl_coverage_fill",
+        {
+            "channel": channel,
+            "coverage_sig": coverage_sig,
+            "missing_letters": missing,
+            "text": text,
+        },
     )
+    return text
 
 
 def _subject_from_prompt(prompt: str) -> str:
