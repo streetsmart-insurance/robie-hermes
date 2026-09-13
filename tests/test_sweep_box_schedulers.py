@@ -208,3 +208,79 @@ def test_robie_hermes_units_dedupes_repeated_rows(sweep):
         "robie-health-check.timer enabled\n"
         "robie-health-check.timer enabled\n") == [
             "robie-health-check.timer"]
+
+
+# --- Section 12: ROBIE Job Engine scheduled-jobs DB helpers ---
+
+def _make_job_db():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE schedules (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, action_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL, interval_minutes INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT NOT NULL,
+        last_run_at TEXT, last_job_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE scheduled_jobs (
+        id TEXT PRIMARY KEY, task_name TEXT NOT NULL UNIQUE,
+        action_type TEXT NOT NULL, parameters_json TEXT NOT NULL,
+        cron_spec TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'America/New_York',
+        target_ref TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+        next_run_at TEXT NOT NULL, last_run_at TEXT, last_job_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    return conn
+
+
+def test_resolve_job_db_path_uses_env(sweep):
+    assert sweep._resolve_job_db_path("/data/jobs.db") == "/data/jobs.db"
+
+
+def test_resolve_job_db_path_falls_back_to_default(sweep):
+    assert sweep._resolve_job_db_path("") == (
+        "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
+    assert sweep._resolve_job_db_path("   ") == (
+        "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
+
+
+def test_dump_job_tables_hourly_rows_first(sweep):
+    conn = _make_job_db()
+    conn.execute(
+        "INSERT INTO schedules (id, name, action_type, payload_json,"
+        " interval_minutes, enabled, next_run_at, created_at, updated_at)"
+        " VALUES ('s1','daily-cleanup','cleanup','{}',1440,1,"
+        " '2026-09-14T06:00:00-04:00','2026-09-13','2026-09-13')")
+    conn.execute(
+        "INSERT INTO scheduled_jobs (id, task_name, action_type,"
+        " parameters_json, cron_spec, enabled, next_run_at, created_at,"
+        " updated_at) VALUES ('j1','hourly-audit','mailbox_audit','{}',"
+        " '0 * * * *',1,'2026-09-13T11:00:00-04:00',"
+        " '2026-09-13','2026-09-13')")
+    out = sweep._dump_job_tables(conn)
+    conn.close()
+    assert "tables: scheduled_jobs, schedules" in out
+    assert "--- schedules (1 row(s)) ---" in out
+    assert "--- scheduled_jobs (1 row(s)) ---" in out
+    assert "name=hourly-audit" in out
+    assert "schedule=0 * * * *" in out
+    assert "enabled=1" in out
+    assert "next_run_at=2026-09-13T11:00:00-04:00" in out
+    # payload_json/parameters_json must NOT leak into the dump
+    assert "payload_json" not in out
+    assert "parameters_json" not in out
+
+
+def test_dump_job_tables_absent_tables_reported(sweep):
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    out = sweep._dump_job_tables(conn)
+    conn.close()
+    assert "--- schedules: <absent>" in out
+    assert "--- scheduled_jobs: <absent>" in out
+
+
+def test_dump_job_tables_never_raises_on_broken_conn(sweep):
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.close()
+    out = sweep._dump_job_tables(conn)
+    assert "<could not list tables:" in out
