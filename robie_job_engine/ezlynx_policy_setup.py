@@ -1190,9 +1190,15 @@ class EzlynxPolicySetupPage:
         # No FormEntry after 30s: capture post-click validation state.
         report["validation"]["post_click"] = await self._validation_snapshot()
         report["landed_url"] = self.page.url
+        val = report["validation"]["post_click"] or {}
+        # Surface validation errors in the error message so they reach the email
+        val_errors = val.get("errors", val.get("validation_errors", []))
+        if isinstance(val_errors, list):
+            val_errors = val_errors[:5]
         report["error"] = (
             "Save & Continue Edit clicked; no FormEntry URL after 30s. "
-            "See validation snapshot for blocking errors."
+            f"VALIDATION_ERRORS: {val_errors} "
+            f"LANDED_URL: {self.page.url} "
         )
         return report
 
