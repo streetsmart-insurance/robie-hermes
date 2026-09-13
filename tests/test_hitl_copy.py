@@ -15,8 +15,10 @@ from robie_job_engine.hitl import (
 from robie_job_engine.hitl_copy import (
     COVERAGE_AMOUNTS_MISSING_CHAT,
     COVERAGE_AMOUNTS_MISSING_EMAIL,
+    COVERAGE_LABELS_EMPTY_EMAIL,
     human_hitl_notice,
     sanitize_plain_text,
+    worker_report_human_text,
 )
 from robie_job_engine.hitl_escalation import HitlRequest, build_hitl_notice
 
@@ -201,6 +203,43 @@ class PlainEmailSanitizerTests(unittest.TestCase):
         self.assertNotIn("letter-spacing", raw)
         self.assertNotIn("<p", raw)
         self.assertIn("I opened the homeowners coverage page.", raw)
+        cte = str(message.get("Content-Transfer-Encoding") or "").casefold()
+        self.assertIn(cte, {"8bit", "7bit", ""})
+
+
+class WorkerReportEmailTests(unittest.TestCase):
+    def test_playwright_blocked_is_not_the_lead(self) -> None:
+        text = worker_report_human_text(
+            "PLAYWRIGHT_BLOCKED: no coverage labels were filled after "
+            "Gemini apply + retry. Looked for ['Dwelling', 'Other Structures']",
+            channel="email",
+        )
+        self.assertEqual(text, COVERAGE_LABELS_EMPTY_EMAIL)
+        self.assertFalse(text.casefold().startswith("playwright_blocked"))
+        self.assertIn("Reply to this email", text)
+        self.assertNotIn("Chat thread", text)
+        lines = text.split("\n")
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertTrue(all(len(line) <= 160 for line in lines))
+
+    def test_worker_report_mail_is_text_plain_8bit(self) -> None:
+        body = worker_report_human_text(
+            "PLAYWRIGHT_BLOCKED: no coverage labels were filled after Gemini apply + retry.",
+            channel="email",
+        )
+        message = build_plain_email_message(
+            sender="Robie AI <robie@streetsmart.insurance>",
+            to=["carlo@streetsmart.insurance"],
+            cc=[],
+            subject="Re: Set up homeowners policy TEST-HO-20260911-E01",
+            text_body=body,
+            plain_only=True,
+        )
+        raw = message.as_string()
+        self.assertIn("text/plain", raw)
+        self.assertNotIn("quoted-printable", raw.casefold())
+        self.assertNotIn("letter-spacing", raw)
+        self.assertFalse("PLAYWRIGHT_BLOCKED" in raw.split("\n\n", 1)[-1][:40])
         cte = str(message.get("Content-Transfer-Encoding") or "").casefold()
         self.assertIn(cte, {"8bit", "7bit", ""})
 

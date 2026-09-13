@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Fill FormEntry Coverages by literal label text.
+"""Fill FormEntry Coverages from the LIVE page labels.
 
-Carlo 2026-09-12: the FormEntry Coverage tab labels are literal —
-Dwelling, Other Structures, Personal Property, Loss of Use, Blanket,
-Personal Liability EA OCC, Medical Payments EA PER — plus one free-text row
-and deductibles with AMOUNT / PERCENT / TYPE. The invented HO Coverage A-F
-id selectors were never real; they are not used here.
+Carlo 2026-09-13: read the live FormEntry labels. HOME shows Coverage A–F
+(or whatever is actually on the page). Let Gemini pick among those live
+labels, apply, and retry once. Do not look for a hardcoded Dwelling /
+Other Structures alias list. Do not invent A-F id selectors. Do not invent
+an omitted letter's amount.
 
-Strategy: for each label, find the visible label text exactly (case-insensitive),
+Strategy: for each live label, find the visible label text exactly (case-insensitive),
 then resolve the associated input through, in order:
   1. `label[for=id]` -> the input with that id
   2. a wrapping `<label>` element -> the input it contains
@@ -19,10 +19,23 @@ Every fill is read back and reported.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
-# Literal labels from Carlo's training-video evidence, 2026-09-12.
-# Order matches the FormEntry Coverages tab.
+# What HOME FormEntry actually shows. Filler uses the live page text, not
+# a Dwelling / Other Structures alias list.
+HOME_LIVE_COVERAGE_LABELS = (
+    "Coverage A",
+    "Coverage B",
+    "Coverage C",
+    "Coverage D",
+    "Coverage E",
+    "Coverage F",
+)
+COVERAGE_LETTERS = ("A", "B", "C", "D", "E", "F")
+
+# Older training-video labels. Kept for evidence/docs only. HOME fill must
+# not search this list.
 COVERAGE_LABELS = (
     "Dwelling",
     "Other Structures",
@@ -35,14 +48,12 @@ COVERAGE_LABELS = (
 
 DEDUCTIBLE_COLUMNS = ("AMOUNT", "PERCENT", "TYPE")
 
-# A-F amount labels. Never invent values for these when the job is silent.
-COVERAGE_AMOUNT_LABELS = (
-    "Dwelling",
-    "Other Structures",
-    "Personal Property",
-    "Loss of Use",
-    "Personal Liability EA OCC",
-    "Medical Payments EA PER",
+# Preferred live A–F names. Never invent values for a letter the job omitted.
+COVERAGE_AMOUNT_LABELS = HOME_LIVE_COVERAGE_LABELS
+
+_LIVE_LETTER_RE = re.compile(
+    r"^coverage\s+([A-F])(?:\s*[-:–—(]|\s*$)",
+    re.IGNORECASE,
 )
 
 LIST_LIVE_LABELS_JS = r"""
@@ -125,8 +136,9 @@ def normalize_coverage_label(text: str) -> str:
 
 
 def match_wanted_to_live_label(wanted: str, live_labels: list[str]) -> str | None:
-    """Map a job label onto a live FormEntry label. Exact first, then substring.
+    """Map a wanted live name onto a live FormEntry label. Exact first.
 
+    HOME fill passes Coverage A–F (from the page), not Dwelling aliases.
     Does not invent selectors. Does not invent amounts.
     """
     want = normalize_coverage_label(wanted)
@@ -144,6 +156,73 @@ def match_wanted_to_live_label(wanted: str, live_labels: list[str]) -> str | Non
         if live and live in want:
             return label
     return None
+
+
+def live_label_for_coverage_letter(
+    letter: str, live_labels: list[str]
+) -> str | None:
+    """Return the live FormEntry label for Coverage A–F, or None.
+
+    Reads live text only. Does not search a Dwelling alias list.
+    """
+    want = str(letter or "").strip().upper()
+    if want not in COVERAGE_LETTERS:
+        return None
+    exact: list[str] = []
+    prefixed: list[str] = []
+    for label in live_labels:
+        folded = normalize_coverage_label(label)
+        match = _LIVE_LETTER_RE.match(folded)
+        if not match or match.group(1).upper() != want:
+            continue
+        if folded == f"coverage {want.casefold()}":
+            exact.append(label)
+        else:
+            prefixed.append(label)
+    if exact:
+        return exact[0]
+    if prefixed:
+        return prefixed[0]
+    return None
+
+
+def map_letter_amounts_to_live_labels(
+    amounts_by_letter: dict[str, str],
+    live_labels: list[str],
+    *,
+    gemini_client: Any | None = None,
+) -> dict[str, str]:
+    """Map stated A–F amounts onto live labels. Never invent a letter.
+
+    Gemini may pick among the live labels when the page is not literally
+    Coverage A–F. It cannot invent Coverage E if E was omitted.
+    """
+    mapped: dict[str, str] = {}
+    leftover = [str(item).strip() for item in live_labels if str(item).strip()]
+    for letter in COVERAGE_LETTERS:
+        amount = str((amounts_by_letter or {}).get(letter) or "").strip()
+        if not amount:
+            continue
+        live = live_label_for_coverage_letter(letter, leftover)
+        if live is None and leftover:
+            from .gemini_field_helper import ask_gemini_live_option
+
+            decision = ask_gemini_live_option(
+                widget_name=f"Coverage {letter}",
+                wanted=f"Coverage {letter}",
+                live_options=leftover,
+                client=gemini_client,
+            )
+            if decision.action == "APPLY" and decision.option:
+                live = decision.option
+        if not live:
+            continue
+        mapped[live] = amount
+        used = normalize_coverage_label(live)
+        leftover = [
+            item for item in leftover if normalize_coverage_label(item) != used
+        ]
+    return mapped
 
 
 def list_live_coverage_labels(page: Any) -> list[str]:

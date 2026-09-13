@@ -215,6 +215,40 @@ def fail_closed_human_text(*, channel: str = CHANNEL_CHAT) -> str:
     )
 
 
+def worker_report_human_text(text: str, *, channel: str = CHANNEL_EMAIL) -> str:
+    """Worker-report Gmail/Chat: short plain sentences. No PLAYWRIGHT_BLOCKED lead."""
+    from .policy_setup_dispatch import (
+        is_coverage_fill_miss,
+        is_formentry_mint_miss,
+        is_policy_setup_fail_closed,
+    )
+
+    raw = sanitize_plain_text(text)
+    if (
+        is_coverage_fill_miss(raw)
+        or coverage_labels_empty(raw)
+        or coverage_amounts_missing(raw)
+    ):
+        return coverage_fill_human_text(channel=channel, detail=raw)
+    if is_formentry_mint_miss(raw):
+        return mint_miss_human_text(channel=channel)
+    if is_policy_setup_fail_closed(raw):
+        return fail_closed_human_text(channel=channel)
+    folded = raw.casefold()
+    if folded.startswith("playwright_blocked") or folded.startswith("robie_blocked"):
+        return generic_stuck_human_text(channel=channel, what_happened=raw)
+    return _short_plain_sentences(raw)
+
+
+def _short_plain_sentences(text: str) -> str:
+    raw = sanitize_plain_text(text)
+    lines = [line for line in raw.split("\n") if line]
+    if len(lines) >= 2 and all(len(line) <= 120 for line in lines):
+        return raw
+    parts = re.split(r"(?<=[.!?])\s+", raw)
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
 def generic_stuck_human_text(
     *,
     channel: str = CHANNEL_CHAT,

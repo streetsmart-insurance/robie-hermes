@@ -96,7 +96,7 @@ class TestHomeownersLabelMapping(unittest.TestCase):
         self.assertIn("already existed", result.error)
         self.assertNotIn("Create HTTP None", result.error)
 
-    def test_maps_to_carlo_literal_labels(self):
+    def test_maps_to_live_coverage_letters_not_dwelling_aliases(self):
         ho = eps.HomeownersCoverageItem(
             dwelling_a="250000",
             other_structures_b="25000",
@@ -105,19 +105,41 @@ class TestHomeownersLabelMapping(unittest.TestCase):
             liability_e="500000",
             med_pay_f="5000",
         )
+        letters = eps.homeowners_amounts_by_letter(ho)
+        self.assertEqual(letters["A"], "250000")
+        self.assertEqual(letters["F"], "5000")
         values = eps._homeowners_values_by_label(ho)
-        self.assertEqual(values["Dwelling"], "250000")
-        self.assertEqual(values["Other Structures"], "25000")
-        self.assertEqual(values["Personal Property"], "100000")
-        self.assertEqual(values["Loss of Use"], "50000")
-        self.assertEqual(values["Personal Liability EA OCC"], "500000")
-        self.assertEqual(values["Medical Payments EA PER"], "5000")
-        # No invented selectors in the keys.
+        self.assertEqual(values["Coverage A"], "250000")
+        self.assertEqual(values["Coverage B"], "25000")
+        self.assertEqual(values["Coverage C"], "100000")
+        self.assertEqual(values["Coverage D"], "50000")
+        self.assertEqual(values["Coverage E"], "500000")
+        self.assertEqual(values["Coverage F"], "5000")
+        self.assertNotIn("Dwelling", values)
+        self.assertNotIn("Other Structures", values)
         for key in values:
             self.assertNotIn("HO_Coverage", key)
 
     def test_none_coverage_gives_empty(self):
         self.assertEqual(eps._homeowners_values_by_label(None), {})
+
+    def test_omitted_e_is_not_invented(self):
+        ho = eps.HomeownersCoverageItem(
+            dwelling_a="1200000",
+            other_structures_b="120000",
+            personal_property_c="500000",
+            loss_of_use_d="500000",
+            med_pay_f="10000",
+        )
+        letters = eps.homeowners_amounts_by_letter(ho)
+        self.assertNotIn("E", letters)
+        self.assertEqual(
+            eps.stated_live_coverage_names(letters),
+            ["Coverage A", "Coverage B", "Coverage C", "Coverage D", "Coverage F"],
+        )
+        values = eps._homeowners_values_by_label(ho)
+        self.assertNotIn("Coverage E", values)
+        self.assertNotIn("Personal Liability EA OCC", values)
 
 
 class TestToIsoDate(unittest.TestCase):

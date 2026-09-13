@@ -22,9 +22,8 @@ POLICY_SETUP_SCHEMA = {
         "the job asks to create, set up, or complete a homeowners policy. "
         "The engine runs search-first (no duplicate), creates with the gold "
         "carrier payload only when absent, mints the FormEntry via Save & "
-        "Continue Edit, and fills coverages by literal label (Dwelling, Other "
-        "Structures, Personal Property, Loss of Use, Blanket, Personal "
-        "Liability EA OCC, Medical Payments EA PER). Applicant 220250093 only. "
+        "Continue Edit, and fills coverages from the live FormEntry labels "
+        "(Coverage A–F, or whatever is actually on the page). Applicant 220250093 only. "
         "Never binds. Returns the engine's evidence report."
     ),
     "parameters": {
