@@ -19,12 +19,20 @@ from robie_job_engine.gemini_field_helper import ask_gemini_live_option, exact_l
 
 
 class FakeGemini:
-    def __init__(self, payload: str):
+    def __init__(self, payload: str, content: str | None = None):
         self.payload = payload
+        self.content = content
         self.prompts: list[str] = []
+        self.content_prompts: list[str] = []
 
     def generate_unique_field(self, prompt: str) -> str:
         self.prompts.append(prompt)
+        return self.payload
+
+    def generate_content(self, prompt: str) -> str:
+        self.content_prompts.append(prompt)
+        if self.content is not None:
+            return self.content
         return self.payload
 
 
@@ -218,11 +226,48 @@ class LiveOptionHelperTests(unittest.TestCase):
         decision = ask_gemini_live_option(
             widget_name="Billing Type",
             wanted="Direct Bill",
-            live_options=["Agency", "Direct"],
+            live_options=["---Select---", "Agency", "Direct"],
             client=FakeGemini(json.dumps({"decision": "unique", "option": "Direct"})),
         )
         self.assertEqual(decision.action, "APPLY")
         self.assertEqual(decision.option, "Direct")
+        self.assertTrue(decision.gemini_asked)
+
+    def test_production_exact_miss_asks_gemini_and_applies_named_live_option(self) -> None:
+        client = FakeGemini(json.dumps({"decision": "unique", "option": "Direct"}))
+        decision = ask_gemini_live_option(
+            widget_name="Billing Type",
+            wanted="Direct Bill",
+            live_options=["---Select---", "Agency", "Direct"],
+            client=client,
+        )
+        self.assertEqual(decision.action, "APPLY")
+        self.assertEqual(decision.option, "Direct")
+        self.assertTrue(decision.gemini_asked)
+        self.assertEqual(len(client.prompts), 1)
+        self.assertIn("Direct Bill", client.prompts[0])
+        self.assertIn("- Direct", client.prompts[0])
+        self.assertIn("Do not answer unsure just because", client.prompts[0])
+
+    def test_unsure_json_then_plain_live_option_on_retry_is_applied(self) -> None:
+        client = FakeGemini(
+            json.dumps(
+                {
+                    "decision": "unsure",
+                    "reason": "Wanted value 'Direct Bill' has no exact match in the live options.",
+                }
+            ),
+            content="Direct",
+        )
+        decision = ask_gemini_live_option(
+            widget_name="Billing Type",
+            wanted="Direct Bill",
+            live_options=["---Select---", "Agency", "Direct"],
+            client=client,
+        )
+        self.assertEqual(decision.action, "APPLY")
+        self.assertEqual(decision.option, "Direct")
+        self.assertTrue(client.content_prompts)
 
     def test_gemini_unsure_is_hitl_no_option(self) -> None:
         decision = ask_gemini_live_option(
@@ -274,6 +319,28 @@ class WidgetFillTests(unittest.TestCase):
             self.assertFalse(page.lob_touched)
             self.assertFalse(page.scanned_all_selects)
             self.assertTrue(page.opened_department)
+
+        asyncio.run(_run())
+
+    def test_billing_exact_miss_applies_gemini_live_option_and_retries(self) -> None:
+        async def _run() -> None:
+            page = EditPolicyPage(
+                department_options=["---Select---"],
+                billing_options=["---Select---", "Agency", "Direct"],
+            )
+            result = await fill_identified_widget(
+                page,
+                BILLING_TYPE_WIDGET,
+                "Direct Bill",
+                gemini_client=FakeGemini(
+                    json.dumps({"decision": "unique", "option": "Direct"})
+                ),
+            )
+            self.assertFalse(result.hitl, result.error)
+            self.assertTrue(result.gemini_applied)
+            self.assertEqual(result.selected, "Direct")
+            self.assertEqual(page.billing_selected, "Direct")
+            self.assertGreaterEqual(result.attempts, 1)
 
         asyncio.run(_run())
 
