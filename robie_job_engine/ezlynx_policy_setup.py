@@ -19,7 +19,7 @@ from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
 # Code version marker from PR 371. The job report includes this so we can
 # correlate any run to the exact code that executed. Do not remove.
-CODE_VERSION = "712cdb0a4af2dafdfa38cb5406084b5279fd5f60"  # PR #370 merge commit
+CODE_VERSION = "c6d216cec99662b945d81a69b2a2c2d55eeee7b3"  # PR #370 merge commit
 
 EZLYNX_BASE_URL = "https://app.ezlynx.com"
 
