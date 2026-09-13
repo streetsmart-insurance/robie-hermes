@@ -281,7 +281,9 @@ class HomeSetupPolicyByLobTests(unittest.TestCase):
                 )
                 return captured["fill"]
 
-            async def _spy_mint(policy_id: str, applicant_id: str = "") -> dict:
+            async def _spy_mint(
+                policy_id: str, applicant_id: str = "", **_kwargs
+            ) -> dict:
                 fill = await setup._fill_required_policy_fields()
                 captured["mint_policy_id"] = policy_id
                 captured["mint_applicant_id"] = applicant_id

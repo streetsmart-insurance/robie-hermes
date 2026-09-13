@@ -419,6 +419,90 @@ def url_is_minted_formentry(url: object) -> bool:
     return FORMENTRY_RE.search(text) is not None
 
 
+_SENTINEL_LOB_ORIG = re.compile(r"^0?1/0?1/1900$")
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+_MDY_DATE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+_LOB_ORIG_BANNER = re.compile(r"lob orig|must be after", re.IGNORECASE)
+
+
+def job_effective_date_for_ezlynx(raw: str) -> str:
+    """MM/DD/YYYY from the job effective date. Never invent or hardcode a date."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    iso = _ISO_DATE.match(text)
+    if iso:
+        return f"{iso.group(2)}/{iso.group(3)}/{iso.group(1)}"
+    mdy = _MDY_DATE.match(text)
+    if mdy:
+        return f"{int(mdy.group(1)):02d}/{int(mdy.group(2)):02d}/{mdy.group(3)}"
+    return text
+
+
+def is_sentinel_lob_orig_date(value: str) -> bool:
+    """EZLynx default 1/1/1900 is not a real LOB Orig. Date."""
+    return bool(_SENTINEL_LOB_ORIG.match(str(value or "").strip()))
+
+
+def collect_visible_validation_errors(snapshot: dict[str, Any] | None) -> list[str]:
+    """Flatten every visible validation banner/field error. Never drop a red banner.
+
+    Job 677f362f reported VALIDATION_ERRORS: [] while the page showed
+    "LOB Orig. Date: LOB Orig. Date must be after". The snapshot used
+    field_errors/summary_errors; the mint path read errors/validation_errors.
+    """
+    snap = dict(snapshot or {})
+    collected: list[str] = []
+    for key in (
+        "errors",
+        "validation_errors",
+        "field_errors",
+        "summary_errors",
+        "banners",
+        "alerts",
+        "banner_lines",
+    ):
+        raw = snap.get(key)
+        if isinstance(raw, str) and raw.strip():
+            collected.append(raw.strip())
+        elif isinstance(raw, list):
+            for item in raw:
+                text = str(item or "").strip()
+                if text:
+                    collected.append(text)
+    body = str(snap.get("body_text") or snap.get("body_text_sample") or "")
+    for line in body.splitlines():
+        folded = line.strip()
+        if folded and _LOB_ORIG_BANNER.search(folded):
+            collected.append(folded)
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in collected:
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def is_lob_orig_date_validation_miss(
+    snapshot: dict[str, Any] | None,
+    field_value: str = "",
+) -> bool:
+    """True when 1/1/1900 or a visible 'must be after' banner is blocking mint."""
+    snap = dict(snapshot or {})
+    value = str(
+        field_value or snap.get("lob_orig_date") or snap.get("lob_origination_date") or ""
+    ).strip()
+    if is_sentinel_lob_orig_date(value):
+        return True
+    blob = " ".join(collect_visible_validation_errors(snap)).casefold()
+    return "must be after" in blob or (
+        "lob orig" in blob and "must be after" in blob
+    )
+
+
 def is_commercial_lob(lob_input: str) -> bool:
     """HOME / homeowners / personal lines are not commercial.
 
@@ -489,6 +573,7 @@ class EzlynxPolicySetupPage:
         self.applicant_id: str | None = None
         self.job_id: str | None = job_id
         self.lob: str = ""
+        self._job_effective_date: str = ""
         self._hitl_deps: dict = hitl_deps or {}
         # Wire up default senders if not provided
         if "email_sender" not in self._hitl_deps:
@@ -983,6 +1068,7 @@ class EzlynxPolicySetupPage:
                 stopped_before_bind=True,
             )
 
+        self._job_effective_date = str(shell_input.effective_date or "").strip()
         evidence: dict[str, Any] = {"phases": []}
         try:
             from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
@@ -1065,7 +1151,11 @@ class EzlynxPolicySetupPage:
 
         # FormEntry: click Save & Continue Edit on the Edit Policy header,
         # watch validation + DOM for the FormEntry URL.
-        nav = await self._mint_formentry(policy_id, applicant_id)
+        nav = await self._mint_formentry(
+            policy_id,
+            applicant_id,
+            effective_date=shell_input.effective_date,
+        )
         evidence["formentry_nav"] = nav
         evidence["phases"].append("formentry_mint")
         if not nav.get("formentry_found"):
@@ -1130,13 +1220,11 @@ class EzlynxPolicySetupPage:
         return filled
 
     async def _fill_required_policy_fields(self) -> dict[str, Any]:
-        """Set Billing Type and Department before Save & Continue Edit.
+        """Set Billing Type, Department, and LOB Orig. Date before Save & Continue.
 
-        Each field is the identified widget only (#BillingType, #Department).
-        Read that widget's live options. Exact match, else Gemini names one
-        live option, apply, retry once. No alias maps. Never scan other
-        selects (Line of Business is #mergeSplitLOB, not Department).
-        HOME / homeowners wanted Department is Personal, not Commercial.
+        Dropdowns use the identified widget + Gemini live-option helper.
+        LOB Orig. Date is filled from the job effective date (never a hardcoded
+        date or alias list). HOME wanted Department is Personal, not Commercial.
         """
         from .ezlynx_field_widgets import (
             BILLING_TYPE_WIDGET,
@@ -1168,6 +1256,67 @@ class EzlynxPolicySetupPage:
         result["department"] = department.selected
         result["department_visible"] = department.selected
         result["department_via"] = department.via
+        result["lob_orig"] = await self._fill_lob_orig_date()
+        return result
+
+    async def _lob_orig_date_locator(self) -> Any:
+        """#LOBOriginationDate, then the live Edit-page label. No invented IDs."""
+        primary = self.page.locator("#LOBOriginationDate")
+        if await primary.count() > 0:
+            return primary.first
+        for label in ("LOB Orig. Date", "LOB Origination Date"):
+            getter = getattr(self.page, "get_by_label", None)
+            if not callable(getter):
+                continue
+            try:
+                by_label = getter(label)
+                if await by_label.count() > 0:
+                    return by_label.first
+            except Exception:
+                continue
+        return None
+
+    async def _read_input_value(self, locator: Any) -> str:
+        if locator is None:
+            return ""
+        for attr in ("input_value", "evaluate"):
+            fn = getattr(locator, attr, None)
+            if not callable(fn):
+                continue
+            try:
+                if attr == "input_value":
+                    return str(await fn() or "").strip()
+                return str(await fn("el => el.value || ''") or "").strip()
+            except Exception:
+                continue
+        return ""
+
+    async def _fill_lob_orig_date(self) -> dict[str, Any]:
+        """Read the live LOB Orig. Date and fill it from the job effective date."""
+        wanted = job_effective_date_for_ezlynx(getattr(self, "_job_effective_date", "") or "")
+        locator = await self._lob_orig_date_locator()
+        before = await self._read_input_value(locator)
+        result: dict[str, Any] = {
+            "before": before,
+            "wanted": wanted,
+            "after": before,
+            "filled": False,
+            "sentinel": is_sentinel_lob_orig_date(before),
+        }
+        if locator is None:
+            result["error"] = "LOB Orig. Date field not found"
+            return result
+        if not wanted:
+            result["error"] = "job effective date is empty; will not invent LOB Orig. Date"
+            return result
+        fill = getattr(locator, "fill", None)
+        if not callable(fill):
+            result["error"] = "LOB Orig. Date locator has no fill"
+            return result
+        await fill(wanted)
+        after = await self._read_input_value(locator)
+        result["after"] = after
+        result["filled"] = True
         return result
 
     async def _escalate_formentry_hitl(
@@ -1264,14 +1413,23 @@ class EzlynxPolicySetupPage:
                 + f" HITL escalation error ({err_msg}); failing closed."
             )
 
-    async def _mint_formentry(self, policy_id: str, applicant_id: str = "") -> dict[str, Any]:
+    async def _mint_formentry(
+        self,
+        policy_id: str,
+        applicant_id: str = "",
+        effective_date: str = "",
+    ) -> dict[str, Any]:
         """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
 
         The door is the green Save & Continue Edit button on the Edit Policy
         header. The FormEntry URL is
         /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
         Watches DOM validation state, not networkidle and not URL-only.
+        LOB Orig. Date is filled from the job effective date before click;
+        one retry if the 1/1/1900 / must-be-after banner is still visible.
         """
+        if effective_date:
+            self._job_effective_date = str(effective_date).strip()
         report: dict[str, Any] = {
             "code_version": CODE_VERSION,
             "policy_id": policy_id,
@@ -1497,17 +1655,77 @@ class EzlynxPolicySetupPage:
             return report
 
         await button.first.click()
+        report["save_clicks"] = 1
 
-        # Watch for the FormEntry URL: poll the DOM + URL, not networkidle.
-        for _ in range(30):
+        minted = await self._poll_formentry_or_banner(report, seconds=30, snap_key="post_click")
+        if minted:
+            return report
+
+        snap = report["validation"].get("post_click") or {}
+        if is_lob_orig_date_validation_miss(snap):
+            retry_fill = await self._fill_lob_orig_date()
+            report["lob_orig_retry"] = retry_fill
+            report["field_fill"] = dict(report.get("field_fill") or {})
+            report["field_fill"]["lob_orig_retry"] = retry_fill
+            await button.first.click()
+            report["save_clicks"] = 2
+            minted = await self._poll_formentry_or_banner(
+                report, seconds=30, snap_key="post_retry"
+            )
+            if minted:
+                report["via"] = "save_and_continue_edit_lob_orig_retry"
+                return report
+
+        # Still on Edit. Quote the visible banner — never VALIDATION_ERRORS: [].
+        report["landed_url"] = self.page.url
+        val = (
+            report["validation"].get("post_retry")
+            or report["validation"].get("post_click")
+            or {}
+        )
+        val_errors = collect_visible_validation_errors(val)
+        if not val_errors:
+            page_state = await self._page_state_snapshot()
+            report["page_state"] = page_state
+            val_errors = collect_visible_validation_errors(
+                {**val, "body_text_sample": page_state.get("body_text_sample")}
+            )
+        if not val_errors and is_lob_orig_date_validation_miss(val):
+            val_errors = [
+                "LOB Orig. Date: LOB Orig. Date must be after "
+                f"(live value {val.get('lob_orig_date') or '1/1/1900'})"
+            ]
+        report["error"] = (
+            "Save & Continue Edit clicked; no FormEntry URL after 30s. "
+            f"VALIDATION_ERRORS: {val_errors[:5]} "
+            f"LANDED_URL: {self.page.url} "
+        )
+        await self._escalate_formentry_hitl(
+            report,
+            attempted=["save_and_continue_edit", "lob_orig_date_fill", "formentry_url_poll"]
+            + list(strategies_tried),
+            applicant_id=applicant_id,
+            policy_id=policy_id,
+        )
+        return report
+
+    async def _poll_formentry_or_banner(
+        self,
+        report: dict[str, Any],
+        *,
+        seconds: int,
+        snap_key: str,
+    ) -> bool:
+        """Poll for a minted FormEntry URL. Stop early on a visible validation banner."""
+        last_snap: dict[str, Any] = {}
+        for _ in range(seconds):
             await self.page.wait_for_timeout(1000)
             url = self.page.url
             if url_is_minted_formentry(url):
                 report["formentry_found"] = True
                 report["formentry_url"] = url
                 report["via"] = "save_and_continue_edit"
-                return report
-            # Also check other tabs — the mint may open a new tab.
+                return True
             for tab in self._all_tabs():
                 try:
                     turl = tab.url
@@ -1517,28 +1735,13 @@ class EzlynxPolicySetupPage:
                     report["formentry_found"] = True
                     report["formentry_url"] = turl
                     report["via"] = "save_and_continue_edit_new_tab"
-                    return report
-
-        # True 30s timeout after an actual click.
-        report["validation"]["post_click"] = await self._validation_snapshot()
-        report["landed_url"] = self.page.url
-        val = report["validation"]["post_click"] or {}
-        val_errors = val.get("errors", val.get("validation_errors", []))
-        if isinstance(val_errors, list):
-            val_errors = val_errors[:5]
-        report["error"] = (
-            "Save & Continue Edit clicked; no FormEntry URL after 30s. "
-            f"VALIDATION_ERRORS: {val_errors} "
-            f"LANDED_URL: {self.page.url} "
-        )
-        await self._escalate_formentry_hitl(
-            report,
-            attempted=["save_and_continue_edit", "formentry_url_poll_30s"]
-            + list(strategies_tried),
-            applicant_id=applicant_id,
-            policy_id=policy_id,
-        )
-        return report
+                    return True
+            last_snap = await self._validation_snapshot()
+            if is_lob_orig_date_validation_miss(last_snap):
+                report["validation"][snap_key] = last_snap
+                return False
+        report["validation"][snap_key] = last_snap or await self._validation_snapshot()
+        return False
 
     def _all_tabs(self) -> list[Any]:
         try:
@@ -1548,7 +1751,7 @@ class EzlynxPolicySetupPage:
                 return [self.page]
 
     async def _validation_snapshot(self) -> dict[str, Any]:
-        """Read validation markers from the DOM: field errors, aria-invalid, summary."""
+        """Read validation markers from the DOM, including the red banner."""
         js = r"""
         () => {
           const fieldErrors = Array.from(
@@ -1557,11 +1760,34 @@ class EzlynxPolicySetupPage:
           const summary = Array.from(
                 document.querySelectorAll(".validation-summary-errors")
           ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 5);
+          const banners = Array.from(
+                document.querySelectorAll(
+                  ".alert-danger, .alert-error, .alert, [role='alert'], .toast-error, .validation-summary-errors"
+                )
+          ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 10);
+          const body = document.body ? document.body.innerText : "";
+          const bannerLines = body.split("\\n").map((s) => s.trim()).filter((s) =>
+                /must be after|lob orig/i.test(s)
+          ).slice(0, 10);
           const ariaInvalid = Array.from(
                 document.querySelectorAll("[aria-invalid='true']")
           ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
-          return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
-                  url: location.href};
+          const orig = document.querySelector("#LOBOriginationDate");
+          const lobOrigDate = orig ? String(orig.value || "").trim() : "";
+          const errors = [...fieldErrors, ...summary, ...banners, ...bannerLines]
+                .filter(Boolean);
+          return {
+                field_errors: fieldErrors,
+                summary_errors: summary,
+                banners,
+                banner_lines: bannerLines,
+                aria_invalid: ariaInvalid,
+                lob_orig_date: lobOrigDate,
+                errors,
+                validation_errors: errors,
+                url: location.href,
+                body_text_sample: body.slice(0, 800),
+          };
         }
         """
         try:

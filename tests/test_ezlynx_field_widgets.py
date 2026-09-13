@@ -97,6 +97,7 @@ class EditPolicyPage:
         billing_options: list[str] | None = None,
         lob_options: list[str] | None = None,
         department_present: bool = True,
+        lob_orig_date: str | None = None,
     ) -> None:
         self.department_options = list(department_options)
         self.billing_options = list(billing_options or ["Agency", "Direct"])
@@ -109,6 +110,8 @@ class EditPolicyPage:
         self.lob_touched = False
         self.opened_department = False
         self.scanned_all_selects = False
+        self.lob_orig_present = lob_orig_date is not None
+        self.lob_orig_date = lob_orig_date or ""
 
     async def wait_for_timeout(self, _ms: int) -> None:
         return None
@@ -170,6 +173,27 @@ class EditPolicyPage:
             return _Node(children=[_Node(text=opt) for opt in self.billing_options])
         if "option:checked" in selector and "BillingType" in selector:
             return _Node(text=self.billing_selected)
+        if selector == "#LOBOriginationDate":
+            if not self.lob_orig_present:
+                missing = _Node()
+
+                async def _zero() -> int:
+                    return 0
+
+                missing.count = _zero  # type: ignore[method-assign]
+                return missing
+            field = _Node(element_id="LOBOriginationDate")
+
+            async def _value() -> str:
+                return self.lob_orig_date
+
+            async def _fill(value: str) -> None:
+                self.lob_orig_date = value
+                field.selected_label = value
+
+            field.input_value = _value  # type: ignore[method-assign]
+            field.fill = _fill  # type: ignore[method-assign]
+            return field
         if selector == "#BillingType" or selector == BILLING_TYPE_WIDGET.root:
             select = _Node(
                 children=[_Node(text=opt) for opt in self.billing_options],
