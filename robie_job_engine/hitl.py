@@ -326,10 +326,28 @@ def classify_human_reply(text: str, interaction_state: dict[str, Any]) -> str:
     if normalized in {"retry", "/retry"}:
         return "ANSWER"
 
-    is_new_intent = (
-        value.startswith("/")
-        or "?" in value
-        or any(normalized.startswith(prefix) for prefix in _NEW_INTENT_PREFIXES)
+    if value.startswith("/") or "?" in value:
+        return "NEW_INTENT"
+
+    field_name = str(interaction_state.get("field_name") or "").casefold()
+    typed_field = (
+        "fein" in field_name
+        or "naics" in field_name
+        or ("effective" in field_name and "date" in field_name)
+    )
+    # Coverage A–F amounts resume the parked HITL on the same Chat job.
+    # Check before generic new-intent prefixes so a long "A $1,200,000; B …"
+    # reply is not opened as a second hermes.google_chat_task.
+    if not typed_field:
+        try:
+            from .policy_setup_dispatch import parse_coverage_amounts_from_reply
+        except Exception:
+            parse_coverage_amounts_from_reply = None
+        if parse_coverage_amounts_from_reply and parse_coverage_amounts_from_reply(value):
+            return "ANSWER"
+
+    is_new_intent = any(
+        normalized.startswith(prefix) for prefix in _NEW_INTENT_PREFIXES
     )
     if is_new_intent:
         return "NEW_INTENT"
@@ -337,7 +355,6 @@ def classify_human_reply(text: str, interaction_state: dict[str, Any]) -> str:
     if not bool(interaction_state.get("accepts_value", True)):
         return "INVALID"
 
-    field_name = str(interaction_state.get("field_name") or "").casefold()
     if "fein" in field_name:
         return "ANSWER" if _FEIN_REPLY.fullmatch(value) else "INVALID"
     if "naics" in field_name:

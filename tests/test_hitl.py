@@ -180,6 +180,17 @@ class HumanInTheLoopContractTests(unittest.TestCase):
         self.assertEqual(classify_human_reply("RETRY", interaction), "ANSWER")
         self.assertEqual(classify_human_reply("123-45-6789", interaction), "INVALID")
 
+    def test_coverage_amount_reply_is_an_answer_not_a_new_job(self):
+        interaction = {"field_name": "operator_response", "accepts_value": True}
+        reply = (
+            "Coverage A $1,200,000; B $120,000; C $500,000; D $500,000; F $10,000"
+        )
+        self.assertEqual(classify_human_reply(reply, interaction), "ANSWER")
+        self.assertEqual(
+            classify_human_reply("What jobs are pending?", interaction),
+            "NEW_INTENT",
+        )
+
 
 class StructuredBlockerTriggerTests(unittest.TestCase):
     """The HITL trigger must catch the raw guard error, not only the

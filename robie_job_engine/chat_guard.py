@@ -423,11 +423,14 @@ def chat_hermes_should_run(db_path: str, job_id: str | None) -> bool:
     """False when Chat already parked HITL / left a non-RUNNING state.
 
     After fail-closed policy setup, do not start a google_chat_task worker
-    that will sit in RUNNING with a "still working" bubble.
+    that will sit in RUNNING with a "still working" bubble. A HITL coverage
+    resume fills through ezlynx_policy_setup — Hermes must not wander.
     """
     if not job_id:
         return True
     job = JobStore(db_path).get_job(job_id)
+    if bool(dict(job.get("payload") or {}).get("hitl_resume")):
+        return False
     return JobStatus(job["status"]) in {JobStatus.PENDING, JobStatus.RUNNING}
 
 
@@ -756,10 +759,23 @@ def _bind_chat_policy_setup(
         is_policy_setup_honest_hitl,
     )
 
+    job_id = str(job.get("id") or "")
+    payload = dict(job.get("payload") or {})
+    if job_id and payload.get("hitl_resume"):
+        from .chat_hitl import run_chat_hitl_coverage_resume
+
+        applied = run_chat_hitl_coverage_resume(db_path, job_id)
+        extra = [
+            "- HITL resume applied Coverage A–F through ezlynx_policy_setup.",
+            "- Do not call playwright_exec. POLICY_SETUP_ORDER still refuses wander.",
+        ]
+        if applied:
+            extra.append(applied)
+        return extra + _policy_setup_contract(text)
+
     contract = _policy_setup_contract(text)
     if not contract:
         return []
-    job_id = str(job.get("id") or "")
     if not job_id:
         return contract
     policy_args = extract_policy_setup_args(text) or {}
@@ -996,6 +1012,39 @@ def open_chat_job(
         logger.exception("start-of-job tab flush failed; continuing")
     queue = DurableChatEventQueue(db_path)
     context_key = conversation_id or f"google-chat:{requested_by or 'unknown'}"
+    from .chat_hitl import (
+        find_parked_chat_hitl_job,
+        ingest_chat_hitl_reply,
+        is_chat_coverage_hitl_resume_reply,
+    )
+
+    parked_hitl = find_parked_chat_hitl_job(store, context_key, queue=queue)
+    if parked_hitl and is_chat_coverage_hitl_resume_reply(store, parked_hitl, text):
+        from .engine import is_retry_text, leftover_retry_hold_reason
+
+        if is_retry_text(text):
+            leftover = leftover_retry_hold_reason(parked_hitl)
+            store.checkpoint(
+                parked_hitl["id"],
+                "leftover_retry",
+                {"refused": bool(leftover), "reason": leftover, "auto_retry": False},
+            )
+            if leftover:
+                return parked_hitl["id"]
+        ingest_chat_hitl_reply(
+            store,
+            job_id=parked_hitl["id"],
+            message_id=message_id,
+            text=text,
+        )
+        queue.link_conversation_job(
+            conversation_id=context_key,
+            job_id=parked_hitl["id"],
+            message_id=message_id,
+            event_id=message_id,
+            relation="CONTINUATION",
+        )
+        return parked_hitl["id"]
     files = list(attachments or [])
     refs = list(attachment_refs or [])
     classification = classify_request(
@@ -1122,6 +1171,14 @@ def open_chat_job(
                     store.resume(parked_id)
                     continued_job = store.get_job(parked_id)
     if continued_job is not None:
+        if is_chat_coverage_hitl_resume_reply(store, continued_job, text):
+            ingest_chat_hitl_reply(
+                store,
+                job_id=continued_job["id"],
+                message_id=message_id,
+                text=text,
+            )
+            continued_job = store.get_job(continued_job["id"])
         job = continued_job
     else:
         job = store.create_job(

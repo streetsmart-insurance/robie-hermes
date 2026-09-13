@@ -137,6 +137,8 @@ def is_coverage_fill_miss(text: str) -> bool:
         or "will not invent them" in folded
         or "will not invent dollar amounts" in folded
         or "coverage a, b, c, d, e, and f" in folded
+        or "i still need the coverage" in folded
+        or "i still need coverage" in folded
     )
 
 
@@ -240,6 +242,42 @@ def _find_date_near_label(text: str, label_re: str) -> str | None:
     if match.group(4):
         return _normalize_date(match.group(4), match.group(5), match.group(6))
     return _normalize_date(match.group(3), match.group(1), match.group(2))
+
+
+COVERAGE_LETTER_KEYS = {
+    "A": "dwelling",
+    "B": "other_structures",
+    "C": "personal_property",
+    "D": "loss_of_use",
+    "E": "personal_liability",
+    "F": "medical_payments",
+}
+_LETTER_AMOUNT_RE = re.compile(
+    r"(?:coverage\s+)?\b([A-F])\b\s*[:\-]?\s*\$?\s*([\d,]{3,}(?:\.\d{1,2})?)",
+    re.IGNORECASE,
+)
+
+
+def parse_coverage_amounts_from_reply(text: str) -> dict[str, str]:
+    """Parse Coverage A–F dollar amounts from a HITL reply. Never invent a letter.
+
+    Accepts ``Coverage A $1,200,000; B $120,000`` and ``A $1,200,000 B $120,000``.
+    A letter with no number is omitted.
+    """
+    raw = str(text or "")
+    found: dict[str, str] = {}
+    for key, label_res in _LIMIT_LABELS.items():
+        value = _find_limit(raw, label_res)
+        if value:
+            found[key] = value
+    for match in _LETTER_AMOUNT_RE.finditer(raw):
+        key = COVERAGE_LETTER_KEYS.get(match.group(1).upper())
+        if not key or found.get(key):
+            continue
+        value = match.group(2).replace(",", "").split(".")[0]
+        if value.isdigit() and int(value) > 0:
+            found[key] = value
+    return found
 
 
 def _find_limit(text: str, label_res: list[str]) -> str | None:

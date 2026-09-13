@@ -1324,6 +1324,29 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # A retryable exception leaves the durable event available after restart.
         await asyncio.to_thread(require_message_execution_available, ROBIE_JOB_DB)
+        if job_id:
+            from robie_job_engine.chat_hitl import run_chat_hitl_coverage_resume
+            from robie_job_engine.policy_setup_dispatch import is_coverage_fill_miss
+
+            hitl_text = await asyncio.to_thread(
+                run_chat_hitl_coverage_resume, ROBIE_JOB_DB, job_id
+            )
+            if hitl_text is not None:
+                # Missing-letter HITL is already posted. Success still needs
+                # a Chat reply; send() runs guard_chat_response.
+                if (
+                    event.source is not None
+                    and not is_coverage_fill_miss(hitl_text)
+                ):
+                    await self.send(
+                        event.source.chat_id,
+                        hitl_text,
+                        reply_to=event.message_id,
+                        metadata={
+                            "thread_id": getattr(event.source, "thread_id", None)
+                        },
+                    )
+                return
         if job_id and not chat_hermes_should_run(ROBIE_JOB_DB, job_id):
             # Fail-closed policy setup already parked HITL. Do not start a
             # google_chat_task worker that would sit in RUNNING / still working.
