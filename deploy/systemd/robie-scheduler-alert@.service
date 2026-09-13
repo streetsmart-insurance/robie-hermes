@@ -1,0 +1,25 @@
+[Unit]
+Description=ROBIE scheduler failure Chat alert (%i)
+After=local-fs.target network-online.target
+Wants=network-online.target
+# Do not set OnFailure on this oneshot. The Python entrypoint always
+# exits 0 (local log is the fallback if Chat is down) so a Chat outage
+# cannot recurse through OnFailure.
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+Environment=ROBIE_PREFLIGHT_CHAT_SPACE=spaces/AAQAZbLJO78
+Environment=ROBIE_PREFLIGHT_FAIL_NOTIFY=carlo@streetsmart.insurance,jake@streetsmart.insurance
+Environment=ROBIE_SCHEDULER_ALERT_LOG=/opt/streetsmart-hermes/robie-job-engine/data/scheduler-alert.log
+EnvironmentFile=-/etc/streetsmart-hermes/robie-recording.env
+# Same Chat APP venv Production pre-flight already uses.
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m robie_job_engine.scheduler_alert %i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data
