@@ -173,8 +173,11 @@ class LiveLabelMappingTests(unittest.TestCase):
         self.assertTrue(is_location_section_labels(LIVE_LOCATION_LABELS))
         self.assertFalse(is_location_section_labels(LIVE_HOME_LABELS))
         leftover = filter_coverage_candidate_labels(LIVE_LOCATION_LABELS)
+        self.assertEqual(leftover, [])
         self.assertNotIn("Address", leftover)
         self.assertNotIn("Address 1", leftover)
+        self.assertNotIn("Name", leftover)
+        self.assertNotIn("Line Of Business", leftover)
         self.assertNotIn("City", leftover)
         self.assertNotIn("Location #", leftover)
         mapped = map_letter_amounts_to_live_labels(
@@ -184,6 +187,28 @@ class LiveLabelMappingTests(unittest.TestCase):
         )
         self.assertEqual(mapped, {})
         self.assertNotIn("Address", mapped)
+        self.assertNotIn("Name", mapped)
+        self.assertNotIn("Address 1", mapped)
+        self.assertNotIn("Line Of Business", mapped)
+
+    def test_retry_leftovers_name_address1_line_of_business_are_not_filled(self) -> None:
+        mapped = map_letter_amounts_to_live_labels(
+            {
+                "A": "1200000",
+                "B": "120000",
+                "C": "500000",
+                "D": "500000",
+                "E": "10000",
+                "F": "10000",
+            },
+            LIVE_LOCATION_LABELS,
+            gemini_client=FakeGemini(
+                '{"decision":"apply","option":"Name"}'
+            ),
+        )
+        self.assertEqual(mapped, {})
+        for label in ("Name", "Address 1", "Line Of Business", "Address"):
+            self.assertNotIn(label, mapped)
 
 
 class LiveLabelFillSetupTests(unittest.TestCase):

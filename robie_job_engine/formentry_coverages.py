@@ -241,7 +241,14 @@ def is_location_section_labels(live_labels: list[str]) -> bool:
 
 
 def filter_coverage_candidate_labels(live_labels: list[str]) -> list[str]:
-    """Drop Location/Address chrome so Gemini cannot map a letter onto Address."""
+    """Drop Location/Address chrome so Gemini cannot map a letter onto Address.
+
+    Live miss 44928e33 RETRY still mapped onto Name / Address 1 / Line Of
+    Business while FormEntry was on Location. Nothing on that tab is a
+    coverage field — leftover must be empty until Coverages is open.
+    """
+    if is_location_section_labels(live_labels):
+        return []
     return [
         str(item).strip()
         for item in live_labels

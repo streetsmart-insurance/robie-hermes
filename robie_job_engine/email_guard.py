@@ -100,6 +100,7 @@ def run_guarded_email_task(
     run_agent_with_context: Callable[[str, str, str], str] | None = None,
     verifiers: dict[str, Any] | None = None,
     attachment_names: tuple[str, ...] = (),
+    thread_id: str = "",
 ) -> str:
     """Run once and require independent destination evidence before completion."""
     request_text = prompt
@@ -134,6 +135,8 @@ def run_guarded_email_task(
         store,
         subject=_subject_from_prompt(request_text),
         body=request_text,
+        thread_id=thread_id,
+        gmail_message_id=gmail_message_id,
     )
     if parked:
         ingest_email_hitl_reply(
@@ -142,12 +145,27 @@ def run_guarded_email_task(
             gmail_message_id=gmail_message_id,
             subject=_subject_from_prompt(request_text),
             body=request_text,
+            thread_id=thread_id,
         )
         job = store.get_job(parked["id"])
+        if JobStatus(job["status"]) == JobStatus.RUNNING:
+            raise EmailTaskPending(
+                f"ROBIE Job {job['id']} is {job['status']}; keep email unread"
+            )
     else:
+        payload = {
+            "worker": "hermes-cua",
+            "gmail_message_id": gmail_message_id,
+            "prompt": prompt,
+            "request_text": request_text,
+            "document_names": list(attachment_names),
+            **targets,
+        }
+        if str(thread_id or "").strip():
+            payload["gmail_thread_id"] = str(thread_id).strip()
         job = store.create_job(
             "hermes.email_task",
-            {"worker": "hermes-cua", "gmail_message_id": gmail_message_id, "prompt": prompt, "request_text": request_text, "document_names": list(attachment_names), **targets},
+            payload,
             idempotency_key=f"gmail:{gmail_message_id}",
             max_attempts=3,
         )

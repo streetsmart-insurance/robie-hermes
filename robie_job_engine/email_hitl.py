@@ -46,36 +46,130 @@ def parse_hitl_job_token(subject: str, body: str = "") -> str | None:
     return None
 
 
-def resolve_parked_email_hitl_job(
+def reply_leads_with_retry(text: str) -> bool:
+    """True when the human's own lines are RETRY, not quoted HITL copy."""
+    from .engine import is_retry_text
+
+    raw = str(text or "")
+    if is_retry_text(raw):
+        return True
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(">"):
+            continue
+        if stripped.casefold().startswith("subject:"):
+            continue
+        return " ".join(stripped.casefold().split()) in {"retry", "/retry"}
+    return False
+
+
+def is_email_coverage_hitl_job(store: JobStore, job: dict[str, Any]) -> bool:
+    """True when this email job is a coverage / policy-setup HITL."""
+    from .policy_setup_dispatch import (
+        POLICY_SETUP_REQUIRED_KIND,
+        is_coverage_fill_miss,
+    )
+
+    if is_coverage_fill_miss(str(job.get("last_error") or "")):
+        return True
+    payload = dict(job.get("payload") or {})
+    if payload.get("hitl_resume") or payload.get("human_input_values"):
+        return True
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        return False
+    marker = store.get_checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND) or {}
+    if marker:
+        return True
+    action = store.get_checkpoint(job_id, "action") or {}
+    return str(action.get("action") or "") == "ezlynx_policy_setup"
+
+
+def _token_matches_job(job_id: str, token: str) -> bool:
+    folded = str(token or "").strip().casefold()
+    if not folded:
+        return False
+    compact = folded.replace("-", "")
+    raw = str(job_id or "")
+    return raw.casefold().startswith(folded) or raw.replace("-", "").casefold().startswith(
+        compact
+    )
+
+
+def resolve_email_hitl_job(
     store: JobStore,
     token: str,
+    *,
+    awaiting_only: bool = False,
 ) -> dict[str, Any] | None:
-    """Resolve a subject token (full uuid or 8-char prefix) to one parked job."""
+    """Resolve a [ROBIE HITL] token to the email job it names."""
     token = str(token or "").strip()
     if not token:
         return None
-    folded = token.casefold()
-    compact = folded.replace("-", "")
     try:
         job = store.get_job(token)
     except KeyError:
         job = None
     if job is None:
         matches: list[dict[str, Any]] = []
-        for row in store.list_jobs_by_status({JobStatus.AWAITING_HUMAN_INPUT}):
-            job_id = str(row.get("id") or "")
-            if job_id.casefold().startswith(folded) or job_id.replace(
-                "-", ""
-            ).casefold().startswith(compact):
+        statuses = (
+            {JobStatus.AWAITING_HUMAN_INPUT}
+            if awaiting_only
+            else set(JobStatus)
+        )
+        for row in store.list_jobs_by_status(statuses):
+            if str(row.get("action_type") or "") != "hermes.email_task":
+                continue
+            if _token_matches_job(str(row.get("id") or ""), token):
                 matches.append(row)
         if len(matches) != 1:
             return None
         job = matches[0]
     if str(job.get("action_type") or "") != "hermes.email_task":
         return None
-    if JobStatus(job["status"]) != JobStatus.AWAITING_HUMAN_INPUT:
+    if awaiting_only and JobStatus(job["status"]) != JobStatus.AWAITING_HUMAN_INPUT:
         return None
     return job
+
+
+def resolve_parked_email_hitl_job(
+    store: JobStore,
+    token: str,
+) -> dict[str, Any] | None:
+    """Resolve a subject token (full uuid or 8-char prefix) to one parked job."""
+    return resolve_email_hitl_job(store, token, awaiting_only=True)
+
+
+def _email_jobs_on_thread(store: JobStore, thread_id: str) -> list[dict[str, Any]]:
+    thread = str(thread_id or "").strip()
+    if not thread:
+        return []
+    matches: list[dict[str, Any]] = []
+    for row in store.list_jobs_by_status(set(JobStatus)):
+        if str(row.get("action_type") or "") != "hermes.email_task":
+            continue
+        payload = dict(row.get("payload") or {})
+        if str(payload.get("gmail_thread_id") or "").strip() == thread:
+            matches.append(row)
+    return matches
+
+
+def _job_for_hitl_gmail_message(
+    store: JobStore, gmail_message_id: str
+) -> dict[str, Any] | None:
+    message_id = str(gmail_message_id or "").strip()
+    if not message_id:
+        return None
+    kind = f"gmail_hitl_reply:{message_id}"
+    for row in store.list_jobs_by_status(set(JobStatus)):
+        if str(row.get("action_type") or "") != "hermes.email_task":
+            continue
+        marker = store.get_checkpoint(str(row.get("id") or ""), kind) or {}
+        if marker.get("resumed") or marker.get("job_id"):
+            return row
+    return None
 
 
 def find_parked_email_hitl_job(
@@ -84,25 +178,47 @@ def find_parked_email_hitl_job(
     subject: str = "",
     body: str = "",
     thread_id: str = "",
+    gmail_message_id: str = "",
 ) -> dict[str, Any] | None:
-    """Find the AWAITING_HUMAN_INPUT email job this Gmail reply belongs to."""
+    """Find the email job this HITL/RETRY reply belongs to.
+
+    Live miss 44928e33: RETRY resumed the waiting job, then a second inbox
+    pass created hermes.email_task 508d1619 (gmail:1a09c697edabe8be) because
+    44928e33 was no longer AWAITING. A HITL/RETRY reply must never mint a
+    sibling job.
+    """
+    already = _job_for_hitl_gmail_message(store, gmail_message_id)
+    if already:
+        return already
     token = parse_hitl_job_token(subject, body)
     if token:
-        found = resolve_parked_email_hitl_job(store, token)
+        found = resolve_email_hitl_job(store, token)
         if found:
             return found
-    thread = str(thread_id or "").strip()
-    if not thread:
-        return None
-    matches = []
-    for row in store.list_jobs_by_status({JobStatus.AWAITING_HUMAN_INPUT}):
-        if str(row.get("action_type") or "") != "hermes.email_task":
-            continue
-        payload = dict(row.get("payload") or {})
-        if str(payload.get("gmail_thread_id") or "").strip() == thread:
-            matches.append(row)
-    if len(matches) == 1:
-        return matches[0]
+    thread_jobs = _email_jobs_on_thread(store, thread_id)
+    awaiting = [
+        row
+        for row in thread_jobs
+        if JobStatus(row["status"]) == JobStatus.AWAITING_HUMAN_INPUT
+    ]
+    if len(awaiting) == 1:
+        return awaiting[0]
+    retryish = reply_leads_with_retry(body)
+    if retryish and thread_jobs:
+        coverage = [row for row in thread_jobs if is_email_coverage_hitl_job(store, row)]
+        if len(coverage) == 1:
+            return coverage[0]
+        if len(thread_jobs) == 1:
+            return thread_jobs[0]
+    if retryish:
+        parked = [
+            row
+            for row in store.list_jobs_by_status({JobStatus.AWAITING_HUMAN_INPUT})
+            if str(row.get("action_type") or "") == "hermes.email_task"
+            and is_email_coverage_hitl_job(store, row)
+        ]
+        if len(parked) == 1:
+            return parked[0]
     return None
 
 
@@ -175,8 +291,49 @@ def ingest_email_hitl_reply(
     from .policy_setup_dispatch import parse_coverage_amounts_from_reply
 
     job = store.get_job(job_id)
+    existing = store.get_checkpoint(
+        job_id, f"gmail_hitl_reply:{str(gmail_message_id or '').strip()}"
+    ) or {}
+    if existing.get("resumed") or existing.get("attached"):
+        return {
+            "resumed": bool(existing.get("resumed")),
+            "job_id": job_id,
+            "coverage": dict(
+                (dict(job.get("payload") or {}).get("human_input_values") or {}).get(
+                    "coverage"
+                )
+                or {}
+            ),
+            "missing_letters": missing_coverage_letters(
+                dict(
+                    (dict(job.get("payload") or {}).get("human_input_values") or {}).get(
+                        "coverage"
+                    )
+                    or {}
+                )
+            ),
+            "status": job["status"],
+            "already": True,
+        }
     if JobStatus(job["status"]) != JobStatus.AWAITING_HUMAN_INPUT:
-        raise RuntimeError(f"job {job_id} is not awaiting human input")
+        store.checkpoint(
+            job_id,
+            f"gmail_hitl_reply:{str(gmail_message_id or '').strip()}",
+            {"job_id": job_id, "resumed": False, "attached": True},
+        )
+        return {
+            "resumed": False,
+            "job_id": job_id,
+            "coverage": dict(
+                (dict(job.get("payload") or {}).get("human_input_values") or {}).get(
+                    "coverage"
+                )
+                or {}
+            ),
+            "missing_letters": [],
+            "status": job["status"],
+            "already": True,
+        }
     reply = str(body or "")
     amounts = parse_coverage_amounts_from_reply(f"{subject}\n{reply}")
     payload = dict(job.get("payload") or {})
@@ -184,7 +341,7 @@ def ingest_email_hitl_reply(
     coverage = dict(human.get("coverage") or {})
     coverage.update(amounts)
     human["coverage"] = coverage
-    if is_retry_text(reply):
+    if is_retry_text(reply) or reply_leads_with_retry(reply):
         human["operator_response"] = "RETRY"
     payload["human_input_values"] = human
     payload["hitl_resume"] = True
