@@ -132,11 +132,14 @@ def coverage_amounts_missing(error: str | None) -> bool:
 def still_on_location_tab(error: str | None) -> bool:
     """True when FormEntry is still Location/Address after a Coverages click."""
     folded = " ".join(str(error or "").casefold().split())
+    compact = folded.replace(" ", "")
     return (
         "still on the formentry location" in folded
         or "could not open coverages" in folded
         or "i am on the address tab" in folded
         or "cannot open coverages" in folded
+        or "cannot read the coverage fields" in folded
+        or "live_labels=[]" in compact
         or ("live_labels=" in folded and "location #" in folded)
     )
 
@@ -152,15 +155,20 @@ def coverage_labels_empty(error: str | None) -> bool:
 
 
 def coverage_letters_from_detail(detail: str) -> list[str]:
-    """Letters named after 'still need' / 'missing Coverage X'."""
+    """Letters named after 'still need' / 'missing Coverage X'.
+
+    Include the Oxford-comma tail (``A, B, C, D, E, and F``). A letter-class
+    match on ``and`` used to swallow F, so Gmail said ``I have Coverage F``.
+    """
     folded = str(detail or "")
     letters: list[str] = []
     for match in re.finditer(
-        r"(?:still need(?: the)? coverage|missing coverage)\s+([A-F](?:\s*,\s*[A-F])*)",
+        r"(?:still need(?: the)? coverage|missing coverage)\s+"
+        r"(.+?)(?:\s+dollar|\s+amount|\.|$)",
         folded,
-        re.IGNORECASE,
+        re.IGNORECASE | re.DOTALL,
     ):
-        for letter in re.findall(r"[A-F]", match.group(1).upper()):
+        for letter in re.findall(r"\b([A-F])\b", match.group(1).upper()):
             if letter not in letters:
                 letters.append(letter)
     if not letters:
@@ -212,6 +220,8 @@ def coverage_fill_human_text(*, channel: str = CHANNEL_EMAIL, detail: str = "") 
     email = normalize_hitl_channel(channel) == CHANNEL_EMAIL
     if still_on_location_tab(detail):
         return COVERAGE_TAB_STUCK_EMAIL if email else COVERAGE_TAB_STUCK_CHAT
+    # Amounts already on the email/prompt: never ask for A–F again when
+    # the miss is empty/Location labels (live 712eccd0).
     missing = coverage_letters_from_detail(detail)
     if missing and (
         "still need" in str(detail or "").casefold()

@@ -301,11 +301,15 @@ class HomeSetupPolicyByLobTests(unittest.TestCase):
             setup._fill_required_policy_fields = _spy_fill  # type: ignore[method-assign]
             setup._mint_formentry = _spy_mint  # type: ignore[method-assign]
 
-            from unittest.mock import patch
+            from unittest.mock import AsyncMock, patch
 
             from robie_job_engine.ezlynx_policy_setup import (
                 HomeownersCoverageItem,
                 PolicyShellInput,
+            )
+            from robie_job_engine.formentry_coverages import (
+                HOME_LIVE_COVERAGE_LABELS,
+                CoveragesTabResult,
             )
 
             with patch("robie_job_engine.ezlynx_api.EzlynxApiClient"), patch(
@@ -317,6 +321,15 @@ class HomeSetupPolicyByLobTests(unittest.TestCase):
                     "verdict": "ALREADY_EXISTS",
                     "read_back": {"policyId": "83669533"},
                 },
+            ), patch(
+                "robie_job_engine.formentry_coverages.aensure_coverages_tab",
+                new=AsyncMock(
+                    return_value=CoveragesTabResult(
+                        live_labels=list(HOME_LIVE_COVERAGE_LABELS),
+                        on_coverages=True,
+                        still_on_location=False,
+                    )
+                ),
             ), patch(
                 "robie_job_engine.formentry_coverages.afill_coverages_by_label",
                 return_value={"filled_count": 1, "not_found": []},

@@ -270,6 +270,18 @@ def is_location_section_labels(live_labels: list[str]) -> bool:
     return hits >= 3
 
 
+def coverages_fields_unreadable(live_labels: list[str]) -> bool:
+    """True when field labels are empty or still Location. Not Coverages.
+
+    Live miss 712eccd0: empty live_labels=[] is not location-shaped (needs
+    three hints), so fill ran anyway and HITL asked for A–F already on the
+    email. Empty labels are not proof Coverages opened.
+    """
+    if has_live_coverage_letter(live_labels):
+        return False
+    return (not live_labels) or is_location_section_labels(live_labels)
+
+
 def filter_coverage_candidate_labels(live_labels: list[str]) -> list[str]:
     """Drop Location/Address chrome so Gemini cannot map a letter onto Address.
 
@@ -575,13 +587,9 @@ async def aensure_coverages_tab(
         )
 
     nav = await alist_live_nav_labels(page)
-    if not is_location_section_labels(live) and not live_nav_coverage_name(nav):
-        return CoveragesTabResult(
-            live_labels=live,
-            on_coverages=False,
-            still_on_location=False,
-            locators_tried=tried,
-        )
+    # Empty labels are not Coverages. Do not skip the live-nav click.
+    # Live miss 712eccd0 returned still_on_location=False for live==[]
+    # when nav had no coverage name, then fill-miss asked for A–F.
 
     name, asked = pick_live_coverage_nav(nav, gemini_client=gemini_client)
     gemini_asked = gemini_asked or asked
@@ -625,10 +633,11 @@ async def aensure_coverages_tab(
                 )
 
     live = await alist_live_coverage_labels(page)
+    proven = _coverages_tab_proven(live)
     return CoveragesTabResult(
         live_labels=live,
-        on_coverages=_coverages_tab_proven(live),
-        still_on_location=is_location_section_labels(live),
+        on_coverages=proven,
+        still_on_location=coverages_fields_unreadable(live),
         clicked=clicked,
         locators_tried=tried or [COVERAGES_LIVE_NAV_CLICK],
         gemini_asked=gemini_asked,

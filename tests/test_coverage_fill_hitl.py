@@ -246,7 +246,11 @@ class CoverageFillSetupTests(unittest.TestCase):
                 )
 
             self.assertFalse(result.success)
-            self.assertIn(NO_LABELS, result.error or "")
+            error = result.error or ""
+            self.assertIn("could not open Coverages", error)
+            self.assertIn("cannot read the coverage fields", error)
+            self.assertNotIn("still need Coverage", error)
+            self.assertNotIn(NO_LABELS, error)
             self.assertTrue(result.hitl_posted)
             self.assertEqual(result.policy_id, "83669533")
             mock_escalate.assert_called()

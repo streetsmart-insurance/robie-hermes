@@ -222,6 +222,26 @@ class ExtractArgsTests(unittest.TestCase):
         self.assertEqual(args["personal_liability"], "10000")
         self.assertEqual(args["medical_payments"], "10000")
 
+    def test_colon_comma_coverage_lines_are_consumed(self):
+        text = (
+            "Please create the homeowners policy TEST-HO-20260911-E01 "
+            "on applicant 220250093.\n"
+            "Coverage amounts:\n"
+            "Coverage A: $1,200,000\n"
+            "Coverage B: $120,000\n"
+            "Coverage C: $500,000\n"
+            "Coverage D: $500,000\n"
+            "Coverage E: $10,000\n"
+            "Coverage F: $10,000\n"
+        )
+        args = extract_policy_setup_args(text)
+        self.assertEqual(args["dwelling"], "1200000")
+        self.assertEqual(args["other_structures"], "120000")
+        self.assertEqual(args["personal_property"], "500000")
+        self.assertEqual(args["loss_of_use"], "500000")
+        self.assertEqual(args["personal_liability"], "10000")
+        self.assertEqual(args["medical_payments"], "10000")
+
     def test_returns_none_outside_job_class(self):
         self.assertIsNone(extract_policy_setup_args("What is the status?"))
 
