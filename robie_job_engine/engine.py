@@ -218,6 +218,7 @@ class JobEngine:
             runs.terminate(run["id"], "BLOCKED")
             return self.store.get_job(job_id)
         runs.bind(run["id"], "lease", {"owner": lease_owner, "job_id": job_id})
+        hitl_resume = bool(dict(job.get("payload") or {}).get("hitl_resume"))
         verify_only = False
         existing_action = self.store.get_checkpoint(job_id, "action")
         existing_intent = self.store.get_checkpoint(job_id, "action_intent")
@@ -234,7 +235,10 @@ class JobEngine:
                 self.store.release_lease(job_id)
                 runs.terminate(run["id"], "BLOCKED")
                 return self.store.get_job(job_id)
-            verify_only = True
+            # A HITL reply is new work on the same job (coverage amounts).
+            # Do not skip the worker just because the first attempt left an
+            # action checkpoint (job 28bff7c8 / a8068d3d).
+            verify_only = not hitl_resume
         runs.bind(
             run["id"],
             "durable_work",
@@ -372,7 +376,7 @@ class JobEngine:
                         release_lease=True,
                     )
             action = self.store.get_checkpoint(job_id, "action")
-            if action is None and not verify_only:
+            if (action is None or hitl_resume) and not verify_only:
                 job = self._perform(job, ledger=ledger, run_id=run["id"])
                 if job["status"] != JobStatus.VERIFYING:
                     if recording_started:
