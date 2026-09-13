@@ -32,6 +32,7 @@ class HitlRequest:
     original_requester: str | None = None  # Email of who triggered the job
     notify_carlo: bool = True  # Always notify Carlo
     notify_requester: bool = True  # Also notify the original requester
+    screenshot_path: str | None = None  # Path to screenshot of the stuck state
 
 
 @dataclass
@@ -58,6 +59,13 @@ def ask_gemini(request: HitlRequest, gemini_client: Any = None) -> HitlResponse:
             return HitlResponse(
                 source="gemini",
                 suggestion="Gemini client not available",
+                actionable=False,
+            )
+        # Client may be None if not configured (no env vars)
+        if gemini_client is None:
+            return HitlResponse(
+                source="gemini",
+                suggestion="Gemini not configured (missing project/location/model)",
                 actionable=False,
             )
     
@@ -146,6 +154,15 @@ Applicant: {request.applicant_id}
 Policy: {request.policy_id or 'unknown'}
 
 Gemini was asked first but could not resolve this.
+
+What the job is trying to do:
+- Click "Save & Continue Edit" on the Edit Policy page to mint a FormEntry URL
+- Then fill coverage limits and deductibles in the FormEntry
+
+What was tried (in order):
+{chr(10).join(f"  {i+1}. {a}" for i, a in enumerate(request.attempted))}
+
+{f"Screenshot captured: {request.screenshot_path}" if request.screenshot_path else "No screenshot captured."}
 
 Reply with guidance, or the job will fail closed after 30 minutes.
 
