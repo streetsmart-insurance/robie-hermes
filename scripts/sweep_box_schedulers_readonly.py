@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Sweep hermes-poc-01 for the hourly inbox processor. STRICTLY read-only.
 
-Something on this box fires every hour at ~:00:16-:00:28 ET: it sends
-"Robie Daily Mailbox Audit & Cleanup Report" and "[URGENT / CSR ACTION]
-Carrier Response Received" emails as robie@streetsmart.insurance and logs
-notes to EZLynx via REST API. It is NOT in the job engine's scheduled_jobs
-table, NOT in the repo, and NOT a repo systemd timer. This sweep looks for
-it in the remaining scheduler surfaces: systemd timers/units, user and
-system crontabs, and recent process starts.
+Known state (2026-09-12): the ONLY inbox scheduler on this box is
+/etc/systemd/system/hermes-email-watcher.timer -> hermes-email-watcher.service
+("Poll robie@streetsmart.insurance inbox every 60 seconds"). Crontabs are
+empty and there is NO separate hourly trigger. Yet "Robie Daily Mailbox Audit
+& Cleanup Report" and "[URGENT / CSR ACTION] Carrier Response Received"
+emails go out HOURLY at ~:00, so the hourly cadence lives inside whatever
+hermes-email-watcher.service executes. This sweep captures that service's
+full definition, its ExecStart target (with symlinks resolved), the first
+200 lines of the target plus any hourly/time-gating logic, and a names-only
+listing of the hermes home directories that may hold the audit logic.
 
 Touches nothing:
-- systemctl/journalctl/crontab queries are read-only; no enable/start/stop.
-- No file is written anywhere (output goes to stdout only).
+- systemctl/journalctl/crontab/ls/readlink/file/sed/grep are read-only;
+  no enable/start/stop, no file writes anywhere (stdout only).
 - Anything that looks like a secret value is redacted before printing.
 """
 from __future__ import annotations
@@ -24,6 +27,9 @@ from pathlib import Path
 
 KEYWORDS = ("mailbox", "audit", "urgent", "cleanup", "cleanup_report",
             "carrier response", "carrier_response", "inbox")
+
+WATCHER_UNIT = "hermes-email-watcher.service"
+WATCHER_HOME = "/home/streetsmart-hermes/.hermes"
 
 USERS = ("streetsmart-hermes", "ubuntu", "root")
 
@@ -78,6 +84,50 @@ def _matches_keywords(text: str) -> list[str]:
     return sorted({kw for kw in KEYWORDS if kw in low})
 
 
+def _execstart_target(execstart_line: str) -> str:
+    """Best-effort: extract the executed script/binary from an ExecStart.
+
+    Handles both the plain `ExecStart=/path args...` form and the
+    `systemctl show` structured form `{ path=/bin/x ; argv[]=/bin/x ; ... }`.
+    Prefers a script file (.py/.sh) passed to an interpreter over the
+    interpreter itself.
+    """
+    s = execstart_line.strip()
+    argv_tokens = re.findall(r"argv\[\]=([^\s;}]+)", s)
+    path_m = re.search(r"path=([^\s;}]+)", s)
+    candidates: list[str] = []
+    for tok in argv_tokens:
+        t = tok.lstrip("-+!@:")
+        if not t:
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t) and "/" not in t.split("=", 1)[0]:
+            continue
+        candidates.append(t)
+    for tok in candidates:
+        if tok.endswith((".py", ".sh", ".pl", ".rb")):
+            return tok
+    if candidates:
+        return candidates[0]
+    if path_m:
+        return path_m.group(1)
+    if s.startswith("ExecStart="):
+        s = s[len("ExecStart="):]
+    plain: list[str] = []
+    for tok in s.split():
+        t = tok.lstrip("-+!@:")
+        if not t:
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t) and "/" not in t.split("=", 1)[0]:
+            continue
+        plain.append(t)
+    for tok in plain:
+        if tok.endswith((".py", ".sh", ".pl", ".rb")):
+            return tok
+    if plain:
+        return plain[0]
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hours", type=int, default=3,
@@ -117,7 +167,6 @@ def main(argv: list[str] | None = None) -> int:
     grep_out = _sh_shell(
         "grep -rilE 'mailbox|urgent|cleanup|carrier.response|inbox' "
         f"{SYSTEMD_UNIT_GLOB}/*.timer {SYSTEMD_UNIT_GLOB}/*.service "
-        "2>/dev/null | head -20"
     )
     for path in grep_out.splitlines():
         path = path.strip()
@@ -195,13 +244,74 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(ps or "  <no matching processes right now>")
 
+    section("8. Email-watcher service deep capture (read-only)")
+    print(f"  --- systemctl cat {WATCHER_UNIT} ---")
+    unit_body = _sh("systemctl", "cat", WATCHER_UNIT)
+    print("  " + (unit_body.replace("\n", "\n  ")
+                  if unit_body else "  <unit not found>"))
+    print(f"  --- systemctl show {WATCHER_UNIT} ExecStart ---")
+    execstart = _sh("systemctl", "show", WATCHER_UNIT, "-p", "ExecStart",
+                    "--value")
+    print("  " + (execstart.replace("\n", "\n  ") if execstart else "  <n/a>"))
+    target = _execstart_target(execstart) if execstart else ""
+    real = ""
+    if target:
+        resolved = _sh_shell(f"readlink -f '{target}'").splitlines()
+        real = resolved[0] if resolved else ""
+        print(f"  --- resolved target: {target} -> {real or '<unresolvable>'}")
+        if real:
+            ftype = _sh_shell(f"file -b '{real}'")
+            print(f"  file: {ftype or '<unknown>'}")
+            if "text" in (ftype or "").lower():
+                head = _sh_shell(f"sed -n '1,200p' '{real}'")
+                print("  --- first 200 lines of the target ---")
+                print("  " + (head.replace("\n", "\n  ")
+                              if head else "  <empty>"))
+                gate = _sh_shell(
+                    "grep -inE 'hour|3600|minute\\s*==\\s*0|schedule|audit|"
+                    "URGENT|cleanup|mailbox|send.*report' "
+                    f"'{real}' | head -60"
+                )
+                print("  --- hourly/time-gating keyword hits in the target ---")
+                print("  " + (gate.replace("\n", "\n  ")
+                              if gate else "  <none>"))
+                if gate:
+                    findings.append(
+                        "The email-watcher's ExecStart target "
+                        f"({real}) contains hourly/time-gating logic "
+                        "(keyword hits shown in section 8). That is where "
+                        "the hourly mailbox-audit/URGENT cadence lives — "
+                        "there is no separate hourly timer on this box."
+                    )
+            else:
+                print("  <binary file — contents not dumped>")
+    _absent = ("not found", "no files found", "could not be found",
+               "no such file", "<could not run")
+    if unit_body and not any(m in unit_body.lower() for m in _absent):
+        findings.append(
+            f"{WATCHER_UNIT} captured in full (section 8). "
+            f"ExecStart resolves to: {real or target or '<unresolvable>'}."
+        )
+
+    section("9. hermes home directory listing (names only)")
+    print(f"  --- ls -la {WATCHER_HOME} ---")
+    hermes_ls = _sh("ls", "-la", WATCHER_HOME)
+    print("  " + (hermes_ls.replace("\n", "\n  ")
+                  if hermes_ls else "  <not accessible>"))
+    for sub in ("skills", "tasks"):
+        subp = str(Path(WATCHER_HOME) / sub)
+        print(f"  --- ls -la {subp} (names only) ---")
+        out = _sh("ls", "-la", subp)
+        print("  " + (out.replace("\n", "\n  ") if out else "  <absent>"))
+
     section("WHAT THIS MEANS")
     if not findings:
         print("  No systemd timer, unit file, crontab, or recent process start")
-        print("  matched the inbox keywords. The hourly processor is therefore")
-        print("  probably NOT scheduled on this box via systemd or cron — next")
-        print("  places to look: another VM (e.g. streetsmart-accountability-prod),")
-        print("  a container/CI schedule, or an external scheduler (Zapier etc.).")
+        print("  matched the inbox keywords, and the email-watcher service")
+        print("  could not be captured. The hourly processor is therefore")
+        print("  probably NOT driven from this box — next places to look:")
+        print("  another VM (e.g. streetsmart-accountability-prod), a")
+        print("  container/CI schedule, or an external scheduler (Zapier etc.).")
         return 1
     for n, item in enumerate(findings, 1):
         print(f"  {n}. {item}")
