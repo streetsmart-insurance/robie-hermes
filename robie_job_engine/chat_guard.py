@@ -18,6 +18,7 @@ from .context_policy import (
 from .chat_queue import DurableChatEventQueue
 from .idempotency import DurableWorkLedger, IdempotencyError
 from .hitl import (
+    coverage_fill_miss_hitl_text,
     formentry_mint_miss_hitl_text,
     interaction_for_blocker,
     policy_setup_fail_closed_hitl_text,
@@ -442,7 +443,7 @@ def park_policy_setup_fail_closed(
     store = store or JobStore(db_path)
     job = store.get_job(job_id)
     recordings = recordings or RecordingManager(db_path)
-    from .policy_setup_dispatch import is_formentry_mint_miss
+    from .policy_setup_dispatch import is_coverage_fill_miss, is_formentry_mint_miss
 
     error = (
         policy_setup_fail_closed_reason(content)
@@ -451,9 +452,14 @@ def park_policy_setup_fail_closed(
     )
     if is_formentry_mint_miss(content):
         prompt = formentry_mint_miss_hitl_text(job_id=job_id, detail=error)
+    elif is_coverage_fill_miss(content):
+        prompt = coverage_fill_miss_hitl_text(job_id=job_id, detail=error)
     else:
         prompt = policy_setup_fail_closed_hitl_text(job_id=job_id, detail=error)
-    payload = dict(job.get("payload") or {})
+    from .hitl_ladder import stamp_hitl_posted_at
+
+    payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
+    store.update_payload(job_id, payload)
     interaction = {
         "awaiting": "human_input",
         "action_type": job["action_type"],
@@ -811,6 +817,28 @@ def _bind_chat_policy_setup(
         return extra + contract
     marker["tool_called"] = True
     store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, marker)
+    if isinstance(report, dict):
+        payload = dict(job.get("payload") or {})
+        number = str(
+            report.get("policy_number") or policy_args.get("policy_number") or ""
+        ).strip()
+        pid = str(report.get("policy_id") or report.get("policyId") or "").strip()
+        if number:
+            payload["policy_number"] = number
+        if pid:
+            payload["policy_id"] = pid
+        payload.setdefault("applicant_id", "220250093")
+        store.update_payload(job_id, payload)
+        dest = {"applicant_id": "220250093"}
+        if number:
+            dest["policy_number"] = number
+        if pid:
+            dest["policy_id"] = pid
+        store.checkpoint(
+            job_id,
+            "action",
+            {"action": "ezlynx_policy_setup", "destination": dest, "detail": {"report": report}},
+        )
     extra.append(
         "- Job Engine invoked the callable ezlynx_policy_setup handler "
         "in-process (tool_called=true). Do not call playwright_exec for "
@@ -823,10 +851,19 @@ def _bind_chat_policy_setup(
         blob = str(report or "")
     if is_policy_setup_honest_hitl(blob) or "PLAYWRIGHT_BLOCKED" in blob:
         park_policy_setup_fail_closed(db_path, job_id, blob, store=store)
-        extra.append(
-            "- STOP AND ASK. FormEntry was not minted. Job is "
-            "AWAITING_HUMAN_INPUT (not still working)."
-        )
+        from .policy_setup_dispatch import is_coverage_fill_miss
+
+        if is_coverage_fill_miss(blob):
+            extra.append(
+                "- STOP AND ASK. Coverage labels were not filled. Amounts "
+                "that were not on the job were not guessed. Job is "
+                "AWAITING_HUMAN_INPUT (not still working)."
+            )
+        else:
+            extra.append(
+                "- STOP AND ASK. FormEntry was not minted. Job is "
+                "AWAITING_HUMAN_INPUT (not still working)."
+            )
     return extra + contract
 
 
@@ -939,6 +976,12 @@ def open_chat_job(
     """Create the Job before execution and bind durable attachment artifacts."""
     store = JobStore(db_path)
     store.fail_orphaned_chat_jobs()
+    try:
+        from .hitl_ladder import expire_unanswered_hitl_jobs
+
+        expire_unanswered_hitl_jobs(store)
+    except Exception:
+        logger.exception("unanswered HITL expire failed; continuing")
     try:
         from .tab_cleanup import flush_tabs_at_job_start
 
@@ -1604,7 +1647,10 @@ def guard_chat_response(
         JobStatus.RUNNING,
         JobStatus.VERIFYING,
     }:
-        payload = dict(job.get("payload") or {})
+        from .hitl_ladder import stamp_hitl_posted_at
+
+        payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
+        store.update_payload(job_id, payload)
         interaction = interaction_for_blocker(
             blocker,
             action_type=job["action_type"],
@@ -1716,7 +1762,10 @@ def guard_chat_response(
             action_type=job["action_type"],
         )
         if decision.status == JobStatus.AWAITING_HUMAN_INPUT.value:
-            payload = dict(current.get("payload") or {})
+            from .hitl_ladder import stamp_hitl_posted_at
+
+            payload = stamp_hitl_posted_at(dict(current.get("payload") or {}))
+            store.update_payload(job_id, payload)
             interaction = interaction_for_blocker(
                 decision.error,
                 action_type=job["action_type"],

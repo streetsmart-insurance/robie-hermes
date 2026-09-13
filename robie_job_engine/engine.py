@@ -167,7 +167,18 @@ class JobEngine:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Resume via RETRY only for a fresh HITL. Leftover ids stay put."""
+        from .hitl_ladder import unanswered_hitl_kill_reason
+
         job = self.store.get_job(job_id)
+        kill = unanswered_hitl_kill_reason(job, now=now)
+        if kill:
+            return self.store.transition(
+                job_id,
+                JobStatus.FAILED,
+                expected={JobStatus.AWAITING_HUMAN_INPUT},
+                error=kill,
+                release_lease=True,
+            )
         reason = leftover_retry_hold_reason(job, now=now)
         self.store.checkpoint(
             job_id,
@@ -181,7 +192,14 @@ class JobEngine:
             return current
         return self.store.resume(job_id)
 
+    def expire_unanswered_hitl(self, *, now: datetime | None = None) -> list[str]:
+        """Kill HITL jobs Carlo did not answer within 30 minutes."""
+        from .hitl_ladder import expire_unanswered_hitl_jobs
+
+        return expire_unanswered_hitl_jobs(self.store, now=now)
+
     def run(self, job_id: str) -> dict[str, Any]:
+        self.expire_unanswered_hitl()
         lease_owner = f"{self.owner}:{uuid.uuid4()}"
         runs = IsolatedRunStore(self.store.path)
         ledger = DurableWorkLedger(self.store.path)
@@ -622,6 +640,11 @@ class JobEngine:
                     release_lease=True,
                 )
         if result.hold_status in WAITING_STATUSES:
+            if result.hold_status == JobStatus.AWAITING_HUMAN_INPUT:
+                from .hitl_ladder import stamp_hitl_posted_at
+
+                payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
+                self.store.update_payload(job["id"], payload)
             return self.store.transition(
                 job["id"],
                 result.hold_status,
@@ -820,6 +843,11 @@ class JobEngine:
         self.store.add_evidence(job["id"], result.verified, result.evidence)
         self.store.add_attempt(job["id"], "verify", number, "verified" if result.verified else "not_verified", {"error": result.error, "method": result.evidence.method, "authoritative": result.evidence.authoritative})
         if result.hold_status in WAITING_STATUSES:
+            if result.hold_status == JobStatus.AWAITING_HUMAN_INPUT:
+                from .hitl_ladder import stamp_hitl_posted_at
+
+                payload = stamp_hitl_posted_at(dict(job.get("payload") or {}))
+                self.store.update_payload(job["id"], payload)
             return self.store.transition(
                 job["id"],
                 result.hold_status,

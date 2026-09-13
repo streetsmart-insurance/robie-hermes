@@ -323,7 +323,7 @@ class MintStopAndAskTests(unittest.TestCase):
             ),
             {"chat_sender": lambda msg: chats.append(msg) or True},
         )
-        self.assertFalse(gemini_resolved_and_job_continuing(
+        self.assertTrue(gemini_resolved_and_job_continuing(
             HitlRequest(
                 job_id="job-hitl-1",
                 phase="formentry_mint",
@@ -337,6 +337,7 @@ class MintStopAndAskTests(unittest.TestCase):
                 formentry_exists=True,
                 job_still_running=True,
                 script_or_job_stopped=False,
+                save_skipped=False,
             )
         ))
         self.assertIn("live control shows", notice["body"].casefold())

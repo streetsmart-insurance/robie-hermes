@@ -72,7 +72,7 @@ class LeftoverRetryEngineTests(unittest.TestCase):
             self.assertTrue(checkpoint["refused"])
             self.assertFalse(checkpoint["auto_retry"])
 
-    def test_thirty_minute_hitl_retry_is_allowed(self):
+    def test_twenty_nine_minute_hitl_retry_is_allowed(self):
         with durable_temporary_directory() as tmp:
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(
@@ -86,7 +86,7 @@ class LeftoverRetryEngineTests(unittest.TestCase):
                 db,
                 job_id,
                 status=JobStatus.AWAITING_HUMAN_INPUT,
-                age=timedelta(minutes=30),
+                age=timedelta(minutes=29),
             )
             store = JobStore(db)
             parked = store.get_job(job_id)
@@ -101,6 +101,32 @@ class LeftoverRetryEngineTests(unittest.TestCase):
             checkpoint = store.get_checkpoint(job_id, "leftover_retry")
             self.assertFalse(checkpoint["refused"])
             self.assertFalse(checkpoint["auto_retry"])
+
+    def test_thirty_minute_unanswered_hitl_is_killed(self):
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            job_id = open_chat_job(
+                db,
+                "message-stale-hitl",
+                "finish the EZLynx commercial auto",
+                conversation_id="spaces/stale-hitl-kill",
+            )
+            stop_generic_chat_job_heartbeat(db, job_id)
+            _age_job(
+                db,
+                job_id,
+                status=JobStatus.AWAITING_HUMAN_INPUT,
+                age=timedelta(minutes=30),
+            )
+            store = JobStore(db)
+            engine = JobEngine(store, {}, {})
+            result = engine.request_retry(job_id)
+            after = store.get_job(job_id)
+            self.assertEqual(result["status"], JobStatus.FAILED.value)
+            self.assertEqual(after["status"], JobStatus.FAILED.value)
+            self.assertIn("HITL_NO_REPLY", after.get("last_error") or "")
+            self.assertNotEqual(after["status"], JobStatus.PENDING.value)
+            self.assertNotEqual(after["status"], JobStatus.RUNNING.value)
 
 
 if __name__ == "__main__":

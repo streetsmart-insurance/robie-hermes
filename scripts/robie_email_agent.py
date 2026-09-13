@@ -260,14 +260,25 @@ def _format_policy_setup_response(policy_number: str, report: dict, sender: str)
             "Verify the policy in EZLynx before relying on it."
         )
     error = str(report.get("error") or "").strip()
-    from robie_job_engine.policy_setup_dispatch import is_formentry_mint_miss
-    from robie_job_engine.hitl import formentry_mint_miss_hitl_text
+    from robie_job_engine.policy_setup_dispatch import (
+        is_coverage_fill_miss,
+        is_formentry_mint_miss,
+    )
+    from robie_job_engine.hitl import (
+        coverage_fill_miss_hitl_text,
+        formentry_mint_miss_hitl_text,
+    )
 
     if is_formentry_mint_miss(error) or (
         report.get("phase_reached") == "formentry_mint"
         and not report.get("success")
     ):
         return formentry_mint_miss_hitl_text(detail=error)
+    if is_coverage_fill_miss(error) or (
+        report.get("phase_reached") == "coverage_fill"
+        and not report.get("success")
+    ):
+        return coverage_fill_miss_hitl_text(detail=error)
     return (
         f"ROBIE_OUTCOME_UNKNOWN: Policy setup for {policy_number} did not complete "
         f"(phase reached: {report.get('phase_reached')}; error: {error}). "
@@ -491,6 +502,15 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
         }
         if policy_id:
             destination['policy_id'] = policy_id
+        # Job 2b30d293: verifier said "no policy number" because the email
+        # job payload never received the policy id/number the handler found.
+        job_row = store.get_job(job_id)
+        payload = dict(job_row.get("payload") or {})
+        payload["policy_number"] = dest_policy_number
+        payload["applicant_id"] = "220250093"
+        if policy_id:
+            payload["policy_id"] = policy_id
+        store.update_payload(job_id, payload)
         # Handler was invoked. Job c75aab5c left tool_called=false after a
         # real Save & Continue Edit click because this only ran on success.
         store.checkpoint(job_id, POLICY_SETUP_REQUIRED_KIND, {

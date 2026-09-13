@@ -125,8 +125,8 @@ def _run_policy_setup(args: dict) -> dict:
                     other_structures_b=str(args.get("other_structures") or ""),
                     personal_property_c=str(args.get("personal_property") or ""),
                     loss_of_use_d=str(args.get("loss_of_use") or ""),
-                    liability_e=str(args.get("personal_liability") or "500000"),
-                    med_pay_f=str(args.get("medical_payments") or "5000"),
+                    liability_e=str(args.get("personal_liability") or ""),
+                    med_pay_f=str(args.get("medical_payments") or ""),
                 ),
             )
             result = await setup.setup_policy_by_lob(shell)

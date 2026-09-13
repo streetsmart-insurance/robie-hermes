@@ -238,8 +238,8 @@ class HomeownersCoverageItem:
     other_structures_b: str = ""
     personal_property_c: str = ""
     loss_of_use_d: str = ""
-    liability_e: str = "500000"
-    med_pay_f: str = "5000"
+    liability_e: str = ""
+    med_pay_f: str = ""
     all_peril_deductible: str = "1000"
     wind_hail_deductible: str = "1000"
     hurricane_deductible: str = "2%"
@@ -324,6 +324,7 @@ class PolicySetupResult:
     validation: dict[str, Any] | None = None
     landed_url: str | None = None
     code_version: str | None = None
+    policy_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -336,6 +337,9 @@ class PolicySetupResult:
             "note_added": self.note_added,
             "stopped_before_bind": self.stopped_before_bind,
         }
+        if self.policy_id:
+            payload["policy_id"] = self.policy_id
+            payload["policyId"] = self.policy_id
         for key in FORMENTRY_NAV_EVIDENCE_KEYS:
             value = getattr(self, key)
             if value is not None:
@@ -378,6 +382,7 @@ def policy_setup_result_from_formentry_nav(
     policy_number: str,
     lob: str,
     nav: dict[str, Any],
+    policy_id: str | None = None,
 ) -> PolicySetupResult:
     """Fail-closed FormEntry result that keeps mint evidence on the outer report."""
     extras = {key: nav.get(key) for key in FORMENTRY_NAV_EVIDENCE_KEYS}
@@ -390,6 +395,7 @@ def policy_setup_result_from_formentry_nav(
         error=nav.get("error") or "FormEntry was not minted",
         note_added=False,
         stopped_before_bind=True,
+        policy_id=policy_id or str(nav.get("policy_id") or "").strip() or None,
         **extras,
     )
 
@@ -563,6 +569,11 @@ def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, 
     if ho.med_pay_f:
         values["Medical Payments EA PER"] = clean_currency(ho.med_pay_f)
     return values
+
+
+def homeowners_coverage_amounts_missing(ho: HomeownersCoverageItem | None) -> bool:
+    """True when the job stated no Coverage A-F amounts. Do not guess."""
+    return not _homeowners_values_by_label(ho)
 
 
 class EzlynxPolicySetupPage:
@@ -1115,6 +1126,7 @@ class EzlynxPolicySetupPage:
                     pid = str(resp).strip().strip('"')
                     if pid and pid.lstrip('-').isdigit():
                         policy_id = pid
+        self._policy_id = str(policy_id or "").strip()
         if not policy_id:
             # Fail closed with raw HTTP/body details for diagnosis.
             diagnostic = api_report.get("no_id_diagnostic")
@@ -1164,20 +1176,58 @@ class EzlynxPolicySetupPage:
                 policy_number=shell_input.policy_number,
                 lob=normalized,
                 nav=nav,
+                policy_id=str(policy_id or ""),
             )
 
-        # Coverages tab -> fill by literal label.
+        # Coverages tab -> fill by live label from the job payload.
+        # Do not invent #HO_CoverageA-F. Do not guess amounts.
+        values = _homeowners_values_by_label(shell_input.homeowners_coverage)
+        evidence["phases"].append("coverage_fill")
+        if not values:
+            report = {
+                "error": (
+                    "PLAYWRIGHT_BLOCKED: coverage amounts not on the job; "
+                    "will not guess coverage amounts"
+                ),
+                "coverage_fill": {"filled_count": 0, "not_found": [], "labels": {}},
+                "formentry_found": True,
+                "policy_id": str(policy_id or ""),
+            }
+            await self._escalate_formentry_hitl(
+                report,
+                attempted=["coverage_fill", "job_payload_amounts"],
+                applicant_id=applicant_id,
+                policy_id=str(policy_id or ""),
+                phase="coverage_fill",
+            )
+            evidence["coverage_fill"] = report["coverage_fill"]
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="coverage_fill",
+                error=report["error"],
+                note_added=False,
+                stopped_before_bind=True,
+                hitl_response=report.get("hitl_response"),
+                hitl_posted=report.get("hitl_posted"),
+                continue_after_hitl=False,
+                policy_id=str(policy_id or ""),
+                field_fill=report["coverage_fill"],
+            )
+
         try:
-            from .formentry_coverages import COVERAGE_LABELS, afill_coverages_by_label
+            from .formentry_coverages import afill_coverages_by_label
 
             coverages_tab = self.page.locator("[role='tab']:has-text('Coverages')")
             if await coverages_tab.count() > 0:
                 await coverages_tab.first.click()
                 await self.page.wait_for_timeout(1500)
-            values = _homeowners_values_by_label(shell_input.homeowners_coverage)
-            fill_report = await afill_coverages_by_label(self.page, values)
+            fill_report = await afill_coverages_by_label(
+                self.page, values, gemini_client=self._gemini_client()
+            )
             evidence["coverage_fill"] = fill_report
-            evidence["phases"].append("coverage_fill")
         except Exception as exc:  # noqa: BLE001 - report, don't raise
             return PolicySetupResult(
                 success=False,
@@ -1188,17 +1238,103 @@ class EzlynxPolicySetupPage:
                 error=f"{type(exc).__name__}: {exc}",
                 note_added=False,
                 stopped_before_bind=True,
+                policy_id=str(policy_id or ""),
+            )
+
+        if fill_report.get("filled_count", 0) <= 0:
+            report = {
+                "error": (
+                    "PLAYWRIGHT_BLOCKED: no coverage labels were filled. "
+                    f"Looked for {list(values)}. "
+                    f"not_found={fill_report.get('not_found')}"
+                ),
+                "coverage_fill": fill_report,
+                "formentry_found": True,
+                "policy_id": str(policy_id or ""),
+            }
+            await self._escalate_formentry_hitl(
+                report,
+                attempted=["coverage_fill", "live_label_match"],
+                applicant_id=applicant_id,
+                policy_id=str(policy_id or ""),
+                phase="coverage_fill",
+            )
+            if report.get("continue_after_hitl"):
+                try:
+                    fill_report = await afill_coverages_by_label(
+                        self.page, values, gemini_client=self._gemini_client()
+                    )
+                    evidence["coverage_fill"] = fill_report
+                except Exception as exc:  # noqa: BLE001
+                    fill_report = {
+                        "filled_count": 0,
+                        "not_found": list(values),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                if fill_report.get("filled_count", 0) > 0:
+                    return PolicySetupResult(
+                        success=not fill_report.get("not_found"),
+                        applicant_id=applicant_id,
+                        policy_number=shell_input.policy_number,
+                        lob=normalized,
+                        phase_reached="coverage_fill",
+                        error=None,
+                        note_added=False,
+                        stopped_before_bind=True,
+                        policy_id=str(policy_id or ""),
+                        field_fill=fill_report,
+                        continue_after_hitl=True,
+                    )
+                report = {
+                    "error": (
+                        "PLAYWRIGHT_BLOCKED: no coverage labels were filled "
+                        "after Gemini apply + retry. "
+                        f"Looked for {list(values)}. "
+                        f"not_found={fill_report.get('not_found')}"
+                    ),
+                    "coverage_fill": fill_report,
+                    "formentry_found": True,
+                    "policy_id": str(policy_id or ""),
+                }
+                await self._escalate_formentry_hitl(
+                    report,
+                    attempted=[
+                        "coverage_fill",
+                        "live_label_match",
+                        "gemini_apply_retry",
+                    ],
+                    applicant_id=applicant_id,
+                    policy_id=str(policy_id or ""),
+                    phase="coverage_fill",
+                    applied_retry_failed=True,
+                )
+            return PolicySetupResult(
+                success=False,
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="coverage_fill",
+                error=report["error"],
+                note_added=False,
+                stopped_before_bind=True,
+                hitl_response=report.get("hitl_response"),
+                hitl_posted=report.get("hitl_posted"),
+                continue_after_hitl=False,
+                policy_id=str(policy_id or ""),
+                field_fill=fill_report,
             )
 
         return PolicySetupResult(
-            success=fill_report.get("filled_count", 0) > 0 and not fill_report.get("not_found"),
+            success=not fill_report.get("not_found"),
             applicant_id=applicant_id,
             policy_number=shell_input.policy_number,
             lob=normalized,
             phase_reached="coverage_fill",
-            error=None if fill_report.get("filled_count") else "no coverage labels were filled",
+            error=None,
             note_added=False,
             stopped_before_bind=True,
+            policy_id=str(policy_id or ""),
+            field_fill=fill_report,
         )
 
     async def _fill_identified_dropdown(self, widget: Any, wanted: str) -> Any:
@@ -1319,6 +1455,28 @@ class EzlynxPolicySetupPage:
         result["filled"] = True
         return result
 
+    def _hitl_channel(self) -> str:
+        """Email jobs HITL by email; Chat jobs HITL in the originating thread."""
+        forced = str((self._hitl_deps or {}).get("channel") or "").strip().casefold()
+        if forced in {"email", "chat", "any"}:
+            return forced
+        try:
+            import os
+
+            from .store import JobStore
+
+            job_id = str(self.job_id or "").strip()
+            db_path = os.environ.get("ROBIE_JOB_DB") or ""
+            if job_id and db_path:
+                payload = dict(JobStore(db_path).get_job(job_id).get("payload") or {})
+                if payload.get("gmail_message_id") and not payload.get("conversation_id"):
+                    return "email"
+                if payload.get("conversation_id"):
+                    return "chat"
+        except Exception:
+            pass
+        return "any"
+
     async def _escalate_formentry_hitl(
         self,
         report: dict[str, Any],
@@ -1326,11 +1484,13 @@ class EzlynxPolicySetupPage:
         attempted: list[str],
         applicant_id: str,
         policy_id: str,
+        phase: str = "formentry_mint",
+        applied_retry_failed: bool = False,
     ) -> None:
         """Gemini-then-Carlo HITL. Fail closed. Append source/reason to report['error'].
 
-        Shared by missing-button, field-fill failure, and a true 30s no-FormEntry
-        timeout after an actual Save & Continue Edit click.
+        Shared by missing-button, field-fill failure, a true 30s no-FormEntry
+        timeout, and empty coverage fill after FormEntry opened.
         """
         if "page_state" not in report:
             try:
@@ -1362,9 +1522,13 @@ class EzlynxPolicySetupPage:
             if "PLAYWRIGHT_BLOCKED" not in error_text:
                 error_text = f"PLAYWRIGHT_BLOCKED: {error_text}"
                 report["error"] = error_text
+            unguessable = phase == "coverage_fill" and (
+                "will not guess" in error_text.casefold()
+                or "coverage amounts not on the job" in error_text.casefold()
+            )
             hitl_request = HitlRequest(
                 job_id=getattr(self, "job_id", None) or "unknown",
-                phase="formentry_mint",
+                phase=phase,
                 error=error_text,
                 page_state=report.get("page_state") or {},
                 attempted=attempted,
@@ -1374,14 +1538,29 @@ class EzlynxPolicySetupPage:
                 gemini_applied=gemini_applied,
                 gemini_named_option=named,
                 live_control_shows=visible,
-                formentry_exists=bool(report.get("formentry_found")),
+                formentry_exists=bool(report.get("formentry_found"))
+                or phase == "coverage_fill",
                 job_still_running=False,
                 save_skipped=bool(report.get("field_fill_error"))
                 or "skipped Save" in (report.get("error") or ""),
                 script_or_job_stopped=True,
+                unguessable=unguessable,
+                channel=self._hitl_channel(),
+                gemini_asked=bool(fill.get("gemini_asked")) or bool(named),
+                applied_retry_failed=applied_retry_failed or unguessable,
             )
             deps = getattr(self, "_hitl_deps", {})
             hitl_response = escalate(hitl_request, deps)
+            if hitl_response.actionable:
+                report["continue_after_hitl"] = True
+                report["hitl_posted"] = False
+                report["hitl_response"] = {
+                    "source": hitl_response.source,
+                    "suggestion": hitl_response.suggestion,
+                    "actionable": True,
+                    "hitl_posted": False,
+                }
+                return
             report["continue_after_hitl"] = False
             report["hitl_posted"] = bool(hitl_response.hitl_posted)
             report["hitl_response"] = {
@@ -1391,9 +1570,10 @@ class EzlynxPolicySetupPage:
                 "hitl_posted": bool(hitl_response.hitl_posted),
             }
             if hitl_response.hitl_posted:
+                dest = "email" if hitl_request.channel == "email" else "originating Chat thread"
                 report["error"] = (
                     (report.get("error") or "")
-                    + " HITL posted to the originating Chat thread. STOP AND ASK."
+                    + f" HITL posted to the {dest}. STOP AND ASK."
                 )
             else:
                 reason = hitl_response.suggestion or "Chat ping failed"

@@ -40,6 +40,10 @@ class HitlRequest:
     job_still_running: bool = False
     save_skipped: bool = False
     script_or_job_stopped: bool = True
+    unguessable: bool = False
+    channel: str = "chat"
+    gemini_asked: bool = False
+    applied_retry_failed: bool = False
 
 
 @dataclass
@@ -214,8 +218,16 @@ def live_control_shows_named_option(request: HitlRequest) -> bool:
 
 
 def gemini_resolved_and_job_continuing(request: HitlRequest) -> bool:
-    """Always False. Honest HITL is STOP AND ASK; never continue after posting."""
-    return False
+    """True only when Gemini answered, was applied, and the job is continuing.
+
+    Carlo HITL copy must never claim this. If the script stopped or Save was
+    skipped, this is False even if a live control once matched.
+    """
+    if request.script_or_job_stopped or request.save_skipped:
+        return False
+    if not request.job_still_running:
+        return False
+    return bool(request.gemini_applied) and live_control_shows_named_option(request)
 
 
 def build_hitl_notice(
@@ -251,6 +263,12 @@ def build_hitl_notice(
             "The page stayed on Policy/Actions/Edit. "
             "Gemini did not handle this."
         )
+    elif request.phase == "coverage_fill":
+        facts.append(
+            "FormEntry opened. Coverage labels were not filled from the job "
+            "payload. Amounts that were not on the job were not guessed. "
+            "Gemini did not handle this."
+        )
     elif gemini_text and "unsure" in (request.error or "").casefold():
         facts.append("Gemini is still unsure after one retry. HITL, no select.")
     elif gemini_response and gemini_response.source == "gemini" and gemini_text:
@@ -265,7 +283,7 @@ def build_hitl_notice(
     if request.save_skipped:
         facts.append("The fill still failed. Save was skipped.")
     facts.append("STOP AND ASK. The script/job stopped.")
-    if not request.formentry_exists:
+    if not request.formentry_exists and request.phase != "coverage_fill":
         facts.append("FormEntry does not exist.")
     subject = f"[ROBIE HITL] Job {request.job_id} stuck at {request.phase}"
     body = (
@@ -340,14 +358,20 @@ def _deliver_hitl(
             chat_error = f"{type(exc).__name__}: {exc}"
     else:
         chat_error = chat_error or "no chat_sender in deps"
+    channel = str(getattr(request, "channel", "chat") or "chat").strip().casefold()
+    if channel == "email":
+        posted = email_sent
+    elif channel == "any":
+        posted = chat_sent or email_sent
+    else:
+        posted = chat_sent
     return {
         "email_sent": email_sent,
         "chat_sent": chat_sent,
         "email_error": email_error,
         "chat_error": chat_error,
-        # Email HITL is dead (signBlob 403). Chat thread is the HITL channel.
-        "sent": chat_sent,
-        "hitl_posted": chat_sent,
+        "sent": posted,
+        "hitl_posted": posted,
     }
 
 
@@ -422,22 +446,96 @@ def wait_for_carlo_response(
 
 
 def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlResponse:
-    """STOP AND ASK. Post HITL to the originating Chat thread. Do not continue.
+    """Global HITL ladder: Gemini first, apply and continue, Carlo only after.
 
-    Field-fill already asked Gemini once and retried once. A second Gemini
-    JSON/code-diff answer is not a dropdown apply and must not look resolved.
-    Email HITL is not the channel. If Chat ping fails, HITL posted=false.
+    1. Unguessable facts (missing coverage amounts) skip Gemini and HITL Carlo.
+    2. Otherwise ask Gemini. If actionable, return continue — do not sit on it.
+    3. Gemini miss, or Gemini + applied retry still failing, loops Carlo.
+    4. Chat is the HITL channel for Chat jobs; email is the channel for email jobs.
     """
+    from .hitl_ladder import (
+        ACTION_AWAIT_HUMAN,
+        ACTION_CONTINUE,
+        HitlLadderState,
+        decide_hitl_ladder,
+    )
+
     deps = deps or {}
-    notice = build_hitl_notice(request, None)
+    coverage_unguessable = request.phase == "coverage_fill" and (
+        "will not guess" in (request.error or "").casefold()
+        or "coverage amounts not on the job" in (request.error or "").casefold()
+    )
+    gemini_asked = bool(request.gemini_asked) or bool(request.gemini_named_option)
+    applied_failed = bool(request.applied_retry_failed) or (
+        bool(request.gemini_applied) and bool(request.script_or_job_stopped)
+    )
+    named_not_applied = bool(request.gemini_named_option) and not request.gemini_applied
+    if named_not_applied and request.script_or_job_stopped:
+        applied_failed = True
+
+    gemini_response: HitlResponse | None = None
+    if (
+        not request.unguessable
+        and not coverage_unguessable
+        and not gemini_asked
+        and not applied_failed
+    ):
+        gemini_response = ask_gemini(request, deps.get("gemini_client"))
+        gemini_asked = True
+
+    state = HitlLadderState(
+        gemini_asked=gemini_asked,
+        gemini_actionable=bool(gemini_response and gemini_response.actionable)
+        or (bool(request.gemini_named_option) and request.gemini_applied),
+        gemini_applied=bool(request.gemini_applied),
+        applied_retry_attempted=applied_failed or bool(request.applied_retry_failed),
+        applied_retry_failed=applied_failed,
+        unguessable=bool(request.unguessable) or coverage_unguessable,
+        channel=request.channel or "chat",
+    )
+    decision = decide_hitl_ladder(state)
+
+    if decision.action == ACTION_CONTINUE or (
+        decision.action != ACTION_AWAIT_HUMAN
+        and gemini_response
+        and gemini_response.actionable
+        and not applied_failed
+    ):
+        suggestion = (
+            (gemini_response.suggestion if gemini_response else "")
+            or request.gemini_named_option
+            or "Gemini named a live option; apply it and continue."
+        )
+        raw = {
+            "hitl_posted": False,
+            "continue_after_hitl": True,
+            "ladder": decision.action,
+            "reason": decision.reason,
+        }
+        return HitlResponse(
+            source="gemini",
+            suggestion=suggestion,
+            actionable=True,
+            hitl_posted=False,
+            fix_file=gemini_response.fix_file if gemini_response else None,
+            fix_location=gemini_response.fix_location if gemini_response else None,
+            fix_before=gemini_response.fix_before if gemini_response else None,
+            fix_after=gemini_response.fix_after if gemini_response else None,
+            fix_reason=gemini_response.fix_reason if gemini_response else None,
+            raw=raw,
+        )
+
+    notice = build_hitl_notice(request, gemini_response)
     if request.notify_carlo:
-        chat_posted, post_error = ping_carlo(request, deps, None)
+        chat_posted, post_error = ping_carlo(request, deps, gemini_response)
     else:
         chat_posted, post_error = False, "notify_carlo=false"
     raw = {
         "hitl_posted": chat_posted,
         "continue_after_hitl": False,
         "error": post_error,
+        "ladder": decision.action,
+        "reason": decision.reason,
     }
     if not chat_posted:
         return HitlResponse(
