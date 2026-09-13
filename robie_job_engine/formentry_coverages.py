@@ -147,7 +147,7 @@ def match_wanted_to_live_label(wanted: str, live_labels: list[str]) -> str | Non
 
 
 def list_live_coverage_labels(page: Any) -> list[str]:
-    """Read visible Coverages-tab labels. Never guesses #HO_CoverageA-F."""
+    """Read visible Coverages-tab labels. Never guesses invented A-F id selectors."""
     try:
         raw = page.evaluate(LIST_LIVE_LABELS_JS)
     except TypeError:

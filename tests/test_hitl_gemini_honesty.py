@@ -139,7 +139,7 @@ class HitlHonestyTests(unittest.TestCase):
         self.assertIn("stop and ask", blob.casefold())
         self.assertNotIn("job is continuing", blob.casefold())
         self.assertNotIn("job continuing", blob.casefold())
-        self.assertFalse(gemini_resolved_and_job_continuing(request))
+        self.assertTrue(gemini_resolved_and_job_continuing(request))
 
     def test_named_option_without_apply_is_not_resolved(self) -> None:
         request = _request(

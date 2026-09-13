@@ -58,7 +58,8 @@ class CoverageFillDetectTests(unittest.TestCase):
         self.assertIn("ROBIE HITL: STOP AND ASK", text)
         self.assertIn("not guessed", text.casefold())
         self.assertNotIn("Gemini already handled", text)
-        self.assertNotIn("still working", text.casefold())
+        self.assertNotIn("job is still working", text.casefold())
+        self.assertIn("not still working", text.casefold())
 
     def test_worker_contract_parks_awaiting_not_unverified(self) -> None:
         decision = classify_chat_close_without_checkpoint(
