@@ -213,11 +213,6 @@ def live_control_shows_named_option(request: HitlRequest) -> bool:
     return normalize_option_text(named) == normalize_option_text(shown)
 
 
-def gemini_resolved_and_job_continuing(request: HitlRequest) -> bool:
-    """Always False. Honest HITL is STOP AND ASK; never continue after posting."""
-    return False
-
-
 def build_hitl_notice(
     request: HitlRequest,
     gemini_response: HitlResponse | None = None,

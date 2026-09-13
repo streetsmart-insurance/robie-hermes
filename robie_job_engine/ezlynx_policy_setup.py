@@ -303,6 +303,7 @@ FORMENTRY_NAV_EVIDENCE_KEYS = (
     "validation",
     "landed_url",
     "code_version",
+    "label_inventory",
 )
 
 
@@ -324,6 +325,7 @@ class PolicySetupResult:
     validation: dict[str, Any] | None = None
     landed_url: str | None = None
     code_version: str | None = None
+    label_inventory: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -563,6 +565,35 @@ def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, 
     if ho.med_pay_f:
         values["Medical Payments EA PER"] = clean_currency(ho.med_pay_f)
     return values
+
+
+def _extract_label_mapping(text: str, visible_labels: list[str]) -> dict[str, str]:
+    """Parse Gemini's {"mapping": {wanted: visible}} JSON.
+
+    A mapped label must match a visible label (case-insensitive); anything
+    Gemini invented is dropped. Never invent labels.
+    """
+    import json as _json
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        payload = _json.loads(text[start : end + 1])
+    except Exception:  # noqa: BLE001
+        return {}
+    raw = payload.get("mapping") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    visible = {str(v).strip() for v in visible_labels if str(v).strip()}
+    mapping: dict[str, str] = {}
+    for ours, real in raw.items():
+        real_text = str(real or "").strip()
+        match = next((v for v in visible if v.casefold() == real_text.casefold()), None)
+        if match and str(ours).strip():
+            mapping[str(ours).strip()] = match
+    return mapping
 
 
 class EzlynxPolicySetupPage:
@@ -1190,15 +1221,82 @@ class EzlynxPolicySetupPage:
                 stopped_before_bind=True,
             )
 
+        filled_count = fill_report.get("filled_count", 0)
+        label_inventory = None
+        if not filled_count:
+            # Zero-fill: capture what IS on the page so Gemini's fix uses
+            # evidence, not guesses. Read-only DOM inspection; no clicks.
+            label_inventory = await self._coverage_label_inventory()
+
+        if filled_count:
+            return PolicySetupResult(
+                success=not fill_report.get("not_found"),
+                applicant_id=applicant_id,
+                policy_number=shell_input.policy_number,
+                lob=normalized,
+                phase_reached="coverage_fill",
+                error=None,
+                note_added=False,
+                stopped_before_bind=True,
+                label_inventory=label_inventory,
+            )
+
+        # HITL loop: Gemini first (apply fix, keep going), then Carlo with a
+        # 30-minute response window, then kill the job. Generic mechanism.
+        from .hitl_loop import HitlLoopConfig, RetryOutcome, hitl_retry_loop
+
+        screenshot_path = await self._capture_hitl_screenshot()
+        coverage_item = shell_input.homeowners_coverage
+
+        async def _retry_coverage(fix: dict[str, Any]) -> RetryOutcome:
+            return await self._retry_coverage_fill(fix, coverage_item)
+
+        loop_report = await hitl_retry_loop(
+            job_id=getattr(self, "job_id", None) or "unknown",
+            phase="coverage_fill",
+            first_error="no coverage labels were filled",
+            first_evidence={
+                "label_inventory": label_inventory,
+                "coverage_fill": fill_report,
+                "labels_tried": list(values.keys()),
+                "wanted": dict(values),
+                "not_found": list(fill_report.get("not_found", [])),
+            },
+            consult_gemini=self._consult_gemini_coverage_labels,
+            retry_with_fix=_retry_coverage,
+            applicant_id=applicant_id,
+            policy_id=policy_id,
+            attempted=[
+                "coverage_fill_by_literal_label",
+                f"labels_tried={len(values)}",
+                f"not_found={len(fill_report.get('not_found', []))}",
+            ],
+            screenshot_path=screenshot_path,
+            deps=self._hitl_deps,
+            config=HitlLoopConfig(),
+        )
+        final_evidence = loop_report.get("final_evidence") or {}
         return PolicySetupResult(
-            success=fill_report.get("filled_count", 0) > 0 and not fill_report.get("not_found"),
+            success=bool(loop_report.get("recovered")),
             applicant_id=applicant_id,
             policy_number=shell_input.policy_number,
             lob=normalized,
             phase_reached="coverage_fill",
-            error=None if fill_report.get("filled_count") else "no coverage labels were filled",
+            error=loop_report.get("final_error"),
             note_added=False,
             stopped_before_bind=True,
+            label_inventory=final_evidence.get("label_inventory") or label_inventory,
+            hitl_posted=loop_report.get("hitl_posted"),
+            hitl_response={
+                "source": "hitl_loop",
+                "recovered": loop_report.get("recovered"),
+                "killed": loop_report.get("killed"),
+                "carlo_looped_in": loop_report.get("carlo_looped_in"),
+                "carlo_replied": loop_report.get("carlo_replied"),
+                "gemini_attempts": loop_report.get("gemini_attempts"),
+                "loop_log": loop_report.get("loop_log"),
+            },
+            continue_after_hitl=bool(loop_report.get("recovered")),
         )
 
     async def _fill_identified_dropdown(self, widget: Any, wanted: str) -> Any:
@@ -1412,6 +1510,174 @@ class EzlynxPolicySetupPage:
                 (report.get("error") or "")
                 + f" HITL escalation error ({err_msg}); failing closed."
             )
+
+    async def _coverage_label_inventory(self) -> dict[str, Any]:
+        """Read-only inventory of visible labels/inputs on the Coverages screen.
+
+        Captured when zero coverage labels were filled, so the next fix is
+        based on evidence, not guesses. No clicks, no writes.
+        """
+        js = r"""
+        () => {
+          const norm = (s) => (s || "").trim().replace(/\s+/g, " ");
+          const seen = new Set();
+          const labels = [];
+          for (const el of document.querySelectorAll(
+            "label, th, legend, .field-label, .control-label, .coverage-label"
+          )) {
+            const t = norm(el.innerText).slice(0, 80);
+            if (t && !seen.has(t)) { seen.add(t); labels.push(t); }
+          }
+          const inputs = [];
+          for (const el of document.querySelectorAll("input, select, textarea")) {
+            if (el.offsetParent === null && el.type !== "hidden") continue;
+            inputs.push({
+              tag: el.tagName.toLowerCase(),
+              type: el.getAttribute("type") || "",
+              id: el.id || "",
+              name: el.getAttribute("name") || "",
+              label: norm(el.getAttribute("aria-label") || ""),
+            });
+            if (inputs.length >= 120) break;
+          }
+          const tabs = Array.from(document.querySelectorAll("[role='tab']"))
+            .map((el) => norm(el.innerText).slice(0, 60)).filter(Boolean);
+          return {
+            url: location.href,
+            title: document.title,
+            tabs: tabs,
+            labels: labels.slice(0, 200),
+            inputs: inputs,
+          };
+        }
+        """
+        try:
+            return await self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    async def _capture_hitl_screenshot(self) -> str | None:
+        """Best-effort screenshot for a HITL ping. Never raises."""
+        try:
+            import os
+            import time
+
+            screenshot_dir = "/tmp/robie-hitl-screenshots"
+            os.makedirs(screenshot_dir, exist_ok=True)
+            path = os.path.join(screenshot_dir, f"hitl-loop-{int(time.time())}.png")
+            await self.page.screenshot(path=path)
+            return path
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _consult_gemini_coverage_labels(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Ask Gemini to map wanted coverages onto the real on-screen labels.
+
+        Returns a runtime fix {"action": "retry_with_labels", "mapping": ...}
+        or None when Gemini has nothing usable. Gemini corrects LABELS only;
+        the money amounts always come from the job input. A mapped label must
+        match a visible label exactly, or it is dropped (never invent labels).
+        """
+        inventory = evidence.get("label_inventory") or {}
+        visible = [str(t) for t in (inventory.get("labels") or []) if str(t).strip()]
+        tried = evidence.get("labels_tried") or []
+        not_found = evidence.get("not_found") or []
+        wanted = dict(evidence.get("wanted") or {})
+        if not visible or not wanted:
+            return None
+        prompt = (
+            "You are helping a browser automation job fill a homeowners insurance "
+            "coverage form in EZLynx. The job tried these labels and the page did "
+            f"not have them: {tried}. The ones it could not find: {not_found}.\n\n"
+            "These are the labels/headers actually visible on the coverage screen "
+            f"right now:\n{visible}\n\n"
+            f"The job needs to fill these coverage amounts: {wanted}\n\n"
+            "Map each needed coverage to the EXACT label text visible on the "
+            "screen. Use only labels from the visible list above, copied "
+            "character-for-character. If a coverage has no matching visible "
+            "label, omit it.\n\n"
+            'Reply with ONLY this JSON, no other text:\n'
+            '{"mapping": {"<needed label>": "<exact visible label>"}, '
+            '"reason": "<one sentence>"}\n'
+            'If nothing matches, reply: {"mapping": {}, "reason": "<why>"}'
+        )
+        client = self._gemini_client()
+        if client is None:
+            return None
+        try:
+            raw = client.generate_content(prompt)
+            text = raw.strip() if isinstance(raw, str) else str(raw).strip()
+        except Exception:  # noqa: BLE001
+            return None
+        mapping = _extract_label_mapping(text, visible)
+        if not mapping:
+            return None
+        return {
+            "action": "retry_with_labels",
+            "mapping": mapping,
+            "reason": "Gemini mapped wanted coverages to visible labels",
+        }
+
+    async def _retry_coverage_fill(
+        self, fix: dict[str, Any], coverage_item: Any
+    ) -> Any:
+        """Apply a HITL-loop fix and retry the coverage fill. Judged by fill."""
+        from .formentry_coverages import afill_coverages_by_label
+        from .hitl_loop import RetryOutcome
+
+        action = fix.get("action")
+        if action == "carlo_guidance":
+            # Carlo may have corrected the page by hand: retry the standard
+            # labels against the (possibly fixed) page.
+            values = _homeowners_values_by_label(coverage_item)
+            note = "Carlo's guidance"
+        elif action == "retry_with_labels":
+            mapping = fix.get("mapping") or {}
+            wanted = _homeowners_values_by_label(coverage_item)
+            values = {
+                real: wanted[ours]
+                for ours, real in mapping.items()
+                if ours in wanted and str(real).strip()
+            }
+            if not values:
+                return RetryOutcome(
+                    success=False,
+                    detail="Gemini mapping was empty; nothing to retry.",
+                    evidence={},
+                )
+            note = f"Gemini label mapping ({len(values)} labels)"
+        else:
+            return RetryOutcome(
+                success=False, detail=f"Unknown fix action {action!r}.", evidence={}
+            )
+        try:
+            fill_report = await afill_coverages_by_label(self.page, values)
+        except Exception as exc:  # noqa: BLE001
+            return RetryOutcome(
+                success=False,
+                detail=f"{note}: retry raised {type(exc).__name__}: {exc}",
+                evidence={},
+            )
+        ok = fill_report.get("filled_count", 0) > 0 and not fill_report.get("not_found")
+        inventory = await self._coverage_label_inventory()
+        detail = (
+            f"{note}: filled {fill_report.get('filled_count', 0)} labels"
+            if ok
+            else f"{note}: still missed {fill_report.get('not_found', [])}"
+        )
+        return RetryOutcome(
+            success=bool(ok),
+            detail=detail,
+            evidence={
+                "label_inventory": inventory,
+                "coverage_fill": fill_report,
+                "wanted": dict(values),
+                "labels_tried": list(values.keys()),
+                "not_found": list(fill_report.get("not_found", [])),
+            },
+        )
 
     async def _mint_formentry(
         self,
