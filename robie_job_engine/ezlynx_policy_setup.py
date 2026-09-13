@@ -228,7 +228,7 @@ class PolicyShellInput:
     full_term_premium: str = ""
     annual_premium: str = ""
     total_commission: str = "12.00"
-    department: str = ""  # "Commercial Lines (CL)" or "Personal Lines (P/L)"
+    department: str = ""  # wanted Department value, not an EZLynx label
     # LOB Specific Components
     vehicles: Sequence[VehicleItem] = field(default_factory=tuple)
     drivers: Sequence[DriverItem] = field(default_factory=tuple)
@@ -379,6 +379,7 @@ class EzlynxPolicySetupPage:
         self.page = page
         self.applicant_id: str | None = None
         self.job_id: str | None = job_id
+        self.lob: str = ""
         self._hitl_deps: dict = hitl_deps or {}
         # Wire up default senders if not provided
         if "email_sender" not in self._hitl_deps:
@@ -493,25 +494,20 @@ class EzlynxPolicySetupPage:
         if await comm_input.count() > 0:
             await comm_input.fill(clean_currency(comm_val))
 
-        # 8b. Department selection (Commercial Lines (CL) for commercial, Personal Lines (P/L) for personal)
-        dept_val = shell_input.department or (
-            "Commercial Lines (CL)" if is_commercial_lob(shell_input.lob) else "Personal Lines (P/L)"
+        # 8b. Department: #Department widget only. Exact live match, else Gemini.
+        from .ezlynx_field_widgets import DEPARTMENT_WIDGET, fill_identified_widget
+
+        dept_wanted = shell_input.department or (
+            "Commercial" if is_commercial_lob(shell_input.lob) else "Personal"
         )
-        dept_trigger = self.page.locator("#Department .select2-choice, #Department a.ui-select-match")
-        if await dept_trigger.count() > 0:
-            await dept_trigger.click()
-            await self.page.wait_for_timeout(250)
-            dept_option = self.page.locator(f"#Department .ui-select-choices-row:has-text('{dept_val}')")
-            if await dept_option.count() > 0:
-                await dept_option.click()
-            else:
-                search_input = self.page.locator("#Department input.ui-select-search")
-                if await search_input.count() > 0:
-                    await search_input.fill(dept_val)
-                    await self.page.wait_for_timeout(200)
-                    row = self.page.locator(f"#Department .ui-select-choices-row:has-text('{dept_val}')")
-                    if await row.count() > 0:
-                        await row.click()
+        dept_fill = await fill_identified_widget(
+            self.page,
+            DEPARTMENT_WIDGET,
+            dept_wanted,
+            gemini_client=(self._hitl_deps or {}).get("gemini_client"),
+        )
+        if dept_fill.hitl:
+            raise RuntimeError(dept_fill.error or "Department fill HITL")
 
         # 9. Submit action (Add & Edit vs Add Policy)
         if save_and_edit:
@@ -831,6 +827,7 @@ class EzlynxPolicySetupPage:
         draft_write_gate. No bind, ever.
         """
         normalized = normalize_lob(shell_input.lob)
+        self.lob = normalized
         try:
             applicant_id = require_allowed_ezlynx_write_applicant(shell_input.applicant_id)
         except RuntimeError as exc:
@@ -992,187 +989,48 @@ class EzlynxPolicySetupPage:
     async def _fill_required_policy_fields(self) -> dict[str, Any]:
         """Set Billing Type and Department before Save & Continue Edit.
 
-        The Edit Policy form requires these fields; empty values block
-        the save with client-side validation ("Billing Type is required").
-        Billing Type is "Direct Bill" (EZLynx shows it as "Direct"). Department is "Personal" for
-        personal lines (HO) and "Commercial" for commercial lines.
-
-        Returns a dict with what was found/set, for debugging.
-        Raises on failure (no silent pass).
+        Each field is the identified widget only (#BillingType, #Department).
+        Read that widget's live options. Exact match, else Gemini names one
+        live option, apply, retry once. No alias maps. Never scan other
+        selects (Line of Business is #mergeSplitLOB, not Department).
         """
+        from .ezlynx_field_widgets import (
+            BILLING_TYPE_WIDGET,
+            DEPARTMENT_WIDGET,
+            fill_identified_widget,
+        )
+
+        gemini_client = (self._hitl_deps or {}).get("gemini_client")
         result: dict[str, Any] = {"billing": None, "department": None, "errors": []}
 
-        # Billing Type -> Direct Bill
-        # Strategy: find the label, then the select via for-attribute or DOM proximity
-        billing_select = None
-        strategies = [
-            # Label with for attribute pointing to select id
-            ("label[for*='Billing' i] + select, label[for*='billing' i] ~ select", "label-for"),
-            # Select with name/id containing billing
-            ("select[name*='Billing' i], select[id*='Billing' i], select[name*='billing' i], select[id*='billing' i]", "name-id"),
-            # Label text then nearby select (parent container search)
-            ("label:has-text('Billing Type')", "label-text"),
-        ]
-        for selector, name in strategies:
-            try:
-                loc = self.page.locator(selector).first
-                if await loc.count() > 0:
-                    # If we found a label, find its associated select
-                    if name == "label-text" or name == "label-for":
-                        tag = await loc.evaluate("el => el.tagName.toLowerCase()")
-                        if tag == "label":
-                            for_attr = await loc.get_attribute("for")
-                            if for_attr:
-                                sel = self.page.locator(f"#{for_attr}").first
-                                if await sel.count() > 0:
-                                    billing_select = sel
-                                    break
-                            # Try sibling/parent search
-                            sel = loc.locator("xpath=./following::select[1]").first
-                            if await sel.count() > 0:
-                                billing_select = sel
-                                break
-                        elif tag == "select":
-                            billing_select = loc
-                            break
-                    else:
-                        billing_select = loc
-                        break
-            except Exception as e:
-                result["errors"].append(f"billing strategy {name}: {e}")
+        billing = await fill_identified_widget(
+            self.page,
+            BILLING_TYPE_WIDGET,
+            "Direct Bill",
+            gemini_client=gemini_client,
+        )
+        result["billing_fill"] = billing.to_dict()
+        result["billing_options"] = billing.live_options
+        if billing.hitl:
+            raise RuntimeError(billing.error or "Billing Type fill HITL")
+        result["billing"] = billing.selected
+        result["billing_visible"] = billing.selected
+        result["billing_via"] = billing.via
 
-        if billing_select is None:
-            # Last resort: find all selects, check options for Direct Bill
-            try:
-                all_selects = self.page.locator("select")
-                count = await all_selects.count()
-                for i in range(count):
-                    sel = all_selects.nth(i)
-                    try:
-                        options = await sel.locator("option").all_inner_texts()
-                        if any("Direct Bill" in opt for opt in options):
-                            billing_select = sel
-                            break
-                    except Exception:
-                        continue
-            except Exception as e:
-                result["errors"].append(f"billing fallback: {e}")
-
-        if billing_select is None:
-            raise RuntimeError(f"Could not find Billing Type dropdown. Tried: {[s[1] for s in strategies]}. Errors: {result['errors']}")
-
-        # Read actual options first (Angular may load them dynamically)
-        # then match flexibly instead of assuming exact label text
-        options = await billing_select.locator("option").all()
-        option_texts = []
-        target_value = None
-        for opt in options:
-            try:
-                text = (await opt.inner_text()).strip()
-                val = await opt.get_attribute("value")
-                option_texts.append(f"{text!r} (value={val!r})")
-                # Alias: EZLynx labels this option "Direct", not "Direct Bill".
-                # Try the canonical name first, then known aliases.
-                if text.lower() == "direct bill":
-                    target_value = val
-                    result["billing_matched"] = "direct bill (exact)"
-                elif text.lower() == "direct" and target_value is None:
-                    target_value = val
-                    result["billing_matched"] = "direct (alias)" 
-            except Exception:
-                continue
-        result["billing_options"] = option_texts
-        if target_value is None:
-            raise RuntimeError(
-                f"Option 'Direct Bill'/'Direct' not found in BillingType dropdown. "
-                f"Available options: {option_texts}"
-            )
-        await billing_select.select_option(value=target_value)
-        # Verify
-        selected = await billing_select.input_value()
-        result["billing"] = selected
-        try:
-            visible = await billing_select.locator("option:checked").inner_text()
-            result["billing_visible"] = visible.strip()
-        except Exception:
-            pass
-
-        # Department -> Personal (HO) or Commercial
-        dept_select = None
-        dept_strategies = [
-            ("select[name*='Department' i], select[id*='Department' i], select[name*='department' i], select[id*='department' i]", "name-id"),
-            ("label:has-text('DEPARTMENT')", "label-text"),
-        ]
-        for selector, name in dept_strategies:
-            try:
-                loc = self.page.locator(selector).first
-                if await loc.count() > 0:
-                    tag = await loc.evaluate("el => el.tagName.toLowerCase()")
-                    if tag == "label":
-                        for_attr = await loc.get_attribute("for")
-                        if for_attr:
-                            sel = self.page.locator(f"#{for_attr}").first
-                            if await sel.count() > 0:
-                                dept_select = sel
-                                break
-                        sel = loc.locator("xpath=./following::select[1]").first
-                        if await sel.count() > 0:
-                            dept_select = sel
-                            break
-                    elif tag == "select":
-                        dept_select = loc
-                        break
-            except Exception as e:
-                result["errors"].append(f"dept strategy {name}: {e}")
-
-        if dept_select is None:
-            try:
-                all_selects = self.page.locator("select")
-                count = await all_selects.count()
-                for i in range(count):
-                    sel = all_selects.nth(i)
-                    try:
-                        options = await sel.locator("option").all_inner_texts()
-                        if any("Personal" in opt for opt in options):
-                            dept_select = sel
-                            break
-                    except Exception:
-                        continue
-            except Exception as e:
-                result["errors"].append(f"dept fallback: {e}")
-
-        if dept_select is None:
-            raise RuntimeError(f"Could not find Department dropdown. Errors: {result['errors']}")
-
-        lob = (getattr(self, "lob", "") or "").upper()
-        dept_target = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
-        options = await dept_select.locator("option").all()
-        option_texts = []
-        target_value = None
-        for opt in options:
-            try:
-                text = (await opt.inner_text()).strip()
-                val = await opt.get_attribute("value")
-                option_texts.append(f"{text!r} (value={val!r})")
-                if text.lower() == dept_target.lower():
-                    target_value = val
-            except Exception:
-                continue
-        result["department_options"] = option_texts
-        if target_value is None:
-            raise RuntimeError(
-                f"Option {dept_target!r} not found in Department dropdown. "
-                f"Available options: {option_texts}"
-            )
-        await dept_select.select_option(value=target_value)
-        selected = await dept_select.input_value()
-        result["department"] = selected
-        try:
-            visible = await dept_select.locator("option:checked").inner_text()
-            result["department_visible"] = visible.strip()
-        except Exception:
-            pass
-
+        dept_wanted = "Commercial" if is_commercial_lob(getattr(self, "lob", "") or "") else "Personal"
+        department = await fill_identified_widget(
+            self.page,
+            DEPARTMENT_WIDGET,
+            dept_wanted,
+            gemini_client=gemini_client,
+        )
+        result["department_fill"] = department.to_dict()
+        result["department_options"] = department.live_options
+        if department.hitl:
+            raise RuntimeError(department.error or "Department fill HITL")
+        result["department"] = department.selected
+        result["department_visible"] = department.selected
+        result["department_via"] = department.via
         return result
 
     async def _escalate_formentry_hitl(
@@ -1210,6 +1068,9 @@ class EzlynxPolicySetupPage:
                 await self.page.screenshot(path=screenshot_path)
             except Exception:
                 screenshot_path = None
+            fill_applied = bool((report.get("field_fill") or {}).get("department")) and bool(
+                (report.get("field_fill") or {}).get("billing")
+            )
             hitl_request = HitlRequest(
                 job_id=getattr(self, "job_id", "unknown"),
                 phase="formentry_mint",
@@ -1219,6 +1080,12 @@ class EzlynxPolicySetupPage:
                 applicant_id=applicant_id,
                 policy_id=policy_id,
                 screenshot_path=screenshot_path,
+                gemini_applied=fill_applied,
+                formentry_exists=bool(report.get("formentry_found")),
+                job_still_running=False,
+                save_skipped=bool(report.get("field_fill_error"))
+                or "skipped Save" in (report.get("error") or ""),
+                script_or_job_stopped=True,
             )
             deps = getattr(self, "_hitl_deps", {})
             hitl_response = escalate(hitl_request, deps)
