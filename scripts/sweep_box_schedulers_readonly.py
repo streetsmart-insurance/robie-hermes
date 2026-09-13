@@ -29,6 +29,15 @@ the keyword filter missed hourly timers that fire at :00
 (robie-production-preflight.timer, robie-ascend-sync.timer,
 robie-health-check.timer), which remain audit-trigger suspects.
 
+Section 12 covers the last unchecked surface: the ROBIE Job Engine's own
+scheduled-jobs SQLite DB ($ROBIE_JOB_DB or the engine default path). The
+engine scheduler ticks every 60s via robie-scheduler.timer and reads the
+`schedules` and `scheduled_jobs` tables — an hourly row there would fire
+the audit without leaving any systemd/cron/Hermes-cron trace. Read-only:
+opens the DB with sqlite3 mode=ro + PRAGMA query_only=ON, dumps tables
+and schedule rows (name/title, cron/interval, enabled, run timestamps),
+hourly-first, everything through _redact.
+
 Touches nothing:
 - systemctl/journalctl/crontab/ls/readlink/file/sed/grep are read-only;
   no enable/start/stop, no file writes anywhere (stdout only).
@@ -39,8 +48,10 @@ from __future__ import annotations
 import argparse
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 KEYWORDS = ("mailbox", "audit", "urgent", "cleanup", "cleanup_report",
@@ -224,6 +235,81 @@ def _robie_hermes_units(unit_files_text: str) -> list[str]:
         if _ROBIE_HERMES_UNIT_RE.match(name) and name not in units:
             units.append(name)
     return units
+
+
+JOB_DB_DEFAULT = "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db"
+
+
+def _resolve_job_db_path(env_value: str) -> str:
+    """Pure: $ROBIE_JOB_DB value, else the engine default DB path."""
+    value = (env_value or "").strip()
+    return value if value else JOB_DB_DEFAULT
+
+
+def _dump_job_tables(conn: "sqlite3.Connection") -> str:
+    """Read-only dump of the job-engine SQLite store (tables + schedules).
+
+    Expects `conn` opened read-only (mode=ro URI); also sets
+    PRAGMA query_only=ON. Lists tables, then dumps from `schedules`
+    and `scheduled_jobs`: name/title, cron/interval, enabled flag,
+    next/last run timestamps — hourly rows first. Never raises:
+    returns an explanatory line on any failure.
+    """
+    lines: list[str] = []
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    except Exception as exc:  # noqa: BLE001 - probe must not crash
+        return f"  <could not list tables: {type(exc).__name__}: {exc}>"
+    lines.append("  tables: " + (", ".join(tables) if tables else "<none>"))
+    for table in ("schedules", "scheduled_jobs"):
+        if table not in tables:
+            lines.append(f"  --- {table}: <absent>")
+            continue
+        try:
+            cols = [r[1] for r in
+                    conn.execute(f'PRAGMA table_info("{table}")')]
+            want = ("name", "task_name", "action_type", "interval_minutes",
+                    "cron_spec", "enabled", "next_run_at", "last_run_at")
+            sel = [c for c in want if c in cols]
+            if not sel:
+                lines.append(f"  --- {table}: <no recognized columns>")
+                continue
+            qcols = ", ".join(f'"{c}"' for c in sel)
+            rows = conn.execute(
+                f'SELECT {qcols} FROM "{table}"').fetchall()
+        except Exception as exc:  # noqa: BLE001 - probe must not crash
+            lines.append(
+                f"  --- {table}: <read failed: {type(exc).__name__}>")
+            continue
+        lines.append(f"  --- {table} ({len(rows)} row(s)) ---")
+
+        def _hourly_first(row: tuple) -> int:
+            d = dict(zip(sel, row))
+            if d.get("interval_minutes") == 60:
+                return 0
+            cron = str(d.get("cron_spec") or "")
+            # minute field "0" (e.g. "0 * * * *") fires at the top of the hour
+            if cron.split()[:1] == ["0"]:
+                return 0
+            return 1
+
+        for row in sorted(rows, key=_hourly_first):
+            d = dict(zip(sel, row))
+            label = d.get("name") or d.get("task_name") or "?"
+            if d.get("cron_spec"):
+                sched = str(d["cron_spec"])
+            elif d.get("interval_minutes") is not None:
+                sched = f"every {d['interval_minutes']}m"
+            else:
+                sched = "?"
+            lines.append(
+                f"    name={label} action={d.get('action_type')} "
+                f"schedule={sched} enabled={d.get('enabled')} "
+                f"next_run_at={d.get('next_run_at')} "
+                f"last_run_at={d.get('last_run_at')}")
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -562,6 +648,38 @@ def main(argv: list[str] | None = None) -> int:
             "firing time, and each service's ExecStart= for the report "
             "generator."
         )
+
+    section("12. ROBIE Job Engine scheduled-jobs DB (read-only)")
+    # The engine scheduler ticks every 60s via robie-scheduler.timer and
+    # reads `schedules` + `scheduled_jobs` from $ROBIE_JOB_DB (default
+    # /opt/streetsmart-hermes/robie-job-engine/data/jobs.db). An hourly
+    # row here would fire the audit with no systemd/cron/Hermes-cron trace.
+    job_db_env = _sh("printenv", "ROBIE_JOB_DB")
+    job_db_path = _resolve_job_db_path(job_db_env)
+    print(f"  ROBIE_JOB_DB env: {job_db_env or '<unset>'}")
+    print(f"  resolved path: {job_db_path}")
+    ls_out = _sh("ls", "-la", "--", job_db_path)
+    print("  file: " + (ls_out or "<absent or unreadable>"))
+    if "No such file" in ls_out or not ls_out or ls_out.startswith("<"):
+        print("  <DB absent — nothing to dump>")
+    else:
+        dump = ""
+        try:
+            uri = ("file:" + urllib.parse.quote(job_db_path) + "?mode=ro")
+            conn = sqlite3.connect(uri, uri=True, timeout=10)
+            try:
+                dump = _dump_job_tables(conn)
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 - probe must not crash
+            dump = (f"  <could not open DB read-only: "
+                    f"{type(exc).__name__}: {exc}>")
+        print(_redact(dump))
+        if "name=" in dump:
+            findings.append(
+                "ROBIE Job Engine scheduled-jobs DB dumped in section 12. "
+                "Match any hourly row (interval 60m or cron minute '0') "
+                "against the XX:00:30 audit firing time.")
 
     section("WHAT THIS MEANS")
     if not findings:
