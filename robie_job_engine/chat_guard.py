@@ -977,6 +977,12 @@ def open_chat_job(
     store = JobStore(db_path)
     store.fail_orphaned_chat_jobs()
     try:
+        from .hitl_ladder import expire_unanswered_hitl_jobs
+
+        expire_unanswered_hitl_jobs(store)
+    except Exception:
+        logger.exception("unanswered HITL expire failed; continuing")
+    try:
         from .tab_cleanup import flush_tabs_at_job_start
 
         flush_tabs_at_job_start(db_path=db_path)
@@ -1756,7 +1762,10 @@ def guard_chat_response(
             action_type=job["action_type"],
         )
         if decision.status == JobStatus.AWAITING_HUMAN_INPUT.value:
-            payload = dict(current.get("payload") or {})
+            from .hitl_ladder import stamp_hitl_posted_at
+
+            payload = stamp_hitl_posted_at(dict(current.get("payload") or {}))
+            store.update_payload(job_id, payload)
             interaction = interaction_for_blocker(
                 decision.error,
                 action_type=job["action_type"],

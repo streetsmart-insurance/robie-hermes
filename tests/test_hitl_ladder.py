@@ -164,6 +164,31 @@ class HitlLadderExpireTests(unittest.TestCase):
             )
             self.assertIn("HITL_NO_REPLY", store.get_job(email_job["id"])["last_error"])
 
+    def test_open_chat_job_kills_stale_email_and_chat_hitl(self) -> None:
+        """Chat-only days never call JobEngine.run; open_chat_job must sweep."""
+        from robie_job_engine.chat_guard import open_chat_job, stop_generic_chat_job_heartbeat
+
+        stale = (
+            datetime.now(timezone.utc) - timedelta(seconds=HITL_NO_REPLY_SECONDS + 30)
+        ).isoformat()
+        with durable_temporary_directory() as tmp:
+            db = str(Path(tmp) / "jobs.db")
+            store = JobStore(db)
+            email_job = self._parked(store, "hermes.email_task", posted_at=stale)
+            chat_job = self._parked(store, "hermes.google_chat_task", posted_at=stale)
+            opened = open_chat_job(
+                db,
+                "message-hitl-sweep",
+                "finish the EZLynx commercial auto",
+                conversation_id="spaces/hitl-sweep",
+            )
+            self.assertTrue(opened)
+            stop_generic_chat_job_heartbeat(db, opened)
+            self.assertEqual(store.get_job(email_job["id"])["status"], JobStatus.FAILED.value)
+            self.assertEqual(store.get_job(chat_job["id"])["status"], JobStatus.FAILED.value)
+            self.assertIn("HITL_NO_REPLY", store.get_job(email_job["id"])["last_error"])
+            self.assertIn("HITL_NO_REPLY", store.get_job(chat_job["id"])["last_error"])
+
     def test_unanswered_reason_uses_posted_at_not_running(self) -> None:
         job = {
             "status": JobStatus.AWAITING_HUMAN_INPUT.value,
@@ -180,6 +205,85 @@ class HitlLadderExpireTests(unittest.TestCase):
 
 
 class HitlLadderChannelEscalateTests(unittest.TestCase):
+    def test_generic_phase_gemini_apply_continues_email_and_chat(self) -> None:
+        """Any job type: Gemini answers → apply and continue, no Carlo HITL."""
+        for channel in ("email", "chat"):
+            chats: list[str] = []
+            emails: list[str] = []
+            response = escalate(
+                HitlRequest(
+                    job_id=f"any-{channel}",
+                    phase="unique_write",
+                    error="PLAYWRIGHT_BLOCKED: write target matched 3 fields",
+                    page_state={"url": "https://app.ezlynx.com"},
+                    attempted=["unique_write"],
+                    applicant_id="",
+                    gemini_asked=False,
+                    gemini_applied=False,
+                    channel=channel,
+                    script_or_job_stopped=False,
+                    job_still_running=True,
+                ),
+                {
+                    "gemini_client": type(
+                        "C",
+                        (),
+                        {
+                            "generate_content": lambda self, _p: (
+                                "FILE: robie_job_engine/playwright_write_guard.py\n"
+                                "AFTER: apply the named unique field"
+                            )
+                        },
+                    )(),
+                    "chat_sender": lambda m: chats.append(m) or True,
+                    "email_sender": lambda **_k: emails.append("sent"),
+                },
+            )
+            self.assertTrue(response.actionable, channel)
+            self.assertEqual(response.source, "gemini", channel)
+            self.assertFalse(response.hitl_posted, channel)
+            self.assertEqual(chats, [])
+            self.assertEqual(emails, [])
+
+    def test_generic_phase_gemini_miss_loops_carlo_email_and_chat(self) -> None:
+        """Any job type: Gemini miss → Carlo HITL, not fake RUNNING."""
+        for channel, email_ok, chat_ok in (
+            ("email", True, False),
+            ("chat", False, True),
+        ):
+            chats: list[str] = []
+            emails: list[str] = []
+
+            def email_sender(**_k):
+                emails.append("sent")
+                if not email_ok:
+                    raise RuntimeError("signBlob failed")
+
+            response = escalate(
+                HitlRequest(
+                    job_id=f"miss-{channel}",
+                    phase="unique_write",
+                    error="PLAYWRIGHT_BLOCKED: write target matched 3 fields",
+                    page_state={},
+                    attempted=["unique_write", "gemini"],
+                    applicant_id="",
+                    gemini_asked=False,
+                    channel=channel,
+                ),
+                {
+                    "gemini_client": type(
+                        "C",
+                        (),
+                        {"generate_content": lambda self, _p: "UNSURE"},
+                    )(),
+                    "chat_sender": lambda m: chats.append(m) or chat_ok,
+                    "email_sender": email_sender,
+                },
+            )
+            self.assertFalse(response.actionable, channel)
+            self.assertTrue(response.hitl_posted, channel)
+            self.assertEqual(response.source, "system", channel)
+
     def test_email_channel_counts_email_send_as_posted(self) -> None:
         sent = []
 
