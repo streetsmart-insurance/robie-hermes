@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 
 from robie_job_engine.ezlynx_field_widgets import BILLING_TYPE_WIDGET, DEPARTMENT_WIDGET
+from robie_job_engine.ezlynx_account_nav import FORMENTRY_RE
 from robie_job_engine.ezlynx_policy_setup import (
     CODE_VERSION,
     EzlynxPolicySetup,
@@ -19,6 +20,7 @@ from robie_job_engine.ezlynx_policy_setup import (
     is_commercial_lob,
     normalize_lob,
     running_code_version,
+    url_is_minted_formentry,
 )
 from tests.test_ezlynx_field_widgets import EditPolicyPage, FakeGemini
 
@@ -279,6 +281,109 @@ class HomeSetupPolicyByLobTests(unittest.TestCase):
             self.assertEqual(captured["fill"]["department"], "Personal Lines (P/L)")
             self.assertTrue(result.success)
             self.assertEqual(result.phase_reached, "coverage_fill")
+
+        asyncio.run(_run())
+
+
+REAL_FORMENTRY_URL = (
+    "https://app.ezlynx.com/applicantportal/Policy/83669533/FormEntry/Index/"
+    "480541001?prevApplied=480541001"
+)
+EDIT_POLICY_URL = (
+    "https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/"
+    "220250093/83669533"
+)
+OLD_ACCOUNT_FORMENTRY_URL = (
+    "https://app.ezlynx.com/applicantportal/FormEntry/220250093"
+)
+
+
+class MintedFormEntryUrlTests(unittest.TestCase):
+    def test_account_nav_regex_misses_the_live_policy_formentry_url(self) -> None:
+        self.assertIsNone(FORMENTRY_RE.search(REAL_FORMENTRY_URL))
+        self.assertIsNotNone(FORMENTRY_RE.search(OLD_ACCOUNT_FORMENTRY_URL))
+
+    def test_mint_detector_accepts_policy_index_url(self) -> None:
+        self.assertTrue(url_is_minted_formentry(REAL_FORMENTRY_URL))
+        self.assertTrue(url_is_minted_formentry(OLD_ACCOUNT_FORMENTRY_URL))
+        self.assertFalse(url_is_minted_formentry(EDIT_POLICY_URL))
+        self.assertFalse(url_is_minted_formentry(""))
+        self.assertFalse(
+            url_is_minted_formentry(
+                "https://app.ezlynx.com/applicantportal/Policy/83669533/Edit"
+            )
+        )
+
+    def test_mint_after_save_recognizes_policy_formentry_index_url(self) -> None:
+        async def _run() -> None:
+            from unittest.mock import AsyncMock, MagicMock
+
+            class _Btn:
+                def __init__(self, page: "_MintPage") -> None:
+                    self._page = page
+                    self.first = self
+                    self.clicked = False
+
+                async def count(self) -> int:
+                    return 1
+
+                async def click(self) -> None:
+                    self.clicked = True
+                    self._page.url = REAL_FORMENTRY_URL
+
+            class _MintPage:
+                def __init__(self) -> None:
+                    self.url = EDIT_POLICY_URL
+                    self.button = _Btn(self)
+                    self.context = MagicMock()
+                    self.context.pages = [self]
+                    self.frames = []
+                    self.goto = AsyncMock()
+                    self.wait_for_timeout = AsyncMock()
+                    self.screenshot = AsyncMock()
+                    self.evaluate = AsyncMock(return_value={})
+
+                def get_by_role(self, role: str, name=None):
+                    if role == "button" and name == "Save & Continue Edit":
+                        return self.button
+                    missing = _Btn(self)
+
+                    async def _zero() -> int:
+                        return 0
+
+                    missing.count = _zero  # type: ignore[method-assign]
+                    return missing
+
+                def locator(self, *_args, **_kwargs):
+                    return self.get_by_role("none")
+
+            page = _MintPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="mint-url",
+                hitl_deps={
+                    "gemini_client": FakeGemini('{"decision":"unsure"}'),
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: False,
+                },
+            )
+            setup.lob = "HOME"
+            setup.applicant_id = "220250093"
+
+            async def _fill() -> dict:
+                return {
+                    "billing": "Direct",
+                    "department": "Personal Lines (P/L)",
+                    "department_wanted": "Personal",
+                }
+
+            setup._fill_required_policy_fields = _fill  # type: ignore[method-assign]
+            nav = await setup._mint_formentry("83669533", "220250093")
+            self.assertTrue(page.button.clicked)
+            self.assertTrue(nav.get("formentry_found"), nav)
+            self.assertEqual(nav.get("formentry_url"), REAL_FORMENTRY_URL)
+            self.assertEqual(nav.get("via"), "save_and_continue_edit")
+            self.assertEqual(nav.get("code_version"), CODE_VERSION)
 
         asyncio.run(_run())
 

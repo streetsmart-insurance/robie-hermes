@@ -366,6 +366,26 @@ def normalize_lob(lob_input: str) -> str:
     return LINE_OF_BUSINESS_MAP.get(cleaned.lower().replace(" ", "_"), cleaned)
 
 
+def url_is_minted_formentry(url: object) -> bool:
+    """True after Save & Continue Edit lands on a FormEntry page.
+
+    The live door is
+    /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
+    The older /applicantportal/FormEntry/{accountId} tab also counts.
+    Do not use account-nav FORMENTRY_RE alone — that pattern misses the
+    Policy/.../FormEntry/Index/... URL and would HITL a successful mint.
+    """
+    from .ezlynx_account_nav import FORMENTRY_RE
+    from .ezlynx_write_scope import is_policy_form_entry_url
+
+    text = str(url or "").strip()
+    if not text:
+        return False
+    if is_policy_form_entry_url(text):
+        return True
+    return FORMENTRY_RE.search(text) is not None
+
+
 def is_commercial_lob(lob_input: str) -> bool:
     """HOME / homeowners / personal lines are not commercial.
 
@@ -1203,8 +1223,6 @@ class EzlynxPolicySetupPage:
         /applicantportal/Policy/{policyId}/FormEntry/Index/{formEntryId}.
         Watches DOM validation state, not networkidle and not URL-only.
         """
-        from .ezlynx_account_nav import FORMENTRY_RE
-
         report: dict[str, Any] = {
             "code_version": CODE_VERSION,
             "policy_id": policy_id,
@@ -1243,7 +1261,7 @@ class EzlynxPolicySetupPage:
                 url = tab.url
             except Exception:  # noqa: BLE001
                 continue
-            if FORMENTRY_RE.search(url or ""):
+            if url_is_minted_formentry(url):
                 report["formentry_found"] = True
                 report["formentry_url"] = url
                 report["via"] = "already_open_tab"
@@ -1426,7 +1444,7 @@ class EzlynxPolicySetupPage:
         for _ in range(30):
             await self.page.wait_for_timeout(1000)
             url = self.page.url
-            if FORMENTRY_RE.search(url or ""):
+            if url_is_minted_formentry(url):
                 report["formentry_found"] = True
                 report["formentry_url"] = url
                 report["via"] = "save_and_continue_edit"
@@ -1437,7 +1455,7 @@ class EzlynxPolicySetupPage:
                     turl = tab.url
                 except Exception:  # noqa: BLE001
                     continue
-                if FORMENTRY_RE.search(turl or ""):
+                if url_is_minted_formentry(turl):
                     report["formentry_found"] = True
                     report["formentry_url"] = turl
                     report["via"] = "save_and_continue_edit_new_tab"
