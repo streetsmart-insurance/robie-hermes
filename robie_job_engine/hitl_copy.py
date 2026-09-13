@@ -137,6 +137,7 @@ def still_on_location_tab(error: str | None) -> bool:
         or "could not open coverages" in folded
         or "i am on the address tab" in folded
         or "cannot open coverages" in folded
+        or ("live_labels=" in folded and "location #" in folded)
     )
 
 

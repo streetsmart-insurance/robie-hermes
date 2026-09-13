@@ -21,11 +21,13 @@ from robie_job_engine.ezlynx_policy_setup import (
     stated_live_coverage_names,
 )
 from robie_job_engine.formentry_coverages import (
+    COVERAGES_LIVE_NAV_CLICK,
     COVERAGES_TAB_LOCATOR,
     HOME_LIVE_COVERAGE_LABELS,
     filter_coverage_candidate_labels,
     is_location_section_labels,
     live_label_for_coverage_letter,
+    live_nav_coverage_name,
     map_letter_amounts_to_live_labels,
 )
 from robie_job_engine.hitl_copy import (
@@ -118,6 +120,41 @@ class LocationThenCoveragesPage(_MintedPage):
             and name in ("Coverages", "Coverage")
             and role in ("link", "tab", "button")
         )
+        loc.count = AsyncMock(return_value=1 if match else 0)
+
+        async def _click(*_a, **_k):
+            if match:
+                self.section = "coverages"
+                self.clicked_tabs.append(f"{role}:{name}")
+
+        loc.click = AsyncMock(side_effect=_click)
+        return loc
+
+
+class CoverageOnlyLinkPage(LocationThenCoveragesPage):
+    """Live nav is 'Coverage' (not Coverages) and only a link, not role=tab."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        async def _evaluate(script=None, *_a, **_k):
+            src = str(script or "")
+            if "nav-link" in src or ".k-link" in src:
+                return [
+                    "Insured Information",
+                    "Location",
+                    "Coverage",
+                    "Underwriting",
+                ]
+            if self.section == "location":
+                return list(LIVE_LOCATION_LABELS)
+            return list(LIVE_HOME_LABELS)
+
+        self.evaluate = _evaluate
+
+    def get_by_role(self, role, name=None, exact=False):
+        loc = MagicMock()
+        match = exact and role == "link" and name == "Coverage"
         loc.count = AsyncMock(return_value=1 if match else 0)
 
         async def _click(*_a, **_k):
@@ -478,7 +515,11 @@ class LiveLabelFillSetupTests(unittest.TestCase):
 
             self.assertTrue(result.success)
             self.assertEqual(page.clicked_tabs[0], "link:Coverages")
-            self.assertEqual(COVERAGES_TAB_LOCATOR, 'get_by_role("link", name="Coverages", exact=True)')
+            self.assertEqual(
+                COVERAGES_TAB_LOCATOR,
+                'get_by_role("link", name=<live nav coverage text>, exact=True)',
+            )
+            self.assertEqual(COVERAGES_LIVE_NAV_CLICK, COVERAGES_TAB_LOCATOR)
             self.assertEqual(page.section, "coverages")
             self.assertEqual(len(captured), 1)
             self.assertEqual(
@@ -494,6 +535,92 @@ class LiveLabelFillSetupTests(unittest.TestCase):
             )
             self.assertNotIn("Address", captured[0])
             self.assertNotIn("#HO_CoverageA", str(captured[0]))
+
+        asyncio.run(_run())
+
+    def test_live_nav_coverage_link_not_exact_coverages_changes_labels_then_fills(
+        self,
+    ) -> None:
+        self.assertEqual(
+            live_nav_coverage_name(
+                ["Insured Information", "Location", "Coverage", "Underwriting"]
+            ),
+            "Coverage",
+        )
+        self.assertIsNone(
+            live_nav_coverage_name(["Insured Information", "Location", "Address"])
+        )
+
+        async def _run() -> None:
+            page = CoverageOnlyLinkPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="c6873406-coverage-nav",
+                hitl_deps={
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: True,
+                },
+            )
+
+            async def _already_minted(policy_id, applicant_id="", **_k):
+                return {
+                    "formentry_found": True,
+                    "formentry_url": REAL_FORMENTRY_URL,
+                    "policy_id": policy_id,
+                }
+
+            setup._mint_formentry = _already_minted  # type: ignore[method-assign]
+            captured: list[dict] = []
+
+            async def fake_fill(_page, values, **_k):
+                self.assertEqual(page.section, "coverages")
+                captured.append(dict(values))
+                return {
+                    "filled_count": len(values),
+                    "not_found": [],
+                    "labels": {
+                        label: {"found": True, "filled": True} for label in values
+                    },
+                }
+
+            with (
+                patch(
+                    "robie_job_engine.hitl_escalation.escalate",
+                    side_effect=AssertionError("must not HITL when A-F are on the email"),
+                ),
+                patch("robie_job_engine.ezlynx_api.EzlynxApiClient"),
+                patch("robie_job_engine.ezlynx_api.load_ezlynx_api_config"),
+                patch(
+                    "robie_job_engine.policy_setup_proof.search_first_create",
+                    return_value={
+                        "policy_id": "83669533",
+                        "verdict": "ALREADY_EXISTS",
+                        "read_back": {"policyId": "83669533"},
+                    },
+                ),
+                patch(
+                    "robie_job_engine.formentry_coverages.afill_coverages_by_label",
+                    side_effect=fake_fill,
+                ),
+            ):
+                result = await setup.setup_policy_by_lob(
+                    PolicyShellInput(
+                        applicant_id="220250093",
+                        lob="HOME",
+                        policy_number="TEST-HO-20260911-E01",
+                        effective_date="10/02/2026",
+                        expiration_date="10/02/2027",
+                        request_text=LETTER_EMAIL,
+                    )
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(page.clicked_tabs, ["link:Coverage"])
+            self.assertNotIn("tab:Coverages", page.clicked_tabs)
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["Coverage A"], "1200000")
+            self.assertNotIn("Address", captured[0])
+            self.assertFalse(result.hitl_posted)
 
         asyncio.run(_run())
 
@@ -654,7 +781,6 @@ class LiveLabelFillSetupTests(unittest.TestCase):
             self.assertNotIn("I need the Coverage A", body)
             self.assertNotIn("They were not on the email", body)
             self.assertIn("link:Coverages", page.clicked_tabs)
-            self.assertIn("tab:Coverages", page.clicked_tabs)
 
         asyncio.run(_run())
 
@@ -686,7 +812,7 @@ class LocationTabHitlCopyTests(unittest.TestCase):
             self.assertNotIn("They were not on the email", text)
             self.assertNotIn("they were not on the email", text.casefold())
             self.assertNotIn("PLAYWRIGHT_BLOCKED", text)
-        self.assertIn("could not match the coverage labels", email.casefold())
+        self.assertIn("I am on the address tab and cannot open Coverages", email)
         self.assertIn("Reply to this email", email)
         self.assertNotIn("Chat thread", email)
         self.assertIn("Reply in this Chat thread", chat)

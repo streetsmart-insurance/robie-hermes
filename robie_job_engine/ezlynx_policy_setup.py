@@ -1324,6 +1324,7 @@ class EzlynxPolicySetupPage:
             from .formentry_coverages import (
                 aensure_coverages_tab,
                 afill_coverages_by_label,
+                is_location_section_labels,
                 map_letter_amounts_to_live_labels,
             )
 
@@ -1339,7 +1340,7 @@ class EzlynxPolicySetupPage:
                 "locators_tried": list(tab.locators_tried),
                 "gemini_asked": tab.gemini_asked,
             }
-            if tab.still_on_location:
+            if tab.still_on_location or is_location_section_labels(live_labels):
                 report = {
                     "error": coverages_tab_stuck_error(
                         live_labels=live_labels,
@@ -1403,6 +1404,38 @@ class EzlynxPolicySetupPage:
             )
 
         if fill_report.get("filled_count", 0) <= 0:
+            if is_location_section_labels(live_labels):
+                report = {
+                    "error": coverages_tab_stuck_error(
+                        live_labels=live_labels,
+                        locators_tried=list(tab.locators_tried),
+                    ),
+                    "coverage_fill": fill_report,
+                    "formentry_found": True,
+                    "policy_id": str(policy_id or ""),
+                }
+                await self._escalate_formentry_hitl(
+                    report,
+                    attempted=["coverages_tab", "gemini_nav_retry"],
+                    applicant_id=applicant_id,
+                    policy_id=str(policy_id or ""),
+                    phase="coverage_fill",
+                )
+                return PolicySetupResult(
+                    success=False,
+                    applicant_id=applicant_id,
+                    policy_number=shell_input.policy_number,
+                    lob=normalized,
+                    phase_reached="coverage_fill",
+                    error=report["error"],
+                    note_added=False,
+                    stopped_before_bind=True,
+                    hitl_response=report.get("hitl_response"),
+                    hitl_posted=report.get("hitl_posted"),
+                    continue_after_hitl=False,
+                    policy_id=str(policy_id or ""),
+                    field_fill=fill_report,
+                )
             looked = list(values) or stated_live_coverage_names(amounts)
             report = {
                 "error": coverage_fill_miss_error(
@@ -1428,7 +1461,9 @@ class EzlynxPolicySetupPage:
                         self.page, gemini_client=self._gemini_client()
                     )
                     live_labels = list(tab.live_labels)
-                    if tab.still_on_location:
+                    if tab.still_on_location or is_location_section_labels(
+                        live_labels
+                    ):
                         raise RuntimeError(
                             coverages_tab_stuck_error(
                                 live_labels=live_labels,
@@ -1465,14 +1500,25 @@ class EzlynxPolicySetupPage:
                         continue_after_hitl=True,
                     )
                 looked = list(values) or stated_live_coverage_names(amounts)
-                report = {
-                    "error": coverage_fill_miss_error(
+                retry_error = str(fill_report.get("error") or "")
+                if (
+                    is_location_section_labels(live_labels)
+                    or "could not open Coverages" in retry_error
+                ):
+                    miss_error = coverages_tab_stuck_error(
+                        live_labels=live_labels,
+                        locators_tried=list(getattr(tab, "locators_tried", [])),
+                    )
+                else:
+                    miss_error = coverage_fill_miss_error(
                         amounts_by_letter=amounts,
                         looked=looked,
                         live_labels=live_labels,
                         not_found=fill_report.get("not_found"),
                         after_retry=True,
-                    ),
+                    )
+                report = {
+                    "error": miss_error,
                     "coverage_fill": fill_report,
                     "formentry_found": True,
                     "policy_id": str(policy_id or ""),
