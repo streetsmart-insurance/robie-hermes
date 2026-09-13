@@ -141,6 +141,7 @@ def is_coverage_fill_miss(text: str) -> bool:
         or "could not open coverages" in folded
         or "still on the formentry location" in folded
         or "i am on the address tab" in folded
+        or "cannot read the coverage fields" in folded
     )
 
 
@@ -258,17 +259,31 @@ _LETTER_AMOUNT_RE = re.compile(
     r"(?:coverage\s+)?\b([A-F])\b\s*[:\-]?\s*\$?\s*([\d,]{3,}(?:\.\d{1,2})?)",
     re.IGNORECASE,
 )
+# Live email/prompt lines: ``Coverage A: $1,200,000`` (colon + comma).
+_COLON_COVERAGE_RE = re.compile(
+    r"Coverage\s+([A-F])\s*:\s*\$?\s*([\d,]+(?:\.\d{1,2})?)",
+    re.IGNORECASE,
+)
 
 
 def parse_coverage_amounts_from_reply(text: str) -> dict[str, str]:
     """Parse Coverage A–F dollar amounts from a HITL reply. Never invent a letter.
 
-    Accepts ``Coverage A $1,200,000; B $120,000`` and ``A $1,200,000 B $120,000``.
-    A letter with no number is omitted.
+    Accepts ``Coverage A: $1,200,000``, ``Coverage A $1,200,000; B $120,000``,
+    and ``A $1,200,000 B $120,000``. A letter with no number is omitted.
     """
     raw = str(text or "")
     found: dict[str, str] = {}
+    for match in _COLON_COVERAGE_RE.finditer(raw):
+        key = COVERAGE_LETTER_KEYS.get(match.group(1).upper())
+        if not key:
+            continue
+        value = match.group(2).replace(",", "").split(".")[0]
+        if value.isdigit() and int(value) > 0 and key not in found:
+            found[key] = value
     for key, label_res in _LIMIT_LABELS.items():
+        if found.get(key):
+            continue
         value = _find_limit(raw, label_res)
         if value:
             found[key] = value
@@ -300,8 +315,8 @@ def extract_policy_setup_args(text: str) -> dict | None:
 
     Dates come from the body when stated, else the gold E01 term
     (10/02/2026–10/02/2027). Coverage limits come from the body when stated:
-    Dwelling/Coverage A labels, or letter form ``A $1,200,000 B $120,000``.
-    Returns None outside the job class.
+    ``Coverage A: $1,200,000`` colon lines, Dwelling/Coverage A labels, or
+    letter form ``A $1,200,000 B $120,000``. Returns None outside the job class.
     """
     base = detect_policy_setup_request(text)
     if not base:

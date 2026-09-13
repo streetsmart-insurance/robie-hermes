@@ -623,7 +623,14 @@ def coverages_tab_stuck_error(
     live_labels: list[str],
     locators_tried: list[str],
 ) -> str:
-    """Location tab did not switch. Do not claim A–F amounts were missing."""
+    """Location tab / empty labels. Do not claim A–F amounts were missing."""
+    if not live_labels:
+        return (
+            "PLAYWRIGHT_BLOCKED: I cannot read the coverage fields yet; "
+            "could not open Coverages. "
+            f"locators_tried={locators_tried}. "
+            f"live_labels={live_labels}."
+        )
     return (
         "PLAYWRIGHT_BLOCKED: still on the FormEntry Location/Address tab; "
         "could not open Coverages. "
@@ -640,19 +647,17 @@ def coverage_fill_miss_error(
     not_found: Any,
     after_retry: bool = False,
 ) -> str:
-    """Label-miss last_error. Name stated letters. Do not call them missing amounts."""
-    letters = [
-        letter
-        for letter in ("A", "B", "C", "D", "E", "F")
-        if str((amounts_by_letter or {}).get(letter) or "").strip()
-    ]
+    """Label-miss last_error. Do not call stated A–F amounts missing."""
+    from .formentry_coverages import coverages_fields_unreadable
+
+    if coverages_fields_unreadable(list(live_labels or [])):
+        return coverages_tab_stuck_error(
+            live_labels=list(live_labels or []),
+            locators_tried=[],
+        )
     retry = " after Gemini apply + retry" if after_retry else ""
-    still = ""
-    if letters:
-        still = f" still need Coverage {', '.join(letters)}."
     return (
-        f"PLAYWRIGHT_BLOCKED: no coverage labels were filled{retry}."
-        f"{still} "
+        f"PLAYWRIGHT_BLOCKED: no coverage labels were filled{retry}. "
         f"Looked for {looked}. "
         f"live_labels={live_labels}. "
         f"not_found={not_found}"
@@ -1324,6 +1329,7 @@ class EzlynxPolicySetupPage:
             from .formentry_coverages import (
                 aensure_coverages_tab,
                 afill_coverages_by_label,
+                coverages_fields_unreadable,
                 is_location_section_labels,
                 map_letter_amounts_to_live_labels,
             )
@@ -1340,7 +1346,12 @@ class EzlynxPolicySetupPage:
                 "locators_tried": list(tab.locators_tried),
                 "gemini_asked": tab.gemini_asked,
             }
-            if tab.still_on_location or is_location_section_labels(live_labels):
+            if (
+                not tab.on_coverages
+                or tab.still_on_location
+                or coverages_fields_unreadable(live_labels)
+                or is_location_section_labels(live_labels)
+            ):
                 report = {
                     "error": coverages_tab_stuck_error(
                         live_labels=live_labels,
@@ -1404,7 +1415,11 @@ class EzlynxPolicySetupPage:
             )
 
         if fill_report.get("filled_count", 0) <= 0:
-            if is_location_section_labels(live_labels):
+            if (
+                not getattr(tab, "on_coverages", False)
+                or coverages_fields_unreadable(live_labels)
+                or is_location_section_labels(live_labels)
+            ):
                 report = {
                     "error": coverages_tab_stuck_error(
                         live_labels=live_labels,
@@ -1461,8 +1476,11 @@ class EzlynxPolicySetupPage:
                         self.page, gemini_client=self._gemini_client()
                     )
                     live_labels = list(tab.live_labels)
-                    if tab.still_on_location or is_location_section_labels(
-                        live_labels
+                    if (
+                        not tab.on_coverages
+                        or tab.still_on_location
+                        or coverages_fields_unreadable(live_labels)
+                        or is_location_section_labels(live_labels)
                     ):
                         raise RuntimeError(
                             coverages_tab_stuck_error(
@@ -1502,8 +1520,10 @@ class EzlynxPolicySetupPage:
                 looked = list(values) or stated_live_coverage_names(amounts)
                 retry_error = str(fill_report.get("error") or "")
                 if (
-                    is_location_section_labels(live_labels)
+                    coverages_fields_unreadable(live_labels)
+                    or is_location_section_labels(live_labels)
                     or "could not open Coverages" in retry_error
+                    or "cannot read the coverage fields" in retry_error
                 ):
                     miss_error = coverages_tab_stuck_error(
                         live_labels=live_labels,

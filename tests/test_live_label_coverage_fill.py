@@ -24,6 +24,7 @@ from robie_job_engine.formentry_coverages import (
     COVERAGES_LIVE_NAV_CLICK,
     COVERAGES_TAB_LOCATOR,
     HOME_LIVE_COVERAGE_LABELS,
+    coverages_fields_unreadable,
     filter_coverage_candidate_labels,
     is_location_section_labels,
     live_label_for_coverage_letter,
@@ -33,9 +34,13 @@ from robie_job_engine.formentry_coverages import (
 from robie_job_engine.hitl_copy import (
     COVERAGE_TAB_STUCK_EMAIL,
     coverage_fill_human_text,
+    coverage_letters_from_detail,
 )
 from robie_job_engine.hitl_escalation import HitlResponse
-from robie_job_engine.policy_setup_dispatch import extract_policy_setup_args
+from robie_job_engine.policy_setup_dispatch import (
+    extract_policy_setup_args,
+    parse_coverage_amounts_from_reply,
+)
 from tests.test_coverage_fill_hitl import _MintedPage
 from tests.test_ezlynx_field_widgets import FakeGemini
 from tests.test_home_formentry_fill import REAL_FORMENTRY_URL
@@ -79,6 +84,30 @@ LETTER_EMAIL = (
     "Please create the homeowners policy TEST-HO-20260911-E01 "
     "on applicant 220250093.\n"
     "A $1,200,000 B $120,000 C $500,000 D $500,000 E $10,000 F $10,000"
+)
+# Live HOME email job 712eccd0 — colon + comma amounts already on the prompt.
+COLON_EMAIL = (
+    "Please create the homeowners policy TEST-HO-20260911-E01 "
+    "on applicant 220250093.\n"
+    "Coverage amounts:\n"
+    "Coverage A: $1,200,000\n"
+    "Coverage B: $120,000\n"
+    "Coverage C: $500,000\n"
+    "Coverage D: $500,000\n"
+    "Coverage E: $10,000\n"
+    "Coverage F: $10,000\n"
+)
+LIVE_EMPTY_LABEL_MISS = (
+    "PLAYWRIGHT_BLOCKED: no coverage labels were filled. still need Coverage "
+    "A, B, C, D, E, F. Looked for ['Coverage A', 'Coverage B', 'Coverage C', "
+    "'Coverage D', 'Coverage E', 'Coverage F']. live_labels=[]. not_found=[] "
+    "HITL posted to the email. STOP AND ASK."
+)
+LIVE_LAST_ERROR_ALL_SIX = (
+    "I opened the homeowners coverage page.\n"
+    "I still need Coverage A, B, C, D, E, and F dollar amounts. "
+    "I will not invent them.\n"
+    "Reply to this email with those numbers."
 )
 LIVE_LABEL_MISS = (
     "PLAYWRIGHT_BLOCKED: no coverage labels were filled after Gemini apply + "
@@ -185,6 +214,66 @@ class StuckLocationPage(LocationThenCoveragesPage):
         return loc
 
 
+class EmptyLabelsThenCoveragesPage(_MintedPage):
+    """Field labels start empty (live 712eccd0). Live nav still names Coverages."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.section = "empty"
+        self.clicked_tabs: list[str] = []
+
+        async def _evaluate(script=None, *_a, **_k):
+            src = str(script or "")
+            if "nav-link" in src or ".k-link" in src:
+                return [
+                    "Insured Information",
+                    "Location",
+                    "Coverages",
+                    "Underwriting",
+                ]
+            if self.section != "coverages":
+                return []
+            return list(LIVE_HOME_LABELS)
+
+        self.evaluate = _evaluate
+
+    def get_by_role(self, role, name=None, exact=False):
+        loc = MagicMock()
+        match = (
+            exact
+            and name in ("Coverages", "Coverage")
+            and role in ("link", "tab", "button")
+        )
+        loc.count = AsyncMock(return_value=1 if match else 0)
+
+        async def _click(*_a, **_k):
+            if match:
+                self.section = "coverages"
+                self.clicked_tabs.append(f"{role}:{name}")
+
+        loc.click = AsyncMock(side_effect=_click)
+        return loc
+
+
+class EmptyLabelsStuckPage(EmptyLabelsThenCoveragesPage):
+    """Nav click happens but field labels stay empty — still not Coverages."""
+
+    def get_by_role(self, role, name=None, exact=False):
+        loc = MagicMock()
+        match = (
+            exact
+            and name in ("Coverages", "Coverage")
+            and role in ("link", "tab", "button")
+        )
+        loc.count = AsyncMock(return_value=1 if match else 0)
+
+        async def _click(*_a, **_k):
+            self.clicked_tabs.append(f"{role}:{name}")
+
+        loc.click = AsyncMock(side_effect=_click)
+        return loc
+
+
 class LiveLabelMappingTests(unittest.TestCase):
     def test_reads_coverage_a_f_not_dwelling_aliases(self) -> None:
         self.assertEqual(
@@ -240,6 +329,12 @@ class LiveLabelMappingTests(unittest.TestCase):
             amounts, live, gemini_client=FakeGemini('{"decision":"unsure"}')
         )
         self.assertEqual(mapped, {"Coverage A": "1200000"})
+
+    def test_empty_live_labels_are_unreadable_not_coverages(self) -> None:
+        self.assertFalse(is_location_section_labels([]))
+        self.assertTrue(coverages_fields_unreadable([]))
+        self.assertTrue(coverages_fields_unreadable(LIVE_LOCATION_LABELS))
+        self.assertFalse(coverages_fields_unreadable(LIVE_HOME_LABELS))
 
     def test_location_labels_are_not_coverage_candidates(self) -> None:
         self.assertTrue(is_location_section_labels(LIVE_LOCATION_LABELS))
@@ -784,6 +879,178 @@ class LiveLabelFillSetupTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_empty_labels_colon_prompt_clicks_live_nav_then_fills(self) -> None:
+        async def _run() -> None:
+            page = EmptyLabelsThenCoveragesPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="712eccd0-empty-then-fill",
+                hitl_deps={
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: True,
+                },
+            )
+
+            async def _already_minted(policy_id, applicant_id="", **_k):
+                return {
+                    "formentry_found": True,
+                    "formentry_url": REAL_FORMENTRY_URL,
+                    "policy_id": policy_id,
+                }
+
+            setup._mint_formentry = _already_minted  # type: ignore[method-assign]
+            captured: list[dict] = []
+
+            async def fake_fill(_page, values, **_k):
+                self.assertEqual(page.section, "coverages")
+                captured.append(dict(values))
+                return {
+                    "filled_count": len(values),
+                    "not_found": [],
+                    "labels": {
+                        label: {"found": True, "filled": True} for label in values
+                    },
+                }
+
+            with (
+                patch(
+                    "robie_job_engine.hitl_escalation.escalate",
+                    side_effect=AssertionError(
+                        "must not HITL when A-F are on the email and Coverages opens"
+                    ),
+                ),
+                patch("robie_job_engine.ezlynx_api.EzlynxApiClient"),
+                patch("robie_job_engine.ezlynx_api.load_ezlynx_api_config"),
+                patch(
+                    "robie_job_engine.policy_setup_proof.search_first_create",
+                    return_value={
+                        "policy_id": "83669533",
+                        "verdict": "ALREADY_EXISTS",
+                        "read_back": {"policyId": "83669533"},
+                    },
+                ),
+                patch(
+                    "robie_job_engine.formentry_coverages.afill_coverages_by_label",
+                    side_effect=fake_fill,
+                ),
+            ):
+                result = await setup.setup_policy_by_lob(
+                    PolicyShellInput(
+                        applicant_id="220250093",
+                        lob="HOME",
+                        policy_number="TEST-HO-20260911-E01",
+                        effective_date="10/02/2026",
+                        expiration_date="10/02/2027",
+                        request_text=COLON_EMAIL,
+                    )
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(page.clicked_tabs[0], "link:Coverages")
+            self.assertEqual(page.section, "coverages")
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(
+                captured[0],
+                {
+                    "Coverage A": "1200000",
+                    "Coverage B": "120000",
+                    "Coverage C": "500000",
+                    "Coverage D": "500000",
+                    "Coverage E": "10000",
+                    "Coverage F": "10000",
+                },
+            )
+            self.assertNotIn("#HO_CoverageA", str(captured[0]))
+            self.assertNotIn("Dwelling", captured[0])
+            self.assertFalse(result.hitl_posted)
+            self.assertNotIn("I still need Coverage A", result.error or "")
+
+        asyncio.run(_run())
+
+    def test_empty_labels_colon_prompt_is_address_tab_not_missing_amounts(
+        self,
+    ) -> None:
+        async def _run() -> None:
+            page = EmptyLabelsStuckPage()
+            setup = EzlynxPolicySetupPage(
+                page,
+                job_id="712eccd0-empty-stuck",
+                hitl_deps={
+                    "email_sender": lambda **_k: None,
+                    "chat_sender": lambda _m: True,
+                },
+            )
+
+            async def _already_minted(policy_id, applicant_id="", **_k):
+                return {
+                    "formentry_found": True,
+                    "formentry_url": REAL_FORMENTRY_URL,
+                    "policy_id": policy_id,
+                }
+
+            setup._mint_formentry = _already_minted  # type: ignore[method-assign]
+            filled: list[dict] = []
+
+            async def fake_fill(_page, values, **_k):
+                filled.append(dict(values))
+                raise AssertionError("must not fill while live labels are empty")
+
+            with (
+                patch(
+                    "robie_job_engine.hitl_escalation.escalate",
+                    return_value=HitlResponse(
+                        source="system",
+                        suggestion="STOP AND ASK",
+                        actionable=False,
+                        hitl_posted=True,
+                    ),
+                ) as mock_escalate,
+                patch("robie_job_engine.ezlynx_api.EzlynxApiClient"),
+                patch("robie_job_engine.ezlynx_api.load_ezlynx_api_config"),
+                patch(
+                    "robie_job_engine.policy_setup_proof.search_first_create",
+                    return_value={
+                        "policy_id": "83669533",
+                        "verdict": "ALREADY_EXISTS",
+                        "read_back": {"policyId": "83669533"},
+                    },
+                ),
+                patch(
+                    "robie_job_engine.formentry_coverages.afill_coverages_by_label",
+                    side_effect=fake_fill,
+                ),
+            ):
+                result = await setup.setup_policy_by_lob(
+                    PolicyShellInput(
+                        applicant_id="220250093",
+                        lob="HOME",
+                        policy_number="TEST-HO-20260911-E01",
+                        effective_date="10/02/2026",
+                        expiration_date="10/02/2027",
+                        request_text=COLON_EMAIL,
+                    )
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(filled, [])
+            error = result.error or ""
+            self.assertIn("could not open Coverages", error)
+            self.assertIn("cannot read the coverage fields", error)
+            self.assertIn("live_labels=[]", error.replace(" ", ""))
+            self.assertNotIn("still need Coverage", error)
+            self.assertNotIn("I still need Coverage A", error)
+            self.assertNotIn("coverage amounts not on the job", error)
+            self.assertTrue(result.hitl_posted)
+            req = mock_escalate.call_args[0][0]
+            body = coverage_fill_human_text(channel="email", detail=req.error)
+            self.assertEqual(body, COVERAGE_TAB_STUCK_EMAIL)
+            self.assertIn("I am on the address tab and cannot open Coverages", body)
+            self.assertNotIn("I still need Coverage A", body)
+            self.assertNotIn("They were not on the email", body)
+            self.assertIn("link:Coverages", page.clicked_tabs)
+
+        asyncio.run(_run())
+
 
 class LetterEmailConsumeTests(unittest.TestCase):
     def test_extract_consumes_letter_form_amounts(self) -> None:
@@ -794,6 +1061,34 @@ class LetterEmailConsumeTests(unittest.TestCase):
         self.assertEqual(args["loss_of_use"], "500000")
         self.assertEqual(args["personal_liability"], "10000")
         self.assertEqual(args["medical_payments"], "10000")
+
+    def test_extract_consumes_colon_comma_coverage_lines(self) -> None:
+        args = extract_policy_setup_args(COLON_EMAIL)
+        parsed = parse_coverage_amounts_from_reply(COLON_EMAIL)
+        self.assertEqual(parsed["dwelling"], "1200000")
+        self.assertEqual(parsed["other_structures"], "120000")
+        self.assertEqual(parsed["personal_property"], "500000")
+        self.assertEqual(parsed["loss_of_use"], "500000")
+        self.assertEqual(parsed["personal_liability"], "10000")
+        self.assertEqual(parsed["medical_payments"], "10000")
+        self.assertEqual(args["dwelling"], "1200000")
+        self.assertEqual(args["other_structures"], "120000")
+        self.assertEqual(args["personal_property"], "500000")
+        self.assertEqual(args["loss_of_use"], "500000")
+        self.assertEqual(args["personal_liability"], "10000")
+        self.assertEqual(args["medical_payments"], "10000")
+        merged = merge_homeowners_coverage_from_text(None, COLON_EMAIL)
+        self.assertEqual(
+            homeowners_amounts_by_letter(merged),
+            {
+                "A": "1200000",
+                "B": "120000",
+                "C": "500000",
+                "D": "500000",
+                "E": "10000",
+                "F": "10000",
+            },
+        )
 
     def test_policy_number_e01_is_not_coverage_e(self) -> None:
         merged = merge_homeowners_coverage_from_text(
@@ -830,6 +1125,23 @@ class LocationTabHitlCopyTests(unittest.TestCase):
         self.assertIn("I am on the address tab and cannot open Coverages", email)
         self.assertNotIn("I need the Coverage A, B, C, D, E, and F", email)
         self.assertNotIn("They were not on the email", email)
+
+    def test_empty_live_labels_checkpoint_is_address_tab_not_still_need(self) -> None:
+        email = coverage_fill_human_text(channel="email", detail=LIVE_EMPTY_LABEL_MISS)
+        self.assertEqual(email, COVERAGE_TAB_STUCK_EMAIL)
+        self.assertIn("I am on the address tab and cannot open Coverages", email)
+        self.assertNotIn("I still need Coverage A", email)
+        self.assertNotIn("I have Coverage F", email)
+        self.assertNotIn("They were not on the email", email)
+
+    def test_oxford_and_f_is_all_six_not_i_have_f(self) -> None:
+        letters = coverage_letters_from_detail(LIVE_LAST_ERROR_ALL_SIX)
+        self.assertEqual(letters, ["A", "B", "C", "D", "E", "F"])
+        email = coverage_fill_human_text(
+            channel="email", detail=LIVE_LAST_ERROR_ALL_SIX
+        )
+        self.assertNotIn("I have Coverage F", email)
+        self.assertIn("A, B, C, D, E, and F", email)
 
 
 if __name__ == "__main__":
