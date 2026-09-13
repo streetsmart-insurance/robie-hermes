@@ -618,6 +618,20 @@ def merge_homeowners_coverage_from_text(
     )
 
 
+def coverages_tab_stuck_error(
+    *,
+    live_labels: list[str],
+    locators_tried: list[str],
+) -> str:
+    """Location tab did not switch. Do not claim A–F amounts were missing."""
+    return (
+        "PLAYWRIGHT_BLOCKED: still on the FormEntry Location/Address tab; "
+        "could not open Coverages. "
+        f"locators_tried={locators_tried}. "
+        f"live_labels={live_labels}."
+    )
+
+
 def coverage_fill_miss_error(
     *,
     amounts_by_letter: dict[str, str],
@@ -1313,11 +1327,62 @@ class EzlynxPolicySetupPage:
                 map_letter_amounts_to_live_labels,
             )
 
-            live_labels = await aensure_coverages_tab(self.page)
+            tab = await aensure_coverages_tab(
+                self.page, gemini_client=self._gemini_client()
+            )
+            live_labels = list(tab.live_labels)
+            evidence["live_coverage_labels"] = live_labels
+            evidence["coverages_tab"] = {
+                "on_coverages": tab.on_coverages,
+                "still_on_location": tab.still_on_location,
+                "clicked": list(tab.clicked),
+                "locators_tried": list(tab.locators_tried),
+                "gemini_asked": tab.gemini_asked,
+            }
+            if tab.still_on_location:
+                report = {
+                    "error": coverages_tab_stuck_error(
+                        live_labels=live_labels,
+                        locators_tried=list(tab.locators_tried),
+                    ),
+                    "coverage_fill": {
+                        "filled_count": 0,
+                        "not_found": [],
+                        "labels": {},
+                        "live_labels_seen": live_labels,
+                    },
+                    "formentry_found": True,
+                    "policy_id": str(policy_id or ""),
+                }
+                await self._escalate_formentry_hitl(
+                    report,
+                    attempted=[
+                        "coverages_tab",
+                        "gemini_nav_retry",
+                    ],
+                    applicant_id=applicant_id,
+                    policy_id=str(policy_id or ""),
+                    phase="coverage_fill",
+                )
+                evidence["coverage_fill"] = report["coverage_fill"]
+                return PolicySetupResult(
+                    success=False,
+                    applicant_id=applicant_id,
+                    policy_number=shell_input.policy_number,
+                    lob=normalized,
+                    phase_reached="coverage_fill",
+                    error=report["error"],
+                    note_added=False,
+                    stopped_before_bind=True,
+                    hitl_response=report.get("hitl_response"),
+                    hitl_posted=report.get("hitl_posted"),
+                    continue_after_hitl=False,
+                    policy_id=str(policy_id or ""),
+                    field_fill=report["coverage_fill"],
+                )
             values = map_letter_amounts_to_live_labels(
                 amounts, live_labels, gemini_client=self._gemini_client()
             )
-            evidence["live_coverage_labels"] = list(live_labels)
             fill_report = await afill_coverages_by_label(
                 self.page, values, gemini_client=self._gemini_client()
             )
@@ -1359,7 +1424,17 @@ class EzlynxPolicySetupPage:
             )
             if report.get("continue_after_hitl"):
                 try:
-                    live_labels = await aensure_coverages_tab(self.page)
+                    tab = await aensure_coverages_tab(
+                        self.page, gemini_client=self._gemini_client()
+                    )
+                    live_labels = list(tab.live_labels)
+                    if tab.still_on_location:
+                        raise RuntimeError(
+                            coverages_tab_stuck_error(
+                                live_labels=live_labels,
+                                locators_tried=list(tab.locators_tried),
+                            )
+                        )
                     values = map_letter_amounts_to_live_labels(
                         amounts, live_labels, gemini_client=self._gemini_client()
                     )
