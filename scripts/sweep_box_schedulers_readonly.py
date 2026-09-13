@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +39,18 @@ CRON_DIRS = ("/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily")
 SYSTEMD_UNIT_GLOB = "/etc/systemd/system"
 
 # Redact assignment-style secrets and JWT-ish tokens before printing.
+#
+# The line pattern below masks the VALUE of any NAME=value / NAME: value
+# assignment whose NAME merely *contains* key/secret/token/passwd/password
+# (case-insensitive) — e.g. Environment=ROBIE_ASCEND_API_KEY=<redacted>.
+# The older \b word-boundary pattern missed exactly that case (no boundary
+# between "_" and "API"), which leaked a live key in run 34756330819.
+_LINE_SECRET_RE = re.compile(
+    r"(?i)([\"']?[A-Za-z_][A-Za-z0-9_.]*"
+    r"(?:key|secret|token|passwd|password)[A-Za-z0-9_.]*[\"']?"
+    r"\s*[:=]\s*)"
+    r"(?:\"[^\"\n]*\"|\'[^\'\n]*\'|[^\s\"\']+)"
+)
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(token|secret|password|passwd|api[_-]?key|bearer|"
                r"client[_-]?secret|private[_-]?key)\b\s*[:=]\s*\S+"),
@@ -46,6 +59,8 @@ _SECRET_PATTERNS = (
 
 
 def _redact(text: str) -> str:
+    # Line-anchored NAME=value masking first (fail closed on secrets).
+    text = _LINE_SECRET_RE.sub(r"\g<1><redacted>", text)
     for pat in _SECRET_PATTERNS:
         text = pat.sub(lambda m: re.sub(r"\s*[:=]\s*\S+$", "=<redacted>",
                                         m.group(0))
@@ -85,47 +100,46 @@ def _matches_keywords(text: str) -> list[str]:
 
 
 def _execstart_target(execstart_line: str) -> str:
-    """Best-effort: extract the executed script/binary from an ExecStart.
+    """Best-effort: extract the executed script from an ExecStart line.
 
-    Handles both the plain `ExecStart=/path args...` form and the
-    `systemctl show` structured form `{ path=/bin/x ; argv[]=/bin/x ; ... }`.
-    Prefers a script file (.py/.sh) passed to an interpreter over the
-    interpreter itself.
+    Prefers the LAST argument ending in .py/.sh/.pl/.rb (the script) over
+    argv[0] (the interpreter). Handles the `systemctl show` structured
+    form `{ path=... ; argv[]=... ; ... }` where a single argv[] token can
+    hold the whole command line (this was the run-34756330819 bug: the
+    old `[^\\s;}]+` capture stopped at the first space and returned the
+    python interpreter instead of the script), and the plain
+    `ExecStart=/path args...` form. Skips the interpreter and any -X
+    flags; falls back to the first non-flag argument, then argv[0].
     """
     s = execstart_line.strip()
-    argv_tokens = re.findall(r"argv\[\]=([^\s;}]+)", s)
-    path_m = re.search(r"path=([^\s;}]+)", s)
-    candidates: list[str] = []
-    for tok in argv_tokens:
-        t = tok.lstrip("-+!@:")
-        if not t:
-            continue
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t) and "/" not in t.split("=", 1)[0]:
-            continue
-        candidates.append(t)
-    for tok in candidates:
+    # In the structured form each argv[] payload runs to the next ';' and
+    # may itself contain spaces (the whole command line in one token).
+    argv_payloads = re.findall(r"argv\[\]=([^;]+)", s)
+    if argv_payloads:
+        cmdline = " ".join(part.strip() for part in argv_payloads)
+    elif s.startswith("ExecStart="):
+        cmdline = s[len("ExecStart="):].strip()
+    else:
+        cmdline = s
+    try:
+        tokens = shlex.split(cmdline)
+    except ValueError:
+        tokens = cmdline.split()
+    args = [
+        t for t in tokens
+        if not (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t)
+                and "/" not in t.split("=", 1)[0])
+    ]
+    if not args:
+        path_m = re.search(r"path=([^\s;}]+)", s)
+        return path_m.group(1) if path_m else ""
+    for tok in reversed(args[1:]):
         if tok.endswith((".py", ".sh", ".pl", ".rb")):
             return tok
-    if candidates:
-        return candidates[0]
-    if path_m:
-        return path_m.group(1)
-    if s.startswith("ExecStart="):
-        s = s[len("ExecStart="):]
-    plain: list[str] = []
-    for tok in s.split():
-        t = tok.lstrip("-+!@:")
-        if not t:
-            continue
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t) and "/" not in t.split("=", 1)[0]:
-            continue
-        plain.append(t)
-    for tok in plain:
-        if tok.endswith((".py", ".sh", ".pl", ".rb")):
+    for tok in args[1:]:
+        if not tok.startswith("-"):
             return tok
-    if plain:
-        return plain[0]
-    return ""
+    return args[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -258,39 +272,50 @@ def main(argv: list[str] | None = None) -> int:
     if target:
         resolved = _sh_shell(f"readlink -f '{target}'").splitlines()
         real = resolved[0] if resolved else ""
-        print(f"  --- resolved target: {target} -> {real or '<unresolvable>'}")
-        if real:
-            ftype = _sh_shell(f"file -b '{real}'")
-            print(f"  file: {ftype or '<unknown>'}")
-            if "text" in (ftype or "").lower():
-                head = _sh_shell(f"sed -n '1,200p' '{real}'")
-                print("  --- first 200 lines of the target ---")
-                print("  " + (head.replace("\n", "\n  ")
-                              if head else "  <empty>"))
-                gate = _sh_shell(
-                    "grep -inE 'hour|3600|minute\\s*==\\s*0|schedule|audit|"
-                    "URGENT|cleanup|mailbox|send.*report' "
-                    f"'{real}' | head -60"
+        print(f"  --- resolved script target: {target} -> "
+              f"{real or '<unresolvable>'}")
+        if real and real.endswith((".py", ".sh", ".pl", ".rb")):
+            wc = _sh_shell(f"wc -l '{real}'")
+            print(f"  wc -l: {wc or '<n/a>'}")
+            md5 = _sh_shell(f"md5sum '{real}'")
+            print(f"  md5sum: {md5 or '<n/a>'}")
+            head = _sh_shell(f"sed -n '1,200p' '{real}'")
+            print("  --- first 200 lines of the script ---")
+            print("  " + (head.replace("\n", "\n  ")
+                          if head else "  <empty>"))
+            gate = _sh_shell(
+                "grep -inE 'hour|3600|timedelta\\(hours|minute\\s*==\\s*0|"
+                "schedule|audit|URGENT|cleanup|mailbox|Mailbox Audit|"
+                "send_message|actionable|dedupe|dedup|already|processed|"
+                "note' "
+                f"'{real}' | head -80"
+            )
+            print("  --- keyword hits in the script "
+                  "(hourly cadence / dedupe logic) ---")
+            print("  " + (gate.replace("\n", "\n  ")
+                          if gate else "  <none>"))
+            script_dir = str(Path(real).parent)
+            sibs = _sh_shell(f"ls -1 '{script_dir}' 2>/dev/null")
+            print(f"  --- sibling files in {script_dir} (names only) ---")
+            print("  " + (sibs.replace("\n", "\n  ")
+                          if sibs else "  <not listable>"))
+            if gate:
+                findings.append(
+                    "The email-watcher's ExecStart script "
+                    f"({real}) contains hourly/dedupe keyword hits "
+                    "(shown in section 8). That is where the hourly "
+                    "mailbox-audit/URGENT cadence and the duplicate-note "
+                    "logic live — there is no separate hourly timer on "
+                    "this box."
                 )
-                print("  --- hourly/time-gating keyword hits in the target ---")
-                print("  " + (gate.replace("\n", "\n  ")
-                              if gate else "  <none>"))
-                if gate:
-                    findings.append(
-                        "The email-watcher's ExecStart target "
-                        f"({real}) contains hourly/time-gating logic "
-                        "(keyword hits shown in section 8). That is where "
-                        "the hourly mailbox-audit/URGENT cadence lives — "
-                        "there is no separate hourly timer on this box."
-                    )
-            else:
-                print("  <binary file — contents not dumped>")
+        else:
+            print("  <target is not a script file — contents not dumped>")
     _absent = ("not found", "no files found", "could not be found",
                "no such file", "<could not run")
     if unit_body and not any(m in unit_body.lower() for m in _absent):
         findings.append(
             f"{WATCHER_UNIT} captured in full (section 8). "
-            f"ExecStart resolves to: {real or target or '<unresolvable>'}."
+            f"ExecStart script resolves to: {real or target or '<unresolvable>'}."
         )
 
     section("9. hermes home directory listing (names only)")
