@@ -994,7 +994,7 @@ class EzlynxPolicySetupPage:
 
         The Edit Policy form requires these fields; empty values block
         the save with client-side validation ("Billing Type is required").
-        Billing Type is always "Direct Bill". Department is "Personal" for
+        Billing Type is "Direct Bill" (EZLynx shows it as "Direct"). Department is "Personal" for
         personal lines (HO) and "Commercial" for commercial lines.
 
         Returns a dict with what was found/set, for debugging.
@@ -1071,14 +1071,20 @@ class EzlynxPolicySetupPage:
                 text = (await opt.inner_text()).strip()
                 val = await opt.get_attribute("value")
                 option_texts.append(f"{text!r} (value={val!r})")
+                # Alias: EZLynx labels this option "Direct", not "Direct Bill".
+                # Try the canonical name first, then known aliases.
                 if text.lower() == "direct bill":
                     target_value = val
+                    result["billing_matched"] = "direct bill (exact)"
+                elif text.lower() == "direct" and target_value is None:
+                    target_value = val
+                    result["billing_matched"] = "direct (alias)" 
             except Exception:
                 continue
         result["billing_options"] = option_texts
         if target_value is None:
             raise RuntimeError(
-                f"Option 'Direct Bill' not found in BillingType dropdown. "
+                f"Option 'Direct Bill'/'Direct' not found in BillingType dropdown. "
                 f"Available options: {option_texts}"
             )
         await billing_select.select_option(value=target_value)
