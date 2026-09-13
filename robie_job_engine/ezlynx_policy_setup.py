@@ -17,6 +17,10 @@ from typing import Any, Sequence
 from .ezlynx_write_scope import require_allowed_ezlynx_write_applicant
 
 
+# Code version marker from PR 371. The job report includes this so we can
+# correlate any run to the exact code that executed. Do not remove.
+CODE_VERSION = "712cdb0a4af2dafdfa38cb5406084b5279fd5f60"  # PR #370 merge commit
+
 EZLYNX_BASE_URL = "https://app.ezlynx.com"
 
 # Comprehensive Line of Business Map
@@ -240,6 +244,19 @@ class PolicyShellInput:
     discussion_note_body: str = ""
 
 
+# Keys copied from _mint_formentry onto the outer PolicySetupResult / email
+# report. Without these, the checkpoint only kept the 8 dataclass defaults
+# and Carlo never saw field_fill_error / HITL / landed_url / code_version.
+FORMENTRY_NAV_EVIDENCE_KEYS = (
+    "field_fill",
+    "field_fill_error",
+    "hitl_response",
+    "validation",
+    "landed_url",
+    "code_version",
+)
+
+
 @dataclass(frozen=True)
 class PolicySetupResult:
     success: bool
@@ -250,9 +267,15 @@ class PolicySetupResult:
     error: str | None = None
     note_added: bool = False
     stopped_before_bind: bool = True
+    field_fill: dict[str, Any] | None = None
+    field_fill_error: str | None = None
+    hitl_response: dict[str, Any] | None = None
+    validation: dict[str, Any] | None = None
+    landed_url: str | None = None
+    code_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "success": self.success,
             "applicant_id": self.applicant_id,
             "policy_number": self.policy_number,
@@ -262,6 +285,33 @@ class PolicySetupResult:
             "note_added": self.note_added,
             "stopped_before_bind": self.stopped_before_bind,
         }
+        for key in FORMENTRY_NAV_EVIDENCE_KEYS:
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
+
+
+def policy_setup_result_from_formentry_nav(
+    *,
+    applicant_id: str,
+    policy_number: str,
+    lob: str,
+    nav: dict[str, Any],
+) -> PolicySetupResult:
+    """Fail-closed FormEntry result that keeps mint evidence on the outer report."""
+    extras = {key: nav.get(key) for key in FORMENTRY_NAV_EVIDENCE_KEYS}
+    return PolicySetupResult(
+        success=False,
+        applicant_id=applicant_id,
+        policy_number=policy_number,
+        lob=lob,
+        phase_reached="formentry_mint",
+        error=nav.get("error") or "FormEntry was not minted",
+        note_added=False,
+        stopped_before_bind=True,
+        **extras,
+    )
 
 
 def normalize_lob(lob_input: str) -> str:
@@ -325,9 +375,35 @@ def _homeowners_values_by_label(ho: HomeownersCoverageItem | None) -> dict[str, 
 class EzlynxPolicySetupPage:
     """Deterministic Playwright Page Object for EZLynx APE workflows across all LOBs."""
 
-    def __init__(self, page: Any) -> None:
+    def __init__(self, page: Any, job_id: str | None = None, hitl_deps: dict | None = None) -> None:
         self.page = page
         self.applicant_id: str | None = None
+        self.job_id: str | None = job_id
+        self._hitl_deps: dict = hitl_deps or {}
+        # Wire up default senders if not provided
+        if "email_sender" not in self._hitl_deps:
+            self._hitl_deps["email_sender"] = self._default_email_sender()
+        if "chat_sender" not in self._hitl_deps:
+            self._hitl_deps["chat_sender"] = self._default_chat_sender()
+
+    def _default_email_sender(self):
+        """Create an email sender using the verification mailer."""
+        def send(*, to: str, subject: str, body: str) -> None:
+            from .verification_mailer import send_verification_email
+            send_verification_email(
+                to=[to],
+                cc=[],
+                subject=subject,
+                text_body=body,
+            )
+        return send
+
+    def _default_chat_sender(self):
+        """Create a Google Chat sender using the webhook."""
+        def send(message: str) -> bool:
+            from .ascend_sync import send_google_chat_alert
+            return send_google_chat_alert(message)
+        return send
 
     async def navigate_to_policies(self, applicant_id: str) -> None:
         applicant_id = require_allowed_ezlynx_write_applicant(applicant_id)
@@ -788,7 +864,7 @@ class EzlynxPolicySetupPage:
         evidence: dict[str, Any] = {"phases": []}
         try:
             from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
-            from .policy_setup_proof import search_first_create
+            from .policy_setup_proof import _extract_policy_id, search_first_create
 
             client = EzlynxApiClient(load_ezlynx_api_config())
             api_report = search_first_create(
@@ -813,11 +889,9 @@ class EzlynxPolicySetupPage:
             )
 
         row = api_report.get("read_back") or {}
-        policy_id = None
-        for key in ("policyId", "policyID", "id", "PolicyId", "policy_id"):
-            if row.get(key):
-                policy_id = str(row[key])
-                break
+        # Prefer the ID search_first_create already extracted from the row
+        # (it saw the row shape); fall back to scanning the row directly.
+        policy_id = api_report.get("policy_id") or _extract_policy_id(row)
         # Fallback: the create endpoint returns the new policy ID as a bare
         # scalar. If the search read-back hasn't caught up yet (eventual
         # consistency), use the create response ID so FormEntry can proceed.
@@ -837,17 +911,25 @@ class EzlynxPolicySetupPage:
             # Fail closed with raw HTTP/body details for diagnosis.
             diagnostic = api_report.get("no_id_diagnostic")
             if not diagnostic:
-                create_info = api_report.get("create") or {}
-                http_status = create_info.get("http_status")
-                raw_body = create_info.get("raw_body") or ""
-                body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
-                resp_type = create_info.get("response_type")
-                status_src = create_info.get("status_source")
-                diagnostic = (
-                    f"no policy id in read-back; cannot open FormEntry. "
-                    f"Create HTTP {http_status} (via {status_src}, type {resp_type}), "
-                    f"body: {body_preview}"
-                )
+                if api_report.get("verdict") == "ALREADY_EXISTS":
+                    row_keys = sorted(row.keys()) if isinstance(row, dict) else []
+                    diagnostic = (
+                        "no policy id in read-back; cannot open FormEntry. "
+                        "Policy already existed (no create attempted), but the ID "
+                        f"could not be read from the search row. Row keys: {row_keys}"
+                    )
+                else:
+                    create_info = api_report.get("create") or {}
+                    http_status = create_info.get("http_status")
+                    raw_body = create_info.get("raw_body") or ""
+                    body_preview = raw_body[:500] if len(raw_body) > 500 else raw_body
+                    resp_type = create_info.get("response_type")
+                    status_src = create_info.get("status_source")
+                    diagnostic = (
+                        f"no policy id in read-back; cannot open FormEntry. "
+                        f"Create HTTP {http_status} (via {status_src}, type {resp_type}), "
+                        f"body: {body_preview}"
+                    )
             return PolicySetupResult(
                 success=False,
                 applicant_id=applicant_id,
@@ -861,19 +943,15 @@ class EzlynxPolicySetupPage:
 
         # FormEntry: click Save & Continue Edit on the Edit Policy header,
         # watch validation + DOM for the FormEntry URL.
-        nav = await self._mint_formentry(policy_id)
+        nav = await self._mint_formentry(policy_id, applicant_id)
         evidence["formentry_nav"] = nav
         evidence["phases"].append("formentry_mint")
         if not nav.get("formentry_found"):
-            return PolicySetupResult(
-                success=False,
+            return policy_setup_result_from_formentry_nav(
                 applicant_id=applicant_id,
                 policy_number=shell_input.policy_number,
                 lob=normalized,
-                phase_reached="formentry_mint",
-                error=nav.get("error") or "FormEntry was not minted",
-                note_added=False,
-                stopped_before_bind=True,
+                nav=nav,
             )
 
         # Coverages tab -> fill by literal label.
@@ -911,7 +989,266 @@ class EzlynxPolicySetupPage:
             stopped_before_bind=True,
         )
 
-    async def _mint_formentry(self, policy_id: str) -> dict[str, Any]:
+    async def _fill_required_policy_fields(self) -> dict[str, Any]:
+        """Set Billing Type and Department before Save & Continue Edit.
+
+        The Edit Policy form requires these fields; empty values block
+        the save with client-side validation ("Billing Type is required").
+        Billing Type is "Direct Bill" (EZLynx shows it as "Direct"). Department is "Personal" for
+        personal lines (HO) and "Commercial" for commercial lines.
+
+        Returns a dict with what was found/set, for debugging.
+        Raises on failure (no silent pass).
+        """
+        result: dict[str, Any] = {"billing": None, "department": None, "errors": []}
+
+        # Billing Type -> Direct Bill
+        # Strategy: find the label, then the select via for-attribute or DOM proximity
+        billing_select = None
+        strategies = [
+            # Label with for attribute pointing to select id
+            ("label[for*='Billing' i] + select, label[for*='billing' i] ~ select", "label-for"),
+            # Select with name/id containing billing
+            ("select[name*='Billing' i], select[id*='Billing' i], select[name*='billing' i], select[id*='billing' i]", "name-id"),
+            # Label text then nearby select (parent container search)
+            ("label:has-text('Billing Type')", "label-text"),
+        ]
+        for selector, name in strategies:
+            try:
+                loc = self.page.locator(selector).first
+                if await loc.count() > 0:
+                    # If we found a label, find its associated select
+                    if name == "label-text" or name == "label-for":
+                        tag = await loc.evaluate("el => el.tagName.toLowerCase()")
+                        if tag == "label":
+                            for_attr = await loc.get_attribute("for")
+                            if for_attr:
+                                sel = self.page.locator(f"#{for_attr}").first
+                                if await sel.count() > 0:
+                                    billing_select = sel
+                                    break
+                            # Try sibling/parent search
+                            sel = loc.locator("xpath=./following::select[1]").first
+                            if await sel.count() > 0:
+                                billing_select = sel
+                                break
+                        elif tag == "select":
+                            billing_select = loc
+                            break
+                    else:
+                        billing_select = loc
+                        break
+            except Exception as e:
+                result["errors"].append(f"billing strategy {name}: {e}")
+
+        if billing_select is None:
+            # Last resort: find all selects, check options for Direct Bill
+            try:
+                all_selects = self.page.locator("select")
+                count = await all_selects.count()
+                for i in range(count):
+                    sel = all_selects.nth(i)
+                    try:
+                        options = await sel.locator("option").all_inner_texts()
+                        if any("Direct Bill" in opt for opt in options):
+                            billing_select = sel
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                result["errors"].append(f"billing fallback: {e}")
+
+        if billing_select is None:
+            raise RuntimeError(f"Could not find Billing Type dropdown. Tried: {[s[1] for s in strategies]}. Errors: {result['errors']}")
+
+        # Read actual options first (Angular may load them dynamically)
+        # then match flexibly instead of assuming exact label text
+        options = await billing_select.locator("option").all()
+        option_texts = []
+        target_value = None
+        for opt in options:
+            try:
+                text = (await opt.inner_text()).strip()
+                val = await opt.get_attribute("value")
+                option_texts.append(f"{text!r} (value={val!r})")
+                # Alias: EZLynx labels this option "Direct", not "Direct Bill".
+                # Try the canonical name first, then known aliases.
+                if text.lower() == "direct bill":
+                    target_value = val
+                    result["billing_matched"] = "direct bill (exact)"
+                elif text.lower() == "direct" and target_value is None:
+                    target_value = val
+                    result["billing_matched"] = "direct (alias)" 
+            except Exception:
+                continue
+        result["billing_options"] = option_texts
+        if target_value is None:
+            raise RuntimeError(
+                f"Option 'Direct Bill'/'Direct' not found in BillingType dropdown. "
+                f"Available options: {option_texts}"
+            )
+        await billing_select.select_option(value=target_value)
+        # Verify
+        selected = await billing_select.input_value()
+        result["billing"] = selected
+        try:
+            visible = await billing_select.locator("option:checked").inner_text()
+            result["billing_visible"] = visible.strip()
+        except Exception:
+            pass
+
+        # Department -> Personal (HO) or Commercial
+        dept_select = None
+        dept_strategies = [
+            ("select[name*='Department' i], select[id*='Department' i], select[name*='department' i], select[id*='department' i]", "name-id"),
+            ("label:has-text('DEPARTMENT')", "label-text"),
+        ]
+        for selector, name in dept_strategies:
+            try:
+                loc = self.page.locator(selector).first
+                if await loc.count() > 0:
+                    tag = await loc.evaluate("el => el.tagName.toLowerCase()")
+                    if tag == "label":
+                        for_attr = await loc.get_attribute("for")
+                        if for_attr:
+                            sel = self.page.locator(f"#{for_attr}").first
+                            if await sel.count() > 0:
+                                dept_select = sel
+                                break
+                        sel = loc.locator("xpath=./following::select[1]").first
+                        if await sel.count() > 0:
+                            dept_select = sel
+                            break
+                    elif tag == "select":
+                        dept_select = loc
+                        break
+            except Exception as e:
+                result["errors"].append(f"dept strategy {name}: {e}")
+
+        if dept_select is None:
+            try:
+                all_selects = self.page.locator("select")
+                count = await all_selects.count()
+                for i in range(count):
+                    sel = all_selects.nth(i)
+                    try:
+                        options = await sel.locator("option").all_inner_texts()
+                        if any("Personal" in opt for opt in options):
+                            dept_select = sel
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                result["errors"].append(f"dept fallback: {e}")
+
+        if dept_select is None:
+            raise RuntimeError(f"Could not find Department dropdown. Errors: {result['errors']}")
+
+        lob = (getattr(self, "lob", "") or "").upper()
+        dept_target = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
+        options = await dept_select.locator("option").all()
+        option_texts = []
+        target_value = None
+        for opt in options:
+            try:
+                text = (await opt.inner_text()).strip()
+                val = await opt.get_attribute("value")
+                option_texts.append(f"{text!r} (value={val!r})")
+                if text.lower() == dept_target.lower():
+                    target_value = val
+            except Exception:
+                continue
+        result["department_options"] = option_texts
+        if target_value is None:
+            raise RuntimeError(
+                f"Option {dept_target!r} not found in Department dropdown. "
+                f"Available options: {option_texts}"
+            )
+        await dept_select.select_option(value=target_value)
+        selected = await dept_select.input_value()
+        result["department"] = selected
+        try:
+            visible = await dept_select.locator("option:checked").inner_text()
+            result["department_visible"] = visible.strip()
+        except Exception:
+            pass
+
+        return result
+
+    async def _escalate_formentry_hitl(
+        self,
+        report: dict[str, Any],
+        *,
+        attempted: list[str],
+        applicant_id: str,
+        policy_id: str,
+    ) -> None:
+        """Gemini-then-Carlo HITL. Fail closed. Append source/reason to report['error'].
+
+        Shared by missing-button, field-fill failure, and a true 30s no-FormEntry
+        timeout after an actual Save & Continue Edit click.
+        """
+        if "page_state" not in report:
+            try:
+                report["page_state"] = await self._page_state_snapshot()
+            except Exception:  # noqa: BLE001
+                report["page_state"] = {}
+        try:
+            from .hitl_escalation import HitlRequest, escalate
+
+            screenshot_path = None
+            try:
+                import os
+                import time
+
+                screenshot_dir = "/tmp/robie-hitl-screenshots"
+                os.makedirs(screenshot_dir, exist_ok=True)
+                screenshot_path = os.path.join(
+                    screenshot_dir,
+                    f"hitl-{getattr(self, 'job_id', 'unknown')}-{int(time.time())}.png",
+                )
+                await self.page.screenshot(path=screenshot_path)
+            except Exception:
+                screenshot_path = None
+            hitl_request = HitlRequest(
+                job_id=getattr(self, "job_id", "unknown"),
+                phase="formentry_mint",
+                error=report.get("error") or "FormEntry mint failed",
+                page_state=report.get("page_state") or {},
+                attempted=attempted,
+                applicant_id=applicant_id,
+                policy_id=policy_id,
+                screenshot_path=screenshot_path,
+            )
+            deps = getattr(self, "_hitl_deps", {})
+            hitl_response = escalate(hitl_request, deps)
+            report["hitl_response"] = {
+                "source": hitl_response.source,
+                "suggestion": hitl_response.suggestion,
+                "actionable": hitl_response.actionable,
+            }
+            if hitl_response.actionable:
+                report["error"] = (
+                    (report.get("error") or "")
+                    + f" HITL {hitl_response.source} suggested: {hitl_response.suggestion}"
+                )
+            else:
+                reason = hitl_response.suggestion or "no actionable guidance"
+                report["error"] = (
+                    (report.get("error") or "")
+                    + f" HITL escalation failed ({hitl_response.source}): {reason}."
+                )
+                if screenshot_path:
+                    report["error"] += f" Screenshot: {screenshot_path}."
+        except Exception as hitl_exc:  # noqa: BLE001
+            err_msg = f"{type(hitl_exc).__name__}: {hitl_exc}"
+            report["hitl_error"] = err_msg
+            report["error"] = (
+                (report.get("error") or "")
+                + f" HITL escalation error ({err_msg}); failing closed."
+            )
+
+    async def _mint_formentry(self, policy_id: str, applicant_id: str = "") -> dict[str, Any]:
         """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
 
         The door is the green Save & Continue Edit button on the Edit Policy
@@ -922,16 +1259,34 @@ class EzlynxPolicySetupPage:
         from .ezlynx_account_nav import FORMENTRY_RE
 
         report: dict[str, Any] = {
+            "code_version": CODE_VERSION,
             "policy_id": policy_id,
             "formentry_found": False,
             "formentry_url": None,
             "validation": {},
         }
-        applicant_id = self.applicant_id or ""
+        # Use passed applicant_id, fallback to self.applicant_id
+        effective_applicant_id = applicant_id or self.applicant_id or ""
+        # PREVENTION: fail fast if applicant_id is empty — don't navigate to a broken URL
+        if not effective_applicant_id:
+            report["error"] = (
+                "REFUSED: applicant_id is empty, cannot construct Edit Policy URL. "
+                "This would produce a 404 (double slash). "
+                f"policy_id={policy_id}, applicant_id param='{applicant_id}', self.applicant_id='{self.applicant_id}'"
+            )
+            report["refused_empty_applicant_id"] = True
+            return report
         edit_url = (
             f"https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/"
-            f"{applicant_id}/{policy_id}"
+            f"{effective_applicant_id}/{policy_id}"
         )
+        # PREVENTION: validate URL has no empty segments before navigating
+        if "//" in edit_url.replace("https://", ""):
+            report["error"] = (
+                f"REFUSED: malformed Edit Policy URL (double slash): {edit_url}"
+            )
+            report["refused_malformed_url"] = True
+            return report
         await self.page.goto(edit_url, wait_until="domcontentloaded")
         await self.page.wait_for_timeout(2000)
 
@@ -950,10 +1305,174 @@ class EzlynxPolicySetupPage:
         # Capture pre-click validation state from the DOM.
         report["validation"]["pre_click"] = await self._validation_snapshot()
 
-        button = self.page.get_by_role("button", name="Save & Continue Edit")
-        if await button.count() == 0:
-            report["error"] = "Save & Continue Edit button not found on Edit Policy header"
+        # Robust button finding: try multiple strategies with waits.
+        # Strategy 1: exact accessible name (original)
+        # Strategy 2: case-insensitive partial match
+        # Strategy 3: CSS selector for common button patterns
+        button = None
+        strategies_tried = []
+        
+        # Wait for page to stabilize (increase from 2s to 5s total)
+        await self.page.wait_for_timeout(3000)
+        
+        # Strategy 1: exact name
+        strategies_tried.append("exact_name")
+        btn = self.page.get_by_role("button", name="Save & Continue Edit")
+        if await btn.count() > 0:
+            button = btn.first
+        
+        # Strategy 2: partial name match (case-insensitive)
+        if button is None:
+            strategies_tried.append("partial_name")
+            # Try with regex for flexible matching
+            import re
+            btn = self.page.get_by_role("button", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+            if await btn.count() > 0:
+                button = btn.first
+        
+        # Strategy 3: look for button by text content
+        if button is None:
+            strategies_tried.append("text_content")
+            btn = self.page.locator("button", has_text=re.compile(r"Save & Continue Edit", re.IGNORECASE))
+            if await btn.count() > 0:
+                button = btn.first
+        
+        # Strategy 4: CSS selector for green/success buttons (the button is green in screenshots)
+        if button is None:
+            strategies_tried.append("css_green")
+            # Common patterns: .btn-success, .btn-green, button with specific classes
+            for selector in ["button.btn-success", "button.btn-green", "a.btn-success"]:
+                btn = self.page.locator(selector, has_text=re.compile(r"Continue.*Edit", re.IGNORECASE))
+                if await btn.count() > 0:
+                    button = btn.first
+                    break
+
+        # Strategy 5: link role (it might be an <a> styled as a button)
+        if button is None:
+            strategies_tried.append("link_role")
+            link = self.page.get_by_role("link", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+            if await link.count() > 0:
+                button = link.first
+
+        # Strategy 6: search all clickable elements by text (button, a, div, span, input)
+        if button is None:
+            strategies_tried.append("all_elements")
+            try:
+                locator = self.page.locator("button, a, div, span, input[type='button'], input[type='submit']")
+                count = await locator.count()
+                for i in range(min(count, 100)):
+                    el = locator.nth(i)
+                    try:
+                        text = await el.inner_text()
+                        if text and "save" in text.lower() and "continue" in text.lower() and "edit" in text.lower():
+                            button = el
+                            strategies_tried.append(f"all_elements_idx_{i}")
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # Strategy 7: search in iframes
+        if button is None:
+            strategies_tried.append("iframe_search")
+            try:
+                for frame in self.page.frames:
+                    if frame == self.page.main_frame:
+                        continue
+                    try:
+                        btn = frame.get_by_role("button", name=re.compile(r"save.*continue.*edit", re.IGNORECASE))
+                        if await btn.count() > 0:
+                            button = btn.first
+                            strategies_tried.append(f"iframe_found")
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # Strategy 8: JavaScript find and click (last resort)
+        if button is None:
+            try:
+                js_found = await self.page.evaluate("""() => {
+                    const els = document.querySelectorAll('button, a, div, span, input');
+                    for (const el of els) {
+                        const text = (el.innerText || el.value || '').toLowerCase();
+                        if (text.includes('save') && text.includes('continue') && text.includes('edit')) {
+                            return {tag: el.tagName, text: (el.innerText||'').substring(0,100), id: el.id};
+                        }
+                    }
+                    // Also check iframes
+                    for (const frame of document.querySelectorAll('iframe')) {
+                        try {
+                            const doc = frame.contentDocument;
+                            if (!doc) continue;
+                            const els2 = doc.querySelectorAll('button, a, div, span, input');
+                            for (const el of els2) {
+                                const text = (el.innerText || el.value || '').toLowerCase();
+                                if (text.includes('save') && text.includes('continue') && text.includes('edit')) {
+                                    return {tag: el.tagName+'_in_iframe', text: (el.innerText||'').substring(0,100), id: el.id};
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    return null;
+                }""")
+                if js_found:
+                    strategies_tried.append(f"js_found_{js_found.get('tag')}")
+                    report["js_element_found"] = js_found
+                else:
+                    strategies_tried.append("js_miss")
+            except Exception as js_exc:
+                strategies_tried.append(f"js_error")
+
+        report["button_strategies_tried"] = strategies_tried
+        
+        if button is None:
+            report["page_state"] = await self._page_state_snapshot()
+            ps = report["page_state"] or {}
+            page_url = ps.get("url", self.page.url if hasattr(self.page, "url") else "unknown")
+            page_title = ps.get("title", "unknown")
+            visible_buttons = ps.get("buttons", [])[:10]
+            report["error"] = (
+                "Save & Continue Edit button not found on Edit Policy header. "
+                f"Tried strategies: {', '.join(strategies_tried)}. "
+                f"PAGE_URL: {page_url} "
+                f"PAGE_TITLE: {page_title} "
+                f"VISIBLE_BUTTONS: {visible_buttons} "
+            )
+            await self._escalate_formentry_hitl(
+                report,
+                attempted=strategies_tried,
+                applicant_id=applicant_id,
+                policy_id=policy_id,
+            )
             return report
+        # Fill required fields before clicking: Billing Type and Department.
+        # The form validation blocks the save if these are empty.
+        field_fill_failed = False
+        try:
+            fill_result = await self._fill_required_policy_fields()
+            report["field_fill"] = fill_result
+        except Exception as fill_exc:
+            field_fill_failed = True
+            report["field_fill_error"] = f"{type(fill_exc).__name__}: {fill_exc}"
+            report["error"] = f"Failed to fill required fields: {fill_exc}"
+
+        if field_fill_failed:
+            # Keep the field-fill error. Do not claim a click or a 30s wait.
+            report["error"] += (
+                " (skipped Save & Continue Edit click due to field fill failure)"
+            )
+            report["landed_url"] = getattr(self.page, "url", None)
+            await self._escalate_formentry_hitl(
+                report,
+                attempted=["field_fill"] + list(strategies_tried),
+                applicant_id=applicant_id,
+                policy_id=policy_id,
+            )
+            return report
+
         await button.first.click()
 
         # Watch for the FormEntry URL: poll the DOM + URL, not networkidle.
@@ -977,40 +1496,84 @@ class EzlynxPolicySetupPage:
                     report["via"] = "save_and_continue_edit_new_tab"
                     return report
 
-        # No FormEntry after 30s: capture post-click validation state.
+        # True 30s timeout after an actual click.
         report["validation"]["post_click"] = await self._validation_snapshot()
         report["landed_url"] = self.page.url
+        val = report["validation"]["post_click"] or {}
+        val_errors = val.get("errors", val.get("validation_errors", []))
+        if isinstance(val_errors, list):
+            val_errors = val_errors[:5]
         report["error"] = (
             "Save & Continue Edit clicked; no FormEntry URL after 30s. "
-            "See validation snapshot for blocking errors."
+            f"VALIDATION_ERRORS: {val_errors} "
+            f"LANDED_URL: {self.page.url} "
+        )
+        await self._escalate_formentry_hitl(
+            report,
+            attempted=["save_and_continue_edit", "formentry_url_poll_30s"]
+            + list(strategies_tried),
+            applicant_id=applicant_id,
+            policy_id=policy_id,
         )
         return report
 
     def _all_tabs(self) -> list[Any]:
         try:
-            ctx = self.page.context
-            return list(ctx.pages)
+                ctx = self.page.context
+                return list(ctx.pages)
         except Exception:  # noqa: BLE001
-            return [self.page]
+                return [self.page]
 
     async def _validation_snapshot(self) -> dict[str, Any]:
         """Read validation markers from the DOM: field errors, aria-invalid, summary."""
         js = r"""
         () => {
           const fieldErrors = Array.from(
-            document.querySelectorAll(".field-validation-error, .validation-message, [data-valmsg-for]")
+                document.querySelectorAll(".field-validation-error, .validation-message, [data-valmsg-for]")
           ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 20);
           const summary = Array.from(
-            document.querySelectorAll(".validation-summary-errors")
+                document.querySelectorAll(".validation-summary-errors")
           ).map((el) => (el.innerText || "").trim()).filter(Boolean).slice(0, 5);
           const ariaInvalid = Array.from(
-            document.querySelectorAll("[aria-invalid='true']")
+                document.querySelectorAll("[aria-invalid='true']")
           ).map((el) => el.id || el.getAttribute("name") || el.tagName).slice(0, 20);
           return {field_errors: fieldErrors, summary_errors: summary, aria_invalid: ariaInvalid,
                   url: location.href};
         }
         """
         try:
-            return await self.page.evaluate(js)
+                return await self.page.evaluate(js)
         except Exception as exc:  # noqa: BLE001
-            return {"error": f"{type(exc).__name__}: {exc}"}
+                return {"error": f"{type(exc).__name__}: {exc}"}
+
+    async def _page_state_snapshot(self) -> dict[str, Any]:
+        """Capture what IS on the page: URL, title, all buttons/links by name.
+
+        Used when the expected control is absent, so the next fix is based on
+        evidence, not guesses. Read-only DOM inspection; no clicks, no writes.
+        """
+        js = r"""
+        () => {
+          const buttons = Array.from(
+                document.querySelectorAll("button, input[type='button'], input[type='submit'], a.btn, [role='button']")
+          ).map((el) => {
+                const name = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 80);
+                const role = el.getAttribute("role") || el.tagName.toLowerCase();
+                return name ? `${role}: ${name}` : null;
+          }).filter(Boolean).slice(0, 40);
+          const headings = Array.from(
+                document.querySelectorAll("h1, h2, .page-title, .panel-title")
+          ).map((el) => (el.innerText || "").trim().slice(0, 100)).filter(Boolean).slice(0, 10);
+          return {
+                url: location.href,
+                title: document.title,
+                buttons: buttons,
+                headings: headings,
+                body_text_sample: (document.body ? document.body.innerText : "").slice(0, 500),
+          };
+        }
+        """
+        try:
+                return await self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001
+                return {"error": f"{type(exc).__name__}: {exc}"}

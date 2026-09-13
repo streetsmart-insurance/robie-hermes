@@ -44,6 +44,8 @@ class GeminiFieldClient(Protocol):
 
     def generate_unique_field(self, prompt: str) -> str: ...
 
+    def generate_content(self, prompt: str) -> str: ...
+
 
 @dataclass(frozen=True)
 class UniqueFieldDecision:
@@ -294,6 +296,55 @@ class VertexGeminiFieldClient:
         opener = self._opener or urllib.request.urlopen
         try:
             with opener(request, timeout=20) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Vertex generateContent failed: HTTP {exc.code}") from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Vertex generateContent failed: {type(exc).__name__}"
+            ) from exc
+        payload = json.loads(raw.decode("utf-8"))
+        parts = (
+            (((payload.get("candidates") or [{}])[0].get("content") or {}).get("parts"))
+            or []
+        )
+        texts = [str(part.get("text") or "") for part in parts if isinstance(part, dict)]
+        text = "\n".join(item for item in texts if item).strip()
+        if not text:
+            raise RuntimeError("Vertex generateContent returned no text")
+        return text
+
+    def generate_content(self, prompt: str) -> str:
+        """Free-text generation for HITL suggestions (no JSON constraint)."""
+        if not self.configured():
+            raise RuntimeError("Vertex Gemini project is not configured")
+        token = self._access_token()
+        url = (
+            f"https://{self.location}-aiplatform.googleapis.com/v1/"
+            f"projects/{self.project}/locations/{self.location}/"
+            f"publishers/google/models/{self.model}:generateContent"
+        )
+        body = json.dumps(
+            {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 512,
+                },
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        opener = self._opener or urllib.request.urlopen
+        try:
+            with opener(request, timeout=30) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"Vertex generateContent failed: HTTP {exc.code}") from exc
