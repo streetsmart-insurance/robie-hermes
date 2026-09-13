@@ -1015,11 +1015,30 @@ class EzlynxPolicySetupPage:
         if billing_select is None:
             raise RuntimeError(f"Could not find Billing Type dropdown. Tried: {[s[1] for s in strategies]}. Errors: {result['errors']}")
 
-        await billing_select.select_option(label="Direct Bill")
+        # Read actual options first (Angular may load them dynamically)
+        # then match flexibly instead of assuming exact label text
+        options = await billing_select.locator("option").all()
+        option_texts = []
+        target_value = None
+        for opt in options:
+            try:
+                text = (await opt.inner_text()).strip()
+                val = await opt.get_attribute("value")
+                option_texts.append(f"{text!r} (value={val!r})")
+                if text.lower() == "direct bill":
+                    target_value = val
+            except Exception:
+                continue
+        result["billing_options"] = option_texts
+        if target_value is None:
+            raise RuntimeError(
+                f"Option 'Direct Bill' not found in BillingType dropdown. "
+                f"Available options: {option_texts}"
+            )
+        await billing_select.select_option(value=target_value)
         # Verify
         selected = await billing_select.input_value()
         result["billing"] = selected
-        # Also check the visible text
         try:
             visible = await billing_select.locator("option:checked").inner_text()
             result["billing_visible"] = visible.strip()
@@ -1074,8 +1093,26 @@ class EzlynxPolicySetupPage:
             raise RuntimeError(f"Could not find Department dropdown. Errors: {result['errors']}")
 
         lob = (getattr(self, "lob", "") or "").upper()
-        dept_value = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
-        await dept_select.select_option(label=dept_value)
+        dept_target = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
+        options = await dept_select.locator("option").all()
+        option_texts = []
+        target_value = None
+        for opt in options:
+            try:
+                text = (await opt.inner_text()).strip()
+                val = await opt.get_attribute("value")
+                option_texts.append(f"{text!r} (value={val!r})")
+                if text.lower() == dept_target.lower():
+                    target_value = val
+            except Exception:
+                continue
+        result["department_options"] = option_texts
+        if target_value is None:
+            raise RuntimeError(
+                f"Option {dept_target!r} not found in Department dropdown. "
+                f"Available options: {option_texts}"
+            )
+        await dept_select.select_option(value=target_value)
         selected = await dept_select.input_value()
         result["department"] = selected
         try:
