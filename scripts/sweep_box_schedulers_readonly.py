@@ -23,6 +23,12 @@ agent framework's own scheduler (the .hermes/cron/ directories on the box).
 It lists cron job definitions (JSON contents, redacted) and hooks, plus
 any long-running hermes/cron/scheduler processes.
 
+Section 11 dumps the FULL definitions (systemctl cat) of every robie-*
+/ hermes-* unit (services AND timers) regardless of keyword matches —
+the keyword filter missed hourly timers that fire at :00
+(robie-production-preflight.timer, robie-ascend-sync.timer,
+robie-health-check.timer), which remain audit-trigger suspects.
+
 Touches nothing:
 - systemctl/journalctl/crontab/ls/readlink/file/sed/grep are read-only;
   no enable/start/stop, no file writes anywhere (stdout only).
@@ -201,6 +207,23 @@ def _json_files_in_listing(lines: list[str]) -> list[str]:
         if path.endswith(".json"):
             paths.append(path)
     return paths
+
+
+_ROBIE_HERMES_UNIT_RE = re.compile(r"^(robie-|hermes-).*\.(?:timer|service)$")
+
+
+def _robie_hermes_units(unit_files_text: str) -> list[str]:
+    """Pure: robie-* / hermes-* unit names from list-unit-files output.
+
+    Each row is "<unit name>  <state> ...". The header row ("UNIT FILE")
+    does not match the pattern, so it is naturally skipped.
+    """
+    units: list[str] = []
+    for line in unit_files_text.splitlines():
+        name = line.split()[0] if line.split() else ""
+        if _ROBIE_HERMES_UNIT_RE.match(name) and name not in units:
+            units.append(name)
+    return units
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -508,6 +531,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     print("  " + (procs.replace("\n", "\n  ")
                   if procs else "  <no matching processes>"))
+
+    section("11. FULL definitions of every robie-* / hermes-* unit "
+            "(read-only)")
+    # The keyword filter missed hourly timers that fire at :00
+    # (robie-production-preflight.timer, robie-ascend-sync.timer,
+    # robie-health-check.timer). Dump every robie-* / hermes-* service
+    # and timer in full so the XX:00:30 audit firing time can be matched
+    # against a schedule and each ExecStart= inspected for the report
+    # generator.
+    rh_units = _robie_hermes_units(unit_files)
+    if not rh_units:
+        print("  <no robie-* or hermes-* units found>")
+    for unit in rh_units:
+        print(f"  --- systemctl cat {unit} ---")
+        body = _sh("systemctl", "cat", unit)
+        print("  " + (body.replace("\n", "\n  ") if body else "  <empty>"))
+        if unit.endswith(".timer"):
+            sched = _sh("systemctl", "show", unit, "-p", "OnCalendar",
+                        "-p", "OnUnitActiveSec", "-p",
+                        "NextElapseUSecRealtime", "--value")
+            print("  schedule: " + (sched.replace("\n", "; ")
+                                    if sched else "<n/a>"))
+    if rh_units:
+        findings.append(
+            f"{len(rh_units)} robie-*/hermes-* unit(s) dumped in full "
+            "(section 11): " + ", ".join(rh_units[:12]) +
+            (", ..." if len(rh_units) > 12 else "") +
+            ". Match each timer's OnCalendar= against the XX:00:30 audit "
+            "firing time, and each service's ExecStart= for the report "
+            "generator."
+        )
 
     section("WHAT THIS MEANS")
     if not findings:
