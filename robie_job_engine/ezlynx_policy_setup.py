@@ -943,36 +943,148 @@ class EzlynxPolicySetupPage:
             stopped_before_bind=True,
         )
 
-    async def _fill_required_policy_fields(self) -> None:
+    async def _fill_required_policy_fields(self) -> dict[str, Any]:
         """Set Billing Type and Department before Save & Continue Edit.
 
         The Edit Policy form requires these fields; empty values block
         the save with client-side validation ("Billing Type is required").
         Billing Type is always "Direct Bill". Department is "Personal" for
         personal lines (HO) and "Commercial" for commercial lines.
+
+        Returns a dict with what was found/set, for debugging.
+        Raises on failure (no silent pass).
         """
+        result: dict[str, Any] = {"billing": None, "department": None, "errors": []}
+
         # Billing Type -> Direct Bill
+        # Strategy: find the label, then the select via for-attribute or DOM proximity
+        billing_select = None
+        strategies = [
+            # Label with for attribute pointing to select id
+            ("label[for*='Billing' i] + select, label[for*='billing' i] ~ select", "label-for"),
+            # Select with name/id containing billing
+            ("select[name*='Billing' i], select[id*='Billing' i], select[name*='billing' i], select[id*='billing' i]", "name-id"),
+            # Label text then nearby select (parent container search)
+            ("label:has-text('Billing Type')", "label-text"),
+        ]
+        for selector, name in strategies:
+            try:
+                loc = self.page.locator(selector).first
+                if await loc.count() > 0:
+                    # If we found a label, find its associated select
+                    if name == "label-text" or name == "label-for":
+                        tag = await loc.evaluate("el => el.tagName.toLowerCase()")
+                        if tag == "label":
+                            for_attr = await loc.get_attribute("for")
+                            if for_attr:
+                                sel = self.page.locator(f"#{for_attr}").first
+                                if await sel.count() > 0:
+                                    billing_select = sel
+                                    break
+                            # Try sibling/parent search
+                            sel = loc.locator("xpath=./following::select[1]").first
+                            if await sel.count() > 0:
+                                billing_select = sel
+                                break
+                        elif tag == "select":
+                            billing_select = loc
+                            break
+                    else:
+                        billing_select = loc
+                        break
+            except Exception as e:
+                result["errors"].append(f"billing strategy {name}: {e}")
+
+        if billing_select is None:
+            # Last resort: find all selects, check options for Direct Bill
+            try:
+                all_selects = self.page.locator("select")
+                count = await all_selects.count()
+                for i in range(count):
+                    sel = all_selects.nth(i)
+                    try:
+                        options = await sel.locator("option").all_inner_texts()
+                        if any("Direct Bill" in opt for opt in options):
+                            billing_select = sel
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                result["errors"].append(f"billing fallback: {e}")
+
+        if billing_select is None:
+            raise RuntimeError(f"Could not find Billing Type dropdown. Tried: {[s[1] for s in strategies]}. Errors: {result['errors']}")
+
+        await billing_select.select_option(label="Direct Bill")
+        # Verify
+        selected = await billing_select.input_value()
+        result["billing"] = selected
+        # Also check the visible text
         try:
-            billing = self.page.locator("select").filter(has_text="Billing Type").first
-            # Fallback: find by label association
-            if await billing.count() == 0:
-                billing = self.page.locator("label:has-text('Billing Type') + select, label:has-text('Billing Type') ~ select").first
-            if await billing.count() > 0:
-                await billing.select_option(label="Direct Bill")
+            visible = await billing_select.locator("option:checked").inner_text()
+            result["billing_visible"] = visible.strip()
         except Exception:
             pass
-        # Department -> Personal for HO/personal, Commercial for commercial
+
+        # Department -> Personal (HO) or Commercial
+        dept_select = None
+        dept_strategies = [
+            ("select[name*='Department' i], select[id*='Department' i], select[name*='department' i], select[id*='department' i]", "name-id"),
+            ("label:has-text('DEPARTMENT')", "label-text"),
+        ]
+        for selector, name in dept_strategies:
+            try:
+                loc = self.page.locator(selector).first
+                if await loc.count() > 0:
+                    tag = await loc.evaluate("el => el.tagName.toLowerCase()")
+                    if tag == "label":
+                        for_attr = await loc.get_attribute("for")
+                        if for_attr:
+                            sel = self.page.locator(f"#{for_attr}").first
+                            if await sel.count() > 0:
+                                dept_select = sel
+                                break
+                        sel = loc.locator("xpath=./following::select[1]").first
+                        if await sel.count() > 0:
+                            dept_select = sel
+                            break
+                    elif tag == "select":
+                        dept_select = loc
+                        break
+            except Exception as e:
+                result["errors"].append(f"dept strategy {name}: {e}")
+
+        if dept_select is None:
+            try:
+                all_selects = self.page.locator("select")
+                count = await all_selects.count()
+                for i in range(count):
+                    sel = all_selects.nth(i)
+                    try:
+                        options = await sel.locator("option").all_inner_texts()
+                        if any("Personal" in opt for opt in options):
+                            dept_select = sel
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                result["errors"].append(f"dept fallback: {e}")
+
+        if dept_select is None:
+            raise RuntimeError(f"Could not find Department dropdown. Errors: {result['errors']}")
+
+        lob = (getattr(self, "lob", "") or "").upper()
+        dept_value = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC") else "Personal"
+        await dept_select.select_option(label=dept_value)
+        selected = await dept_select.input_value()
+        result["department"] = selected
         try:
-            dept = self.page.locator("select").filter(has_text="Department").first
-            if await dept.count() == 0:
-                dept = self.page.locator("label:has-text('DEPARTMENT') + select, label:has-text('DEPARTMENT') ~ select").first
-            if await dept.count() > 0:
-                # Determine LOB from stored context; default to Personal
-                lob = (getattr(self, "lob", "") or "").upper()
-                dept_value = "Commercial" if lob in ("COMMERCIAL", "BOP", "GL", "WC", "AUTO") else "Personal"
-                await dept.select_option(label=dept_value)
+            visible = await dept_select.locator("option:checked").inner_text()
+            result["department_visible"] = visible.strip()
         except Exception:
             pass
+
+        return result
 
     async def _mint_formentry(self, policy_id: str, applicant_id: str = "") -> dict[str, Any]:
         """Click Save & Continue Edit; watch validation + DOM for the FormEntry URL.
@@ -1211,7 +1323,13 @@ class EzlynxPolicySetupPage:
             return report
         # Fill required fields before clicking: Billing Type and Department.
         # The form validation blocks the save if these are empty.
-        await self._fill_required_policy_fields()
+        try:
+            fill_result = await self._fill_required_policy_fields()
+            report["field_fill"] = fill_result
+        except Exception as fill_exc:
+            report["field_fill_error"] = f"{type(fill_exc).__name__}: {fill_exc}"
+            report["error"] = f"Failed to fill required fields: {fill_exc}"
+            return report
 
         await button.first.click()
 
