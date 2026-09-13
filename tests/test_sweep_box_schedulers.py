@@ -140,3 +140,29 @@ def test_loader_rejects_missing_marker(sweep):
 def test_loader_rejects_shallow_path(sweep):
     assert sweep._resolve_loader_target(
         LAUNCHER_9_LINES, "/launcher.py") == ""
+
+
+# Section 10 helper: extract .json cron definitions from find -printf
+# listing lines ("<path>\t<size>\t<mtime>").
+FIND_LINES = [
+    "/home/streetsmart-hermes/.hermes/cron/daily.json\t123 bytes\t2026-09-13 08:10",
+    "/home/streetsmart-hermes/.hermes/cron/notes.txt\t45 bytes\t2026-09-12 07:00",
+    "/opt/streetsmart-hermes/.hermes/cron/hourly audit.json\t200 bytes\t2026-09-13 09:00",
+]
+
+
+def test_json_files_in_listing_extracts_json_paths(sweep):
+    assert sweep._json_files_in_listing(FIND_LINES) == [
+        "/home/streetsmart-hermes/.hermes/cron/daily.json",
+        "/opt/streetsmart-hermes/.hermes/cron/hourly audit.json",
+    ]
+
+
+def test_json_files_in_listing_empty_input(sweep):
+    assert sweep._json_files_in_listing([]) == []
+
+
+def test_json_files_in_listing_ignores_non_json(sweep):
+    assert sweep._json_files_in_listing(
+        ["  <absent or empty>", "/x/cron/job.yaml\t10 bytes\t2026-01-01 00:00"]
+    ) == []
