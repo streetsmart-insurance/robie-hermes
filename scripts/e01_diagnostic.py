@@ -195,17 +195,19 @@ async def run_hitl_test():
         results["escalate_error"] = f"{type(e).__name__}: {e}"
         print(f"   ❌ escalate() raised: {e}", flush=True)
 
-    # Check what the suggestion says about email/chat delivery
+    # Do not treat Gemini answering as a sent notification or a continuing job.
     suggestion = results.get("escalate", {}).get("suggestion", "") or ""
     if "Could not send" in suggestion:
-        print(f"\n2. ❌ Notification FAILED: {suggestion}", flush=True)
+        print(f"\n2. Notification FAILED: {suggestion}", flush=True)
         results["notification_sent"] = False
-    elif response.source in ("gemini", "carlo") or "sent" in suggestion.lower():
-        print(f"\n2. ✅ Notification path executed (source={response.source})", flush=True)
-        results["notification_sent"] = True
     else:
-        print(f"\n2. ❓ Unclear: {suggestion[:200]}", flush=True)
-        results["notification_sent"] = "unclear"
+        print(
+            f"\n2. escalate() returned source={response.source} "
+            f"actionable={response.actionable}. That is not proof email/chat "
+            "were sent, and not proof a job is continuing.",
+            flush=True,
+        )
+        results["notification_sent"] = "unproven"
 
     # Save results
     path = os.path.join(outdir, "hitl-test.json")

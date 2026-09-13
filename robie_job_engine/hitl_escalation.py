@@ -33,6 +33,11 @@ class HitlRequest:
     notify_carlo: bool = True  # Always notify Carlo
     notify_requester: bool = True  # Also notify the original requester
     screenshot_path: str | None = None  # Path to screenshot of the stuck state
+    gemini_applied: bool = False
+    formentry_exists: bool = False
+    job_still_running: bool = False
+    save_skipped: bool = False
+    script_or_job_stopped: bool = True
 
 
 @dataclass
@@ -146,7 +151,7 @@ If the fix is not a code change (e.g. "wait longer", "click a different button")
 Example:
 FILE: robie_job_engine/ezlynx_policy_setup.py
 LOCATION: _fill_required_policy_fields, Billing Type dropdown
-REASON: Dropdown contains "Direct" not "Direct Bill"; exact match fails, alias needed.
+REASON: Wanted value is not an exact live option; ask Gemini which one live option to select.
 
 BEFORE:
 if text.lower() == "direct bill":
@@ -194,214 +199,191 @@ If you cannot provide a specific actionable suggestion, respond with exactly: UN
         )
 
 
+def gemini_resolved_and_job_continuing(request: HitlRequest) -> bool:
+    """True only when FormEntry exists and a Job Engine job is still running."""
+    return bool(
+        request.gemini_applied
+        and request.formentry_exists
+        and request.job_still_running
+        and not request.script_or_job_stopped
+    )
+
+
+def build_hitl_notice(
+    request: HitlRequest,
+    gemini_response: HitlResponse | None = None,
+) -> dict[str, str]:
+    """Carlo-facing HITL text. Never claim resolved/continuing without proof."""
+    gemini_text = (gemini_response.suggestion if gemini_response else "") or ""
+    gemini_answered = bool(
+        gemini_response
+        and gemini_response.source == "gemini"
+        and gemini_text
+        and "not available" not in gemini_text.casefold()
+        and "not configured" not in gemini_text.casefold()
+        and "could not provide" not in gemini_text.casefold()
+    )
+    if gemini_resolved_and_job_continuing(request):
+        subject = f"[ROBIE HITL] Job {request.job_id}: Gemini applied {request.phase}"
+        body = (
+            f"Gemini named a live option and it was applied.\n"
+            f"FormEntry exists. A Job Engine job is still running.\n\n"
+            f"Job ID: {request.job_id}\n"
+            f"Phase: {request.phase}\n"
+            f"Error: {request.error}\n"
+            f"Applicant: {request.applicant_id}\n"
+            f"Policy: {request.policy_id or 'unknown'}\n"
+        )
+        chat = (
+            f"ROBIE HITL: Job {request.job_id} at {request.phase}. "
+            f"Gemini applied a live option. FormEntry exists. Job still running."
+        )
+        return {"subject": subject, "body": body, "chat": chat}
+
+    facts: list[str] = []
+    if gemini_answered and not request.gemini_applied:
+        facts.append("Gemini answered. Nothing was applied.")
+    elif gemini_answered and request.gemini_applied:
+        facts.append("Gemini answered and a fill was applied.")
+    elif gemini_response and gemini_response.source == "gemini":
+        facts.append("Gemini was asked and did not name a usable live option.")
+    else:
+        facts.append("Gemini was not able to help.")
+    if request.save_skipped:
+        facts.append("The fill still failed. Save was skipped.")
+    if request.script_or_job_stopped or not request.job_still_running:
+        facts.append("The script/job stopped.")
+    if not request.formentry_exists:
+        facts.append("FormEntry does not exist.")
+    subject = f"[ROBIE HITL] Job {request.job_id} stuck at {request.phase}"
+    body = (
+        "Robie needs your help.\n\n"
+        + " ".join(facts)
+        + "\n\n"
+        f"Job ID: {request.job_id}\n"
+        f"Phase: {request.phase}\n"
+        f"Error: {request.error}\n\n"
+        "What was tried:\n"
+        + "\n".join(f"  - {a}" for a in request.attempted)
+        + "\n\n"
+        f"Gemini suggestion (not applied unless stated above):\n{gemini_text or '(none)'}\n\n"
+        f"Applicant: {request.applicant_id}\n"
+        f"Policy: {request.policy_id or 'unknown'}\n"
+    )
+    chat = (
+        f"ROBIE HITL: Job {request.job_id} stuck at {request.phase}. "
+        + " ".join(facts)
+        + f" Error: {request.error[:160]}"
+    )
+    return {"subject": subject, "body": body, "chat": chat}
+
+
+def _deliver_hitl(
+    request: HitlRequest,
+    notice: dict[str, str],
+    deps: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Send email/chat. Never claim email worked unless send succeeded."""
+    deps = deps or {}
+    email_sender = deps.get("email_sender")
+    chat_sender = deps.get("chat_sender")
+    email_sent = False
+    chat_sent = False
+    email_error = ""
+    chat_error = ""
+    recipients: list[str] = []
+    if request.notify_carlo:
+        recipients.append("carlo@streetsmart.insurance")
+    if request.notify_requester and request.original_requester:
+        if request.original_requester not in recipients:
+            recipients.append(request.original_requester)
+    if email_sender and recipients:
+        for recipient in recipients:
+            try:
+                if hasattr(email_sender, "send") and callable(email_sender.send):
+                    email_sender.send(
+                        to=recipient, subject=notice["subject"], body=notice["body"]
+                    )
+                elif callable(email_sender):
+                    email_sender(to=recipient, subject=notice["subject"], body=notice["body"])
+                else:
+                    email_error = "email_sender is neither callable nor has .send"
+                    continue
+                email_sent = True
+            except Exception as exc:
+                email_error = f"{type(exc).__name__}: {exc}"
+    elif not email_sender:
+        email_error = "no email_sender in deps"
+    elif not recipients:
+        email_error = "no recipients"
+    if chat_sender:
+        try:
+            if chat_sender(notice["chat"]):
+                chat_sent = True
+        except Exception as exc:
+            chat_error = f"{type(exc).__name__}: {exc}"
+    return {
+        "email_sent": email_sent,
+        "chat_sent": chat_sent,
+        "email_error": email_error,
+        "chat_error": chat_error,
+        "sent": email_sent or chat_sent,
+    }
+
+
 def notify_carlo_gemini_success(
     request: HitlRequest,
     gemini_response: HitlResponse,
     deps: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """Inform Carlo that Gemini resolved a stuck job (no response needed).
+    """Inform Carlo only when Gemini was applied and the job is still running.
 
-    This is the visibility fix: previously, when Gemini provided actionable
-    guidance, escalate() returned silently and Carlo never heard about it.
-    Now Carlo gets an informational ping every time HITL fires, even when
-    Gemini handles it. The job continues without waiting.
-
-    Returns (sent, error_reason) like ping_carlo.
+    A Gemini suggestion that was not applied is not a resolution. Email
+    signBlob can fail; this function does not claim email worked.
     """
-    deps = deps or {}
-    email_sender = deps.get("email_sender")
-    chat_sender = deps.get("chat_sender")
+    if not gemini_resolved_and_job_continuing(request):
+        delivery = _deliver_hitl(request, build_hitl_notice(request, gemini_response), deps)
+        error = ""
+        if not delivery["sent"]:
+            parts = []
+            if delivery["email_error"]:
+                parts.append(f"email: {delivery['email_error']}")
+            if delivery["chat_error"]:
+                parts.append(f"chat: {delivery['chat_error']}")
+            error = "; ".join(parts) or "unknown failure"
+        return (bool(delivery["sent"]), error)
 
-    subject = f"[ROBIE HITL] Job {request.job_id}: Gemini resolved {request.phase} (no action needed)"
-
-    # Build the structured fix section if Gemini provided it
-    if gemini_response.fix_file or gemini_response.fix_after:
-        fix_section = f"""
---- SUGGESTED FIX (ready to apply) ---
-File: {gemini_response.fix_file or '(not specified)'}
-Location: {gemini_response.fix_location or '(not specified)'}
-Reason: {gemini_response.fix_reason or '(not specified)'}
-
-BEFORE:
-{gemini_response.fix_before or '(no code change — action only)'}
-
-AFTER:
-{gemini_response.fix_after or '(not specified)'}
---- END FIX ---
-"""
-    else:
-        fix_section = f"\nGemini's suggestion (unstructured):\n{gemini_response.suggestion}\n"
-
-    body = f"""Robie hit a snag and Gemini resolved it. No action needed — this is for visibility.
-
-Job ID: {request.job_id}
-Phase: {request.phase}
-Error: {request.error}
-
-What was tried:
-{chr(10).join(f"  - {a}" for a in request.attempted)}
-{fix_section}
-The job is continuing with Gemini's guidance. If you want to override,
-reply to this email.
-
-Applicant: {request.applicant_id}
-Policy: {request.policy_id or 'unknown'}
-"""
-
-    sent = False
-    recipients = []
-    if request.notify_carlo:
-        recipients.append("carlo@streetsmart.insurance")
-    if request.notify_requester and request.original_requester:
-        if request.original_requester not in recipients:
-            recipients.append(request.original_requester)
-
-    email_error = ""
-    if email_sender and recipients:
-        for recipient in recipients:
-            try:
-                if hasattr(email_sender, "send") and callable(email_sender.send):
-                    email_sender.send(to=recipient, subject=subject, body=body)
-                elif callable(email_sender):
-                    email_sender(to=recipient, subject=subject, body=body)
-                else:
-                    email_error = "email_sender is neither callable nor has .send"
-                    continue
-                sent = True
-            except Exception as e:
-                email_error = f"{type(e).__name__}: {e}"
-    elif not email_sender:
-        email_error = "no email_sender in deps"
-
-    chat_error = ""
-    if chat_sender:
-        chat_msg = (
-            f"✅ ROBIE HITL: Job {request.job_id} hit '{request.error[:100]}' "
-            f"at {request.phase}\n"
-            f"Gemini resolved it: {gemini_response.suggestion[:200]}\n"
-            f"No action needed — job continuing."
-        )
-        try:
-            if chat_sender(chat_msg):
-                sent = True
-        except Exception as e:
-            chat_error = f"{type(e).__name__}: {e}"
-
-    error_reason = ""
-    if not sent:
+    notice = build_hitl_notice(request, gemini_response)
+    delivery = _deliver_hitl(request, notice, deps)
+    error = ""
+    if not delivery["sent"]:
         parts = []
-        if email_error:
-            parts.append(f"email: {email_error}")
-        if chat_error:
-            parts.append(f"chat: {chat_error}")
-        error_reason = "; ".join(parts) or "unknown failure"
-    return (sent, error_reason)
+        if delivery["email_error"]:
+            parts.append(f"email: {delivery['email_error']}")
+        if delivery["chat_error"]:
+            parts.append(f"chat: {delivery['chat_error']}")
+        error = "; ".join(parts) or "unknown failure"
+    return (bool(delivery["sent"]), error)
 
 
-def ping_carlo(request: HitlRequest, deps: dict[str, Any] | None = None) -> tuple[bool, str]:
+def ping_carlo(
+    request: HitlRequest,
+    deps: dict[str, Any] | None = None,
+    gemini_response: HitlResponse | None = None,
+) -> tuple[bool, str]:
     """Send HITL notifications via Email and Google Chat.
-    
-    Notifies Carlo and optionally the original requester.
-    Returns (sent, error_reason): sent=True if at least one notification
-    was sent successfully, error_reason describes the failure if not.
+
+    Honest about Gemini and job state. Does not claim email worked unless
+    send succeeded.
     """
-    deps = deps or {}
-    email_sender = deps.get("email_sender")
-    chat_sender = deps.get("chat_sender")  # Function that sends Google Chat messages
-    
-    # Build the message
-    subject = f"[ROBIE HITL] Job {request.job_id} stuck at {request.phase}"
-    
-    body = f"""Robie needs your help.
-
-Job ID: {request.job_id}
-Phase: {request.phase}
-Error: {request.error}
-
-What was tried:
-{chr(10).join(f"  - {a}" for a in request.attempted)}
-
-Page state:
-- URL: {request.page_state.get('url', 'unknown')}
-- Title: {request.page_state.get('title', 'unknown')}
-- Buttons: {', '.join(request.page_state.get('buttons', [])[:15])}
-
-Applicant: {request.applicant_id}
-Policy: {request.policy_id or 'unknown'}
-
-Gemini was asked first but could not resolve this.
-
-What the job is trying to do:
-- Click "Save & Continue Edit" on the Edit Policy page to mint a FormEntry URL
-- Then fill coverage limits and deductibles in the FormEntry
-
-What was tried (in order):
-{chr(10).join(f"  {i+1}. {a}" for i, a in enumerate(request.attempted))}
-
-{f"Screenshot captured: {request.screenshot_path}" if request.screenshot_path else "No screenshot captured."}
-
-Reply with guidance, or the job will fail closed after 30 minutes.
-
-To continue the job, reply with one of:
-- A specific selector or button name to try
-- "SKIP" to skip this phase and continue
-- "ABORT" to stop the job
-"""
-    
-    sent = False
-    
-    # Determine recipients
-    recipients = []
-    if request.notify_carlo:
-        recipients.append("carlo@streetsmart.insurance")
-    if request.notify_requester and request.original_requester:
-        if request.original_requester not in recipients:
-            recipients.append(request.original_requester)
-    
-    # Send via email (handle both callable functions and objects with .send())
-    email_error = ""
-    if email_sender and recipients:
-        for recipient in recipients:
-            try:
-                if hasattr(email_sender, "send") and callable(email_sender.send):
-                    email_sender.send(to=recipient, subject=subject, body=body)
-                elif callable(email_sender):
-                    email_sender(to=recipient, subject=subject, body=body)
-                else:
-                    email_error = "email_sender is neither callable nor has .send"
-                    continue
-                sent = True
-            except Exception as e:
-                email_error = f"{type(e).__name__}: {e}"
-    elif not email_sender:
-        email_error = "no email_sender in deps"
-    elif not recipients:
-        email_error = "no recipients"
-    
-    # Send via Google Chat (shorter format)
-    chat_error = ""
-    if chat_sender:
-        chat_msg = (
-            f"🚨 ROBIE HITL: Job {request.job_id} stuck at {request.phase}\n"
-            f"Error: {request.error[:200]}\n"
-            f"Tried: {', '.join(request.attempted[:3])}\n"
-            f"Reply with guidance or job fails in 30 min."
-        )
-        try:
-            if chat_sender(chat_msg):
-                sent = True
-        except Exception as e:
-            chat_error = f"{type(e).__name__}: {e}"
-    
-    error_reason = ""
-    if not sent:
-        parts = []
-        if email_error:
-            parts.append(f"email: {email_error}")
-        if chat_error:
-            parts.append(f"chat: {chat_error}")
-        error_reason = "; ".join(parts) or "unknown failure"
-    return (sent, error_reason)
+    notice = build_hitl_notice(request, gemini_response)
+    delivery = _deliver_hitl(request, notice, deps)
+    parts = []
+    if not delivery["email_sent"] and delivery["email_error"]:
+        parts.append(f"email: {delivery['email_error']}")
+    if not delivery["chat_sent"] and delivery["chat_error"]:
+        parts.append(f"chat: {delivery['chat_error']}")
+    return (bool(delivery["sent"]), "; ".join(parts))
 
 
 def wait_for_carlo_response(
@@ -435,46 +417,49 @@ def wait_for_carlo_response(
 
 
 def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlResponse:
-    """Full escalation: Gemini first, then Carlo.
-    
-    Returns a HitlResponse with actionable guidance, or actionable=False
-    if neither Gemini nor Carlo could help.
+    """Gemini first, then Carlo. Never claim resolved unless FormEntry exists
+    and a Job Engine job is still running.
     """
     deps = deps or {}
-    
-    # Step 1: Ask Gemini
     gemini_response = ask_gemini(request, deps.get("gemini_client"))
+    resolved = gemini_resolved_and_job_continuing(request) and gemini_response.actionable
 
-    # Step 2: ALWAYS notify Carlo (not just when Gemini fails).
-    # If Gemini succeeded: informational ping, job continues without waiting.
-    # If Gemini failed: blocking ping, wait for Carlo's response below.
-    if request.notify_carlo and gemini_response.actionable:
-        notify_carlo_gemini_success(request, gemini_response, deps)
+    if request.notify_carlo:
+        if resolved:
+            notify_carlo_gemini_success(request, gemini_response, deps)
+            return gemini_response
+        email_sent, email_error = ping_carlo(request, deps, gemini_response)
+        if not email_sent and not request.job_still_running:
+            notice = build_hitl_notice(request, gemini_response)
+            return HitlResponse(
+                source="system",
+                suggestion=notice["body"],
+                actionable=False,
+                raw={"email_error": email_error, "gemini": gemini_response.suggestion},
+            )
+        if not email_sent:
+            return HitlResponse(
+                source="system",
+                suggestion=f"Could not send HITL notification to Carlo ({email_error})",
+                actionable=False,
+            )
+
+    if resolved:
         return gemini_response
 
-    # Step 3: Ping Carlo (and original requester) via Email + Google Chat
-    # (only reached when Gemini could not help)
-    email_sent, email_error = ping_carlo(request, deps)
-    if not email_sent:
-        return HitlResponse(
-            source="system",
-            suggestion=f"Could not send HITL notification to Carlo ({email_error})",
-            actionable=False,
+    if request.job_still_running and not request.script_or_job_stopped:
+        carlo_response = wait_for_carlo_response(
+            request.job_id,
+            timeout_seconds=deps.get("hitl_timeout", 1800),
+            email_checker=deps.get("email_checker"),
         )
-    
-    # Step 4: Wait for Carlo (only when Gemini couldn't help)
-    carlo_response = wait_for_carlo_response(
-        request.job_id,
-        timeout_seconds=deps.get("hitl_timeout", 1800),
-        email_checker=deps.get("email_checker"),
-    )
-    
-    if carlo_response and carlo_response.actionable:
-        return carlo_response
-    
-    # Step 5: Fail closed
+        if carlo_response and carlo_response.actionable:
+            return carlo_response
+
+    notice = build_hitl_notice(request, gemini_response)
     return HitlResponse(
         source="system",
-        suggestion="HITL timeout: neither Gemini nor Carlo provided actionable guidance",
+        suggestion=notice["body"],
         actionable=False,
+        raw={"gemini": gemini_response.suggestion},
     )

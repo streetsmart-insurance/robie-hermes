@@ -462,3 +462,178 @@ def resolve_blocked_unique_write(
         page_url=page_url,
         client=client,
     )
+
+
+@dataclass(frozen=True)
+class LiveOptionDecision:
+    """Gemini pick of one live dropdown option. Never guess; never invent."""
+
+    action: str
+    option: str | None
+    reason: str
+    gemini_asked: bool
+    hitl_operator: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "option": self.option,
+            "reason": self.reason,
+            "gemini_asked": self.gemini_asked,
+            "hitl_operator": self.hitl_operator,
+        }
+
+
+def _option_hitl(reason: str, *, gemini_asked: bool) -> LiveOptionDecision:
+    return LiveOptionDecision(
+        action="HITL",
+        option=None,
+        reason=f"{PLAYWRIGHT_BLOCKED}: {reason}",
+        gemini_asked=gemini_asked,
+        hitl_operator=HITL_OPERATOR,
+    )
+
+
+def normalize_option_text(value: str) -> str:
+    """Strip and casefold. Matching only; never rewrite a live label."""
+    return str(value or "").strip().casefold()
+
+
+def exact_live_option(wanted: str, live_options: Iterable[str]) -> str | None:
+    """Return the live option whose text equals wanted, or None.
+
+    Exact after strip/casefold only. No substring. No alias table.
+    Unique match required.
+    """
+    wanted_norm = normalize_option_text(wanted)
+    if not wanted_norm:
+        return None
+    hits: list[str] = []
+    seen: set[str] = set()
+    for raw in live_options:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        key = normalize_option_text(text)
+        if key != wanted_norm or key in seen:
+            continue
+        seen.add(key)
+        hits.append(text)
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _safe_live_options(live_options: Iterable[str]) -> list[str]:
+    options: list[str] = []
+    seen: set[str] = set()
+    for raw in live_options:
+        label = _safe_label(raw)
+        if not label:
+            continue
+        key = normalize_option_text(label)
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append(label)
+    return options
+
+
+def build_gemini_live_option_prompt(
+    *,
+    widget_name: str,
+    wanted: str,
+    live_options: Iterable[str],
+) -> str:
+    options = _safe_live_options(live_options)
+    wanted_text = _safe_label(wanted) or "(empty)"
+    widget = _safe_label(widget_name) or "dropdown"
+    return (
+        f"A Playwright fill on the {widget} widget has no exact match for "
+        f"the wanted value {wanted_text!r}. Unique-write stays fail-closed. "
+        "Do not guess. Do not invent a label that is not in the live list.\n\n"
+        f"Widget: {widget}\n"
+        f"Wanted value: {wanted_text}\n"
+        "Live options from THAT widget only:\n"
+        + ("\n".join(f"- {option}" for option in options) or "- (none)")
+        + "\n\n"
+        "Reply with JSON only, no markdown:\n"
+        '{"decision":"unique","option":"<exact live option text>"}\n'
+        "or\n"
+        '{"decision":"unsure","reason":"<why no unique option>"}\n'
+        "option must be copied exactly from Live options. "
+        "If zero or more than one option could match, decision must be unsure."
+    )
+
+
+def ask_gemini_live_option(
+    *,
+    widget_name: str,
+    wanted: str,
+    live_options: Iterable[str],
+    client: GeminiFieldClient | None = None,
+) -> LiveOptionDecision:
+    """Ask Gemini which ONE live option to select. Apply only if it is in the list."""
+    options = _safe_live_options(live_options)
+    exact = exact_live_option(wanted, options)
+    if exact is not None:
+        return LiveOptionDecision(
+            action="APPLY",
+            option=exact,
+            reason="wanted value is an exact live option",
+            gemini_asked=False,
+        )
+    if not options:
+        return _option_hitl(
+            "no safe live options to send to Gemini; HITL Carlo",
+            gemini_asked=False,
+        )
+    active = client if client is not None else default_gemini_field_client()
+    if active is None:
+        return _option_hitl(
+            "Gemini/Vertex is not configured for live-option help; HITL Carlo",
+            gemini_asked=False,
+        )
+    prompt = build_gemini_live_option_prompt(
+        widget_name=widget_name,
+        wanted=wanted,
+        live_options=options,
+    )
+    try:
+        raw = active.generate_unique_field(prompt)
+    except Exception as exc:
+        return _option_hitl(
+            f"Gemini request failed ({type(exc).__name__}); HITL Carlo",
+            gemini_asked=True,
+        )
+    payload = _parse_gemini_payload(raw)
+    if not payload:
+        return _option_hitl(
+            "Gemini returned an unreadable option suggestion; HITL Carlo",
+            gemini_asked=True,
+        )
+    decision = str(payload.get("decision") or "").strip().casefold()
+    if decision in {"unsure", "hitl", "unknown", ""}:
+        detail = redact_text(str(payload.get("reason") or "Gemini is unsure"))
+        return _option_hitl(f"{detail}; HITL Carlo", gemini_asked=True)
+    if decision != "unique":
+        return _option_hitl(
+            "Gemini did not name exactly one unique option; HITL Carlo",
+            gemini_asked=True,
+        )
+    named = _safe_label(str(payload.get("option") or payload.get("field_label") or ""))
+    live = exact_live_option(named or "", options)
+    if not named or live is None:
+        return _option_hitl(
+            "Gemini option was not one of the live options; HITL Carlo",
+            gemini_asked=True,
+        )
+    extra = payload.get("options") or payload.get("alternates")
+    if extra:
+        return _option_hitl("Gemini named more than one option; HITL Carlo", gemini_asked=True)
+    return LiveOptionDecision(
+        action="APPLY",
+        option=live,
+        reason="Gemini named one live option",
+        gemini_asked=True,
+    )
