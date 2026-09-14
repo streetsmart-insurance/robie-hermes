@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .ezlynx_ho_labels import HO_COVERAGE_FIELDS
+
 # What HOME FormEntry actually shows. Filler uses the live page text, not
 # a Dwelling / Other Structures alias list.
 HOME_LIVE_COVERAGE_LABELS = (
@@ -208,6 +210,32 @@ def match_wanted_to_live_label(wanted: str, live_labels: list[str]) -> str | Non
     return None
 
 
+def proven_label_for_coverage_letter(
+    letter: str, live_labels: list[str]
+) -> str | None:
+    """Deterministic match against proven HO labels — before regex/Gemini.
+
+    PROVEN 2026-09-13 (policy 83670183, manual browser run): the live DOM
+    does NOT say "Coverage A". The real texts are e.g.
+    "Enter limit: The limit associated with dwelling coverage." (A),
+    "Other Structures" (B), "Personal Property Coverage" (C),
+    "Loss of Use" (D), "Personal Liability Each Occurrence" (E),
+    "Medical Payments Each Person" (F).
+    Returns the live label verbatim when it matches a proven text.
+    """
+    want = str(letter or "").strip().upper()
+    if want not in COVERAGE_LETTERS:
+        return None
+    field = next((f for f in HO_COVERAGE_FIELDS if f.letter == want), None)
+    if field is None:
+        return None
+    needles = {field.label.casefold(), field.textbox_hint.casefold()}
+    for label in live_labels or []:
+        if str(label or "").strip().casefold() in needles:
+            return label
+    return None
+
+
 def live_label_for_coverage_letter(
     letter: str, live_labels: list[str]
 ) -> str | None:
@@ -218,6 +246,9 @@ def live_label_for_coverage_letter(
     want = str(letter or "").strip().upper()
     if want not in COVERAGE_LETTERS:
         return None
+    proven = proven_label_for_coverage_letter(want, live_labels)
+    if proven is not None:
+        return proven
     exact: list[str] = []
     prefixed: list[str] = []
     for label in live_labels:
