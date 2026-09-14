@@ -7,6 +7,7 @@ import pytest
 
 from robie_job_engine.ascend_api import AscendApiClient, AscendApiError
 from robie_job_engine import ascend_notice_triage as triage
+from robie_job_engine import zapier_tasks
 
 
 SAMPLE_UUID = "e46ca1f6-1e2d-491b-8944-3cf06e82e312"
@@ -183,7 +184,7 @@ def test_triage_late_payment_resolves_by_uuid():
     assert result["program_uuid"] == SAMPLE_UUID
     assert result["lookup_method"] == "program_uuid_from_email"
     assert result["needs_human_review"] is False
-    assert result["recommendation"]["ezlynx_workflow"] == "AscendNOC"
+    assert result["recommendation"]["ezlynx_workflow"] == "Ascend NOC"
     assert "past_due" in result["note_text"]
     assert "$3,528.22" in result["note_text"]
 
@@ -235,3 +236,108 @@ def test_triage_cancellation_recommends_human_check():
     assert result["notice_type"] == triage.CANCELLATION
     assert result["recommendation"]["ezlynx_workflow"] == "Service-Cancellation"
     assert result["needs_human_review"] is False  # program resolved; action still advisory
+
+
+# ---------------------------------------------------------------------------
+# Cancellation -> Zapier task payload
+# ---------------------------------------------------------------------------
+
+
+def _cancellation_result():
+    subject = (
+        "The coverage policy for Stafford Adult Softball League LLC has been "
+        "canceled due to non-payment"
+    )
+    body = (
+        "Stafford Adult Softball League LLC canceled for non-payment and still has "
+        "an overdue balance of $44.70. The loan has been canceled effective 06/22/2026.\n"
+        f"Complete the cancelation here ( https://dashboard.useascend.com/programs/{SAMPLE_UUID} )."
+    )
+    routes = {
+        ("GET", f"/programs/{SAMPLE_UUID}"): {
+            "data": {"id": SAMPLE_UUID, "status": "canceled"}
+        },
+    }
+    return triage.triage_notice(make_client(routes=routes), subject, body)
+
+
+def test_cancellation_recommendation_flags_zapier_task():
+    result = _cancellation_result()
+    assert result["recommendation"].get("zapier_task") is True
+
+
+def test_cancellation_recommendation_encodes_alejandro_rules():
+    # Alejandro (2026-09-14): manual policies only, Cancel Confirmation
+    # always, return premium from the notice or $0, check History/notes
+    # for duplicates, notes in the auto-run cancellation WF.
+    instruction = _cancellation_result()["recommendation"]["instruction"]
+    assert "Cancel Confirmation" in instruction
+    assert "$0" in instruction
+    assert "History of transactions" in instruction
+
+
+def test_late_payment_uses_ascend_noc_label_and_est_cutoff():
+    # Alejandro (2026-09-14): the label is spelled "Ascend NOC";
+    # no task assignment after 4:30 PM EST.
+    rec = triage.recommended_action(triage.LATE_PAYMENT)
+    assert rec["ezlynx_workflow"] == "Ascend NOC"
+    assert rec["ezlynx_label"] == "Ascend NOC"
+    assert "4:30 PM EST" in rec["instruction"]
+
+
+def test_build_cancellation_task_payload():
+    result = _cancellation_result()
+    payload = triage.build_cancellation_task_payload(
+        result, applicant_id="220250093", account_csr="Erika Palacios"
+    )
+    assert payload["applicant_id"] == "220250093"
+    assert payload["assignee"] == "Erika Palacios"
+    assert payload["source"] == "inbox-triage"
+    assert "Stafford Adult Softball League LLC" in payload["task_title"]
+    assert payload["notice_type"] == triage.CANCELLATION
+    assert payload["program_uuid"] == SAMPLE_UUID
+    assert "canceled" in payload["email_subject"]
+
+
+def test_build_cancellation_task_payload_rejects_wrong_type():
+    subject, body = _late_payment_email()
+    routes = {
+        ("GET", f"/programs/{SAMPLE_UUID}"): {
+            "data": {"id": SAMPLE_UUID, "status": "past_due"}
+        },
+    }
+    result = triage.triage_notice(make_client(routes=routes), subject, body)
+    with pytest.raises(ValueError):
+        triage.build_cancellation_task_payload(
+            result, applicant_id="220250093", account_csr="Erika Palacios"
+        )
+
+
+def test_build_cancellation_task_payload_requires_ids():
+    result = _cancellation_result()
+    with pytest.raises(ValueError):
+        triage.build_cancellation_task_payload(result, applicant_id="", account_csr="Erika Palacios")
+    with pytest.raises(ValueError):
+        triage.build_cancellation_task_payload(result, applicant_id="220250093", account_csr="")
+
+
+# ---------------------------------------------------------------------------
+# zapier_tasks firing helper
+# ---------------------------------------------------------------------------
+
+
+def test_fire_task_dry_run_validates_without_firing():
+    payload = {
+        "applicant_id": "220250093",
+        "task_title": "Ascend cancellation notice - Test LLC",
+        "assignee": "Erika Palacios",
+        "source": "inbox-triage",
+    }
+    result = zapier_tasks.fire_task(payload, dry_run=True)
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+
+
+def test_fire_task_rejects_incomplete_payload():
+    with pytest.raises(ValueError):
+        zapier_tasks.fire_task({"task_title": "no ids"}, dry_run=True)

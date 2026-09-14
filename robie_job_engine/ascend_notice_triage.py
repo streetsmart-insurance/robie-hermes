@@ -34,6 +34,10 @@ UNKNOWN = "unknown"
 
 NOTICE_TYPES = (LATE_PAYMENT, CANCELLATION, RETURN_PREMIUM, NEW_PROGRAM, UNKNOWN)
 
+# Source tag sent with every Zapier-fired task so the Zap (and the audit log)
+# can tell inbox-triage tasks apart from other task creators.
+ZAPIER_SOURCE = "inbox-triage"
+
 # Subject-line patterns observed in real Ascend mail (Sep 2026).  Kept as
 # ordered (pattern, type) pairs so the first match wins; the unknown fallback
 # is intentional -- an unrecognized notice must go to a human, never be
@@ -116,6 +120,11 @@ def extract_insured_name(subject: str, body: str) -> str | None:
     if match:
         return match.group(1).strip()
     match = re.search(
+        r"[Cc]overage policy for (.+?) has been canceled", subject_text, re.IGNORECASE
+    )
+    if match:
+        return match.group(1).strip()
+    match = re.search(
         r"coverage policy for (.+?) has been canceled", body or "", re.IGNORECASE
     )
     if match:
@@ -143,22 +152,38 @@ def recommended_action(notice_type: str) -> dict[str, Any]:
     """EZLynx-side recommendation for a notice type (advisory only)."""
     if notice_type == LATE_PAYMENT:
         return {
-            "ezlynx_workflow": "AscendNOC",
-            "ezlynx_label": "AscendNOC",
+            "ezlynx_workflow": "Ascend NOC",
+            "ezlynx_label": "Ascend NOC",
             "instruction": (
-                "Open the AscendNOC workflow for the matched program, file the "
-                "email and note the past-due amount and due date. Assign for "
-                "tomorrow when past 2:30 PM Central."
+                "Open the Ascend NOC workflow for the matched program, file "
+                "the email and note the past-due amount and due date. If a "
+                "workflow already exists for this program, keep it assigned "
+                "to the person already working it (check the Activity "
+                "notes); new tasks go to the CSR or assigned producer. Do "
+                "not assign tasks to anyone after 4:30 PM EST -- hold them "
+                "for the next business day."
             ),
         }
     if notice_type == CANCELLATION:
         return {
             "ezlynx_workflow": "Service-Cancellation",
             "ezlynx_label": "email received",
+            "zapier_task": True,
             "instruction": (
-                "Flag for human review before any EZLynx cancellation: confirm "
-                "the loan cancel effective date and overdue balance against "
-                "the carrier policy, then follow the manual cancellation SOP."
+                "Apply the cancellation transaction in EZLynx ONLY if the "
+                "policy is manual -- download policies are handled by the "
+                "carrier download. First check the History of transactions "
+                "and the Activity notes: if the cancellation was already "
+                "applied, do not apply it again. Cancel type is always "
+                "'Cancel Confirmation'. Enter the return premium from the "
+                "notice; if the notice shows none, enter $0. After applying, "
+                "EZLynx auto-runs a cancellation workflow assigned to the "
+                "CSR -- enter notes there. If the workflow does not trigger "
+                "(EZLynx bug), manually run a cancellation-notice label to "
+                "create it and add notes. Assign an EZLynx follow-up task "
+                "via the Zapier task Zap (build_cancellation_task_payload) "
+                "to the CSR on the account; a human CSR/AP reviews before "
+                "anything is closed."
             ),
         }
     if notice_type == RETURN_PREMIUM:
@@ -204,6 +229,7 @@ def triage_notice(
 
     result: dict[str, Any] = {
         "notice_type": notice_type,
+        "email_subject": (subject or "").strip(),
         "insured_name": insured_name,
         "policy_numbers": policy_numbers,
         "program_uuid": program_uuid,
@@ -269,3 +295,45 @@ def triage_notice(
         lines.append(f"Ascend program status: {program_status}")
     result["note_text"] = "\n".join(lines)
     return result
+
+
+def build_cancellation_task_payload(
+    triage_result: dict[str, Any],
+    applicant_id: str,
+    account_csr: str,
+) -> dict[str, Any]:
+    """Build the Zapier EZLynx-task payload for a cancellation notice.
+
+    The task goes to the CSR on the matched EZLynx account -- ``account_csr``
+    is resolved dynamically by the caller from the account (there is no
+    static default assignee).  Triage itself never invents the applicant or
+    the CSR.  Firing happens through the zapier skill's ``bin/zap-trigger``
+    (see ``robie_job_engine/zapier_tasks.py``), never from inside this
+    read-only module.
+    """
+    if triage_result.get("notice_type") != CANCELLATION:
+        raise ValueError(
+            "Zapier cancellation tasks are only built for cancellation notices, "
+            f"got {triage_result.get('notice_type')!r}"
+        )
+    if not applicant_id or not str(applicant_id).strip():
+        raise ValueError("applicant_id is required to assign a cancellation task")
+    if not account_csr or not str(account_csr).strip():
+        raise ValueError(
+            "account_csr (the CSR on the matched EZLynx account) is required "
+            "to assign a cancellation task"
+        )
+
+    insured = triage_result.get("insured_name") or "unknown insured"
+    policies = triage_result.get("policy_numbers") or []
+    policy_bits = f" ({', '.join(policies)})" if policies else ""
+    return {
+        "applicant_id": str(applicant_id).strip(),
+        "task_title": f"Ascend cancellation notice - {insured}{policy_bits}",
+        "assignee": str(account_csr).strip(),
+        "source": ZAPIER_SOURCE,
+        "email_subject": triage_result.get("email_subject") or "",
+        "notice_type": CANCELLATION,
+        "program_uuid": triage_result.get("program_uuid") or "",
+        "note_text": triage_result.get("note_text") or "",
+    }
