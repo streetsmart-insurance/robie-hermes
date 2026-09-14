@@ -651,6 +651,183 @@ class _DelayedCountLocator:
     def is_enabled(self):
         return True
 
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self):
+        return self.count() > 0
+
+
+class _DirtyFixturePage:
+    """Documents row starts labeled; Edit → option → Apply clears JE-KILL-01."""
+
+    def __init__(self) -> None:
+        self.url = "https://app.ezlynx.com/web/account/220250093/documents"
+        self.labeled = True
+        self.clicks: list[str] = []
+        self.keyboard = self
+
+    def press(self, key: str) -> None:
+        self.clicks.append(f"key:{key}")
+
+    def evaluate(self, *_args, **_kwargs) -> None:
+        return None
+
+    def goto(self, url, **kwargs):
+        self.url = url
+
+    def reload(self, **kwargs):
+        return None
+
+    def wait_for_timeout(self, *_args, **_kwargs):
+        return None
+
+    def wait_for_load_state(self, *_args, **_kwargs):
+        return None
+
+    def get_by_role(self, role, name="", exact=True):
+        if name == "Password":
+            return _DirtyLocator(self, kind="password", count=0)
+        if name == "Apply":
+            return _DirtyLocator(self, kind="apply", count=1)
+        return _DirtyLocator(self, kind="role", count=1)
+
+    def get_by_text(self, value, exact=True):
+        if value == "JE-KILL-01":
+            return _DirtyLocator(
+                self, kind="applied", count=1 if self.labeled else 0
+            )
+        return _DirtyLocator(self, kind="text", count=0)
+
+    def get_by_label(self, *args, **kwargs):
+        return _DirtyLocator(self, kind="label", count=1)
+
+    def get_by_test_id(self, *args, **kwargs):
+        return _DirtyLocator(self, kind="test_id", count=1)
+
+    def locator(self, selector: str):
+        sel = str(selector)
+        if "edit" in sel:
+            return _DirtyLocator(self, kind="edit", count=1)
+        if "Add label" in sel:
+            return _DirtyLocator(
+                self, kind="add", count=0 if self.labeled else 1
+            )
+        if ":text-is" in sel or "JE-KILL-01" in sel:
+            return _DirtyLocator(
+                self, kind="applied", count=1 if self.labeled else 0
+            )
+        if "mat-list-option" in sel or "label-" in sel:
+            return _DirtyLocator(self, kind="option", count=1)
+        if "cdk-overlay" in sel:
+            return _DirtyLocator(self, kind="overlay", count=0)
+        return _DirtyLocator(self, kind="other", count=0)
+
+
+class _DirtyLocator:
+    def __init__(self, page: _DirtyFixturePage, *, kind: str, count: int) -> None:
+        self.page = page
+        self.kind = kind
+        self._count = count
+
+    def count(self):
+        if self.kind == "applied":
+            return 1 if self.page.labeled else 0
+        if self.kind == "add":
+            return 0 if self.page.labeled else 1
+        return self._count
+
+    def click(self, **kwargs):
+        self.page.clicks.append(self.kind)
+        if self.kind == "apply":
+            self.page.labeled = False
+
+    def fill(self, value):
+        return None
+
+    def wait_for(self, **kwargs):
+        return None
+
+    def is_enabled(self):
+        return True
+
+    def is_visible(self):
+        return self.count() > 0
+
+    @property
+    def first(self):
+        return self
+
+
+class JeKillEnsureCleanDestinationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        for port in getattr(self, "_ports", []):
+            try:
+                port.close()
+            except Exception:
+                pass
+
+    def _scenario_css(self):
+        payload = fixture_payload()
+        rid = payload["scenarios"]["before_action"]["resource_id"]
+        payload["scenarios"]["before_action"]["label_control"] = {
+            "kind": "css",
+            "value": (
+                f'tr:has(#document-checkbox-{rid}-input) '
+                f'button:has-text("Add label")'
+            ),
+        }
+        payload["scenarios"]["before_action"]["label_option"] = {
+            "kind": "css",
+            "value": "mat-list-option#label-test-label",
+        }
+        payload["scenarios"]["before_action"]["applied_label"] = {
+            "kind": "css",
+            "value": (
+                f'tr:has(#document-checkbox-{rid}-input) '
+                f':text-is("JE-KILL-01")'
+            ),
+        }
+        with durable_temporary_directory() as tmp:
+            path = Path(tmp) / "fixture.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return load_fixture(path).scenarios["before_action"]
+
+    def _port(self, scenario, page) -> PersistentChromeEzlynxPort:
+        port = PersistentChromeEzlynxPort(scenario, cdp_url="http://127.0.0.1:9222")
+        self._ports = getattr(self, "_ports", [])
+        self._ports.append(port)
+        port._start_playwright = lambda: _FakePlaywright(_FakeBrowser(page))  # type: ignore[method-assign]
+        return port
+
+    def test_ensure_clean_skips_when_destination_already_unlabeled(self):
+        scenario = self._scenario_css()
+        page = _DirtyFixturePage()
+        page.labeled = False
+        port = self._port(scenario, page)
+        port.ensure_clean_destination()
+        self.assertNotIn("edit", page.clicks)
+        self.assertNotIn("apply", page.clicks)
+
+    def test_ensure_clean_clears_leftover_label_via_edit_option_apply(self):
+        scenario = self._scenario_css()
+        page = _DirtyFixturePage()
+        port = self._port(scenario, page)
+        self.assertTrue(page.labeled)
+        port.ensure_clean_destination()
+        self.assertFalse(page.labeled)
+        action_clicks = [c for c in page.clicks if not c.startswith("key:")]
+        self.assertEqual(action_clicks[:3], ["edit", "option", "apply"])
+
+    def test_run_phase_calls_ensure_clean_before_kill_child(self):
+        source = Path("robie_job_engine/je_kill_live.py").read_text(encoding="utf-8")
+        self.assertIn("ensure_clean_destination", source)
+        self.assertLess(
+            source.index("preflight.ensure_clean_destination()"),
+            source.index("context.Process("),
+        )
+
 
 class JeKillLabelControlSettleTests(unittest.TestCase):
     """Post-navigation race: wait for unique fixture label_control, never guess."""
