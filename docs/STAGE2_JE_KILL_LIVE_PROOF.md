@@ -62,6 +62,18 @@ Covered by `tests/test_je_kill_preflight.py::JeKillJobInventoryTests`,
 which executes the exact heredoc from the remote runner against a seeded
 SQLite `jobs.db`.
 
+## Dirty disposable docs (2026-09-14)
+
+A green JE-KILL leaves `JE-KILL-01` on the three fixture documents. The next
+`before_action` kill then reconciles to `RECONCILED_APPLIED` without calling
+`perform` → `action_attempts: expected 1, got 0`.
+
+Mitigation in `PersistentChromeEzlynxPort.ensure_clean_destination()` (called
+from `run_phase` after auth preflight): dismiss EZLynx release-notes overlays,
+and if the applied-label locator is present, clear via row **edit** → fixture
+label option → **Apply**, then require `Add label` again before spawning the
+kill child.
+
 ## Non-negotiables
 
 - No PAWIVA / `221398001`
