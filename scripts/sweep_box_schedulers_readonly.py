@@ -38,6 +38,12 @@ opens the DB with sqlite3 mode=ro + PRAGMA query_only=ON, dumps tables
 and schedule rows (name/title, cron/interval, enabled, run timestamps),
 hourly-first, everything through _redact.
 
+Section 14 covers the surfaces sections 1-13 missed: carlo_streetsmart_insurance's crontab (its 5-min call-label cron proves
+that user has jobs the sweep never listed), /opt/renewal-automation-system
+(a whole second Robie system), the engine DB's report_run_configs /
+report_runs tables, and the deployed robie_health_check.py content
+(robie-health-check.timer fires hourly at :00).
+
 Touches nothing:
 - systemctl/journalctl/crontab/ls/readlink/file/sed/grep are read-only;
   no enable/start/stop, no file writes anywhere (stdout only).
@@ -722,6 +728,113 @@ def main(argv: list[str] | None = None) -> int:
             print("  <file exists but is empty or unreadable>")
     else:
         print("  <no candidate agent script found>")
+
+
+    section("14. Remaining hourly-trigger suspects (read-only)")
+    # Sections 1-13 ruled out: systemd timers, the three checked crontabs,
+    # Hermes cron jobs.json, the engine's schedules/scheduled_jobs tables,
+    # and the deployed email-agent script (no hourly/report strings in any
+    # of them). The report STILL fires hourly at ~:00:30 ET, so the trigger
+    # is on a surface the sweep never looked at:
+    #   (a) carlo_streetsmart_insurance's crontab — process starts PROVE this
+    #       user has cron jobs (run_robie_call_label_watch.sh every 5 min)
+    #       but section 4 only checked streetsmart-hermes, ubuntu, root.
+    #   (b) /opt/renewal-automation-system — a whole second Robie system the
+    #       sweep never listed (backup, browser bridge, health watchdog,
+    #       call-label watch).
+    #   (c) the engine DB's report_run_configs / report_runs tables — the
+    #       audit email is literally titled a "Report"; section 12 only
+    #       dumped schedules/scheduled_jobs.
+    #   (d) the DEPLOYED /opt/streetsmart-hermes/scripts/robie_health_check.py
+    #       (robie-health-check.timer fires hourly at :00) — section 11
+    #       dumped the unit but never the script's content.
+    # Everything below is read-only: list, cat, grep, sqlite3 mode=ro.
+
+    print("  --- 14a. carlo_streetsmart_insurance crontab ---")
+    out = _sh("crontab", "-l", "-u", "carlo_streetsmart_insurance")
+    print("  " + (out.replace("\n", "\n  ") if out else "<empty>"))
+    if _matches_keywords(out) or "0 *" in out or "0  * " in out:
+        findings.append(
+            "carlo_streetsmart_insurance's crontab (section 14a) has an "
+            "inbox-keyword or hourly ('0 *') entry — prime trigger suspect.")
+    print("  --- /var/spool/cron/crontabs listing (names only) ---")
+    print("  " + _sh("ls", "-la", "/var/spool/cron/crontabs").replace(
+        "\n", "\n  "))
+
+    print("  --- 14b. /opt/renewal-automation-system (names only, top 120) ---")
+    listing = _sh_shell(
+        "find /opt/renewal-automation-system -maxdepth 3 "
+        "| head -120")
+    print("  " + (listing.replace("\n", "\n  ") if listing else "<absent>"))
+    print("  --- /srv/robie (names only, top 40) ---")
+    srv = _sh_shell("find /srv/robie -maxdepth 2 2>/dev/null | head -40")
+    print("  " + (srv.replace("\n", "\n  ") if srv else "<absent>"))
+
+    print("  --- 14c. content grep for the report/urgent subject phrases ---")
+    # Exact phrases from the emails themselves. Filenames + line numbers
+    # only; bodies go through _redact.
+    _grep_roots = ("/opt/renewal-automation-system",
+                   "/opt/streetsmart-hermes/scripts",
+                   "/srv/robie")
+    _grep_pat = ("Mailbox Audit & Cleanup Report|URGENT / CSR ACTION|"
+                 "Carrier Response Received")
+    for _root in _grep_roots:
+        hits = _sh_shell(
+            f"grep -rl --include='*.py' --include='*.sh' --include='*.json' "
+            f"-e '{_grep_pat}' '{_root}' 2>/dev/null | head -20")
+        print(f"  [{_root}] files containing the phrases:")
+        print("  " + (hits.replace("\n", "\n  ") if hits else "<none>"))
+        if hits and "<none>" not in hits:
+            findings.append(
+                f"A file under {_root} (section 14c) contains the hourly "
+                "report/urgent subject phrases — this is the generator. "
+                "Write the twice-daily + dedupe fix against it.")
+
+    print("  --- 14d. engine DB report_run_configs / report_runs ---")
+    try:
+        uri = ("file:" + urllib.parse.quote(job_db_path) + "?mode=ro")
+        conn = sqlite3.connect(uri, uri=True, timeout=10)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            for _table in ("report_run_configs", "report_runs"):
+                try:
+                    _cols = [r[1] for r in
+                             conn.execute(f'PRAGMA table_info("{_table}")')]
+                except Exception:
+                    print(f"  --- {_table}: <unreadable>")
+                    continue
+                if not _cols:
+                    print(f"  --- {_table}: <absent>")
+                    continue
+                _rows = conn.execute(
+                    f'SELECT * FROM "{_table}" LIMIT 25').fetchall()
+                print(f"  --- {_table} ({len(_rows)} row(s), "
+                      f"cols={_cols}) ---")
+                for _r in _rows:
+                    print("  " + _redact(" | ".join(
+                        str(_c)[:120] for _c in _r)))
+                if _rows:
+                    findings.append(
+                        f"Engine DB table {_table} has rows (section 14d) — "
+                        "check cadence columns for the hourly audit trigger.")
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - probe must not crash
+        print(f"  <could not open DB read-only: "
+              f"{type(exc).__name__}: {exc}>")
+
+    print("  --- 14e. deployed robie_health_check.py identity ---")
+    _hc = "/opt/streetsmart-hermes/scripts/robie_health_check.py"
+    print("  md5: " + _sh("md5sum", "--", _hc))
+    print("  wc: " + _sh("wc", "-l", "--", _hc))
+    _hc_head = _sh_shell(f"sed -n '1,40p' '{_hc}'")
+    print("  --- first 40 lines (redacted) ---")
+    print("  " + _redact(_hc_head).replace("\n", "\n  "))
+    if _matches_keywords(_hc_head):
+        findings.append(
+            "Deployed robie_health_check.py (section 14e, fired hourly at "
+            ":00 by robie-health-check.timer) contains inbox keywords — "
+            "the hourly report generator.")
 
     section("WHAT THIS MEANS")
     if not findings:
