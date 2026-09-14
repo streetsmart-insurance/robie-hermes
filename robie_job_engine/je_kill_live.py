@@ -421,8 +421,14 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
         self._dismiss_blocking_overlays()
         applied = self._locator(self.scenario.applied_label)
-        control = self._locator(self.scenario.label_control)
-        if applied.count() == 0 and control.count() == 1:
+        if applied.count() == 0:
+            # Table rows settle after domcontentloaded; do not treat a missing
+            # Add-label control as "still labeled" or we click a non-existent edit.
+            self._wait_unique(
+                self._locator(self.scenario.label_control),
+                "click target",
+                LABEL_CONTROL_SETTLE_TIMEOUT_MS,
+            )
             return
         edit = self._edit_labels_locator(page)
         self._require_one(edit, "edit labels").click()

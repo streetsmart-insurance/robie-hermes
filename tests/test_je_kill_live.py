@@ -667,6 +667,8 @@ class _DirtyFixturePage:
         self.labeled = True
         self.clicks: list[str] = []
         self.keyboard = self
+        self.settle_add_after_s: float | None = None
+        self.nav_at: float | None = None
 
     def press(self, key: str) -> None:
         self.clicks.append(f"key:{key}")
@@ -676,9 +678,10 @@ class _DirtyFixturePage:
 
     def goto(self, url, **kwargs):
         self.url = url
+        self.nav_at = time.monotonic()
 
     def reload(self, **kwargs):
-        return None
+        self.nav_at = time.monotonic()
 
     def wait_for_timeout(self, *_args, **_kwargs):
         return None
@@ -735,7 +738,15 @@ class _DirtyLocator:
         if self.kind == "applied":
             return 1 if self.page.labeled else 0
         if self.kind == "add":
-            return 0 if self.page.labeled else 1
+            if self.page.labeled:
+                return 0
+            if self.page.settle_add_after_s is None:
+                return 1
+            if self.page.nav_at is None:
+                return 0
+            if time.monotonic() - self.page.nav_at < self.page.settle_add_after_s:
+                return 0
+            return 1
         return self._count
 
     def click(self, **kwargs):
@@ -809,6 +820,18 @@ class JeKillEnsureCleanDestinationTests(unittest.TestCase):
         port.ensure_clean_destination()
         self.assertNotIn("edit", page.clicks)
         self.assertNotIn("apply", page.clicks)
+
+    def test_ensure_clean_waits_for_add_label_when_unlabeled_not_yet_settled(self):
+        scenario = self._scenario_css()
+        page = _DirtyFixturePage()
+        page.labeled = False
+        page.settle_add_after_s = 0.15
+        page.nav_at = None
+        port = self._port(scenario, page)
+        started = time.monotonic()
+        port.ensure_clean_destination()
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
+        self.assertNotIn("edit", page.clicks)
 
     def test_ensure_clean_clears_leftover_label_via_edit_option_apply(self):
         scenario = self._scenario_css()
