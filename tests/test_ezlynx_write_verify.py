@@ -237,3 +237,16 @@ def test_doc_policy_number_match_corroborates():
     )
     assert evidence["verified"] is True
     assert evidence["checks"]["document_corroboration"]["corroborating_document_found"] is True
+
+
+def test_document_corroboration_name_containment():
+    from robie_job_engine.ezlynx_write_verify import _document_corroborates
+
+    assert _document_corroborates(
+        {"DocumentName": "COI - Green Lion Lawn Care LLC.pdf"}, "", "Green Lion Lawn Care LLC"
+    )
+    assert not _document_corroborates(
+        {"DocumentName": "COI - Some Other Company LLC.pdf"}, "", "Green Lion Lawn Care LLC"
+    )
+    # Short names do not get containment matching.
+    assert not _document_corroborates({"DocumentName": "ABC Corp file.pdf"}, "", "ABC")

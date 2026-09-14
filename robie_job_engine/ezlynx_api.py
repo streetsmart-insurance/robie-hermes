@@ -552,6 +552,28 @@ class EzlynxApiClient:
             raise EzlynxApiError(None, "EZLynx API returned unexpected shape")
         return parsed
 
+    def post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    ) -> Any:
+        """Authenticated POST of a JSON payload against the API origin.
+
+        Added for the verified writers (discussion notes). ``path`` is
+        relative to the API origin, e.g. ``"/DiscussionApi/discussions/v1/notes"``.
+        Fail-closed: transport and HTTP errors raise EzlynxApiError.
+        """
+        url = self._origin() + "/" + str(path or "").lstrip("/")
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        return self._request_json("POST", url, data=data, headers=headers, timeout=timeout)
+
     def _response_content_type(self, resp: Any) -> str:
         headers = getattr(resp, "headers", None) or {}
         getter = getattr(headers, "get", None)

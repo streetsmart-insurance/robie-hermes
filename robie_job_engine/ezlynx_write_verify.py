@@ -57,9 +57,23 @@ _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
 _DBA_TAIL_RE = re.compile(r"\s+dba\s+.+$", re.IGNORECASE)
 # Document fields consulted, in order, for an insured/policy reference.
-# Exact DocumentApi field names get pinned when the live wiring is built.
-_DOC_NAME_FIELDS = ("insured_name", "name", "title", "description", "file_name")
-_DOC_POLICY_FIELDS = ("policy_number", "policyNumber")
+# Covers the raw DocumentApi shapes and the normalized shape produced by
+# ezlynx_api.document_display_fields (name/description/policy_number).
+_DOC_NAME_FIELDS = (
+    "DocumentName",
+    "documentName",
+    "Name",
+    "name",
+    "FileName",
+    "fileName",
+    "Title",
+    "title",
+    "Description",
+    "description",
+    "insured_name",
+    "file_name",
+)
+_DOC_POLICY_FIELDS = ("PolicyNumber", "policyNumber", "policy_number")
 
 
 class EzlynxWriteVerifyError(RuntimeError):
@@ -86,14 +100,22 @@ def names_match(expected: object, actual: object) -> bool:
 
 
 def _document_corroborates(doc: dict, policy_number: str, expected_name: object) -> bool:
-    """True when one document references the expected policy or insured name."""
+    """True when one document references the expected policy or insured name.
+
+    Policy numbers match exactly. Names corroborate by containment: a
+    document named ``"COI - Green Lion Lawn Care LLC.pdf"`` references the
+    insured even though it is not exactly the insured's name. The length
+    guard keeps short names from matching everything.
+    """
 
     for field in _DOC_POLICY_FIELDS:
         if policy_number and str(doc.get(field) or "").strip() == policy_number:
             return True
-    for field in _DOC_NAME_FIELDS:
-        if names_match(expected_name, doc.get(field)):
-            return True
+    want = normalize_name(expected_name)
+    if len(want) >= 4:
+        for field in _DOC_NAME_FIELDS:
+            if want in normalize_name(doc.get(field)):
+                return True
     return False
 
 
