@@ -145,3 +145,95 @@ def test_names_match_rule(expected, actual, want):
 
 def test_normalize_name():
     assert normalize_name("  Green\tLion, LLC! ") == "green lion llc"
+
+
+# Check 4 -- document corroboration (COI / hello-inbox path: no policy number).
+
+
+def _docs_fetch_match(applicant_id):
+    return [
+        {"title": "Certificate of Insurance", "insured_name": "Green Lion Lawn Care LLC"},
+        {"title": "Dec page", "policy_number": "OTHER123"},
+    ]
+
+
+def _docs_fetch_disagree(applicant_id):
+    return [{"title": "Certificate of Insurance", "insured_name": "Some Other Company LLC"}]
+
+
+def test_coi_no_policy_docs_corroborate_pass():
+    evidence = verify_write_target(
+        APPLICANT,
+        expected_name="Green Lion Lawn Care LLC",
+        policy_search_fn=None,
+        applicant_fetch_fn=_fetch_ok,
+        documents_fetch_fn=_docs_fetch_match,
+    )
+    assert evidence["verified"] is True
+    check4 = evidence["checks"]["document_corroboration"]
+    assert check4["passed"] is True
+    assert check4["documents_reviewed"] == 2
+    assert check4["corroborating_document_found"] is True
+
+
+def test_coi_no_policy_docs_disagree_refuse():
+    with pytest.raises(EzlynxWriteVerifyError, match="check 4"):
+        verify_write_target(
+            APPLICANT,
+            expected_name="Green Lion Lawn Care LLC",
+            policy_search_fn=None,
+            applicant_fetch_fn=_fetch_ok,
+            documents_fetch_fn=_docs_fetch_disagree,
+        )
+
+
+def test_coi_no_policy_no_docs_pass_with_note():
+    evidence = verify_write_target(
+        APPLICANT,
+        expected_name="Green Lion Lawn Care LLC",
+        policy_search_fn=None,
+        applicant_fetch_fn=_fetch_ok,
+        documents_fetch_fn=lambda aid: [],
+    )
+    assert evidence["verified"] is True
+    check4 = evidence["checks"]["document_corroboration"]
+    assert check4["passed"] is True and check4["skipped"] is True
+
+
+def test_policy_known_docs_disagree_is_evidence_only():
+    evidence = verify_write_target(
+        APPLICANT,
+        expected_policy_number=POLICY,
+        expected_name="Green Lion Lawn Care LLC",
+        policy_search_fn=_search_ok,
+        applicant_fetch_fn=_fetch_ok,
+        documents_fetch_fn=_docs_fetch_disagree,
+    )
+    assert evidence["verified"] is True
+    check4 = evidence["checks"]["document_corroboration"]
+    assert check4["passed"] is True and check4["evidence_only"] is True
+
+
+def test_check4_skipped_without_fn():
+    evidence = verify_write_target(
+        APPLICANT,
+        expected_policy_number=POLICY,
+        expected_name="Green Lion Lawn Care LLC",
+        policy_search_fn=_search_ok,
+        applicant_fetch_fn=_fetch_ok,
+    )
+    check4 = evidence["checks"]["document_corroboration"]
+    assert check4["passed"] is True and check4["skipped"] is True
+
+
+def test_doc_policy_number_match_corroborates():
+    evidence = verify_write_target(
+        APPLICANT,
+        expected_policy_number=POLICY,
+        expected_name="Green Lion Lawn Care LLC",
+        policy_search_fn=_search_ok,
+        applicant_fetch_fn=_fetch_ok,
+        documents_fetch_fn=lambda aid: [{"file_name": "cert.pdf", "policy_number": POLICY}],
+    )
+    assert evidence["verified"] is True
+    assert evidence["checks"]["document_corroboration"]["corroborating_document_found"] is True

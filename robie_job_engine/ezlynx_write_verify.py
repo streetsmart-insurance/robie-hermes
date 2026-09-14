@@ -19,8 +19,16 @@ Check 3 -- name cross-reference: the name on the applicant record must
     independent identifier, guarding against a consistently-wrong
     policy-number/applicant-id pair in the input data.
 
+Check 4 -- document corroboration (optional): read the applicant's
+    documents tab. The account's own paperwork is another independent
+    signal of who the account belongs to. This is the backup identifier
+    for writes with no policy number (COI requests, hello-inbox items):
+    when check 2 is skipped and the documents name a different insured,
+    the write is refused. When a policy number was verified (check 2
+    passed), check 4 is evidence only and never refuses on its own.
+
 Any failure refuses the write with the evidence attached. Nothing here
-performs network I/O itself: the two EZLynx reads are injected as
+performs network I/O itself: the EZLynx reads are injected as
 callables so the verifier is unit-testable and the live HTTP wiring
 (API session, retry, auth) stays in one place when it is built.
 
@@ -48,6 +56,10 @@ EZLYNX_WRITE_VERIFY_REFUSED = "EZLYNX_WRITE_VERIFY_REFUSED"
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
 _DBA_TAIL_RE = re.compile(r"\s+dba\s+.+$", re.IGNORECASE)
+# Document fields consulted, in order, for an insured/policy reference.
+# Exact DocumentApi field names get pinned when the live wiring is built.
+_DOC_NAME_FIELDS = ("insured_name", "name", "title", "description", "file_name")
+_DOC_POLICY_FIELDS = ("policy_number", "policyNumber")
 
 
 class EzlynxWriteVerifyError(RuntimeError):
@@ -73,6 +85,18 @@ def names_match(expected: object, actual: object) -> bool:
     return bool(want_no_dba) and want_no_dba == got
 
 
+def _document_corroborates(doc: dict, policy_number: str, expected_name: object) -> bool:
+    """True when one document references the expected policy or insured name."""
+
+    for field in _DOC_POLICY_FIELDS:
+        if policy_number and str(doc.get(field) or "").strip() == policy_number:
+            return True
+    for field in _DOC_NAME_FIELDS:
+        if names_match(expected_name, doc.get(field)):
+            return True
+    return False
+
+
 def verify_write_target(
     applicant_id: object,
     *,
@@ -80,8 +104,9 @@ def verify_write_target(
     expected_name: object = None,
     policy_search_fn: Optional[Callable[[str], Optional[dict]]] = None,
     applicant_fetch_fn: Optional[Callable[[str], Optional[dict]]] = None,
+    documents_fetch_fn: Optional[Callable[[str], list]] = None,
 ) -> dict:
-    """Run the triple check. Returns the evidence bundle or raises.
+    """Run the verification. Returns the evidence bundle or raises.
 
     ``policy_search_fn(policy_number)`` must return a mapping with
     ``applicant_id`` (and ideally ``policy_number``) for the policy EZLynx
@@ -90,8 +115,13 @@ def verify_write_target(
     ``applicant_fetch_fn(applicant_id)`` must return a mapping with ``name``
     for the applicant record, or ``None`` when the record cannot be read.
 
-    When ``expected_policy_number`` is not known for a write, check 2 is
-    recorded as skipped and checks 1 and 3 still gate the write.
+    ``documents_fetch_fn(applicant_id)`` must return a list of document
+    mappings for the applicant's documents tab (``[]`` when empty).
+
+    When ``expected_policy_number`` is not known for a write (COI request,
+    hello-inbox item), check 2 is recorded as skipped and checks 1 and 3
+    still gate the write; check 4 then corroborates against the documents
+    tab and refuses when the paperwork disagrees.
     """
 
     target = normalize_applicant_id(applicant_id)
@@ -164,6 +194,51 @@ def verify_write_target(
             f"failed -- expected {str(expected_name or '')!r}, applicant "
             f"{target} record shows {str(actual_name or '')!r}"
         )
+
+    # Check 4 -- document corroboration (optional).
+    policy_check = evidence["checks"]["policy_cross_reference"]
+    if documents_fetch_fn is None:
+        evidence["checks"]["document_corroboration"] = {
+            "passed": True,
+            "skipped": True,
+            "reason": "no documents_fetch_fn supplied",
+        }
+    else:
+        documents = list(documents_fetch_fn(target) or [])
+        corroborating = next(
+            (d for d in documents if _document_corroborates(d, policy_number, expected_name)),
+            None,
+        )
+        check4: dict = {
+            "documents_reviewed": len(documents),
+            "corroborating_document_found": corroborating is not None,
+        }
+        if not documents:
+            # Nothing on the tab to corroborate with -- pass on checks 1-3, say so.
+            check4.update(
+                {"passed": True, "skipped": True, "reason": "no documents on applicant"}
+            )
+        elif corroborating is not None:
+            check4.update({"passed": True})
+        elif policy_check.get("skipped"):
+            # No policy number AND the paperwork names someone else: refuse.
+            check4.update({"passed": False})
+            evidence["checks"]["document_corroboration"] = check4
+            raise EzlynxWriteVerifyError(
+                f"{EZLYNX_WRITE_VERIFY_REFUSED}: check 4 (document corroboration) "
+                f"failed -- {len(documents)} document(s) on applicant {target} "
+                f"and none reference {str(expected_name or '')!r}"
+            )
+        else:
+            # Policy number already verified ownership; documents are evidence only.
+            check4.update(
+                {
+                    "passed": True,
+                    "evidence_only": True,
+                    "reason": "policy ownership already verified by check 2",
+                }
+            )
+        evidence["checks"]["document_corroboration"] = check4
 
     evidence["verified"] = True
     return evidence
