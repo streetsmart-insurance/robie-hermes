@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
+          env PYTHONPATH="${APP_ROOT}" \
             "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
             --app-root "${APP_ROOT}" --mode preflight
           REMOTE_EOF
@@ -229,7 +229,7 @@ jobs:
           set -euo pipefail
           trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
+          env PYTHONPATH="${APP_ROOT}" \
             "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
             --app-root "${APP_ROOT}" --mode verify
           REMOTE_EOF
