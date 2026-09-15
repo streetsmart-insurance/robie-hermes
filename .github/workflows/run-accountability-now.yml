@@ -82,6 +82,21 @@ jobs:
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --command="sudo install -o root -g root -m 0644 ${remote_timer} /etc/systemd/system/streetsmart-accountability.timer && sudo rm -f ${remote_timer} && sudo systemctl daemon-reload"
 
+      - name: Repair the installed lock timeout
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --command="sudo bash -s" <<'LOCK_EOF'
+          set -euo pipefail
+          wrapper=/opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh
+          test -x "${wrapper}"
+          if grep -Eq 'flock .*15m' "${wrapper}"; then
+            sed -i -E '/flock/ s/15m/900/' "${wrapper}"
+          fi
+          ! grep -Eq 'flock .*15m' "${wrapper}"
+          grep -Eq 'flock .*900' "${wrapper}"
+          LOCK_EOF
+
       - name: Verify installed fail-closed runtime
         run: |
           set -euo pipefail
