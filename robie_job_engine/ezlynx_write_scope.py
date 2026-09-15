@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 EZLYNX_WRITE_SCOPE_REFUSED = "EZLYNX_WRITE_SCOPE_REFUSED"
 EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "EZLYNX_WRITE_APPLICANT_IDS"
+EZLYNX_HOSTS = frozenset({"app.ezlynx.com", "app.uatezlynx.com"})
 DEFAULT_ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = frozenset({"220250093"})
 PRODUCTION_JOB_DB = Path("/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
 _ACCOUNT_PATH = re.compile(r"/web/account/([^/?#]+)(?:/|$)", re.IGNORECASE)
@@ -152,7 +153,7 @@ def require_allowed_ezlynx_write_applicant(value: object) -> str:
 
 def applicant_id_from_ezlynx_url(url: object) -> str | None:
     parsed = urlparse(str(url or "").strip())
-    if parsed.hostname and parsed.hostname.casefold() != "app.ezlynx.com":
+    if parsed.hostname and parsed.hostname.casefold() not in EZLYNX_HOSTS:
         return None
     path = parsed.path or ""
     match = (
