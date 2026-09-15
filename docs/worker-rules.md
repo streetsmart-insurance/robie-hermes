@@ -306,6 +306,55 @@ Snapshot only. These explain where the rules came from; they are not permanent w
 - **"Our directory"** = Carlo's Google Contacts (XS Brokers proven: accounting@xsbrokers.com, (617) 890-4209).
 - **Hourly worker-chat recon** ran ~hourly through 20:00 EDT; end-of-day report runonce at 21:00 EDT; robie@ inbox monitoring added to the hourly job.
 
+## 20. Outbound email → EZLynx note logging (APPROVED by Carlo 2026-09-14 ~21:12 EDT)
+
+Every time Ralph or a Robie worker sends an email outside EZLynx about an EZLynx policy or account, the same worker must add a note on that account in EZLynx documenting the outbound email.
+
+Carlo's decisions, in his words:
+- ~17:30 EDT: "whenever Ralph emails outside EZLynx about an EZLynx policy/account, Ralph must add an EZLynx note documenting the outbound email. The note should include date, sender, recipient, subject, and a summary of the request." First use: the Amy O'Donnell/XS Brokers email for ISCA Contracting `BDG-312624001`, logged on EZLynx account `82861889` at 5:29 PM.
+- ~17:34 EDT: "yes log notes all the time."
+- ~20:40 EDT: reaffirmed as a standing rule to all 8 worker chats.
+
+Status: **BUILT as a manual standing rule.** The worker sends the email, then adds an EZLynx Discussion note by hand. Nothing is automatic.
+
+Every note must contain: date sent, sender (e.g. `robie@streetsmart.insurance`), recipient, exact subject line, and a short summary of what the email asked for.
+
+Applicant rule — **BUILT.** Resolve the applicant ID before writing. Never guess. Match by client email, policy number, or insured name against the directory; if it cannot be resolved with certainty, mark the email's logging as UNVERIFIED and report it — do not write the note to the wrong account.
+
+Duplicate check — the Julio's Tree Service lesson. The same underwriter note was logged 4 times on one account — Note IDs `1126364012`, `1126383038`, `1126386695`, `1126390715` — one for each hourly "[URGENT / CSR ACTION]" email to sandy@. Before writing a note, the worker must check whether an equivalent note for the same email already exists on the account. If one exists, do not write another. Today this check is done by eye; there is no automatic duplicate detection.
+
+Automation status — **DESIGNED, not built.** `ezlynx_writers.post_note()` exists in `robie_job_engine/ezlynx_writers.py`, but the file itself says "NOTE POST PATH UNVERIFIED" — it has never run live and sits in open PR #414 (`ralph/ezlynx-write-scope-configurable`) with failing CI. The read side is broken: all four probed API shapes for reading notes return HTTP 404, so an automatic duplicate check cannot work until EZLynx provides a way to read notes.
+
+Open decisions on this rule (Carlo's desk):
+1. Carlo's 2026-09-12 ask — "For the email report from robie can we have it clean up its emails using ezlynx api and make sure its on robie forever unless we change" — confirm or correct the interpretation (duplicate-check via API + permanent Robie-server schedule).
+2. Should sent-email→note logging become automatic, or stay manual?
+3. Approve an EZLynx support request to get a working note-read API path?
+
+## 21. Document filing to EZLynx (APPROVED by Carlo 2026-09-14 ~21:12 EDT)
+
+Which documents the workers save into EZLynx, where they go, and which method they use.
+
+Carlo's decisions, in his words:
+- 2026-09-14: "I clear that please do this" — uploading renewal documents to client applicant accounts in EZLynx, scoped to the manual renewal worker. Standing limits still on: never delete a policy, never bind/quote without his per-policy approval, never contact clients, every action in the morning report.
+- 2026-09-12: "use the Documents API to push documents into EZLynx" — direction given, never proven live.
+
+Status: **BUILT (browser, verified 2026-09-14).** Every real filing today went through the browser:
+- Renewal offers filed as "renewal offer" — e.g. the AmWINS renewal offer for John Kotarja, policy `25AWA1265-01946`, Quote `534809R1-1`.
+- Policy PDFs to Documents → "Policy Changes/Declarations" — e.g. the Scottsdale GL policy for Top to Bottom Insulation LLC, applicant `219608909`, uploaded by Carlo Ferrara on 09/14/2026 and verified in the Documents list. Also the Ategrity GL PDF for Express Automotive, filed to the Documents tab.
+- Hello inbox SOP: cancellation NOCs are saved/renamed and attached to the matching EZLynx workflow; emails and correspondence get the 'email received' label; one discussion per correspondent account (separate discussions, not one merged thread); when no current workflow exists, the filing goes "for record."
+
+Automation status — split:
+- Document search/download via API: **WORKING.** Proven 2026-09-11 on hermes-poc-01 as SSRobie against applicant `220250093` (`GET /documentapi/documents/v1/account/{id}/document-search`).
+- Document upload via API: **DESIGNED, not built.** `EzlynxApiClient.upload_applicant_document` merged in PR #295 (2026-09-12), and `ezlynx_writers.upload_document()` has a passing unit test — but it sits in open PR #414 with failing CI and has never run live against a real applicant. The folders/labels the API would land in are unproven.
+- Download direction: `~/workspace/robie-manual-ops/ezlynx_docpull.py` (2,464 bytes, created 09-14 02:04) — **DESIGNED, never run.**
+
+Open decisions on this rule (Carlo's desk):
+1. Standing clearance for other doc types (cancellation NOCs, audit documents, certificates, correspondence) beyond renewals?
+2. Keep browser filing as the standard, or switch to the API upload path after PR #414's CI is fixed and it's merged?
+3. Which folders and labels must API uploads use, to match the browser conventions?
+4. Should the download direction (`ezlynx_docpull.py`) be activated at all?
+
+
 ---
 
 *End of worker-rules draft. Carlo's review and approval required before any rule is enforced.*
