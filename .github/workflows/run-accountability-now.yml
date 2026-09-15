@@ -72,6 +72,15 @@ jobs:
           fi
           echo "dedicated target confirmed"
 
+      - name: Install the canonical weekday timer
+        run: |
+          set -euo pipefail
+          gcloud compute scp deploy/systemd/streetsmart-accountability.timer \
+            "${PRODUCTION_VM}:/tmp/streetsmart-accountability.timer" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --command="sudo install -o root -g root -m 0644 /tmp/streetsmart-accountability.timer /etc/systemd/system/streetsmart-accountability.timer && sudo systemctl daemon-reload"
+
       - name: Verify installed fail-closed runtime
         run: |
           set -euo pipefail
