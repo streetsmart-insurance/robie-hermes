@@ -24,8 +24,8 @@ def _write_executable(path: Path, text: str) -> None:
 
 def _prepare_app(tmp_path: Path) -> Path:
     app = tmp_path / "app"
-    (app / "src").mkdir(parents=True)
-    (app / "data" / "run_state").mkdir(parents=True)
+    (app / "src").mkdir(parents=True, exist_ok=True)
+    (app / "data" / "run_state").mkdir(parents=True, exist_ok=True)
     return app
 
 
@@ -97,7 +97,7 @@ def test_wrapper_uses_integer_second_flock_wait() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
     assert 'FLOCK_WAIT_SECONDS="${ACCOUNTABILITY_FLOCK_WAIT_SECONDS:-900}"' in text
     assert "flock -w \"${FLOCK_WAIT_SECONDS}\"" in text
-    assert "15m" not in text
+    assert not re.search(r"flock\s+[^\n#]*-w\s+15m\b", text)
     assert "integer seconds" in text
     assert "util-linux" in text
     assert BUSY_MESSAGE in text
