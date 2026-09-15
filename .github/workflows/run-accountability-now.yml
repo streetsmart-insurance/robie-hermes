@@ -41,14 +41,35 @@ jobs:
           service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v3
 
+      - name: Inspect the dedicated VM state
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "streetsmart-accountability-prod"
+          status="$(gcloud compute instances describe "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(status)')"
+          if [ "${status}" != "RUNNING" ]; then
+            echo "::error::Dedicated accountability VM is not RUNNING (state=${status:-unknown})."
+            exit 1
+          fi
+          echo "dedicated instance state: RUNNING"
+
       - name: Confirm the dedicated accountability target
         run: |
           set -euo pipefail
           test "${PRODUCTION_VM}" = "streetsmart-accountability-prod"
           test "${APP_ROOT}" = "/opt/streetsmart-daily-accountability"
-          host="$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="hostname -s" 2>/dev/null | tail -1 | tr -d '\r')"
-          test "${host}" = "streetsmart-accountability-prod"
+          if ! ssh_output="$(gcloud compute ssh "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --quiet --command="hostname -s" 2>&1)"; then
+            echo "::error::Could not SSH to the dedicated accountability VM. The gcloud error below distinguishes OS Login, IAP, instance-state, and network failures."
+            printf '%s\n' "${ssh_output}" >&2
+            exit 1
+          fi
+          host="$(printf '%s\n' "${ssh_output}" | tail -1 | tr -d '\r')"
+          if [ "${host}" != "streetsmart-accountability-prod" ]; then
+            echo "::error::Dedicated target hostname mismatch."
+            exit 1
+          fi
           echo "dedicated target confirmed"
 
       - name: Verify installed fail-closed runtime
