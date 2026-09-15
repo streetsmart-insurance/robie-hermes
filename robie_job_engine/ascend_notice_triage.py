@@ -25,6 +25,7 @@ from typing import Any
 from uuid import UUID
 
 from .ascend_api import AscendApiClient, AscendApiError
+from .zapier_tasks import validate_due_date
 
 LATE_PAYMENT = "late_payment"
 CANCELLATION = "cancellation"
@@ -301,13 +302,16 @@ def build_cancellation_task_payload(
     triage_result: dict[str, Any],
     applicant_id: str,
     account_csr: str,
+    due_date: str,
 ) -> dict[str, Any]:
     """Build the Zapier EZLynx-task payload for a cancellation notice.
 
     The task goes to the CSR on the matched EZLynx account -- ``account_csr``
     is resolved dynamically by the caller from the account (there is no
-    static default assignee).  Triage itself never invents the applicant or
-    the CSR.  Firing happens through the zapier skill's ``bin/zap-trigger``
+    static default assignee).  ``due_date`` is required (ISO YYYY-MM-DD):
+    the Zapier firing layer rejects task payloads without a valid due date.
+    Triage itself never invents the applicant or the CSR.  Firing happens
+    through the zapier skill's ``bin/zap-trigger``
     (see ``robie_job_engine/zapier_tasks.py``), never from inside this
     read-only module.
     """
@@ -332,6 +336,7 @@ def build_cancellation_task_payload(
         "task_title": f"Ascend cancellation notice - {insured}{policy_bits}",
         "assignee": str(account_csr).strip(),
         "source": ZAPIER_SOURCE,
+        "due_date": validate_due_date(due_date),
         "email_subject": triage_result.get("email_subject") or "",
         "notice_type": CANCELLATION,
         "program_uuid": triage_result.get("program_uuid") or "",
