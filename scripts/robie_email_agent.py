@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from robie_job_engine.email_guard import EmailTaskPending, run_guarded_email_task
 from robie_job_engine.ascend_workflow import AscendWorkflowManager
 from robie_job_engine.quote_extractor import ExtractedQuote, strip_email_reply_history
+from robie_job_engine.email_sender_policy import is_allowed_sender, is_self_sender
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("robie_email_agent")
@@ -38,7 +39,6 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(OPT_ROOT / ".hermes")))
 if HERMES_HOME != OPT_ROOT / ".hermes":
     raise RuntimeError("Email Hermes home is outside its installed environment")
 TOKEN_PATH = str(HERMES_HOME / "robie_google_token.json")
-ALLOWED_SENDERS = {"carlo@streetsmart.insurance", "jake@streetsmart.insurance"}
 STATE_FILE = HERMES_HOME / "robie_processed_emails.json"
 SESSION_FILE = Path(os.environ.get("ROBIE_SESSION_FILE", str(HERMES_HOME / "robie_ascend_sessions.json")))
 JOB_DB = os.environ.get("ROBIE_JOB_DB", str(OPT_ROOT / "robie-job-engine/data/jobs.db"))
@@ -63,15 +63,6 @@ def save_ascend_sessions(sessions: dict):
         SESSION_FILE.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
     except Exception as exc:
         logger.warning("Failed saving ascend sessions: %s", exc)
-
-
-def is_allowed_sender(sender: str) -> bool:
-    clean_sender = sender.lower().strip()
-    if clean_sender in ALLOWED_SENDERS:
-        return True
-    if clean_sender.endswith("@streetsmart.insurance") or clean_sender.endswith("@streetsmartinsurance.com"):
-        return True
-    return False
 
 
 def get_gmail_service():
@@ -632,29 +623,36 @@ def process_inbox():
             logger.info("Durable email job is pending; leaving message unread")
             continue
 
-        # Send clean reply: short plain sentences, text/plain 8bit.
-        # MIMEText quoted-printable wraps mid-word and smashes Gmail mobile.
-        from robie_job_engine.hitl_copy import worker_report_human_text
-        from robie_job_engine.verification_mailer import build_plain_email_message
+        # 2026-09-14: never reply to our own mailbox. is_allowed_sender()
+        # already rejects self-senders above; this is defense-in-depth so a
+        # future sender-policy change can never restart the self-reply loop
+        # that sent ~40 robie@->robie@ emails in one night.
+        if is_self_sender(sender):
+            logger.warning("Skipping self-reply to %s on thread %s", sender, thread_id)
+        else:
+            # Send clean reply: short plain sentences, text/plain 8bit.
+            # MIMEText quoted-printable wraps mid-word and smashes Gmail mobile.
+            from robie_job_engine.hitl_copy import worker_report_human_text
+            from robie_job_engine.verification_mailer import build_plain_email_message
 
-        reply_body = worker_report_human_text(response_text, channel="email")
-        reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
-        reply_msg = build_plain_email_message(
-            sender="Robie AI <robie@streetsmart.insurance>",
-            to=[sender],
-            cc=[],
-            subject=reply_subject,
-            text_body=reply_body,
-            plain_only=True,
-        )
-        reply_msg["In-Reply-To"] = headers.get("message-id", "")
-        reply_msg["References"] = headers.get("message-id", "")
+            reply_body = worker_report_human_text(response_text, channel="email")
+            reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
+            reply_msg = build_plain_email_message(
+                sender="Robie AI <robie@streetsmart.insurance>",
+                to=[sender],
+                cc=[],
+                subject=reply_subject,
+                text_body=reply_body,
+                plain_only=True,
+            )
+            reply_msg["In-Reply-To"] = headers.get("message-id", "")
+            reply_msg["References"] = headers.get("message-id", "")
 
-        raw_payload = base64.urlsafe_b64encode(reply_msg.as_bytes()).decode("utf-8")
-        service.users().messages().send(
-            userId="me",
-            body={"raw": raw_payload, "threadId": thread_id}
-        ).execute()
+            raw_payload = base64.urlsafe_b64encode(reply_msg.as_bytes()).decode("utf-8")
+            service.users().messages().send(
+                userId="me",
+                body={"raw": raw_payload, "threadId": thread_id}
+            ).execute()
 
         # Mark as read
         service.users().messages().modify(
@@ -665,7 +663,7 @@ def process_inbox():
 
         processed_ids.add(msg_id)
         save_processed_ids(processed_ids)
-        logger.info("✓ Clean reply sent to %s on thread %s", sender, thread_id)
+        logger.info("Processed message from %s on thread %s (reply sent: %s)", sender, thread_id, not is_self_sender(sender))
 
 
 if __name__ == "__main__":
