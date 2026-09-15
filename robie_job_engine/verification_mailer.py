@@ -20,7 +20,9 @@ from email.policy import SMTP
 from typing import Any
 
 from . import accountability_delivery
+from .email_sender_policy import is_self_sender
 from .hitl_copy import sanitize_plain_text
+from .outbound_send_guard import should_skip_send
 
 logger = logging.getLogger("robie.verification_mailer")
 
@@ -111,6 +113,16 @@ def send_verification_email(
     if not body_text.strip():
         raise ValueError("verification email requires a text body")
 
+    # 2026-09-14: the four verification workers share this send path. A worker
+    # must never address our own mailbox (that is loop fuel for the inbox
+    # agent) and must never repeat a send already sitting in Sent
+    # (no-blind-resend is now code, not a chat rule). Both fail closed.
+    for addr in recipients + cc_list:
+        if is_self_sender(addr):
+            raise ValueError(
+                "verification email must not be addressed to the robie@ mailbox"
+            )
+
     sender = _sender()
     service_account = _delegated_service_account()
     if not sender or not service_account:
@@ -134,6 +146,25 @@ def send_verification_email(
     context = _redacted_log_context(recipients, cc_list, subject_text)
     try:
         gmail = accountability_delivery._delegated_gmail_sender(service_account, sender)
+    except Exception as exc:
+        logger.error(
+            "verification email send failed: %s %s",
+            type(exc).__name__,
+            context,
+        )
+        raise
+    # Sent-folder duplicate check: the guard fails open on lookup errors, so
+    # a Gmail hiccup never blocks legitimate worker mail — but an actual
+    # duplicate in Sent refuses the send loudly instead of double-sending.
+    for addr in recipients:
+        skip, _reason = should_skip_send(gmail, addr, subject_text)
+        if skip:
+            logger.warning("duplicate verification email refused: %s", context)
+            raise ValueError(
+                "duplicate verification email refused: an identical message "
+                "is already in Sent"
+            )
+    try:
         sent = (
             gmail.users()
             .messages()
@@ -164,3 +195,4 @@ def send_verification_email(
     }
     logger.info("verification email sent: %s", {**context, "message_id": message_id})
     return receipt
+
