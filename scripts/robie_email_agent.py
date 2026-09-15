@@ -22,6 +22,7 @@ from robie_job_engine.email_guard import EmailTaskPending, run_guarded_email_tas
 from robie_job_engine.ascend_workflow import AscendWorkflowManager
 from robie_job_engine.quote_extractor import ExtractedQuote, strip_email_reply_history
 from robie_job_engine.email_sender_policy import is_allowed_sender, is_self_sender
+from robie_job_engine.outbound_send_guard import should_skip_send
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("robie_email_agent")
@@ -637,22 +638,31 @@ def process_inbox():
 
             reply_body = worker_report_human_text(response_text, channel="email")
             reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
-            reply_msg = build_plain_email_message(
-                sender="Robie AI <robie@streetsmart.insurance>",
-                to=[sender],
-                cc=[],
-                subject=reply_subject,
-                text_body=reply_body,
-                plain_only=True,
-            )
-            reply_msg["In-Reply-To"] = headers.get("message-id", "")
-            reply_msg["References"] = headers.get("message-id", "")
+            # 2026-09-14: no-blind-resend as code. Check Sent before sending so a
+            # retry or duplicate run can never double-send (Julio's Tree Service).
+            skip_send, skip_reason = should_skip_send(service, sender, reply_subject)
+            if skip_send:
+                logger.warning(
+                    "Skipping duplicate reply to %s on thread %s: %s",
+                    sender, thread_id, skip_reason,
+                )
+            else:
+                reply_msg = build_plain_email_message(
+                    sender="Robie AI <robie@streetsmart.insurance>",
+                    to=[sender],
+                    cc=[],
+                    subject=reply_subject,
+                    text_body=reply_body,
+                    plain_only=True,
+                )
+                reply_msg["In-Reply-To"] = headers.get("message-id", "")
+                reply_msg["References"] = headers.get("message-id", "")
 
-            raw_payload = base64.urlsafe_b64encode(reply_msg.as_bytes()).decode("utf-8")
-            service.users().messages().send(
-                userId="me",
-                body={"raw": raw_payload, "threadId": thread_id}
-            ).execute()
+                raw_payload = base64.urlsafe_b64encode(reply_msg.as_bytes()).decode("utf-8")
+                service.users().messages().send(
+                    userId="me",
+                    body={"raw": raw_payload, "threadId": thread_id}
+                ).execute()
 
         # Mark as read
         service.users().messages().modify(
