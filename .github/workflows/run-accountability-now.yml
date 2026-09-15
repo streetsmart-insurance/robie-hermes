@@ -131,11 +131,10 @@ jobs:
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
           set -euo pipefail
-          installed="${remote_verify}.ubuntu"
-          trap 'rm -f "${remote_verify}" "${installed}"' EXIT
-          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${installed}"
+          trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
-            "${APP_ROOT}/venv/bin/python" "${installed}" \
+            "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
             --app-root "${APP_ROOT}" --mode preflight
           REMOTE_EOF
 
@@ -228,11 +227,10 @@ jobs:
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
             > "${RUNNER_TEMP}/accountability-gmail-verification.json"
           set -euo pipefail
-          installed="${remote_verify}.ubuntu"
-          trap 'rm -f "${remote_verify}" "${installed}"' EXIT
-          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${installed}"
+          trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
-            "${APP_ROOT}/venv/bin/python" "${installed}" \
+            "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
             --app-root "${APP_ROOT}" --mode verify
           REMOTE_EOF
           cat "${RUNNER_TEMP}/accountability-gmail-verification.json" >> "${GITHUB_STEP_SUMMARY}"
