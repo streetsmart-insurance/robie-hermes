@@ -75,11 +75,12 @@ jobs:
       - name: Install the canonical weekday timer
         run: |
           set -euo pipefail
+          remote_timer="/tmp/streetsmart-accountability-${GITHUB_RUN_ID}.timer"
           gcloud compute scp deploy/systemd/streetsmart-accountability.timer \
-            "${PRODUCTION_VM}:/tmp/streetsmart-accountability.timer" \
+            "${PRODUCTION_VM}:${remote_timer}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="sudo install -o root -g root -m 0644 /tmp/streetsmart-accountability.timer /etc/systemd/system/streetsmart-accountability.timer && sudo systemctl daemon-reload"
+            --tunnel-through-iap --command="sudo install -o root -g root -m 0644 ${remote_timer} /etc/systemd/system/streetsmart-accountability.timer && sudo rm -f ${remote_timer} && sudo systemctl daemon-reload"
 
       - name: Verify installed fail-closed runtime
         run: |
