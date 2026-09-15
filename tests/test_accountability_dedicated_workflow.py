@@ -30,3 +30,12 @@ def test_manual_accountability_workflow_verifies_date_and_delivery_marker():
     assert "success marker was not created by today's run" in text
     assert "document_url" in text
     assert "cancel-in-progress: false" in text
+
+
+def test_manual_accountability_workflow_exposes_actionable_ssh_failure():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "gcloud compute instances describe" in text
+    assert "state=${status:-unknown}" in text
+    assert '--quiet --command="hostname -s" 2>&1' in text
+    assert "2>/dev/null" not in text
+    assert "distinguishes OS Login, IAP, instance-state, and network failures" in text
