@@ -1,3 +1,10 @@
+# RETIRED. Do not enable.
+# Why: a Chrome restart without a trailing login is the bug.
+# Must not be enabled without a trailing ezlynx_login_bootstrap.py step.
+# The live Production copy on hermes-poc-01 is disabled, not removed
+# (Dusty already `systemctl disable --now`; mask failed because the unit
+# is a real file in /etc/systemd/system). Do not delete the live unit.
+# Do not enable it. Session heal is monitor-ezlynx-session.yml.
 [Unit]
 Description=Refresh Robie's persistent Chrome session daily at 3:30 AM Eastern
 

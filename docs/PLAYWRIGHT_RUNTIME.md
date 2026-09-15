@@ -71,8 +71,13 @@ overlay. It does not modify a live Hermes installation in place.
   that exposes the tool to CLI and Google Chat profiles.
 - `deploy/hermes/SOUL.playwright.md` is the browser invariant to merge into the
   deployed Robie identity file.
-- `deploy/systemd/robie-chrome-refresh.service` and `.timer` refresh the
-  persistent browser on a bounded daily schedule.
+- `deploy/systemd/robie-chrome-refresh.service` and `.timer` stay in this
+  tree as retired (a restart without a trailing login is the bug). They
+  must not be enabled without a trailing `ezlynx_login_bootstrap.py`.
+  The live Production copy is disabled, not removed (`systemctl disable
+  --now`; mask failed because the unit is a real file in
+  `/etc/systemd/system`). Do not delete the live unit. Do not enable it.
+  Session heal is `.github/workflows/monitor-ezlynx-session.yml`.
 
 ## Deployment contract
 

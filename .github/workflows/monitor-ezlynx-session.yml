@@ -1,16 +1,31 @@
-# Read-only heartbeat for the EZLynx browser session on Production.
+# Sole owner of the Production EZLynx browser session heal path.
 #
 # Why this exists: on 2026-09-11 the session expired quietly. Three jobs failed
-# over five hours and each reported a different downstream symptom. Nothing
-# watched the session itself. This does.
+# over five hours and each reported a different downstream symptom. On
+# 2026-09-12 Production still had three partial owners and no owner: this
+# workflow (detect-only), robie-scheduler 05:30 enqueue (stale since August),
+# and a believed weekday 06:00 timer that was never deployed to hermes-poc-01.
+# The 03:30 Chrome restart never logged in by design. Three mechanisms, zero
+# coverage. That is why every session has been hand-restored.
 #
-# Read-only. It never logs in, never writes, never restarts anything.
+# This workflow is the only healer. Hourly, seven days a week. It never
+# restarts Chrome. It attaches to the existing CDP at 127.0.0.1:9222 the same
+# way ezlynx_login_bootstrap.py already does. Credentials stay in Secret
+# Manager (ezlynx-username / ezlynx-password, project streetsmart-hermes-poc).
+# Never compose or print a password.
+#
+# Every remediation records WHY the session looked logged out (tab list,
+# Chrome MainPID / ActiveEnterTimestamp / ExecMainStartTimestamp, PID change
+# since last check) and persists last-check state at
+# /var/tmp/robie-ezlynx-session-monitor/last-check.json via the existing IAP
+# path. Logout cause stays UNVERIFIED. Cap: one login attempt per check; two
+# consecutive LOGGED_OUT checks stop trying and fail loudly.
 #
 name: Monitor EZLynx session on Production
 
 on:
   schedule:
-    - cron: "0 * * * *"   # hourly; tighten once it has proven quiet
+    - cron: "0 * * * *"   # hourly, seven days a week
   workflow_dispatch:
     inputs:
       probe:
@@ -25,7 +40,11 @@ permissions:
 jobs:
   check-session:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: Production
+    env:
+      MONITOR_DIR: ${{ runner.temp }}/ezlynx-monitor
+      REMOTE_STATE: /var/tmp/robie-ezlynx-session-monitor/last-check.json
     steps:
       - uses: actions/checkout@v4
 
@@ -34,44 +53,256 @@ jobs:
           workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
           service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '584.0.0'  # Pinned 2026-09-12: runner-preinstalled gcloud 583.0.0 crashes on 'gcloud compute ssh' (TypeError: quote_from_bytes() expected bytes); 584.0.0 is the version setup-gcloud@latest resolved on run 34694728948, whose SSH staging succeeded.
 
       - name: Read the EZLynx session state
         id: session
+        run: |
+          set -uo pipefail
+          mkdir -p "${MONITOR_DIR}"
+          PROBE_FLAG=""
+          if [ "${{ inputs.probe || 'true' }}" = "true" ]; then
+            PROBE_FLAG="--probe"
+          fi
+          # Same IAP SSH / deployer SA stack as before. Do not invent a new
+          # SSH path. Retry only the known runner gcloud crash.
+          gcloud_ssh() {
+            local command="$1"
+            local attempt=1
+            local max=3
+            local out="" status=1 err
+            err="$(mktemp)"
+            while [ "${attempt}" -le "${max}" ]; do
+              set +e
+              out=$(gcloud compute ssh hermes-poc-01 \
+                --project=streetsmart-hermes-poc \
+                --zone=us-east1-b \
+                --tunnel-through-iap \
+                --command="${command}" 2>"${err}")
+              status=$?
+              set -e
+              if [ "${status}" -ne 0 ] && [ "${attempt}" -lt "${max}" ] && grep -q "quote_from_bytes" "${err}"; then
+                echo "gcloud ssh crashed with quote_from_bytes; retry ${attempt}/${max}" >&2
+                cat "${err}" >&2
+                attempt=$((attempt + 1))
+                sleep $((attempt * 2))
+                continue
+              fi
+              cat "${err}" >&2
+              printf '%s\n' "${out}"
+              return "${status}"
+            done
+            cat "${err}" >&2
+            printf '%s\n' "${out}"
+            return "${status}"
+          }
+          # Run the checker on the box with the release interpreter, not with
+          # whatever python3 happens to be on PATH in an ad-hoc ssh session.
+          set +e
+          OUTPUT=$(gcloud_ssh "sudo /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+              /opt/streetsmart-hermes/releases/current/scripts/check_ezlynx_session.py \
+              --json ${PROBE_FLAG}")
+          STATUS=$?
+          CHROME_SHOW=$(gcloud_ssh "systemctl show robie-ezlynx-browser.service -p MainPID -p ActiveEnterTimestamp -p ExecMainStartTimestamp --no-pager")
+          LAST_STATE=$(gcloud_ssh "cat '${REMOTE_STATE}' 2>/dev/null || echo {}")
+          set -e
+          printf '%s\n' "${OUTPUT}" > "${MONITOR_DIR}/check.json"
+          printf '%s\n' "${CHROME_SHOW}" > "${MONITOR_DIR}/chrome-show.txt"
+          printf '%s\n' "${LAST_STATE}" > "${MONITOR_DIR}/last-check.json"
+          python3 scripts/ezlynx_session_monitor.py decide \
+            --check-json "${MONITOR_DIR}/check.json" \
+            --chrome-show "${MONITOR_DIR}/chrome-show.txt" \
+            --last-state "${MONITOR_DIR}/last-check.json" \
+            --decision-out "${MONITOR_DIR}/decision.json" \
+            --next-state "${MONITOR_DIR}/next-state.json" \
+            --why-out "${MONITOR_DIR}/why.json"
+          ATTEMPT=$(python3 -c "import json; print(('true' if json.load(open('${MONITOR_DIR}/decision.json'))['attempt_login'] else 'false'))")
+          FAIL_CONSEC=$(python3 -c "import json; print(('true' if json.load(open('${MONITOR_DIR}/decision.json'))['fail_consecutive'] else 'false'))")
+          CAP_STATE=$(python3 -c "import json; print(json.load(open('${MONITOR_DIR}/why.json')).get('cap_state', 'UNEVALUATED'))")
+          echo "$OUTPUT"
+          echo "exit_code=${STATUS}" >> "$GITHUB_OUTPUT"
+          echo "attempt_login=${ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "fail_consecutive=${FAIL_CONSEC}" >> "$GITHUB_OUTPUT"
+          echo "cap_state=${CAP_STATE}" >> "$GITHUB_OUTPUT"
+          echo "have_next_state=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### EZLynx session check (before)"
+            echo ""
+            echo '```json'
+            echo "$OUTPUT"
+            echo '```'
+            echo ""
+            echo "### Why this check looked the way it did"
+            echo ""
+            echo "logout_cause is UNVERIFIED. Do not claim a cause."
+            echo ""
+            if [ "${CAP_STATE}" = "UNEVALUATED" ]; then
+              echo "### LOGIN CAP UNEVALUATED"
+              echo ""
+              echo "last-check.json was missing, empty, or unreadable (or a prior run died before writing it)."
+              echo "One login is still allowed for this check. The consecutive cap did not evaluate."
+              echo "A cap that fails open without telling anyone is not a cap."
+              echo ""
+            fi
+            echo '```json'
+            cat "${MONITOR_DIR}/why.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${CAP_STATE}" = "UNEVALUATED" ]; then
+            echo "::warning title=EZLynx login cap UNEVALUATED::last-check.json was missing, empty, or unreadable. One login is still allowed for this check. The consecutive cap did not evaluate. This is not a silent fail-open."
+          fi
+
+      - name: Warn when the session state could not be determined
+        if: steps.session.outputs.exit_code == '1'
+        run: |
+          echo "::warning title=EZLynx session undetermined::Could not establish session state. This is a different failure from a logged-out session - check CDP on 127.0.0.1:9222 and whether playwright is importable. Do not login-guess."
+
+      - name: Stop after two consecutive LOGGED_OUT checks
+        if: steps.session.outputs.fail_consecutive == 'true'
+        run: |
+          echo "::error title=EZLynx session login cap::Two consecutive hourly checks found LOGGED_OUT. One login attempt per check is the cap. Do not silently re-authenticate hourly forever."
+          echo "why (logout_cause=UNVERIFIED):"
+          cat "${MONITOR_DIR}/why.json"
+          echo "check JSON:"
+          cat "${MONITOR_DIR}/check.json"
+          exit 1
+
+      - name: Re-authenticate when the session is provably logged out
+        if: steps.session.outputs.exit_code == '2' && steps.session.outputs.attempt_login == 'true'
+        id: heal
         run: |
           set -uo pipefail
           PROBE_FLAG=""
           if [ "${{ inputs.probe || 'true' }}" = "true" ]; then
             PROBE_FLAG="--probe"
           fi
-          # Run the checker on the box with the release interpreter, not with
-          # whatever python3 happens to be on PATH in an ad-hoc ssh session.
+          gcloud_ssh() {
+            local command="$1"
+            local attempt=1
+            local max=3
+            local out="" status=1 err
+            err="$(mktemp)"
+            while [ "${attempt}" -le "${max}" ]; do
+              set +e
+              out=$(gcloud compute ssh hermes-poc-01 \
+                --project=streetsmart-hermes-poc \
+                --zone=us-east1-b \
+                --tunnel-through-iap \
+                --command="${command}" 2>"${err}")
+              status=$?
+              set -e
+              if [ "${status}" -ne 0 ] && [ "${attempt}" -lt "${max}" ] && grep -q "quote_from_bytes" "${err}"; then
+                echo "gcloud ssh crashed with quote_from_bytes; retry ${attempt}/${max}" >&2
+                cat "${err}" >&2
+                attempt=$((attempt + 1))
+                sleep $((attempt * 2))
+                continue
+              fi
+              cat "${err}" >&2
+              printf '%s\n' "${out}"
+              return "${status}"
+            done
+            cat "${err}" >&2
+            printf '%s\n' "${out}"
+            return "${status}"
+          }
+          # Attach to the existing CDP at 127.0.0.1:9222. Bootstrap reads
+          # ezlynx-username / ezlynx-password from Secret Manager itself.
+          # Never compose or print a password. Never restart Chrome.
+          # One login attempt per check.
           set +e
-          OUTPUT=$(gcloud compute ssh hermes-poc-01 \
-            --project=streetsmart-hermes-poc \
-            --zone=us-east1-b \
-            --tunnel-through-iap \
-            --command="sudo /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+          BOOTSTRAP_OUT=$(gcloud_ssh "sudo env PYTHONPATH=/opt/streetsmart-hermes/releases/current \
+              /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+              /opt/streetsmart-hermes/releases/current/ezlynx_login_bootstrap.py")
+          BOOTSTRAP_STATUS=$?
+          AFTER_OUTPUT=$(gcloud_ssh "sudo /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
               /opt/streetsmart-hermes/releases/current/scripts/check_ezlynx_session.py \
               --json ${PROBE_FLAG}")
-          STATUS=$?
+          AFTER_STATUS=$?
           set -e
-          echo "$OUTPUT"
-          echo "exit_code=${STATUS}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${AFTER_OUTPUT}" > "${MONITOR_DIR}/after.json"
+          python3 scripts/ezlynx_session_monitor.py apply-after \
+            --next-state "${MONITOR_DIR}/next-state.json" \
+            --after-json "${MONITOR_DIR}/after.json" \
+            --login-attempted
+          echo "bootstrap stdout (literal):"
+          echo "${BOOTSTRAP_OUT}"
+          echo "bootstrap exit_code=${BOOTSTRAP_STATUS}"
+          echo "re-check JSON:"
+          echo "${AFTER_OUTPUT}"
+          echo "after_exit_code=${AFTER_STATUS}"
           {
-            echo "### EZLynx session check"
+            echo "bootstrap_stdout<<BOOTSTRAP_EOF"
+            printf '%s\n' "${BOOTSTRAP_OUT}"
+            echo "BOOTSTRAP_EOF"
+            echo "after_exit_code=${AFTER_STATUS}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "### Login bootstrap (LOGGED_OUT heal, one attempt)"
+            echo ""
+            echo '```'
+            echo "${BOOTSTRAP_OUT}"
+            echo '```'
+            echo ""
+            echo "bootstrap exit_code: ${BOOTSTRAP_STATUS}"
+            echo ""
+            echo "### EZLynx session check (after)"
             echo ""
             echo '```json'
-            echo "$OUTPUT"
+            echo "${AFTER_OUTPUT}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${AFTER_STATUS}" = "2" ]; then
+            echo "::error title=EZLynx session still logged out::bootstrap stdout (literal): ${BOOTSTRAP_OUT}"
+            echo "bootstrap stdout (literal):"
+            echo "${BOOTSTRAP_OUT}"
+            echo "re-check JSON:"
+            echo "${AFTER_OUTPUT}"
+            echo "why (logout_cause=UNVERIFIED):"
+            cat "${MONITOR_DIR}/why.json"
+            exit 1
+          fi
+          if [ "${AFTER_STATUS}" = "1" ]; then
+            echo "::warning title=EZLynx session undetermined after bootstrap::Bootstrap ran; the re-check could not establish session state. Do not login-guess again."
+          fi
 
-      - name: Fail loudly when the session is provably logged out
-        if: steps.session.outputs.exit_code == '2'
+      - name: Persist last-check Chrome PID and start time
+        if: always() && steps.session.outputs.have_next_state == 'true'
         run: |
-          echo "::error title=EZLynx session logged out::The persistent Chrome on hermes-poc-01 is logged out of EZLynx. Policy work through the browser will fail until it is re-authenticated through the Secret Manager credential path."
-          exit 1
-
-      - name: Warn when the session state could not be determined
-        if: steps.session.outputs.exit_code == '1'
-        run: |
-          echo "::warning title=EZLynx session undetermined::Could not establish session state. This is a different failure from a logged-out session - check CDP on 127.0.0.1:9222 and whether playwright is importable."
+          set -uo pipefail
+          gcloud_ssh() {
+            local command="$1"
+            local attempt=1
+            local max=3
+            local out="" status=1 err
+            err="$(mktemp)"
+            while [ "${attempt}" -le "${max}" ]; do
+              set +e
+              out=$(gcloud compute ssh hermes-poc-01 \
+                --project=streetsmart-hermes-poc \
+                --zone=us-east1-b \
+                --tunnel-through-iap \
+                --command="${command}" 2>"${err}")
+              status=$?
+              set -e
+              if [ "${status}" -ne 0 ] && [ "${attempt}" -lt "${max}" ] && grep -q "quote_from_bytes" "${err}"; then
+                echo "gcloud ssh crashed with quote_from_bytes; retry ${attempt}/${max}" >&2
+                cat "${err}" >&2
+                attempt=$((attempt + 1))
+                sleep $((attempt * 2))
+                continue
+              fi
+              cat "${err}" >&2
+              printf '%s\n' "${out}"
+              return "${status}"
+            done
+            cat "${err}" >&2
+            printf '%s\n' "${out}"
+            return "${status}"
+          }
+          test -f "${MONITOR_DIR}/next-state.json"
+          B64=$(base64 -w0 "${MONITOR_DIR}/next-state.json")
+          gcloud_ssh "mkdir -p /var/tmp/robie-ezlynx-session-monitor && printf '%s' '${B64}' | base64 -d > '${REMOTE_STATE}'"
+          echo "persisted ${REMOTE_STATE}"

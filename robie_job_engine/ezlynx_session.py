@@ -6,7 +6,9 @@ PRs under the same filename:
 - PR #10: bounded Job Engine worker/verifier (`EzlynxSessionRefreshWorker`,
   `EzlynxSessionVerifier`) that refresh the canonical Playwright profile.
 - PR #7: Secret Manager-backed login CLI (`ensure_ezlynx_session`,
-  `python -m robie_job_engine.ezlynx_session`) used by the weekday 6 a.m. session timer.
+  `python -m robie_job_engine.ezlynx_session`). The weekday 6 a.m.
+  ``robie-ezlynx-session.timer`` is retired; hourly heal is
+  ``monitor-ezlynx-session.yml`` calling ``ezlynx_login_bootstrap.py``.
 
 Neither path stores, prints, or rotates credential values.
 """
