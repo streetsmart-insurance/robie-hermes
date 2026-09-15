@@ -78,6 +78,16 @@ jobs:
             'Magellan session is expired|Failed to inject HTML content|CDP dispatch attempt|Falling back to AppleScript' \
             "${root}/src" "${root}/scripts" 2>/dev/null || true)
 
+          echo "magellan_auth_source:"
+          sed -n '1,110p' "${root}/src/extractors/magellan_playwright.py" 2>/dev/null | redact
+
+          echo "active_delivery_entrypoints:"
+          grep -RIn -B 18 -A 28 \
+            --exclude='*.bak*' --exclude='*.html' --exclude='*.json' \
+            -E 'send_morning_email|send_email|--deliver|deliver_report|gmail.*send|send.*gmail' \
+            "${root}/src/production_main.py" "${root}/src" "${root}/scripts" 2>/dev/null |
+            redact | head -500 || true
+
           echo "latest_failure_summary:"
           tail -n 500 "${root}/data/logs/daily_run.log" 2>/dev/null |
             grep -Ei 'Starting StreetSmart|Run Complete|error|failed|missing|required|stale|denied|exception|traceback|unavailable|timeout|not found|refused|invalid|Magellan|HTML|CDP|AppleScript' |
