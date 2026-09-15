@@ -1,0 +1,96 @@
+name: Diagnose accountability runtime (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_ACCOUNTABILITY_RUNTIME
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_ACCOUNTABILITY_RUNTIME'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: streetsmart-accountability-prod
+      APP_ROOT: /opt/streetsmart-daily-accountability
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Collect redacted runtime diagnostics
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/accountability-runtime-diagnostic.txt"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<'REMOTE_EOF' > "${output}"
+          set -euo pipefail
+          root=/opt/streetsmart-daily-accountability
+          redact() {
+            sed -E \
+              -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[redacted-email]/g' \
+              -e 's/(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g' \
+              -e 's/[0-9]{7,}/[redacted-number]/g' \
+              -e 's/(password|token|secret|authorization)([[:space:]]*[:=][[:space:]]*)[^ ,;]+/\1\2[redacted]/Ig'
+          }
+
+          echo "host=$(hostname -s)"
+          echo "captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "runtime_files:"
+          stat -c '%U:%G %a %y %n' \
+            "${root}/scripts/run_daily_accountability_vm.sh" \
+            "${root}/src/production_main.py" \
+            "${root}/data/logs/daily_run.log" 2>&1 | redact
+          echo "commands:"
+          command -v node || true
+          command -v nodejs || true
+          command -v google-chrome || true
+          "${root}/venv/bin/python" --version 2>&1
+          "${root}/venv/bin/python" - <<'PYEOF'
+          import importlib.util
+          for name in ("playwright", "google.cloud.secretmanager", "googleapiclient", "httplib2"):
+              print(f"{name}={bool(importlib.util.find_spec(name))}")
+          PYEOF
+          echo "listeners:"
+          ss -ltn 2>/dev/null | grep -E ':(9222|9223)[[:space:]]' || true
+          echo "browser_units:"
+          systemctl list-unit-files --no-pager 2>/dev/null | grep -Ei 'magellan|chrome|browser' | head -40 || true
+
+          echo "source_matches:"
+          while IFS= read -r hit; do
+            echo "file=${hit}"
+            grep -n -B 30 -A 45 -E \
+              'Magellan session is expired|Failed to inject HTML content|CDP dispatch attempt|Falling back to AppleScript' \
+              "${hit}" 2>/dev/null | redact | head -240
+          done < <(grep -RIl -E \
+            'Magellan session is expired|Failed to inject HTML content|CDP dispatch attempt|Falling back to AppleScript' \
+            "${root}/src" "${root}/scripts" 2>/dev/null || true)
+
+          echo "latest_failure_summary:"
+          tail -n 500 "${root}/data/logs/daily_run.log" 2>/dev/null |
+            grep -Ei 'Starting StreetSmart|Run Complete|error|failed|missing|required|stale|denied|exception|traceback|unavailable|timeout|not found|refused|invalid|Magellan|HTML|CDP|AppleScript' |
+            tail -n 160 | redact
+          REMOTE_EOF
+          test -s "${output}"
+          cat "${output}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload redacted diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accountability-runtime-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/accountability-runtime-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 7
