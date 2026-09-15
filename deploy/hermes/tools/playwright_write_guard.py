@@ -616,6 +616,22 @@ def consult_gemini_for_blocked_write(
     return unique_locator_from_gemini_label(page, str(field_label))
 
 
+def _record_wrote_marker(page: Any, *, method_name: str) -> None:
+    """Record one worker-unforgeable write marker. Never raises.
+
+    Called only after a guarded write succeeded. The marker is written by the
+    guard — not by worker code — and the job id comes from the server-set
+    ROBIE_JOB_ID environment, so a worker cannot fake or suppress its own
+    write count. A marker failure must never break the write it records.
+    """
+    try:
+        from robie_job_engine.write_markers import record_write_marker
+
+        record_write_marker(method=method_name, url=_page_url_text(page))
+    except Exception:
+        pass
+
+
 def _hitl_blocked(reason: str) -> RuntimeError:
     detail = reason if reason.startswith(PLAYWRIGHT_BLOCKED) else f"{PLAYWRIGHT_BLOCKED}: {reason}"
     return RuntimeError(f"{detail}; HITL {HITL_OPERATOR}")
@@ -662,6 +678,7 @@ def _gemini_then_write_or_hitl(
                 )
             ) from exc
         raise
+    _record_wrote_marker(page, method_name=getattr(method, "__name__", "write"))
     _publish_page_hint_from_page(page)
     return result
 
@@ -734,7 +751,9 @@ def _wrap_write(
                     kwargs=kwargs,
                 )
             raise
-        _publish_page_hint_from_page(_page_from_target(self, page_level=page_level))
+        target_page = _page_from_target(self, page_level=page_level)
+        _record_wrote_marker(target_page, method_name=method_name)
+        _publish_page_hint_from_page(target_page)
         return result
 
     wrapped.__name__ = method_name

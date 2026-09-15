@@ -135,6 +135,15 @@ class JobStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_playwright_exec_job
                     ON playwright_exec(job_id, id);
+                CREATE TABLE IF NOT EXISTS write_markers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    method TEXT NOT NULL,
+                    url TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_write_markers_job
+                    ON write_markers(job_id, id);
                 """
             )
 
@@ -708,6 +717,37 @@ class JobStore:
             item["result"] = json.loads(item.pop("result_json") or "{}")
             result.append(item)
         return result
+
+    def add_write_marker(self, job_id: str, method: str, url: str = "") -> int:
+        """Record one worker-unforgeable write marker. Raises KeyError for unknown job."""
+        now = utc_now()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            cursor = conn.execute(
+                """INSERT INTO write_markers(job_id, method, url, created_at)
+                   VALUES(?,?,?,?)""",
+                (job_id, str(method or "write"), str(url or ""), now),
+            )
+            return int(cursor.lastrowid)
+
+    def list_write_markers(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id, job_id, method, url, created_at
+                   FROM write_markers WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_write_markers(self, job_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM write_markers WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        return int(row["n"])
 
     def add_evidence(self, job_id: str, verified: bool, evidence: VerificationEvidence) -> None:
         expected = redact_mapping(evidence.expected)

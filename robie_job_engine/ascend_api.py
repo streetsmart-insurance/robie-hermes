@@ -24,6 +24,7 @@ from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerR
 from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
 from .secret_manager import GoogleSecretManagerAccessor, SecretAccessor
 from .secrets import redact_text
+from .write_markers import record_write_marker
 
 
 ACTION_TYPE = "ascend.create_program"
@@ -341,6 +342,9 @@ class AscendApiClient:
 
     def create_program(self, body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         response = self.transport.request("POST", "/programs", json_body=body)
+        # Slice 4: every successful Ascend create records a worker-unforgeable
+        # write marker. record_write_marker never raises.
+        record_write_marker(method="ascend.create_program", url="/programs")
         return self._record_id(response, "program"), self._record(response)
 
     def get_program(self, program_id: str) -> dict[str, Any]:
@@ -348,6 +352,7 @@ class AscendApiClient:
 
     def create_billable(self, body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         response = self.transport.request("POST", "/billables", json_body=body)
+        record_write_marker(method="ascend.create_billable", url="/billables")
         return self._record_id(response, "billable"), self._record(response)
 
     def get_billable(self, billable_id: str) -> dict[str, Any]:
@@ -381,6 +386,7 @@ class AscendApiClient:
 
     def create_insured(self, body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         response = self.transport.request("POST", "/insureds", json_body=body)
+        record_write_marker(method="ascend.create_insured", url="/insureds")
         return self._record_id(response, "insured"), self._record(response)
 
     def find_or_create_insured(
