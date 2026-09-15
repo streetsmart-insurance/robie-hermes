@@ -112,8 +112,13 @@ jobs:
       - name: Run the dedicated accountability service
         run: |
           set -euo pipefail
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="sudo systemctl start ${UNIT}"
+          if ! gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --command="sudo systemctl start ${UNIT}"; then
+            echo "::error::Accountability service failed; systemd result metadata follows."
+            gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+              --tunnel-through-iap --command="sudo systemctl show ${UNIT} --no-pager -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p StatusText" || true
+            exit 1
+          fi
           echo "accountability service completed"
 
       - name: Verify exact prior-business-day delivery
