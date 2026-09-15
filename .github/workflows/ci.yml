@@ -55,6 +55,7 @@ jobs:
             tests/test_reporting_suite.py \
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py \
+            tests/test_run_daily_accountability_vm.py \
             tests/test_ezlynx_api.py
           PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
       - name: Test production job client scope
