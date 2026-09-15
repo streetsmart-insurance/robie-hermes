@@ -137,7 +137,16 @@ ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
 
 
 def applicant_is_write_allowed(value: object) -> bool:
-    return normalize_applicant_id(value) in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+    applicant = normalize_applicant_id(value)
+    if applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
+        return True
+    # A running Production job may write only to the client named by its own
+    # immutable intake record on the real Production host/release. Worker
+    # payloads, prompts, and flags can never widen this: production_job_applicant
+    # is fail-closed everywhere else.
+    return bool(
+        re.fullmatch(r"[1-9]\d*", applicant) and production_job_applicant() == applicant
+    )
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:
