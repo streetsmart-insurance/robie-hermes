@@ -1,0 +1,22 @@
+{
+  "report_kind": "department_tab_google_doc",
+  "document_id": "1lnhIplYM8DLdFyITL9tCUVrImYzYy1Vbfax7eeAkdhg",
+  "document_url": "https://docs.google.com/document/d/1lnhIplYM8DLdFyITL9tCUVrImYzYy1Vbfax7eeAkdhg/edit",
+  "mailbox": "robie@streetsmart.insurance",
+  "schedule_america_new_york": {
+    "collect": "06:45",
+    "publish_deliver": "09:00",
+    "late_check": "09:20"
+  },
+  "exact_ezlynx_subjects": [
+    "Robie - EZLynx Activities",
+    "Robie - EZLynx Overdue Tasks",
+    "Robie - EZLynx Sales Center",
+    "Robie - EZLynx Policy Changes"
+  ],
+  "allowed_sender_domains": ["appliedsystems.com", "ezlynx.com"],
+  "not_this_report": [
+    "MacBook Air High-Risk SLA digest",
+    "Hermes Job Engine markdown / streetsmart-accountability.timer"
+  ]
+}

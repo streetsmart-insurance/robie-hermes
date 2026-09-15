@@ -48,6 +48,9 @@ jobs:
             tests/test_accountability_dashboard.py \
             tests/test_accountability_connections.py \
             tests/test_scheduled_report_email_sync.py \
+            tests/test_scheduled_report_ingest.py \
+            tests/test_accountability_pipeline.py \
+            tests/test_accountability_delivery.py \
             tests/test_center_audits.py \
             tests/test_operational_trackers.py \
             tests/test_submission_audit_runtime.py \

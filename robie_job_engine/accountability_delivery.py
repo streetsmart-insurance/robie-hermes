@@ -39,6 +39,7 @@ def deliver_report(
     mode: str,
     delivery: Mapping[str, Any],
     environment: Mapping[str, str],
+    subject: str | None = None,
 ) -> list[dict[str, Any]]:
     text = report_path.read_text(encoding="utf-8")
     receipts: list[dict[str, Any]] = []
@@ -61,14 +62,22 @@ def deliver_report(
         message = EmailMessage()
         message["To"] = ", ".join(recipients)
         message["From"] = sender
-        message["Subject"] = f"StreetSmart {mode.title()} Accountability Report"
+        message["Subject"] = subject or f"StreetSmart {mode.title()} Accountability Report"
         message.set_content(text)
         gmail = _delegated_gmail_sender(service_account, sender)
         sent = gmail.users().messages().send(
             userId="me",
             body={"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")},
         ).execute()
-        receipts.append({"kind": "gmail", "destination": recipients, "message_id": sent.get("id"), "sender": sender})
+        message_id = str(sent.get("id") or "").strip()
+        receipts.append({
+            "kind": "gmail",
+            "destination": recipients,
+            "message_id": message_id,
+            "sender": sender,
+            "service_account": service_account,
+            "delivered": bool(message_id),
+        })
     if not receipts:
         raise ValueError(f"delivery is enabled but no destination is configured for {mode}")
     return receipts
@@ -94,8 +103,15 @@ def _chat_chunks(text: str, limit: int = 3500) -> list[str]:
     return chunks
 
 
-def verify_delivery_receipts(receipts: list[dict[str, Any]]) -> tuple[bool, list[dict[str, Any]]]:
+def verify_delivery_receipts(
+    receipts: list[dict[str, Any]],
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[bool, list[dict[str, Any]]]:
     """Fresh destination read-back; a create response alone is not verification."""
+    import os
+
+    env = dict(environment or {})
     observed: list[dict[str, Any]] = []
     for receipt in receipts:
         if receipt.get("kind") == "google_chat":
@@ -106,14 +122,30 @@ def verify_delivery_receipts(receipts: list[dict[str, Any]]) -> tuple[bool, list
         elif receipt.get("kind") == "gmail":
             sender = str(receipt.get("sender") or "")
             message_id = str(receipt.get("message_id") or "")
-            # Sender read-back uses the same explicitly delegated identity.
-            import os
-            account = os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", "").strip()
-            item = _delegated_gmail_sender(account, sender).users().messages().get(
-                userId="me", id=message_id, format="minimal"
-            ).execute() if account and sender and message_id else {}
+            account = str(
+                receipt.get("service_account")
+                or env.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
+                or os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
+                or ""
+            ).strip()
+            # format=minimal works with gmail.send + gmail.metadata. format=full
+            # needs gmail.readonly and is what made Production report
+            # delivered=false after a successful gmail.send.
+            item: dict[str, Any] = {}
+            if account and sender and message_id:
+                try:
+                    item = _delegated_gmail_sender(account, sender).users().messages().get(
+                        userId="me", id=message_id, format="minimal"
+                    ).execute()
+                except Exception:
+                    item = {}
             ok = str(item.get("id") or "") == message_id
-            observed.append({"kind": "gmail", "id": message_id, "exists_in_sent_mailbox": ok})
+            observed.append({
+                "kind": "gmail",
+                "id": message_id,
+                "exists_in_sent_mailbox": ok,
+                "delivered": ok,
+            })
         else:
             observed.append({"kind": receipt.get("kind"), "exists": False})
     return all(item.get("exists") or item.get("exists_in_sent_mailbox") for item in observed), observed

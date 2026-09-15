@@ -57,7 +57,19 @@ def _labels(report_config: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
 
 
 def classify_report(subject: str, filename: str, report_config: Mapping[str, Mapping[str, Any]]) -> str | None:
-    labels = _labels(report_config)
+    exact = " ".join(str(subject or "").split())
+    exact_matches = [
+        key for key, raw in report_config.items()
+        if " ".join(str((raw or {}).get("exact_subject") or "").split()) == exact
+    ]
+    if len(exact_matches) > 1:
+        raise ScheduledReportEvidenceError("scheduled attachment contains conflicting report labels")
+    if exact_matches:
+        return exact_matches[0]
+    labels = _labels({
+        key: raw for key, raw in report_config.items()
+        if str((raw or {}).get("label") or "").strip()
+    })
     haystack = f"{subject} {filename}".upper()
     matches = [
         key for key, label in labels.items()
@@ -197,7 +209,9 @@ def collect_scheduled_tabular_reports(
     reports = {str(key): dict(value or {}) for key, value in dict(config.get("reports") or {}).items()}
     if not reports:
         raise ScheduledReportEvidenceError("scheduled report collection requires report definitions")
-    _labels(reports)
+    labeled = {key: raw for key, raw in reports.items() if str(raw.get("label") or "").strip()}
+    if labeled:
+        _labels(labeled)
     now = as_of or datetime.now(timezone.utc)
     max_age_hours = max(1, int(config.get("max_age_hours") or 192))
     output_dir.mkdir(parents=True, exist_ok=True)
