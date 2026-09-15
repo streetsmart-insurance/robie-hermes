@@ -1,0 +1,121 @@
+"""Regression tests for robie_job_engine.outbound_send_guard.
+
+2026-09-14: the no-blind-resend rule was a chat instruction, not code. These
+tests pin the Sent-folder duplicate guard that enforces it.
+"""
+
+import time
+from unittest.mock import Mock
+
+from robie_job_engine.outbound_send_guard import (
+    find_recent_sent,
+    normalize_subject,
+    should_skip_send,
+)
+
+
+def _sent_message(msg_id, to, subject, age_seconds=3600):
+    internal_date = str(int((time.time() - age_seconds) * 1000))
+    return {
+        "id": msg_id,
+        "payload": {
+            "headers": [
+                {"name": "To", "value": to},
+                {"name": "Subject", "value": subject},
+                {"name": "Date", "value": "Mon, 14 Sep 2026 20:00:00 -0400"},
+            ]
+        },
+        "internalDate": internal_date,
+    }
+
+
+def _service_with_sent(*messages):
+    service = Mock()
+    api = service.users.return_value.messages.return_value
+    api.list.return_value.execute.return_value = {
+        "messages": [{"id": m["id"]} for m in messages]
+    }
+    by_id = {m["id"]: m for m in messages}
+
+    def fake_get(userId=None, id=None, format=None, metadataHeaders=None):
+        get_mock = Mock()
+        get_mock.execute.return_value = by_id[id]
+        return get_mock
+
+    api.get.side_effect = fake_get
+    return service
+
+
+def test_normalize_subject_strips_reply_prefixes():
+    assert normalize_subject("Re: Renewal offer") == normalize_subject("Renewal offer")
+    assert normalize_subject("RE:  Fwd:  Renewal   offer") == "renewal offer"
+    assert normalize_subject("  Renewal Offer ") == "renewal offer"
+
+
+def test_exact_duplicate_is_skipped():
+    service = _service_with_sent(
+        _sent_message("s1", "tracy.paquette@amwins.com", "Re: Maier Solar renewal")
+    )
+    skip, reason = should_skip_send(
+        service, "tracy.paquette@amwins.com", "Re: Maier Solar renewal"
+    )
+    assert skip is True
+    assert "s1" in reason
+
+
+def test_subject_without_prefix_still_matches():
+    service = _service_with_sent(
+        _sent_message("s1", "tracy.paquette@amwins.com", "Re: Maier Solar renewal")
+    )
+    skip, _ = should_skip_send(
+        service, "tracy.paquette@amwins.com", "Maier Solar renewal"
+    )
+    assert skip is True
+
+
+def test_different_subject_is_not_skipped():
+    service = _service_with_sent(
+        _sent_message("s1", "tracy.paquette@amwins.com", "Re: Maier Solar renewal")
+    )
+    skip, _ = should_skip_send(
+        service, "tracy.paquette@amwins.com", "Re: Something else entirely"
+    )
+    assert skip is False
+
+
+def test_different_recipient_is_not_skipped():
+    service = _service_with_sent(
+        _sent_message("s1", "tracy.paquette@amwins.com", "Re: Maier Solar renewal")
+    )
+    skip, _ = should_skip_send(
+        service, "someone.else@example.com", "Re: Maier Solar renewal"
+    )
+    assert skip is False
+
+
+def test_old_sent_message_outside_window_is_not_skipped():
+    service = _service_with_sent(
+        _sent_message(
+            "s1", "tracy.paquette@amwins.com", "Re: Maier Solar renewal",
+            age_seconds=48 * 3600,
+        )
+    )
+    skip, _ = should_skip_send(
+        service, "tracy.paquette@amwins.com", "Re: Maier Solar renewal",
+        window_hours=24,
+    )
+    assert skip is False
+
+
+def test_no_service_fails_open():
+    skip, reason = should_skip_send(None, "a@b.com", "Subject")
+    assert skip is False
+    assert reason == "no matching sent message"
+
+
+def test_api_error_fails_open():
+    service = Mock()
+    service.users.return_value.messages.return_value.list.side_effect = RuntimeError("boom")
+    skip, _ = should_skip_send(service, "a@b.com", "Subject")
+    assert skip is False
+    assert find_recent_sent(service, "a@b.com", "Subject") == []
