@@ -82,6 +82,12 @@ jobs:
           test -x /opt/streetsmart-daily-accountability/venv/bin/python
           test -x /opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh
           test -f /opt/streetsmart-daily-accountability/src/production_main.py
+          echo "installed_service_unit_begin"
+          systemctl cat streetsmart-accountability.service --no-pager
+          echo "installed_service_unit_end"
+          echo "installed_timer_unit_begin"
+          systemctl cat streetsmart-accountability.timer --no-pager
+          echo "installed_timer_unit_end"
           systemctl cat streetsmart-accountability.service --no-pager |
             grep -Fq 'ExecStart=/opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh'
           systemctl cat streetsmart-accountability.timer --no-pager |
