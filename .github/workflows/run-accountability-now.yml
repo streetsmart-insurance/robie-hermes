@@ -97,6 +97,48 @@ jobs:
           grep -Eq 'flock .*900' "${wrapper}"
           LOCK_EOF
 
+      - name: Repair and preflight Magellan authentication
+        run: |
+          set -euo pipefail
+          remote_repair="/tmp/accountability-magellan-repair-${GITHUB_RUN_ID}.py"
+          remote_preflight="/tmp/accountability-magellan-preflight-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/repair_dedicated_accountability_magellan.py \
+            "${PRODUCTION_VM}:${remote_repair}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute scp scripts/preflight_dedicated_accountability_magellan.py \
+            "${PRODUCTION_VM}:${remote_preflight}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+          set -euo pipefail
+          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_repair}" "${remote_repair}.ubuntu"
+          install -o ubuntu -g ubuntu -m 0755 "${remote_preflight}" "${remote_preflight}.ubuntu"
+          rm -f "${remote_repair}" "${remote_preflight}"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" \
+            --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
+            "${APP_ROOT}/venv/bin/python" "${remote_preflight}.ubuntu" --app-root "${APP_ROOT}"
+          REMOTE_EOF
+
+      - name: Refuse duplicate prior-business-day delivery
+        run: |
+          set -euo pipefail
+          remote_verify="/tmp/accountability-delivery-preflight-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/verify_dedicated_accountability_delivery.py \
+            "${PRODUCTION_VM}:${remote_verify}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+          set -euo pipefail
+          installed="${remote_verify}.ubuntu"
+          trap 'rm -f "${remote_verify}" "${installed}"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${installed}"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
+            "${APP_ROOT}/venv/bin/python" "${installed}" \
+            --app-root "${APP_ROOT}" --mode preflight
+          REMOTE_EOF
+
       - name: Verify installed fail-closed runtime
         run: |
           set -euo pipefail
@@ -175,11 +217,33 @@ jobs:
           VERIFY_EOF
           cat "${RUNNER_TEMP}/accountability-verification.json" >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Verify exact Gmail Sent delivery
+        run: |
+          set -euo pipefail
+          remote_verify="/tmp/accountability-delivery-verify-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/verify_dedicated_accountability_delivery.py \
+            "${PRODUCTION_VM}:${remote_verify}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
+            > "${RUNNER_TEMP}/accountability-gmail-verification.json"
+          set -euo pipefail
+          installed="${remote_verify}.ubuntu"
+          trap 'rm -f "${remote_verify}" "${installed}"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${installed}"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
+            "${APP_ROOT}/venv/bin/python" "${installed}" \
+            --app-root "${APP_ROOT}" --mode verify
+          REMOTE_EOF
+          cat "${RUNNER_TEMP}/accountability-gmail-verification.json" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Upload redacted verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: accountability-verification-${{ github.run_id }}
-          path: ${{ runner.temp }}/accountability-verification.json
+          path: |
+            ${{ runner.temp }}/accountability-verification.json
+            ${{ runner.temp }}/accountability-gmail-verification.json
           if-no-files-found: warn
           retention-days: 30
