@@ -370,6 +370,109 @@ class PersistentChromeEzlynxPort:
         self._assert_authenticated()
 
     @_on_playwright_thread
+    def _dismiss_blocking_overlays(self) -> None:
+        """EZLynx release-notes / dark backdrops steal clicks on documents."""
+        page = self._connect()
+        for _ in range(4):
+            closed = False
+            for sel in (
+                '.cdk-overlay-container button[aria-label*="lose" i]',
+                '.cdk-overlay-container button:has-text("Close")',
+                '.cdk-overlay-container button:has-text("Got it")',
+                '.cdk-overlay-container button:has-text("OK")',
+            ):
+                loc = page.locator(sel)
+                if loc.count() and loc.first.is_visible():
+                    try:
+                        loc.first.click(timeout=1_500)
+                        closed = True
+                        page.wait_for_timeout(200)
+                    except Exception:
+                        pass
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            page.wait_for_timeout(150)
+            backdrop = page.locator(".cdk-overlay-backdrop-showing")
+            if backdrop.count() == 0:
+                return
+            if not closed:
+                try:
+                    page.evaluate(
+                        "() => { document.querySelectorAll('.cdk-overlay-container')"
+                        ".forEach((n) => { n.innerHTML = ''; }); }"
+                    )
+                except Exception:
+                    pass
+                return
+
+    @_on_playwright_thread
+    def ensure_clean_destination(self) -> None:
+        """Strip leftover fixture label so kill-before-action still attempts work.
+
+        A prior successful JE-KILL leaves ``JE-KILL-01`` on the disposable docs.
+        Restart reconcile then returns APPLIED without calling ``perform`` →
+        ``action_attempts=0`` and Stage 2 fails closed. Clear via the row Edit
+        control + fixture label option + Apply before spawning the kill child.
+        """
+        page = self._connect()
+        page.goto(self.scenario.action_url, wait_until="domcontentloaded", timeout=30_000)
+        self._assert_authenticated()
+        self._dismiss_blocking_overlays()
+        applied = self._locator(self.scenario.applied_label)
+        if applied.count() == 0:
+            # Table rows settle after domcontentloaded; do not treat a missing
+            # Add-label control as "still labeled" or we click a non-existent edit.
+            self._wait_unique(
+                self._locator(self.scenario.label_control),
+                "click target",
+                LABEL_CONTROL_SETTLE_TIMEOUT_MS,
+            )
+            return
+        edit = self._edit_labels_locator(page)
+        self._require_one(edit, "edit labels").click()
+        page.wait_for_timeout(400)
+        option = self._locator(self.scenario.label_option)
+        self._require_one(option, "label option").click()
+        apply = self._locator(self.scenario.apply_button)
+        self._require_one(apply, "Apply").click()
+        page.wait_for_timeout(500)
+        page.reload(wait_until="domcontentloaded", timeout=30_000)
+        self._assert_authenticated()
+        self._dismiss_blocking_overlays()
+        applied = self._locator(self.scenario.applied_label)
+        if applied.count() != 0:
+            raise RuntimeError(
+                "JE-KILL REFUSED: disposable destination still labeled after clear; "
+                f"applied_label count={applied.count()}"
+            )
+        self._wait_unique(
+            self._locator(self.scenario.label_control),
+            "click target",
+            LABEL_CONTROL_SETTLE_TIMEOUT_MS,
+        )
+
+    def _edit_labels_locator(self, page: Any) -> Any:
+        """Row edit control derived from fixture label_control, never invented."""
+        ctrl = self.scenario.label_control
+        if ctrl.get("kind") == "css":
+            value = str(ctrl.get("value") or "")
+            if 'button:has-text("Add label")' in value:
+                return page.locator(
+                    value.replace(
+                        'button:has-text("Add label")',
+                        'button:has-text("edit")',
+                    )
+                )
+        return (
+            page.locator("tr")
+            .filter(has_text=self.scenario.document_name)
+            .locator("button")
+            .filter(has_text="edit")
+        )
+
+    @_on_playwright_thread
     def begin_action(self) -> None:
         page = self._connect()
         page.goto(self.scenario.action_url, wait_until="domcontentloaded", timeout=30_000)
@@ -592,6 +695,7 @@ def run_phase(fixture_path: Path, fixture: LiveFixture, phase: str, run_root: Pa
     preflight = PersistentChromeEzlynxPort(scenario, cdp_url=cdp_url)
     try:
         preflight.preflight()
+        preflight.ensure_clean_destination()
     finally:
         preflight.close()
     context = multiprocessing.get_context("spawn")

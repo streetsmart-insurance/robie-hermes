@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -438,46 +439,62 @@ class AscendApiClient:
         return "3b5cc5b8-3636-4342-bd3d-9da12d2f690e"
 
     def find_program_by_policy(self, policy_number: str) -> dict[str, Any] | None:
-        """Find active or purchased program containing the given policy number."""
+        """Find active or purchased program containing the given policy number.
+
+        Returns None only when the policy genuinely has no matching program.
+        Transport, authentication, and API failures raise AscendApiError so a
+        failed lookup is never mistaken for "no program found".
+        """
         clean_policy = policy_number.strip().upper()
         # 1. Search billables directly if possible
-        try:
-            resp = self.transport.request("GET", "/billables", query={"policy_number": clean_policy})
-            items = resp.get("data", [])
-            if items:
-                first_billable = items[0]
-                prog_id = first_billable.get("program_id")
-                if prog_id:
-                    prog = self.get_program(prog_id)
-                    return {
-                        "program": prog,
-                        "billable": first_billable,
-                        "program_id": prog_id,
-                        "parent_billable_id": first_billable.get("id"),
-                    }
-        except Exception:
-            pass
+        resp = self.transport.request("GET", "/billables", query={"policy_number": clean_policy})
+        items = resp.get("data", [])
+        if items:
+            first_billable = items[0]
+            prog_id = first_billable.get("program_id")
+            if prog_id:
+                prog = self.get_program(prog_id)
+                return {
+                    "program": prog,
+                    "billable": first_billable,
+                    "program_id": prog_id,
+                    "parent_billable_id": first_billable.get("id"),
+                }
 
         # 2. Fallback: inspect recent programs
-        try:
-            progs = self.transport.request("GET", "/programs", query={"page_size": 50}).get("data", [])
-            for p in progs:
-                pid = p.get("id")
-                try:
-                    b_resp = self.transport.request("GET", f"/programs/{pid}/billables")
-                    for b in b_resp.get("data", []):
-                        if str(b.get("policy_number", "")).strip().upper() == clean_policy:
-                            return {
-                                "program": p,
-                                "billable": b,
-                                "program_id": pid,
-                                "parent_billable_id": b.get("id"),
-                            }
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        progs = self.transport.request("GET", "/programs", query={"page_size": 50}).get("data", [])
+        for p in progs:
+            pid = p.get("id")
+            b_resp = self.transport.request("GET", f"/programs/{pid}/billables")
+            for b in b_resp.get("data", []):
+                if str(b.get("policy_number", "")).strip().upper() == clean_policy:
+                    return {
+                        "program": p,
+                        "billable": b,
+                        "program_id": pid,
+                        "parent_billable_id": b.get("id"),
+                    }
         return None
+
+    @staticmethod
+    def extract_program_uuid(text: str) -> str | None:
+        """Pull the Ascend program UUID from a dashboard link in notice emails.
+
+        Every Ascend notice email (late payment, cancellation, return premium)
+        carries a link shaped like
+        https://dashboard.useascend.com/programs/<uuid>[...].  Looking the
+        program up by this UUID is more reliable than searching by policy
+        number, so triage should prefer it.
+        """
+        match = re.search(
+            r"dashboard\.useascend\.com/programs/([0-9a-fA-F-]{36})", text or ""
+        )
+        if not match:
+            return None
+        try:
+            return str(UUID(match.group(1)))
+        except (TypeError, ValueError, AttributeError):
+            return None
 
     def create_endorsement_billable(
         self,
