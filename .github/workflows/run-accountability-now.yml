@@ -82,12 +82,15 @@ jobs:
           test -x /opt/streetsmart-daily-accountability/venv/bin/python
           test -x /opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh
           test -f /opt/streetsmart-daily-accountability/src/production_main.py
-          systemctl is-enabled --quiet streetsmart-accountability.timer
-          systemctl is-active --quiet streetsmart-accountability.timer
           systemctl cat streetsmart-accountability.service --no-pager |
             grep -Fq 'ExecStart=/opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh'
           systemctl cat streetsmart-accountability.timer --no-pager |
-            grep -Fq 'America/New_York'
+            grep -Fq 'OnCalendar=Mon..Fri *-*-* 09:00:00 America/New_York'
+          systemctl cat streetsmart-accountability.timer --no-pager |
+            grep -Fq 'Persistent=true'
+          systemctl enable --now streetsmart-accountability.timer
+          systemctl is-enabled --quiet streetsmart-accountability.timer
+          systemctl is-active --quiet streetsmart-accountability.timer
           CHECK_EOF
 
       - name: Run the dedicated accountability service
