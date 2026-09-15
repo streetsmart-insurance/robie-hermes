@@ -27,7 +27,19 @@ def _expected(root: Path) -> tuple[str, set[str], object, str]:
     today = datetime.now(ZoneInfo("America/New_York")).date()
     target = get_previous_business_day(today).isoformat()
     subject = f"StreetSmart Yesterday Accountability — {target}"
-    credentials = delegated_credentials([GMAIL_READONLY_SCOPE], REPORTING_MAILBOX)
+    try:
+        credentials = delegated_credentials([GMAIL_READONLY_SCOPE], REPORTING_MAILBOX)
+    except RuntimeError as exc:
+        credential_path = root / "data" / "credentials" / "service_account.json"
+        if str(exc) != "Google delegation credential is unavailable" or not credential_path.is_file():
+            raise
+        from google.oauth2 import service_account
+
+        credentials = service_account.Credentials.from_service_account_file(
+            str(credential_path),
+            scopes=[GMAIL_READONLY_SCOPE],
+            subject=REPORTING_MAILBOX,
+        )
     gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
     return subject, {value.casefold() for value in RECIPIENTS}, gmail, target
 
