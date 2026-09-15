@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -30,16 +31,37 @@ def _expected(root: Path) -> tuple[str, set[str], object, str]:
     try:
         credentials = delegated_credentials([GMAIL_READONLY_SCOPE], REPORTING_MAILBOX)
     except RuntimeError as exc:
-        credential_path = root / "data" / "credentials" / "service_account.json"
-        if str(exc) != "Google delegation credential is unavailable" or not credential_path.is_file():
+        if str(exc) != "Google delegation credential is unavailable":
             raise
+        credential_path = root / "data" / "credentials" / "service_account.json"
         from google.oauth2 import service_account
 
-        credentials = service_account.Credentials.from_service_account_file(
-            str(credential_path),
-            scopes=[GMAIL_READONLY_SCOPE],
-            subject=REPORTING_MAILBOX,
-        )
+        if credential_path.is_file():
+            credentials = service_account.Credentials.from_service_account_file(
+                str(credential_path),
+                scopes=[GMAIL_READONLY_SCOPE],
+                subject=REPORTING_MAILBOX,
+            )
+        else:
+            service_account_email = os.environ.get(
+                "ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT", ""
+            ).strip()
+            if not service_account_email:
+                raise
+            import google.auth
+            from google.auth import iam
+            from google.auth.transport.requests import Request
+
+            source, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            credentials = service_account.Credentials(
+                signer=iam.Signer(Request(), source, service_account_email),
+                service_account_email=service_account_email,
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=[GMAIL_READONLY_SCOPE],
+                subject=REPORTING_MAILBOX,
+            )
     gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
     return subject, {value.casefold() for value in RECIPIENTS}, gmail, target
 
