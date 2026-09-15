@@ -136,7 +136,7 @@ class EmailProcessBoundaryTests(TestCase):
                 calls.append(job_id)
                 return f'Policy {BOND_POLICY} exists.'
             ns={'get_gmail_service':lambda:service,'load_processed_ids':lambda:set(),'save_processed_ids':Mock(),
-                'extract_sender_email':lambda v:v,'is_allowed_sender':lambda v:True,'is_self_sender':lambda v:False,'extract_body_text':lambda p:body,
+                'extract_sender_email':lambda v:v,'is_allowed_sender':lambda v:True,'is_self_sender':lambda v:False,'should_skip_send':lambda *a:(False,'test'),'extract_body_text':lambda p:body,
                 'download_attachments':lambda *a:[],'logger':Mock(),'JOB_DB':db,'run_guarded_email_task':run_guarded_email_task,
                 'run_agent_task':Mock(side_effect=AssertionError('use context')),'run_email_job':execute,
                 'EmailTaskPending':email_guard.EmailTaskPending,'MIMEText':MIMEText,'base64':base64}
