@@ -288,15 +288,31 @@ def test_late_payment_uses_ascend_noc_label_and_est_cutoff():
 def test_build_cancellation_task_payload():
     result = _cancellation_result()
     payload = triage.build_cancellation_task_payload(
-        result, applicant_id="220250093", account_csr="Erika Palacios"
+        result, applicant_id="220250093", account_csr="Erika Palacios",
+        due_date="2026-09-20",
     )
     assert payload["applicant_id"] == "220250093"
     assert payload["assignee"] == "Erika Palacios"
     assert payload["source"] == "inbox-triage"
+    assert payload["due_date"] == "2026-09-20"
     assert "Stafford Adult Softball League LLC" in payload["task_title"]
     assert payload["notice_type"] == triage.CANCELLATION
     assert payload["program_uuid"] == SAMPLE_UUID
     assert "canceled" in payload["email_subject"]
+
+
+def test_build_cancellation_task_payload_rejects_bad_due_date():
+    result = _cancellation_result()
+    with pytest.raises(ValueError):
+        triage.build_cancellation_task_payload(
+            result, applicant_id="220250093", account_csr="Erika Palacios",
+            due_date="tomorrow",
+        )
+    with pytest.raises(ValueError):
+        triage.build_cancellation_task_payload(
+            result, applicant_id="220250093", account_csr="Erika Palacios",
+            due_date="",
+        )
 
 
 def test_build_cancellation_task_payload_rejects_wrong_type():
@@ -309,16 +325,17 @@ def test_build_cancellation_task_payload_rejects_wrong_type():
     result = triage.triage_notice(make_client(routes=routes), subject, body)
     with pytest.raises(ValueError):
         triage.build_cancellation_task_payload(
-            result, applicant_id="220250093", account_csr="Erika Palacios"
+            result, applicant_id="220250093", account_csr="Erika Palacios",
+            due_date="2026-09-20",
         )
 
 
 def test_build_cancellation_task_payload_requires_ids():
     result = _cancellation_result()
     with pytest.raises(ValueError):
-        triage.build_cancellation_task_payload(result, applicant_id="", account_csr="Erika Palacios")
+        triage.build_cancellation_task_payload(result, applicant_id="", account_csr="Erika Palacios", due_date="2026-09-20")
     with pytest.raises(ValueError):
-        triage.build_cancellation_task_payload(result, applicant_id="220250093", account_csr="")
+        triage.build_cancellation_task_payload(result, applicant_id="220250093", account_csr="", due_date="2026-09-20")
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +349,7 @@ def test_fire_task_dry_run_validates_without_firing():
         "task_title": "Ascend cancellation notice - Test LLC",
         "assignee": "Erika Palacios",
         "source": "inbox-triage",
+        "due_date": "2026-09-20",
     }
     result = zapier_tasks.fire_task(payload, dry_run=True)
     assert result["ok"] is True
