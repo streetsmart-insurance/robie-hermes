@@ -465,3 +465,21 @@ def test_driver_has_no_delete_surface():
     assert '"DELETE"' not in source and "'DELETE'" not in source
     for name in dir(driver):
         assert "delete" not in name.lower(), f"unexpected delete API: {name}"
+\n
+
+# ---------------------------------------------------------------------------
+# stdout contract: the GitHub workflow parses driver stdout as JSON
+# ---------------------------------------------------------------------------
+
+
+def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
+    """On a fatal fail-closed, stdout must parse as JSON (log lines go to
+    stderr) because the driver workflow feeds stdout to json.tool."""
+    monkeypatch.delenv("ROBIE_ENV", raising=False)
+    monkeypatch.delenv("ASCEND_DRIVER_LIVE", raising=False)
+    rc = driver.main([])
+    assert rc == 1
+    out, _err = capsys.readouterr()
+    payload = json.loads(out)  # raises when stdout is polluted by log lines
+    assert payload["dry_run"] is True
+    assert "ROBIE_ENV" in payload["fatal"]
