@@ -96,11 +96,15 @@ def test_report_content_gate_accepts_populated_submission_center():
     evidence = _report_module().validate_submission_content(
         "Sales / service — Submission Center\n"
         "Open over 30 days: 4\n"
-        "Evidence source: live EZLynx Submission Center"
+        "Evidence source: live EZLynx Submission Center\n"
+        "Customer sentiment — Magellan\n"
+        "Verified zero — full target-date pagination completed"
     )
     assert evidence["verified"] is True
     assert evidence["submission_center_section_present"] is True
     assert evidence["submission_center_unverified_marker_present"] is False
+    assert evidence["magellan_section_present"] is True
+    assert evidence["magellan_unverified_marker_present"] is False
     assert len(evidence["document_content_sha256"]) == 64
 
 
@@ -108,8 +112,11 @@ def test_report_content_gate_accepts_populated_submission_center():
     "text",
     [
         "Executive summary only",
-        "Submission Center was not verified: Locator.click timeout",
-        "UNVERIFIED — server Submission Center audit unavailable",
+        "Submission Center was not verified: Locator.click timeout\nMagellan verified zero",
+        "UNVERIFIED — server Submission Center audit unavailable\nMagellan verified zero",
+        "Submission Center verified\nCustomer feedback only",
+        "Submission Center verified\nMagellan\nNo verified records for this report date.",
+        "Submission Center verified\nMagellan unavailable",
     ],
 )
 def test_report_content_gate_fails_closed_for_missing_or_unverified_evidence(text):
