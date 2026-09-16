@@ -70,7 +70,7 @@ jobs:
             --project="${PROJECT_ID}" \
             --zone="${ZONE}" \
             --tunnel-through-iap \
-            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
               -m robie_job_engine.ascend_notice_driver ${DRIVER_FLAGS}")
           STATUS=$?
           set -e
