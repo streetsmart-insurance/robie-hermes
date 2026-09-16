@@ -79,7 +79,7 @@ class SheetsSafeUpsertTests(unittest.TestCase):
         self.assertEqual("Jobs!A7:Y7", request["body"]["data"][0]["range"])
         self.assertEqual("target-job", request["body"]["data"][0]["values"][0][17])
         self.assertEqual(
-            ["Jobs!A7:Y7", "Jobs!Z7:AB7", "Jobs!AD7:AE7", "Jobs!AG7"],
+            ["Jobs!A7:Y7", "Jobs!Z7:AB7", "Jobs!AD7:AE7", "Jobs!AG7", "Jobs!AH7"],
             [write["range"] for write in request["body"]["data"]],
         )
         self.assertEqual("Verified", request["body"]["data"][2]["values"][0][0])

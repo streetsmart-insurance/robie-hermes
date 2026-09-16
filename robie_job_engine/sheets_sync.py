@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +104,7 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
         "NEEDS_SKILL": "Needs a Skill — waiting",
         "NEEDS_CLARIFICATION": "Needs clarification — waiting",
         "NEEDS_AUTH": "Needs authorization — waiting",
+        "AWAITING_HUMAN_INPUT": "Waiting on you — needs your input",
         "WAITING": "Waiting — not complete",
         "RUNNING": "Working now",
         "VERIFYING": "Checking the result",
@@ -168,6 +170,85 @@ def _friendly_jobs(rows: list[dict[str, Any]], limit: int = 1000) -> list[list[A
             item.get("estimated_cost_usd", 0),
         ])
     return output or [[""]]
+
+
+_ERROR_PREFIX_RE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*Error|Exception|TimeoutError)\s*:\s*", re.IGNORECASE
+)
+_URL_RE = re.compile(r"https?://\S+")
+_PATH_RE = re.compile(r'"?(?:/[\w.\-]+)+/?"?')
+
+
+def _clean_error(raw: Any) -> str:
+    """Return a reader-safe one-line summary of an engine error.
+
+    Drops tracebacks, URLs, and file paths so the value is safe to show a
+    non-technical reader in the Control Center.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    # In a traceback the last line carries the actual error message.
+    line = lines[-1] if lines[0].lower().startswith("traceback") else lines[0]
+    line = _URL_RE.sub("", line)
+    line = _PATH_RE.sub("", line)
+    line = _ERROR_PREFIX_RE.sub("", line)
+    line = re.sub(r"\s{2,}", " ", line).strip(" :;,-")
+    return line[:220].strip()
+
+
+def _plain_english_what_went_wrong(item: dict[str, Any]) -> str:
+    """Plain-English explanation of why a job is stuck or failed.
+
+    Returns 1-3 short sentences with no jargon, tracebacks, or file paths.
+    Jobs in good or neutral states return an empty string.
+    """
+    status = str(item.get("status") or "").strip().upper()
+    payload = item.get("payload") or {}
+    error = _clean_error(item.get("last_error"))
+    requester = _friendly_person(
+        payload.get("requested_by") or payload.get("sender") or payload.get("from") or ""
+    )
+    who = requester if requester else "the person who requested it"
+    skill = str(payload.get("skill") or "").strip()
+
+    if status == "FAILED":
+        detail = f" What the system reported: {error}." if error else ""
+        return (
+            "This job failed and will not try again on its own."
+            f"{detail} Please review it and re-run the job or fix the underlying problem."
+        )
+    if status == "NEEDS_AUTH":
+        what = error or "an approval this job cannot grant itself"
+        return (
+            f"This job is waiting for authorization: {what}."
+            f" {who} needs to approve it before it can continue."
+        )
+    if status in {"NEEDS_CLARIFICATION", "AWAITING_HUMAN_INPUT"}:
+        need = error or "a missing detail"
+        return (
+            f"This job is waiting on {who} for: {need}."
+            " Once they reply with the answer, it will continue on its own."
+        )
+    if status == "UNVERIFIED":
+        what = error or "the result in the destination system"
+        return (
+            "The work ran, but the result could not be independently verified:"
+            f" {what}. Please check it manually before treating it as done."
+        )
+    if status == "PAUSED":
+        why = error or "it was paused by a person or a safety check"
+        return f"This job is paused: {why}. Unpause it when you are ready for it to continue."
+    if status == "NEEDS_SKILL":
+        what = skill or error or "a capability that is not installed yet"
+        return (
+            f"This job is stuck because it needs a skill that is not set up yet: {what}."
+            " Ask the team to add it, then the job can continue."
+        )
+    return ""
 
 
 def _runtime_job_fields(item: dict[str, Any]) -> dict[str, Any]:
@@ -243,7 +324,8 @@ def upsert_job_rows(
             appended += 1
         else:
             updated += 1
-        runtime = _runtime_job_fields(next(item for item in selected if str(item.get("id")) == job_id))
+        job = next(item for item in selected if str(item.get("id")) == job_id)
+        runtime = _runtime_job_fields(job)
         writes.extend([
             {"range": f"Jobs!A{sheet_row}:Y{sheet_row}", "values": [row]},
             {"range": f"Jobs!Z{sheet_row}:AB{sheet_row}", "values": [[
@@ -253,6 +335,7 @@ def upsert_job_rows(
                 runtime["verification_status"], runtime["evidence_count"],
             ]]},
             {"range": f"Jobs!AG{sheet_row}", "values": [[runtime["control_mode"]]]},
+            {"range": f"Jobs!AH{sheet_row}", "values": [[_plain_english_what_went_wrong(job)]]},
         ])
 
     if writes:
