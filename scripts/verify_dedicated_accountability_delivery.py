@@ -66,6 +66,34 @@ def _expected(root: Path) -> tuple[str, set[str], object, str]:
     return subject, {value.casefold() for value in RECIPIENTS}, gmail, target
 
 
+def _keyless_expected(
+    *,
+    target: str,
+    mailbox: str,
+    recipients: list[str],
+    service_account_email: str,
+) -> tuple[str, set[str], object, str]:
+    from googleapiclient.discovery import build
+    import google.auth
+    from google.auth import iam
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
+
+    source, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials = service_account.Credentials(
+        signer=iam.Signer(Request(), source, service_account_email),
+        service_account_email=service_account_email,
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=[GMAIL_METADATA_SCOPE],
+        subject=mailbox,
+    )
+    gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    subject = f"StreetSmart Yesterday Accountability — {target}"
+    return subject, {value.casefold() for value in recipients}, gmail, target
+
+
 def _find_exact(gmail, subject: str, expected_recipients: set[str]) -> bool:
     response = gmail.users().messages().list(
         userId="me",
@@ -101,12 +129,40 @@ def _find_exact(gmail, subject: str, expected_recipients: set[str]) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app-root", required=True)
+    parser.add_argument("--app-root")
     parser.add_argument("--mode", choices=("preflight", "verify"), required=True)
+    parser.add_argument("--target-date")
+    parser.add_argument("--mailbox")
+    parser.add_argument("--recipient", action="append", default=[])
+    parser.add_argument("--service-account-email")
     args = parser.parse_args()
 
-    root = Path(args.app_root).expanduser().resolve()
-    subject, recipients, gmail, target = _expected(root)
+    standalone = all((
+        args.target_date,
+        args.mailbox,
+        args.recipient,
+        args.service_account_email,
+    ))
+    if standalone:
+        subject, recipients, gmail, target = _keyless_expected(
+            target=args.target_date,
+            mailbox=args.mailbox,
+            recipients=args.recipient,
+            service_account_email=args.service_account_email,
+        )
+    elif args.app_root and not any((
+        args.target_date,
+        args.mailbox,
+        args.recipient,
+        args.service_account_email,
+    )):
+        root = Path(args.app_root).expanduser().resolve()
+        subject, recipients, gmail, target = _expected(root)
+    else:
+        parser.error(
+            "provide --app-root alone, or provide target-date, mailbox, "
+            "at least one recipient, and service-account-email"
+        )
 
     attempts = 1 if args.mode == "preflight" else 7
     found = False
