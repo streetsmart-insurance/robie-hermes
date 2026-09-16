@@ -7,8 +7,17 @@ The persistent Chrome units accept an optional env file
 no proxy credentials live on the box). The leading '-' on EnvironmentFile
 keeps the file optional: without it Chrome launches exactly as before.
 
+ExecStart runs through ``/bin/sh -c 'exec ...'`` with the flags referenced as
+``$$PROXY_CHROME_FLAGS`` (the doubled dollar defers expansion to the shell).
+This is load-bearing, not cosmetic: systemd does NOT do shell word-splitting,
+so a bare ``${PROXY_CHROME_FLAGS}`` in ExecStart expands to an EMPTY argv entry
+when the env file is absent — and Chrome exits 13 on that empty argument.
+The shell drops an empty/unset variable under word-splitting instead, and
+``exec`` keeps chrome as the main PID so signal handling is unchanged.
+
 This test pins that contract so a future unit edit cannot silently drop the
-proxy wiring or, worse, hardcode proxy credentials into the repo.
+proxy wiring, reintroduce a bare ${...} expansion, or hardcode proxy
+credentials into the repo.
 """
 
 import re
@@ -25,7 +34,11 @@ BROWSER_UNITS = [
 ]
 
 ENV_FILE_LINE = "EnvironmentFile=-/etc/streetsmart-hermes/robie-browser-proxy.env"
-FLAGS_VAR = "${PROXY_CHROME_FLAGS}"
+# Doubled dollar: deferred to the shell inside /bin/sh -c 'exec ...'.
+DEFERRED_FLAGS_VAR = "$$PROXY_CHROME_FLAGS"
+# Bare systemd expansion: forbidden in ExecStart (empty argv entry -> exit 13).
+BARE_FLAGS_VAR = "${PROXY_CHROME_FLAGS}"
+SHELL_EXEC_PREFIX = "/bin/sh -c 'exec /usr/bin/google-chrome"
 
 
 class BrowserProxyUnitTests(unittest.TestCase):
@@ -33,6 +46,13 @@ class BrowserProxyUnitTests(unittest.TestCase):
         path = REPO_ROOT / rel
         self.assertTrue(path.is_file(), f"browser unit missing: {rel}")
         return path.read_text()
+
+    def _exec_lines(self, text, rel):
+        exec_lines = [
+            line for line in text.splitlines() if line.startswith("ExecStart=")
+        ]
+        self.assertTrue(exec_lines, f"{rel} has no ExecStart line")
+        return exec_lines
 
     def test_units_reference_optional_proxy_env_file(self):
         for rel in BROWSER_UNITS:
@@ -44,21 +64,42 @@ class BrowserProxyUnitTests(unittest.TestCase):
                     f"{rel} must source the optional proxy env file",
                 )
 
-    def test_execstart_injects_proxy_flags_variable(self):
+    def test_execstart_defers_proxy_flags_to_shell(self):
         for rel in BROWSER_UNITS:
             with self.subTest(unit=rel):
                 text = self._read(rel)
-                exec_lines = [
-                    line
-                    for line in text.splitlines()
-                    if line.startswith("ExecStart=")
-                ]
-                self.assertTrue(exec_lines, f"{rel} has no ExecStart line")
-                for line in exec_lines:
+                for line in self._exec_lines(text, rel):
                     self.assertIn(
-                        FLAGS_VAR,
+                        DEFERRED_FLAGS_VAR,
                         line,
-                        f"{rel} ExecStart must inject {FLAGS_VAR}",
+                        f"{rel} ExecStart must inject {DEFERRED_FLAGS_VAR} "
+                        "(shell-deferred, so empty vanishes)",
+                    )
+
+    def test_execstart_has_no_bare_systemd_flag_expansion(self):
+        # Regression: a bare ${PROXY_CHROME_FLAGS} in ExecStart expands to an
+        # empty argv entry when the env file is absent, and Chrome exits 13.
+        for rel in BROWSER_UNITS:
+            with self.subTest(unit=rel):
+                text = self._read(rel)
+                for line in self._exec_lines(text, rel):
+                    self.assertNotIn(
+                        BARE_FLAGS_VAR,
+                        line,
+                        f"{rel} ExecStart must not contain a bare "
+                        f"{BARE_FLAGS_VAR} expansion (Chrome exit 13)",
+                    )
+
+    def test_execstart_wrapped_in_shell_exec(self):
+        # The sh -c 'exec ...' wrapper is what makes the empty expansion safe.
+        for rel in BROWSER_UNITS:
+            with self.subTest(unit=rel):
+                text = self._read(rel)
+                for line in self._exec_lines(text, rel):
+                    self.assertTrue(
+                        line.startswith(f"ExecStart={SHELL_EXEC_PREFIX}"),
+                        f"{rel} ExecStart must start with "
+                        f"ExecStart={SHELL_EXEC_PREFIX}",
                     )
 
     def test_no_hardcoded_proxy_credentials_in_units(self):

@@ -15,9 +15,12 @@ Group=streetsmart-hermes
 UMask=0077
 Environment=HOME=/opt/streetsmart-hermes
 # Optional proxy routing for bot-walled carrier portals. See
-# deploy/systemd/robie-ezlynx-browser.service for the documented contract.
+# deploy/systemd/robie-ezlynx-browser.service for the documented contract
+# (including WHY ExecStart is wrapped in /bin/sh -c 'exec ...': a bare
+# ${PROXY_CHROME_FLAGS} expands to an empty argv entry when the env file is
+# absent, and Chrome exits 13 on it).
 EnvironmentFile=-/etc/streetsmart-hermes/robie-browser-proxy.env
-ExecStart=/usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 ${PROXY_CHROME_FLAGS} --user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank
+ExecStart=/bin/sh -c 'exec /usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 $$PROXY_CHROME_FLAGS --user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank'
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
