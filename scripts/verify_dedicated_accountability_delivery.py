@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
-GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
 
 
 def _expected(root: Path) -> tuple[str, set[str], object, str]:
@@ -34,12 +34,12 @@ def _expected(root: Path) -> tuple[str, set[str], object, str]:
     if credential_path.is_file():
         credentials = service_account.Credentials.from_service_account_file(
             str(credential_path),
-            scopes=[GMAIL_READONLY_SCOPE],
+            scopes=[GMAIL_METADATA_SCOPE],
             subject=REPORTING_MAILBOX,
         )
     else:
         try:
-            credentials = delegated_credentials([GMAIL_READONLY_SCOPE], REPORTING_MAILBOX)
+            credentials = delegated_credentials([GMAIL_METADATA_SCOPE], REPORTING_MAILBOX)
         except RuntimeError as exc:
             if str(exc) != "Google delegation credential is unavailable":
                 raise
@@ -59,7 +59,7 @@ def _expected(root: Path) -> tuple[str, set[str], object, str]:
                 signer=iam.Signer(Request(), source, service_account_email),
                 service_account_email=service_account_email,
                 token_uri="https://oauth2.googleapis.com/token",
-                scopes=[GMAIL_READONLY_SCOPE],
+                scopes=[GMAIL_METADATA_SCOPE],
                 subject=REPORTING_MAILBOX,
             )
     gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False)
@@ -69,8 +69,9 @@ def _expected(root: Path) -> tuple[str, set[str], object, str]:
 def _find_exact(gmail, subject: str, expected_recipients: set[str]) -> bool:
     response = gmail.users().messages().list(
         userId="me",
-        q=f'in:sent newer_than:7d subject:"{subject}"',
-        maxResults=20,
+        labelIds=["SENT"],
+        maxResults=100,
+        includeSpamTrash=False,
     ).execute()
     for item in response.get("messages", []):
         message = gmail.users().messages().get(
