@@ -14,7 +14,14 @@ User=streetsmart-hermes
 Group=streetsmart-hermes
 UMask=0077
 Environment=HOME=/opt/streetsmart-hermes
-ExecStart=/usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank
+# Optional proxy routing for bot-walled carrier portals. When the file exists it
+# must define PROXY_CHROME_FLAGS, e.g.:
+#   PROXY_CHROME_FLAGS=--proxy-server=http://proxy.webshare.io:8080
+# Prefer Webshare IP-auth (whitelist the box egress IP in the Webshare dashboard)
+# so no proxy credentials live on the box. The leading '-' makes the file optional:
+# without it Chrome launches exactly as before (direct egress).
+EnvironmentFile=-/etc/streetsmart-hermes/robie-browser-proxy.env
+ExecStart=/usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 ${PROXY_CHROME_FLAGS} --user-data-dir=/opt/streetsmart-hermes/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
