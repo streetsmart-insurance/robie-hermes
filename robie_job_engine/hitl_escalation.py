@@ -12,11 +12,15 @@ This is the REAL HITL — not the dry marker. It actually sends notifications.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
 from typing import Any, Optional
+
+
+logger = logging.getLogger("robie.hitl_escalation")
 
 
 @dataclass
@@ -279,6 +283,14 @@ def _deliver_hitl(
                 email_sent = True
             except Exception as exc:
                 email_error = f"{type(exc).__name__}: {exc}"
+                # Never swallow. signBlob 403 used to vanish when Chat still
+                # posted; log every email failure even if chat_sent becomes True.
+                logger.warning(
+                    "HITL email send failed job_id=%s phase=%s error=%s",
+                    request.job_id,
+                    request.phase,
+                    email_error,
+                )
     elif not email_sender:
         email_error = "no email_sender in deps"
     elif not recipients:
@@ -291,6 +303,12 @@ def _deliver_hitl(
                 chat_error = chat_error or "chat_sender returned false"
         except Exception as exc:
             chat_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "HITL chat send failed job_id=%s phase=%s error=%s",
+                request.job_id,
+                request.phase,
+                chat_error,
+            )
     else:
         chat_error = chat_error or "no chat_sender in deps"
     channel = str(getattr(request, "channel", "chat") or "chat").strip().casefold()
@@ -300,6 +318,17 @@ def _deliver_hitl(
         posted = chat_sent or email_sent
     else:
         posted = chat_sent
+    if email_error and not email_sent:
+        logger.warning(
+            "HITL delivery email path failed job_id=%s channel=%s "
+            "hitl_posted=%s email_sent=%s chat_sent=%s email_error=%s",
+            request.job_id,
+            channel or "chat",
+            posted,
+            email_sent,
+            chat_sent,
+            email_error,
+        )
     return {
         "email_sent": email_sent,
         "chat_sent": chat_sent,
@@ -337,6 +366,7 @@ def ping_carlo(
 
     Honest about Gemini and job state. Chat failure is HITL posted=false.
     Email signBlob 403 is not a HITL post and does not authorize continue.
+    Always returns email/chat error text when a path fails; never silent.
     """
     notice = build_hitl_notice(request, gemini_response)
     delivery = _deliver_hitl(request, notice, deps)
@@ -347,7 +377,26 @@ def ping_carlo(
         parts.append(f"chat: {delivery['chat_error']}")
     if not delivery["chat_sent"] and not delivery["chat_error"]:
         parts.append("chat: HITL posted=false")
-    return (bool(delivery["hitl_posted"]), "; ".join(parts))
+    error = "; ".join(parts)
+    if error:
+        logger.warning(
+            "ping_carlo result job_id=%s hitl_posted=%s email_sent=%s "
+            "chat_sent=%s detail=%s",
+            request.job_id,
+            bool(delivery["hitl_posted"]),
+            bool(delivery["email_sent"]),
+            bool(delivery["chat_sent"]),
+            error,
+        )
+    else:
+        logger.info(
+            "ping_carlo ok job_id=%s hitl_posted=%s email_sent=%s chat_sent=%s",
+            request.job_id,
+            bool(delivery["hitl_posted"]),
+            bool(delivery["email_sent"]),
+            bool(delivery["chat_sent"]),
+        )
+    return (bool(delivery["hitl_posted"]), error)
 
 
 def wait_for_carlo_response(
@@ -373,8 +422,13 @@ def wait_for_carlo_response(
                     actionable=True,
                     raw=reply,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "wait_for_carlo_response poll failed job_id=%s error=%s: %s",
+                job_id,
+                type(exc).__name__,
+                exc,
+            )
         time.sleep(60)  # Check every minute
     
     return None
