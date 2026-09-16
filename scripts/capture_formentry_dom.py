@@ -3,18 +3,19 @@
 
 Connects to the already-running Robie browser on this box
 (http://127.0.0.1:9222), opens a NEW tab (leaving Robie's pages untouched),
-navigates to the FormEntry Edit URL for TEST-HO-20260912-D01
-(policyId 83651751, applicant 220250093), and dumps every input / select /
-textarea on the page: id, name, type, placeholder, label text, current
-value, VISIBLE/HIDDEN, iframe, and tab/section. Tab controls are enumerated
-and each [role=tab] is clicked once (read-only: revealing fields, no fills,
-no Save) so lazily-rendered sections are captured too.
+navigates to either the D01 Edit URL (policyId 83651751) or a literal
+allowlisted FormEntry URL
+(/applicantportal/Policy/83651751/FormEntry/Index/<id>), and dumps every
+input / select / textarea: id, name, type, placeholder, label, value,
+VISIBLE/HIDDEN, iframe, tab/section. Optional ``--prefer-tab Coverages``
+clicks that tab first. Select ``all_options`` is uncapped.
 
 READ-ONLY CONTRACT (enforced by design, not just intent):
   - No field-filling calls, no typing, no checking boxes, no option selection.
   - The only clicks are on [role=tab] elements, logged explicitly.
   - The tab opened by this script is closed at the end.
   - Nothing is ever submitted or saved.
+  - FormEntry ids are never invented.
 
 Output: JSON to stdout and to the path given by --out.
 Exit 0 always on a completed capture; exit 1 with a literal error JSON
@@ -23,11 +24,15 @@ when the capture itself cannot run (no CDP, no playwright, login wall, ...).
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
 
 ENTRY_URL = "https://app.ezlynx.com/applicantportal/Policy/Actions/Edit/220250093/83651751"
+FORMENTRY_URL_RE = re.compile(
+    r"^https://app\.ezlynx\.com/applicantportal/Policy/83651751/FormEntry/Index/\d+(?:[/?#].*)?$"
+)
 CDP_URL = "http://127.0.0.1:9222"
 
 DUMP_JS = r"""
@@ -103,8 +108,8 @@ DUMP_JS = r"""
       });
       extra.options_count = el.options.length;
       extra.multiple = !!el.multiple;
-      extra.all_options = Array.from(el.options).slice(0, 40).map(function(o) {
-        return {value: o.value, text: (o.innerText || '').trim().slice(0, 80)};
+      extra.all_options = Array.from(el.options).map(function(o) {
+        return {value: o.value, text: (o.innerText || '').trim().slice(0, 200)};
       });
     } else {
       value = el.value;
@@ -164,9 +169,15 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="path to write dump JSON")
     ap.add_argument("--cdp", default=CDP_URL)
     ap.add_argument("--url", default=ENTRY_URL)
+    ap.add_argument(
+        "--prefer-tab",
+        default="",
+        help="If set (e.g. Coverages), click that [role=tab] first before dumps",
+    )
     args = ap.parse_args()
 
-    if args.url != ENTRY_URL:
+    allowlisted = args.url == ENTRY_URL or bool(FORMENTRY_URL_RE.match(args.url))
+    if not allowlisted:
         die("refusing non-allowlisted URL", url=args.url)
 
     try:
@@ -179,6 +190,7 @@ def main() -> int:
         "ok": True,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "requested_url": args.url,
+        "prefer_tab": args.prefer_tab or None,
         "landing_url": None,
         "clicks": [],
         "frames": [],
@@ -238,6 +250,32 @@ def main() -> int:
             time.sleep(3)
             result["landing_url"] = page.url
             result["landing_looks_authenticated"] = looks_authenticated(page.url)
+
+            # Optional: open Coverages (or other) tab first for reference dumps.
+            prefer = (args.prefer_tab or "").strip()
+            if prefer and result["landing_looks_authenticated"]:
+                try:
+                    tab = page.get_by_role("tab", name=prefer, exact=True)
+                    if tab.count() == 1:
+                        before = page.url
+                        tab.click(timeout=8000)
+                        time.sleep(2)
+                        result["clicks"].append({
+                            "clicked_tab": prefer,
+                            "selector": f'role=tab[name="{prefer}"]',
+                            "url_before": before,
+                            "url_after": page.url,
+                        })
+                    else:
+                        result["clicks"].append({
+                            "clicked_tab": prefer,
+                            "error": f"prefer-tab matched {tab.count()} elements",
+                        })
+                except Exception as exc:
+                    result["clicks"].append({
+                        "clicked_tab": prefer,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
 
             # Pass 1: dump every frame as-is.
             for fi, frame in enumerate(page.frames):
