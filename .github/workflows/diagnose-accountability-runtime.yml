@@ -47,6 +47,7 @@ jobs:
           }
 
           echo "host=$(hostname -s)"
+          echo "attached_service_account=$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email || true)"
           echo "captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "runtime_files:"
           stat -c '%U:%G %a %y %n' \
@@ -79,7 +80,7 @@ jobs:
             "${root}/src" "${root}/scripts" 2>/dev/null || true)
 
           echo "magellan_auth_source:"
-          sed -n '1,110p' "${root}/src/extractors/magellan_playwright.py" 2>/dev/null | redact
+          sed -n '1,190p' "${root}/src/extractors/magellan_playwright.py" 2>/dev/null | redact
 
           echo "active_delivery_entrypoints:"
           grep -RIn -B 18 -A 28 \
