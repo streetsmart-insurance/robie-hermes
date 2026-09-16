@@ -123,6 +123,22 @@ def main():
     values=settings(args.environment, refs, prior_env.get(api_key))
     env_path=Path('/etc')/root.name/'robie-message-runtime.env'
     files={env_path: ''.join(f'{k}={v}\n' for k,v in values.items())}
+    # Keep accountability env login pins aligned with newest ENABLED (Test
+    # historically left ezlynx-password at versions/1 while message-runtime
+    # moved ahead).
+    for extra_name in ('accountability.env', 'robie-accountability.env'):
+        extra = Path('/etc')/root.name/extra_name
+        if not extra.exists():
+            continue
+        lines=[]
+        for line in extra.read_text().splitlines():
+            if line.startswith('ROBIE_EZLYNX_USERNAME_SECRET='):
+                lines.append('ROBIE_EZLYNX_USERNAME_SECRET='+refs['ROBIE_EZLYNX_USERNAME_SECRET'])
+            elif line.startswith('ROBIE_EZLYNX_PASSWORD_SECRET='):
+                lines.append('ROBIE_EZLYNX_PASSWORD_SECRET='+refs['ROBIE_EZLYNX_PASSWORD_SECRET'])
+            else:
+                lines.append(line)
+        files[extra]='\n'.join(lines)+('\n' if lines else '')
     units=[gateway, 'hermes-email-watcher', 'robie-scheduler']
     loaded=[]
     for unit in units:

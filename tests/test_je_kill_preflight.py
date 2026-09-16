@@ -17,6 +17,7 @@ from robie_job_engine.je_kill_preflight import (
     job_inventory_errors,
     job_inventory_report,
     read_job_inventory,
+    release_pointer_errors,
 )
 
 REMOTE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run-je-kill-test-remote.sh"
@@ -97,6 +98,7 @@ class JeKillPreflightTests(unittest.TestCase):
             }
         ]
         errors = ezlynx_auth_tab_errors(tabs)
+        self.assertTrue(any("CDP AUTHENTICATED required" in e for e in errors))
         self.assertTrue(any("login page" in e for e in errors))
 
     def test_authenticated_tab_passes(self):
@@ -108,6 +110,32 @@ class JeKillPreflightTests(unittest.TestCase):
             }
         ]
         self.assertEqual(ezlynx_auth_tab_errors(tabs), [])
+
+    def test_release_pointer_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "releases" / "aaaaaaaaaaaa" / "robie-hermes-aaaaaaaaaaaa"
+            live.mkdir(parents=True)
+            (root / "current").symlink_to(live)
+            (root / "releases" / "current").symlink_to(live)
+            errors = release_pointer_errors(
+                test_root=str(root), expected_sha="bbbbbbbbbbbb"
+            )
+            self.assertTrue(any("SHA mismatch" in e for e in errors))
+
+    def test_release_pointer_match_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "releases" / "c89f4e6abcde" / "robie-hermes-c89f4e6abcde"
+            live.mkdir(parents=True)
+            (root / "current").symlink_to(live)
+            (root / "releases" / "current").symlink_to(live)
+            self.assertEqual(
+                release_pointer_errors(
+                    test_root=str(root), expected_sha="c89f4e6abcdef0123456789"
+                ),
+                [],
+            )
 
 
 class JeKillJobInventoryTests(unittest.TestCase):

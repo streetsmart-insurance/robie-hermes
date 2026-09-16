@@ -20,6 +20,12 @@ or destructive-action prompts. Those approvals remain inside the Codex client.
 Google Chat can notify Carlo that input is needed, but the safe response path is
 Codex desktop or Codex Remote in the ChatGPT mobile app.
 
+## Stage 3 Production JE-KILL
+
+**HOLD.** Do not run Production JE-KILL Stage 3 until Carlo explicitly
+green-lights the exact QA-certified digest after additional clean Test
+disposables. See `docs/STAGE3_JE_RELIABILITY_HOLD.md`.
+
 ## Notification behavior
 
 - Send a Google Chat DM only when a genuine human decision is required.

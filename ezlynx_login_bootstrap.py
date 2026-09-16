@@ -21,6 +21,14 @@ INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
 
 
 def secret(name: str) -> str:
+    """Always read the newest ENABLED version (never a stale env pin).
+
+    ``ROBIE_EZLYNX_*_SECRET`` may still be present for operators and for
+    ``load_ezlynx_credentials``, but SSRobie login on Test historically pinned
+    ``ezlynx-password`` to ``versions/1`` while newer ENABLED versions worked.
+    Matching Production discipline: list ENABLED by create_time and access that
+    version. If an env pin points elsewhere, log a one-line warning (no value).
+    """
     from google.cloud import secretmanager
 
     client = secretmanager.SecretManagerServiceClient()
@@ -36,8 +44,6 @@ def secret(name: str) -> str:
             raise RuntimeError(
                 f"Pinned Secret Manager reference is invalid for required secret {name}"
             )
-        response = client.access_secret_version(request={"name": reference})
-        return response.payload.data.decode("utf-8").strip()
 
     enabled = list(
         client.list_secret_versions(
@@ -47,6 +53,16 @@ def secret(name: str) -> str:
     if not enabled:
         raise RuntimeError(f"No enabled version exists for required secret {name}")
     newest = max(enabled, key=lambda version: version.create_time)
+    newest_name = str(newest.name)
+    if reference:
+        pinned_suffix = reference.rsplit("/", 1)[-1]
+        newest_suffix = newest_name.rsplit("/", 1)[-1]
+        if pinned_suffix != newest_suffix:
+            print(
+                f"login-secret: ignoring stale pin for {name} "
+                f"(env versions/{pinned_suffix}; newest ENABLED versions/{newest_suffix})",
+                flush=True,
+            )
     response = client.access_secret_version(request={"name": newest.name})
     return response.payload.data.decode("utf-8").strip()
 

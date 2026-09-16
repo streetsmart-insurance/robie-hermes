@@ -43,6 +43,11 @@ class EzlynxCredentials:
 
 
 def load_ezlynx_credentials(accessor: SecretAccessor | None = None) -> EzlynxCredentials:
+    """Load SSRobie login creds from newest ENABLED versions.
+
+    Env refs may be stale pins (Test historically kept password at
+    ``versions/1``). Resolve each secret's parent and access newest ENABLED.
+    """
     username_ref = os.environ.get("ROBIE_EZLYNX_USERNAME_SECRET", "").strip()
     password_ref = os.environ.get("ROBIE_EZLYNX_PASSWORD_SECRET", "").strip()
     if not username_ref or not password_ref:
@@ -50,6 +55,35 @@ def load_ezlynx_credentials(accessor: SecretAccessor | None = None) -> EzlynxCre
             "ROBIE_EZLYNX_USERNAME_SECRET and ROBIE_EZLYNX_PASSWORD_SECRET must be configured"
         )
     accessor = accessor or GoogleSecretManagerAccessor()
-    username = accessor.access(username_ref)
-    password = accessor.access(password_ref)
+    username = accessor.access(_newest_enabled_resource(username_ref, accessor))
+    password = accessor.access(_newest_enabled_resource(password_ref, accessor))
     return EzlynxCredentials(username=username, password=password)
+
+
+def _secret_parent(resource_name: str) -> str:
+    if not resource_name.startswith("projects/") or "/secrets/" not in resource_name:
+        raise ValueError("Secret Manager reference must be a full secret-version resource name")
+    if "/versions/" in resource_name:
+        return resource_name.rsplit("/versions/", 1)[0]
+    return resource_name
+
+
+def _newest_enabled_resource(resource_name: str, accessor: SecretAccessor) -> str:
+    """Return newest ENABLED version resource; fall back to the given pin."""
+    parent = _secret_parent(resource_name)
+    client = getattr(accessor, "_client", None)
+    if client is None:
+        return resource_name
+    try:
+        enabled = list(
+            client.list_secret_versions(
+                request={"parent": parent, "filter": "state:ENABLED"}
+            )
+        )
+    except Exception:
+        return resource_name
+    if not enabled:
+        return resource_name
+    newest = max(enabled, key=lambda version: getattr(version, "create_time", 0))
+    return str(newest.name)
+
