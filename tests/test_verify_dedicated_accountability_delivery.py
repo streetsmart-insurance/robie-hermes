@@ -25,7 +25,8 @@ def test_expected_falls_back_to_installed_dwd_credential(tmp_path, monkeypatch):
     delegated = types.ModuleType("src.google_auth")
 
     def unavailable(*_args, **_kwargs):
-        raise RuntimeError("Google delegation credential is unavailable")
+        calls["delegated_called"] = True
+        raise AssertionError("installed DWD credential must be preferred")
 
     delegated.delegated_credentials = unavailable
 
@@ -75,3 +76,4 @@ def test_expected_falls_back_to_installed_dwd_credential(tmp_path, monkeypatch):
         "subject": "reports@example.test",
     }
     assert gmail["credentials"] == "credential"
+    assert "delegated_called" not in calls
