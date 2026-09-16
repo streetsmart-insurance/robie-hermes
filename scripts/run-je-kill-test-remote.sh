@@ -18,10 +18,16 @@ test "${RUN_ROOT}" = /opt/streetsmart-hermes-test/je-kill/runs
 current="$(readlink -f "${TEST_ROOT}/current")"
 releases_current="$(readlink -f "${TEST_ROOT}/releases/current")"
 test -n "${current}"
-test "${current}" = "${releases_current}"
+test "${current}" = "${releases_current}" || {
+  echo "JE-KILL REFUSED: Test release pointers disagree (current vs releases/current)" >&2
+  exit 2
+}
 case "${current}" in
   "${TEST_ROOT}/releases/${EXPECTED_SHA}/"*) ;;
-  *) echo "Test release does not match workflow commit" >&2; exit 2 ;;
+  *)
+    echo "JE-KILL REFUSED: release pointer SHA mismatch (live=${current}; expected prefix ${EXPECTED_SHA}). Deploy Test to match workflow commit before JE-KILL." >&2
+    exit 2
+    ;;
 esac
 
 test -f "${FIXTURE}" || {
@@ -137,19 +143,20 @@ elif True:
     title = str(eligible[0].get("title") or "").casefold()
     if "login" in url or "signin" in url or title == "login":
         errors.append(
-            "EZLynx Test session is on the login page. Carlo: complete "
-            "Test EZLynx login/MFA on hermes-test-01 before JE-KILL."
+            "CDP AUTHENTICATED required: EZLynx Test session is on the login "
+            "page. Carlo: complete Test EZLynx login/MFA on hermes-test-01 "
+            "before JE-KILL (leave one app.ezlynx.com/web/ tab open)."
         )
 if errors:
     print("JE-KILL PREFLIGHT BLOCKED:")
     for item in errors:
         print(f"- {item}")
     raise SystemExit(2)
-print("JE-KILL PREFLIGHT OK")
+print("JE-KILL PREFLIGHT OK: fixture age + CDP AUTHENTICATED + inventory gate ready")
 PY
 then
   cat "${preflight_log}" >&2
-  echo "JE-KILL REFUSED: preflight blocked (fixture approval and/or EZLynx session)" >&2
+  echo "JE-KILL REFUSED: preflight blocked (fixture age / CDP AUTHENTICATED / inventory / release pointer)" >&2
   exit 2
 fi
 cat "${preflight_log}"

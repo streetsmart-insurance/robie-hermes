@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -131,8 +133,9 @@ def ezlynx_auth_tab_errors(tabs: list[dict[str, Any]]) -> list[str]:
     title = str(eligible[0].get("title") or "").casefold()
     if "login" in url or "signin" in url or title == "login":
         return [
-            "EZLynx Test session is on the login page. Carlo: complete "
-            "Test EZLynx login/MFA on hermes-test-01 before JE-KILL."
+            "CDP AUTHENTICATED required: EZLynx Test session is on the login "
+            "page. Carlo: complete Test EZLynx login/MFA on hermes-test-01 "
+            "before JE-KILL (leave one app.ezlynx.com/web/ tab open)."
         ]
     return []
 
@@ -146,28 +149,93 @@ def read_cdp_tabs(cdp_url: str = "http://127.0.0.1:9222", timeout: float = 5.0) 
     return [row for row in payload if isinstance(row, dict)]
 
 
+def release_pointer_errors(
+    *,
+    test_root: str,
+    expected_sha: str,
+) -> list[str]:
+    """Fail closed when Test release pointers disagree with the workflow SHA."""
+    from pathlib import Path
+
+    errors: list[str] = []
+    root = Path(test_root)
+    sha = str(expected_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        return [f"EXPECTED_SHA invalid: {expected_sha!r}"]
+    short = sha[:12]
+    try:
+        current = root.joinpath("current").resolve()
+        releases_current = root.joinpath("releases", "current").resolve()
+    except OSError as exc:
+        return [f"Test release pointers unreadable: {exc}"]
+    if not current.exists() or not releases_current.exists():
+        return ["Test release pointers missing under current/ or releases/current"]
+    if current != releases_current:
+        errors.append(
+            f"Test release pointers disagree: current={current} "
+            f"releases/current={releases_current}"
+        )
+    expected_prefix = str((root / "releases" / short).resolve())
+    live = str(current)
+    if not (live == expected_prefix or live.startswith(expected_prefix + os.sep)):
+        errors.append(
+            f"Test release pointer SHA mismatch: live={live} "
+            f"expected under releases/{short}/ (workflow commit). Deploy Test "
+            "to match before JE-KILL."
+        )
+    return errors
+
+
 def live_preflight_errors(
     *,
     fixture_path: str,
     cdp_url: str = "http://127.0.0.1:9222",
+    job_db: str | None = None,
+    test_root: str | None = None,
+    expected_sha: str | None = None,
 ) -> list[str]:
-    """Aggregate fixture + CDP blockers before any kill cycle."""
+    """Aggregate fixture + CDP + inventory + release-pointer blockers.
+
+    Each error is one clear line. Callers print ``JE-KILL PREFLIGHT BLOCKED:``
+    then each line. Fail closed before any kill cycle.
+    """
     errors: list[str] = []
+    if test_root and expected_sha:
+        errors.extend(
+            release_pointer_errors(test_root=test_root, expected_sha=expected_sha)
+        )
+    if job_db:
+        try:
+            rows = read_job_inventory(job_db)
+        except (OSError, sqlite3.Error) as exc:
+            errors.append(f"job inventory unreadable: {type(exc).__name__}: {exc}")
+        else:
+            report = job_inventory_report(rows)
+            if report["blocking"]:
+                errors.append(
+                    f"{len(report['blocking'])} active Test Job lease(s): "
+                    + "; ".join(report["blocking"])
+                )
+            # Unleased orphans are ignored for the kill gate (logged by caller).
     try:
         data = json.loads(open(fixture_path, encoding="utf-8").read())
     except OSError as exc:
-        return [f"fixture unreadable: {exc}"]
+        errors.append(f"fixture unreadable: {exc}")
+        return errors
     except json.JSONDecodeError as exc:
-        return [f"fixture JSON invalid: {exc}"]
+        errors.append(f"fixture JSON invalid: {exc}")
+        return errors
     if not isinstance(data, dict):
-        return ["fixture root must be an object"]
+        errors.append("fixture root must be an object")
+        return errors
     errors.extend(fixture_approval_errors(data))
     try:
         tabs = read_cdp_tabs(cdp_url)
     except (URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
         errors.append(
             f"CDP unavailable at {cdp_url}: {type(exc).__name__}: {exc}. "
-            "Ensure robie-ezlynx-browser-test is running on hermes-test-01."
+            "Ensure robie-ezlynx-browser-test is running on hermes-test-01 "
+            "and the SSRobie session is AUTHENTICATED (not login)."
         )
         return errors
     errors.extend(ezlynx_auth_tab_errors(tabs))

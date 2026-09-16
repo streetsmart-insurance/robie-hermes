@@ -58,9 +58,9 @@ Now (`scripts/run-je-kill-test-remote.sh` +
 - still emits `JE-KILL Test inventory: 0 blocking Jobs/leases` before the
   fixture/EZLynx preflight
 
-Covered by `tests/test_je_kill_preflight.py::JeKillJobInventoryTests`,
-which executes the exact heredoc from the remote runner against a seeded
-SQLite `jobs.db`.
+Landed on `main` (Stage 2 / #386 lineage). Stage 3 keeps Test release
+pointer SHA matched and adds the orphan unleased sweeper — see
+`docs/STAGE3_JE_RELIABILITY_HOLD.md`. **Production JE-KILL remains HOLD.**
 
 ## Dirty disposable docs (2026-09-14)
 

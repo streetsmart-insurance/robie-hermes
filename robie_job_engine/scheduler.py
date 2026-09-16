@@ -85,6 +85,20 @@ def run_once(db_path: str) -> dict[str, int]:
                 RecordingManager(db_path).release_local_after_audit(orphan_id)
             except Exception:
                 pass
+    try:
+        from .orphan_unleased_sweeper import run_orphan_unleased_sweep
+
+        sweep = run_orphan_unleased_sweep(db_path)
+        if sweep.get("parked_count"):
+            from .recording import RecordingManager
+
+            for item in sweep.get("parked") or []:
+                try:
+                    RecordingManager(db_path).release_local_after_audit(item["id"])
+                except Exception:
+                    pass
+    except Exception:
+        pass
     expired_contexts = DurableChatEventQueue(db_path).expire_inactive_conversations(
         inactivity_minutes=int(os.environ.get("ROBIE_DM_CONTEXT_TTL_MINUTES", "120"))
     )

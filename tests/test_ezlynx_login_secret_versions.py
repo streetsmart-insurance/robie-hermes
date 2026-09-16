@@ -75,10 +75,14 @@ class EzlynxLoginSecretVersionTests(TestCase):
         )
         page.wait_for_timeout.assert_called_once_with(2_000)
 
-    def test_secret_uses_pinned_version_without_listing_versions(self):
+    def test_secret_ignores_stale_pin_and_uses_newest_enabled(self):
         client = Mock()
+        client.list_secret_versions.return_value = [
+            SimpleNamespace(name="versions/1", create_time=1),
+            SimpleNamespace(name="versions/6", create_time=6),
+        ]
         client.access_secret_version.return_value = SimpleNamespace(
-            payload=SimpleNamespace(data=b"pinned-credential\n")
+            payload=SimpleNamespace(data=b"newest-credential\n")
         )
         google = ModuleType("google")
         google_cloud = ModuleType("google.cloud")
@@ -109,9 +113,9 @@ class EzlynxLoginSecretVersionTests(TestCase):
             spec.loader.exec_module(bootstrap)
             value = bootstrap.secret("ezlynx-password")
 
-        self.assertEqual(value, "pinned-credential")
-        client.list_secret_versions.assert_not_called()
+        self.assertEqual(value, "newest-credential")
+        client.list_secret_versions.assert_called_once()
         client.access_secret_version.assert_called_once_with(
-            request={"name": reference}
+            request={"name": "versions/6"}
         )
 
