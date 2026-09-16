@@ -82,6 +82,19 @@ jobs:
           echo "magellan_auth_source:"
           sed -n '1,190p' "${root}/src/extractors/magellan_playwright.py" 2>/dev/null | redact
 
+          echo "submission_center_sources:"
+          while IFS= read -r hit; do
+            echo "file=${hit}"
+            sed -n '1,620p' "${hit}" 2>/dev/null | redact
+          done < <(grep -RIl -E \
+            'submission-center/overview/submissions|Submission Center was not verified|server Submission Center audit unavailable|submission.?center' \
+            "${root}/src" "${root}/scripts" 2>/dev/null | head -20 || true)
+
+          echo "submission_center_recent_log_context:"
+          tail -n 1200 "${root}/data/logs/daily_run.log" 2>/dev/null |
+            grep -n -B 45 -A 80 -Ei 'Submission Center|submission.?center|Timeout 15000ms|locator\.click' |
+            tail -n 500 | redact || true
+
           echo "active_delivery_entrypoints:"
           grep -RIn -B 18 -A 28 \
             --exclude='*.bak*' --exclude='*.html' --exclude='*.json' \
