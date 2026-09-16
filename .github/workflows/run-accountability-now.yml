@@ -97,24 +97,31 @@ jobs:
           grep -Eq 'flock .*900' "${wrapper}"
           LOCK_EOF
 
-      - name: Repair and preflight Magellan authentication
+      - name: Repair recipients and preflight Magellan authentication
         run: |
           set -euo pipefail
           remote_repair="/tmp/accountability-magellan-repair-${GITHUB_RUN_ID}.py"
           remote_preflight="/tmp/accountability-magellan-preflight-${GITHUB_RUN_ID}.py"
+          remote_recipients="/tmp/accountability-recipient-repair-${GITHUB_RUN_ID}.py"
           gcloud compute scp scripts/repair_dedicated_accountability_magellan.py \
             "${PRODUCTION_VM}:${remote_repair}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
           gcloud compute scp scripts/preflight_dedicated_accountability_magellan.py \
             "${PRODUCTION_VM}:${remote_preflight}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute scp scripts/repair_dedicated_accountability_recipients.py \
+            "${PRODUCTION_VM}:${remote_recipients}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
           set -euo pipefail
-          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu"' EXIT
+          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu" "${remote_recipients}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_repair}" "${remote_repair}.ubuntu"
           install -o ubuntu -g ubuntu -m 0755 "${remote_preflight}" "${remote_preflight}.ubuntu"
-          rm -f "${remote_repair}" "${remote_preflight}"
+          install -o ubuntu -g ubuntu -m 0755 "${remote_recipients}" "${remote_recipients}.ubuntu"
+          rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_recipients}.ubuntu" \
+            --path "${APP_ROOT}/src/reporters/email_delivery.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" \
             --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
