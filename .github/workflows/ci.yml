@@ -56,7 +56,8 @@ jobs:
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py \
             tests/test_run_daily_accountability_vm.py \
-            tests/test_ezlynx_api.py
+            tests/test_ezlynx_api.py \
+            tests/test_browser_proxy_units.py
           PYTHONPATH=. python -m pytest -q tests/test_release_profile.py
       - name: Test production job client scope
         run: PYTHONPATH=.:tests python -m pytest -q tests/test_production_job_scope.py tests/test_ezlynx_write_scope.py tests/test_production_deploy_workflow.py tests/test_email_acceptance_audit.py tests/test_email_agent_runner.py tests/test_ezlynx_policy_setup_profiles.py tests/test_policy_skill_release.py tests/test_hermes_tool_visibility.py tests/test_ezlynx_document_tool.py tests/test_canary_create_policy.py
