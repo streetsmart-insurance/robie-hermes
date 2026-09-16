@@ -82,6 +82,55 @@ jobs:
           echo "magellan_auth_source:"
           sed -n '1,190p' "${root}/src/extractors/magellan_playwright.py" 2>/dev/null | redact
 
+          echo "magellan_report_sources:"
+          while IFS= read -r hit; do
+            echo "file=${hit}"
+            grep -n -B 80 -A 140 -Ei \
+              'No verified records for this report date|Customer sentiment|Magellan|pages_complete' \
+              "${hit}" 2>/dev/null | redact | head -800
+          done < <(grep -RIl -E \
+            'No verified records for this report date|Customer sentiment|Magellan' \
+            "${root}/src" "${root}/scripts" 2>/dev/null | head -30 || true)
+
+          echo "magellan_cache_evidence:"
+          "${root}/venv/bin/python" - <<'PYEOF'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          path = Path("/opt/streetsmart-daily-accountability/data/raw/magellan_latest.json")
+          result = {"present": path.is_file()}
+          if path.is_file():
+              raw = path.read_bytes()
+              data = json.loads(raw)
+              result.update({
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "target_date": str(data.get("target_date") or ""),
+                  "source_status": str(data.get("source_status") or ""),
+                  "pages_complete": data.get("pages_complete") is True,
+                  "pages_reviewed": data.get("pages_reviewed"),
+                  "rows_inspected": data.get("rows_inspected"),
+                  "older_boundary_reached": data.get("older_boundary_reached"),
+                  "pagination_exhausted": data.get("pagination_exhausted"),
+                  "records_on_target_date": data.get("records_on_target_date"),
+                  "call_count": len(data.get("calls") or []),
+              })
+          print(json.dumps(result, sort_keys=True))
+          PYEOF
+
+          echo "submission_center_sources:"
+          while IFS= read -r hit; do
+            echo "file=${hit}"
+            sed -n '1,620p' "${hit}" 2>/dev/null | redact
+          done < <(grep -RIl -E \
+            'submission-center/overview/submissions|Submission Center was not verified|server Submission Center audit unavailable|submission.?center' \
+            "${root}/src" "${root}/scripts" 2>/dev/null | head -20 || true)
+
+          echo "submission_center_recent_log_context:"
+          tail -n 1200 "${root}/data/logs/daily_run.log" 2>/dev/null |
+            grep -n -B 45 -A 80 -Ei 'Submission Center|submission.?center|Timeout 15000ms|locator\.click' |
+            tail -n 500 | redact || true
+
           echo "active_delivery_entrypoints:"
           grep -RIn -B 18 -A 28 \
             --exclude='*.bak*' --exclude='*.html' --exclude='*.json' \
