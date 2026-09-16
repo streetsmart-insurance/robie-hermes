@@ -133,9 +133,13 @@ jobs:
           set -euo pipefail
           trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
-          delegated_env=/etc/streetsmart-hermes/robie-accountability.env
-          test -r "\${delegated_env}"
-          delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' "\${delegated_env}" | tail -1)"
+          delegated_sa=""
+          if [ -r /etc/streetsmart-hermes/robie-accountability.env ]; then
+            delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' /etc/streetsmart-hermes/robie-accountability.env | tail -1)"
+          fi
+          if [ -z "\${delegated_sa}" ]; then
+            delegated_sa="\$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)"
+          fi
           test -n "\${delegated_sa}"
           env ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="\${delegated_sa}" PYTHONPATH="${APP_ROOT}" \
             "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
@@ -233,9 +237,13 @@ jobs:
           set -euo pipefail
           trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
-          delegated_env=/etc/streetsmart-hermes/robie-accountability.env
-          test -r "\${delegated_env}"
-          delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' "\${delegated_env}" | tail -1)"
+          delegated_sa=""
+          if [ -r /etc/streetsmart-hermes/robie-accountability.env ]; then
+            delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' /etc/streetsmart-hermes/robie-accountability.env | tail -1)"
+          fi
+          if [ -z "\${delegated_sa}" ]; then
+            delegated_sa="\$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)"
+          fi
           test -n "\${delegated_sa}"
           env ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="\${delegated_sa}" PYTHONPATH="${APP_ROOT}" \
             "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
