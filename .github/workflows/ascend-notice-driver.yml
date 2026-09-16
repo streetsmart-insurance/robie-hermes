@@ -58,6 +58,10 @@ jobs:
           set -euo pipefail
           test "${PRODUCTION_VM}" = "hermes-poc-01"
           test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          # NOTE (2026-09-16): ROBIE_GMAIL_DELEGATION_SA is intentionally NOT set here.
+          # No value exists anywhere in the repo (code search: referenced only by
+          # ascend_notice_driver.py with no default). The driver will fail closed at the
+          # Gmail step until it is supplied. Do not invent a value.
           DRIVER_FLAGS="--due-days 2"
           if [ "${LIVE_INPUT}" = "true" ]; then
             DRIVER_FLAGS="${DRIVER_FLAGS} --live"
@@ -70,7 +74,7 @@ jobs:
             --project="${PROJECT_ID}" \
             --zone="${ZONE}" \
             --tunnel-through-iap \
-            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest ROBIE_ASCEND_API_ENABLED=1 ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 ROBIE_ASCEND_API_KEY_SECRET=ascend-api-key /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
               -m robie_job_engine.ascend_notice_driver ${DRIVER_FLAGS}")
           STATUS=$?
           set -e
