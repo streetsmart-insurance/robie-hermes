@@ -74,7 +74,7 @@ jobs:
             --project="${PROJECT_ID}" \
             --zone="${ZONE}" \
             --tunnel-through-iap \
-            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest ROBIE_ASCEND_API_ENABLED=1 ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 ROBIE_ASCEND_API_KEY_SECRET=ascend-api-key /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION ROBIE_EZLYNX_API_PROD_SECRET=projects/751771086524/secrets/ezlynx-api-prod/versions/latest ROBIE_ASCEND_API_ENABLED=1 ROBIE_ASCEND_API_BASE_URL=https://api.useascend.com ROBIE_ASCEND_API_PRODUCTION_ENABLED=1 ROBIE_ASCEND_API_KEY_SECRET=projects/751771086524/secrets/ascend-api-key/versions/latest /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
               -m robie_job_engine.ascend_notice_driver ${DRIVER_FLAGS}")
           STATUS=$?
           set -e
