@@ -6,11 +6,22 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "verify_accountability_watchdog.py"
+REPORT_SCRIPT = ROOT / "scripts" / "verify_accountability_report_content.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "accountability-delivery-watchdog.yml"
 
 
 def _module():
     spec = importlib.util.spec_from_file_location("accountability_watchdog", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _report_module():
+    spec = importlib.util.spec_from_file_location(
+        "accountability_report_content", REPORT_SCRIPT
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -29,6 +40,7 @@ def _valid_snapshot():
         "run_date": "2026-09-17",
         "target_date": "2026-09-16",
         "document_url_present": True,
+        "document_id": "1lnhIplYM8DLdFyITL9tCUVrImYzYy1Vbfax7eeAkdhg",
     }
 
 
@@ -49,6 +61,7 @@ def test_watchdog_accepts_only_complete_authoritative_evidence():
         "service_result": "success",
         "service_exit_status": 0,
         "document_url_present": True,
+        "document_id_present": True,
     }
 
 
@@ -65,6 +78,7 @@ def test_watchdog_accepts_only_complete_authoritative_evidence():
         ("run_date", "2026-09-16", "run_date"),
         ("target_date", "2026-09-15", "target_date"),
         ("document_url_present", False, "document_url_present"),
+        ("document_id", "", "document_id_present"),
     ],
 )
 def test_watchdog_fails_closed_for_each_missing_proof(field, bad_value, failed_check):
@@ -76,6 +90,31 @@ def test_watchdog_fails_closed_for_each_missing_proof(field, bad_value, failed_c
             today="2026-09-17",
             expected_target="2026-09-16",
         )
+
+
+def test_report_content_gate_accepts_populated_submission_center():
+    evidence = _report_module().validate_submission_content(
+        "Sales / service — Submission Center\n"
+        "Open over 30 days: 4\n"
+        "Evidence source: live EZLynx Submission Center"
+    )
+    assert evidence["verified"] is True
+    assert evidence["submission_center_section_present"] is True
+    assert evidence["submission_center_unverified_marker_present"] is False
+    assert len(evidence["document_content_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Executive summary only",
+        "Submission Center was not verified: Locator.click timeout",
+        "UNVERIFIED — server Submission Center audit unavailable",
+    ],
+)
+def test_report_content_gate_fails_closed_for_missing_or_unverified_evidence(text):
+    with pytest.raises(RuntimeError):
+        _report_module().validate_submission_content(text)
 
 
 def test_watchdog_schedule_is_dst_safe_and_read_only():
@@ -96,6 +135,8 @@ def test_watchdog_requires_marker_doc_and_exact_gmail_delivery():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "verify_accountability_watchdog.py" in text
     assert "verify_dedicated_accountability_delivery.py" in text
+    assert "verify_accountability_report_content.py" in text
+    assert "Verify Submission Center report content" in text
     assert "--mode verify" in text
     assert "last_success" not in text  # The verifier owns marker parsing.
     assert "--recipient carlo@streetsmart.insurance" in text
