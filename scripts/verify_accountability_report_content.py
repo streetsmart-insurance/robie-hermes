@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the delivered accountability Google Doc contains usable Submission Center evidence."""
+"""Verify the delivered accountability Google Doc contains usable source evidence."""
 
 from __future__ import annotations
 
@@ -13,10 +13,15 @@ from typing import Any, Iterable, Mapping
 
 DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
-UNVERIFIED_MARKERS = (
+SUBMISSION_UNVERIFIED_MARKERS = (
     "submission center was not verified",
     "server submission center audit unavailable",
     "submission center audit unavailable",
+)
+MAGELLAN_UNVERIFIED_MARKERS = (
+    "no verified records for this report date",
+    "magellan was not verified",
+    "magellan unavailable",
 )
 
 
@@ -57,13 +62,24 @@ def validate_submission_content(text: str) -> dict[str, Any]:
     normalized = " ".join(text.split()).casefold()
     if "submission center" not in normalized:
         raise RuntimeError("Submission Center section is missing")
-    matched = [marker for marker in UNVERIFIED_MARKERS if marker in normalized]
-    if matched:
+    submission_markers = [
+        marker for marker in SUBMISSION_UNVERIFIED_MARKERS if marker in normalized
+    ]
+    if submission_markers:
         raise RuntimeError("Submission Center section contains an unverified-source marker")
+    if "magellan" not in normalized:
+        raise RuntimeError("Magellan section is missing")
+    magellan_markers = [
+        marker for marker in MAGELLAN_UNVERIFIED_MARKERS if marker in normalized
+    ]
+    if magellan_markers:
+        raise RuntimeError("Magellan section contains an unverified-source marker")
     return {
         "verified": True,
         "submission_center_section_present": True,
         "submission_center_unverified_marker_present": False,
+        "magellan_section_present": True,
+        "magellan_unverified_marker_present": False,
         "document_content_sha256": hashlib.sha256(
             normalized.encode("utf-8")
         ).hexdigest(),
