@@ -72,8 +72,38 @@ def test_expected_falls_back_to_installed_dwd_credential(tmp_path, monkeypatch):
     assert recipients == {"one@example.test", "two@example.test"}
     assert calls == {
         "path": str(credential_path),
-        "scopes": [module.GMAIL_READONLY_SCOPE],
+        "scopes": [module.GMAIL_METADATA_SCOPE],
         "subject": "reports@example.test",
     }
     assert gmail["credentials"] == "credential"
     assert "delegated_called" not in calls
+
+
+def test_find_exact_uses_bounded_sent_metadata_only():
+    module = _load_module()
+    calls = {}
+
+    class Request:
+        def execute(self):
+            return {"messages": []}
+
+    class Messages:
+        def list(self, **kwargs):
+            calls.update(kwargs)
+            return Request()
+
+    class Users:
+        def messages(self):
+            return Messages()
+
+    class Gmail:
+        def users(self):
+            return Users()
+
+    assert module._find_exact(Gmail(), "subject", {"one@example.test"}) is False
+    assert calls == {
+        "userId": "me",
+        "labelIds": ["SENT"],
+        "maxResults": 100,
+        "includeSpamTrash": False,
+    }
