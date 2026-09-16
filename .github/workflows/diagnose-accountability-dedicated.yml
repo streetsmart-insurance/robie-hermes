@@ -54,40 +54,40 @@ jobs:
       - name: Capture DWD identity mapping and redacted failure tracebacks
         run: |
           set -euo pipefail
-          {
-            attached="$(gcloud compute instances describe "${PRODUCTION_VM}" \
-              --project="${PROJECT_ID}" --zone="${ZONE}" \
-              --format='value(serviceAccounts[0].email)')"
-            echo "attached_service_account=${attached:-missing}"
-            mapping="$(gcloud iam service-accounts list --project="${PROJECT_ID}" \
-              --filter='uniqueId=112650695780807418521' \
-              --format='value(email,uniqueId)' 2>/dev/null || true)"
-            if [ -n "${mapping}" ]; then
-              echo "approved_dwd_client_mapping=${mapping}"
-            else
-              echo "approved_dwd_client_mapping=not_resolved"
-            fi
-            gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-              --tunnel-through-iap --quiet --command="sudo bash -s" <<'REMOTE_EOF'
-            set -euo pipefail
-            redact() {
-              sed -E \
-                -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[redacted-email]/g' \
-                -e 's/(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g' \
-                -e 's/[0-9]{7,}/[redacted-number]/g'
-            }
-            echo "journal_2026_09_16_begin"
-            journalctl -u streetsmart-accountability.service \
-              --since "2026-09-16 12:55:00 UTC" --until "2026-09-16 13:10:00 UTC" \
-              --no-pager 2>&1 | tail -160 | redact
-            echo "journal_2026_09_16_end"
-            echo "journal_2026_09_15_begin"
-            journalctl -u streetsmart-accountability.service \
-              --since "2026-09-15 20:20:00 UTC" --until "2026-09-15 20:35:00 UTC" \
-              --no-pager 2>&1 | tail -160 | redact
-            echo "journal_2026_09_15_end"
-            REMOTE_EOF
-          } | tee "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          attached="$(gcloud compute instances describe "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(serviceAccounts[0].email)')"
+          echo "attached_service_account=${attached:-missing}" \
+            | tee "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          mapping="$(gcloud iam service-accounts list --project="${PROJECT_ID}" \
+            --filter='uniqueId=112650695780807418521' \
+            --format='value(email,uniqueId)' 2>/dev/null || true)"
+          if [ -n "${mapping}" ]; then
+            echo "approved_dwd_client_mapping=${mapping}"
+          else
+            echo "approved_dwd_client_mapping=not_resolved"
+          fi | tee -a "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<'REMOTE_EOF' \
+            | tee -a "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          set -euo pipefail
+          redact() {
+            sed -E \
+              -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[redacted-email]/g' \
+              -e 's/(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g' \
+              -e 's/[0-9]{7,}/[redacted-number]/g'
+          }
+          echo "journal_2026_09_16_begin"
+          journalctl -u streetsmart-accountability.service \
+            --since "2026-09-16 12:55:00 UTC" --until "2026-09-16 13:10:00 UTC" \
+            --no-pager 2>&1 | tail -160 | redact
+          echo "journal_2026_09_16_end"
+          echo "journal_2026_09_15_begin"
+          journalctl -u streetsmart-accountability.service \
+            --since "2026-09-15 20:20:00 UTC" --until "2026-09-15 20:35:00 UTC" \
+            --no-pager 2>&1 | tail -160 | redact
+          echo "journal_2026_09_15_end"
+          REMOTE_EOF
 
       - name: Read timer, runtime, and last-success metadata
         run: |
