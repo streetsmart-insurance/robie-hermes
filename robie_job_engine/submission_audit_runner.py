@@ -12,7 +12,13 @@ from typing import Any
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import (
+    Error as PlaywrightError,
+    Locator,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 from .ezlynx_auth_evidence import authenticated_app_evidence
 
@@ -47,6 +53,28 @@ def _authenticated(page: Page) -> bool:
     return authenticated_app_evidence(page)
 
 
+def _first_visible(locator: Locator, label: str) -> Locator:
+    for index in range(locator.count()):
+        candidate = locator.nth(index)
+        if candidate.is_visible():
+            return candidate
+    raise RuntimeError(f"PLAYWRIGHT_BLOCKED: visible {label} not found")
+
+
+def _activate(locator: Locator, label: str, *, key: str = "Enter") -> None:
+    target = _first_visible(locator, label)
+    target.scroll_into_view_if_needed()
+    try:
+        target.press(key, timeout=5_000)
+    except PlaywrightError:
+        try:
+            target.click(timeout=5_000)
+        except PlaywrightError as exc:
+            raise RuntimeError(
+                f"PLAYWRIGHT_BLOCKED: visible {label} could not be activated"
+            ) from exc
+
+
 def _click_control(page: Page, label: str) -> None:
     candidates = (
         page.get_by_role("combobox", name=re.compile(label, re.I)),
@@ -54,8 +82,8 @@ def _click_control(page: Page, label: str) -> None:
         page.locator("mat-select").filter(has_text=re.compile(label, re.I)),
     )
     for candidate in candidates:
-        if candidate.count():
-            candidate.first.click()
+        if any(candidate.nth(index).is_visible() for index in range(candidate.count())):
+            _activate(candidate, label)
             return
     raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {label} control not found")
 
@@ -63,7 +91,10 @@ def _click_control(page: Page, label: str) -> None:
 def _select_single(page: Page, label: str, option: str) -> None:
     if page.get_by_text(option, exact=True).count() and label.casefold() in page.locator("body").inner_text().casefold():
         field = page.locator("mat-form-field").filter(has_text=re.compile(label, re.I))
-        if field.count() and option.casefold() in field.first.inner_text().casefold():
+        visible_fields = [
+            field.nth(index) for index in range(field.count()) if field.nth(index).is_visible()
+        ]
+        if visible_fields and option.casefold() in visible_fields[0].inner_text().casefold():
             return
     _click_control(page, label)
     choice = page.get_by_role("option", name=re.compile(rf"^{re.escape(option)}$", re.I))
@@ -71,7 +102,7 @@ def _select_single(page: Page, label: str, option: str) -> None:
         choice = page.locator("mat-option").filter(has_text=re.compile(rf"^{re.escape(option)}$", re.I))
     if not choice.count():
         raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {option} option not found")
-    choice.first.click()
+    _activate(choice, f"{option} option")
     page.wait_for_timeout(750)
 
 
@@ -100,19 +131,16 @@ def _exact_visible_option(options: Locator, expected: str) -> Locator | None:
 
 
 def _live_agency_options(page: Page) -> Locator:
-    last_error: PlaywrightTimeoutError | None = None
-    for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox"):
-        options = page.locator(selector)
-        try:
-            options.first.wait_for(state="visible", timeout=5_000)
+    for _ in range(10):
+        for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox"):
+            options = page.locator(selector)
             if (
                 _exact_visible_option(options, "My Submissions") is not None
                 and _exact_visible_option(options, "Streetsmart Insurance") is not None
             ):
                 return options
-        except PlaywrightTimeoutError as exc:
-            last_error = exc
-    raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found") from last_error
+        page.wait_for_timeout(500)
+    raise RuntimeError("PLAYWRIGHT_BLOCKED: visible agency options not found")
 
 
 def _set_agency_scope(page: Page) -> None:
@@ -121,10 +149,11 @@ def _set_agency_scope(page: Page) -> None:
     )
     if not field.count():
         raise RuntimeError("PLAYWRIGHT_BLOCKED: agency field not found")
-    picker_button = field.first.locator("button")
+    visible_field = _first_visible(field, "agency field")
+    picker_button = visible_field.locator("button")
     live_checkbox_picker = picker_button.count() > 0
     if live_checkbox_picker:
-        picker_button.first.click()
+        _activate(picker_button, "agency picker")
         options = _live_agency_options(page)
     else:
         _click_control(page, "Submissions by assigned producer")
@@ -134,14 +163,14 @@ def _set_agency_scope(page: Page) -> None:
     if mine is None or agency is None:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found")
     if _option_selected(mine):
-        mine.click()
+        _activate(mine, "My Submissions checkbox", key="Space")
     if not _option_selected(agency):
-        agency.click()
+        _activate(agency, "Streetsmart Insurance checkbox", key="Space")
     apply_button = page.get_by_role(
         "button", name=re.compile(r"^(Apply|Done|Select)$", re.I)
     )
     if apply_button.count():
-        apply_button.last.click()
+        _activate(apply_button, "agency picker apply button")
     else:
         page.keyboard.press("Escape")
     page.wait_for_timeout(1_000)
@@ -149,7 +178,7 @@ def _set_agency_scope(page: Page) -> None:
         # The live MDC picker collapses to an icon and does not render the
         # chosen producer names in the form-field text. Reopen it and reread
         # the actual checkbox state instead of trusting the prior clicks.
-        picker_button.first.click()
+        _activate(picker_button, "agency picker")
         live_options = _live_agency_options(page)
         live_mine = _exact_visible_option(live_options, "My Submissions")
         live_agency = _exact_visible_option(live_options, "Streetsmart Insurance")
@@ -162,11 +191,11 @@ def _set_agency_scope(page: Page) -> None:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: agency scope did not apply")
         cancel = page.get_by_role("button", name=re.compile(r"^Cancel$", re.I))
         if cancel.count():
-            cancel.last.click()
+            _activate(cancel, "agency picker cancel button")
         else:
             page.keyboard.press("Escape")
     else:
-        field_text = field.first.inner_text().casefold()
+        field_text = visible_field.inner_text().casefold()
         if "streetsmart insurance" not in field_text:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: agency scope did not apply")
         if "my submissions" in field_text:
@@ -196,7 +225,7 @@ def _set_page_size(page: Page) -> None:
         option = page.locator("mat-option").filter(has_text=re.compile(r"^100$"))
     if not option.count():
         raise RuntimeError("PLAYWRIGHT_BLOCKED: 100 page-size option not found")
-    option.first.click()
+    _activate(option, "100 page-size option")
     page.wait_for_timeout(1_000)
 
 
@@ -286,7 +315,7 @@ def _normalize_status_sort(page: Page) -> tuple[int, list[str]]:
             # the server reapplies the sort to the refreshed 100-row result.
             last_statuses = statuses
         before = page.locator("mat-row").first.inner_text() if page.locator("mat-row").count() else ""
-        header.click()
+        _activate(header, "Status sort header")
         page.wait_for_timeout(1_000)
         try:
             page.wait_for_function(
@@ -431,7 +460,7 @@ def _advance_page(page: Page, previous_start: int) -> None:
         or next_button.get_attribute("aria-disabled") == "true"
     ):
         raise RuntimeError("PLAYWRIGHT_BLOCKED: non-closed group exceeded the available live pages")
-    next_button.click()
+    _activate(next_button, "next Submission Center page")
     try:
         page.wait_for_function(
             "previous => { const label=document.querySelector('.mat-paginator-range-label, .mat-mdc-paginator-range-label'); const match=label && label.textContent.match(/([\\d,]+)\\s*[\\-–—]/); return match && Number(match[1].replace(/,/g, '')) > previous; }",
