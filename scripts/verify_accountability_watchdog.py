@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -49,6 +50,9 @@ def collect_snapshot(app_root: Path) -> tuple[dict[str, Any], str, str]:
         raise RuntimeError("missing verified success marker")
     state = json.loads(state_path.read_text(encoding="utf-8"))
 
+    document_url = str(state.get("document_url") or "")
+    document_match = re.search(r"/document/d/([A-Za-z0-9_-]+)", document_url)
+
     snapshot = {
         "host": socket.gethostname().split(".", 1)[0],
         "timer_load": _systemctl_value(TIMER_UNIT, "LoadState"),
@@ -59,9 +63,10 @@ def collect_snapshot(app_root: Path) -> tuple[dict[str, Any], str, str]:
         "service_exit_status": _systemctl_value(SERVICE_UNIT, "ExecMainStatus"),
         "run_date": str(state.get("run_date") or ""),
         "target_date": str(state.get("target_date") or ""),
-        "document_url_present": str(state.get("document_url") or "").startswith(
+        "document_url_present": document_url.startswith(
             "https://docs.google.com/document/"
         ),
+        "document_id": document_match.group(1) if document_match else "",
     }
     return snapshot, today, expected_target
 
@@ -83,6 +88,7 @@ def validate_snapshot(
         "run_date": snapshot.get("run_date") == today,
         "target_date": snapshot.get("target_date") == expected_target,
         "document_url_present": snapshot.get("document_url_present") is True,
+        "document_id_present": bool(str(snapshot.get("document_id") or "").strip()),
     }
     failed = sorted(name for name, passed in checks.items() if not passed)
     if failed:
@@ -99,12 +105,14 @@ def validate_snapshot(
         "service_result": "success",
         "service_exit_status": 0,
         "document_url_present": True,
+        "document_id_present": True,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app-root", required=True)
+    parser.add_argument("--include-document-id", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -116,6 +124,8 @@ def main() -> int:
             today=today,
             expected_target=expected_target,
         )
+        if args.include_document_id:
+            evidence["document_id"] = snapshot["document_id"]
     except Exception as exc:
         print(
             f"watchdog verification failed: {type(exc).__name__}: {exc}",
