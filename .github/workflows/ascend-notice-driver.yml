@@ -1,0 +1,101 @@
+# Ascend notice driver: unread Ascend emails -> EZLynx discussion note + Zapier task.
+#
+# Why this exists: PR #430 put the engine on the box (read-only triage,
+# Discussion API v8 append to an EXISTING discussion, Zapier task firing with
+# a required due date) but nothing ever triggered it. This workflow is the
+# trigger: every 30 minutes it runs robie_job_engine.ascend_notice_driver on
+# the Production box against the hello@ mailbox.
+#
+# Safety:
+# - DRY-RUN BY DEFAULT. The scheduled run never passes --live, so the driver
+#   only reads and logs what it would do. Live mode requires a manual
+#   workflow_dispatch with live=true (a deliberate, auditable action).
+# - The driver fails closed per email (unresolved applicant, missing CSR
+#   username, triage needs_human_review, API error, phone numbers in note
+#   text, write-scope refusal). Nothing is deleted, ever.
+# - Runs on the release interpreter on hermes-poc-01, not the runner's python.
+#
+# Dispatch ONLY from main: the Production environment's deployment branch
+# policy allows main and nothing else.
+
+name: Ascend notice driver
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes; dry-run only (see below)
+  workflow_dispatch:
+    inputs:
+      live:
+        description: "Write notes and fire Zapier tasks (default is dry-run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Run the Ascend notice driver on Production
+        id: driver
+        env:
+          PROJECT_ID: streetsmart-hermes-poc
+          ZONE: us-east1-b
+          PRODUCTION_VM: hermes-poc-01
+          LIVE_INPUT: ${{ inputs.live }}
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "hermes-poc-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          DRIVER_FLAGS="--due-days 2"
+          if [ "${LIVE_INPUT}" = "true" ]; then
+            DRIVER_FLAGS="${DRIVER_FLAGS} --live"
+            echo "::warning title=Ascend driver LIVE mode::Notes will be filed and Zapier tasks fired."
+          else
+            echo "Dry-run mode: the driver reads and logs only; nothing is written."
+          fi
+          set +e
+          OUTPUT=$(gcloud compute ssh "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" \
+            --zone="${ZONE}" \
+            --tunnel-through-iap \
+            --command="sudo env PYTHONPATH=/opt/streetsmart-hermes/current ROBIE_ENV=PRODUCTION /opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python \
+              -m robie_job_engine.ascend_notice_driver ${DRIVER_FLAGS}")
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          echo "$OUTPUT" > "${RUNNER_TEMP}/ascend-driver-summary.json"
+          python3 -m json.tool "${RUNNER_TEMP}/ascend-driver-summary.json" >/dev/null
+          echo "exit_code=${STATUS}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Ascend notice driver"
+            echo ""
+            echo '```json'
+            echo "$OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload run summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ascend-driver-summary-${{ github.run_id }}
+          path: ${{ runner.temp }}/ascend-driver-summary.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail when the driver itself errored
+        if: steps.driver.outputs.exit_code != '0'
+        run: |
+          echo "::error title=Ascend notice driver failed::The driver exited non-zero. See the run summary artifact; per-email failures are fail-closed and do not fail the run, so this means the driver itself could not start (config/auth)."
+          exit 1

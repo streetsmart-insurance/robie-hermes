@@ -14,7 +14,10 @@ User=streetsmart-hermes-test
 Group=streetsmart-hermes-test
 UMask=0077
 Environment=HOME=/opt/streetsmart-hermes-test/.hermes/browser-profiles/ezlynx
-ExecStart=/usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=/opt/streetsmart-hermes-test/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes-test/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank
+# Optional proxy routing for bot-walled carrier portals. See
+# deploy/systemd/robie-ezlynx-browser.service for the documented contract.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-browser-proxy.env
+ExecStart=/usr/bin/google-chrome --headless=new --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 ${PROXY_CHROME_FLAGS} --user-data-dir=/opt/streetsmart-hermes-test/.hermes/browser-profiles/ezlynx --disk-cache-dir=/opt/streetsmart-hermes-test/.hermes/cache/chrome-ezlynx --no-first-run --no-default-browser-check about:blank
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

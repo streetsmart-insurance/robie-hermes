@@ -1,14 +1,21 @@
-"""Keep Test writes isolated; permit Production writes only for the active job's requested client.
+"""Fail-closed applicant scope for consequential EZLynx writes.
 
-Real-client scope is read from the durable original message in the canonical
-Production ledger. A worker-supplied applicant flag alone never grants access.
+The allowlist is fixed at process start: it is read once from the
+``EZLYNX_WRITE_APPLICANT_IDS`` environment variable (comma-separated
+applicant IDs) and falls back to the compiled ``{"220250093"}`` when the
+variable is unset or empty.  A Job payload, prompt, or any other runtime
+input cannot widen it -- authorizing a new account is a deployment-config
+change, reviewed and released like code, and owned by Carlo.
+
+Deletes are never authorized through this scope; the cardinal no-delete
+rule is enforced separately.
 """
 
 from __future__ import annotations
 
-import re
 import json
 import os
+import re
 import socket
 import sqlite3
 from pathlib import Path
@@ -16,9 +23,10 @@ from urllib.parse import urlparse
 
 
 EZLYNX_WRITE_SCOPE_REFUSED = "EZLYNX_WRITE_SCOPE_REFUSED"
-ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = frozenset({"220250093"})
-PRODUCTION_JOB_DB = Path('/opt/streetsmart-hermes/robie-job-engine/data/jobs.db')
+EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "EZLYNX_WRITE_APPLICANT_IDS"
 EZLYNX_HOSTS = frozenset({"app.ezlynx.com", "app.uatezlynx.com"})
+DEFAULT_ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = frozenset({"220250093"})
+PRODUCTION_JOB_DB = Path("/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
 _ACCOUNT_PATH = re.compile(r"/web/account/([^/?#]+)(?:/|$)", re.IGNORECASE)
 _APPLICANT_PORTAL_PATH = re.compile(
     r"/applicantportal/(?:policy/actions/edit|formentry)/([^/?#]+)(?:/|$)",
@@ -46,7 +54,12 @@ def normalize_applicant_id(value: object) -> str:
 
 
 def requested_message_applicant(payload: dict) -> str | None:
-    """Resolve one explicit EZLynx client from original message text, never a worker claim."""
+    """Resolve one explicit EZLynx client from original message text, never a worker claim.
+
+    Read-only and fail-closed: returns an applicant id only when the text
+    names exactly one, and never redirects an existing binding. It does not
+    widen the write allowlist.
+    """
     if not isinstance(payload, dict):
         return None
     text = str(payload.get('request_text') or payload.get('text') or '')
@@ -74,7 +87,11 @@ def _is_installed_production_runtime() -> bool:
 
 
 def production_job_applicant() -> str | None:
-    """Read scope only from this running job on the actual Production host/release."""
+    """Read scope only from this running job on the actual Production host/release.
+
+    Read-only and fail-closed: returns None anywhere else. It resolves which
+    applicant the active job is bound to; it does not widen the write allowlist.
+    """
     if not _is_installed_production_runtime():
         return None
     job_ids = {os.environ[key] for key in ('ROBIE_CURRENT_JOB_ID', 'ROBIE_JOB_ID', 'JOB_ID') if os.environ.get(key)}
@@ -107,11 +124,29 @@ def production_job_applicant() -> str | None:
         return None
 
 
+def _load_allowed_applicant_ids() -> frozenset:
+    """Read the allowlist once at import; job payloads can never widen it."""
+
+    raw = os.environ.get(EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR, "")
+    ids = {normalize_applicant_id(part) for part in raw.split(",")}
+    ids.discard("")
+    return frozenset(ids) if ids else DEFAULT_ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+
+
+ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
+
+
 def applicant_is_write_allowed(value: object) -> bool:
     applicant = normalize_applicant_id(value)
     if applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
         return True
-    return bool(re.fullmatch(r'[1-9]\d*', applicant) and production_job_applicant() == applicant)
+    # A running Production job may write only to the client named by its own
+    # immutable intake record on the real Production host/release. Worker
+    # payloads, prompts, and flags can never widen this: production_job_applicant
+    # is fail-closed everywhere else.
+    return bool(
+        re.fullmatch(r"[1-9]\d*", applicant) and production_job_applicant() == applicant
+    )
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:
@@ -119,8 +154,8 @@ def require_allowed_ezlynx_write_applicant(value: object) -> str:
     if not applicant_is_write_allowed(applicant_id):
         display = applicant_id or "<missing>"
         raise EzlynxWriteScopeError(
-            f"{EZLYNX_WRITE_SCOPE_REFUSED}: applicant {display} is not authorized by the "
-            "active Production job or the Test allowlist"
+            f"{EZLYNX_WRITE_SCOPE_REFUSED}: applicant {display} is not on the "
+            "compiled EZLynx business-write allowlist"
         )
     return applicant_id
 
@@ -162,7 +197,7 @@ def ezlynx_control_scope_block_reason(
 
     Login controls are authentication, not an applicant business-record write.
     Every other generic EZLynx control action must occur on the exact applicant
-    URL named by the bound Job, and the active job must authorize that applicant.
+    URL named by the bound Job, and both identifiers must be compiled-allowed.
     Dedicated read-only crawlers do not use this generic write executor.
     """
 
@@ -182,7 +217,7 @@ def ezlynx_control_scope_block_reason(
     if not applicant_is_write_allowed(requested):
         return (
             f"{EZLYNX_WRITE_SCOPE_REFUSED}: Job applicant {requested} is not "
-            "authorized for the active job"
+            "compiled-allowed"
         )
     if not target:
         return (
@@ -197,6 +232,6 @@ def ezlynx_control_scope_block_reason(
     if not applicant_is_write_allowed(target):
         return (
             f"{EZLYNX_WRITE_SCOPE_REFUSED}: page applicant {target} is not "
-            "authorized for the active job"
+            "compiled-allowed"
         )
     return None

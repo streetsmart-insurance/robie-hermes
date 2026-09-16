@@ -41,15 +41,110 @@ jobs:
           service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v3
 
+      - name: Inspect the dedicated VM state
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "streetsmart-accountability-prod"
+          status="$(gcloud compute instances describe "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(status)')"
+          if [ "${status}" != "RUNNING" ]; then
+            echo "::error::Dedicated accountability VM is not RUNNING (state=${status:-unknown})."
+            exit 1
+          fi
+          echo "dedicated instance state: RUNNING"
+
       - name: Confirm the dedicated accountability target
         run: |
           set -euo pipefail
           test "${PRODUCTION_VM}" = "streetsmart-accountability-prod"
           test "${APP_ROOT}" = "/opt/streetsmart-daily-accountability"
-          host="$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="hostname -s" 2>/dev/null | tail -1 | tr -d '\r')"
-          test "${host}" = "streetsmart-accountability-prod"
+          if ! ssh_output="$(gcloud compute ssh "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --quiet --command="hostname -s" 2>&1)"; then
+            echo "::error::Could not SSH to the dedicated accountability VM. The gcloud error below distinguishes OS Login, IAP, instance-state, and network failures."
+            printf '%s\n' "${ssh_output}" >&2
+            exit 1
+          fi
+          host="$(printf '%s\n' "${ssh_output}" | tail -1 | tr -d '\r')"
+          if [ "${host}" != "streetsmart-accountability-prod" ]; then
+            echo "::error::Dedicated target hostname mismatch."
+            exit 1
+          fi
           echo "dedicated target confirmed"
+
+      - name: Install the canonical weekday timer
+        run: |
+          set -euo pipefail
+          remote_timer="/tmp/streetsmart-accountability-${GITHUB_RUN_ID}.timer"
+          gcloud compute scp deploy/systemd/streetsmart-accountability.timer \
+            "${PRODUCTION_VM}:${remote_timer}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --command="sudo install -o root -g root -m 0644 ${remote_timer} /etc/systemd/system/streetsmart-accountability.timer && sudo rm -f ${remote_timer} && sudo systemctl daemon-reload"
+
+      - name: Repair the installed lock timeout
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --command="sudo bash -s" <<'LOCK_EOF'
+          set -euo pipefail
+          wrapper=/opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh
+          test -x "${wrapper}"
+          if grep -Eq 'flock .*15m' "${wrapper}"; then
+            sed -i -E '/flock/ s/15m/900/' "${wrapper}"
+          fi
+          ! grep -Eq 'flock .*15m' "${wrapper}"
+          grep -Eq 'flock .*900' "${wrapper}"
+          LOCK_EOF
+
+      - name: Repair and preflight Magellan authentication
+        run: |
+          set -euo pipefail
+          remote_repair="/tmp/accountability-magellan-repair-${GITHUB_RUN_ID}.py"
+          remote_preflight="/tmp/accountability-magellan-preflight-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/repair_dedicated_accountability_magellan.py \
+            "${PRODUCTION_VM}:${remote_repair}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute scp scripts/preflight_dedicated_accountability_magellan.py \
+            "${PRODUCTION_VM}:${remote_preflight}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+          set -euo pipefail
+          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_repair}" "${remote_repair}.ubuntu"
+          install -o ubuntu -g ubuntu -m 0755 "${remote_preflight}" "${remote_preflight}.ubuntu"
+          rm -f "${remote_repair}" "${remote_preflight}"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" \
+            --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
+            "${APP_ROOT}/venv/bin/python" "${remote_preflight}.ubuntu" --app-root "${APP_ROOT}"
+          REMOTE_EOF
+
+      - name: Refuse duplicate prior-business-day delivery
+        run: |
+          set -euo pipefail
+          remote_verify="/tmp/accountability-delivery-preflight-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/verify_dedicated_accountability_delivery.py \
+            "${PRODUCTION_VM}:${remote_verify}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+          set -euo pipefail
+          trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
+          delegated_sa=""
+          if [ -r /etc/streetsmart-hermes/robie-accountability.env ]; then
+            delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' /etc/streetsmart-hermes/robie-accountability.env | tail -1)"
+          fi
+          if [ -z "\${delegated_sa}" ]; then
+            delegated_sa="\$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)"
+          fi
+          test -n "\${delegated_sa}"
+          env ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="\${delegated_sa}" PYTHONPATH="${APP_ROOT}" \
+            "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
+            --app-root "${APP_ROOT}" --mode preflight
+          REMOTE_EOF
 
       - name: Verify installed fail-closed runtime
         run: |
@@ -61,19 +156,33 @@ jobs:
           test -x /opt/streetsmart-daily-accountability/venv/bin/python
           test -x /opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh
           test -f /opt/streetsmart-daily-accountability/src/production_main.py
-          systemctl is-enabled --quiet streetsmart-accountability.timer
-          systemctl is-active --quiet streetsmart-accountability.timer
+          echo "installed_service_unit_begin"
+          systemctl cat streetsmart-accountability.service --no-pager
+          echo "installed_service_unit_end"
+          echo "installed_timer_unit_begin"
+          systemctl cat streetsmart-accountability.timer --no-pager
+          echo "installed_timer_unit_end"
           systemctl cat streetsmart-accountability.service --no-pager |
             grep -Fq 'ExecStart=/opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh'
           systemctl cat streetsmart-accountability.timer --no-pager |
-            grep -Fq 'America/New_York'
+            grep -Fq 'OnCalendar=Mon..Fri *-*-* 09:00:00 America/New_York'
+          systemctl cat streetsmart-accountability.timer --no-pager |
+            grep -Fq 'Persistent=true'
+          systemctl enable --now streetsmart-accountability.timer
+          systemctl is-enabled --quiet streetsmart-accountability.timer
+          systemctl is-active --quiet streetsmart-accountability.timer
           CHECK_EOF
 
       - name: Run the dedicated accountability service
         run: |
           set -euo pipefail
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="sudo systemctl start ${UNIT}"
+          if ! gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --command="sudo systemctl start ${UNIT}"; then
+            echo "::error::Accountability service failed; systemd result metadata follows."
+            gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+              --tunnel-through-iap --command="sudo systemctl show ${UNIT} --no-pager -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p StatusText; sudo systemctl status ${UNIT} --no-pager --lines=25 2>&1 | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/[redacted-email]/g; s/(\\+?1[-. ]?)?\\(?[0-9]{3}\\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g; s/[0-9]{7,}/[redacted-number]/g'" || true
+            exit 1
+          fi
           echo "accountability service completed"
 
       - name: Verify exact prior-business-day delivery
@@ -115,11 +224,40 @@ jobs:
           VERIFY_EOF
           cat "${RUNNER_TEMP}/accountability-verification.json" >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Verify exact Gmail Sent delivery
+        run: |
+          set -euo pipefail
+          remote_verify="/tmp/accountability-delivery-verify-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/verify_dedicated_accountability_delivery.py \
+            "${PRODUCTION_VM}:${remote_verify}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
+            > "${RUNNER_TEMP}/accountability-gmail-verification.json"
+          set -euo pipefail
+          trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
+          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
+          delegated_sa=""
+          if [ -r /etc/streetsmart-hermes/robie-accountability.env ]; then
+            delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' /etc/streetsmart-hermes/robie-accountability.env | tail -1)"
+          fi
+          if [ -z "\${delegated_sa}" ]; then
+            delegated_sa="\$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)"
+          fi
+          test -n "\${delegated_sa}"
+          env ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="\${delegated_sa}" PYTHONPATH="${APP_ROOT}" \
+            "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
+            --app-root "${APP_ROOT}" --mode verify
+          REMOTE_EOF
+          cat "${RUNNER_TEMP}/accountability-gmail-verification.json" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Upload redacted verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: accountability-verification-${{ github.run_id }}
-          path: ${{ runner.temp }}/accountability-verification.json
+          path: |
+            ${{ runner.temp }}/accountability-verification.json
+            ${{ runner.temp }}/accountability-gmail-verification.json
           if-no-files-found: warn
           retention-days: 30

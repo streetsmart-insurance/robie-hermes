@@ -72,5 +72,6 @@ After the email delivery succeeds, send the same reporting date and secured Driv
 - `robie_job_engine/operational_trackers.py`: original tracker request dates and age.
 - `robie_job_engine/magellan_collection.py`: read-only, target-dated Magellan sentiment collection through the dedicated persistent browser.
 - `scripts/export_daily_accountability_details.py`: evidence CSV generation.
+- `scripts/run_daily_accountability_vm.sh`: source of truth for the dedicated VM wrapper at `/opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh`. util-linux `flock -w` must be integer seconds (`900`, not `15m`).
 
 Stop and report the exact blocker when a source export, active-roster match, mailbox proof, or dashboard/export reconciliation fails. Never turn incomplete evidence into an employee finding.

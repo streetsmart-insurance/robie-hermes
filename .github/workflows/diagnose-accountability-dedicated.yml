@@ -1,0 +1,104 @@
+name: Diagnose dedicated accountability Production (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DIAGNOSE_ACCOUNTABILITY_PROD
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_ACCOUNTABILITY_PROD'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: streetsmart-accountability-prod
+      APP_ROOT: /opt/streetsmart-daily-accountability
+      TIMER: streetsmart-accountability.timer
+      UNIT: streetsmart-accountability.service
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Verify instance state and SSH path
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "streetsmart-accountability-prod"
+          status="$(gcloud compute instances describe "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(status)')"
+          echo "instance_state=${status:-unknown}"
+          test "${status}" = "RUNNING"
+          if ! ssh_output="$(gcloud compute ssh "${PRODUCTION_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --quiet --command="hostname -s" 2>&1)"; then
+            echo "::error::Dedicated accountability SSH failed. The exact gcloud error follows."
+            printf '%s\n' "${ssh_output}" >&2
+            exit 1
+          fi
+          host="$(printf '%s\n' "${ssh_output}" | tail -1 | tr -d '\r')"
+          test "${host}" = "streetsmart-accountability-prod"
+          echo "ssh_hostname_verified=true"
+
+      - name: Read timer, runtime, and last-success metadata
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<'REMOTE_EOF' \
+            | tee "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          set -u
+          echo "host=$(hostname -s)"
+          echo "timer_load=$(systemctl show streetsmart-accountability.timer -p LoadState --value 2>/dev/null || true)"
+          echo "timer_enabled=$(systemctl is-enabled streetsmart-accountability.timer 2>/dev/null || true)"
+          echo "timer_active=$(systemctl is-active streetsmart-accountability.timer 2>/dev/null || true)"
+          echo "timer_next=$(systemctl show streetsmart-accountability.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+          echo "service_load=$(systemctl show streetsmart-accountability.service -p LoadState --value 2>/dev/null || true)"
+          echo "service_result=$(systemctl show streetsmart-accountability.service -p Result --value 2>/dev/null || true)"
+          echo "service_exit_status=$(systemctl show streetsmart-accountability.service -p ExecMainStatus --value 2>/dev/null || true)"
+          echo "service_last_start=$(systemctl show streetsmart-accountability.service -p ExecMainStartTimestamp --value 2>/dev/null || true)"
+          echo "service_last_exit=$(systemctl show streetsmart-accountability.service -p ExecMainExitTimestamp --value 2>/dev/null || true)"
+          for path in \
+            /opt/streetsmart-daily-accountability/venv/bin/python \
+            /opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh \
+            /opt/streetsmart-daily-accountability/src/production_main.py; do
+            if test -e "${path}"; then echo "runtime_present=${path}"; else echo "runtime_missing=${path}"; fi
+          done
+          python3 - <<'PYEOF'
+          import json
+          from pathlib import Path
+          path = Path('/opt/streetsmart-daily-accountability/data/run_state/last_success.json')
+          result = {'success_marker_present': path.is_file()}
+          if path.is_file():
+              try:
+                  data = json.loads(path.read_text(encoding='utf-8'))
+              except Exception as exc:
+                  result['success_marker_error'] = type(exc).__name__
+              else:
+                  result.update({
+                      'run_date': str(data.get('run_date') or ''),
+                      'target_date': str(data.get('target_date') or ''),
+                      'document_url_present': str(data.get('document_url') or '').startswith('https://docs.google.com/document/'),
+                  })
+          print(json.dumps(result, sort_keys=True))
+          PYEOF
+          REMOTE_EOF
+
+      - name: Upload read-only diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accountability-readonly-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/accountability-readonly-diagnostic.txt
+          if-no-files-found: warn
+          retention-days: 30
