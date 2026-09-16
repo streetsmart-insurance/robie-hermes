@@ -465,7 +465,7 @@ def test_driver_has_no_delete_surface():
     assert '"DELETE"' not in source and "'DELETE'" not in source
     for name in dir(driver):
         assert "delete" not in name.lower(), f"unexpected delete API: {name}"
-\n
+
 
 # ---------------------------------------------------------------------------
 # stdout contract: the GitHub workflow parses driver stdout as JSON
