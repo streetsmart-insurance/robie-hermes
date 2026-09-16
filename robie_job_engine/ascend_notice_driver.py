@@ -58,6 +58,7 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Protocol
@@ -532,6 +533,9 @@ def build_live_context(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The GitHub workflow captures stdout and parses it as the JSON run
+    # summary, so every human-readable log line must go to stderr.
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
     parser = argparse.ArgumentParser(
         description="Drive Ascend notice emails to EZLynx discussion notes + Zapier tasks."
     )
