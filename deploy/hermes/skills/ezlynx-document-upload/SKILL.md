@@ -33,9 +33,10 @@ the DocumentApi OAuth upload endpoint. It returns the new EZLynx document id.
 ## Safety contract
 
 - The engine's write-allowlist (`require_allowed_ezlynx_write_applicant`) runs
-  inside the upload call. Uploads to any applicant outside the active
-  Production job or the Test allowlist (220250093) are refused — the tool
-  returns an error, never a partial upload.
+  inside the upload call. Ops flip: leave `ROBIE_EZLYNX_WRITE_APPLICANT_IDS`
+  unset/empty for agency-wide note/document writes; set it to a comma list
+  to restrict. A bound Production Chat job still fail-closes to that
+  applicant. The tool returns an error, never a partial upload.
 - This tool uploads one document. It never binds, never pays, never deletes
   a policy or a document.
 - A missing/expired EZLynx API session is a failed tool call, never a

@@ -127,18 +127,35 @@ from robie_job_engine.ezlynx_write_scope import (
     ezlynx_control_scope_block_reason,
     require_allowed_ezlynx_write_applicant,
     requested_message_applicant,
+    write_allowlist_is_unrestricted,
 )
 
 allowed = "220250093"
-assert ALLOWED_EZLYNX_WRITE_APPLICANT_IDS == frozenset({allowed})
-assert require_allowed_ezlynx_write_applicant(allowed) == allowed
-for value in (None, "", "220250092", "220250094", "SANITIZED-001"):
+# Unset/empty ROBIE_EZLYNX_WRITE_APPLICANT_IDS = agency-wide. A comma list
+# restricts. This proof records the mode actually compiled into the release
+# process environment; it does not perform a live EZLynx write.
+if write_allowlist_is_unrestricted():
+    assert ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None
+    assert require_allowed_ezlynx_write_applicant(allowed) == allowed
+    assert require_allowed_ezlynx_write_applicant("220250094") == "220250094"
+    refused_values = (None, "", "SANITIZED-001")
+    allowlist_mode = "unrestricted"
+    compiled_allowlist = None
+else:
+    assert allowed in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+    assert require_allowed_ezlynx_write_applicant(allowed) == allowed
+    refused_values = (None, "", "SANITIZED-001")
+    if "220250094" not in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
+        refused_values += ("220250094",)
+    allowlist_mode = "restricted"
+    compiled_allowlist = sorted(ALLOWED_EZLYNX_WRITE_APPLICANT_IDS)
+for value in refused_values:
     try:
         require_allowed_ezlynx_write_applicant(value)
     except RuntimeError as exc:
         assert EZLYNX_WRITE_SCOPE_REFUSED in str(exc)
     else:
-        raise AssertionError(f"non-allowlisted applicant accepted: {value!r}")
+        raise AssertionError(f"invalid or non-allowlisted applicant accepted: {value!r}")
 wrong_page = ezlynx_control_scope_block_reason(
     "https://app.ezlynx.com/web/account/220250094/policies",
     requested_applicant_id=allowed,
@@ -153,8 +170,10 @@ assert requested_message_applicant({"text": "Work on https://app.ezlynx.com/web/
 assert requested_message_applicant({"text": "applicant 440000001 and applicant 440000002"}) is None
 assert requested_message_applicant({"text": "applicant 440000001", "applicant_id": "440000002"}) is None
 print(json.dumps({
-    "compiled_allowlist": [allowed],
-    "unbound_applicants_refused": True,
+    "allowlist_mode": allowlist_mode,
+    "compiled_allowlist": compiled_allowlist,
+    "test_applicant_220250093_allowed": True,
+    "invalid_applicant_ids_refused": True,
     "production_scope_requires_active_original_message": True,
     "wrong_page_refused": True,
     "unscoped_page_refused": True,

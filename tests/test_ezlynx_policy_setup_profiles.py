@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from robie_job_engine.ezlynx_policy_setup_profiles import (
     NEEDS_CLARIFICATION,
@@ -164,17 +165,21 @@ def test_supported_bond_variant_can_reach_ready_without_enabling_save():
 
 
 def test_non_allowlisted_applicant_never_reaches_ready():
-    result = preflight_policy_setup(
-        {
-            **_base(
-                lob="Bonds",
-                bond_type="Home Improvement Bond",
-                bond_amount="SANITIZED",
-                obligee="SANITIZED",
-            ),
-            "applicant_id": "220250094",
-        }
-    )
+    with patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({"220250093"}),
+    ):
+        result = preflight_policy_setup(
+            {
+                **_base(
+                    lob="Bonds",
+                    bond_type="Home Improvement Bond",
+                    bond_amount="SANITIZED",
+                    obligee="SANITIZED",
+                ),
+                "applicant_id": "220250094",
+            }
+        )
     assert result.status == NEEDS_CLARIFICATION
     assert "business-write allowlist" in " ".join(result.reasons)
 

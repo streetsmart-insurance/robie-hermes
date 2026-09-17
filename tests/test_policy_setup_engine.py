@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from robie_job_engine import ezlynx_policy_setup as eps
 from robie_job_engine.hermes_tool_visibility import email_chat_job_schema
@@ -28,7 +29,11 @@ class TestSetupPolicyByLobGates(unittest.TestCase):
         shell = eps.PolicyShellInput(
             applicant_id="221398001", lob="HOME", policy_number="TEST-X"
         )
-        result = run(setup.setup_policy_by_lob(shell))
+        with patch(
+            "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+            frozenset({"220250093"}),
+        ):
+            result = run(setup.setup_policy_by_lob(shell))
         self.assertFalse(result.success)
         self.assertEqual(result.phase_reached, "applicant_write_scope")
 

@@ -149,7 +149,13 @@ class ActionGateTests(unittest.TestCase):
         with durable_temporary_directory() as tmp:
             passes = Path(tmp) / "passes"
             passes.mkdir()
-            with patch("robie_job_engine.action_gate.PASSES_DIR", passes):
+            with (
+                patch("robie_job_engine.action_gate.PASSES_DIR", passes),
+                patch(
+                    "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+                    frozenset({"220250093"}),
+                ),
+            ):
                 record_test_action_pass(
                     POLICY_SETUP_ACTION,
                     job_id="sanitized-policy-setup-test",

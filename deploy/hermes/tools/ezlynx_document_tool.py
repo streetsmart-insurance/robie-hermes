@@ -24,8 +24,9 @@ DOCUMENT_UPLOAD_SCHEMA = {
         "not a hand-rolled API call — whenever the job needs to push a file "
         "(dec page, renewal packet, carrier correspondence, application PDF) "
         "into EZLynx. The engine enforces the write-allowlist: uploads are "
-        "refused for any applicant not authorized by the active Production "
-        "job or the Test allowlist (220250093). Pass file_path as a local "
+        "refused for any applicant not authorized by ROBIE_EZLYNX_WRITE_APPLICANT_IDS "
+        "(unset/empty = agency-wide; comma list = restricted) or by a bound "
+        "Production Chat job. Pass file_path as a local "
         "filesystem path to an already-downloaded file (e.g. an email "
         "attachment saved to the job evidence directory). Returns the new "
         "EZLynx document id on success."
@@ -101,7 +102,7 @@ def _upload_document(args: dict) -> dict:
 
     # Write-allowlist is enforced inside upload_applicant_document via
     # require_allowed_ezlynx_write_applicant: any applicant outside the
-    # active Production job / Test allowlist raises EzlynxWriteScopeError.
+    # env allowlist / bound Production job raises EzlynxWriteScopeError.
     config = load_ezlynx_api_config()
     client = EzlynxApiClient(config)
     kwargs: dict = {}

@@ -5,6 +5,7 @@ All HTTP is faked: no test may touch the network or Secret Manager.
 
 import json
 import os
+from unittest.mock import patch
 from urllib import parse
 
 import pytest
@@ -211,8 +212,12 @@ def test_file_note_happy_path():
 
 def test_file_note_rejects_non_allowlisted_applicant_before_any_http():
     client = make_client(_file_routes([{"discussionId": "d1"}]))
-    with pytest.raises(EzlynxWriteScopeError):
-        disc.file_note_to_existing_discussion(client, "999999999", "Filed note")
+    with patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({ALLOWED_APPLICANT}),
+    ):
+        with pytest.raises(EzlynxWriteScopeError):
+            disc.file_note_to_existing_discussion(client, "999999999", "Filed note")
     assert client._urlopen.calls == []
 
 
