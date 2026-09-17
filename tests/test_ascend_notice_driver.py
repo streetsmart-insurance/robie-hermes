@@ -6,7 +6,11 @@ fails closed per email without touching anything else.
 """
 
 import json
+import os
+import unittest
 from datetime import date
+from pathlib import Path
+from unittest import mock
 from urllib import parse
 
 import pytest
@@ -14,6 +18,11 @@ import pytest
 from robie_job_engine import ascend_notice_driver as driver
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine import ezlynx_discussions as discussions
+from robie_job_engine.gmail_accountability import (
+    GMAIL_METADATA_SCOPE,
+    GMAIL_MODIFY_SCOPE,
+    GMAIL_READONLY_SCOPE,
+)
 
 
 ALLOWED_APPLICANT = "220250093"
@@ -483,3 +492,153 @@ def test_main_stdout_is_json_only_on_fatal(monkeypatch, capsys):
     payload = json.loads(out)  # raises when stdout is polluted by log lines
     assert payload["dry_run"] is True
     assert "ROBIE_ENV" in payload["fatal"]
+
+
+# ---------------------------------------------------------------------------
+# delegated Gmail scopes: search + body need readonly, not metadata
+# ---------------------------------------------------------------------------
+
+
+def test_notice_source_dry_run_requests_readonly_not_metadata():
+    source = driver.GmailNoticeSource(
+        mailbox="hello@streetsmart.insurance",
+        service_account_email="hermes-poc@example.test",
+    )
+    assert source.allow_modify is False
+    assert source.requested_scopes == (GMAIL_READONLY_SCOPE,)
+    assert GMAIL_METADATA_SCOPE not in source.requested_scopes
+
+
+def test_notice_source_live_requests_modify_for_mark_read():
+    source = driver.GmailNoticeSource(
+        mailbox="hello@streetsmart.insurance",
+        service_account_email="hermes-poc@example.test",
+        allow_modify=True,
+    )
+    assert source.requested_scopes == (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE)
+
+
+def test_notice_source_default_factory_is_notice_not_metadata(monkeypatch):
+    seen = {}
+
+    def fake_build(sa, user, *, modify=False):
+        seen.update(sa=sa, user=user, modify=modify)
+        return object()
+
+    monkeypatch.setattr(
+        "robie_job_engine.gmail_accountability.build_notice_gmail_service",
+        fake_build,
+    )
+    source = driver.GmailNoticeSource(
+        mailbox="hello@streetsmart.insurance",
+        service_account_email="hermes-poc@example.test",
+        allow_modify=False,
+    )
+    source._service_client()
+    assert seen == {
+        "sa": "hermes-poc@example.test",
+        "user": "hello@streetsmart.insurance",
+        "modify": False,
+    }
+
+
+def test_notice_source_live_factory_passes_modify(monkeypatch):
+    seen = {}
+
+    def fake_build(sa, user, *, modify=False):
+        seen.update(sa=sa, user=user, modify=modify)
+        return object()
+
+    monkeypatch.setattr(
+        "robie_job_engine.gmail_accountability.build_notice_gmail_service",
+        fake_build,
+    )
+    source = driver.GmailNoticeSource(
+        mailbox="hello@streetsmart.insurance",
+        service_account_email="hermes-poc@example.test",
+        allow_modify=True,
+    )
+    source._service_client()
+    assert seen["modify"] is True
+
+
+def test_notice_driver_source_does_not_import_metadata_factory():
+    text = Path(driver.__file__).read_text(encoding="utf-8")
+    assert "build_notice_gmail_service" in text
+    assert "from .gmail_accountability import build_keyless_delegated_service" not in text
+
+
+class _FakeApiConfig:
+    document_base_url = "https://app.uatezlynx.com"
+    token_endpoint = "https://identity.example.com/connect/token"
+    client_id = "id"
+    client_secret = "secret"
+    username = "SSRobie"
+    integration_group_id = "159"
+
+
+def _stub_live_clients(monkeypatch):
+    monkeypatch.setenv("ROBIE_GMAIL_DELEGATION_SA", "hermes-poc@example.test")
+    monkeypatch.setattr(driver, "load_ezlynx_api_config", lambda: _FakeApiConfig())
+    monkeypatch.setattr(driver, "EzlynxApiClient", lambda *_a, **_k: object())
+    monkeypatch.setattr(driver, "DiscussionApiClient", lambda *_a, **_k: object())
+    monkeypatch.setattr(driver, "configured_ascend_client", lambda: object())
+
+
+def test_build_live_context_dry_run_does_not_request_modify(monkeypatch):
+    _stub_live_clients(monkeypatch)
+    monkeypatch.delenv("ASCEND_DRIVER_GMAIL_MODIFY", raising=False)
+    ctx = driver.build_live_context(
+        mailbox="hello@streetsmart.insurance",
+        query=driver.DEFAULT_QUERY,
+        dry_run=True,
+        due_days=2,
+    )
+    assert ctx.source.allow_modify is False
+    assert ctx.source.requested_scopes == (GMAIL_READONLY_SCOPE,)
+
+
+def test_build_live_context_live_requests_modify(monkeypatch):
+    _stub_live_clients(monkeypatch)
+    ctx = driver.build_live_context(
+        mailbox="hello@streetsmart.insurance",
+        query=driver.DEFAULT_QUERY,
+        dry_run=False,
+        due_days=2,
+    )
+    assert ctx.source.allow_modify is True
+    assert ctx.source.requested_scopes == (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE)
+
+
+def test_gmail_modify_env_flag_requests_modify_in_dry_run(monkeypatch):
+    _stub_live_clients(monkeypatch)
+    monkeypatch.setenv("ASCEND_DRIVER_GMAIL_MODIFY", "1")
+    ctx = driver.build_live_context(
+        mailbox="hello@streetsmart.insurance",
+        query=driver.DEFAULT_QUERY,
+        dry_run=True,
+        due_days=2,
+    )
+    assert ctx.source.allow_modify is True
+
+
+class TestNoticeGmailScopeSelection(unittest.TestCase):
+    def test_dry_run_scopes_support_unread_search(self):
+        source = driver.GmailNoticeSource(
+            mailbox="hello@streetsmart.insurance",
+            service_account_email="hermes-poc@example.test",
+        )
+        self.assertEqual(source.requested_scopes, (GMAIL_READONLY_SCOPE,))
+        self.assertNotIn(GMAIL_METADATA_SCOPE, source.requested_scopes)
+
+    def test_live_scopes_include_modify(self):
+        source = driver.GmailNoticeSource(allow_modify=True)
+        self.assertIn(GMAIL_MODIFY_SCOPE, source.requested_scopes)
+
+    def test_modify_flag_follows_live_or_env(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ASCEND_DRIVER_GMAIL_MODIFY", None)
+            self.assertFalse(driver._notice_allow_modify(dry_run=True))
+            self.assertTrue(driver._notice_allow_modify(dry_run=False))
+        with mock.patch.dict(os.environ, {"ASCEND_DRIVER_GMAIL_MODIFY": "1"}):
+            self.assertTrue(driver._notice_allow_modify(dry_run=True))

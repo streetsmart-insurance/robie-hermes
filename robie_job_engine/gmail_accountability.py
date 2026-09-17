@@ -1,7 +1,10 @@
 """Read-only, metadata-only Gmail accountability summaries.
 
-No message body is requested or persisted. The production credential path uses
-keyless IAM signing plus Google Workspace domain-wide delegation.
+No message body is requested or persisted by the accountability collector.
+The production credential path uses keyless IAM signing plus Google Workspace
+domain-wide delegation. The shared factory defaults to ``gmail.metadata``;
+notice/search callers must request ``gmail.readonly`` (and ``gmail.modify``
+when they will change labels).
 """
 
 from __future__ import annotations
@@ -10,10 +13,26 @@ import hashlib
 import os
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+
+
+def notice_gmail_scopes(*, modify: bool = False) -> tuple[str, ...]:
+    """Scopes for unread search + message bodies (and optional live mark-read).
+
+    ``gmail.metadata`` cannot use ``messages.list?q=`` or read bodies
+    (HttpError 403: Metadata scope does not support 'q' parameter).
+    Dry-run needs ``gmail.readonly``. Live mark-read (remove UNREAD) needs
+    ``gmail.modify``, which includes the readonly operations.
+    """
+
+    if modify:
+        return (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE)
+    return (GMAIL_READONLY_SCOPE,)
 
 
 class GmailAccountabilityError(RuntimeError):
@@ -115,14 +134,28 @@ def summarize_mailbox_threads(
     }
 
 
-def build_keyless_delegated_service(service_account_email: str, user: str) -> Any:
-    """Create a Gmail client with IAM-backed signing and delegated mailbox subject."""
+def build_keyless_delegated_service(
+    service_account_email: str,
+    user: str,
+    *,
+    scopes: Sequence[str] | None = None,
+) -> Any:
+    """Create a Gmail client with IAM-backed signing and delegated mailbox subject.
+
+    Default scopes stay ``gmail.metadata`` so accountability callers that only
+    list thread metadata do not silently gain body access. Callers that search
+    or read bodies must pass ``scopes`` explicitly (see ``notice_gmail_scopes``).
+    """
 
     import google.auth
     from google.auth import iam
     from google.auth.transport.requests import Request
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
+
+    requested = [str(item) for item in (scopes if scopes is not None else (GMAIL_METADATA_SCOPE,))]
+    if not requested:
+        raise ValueError("delegated Gmail scopes must not be empty")
 
     source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     request = Request()
@@ -131,10 +164,25 @@ def build_keyless_delegated_service(service_account_email: str, user: str) -> An
         signer=signer,
         service_account_email=service_account_email,
         token_uri="https://oauth2.googleapis.com/token",
-        scopes=[GMAIL_METADATA_SCOPE],
+        scopes=requested,
         subject=user,
     )
     return build("gmail", "v1", credentials=delegated, cache_discovery=False)
+
+
+def build_notice_gmail_service(
+    service_account_email: str,
+    user: str,
+    *,
+    modify: bool = False,
+) -> Any:
+    """Delegated Gmail client for Ascend notice search + body (and optional mark-read)."""
+
+    return build_keyless_delegated_service(
+        service_account_email,
+        user,
+        scopes=notice_gmail_scopes(modify=modify),
+    )
 
 
 def fetch_mailbox_threads(
