@@ -1,0 +1,176 @@
+name: Verify scheduled accountability delivery
+
+on:
+  schedule:
+    # GitHub cron is UTC. Running both slots plus the New York hour gate
+    # keeps this at 10:15 Eastern across daylight-saving changes.
+    - cron: "15 14,15 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type VERIFY_ACCOUNTABILITY_DELIVERY
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+concurrency:
+  group: streetsmart-accountability-delivery-watchdog
+  cancel-in-progress: false
+
+jobs:
+  verify-delivery:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.ref == 'refs/heads/main' &&
+       inputs.confirmation == 'VERIFY_ACCOUNTABILITY_DELIVERY')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: Production
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      PRODUCTION_VM: streetsmart-accountability-prod
+      APP_ROOT: /opt/streetsmart-daily-accountability
+      ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the canonical New York watchdog slot
+        id: local-time
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> "${GITHUB_OUTPUT}"
+            echo "qualifying_scheduled_proof=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          local_hour="$(TZ=America/New_York date +%H)"
+          if [ "${local_hour}" = "10" ]; then
+            echo "should_run=true" >> "${GITHUB_OUTPUT}"
+            echo "qualifying_scheduled_proof=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should_run=false" >> "${GITHUB_OUTPUT}"
+            echo "qualifying_scheduled_proof=false" >> "${GITHUB_OUTPUT}"
+            echo "Skipping the duplicate UTC slot; local hour is ${local_hour}."
+          fi
+
+      - uses: google-github-actions/auth@v3
+        if: steps.local-time.outputs.should_run == 'true'
+        with:
+          workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
+          service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v3
+        if: steps.local-time.outputs.should_run == 'true'
+
+      - name: Verify dedicated VM state and SSH target
+        if: steps.local-time.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${PRODUCTION_VM}" = "streetsmart-accountability-prod"
+          status="$(gcloud compute instances describe "${PRODUCTION_VM}"             --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(status)')"
+          test "${status}" = "RUNNING"
+          host="$(gcloud compute ssh "${PRODUCTION_VM}"             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap             --quiet --command="hostname -s" 2>&1 | tail -1 | tr -d '\r')"
+          test "${host}" = "streetsmart-accountability-prod"
+
+      - name: Verify timer, service, success marker, and Google Doc evidence
+        id: marker
+        if: steps.local-time.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_script="/tmp/accountability-watchdog-${GITHUB_RUN_ID}.py"
+          gcloud compute scp scripts/verify_accountability_watchdog.py             "${PRODUCTION_VM}:${remote_script}"             --project="${PROJECT_ID}" --zone="${ZONE}"             --tunnel-through-iap --quiet
+          trap 'gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="rm -f '"${remote_script}"'" >/dev/null 2>&1 || true' EXIT
+          gcloud compute ssh "${PRODUCTION_VM}"             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap             --quiet --command="sudo -u ubuntu env PYTHONPATH=${APP_ROOT} ${APP_ROOT}/venv/bin/python ${remote_script} --app-root ${APP_ROOT} --include-document-id"             > "${RUNNER_TEMP}/accountability-watchdog-marker-raw.json"
+          target_date="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["target_date"])' "${RUNNER_TEMP}/accountability-watchdog-marker-raw.json")"
+          document_id="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["document_id"])' "${RUNNER_TEMP}/accountability-watchdog-marker-raw.json")"
+          [[ "${target_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "${document_id}" =~ ^[A-Za-z0-9_-]{20,}$ ]]
+          echo "::add-mask::${document_id}"
+          python - "${RUNNER_TEMP}/accountability-watchdog-marker-raw.json" "${RUNNER_TEMP}/accountability-watchdog-marker.json" <<'PYEOF'
+          import json
+          import sys
+          source = json.load(open(sys.argv[1], encoding="utf-8"))
+          source.pop("document_id", None)
+          with open(sys.argv[2], "w", encoding="utf-8") as handle:
+              json.dump(source, handle, sort_keys=True)
+              handle.write("\n")
+          PYEOF
+          rm -f "${RUNNER_TEMP}/accountability-watchdog-marker-raw.json"
+          cat "${RUNNER_TEMP}/accountability-watchdog-marker.json" >> "${GITHUB_STEP_SUMMARY}"
+          echo "target_date=${target_date}" >> "${GITHUB_OUTPUT}"
+          echo "document_id=${document_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Google read-only verification dependencies
+        if: steps.local-time.outputs.should_run == 'true'
+        run: python -m pip install --quiet google-api-python-client google-auth google-auth-httplib2
+
+      - name: Verify Submission Center report content
+        if: steps.local-time.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_accountability_report_content.py \
+            --document-id "${{ steps.marker.outputs.document_id }}" \
+            --mailbox robie@streetsmart.insurance \
+            --service-account-email "${ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT}" \
+            > "${RUNNER_TEMP}/accountability-watchdog-content.json"
+          cat "${RUNNER_TEMP}/accountability-watchdog-content.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Verify exact Gmail Sent delivery
+        if: steps.local-time.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_dedicated_accountability_delivery.py             --mode verify             --target-date "${{ steps.marker.outputs.target_date }}"             --mailbox robie@streetsmart.insurance             --recipient carlo@streetsmart.insurance             --recipient jake@streetsmart.insurance             --recipient ashley@streetsmart.insurance             --recipient gabrielac@streetsmart.insurance             --service-account-email "${ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT}"             > "${RUNNER_TEMP}/accountability-watchdog-gmail.json"
+          cat "${RUNNER_TEMP}/accountability-watchdog-gmail.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Record qualifying unattended proof
+        if: steps.local-time.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "### Reliability gate"
+            echo "- Scheduled event: ${{ steps.local-time.outputs.qualifying_scheduled_proof }}"
+            echo "- Count this run toward the three-run reliability gate only when Scheduled event is true."
+            echo "- A manual workflow_dispatch verification is evidence, but not an unattended scheduled success."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload redacted watchdog evidence
+        if: always() && steps.local-time.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: accountability-delivery-watchdog-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/accountability-watchdog-marker.json
+            ${{ runner.temp }}/accountability-watchdog-content.json
+            ${{ runner.temp }}/accountability-watchdog-gmail.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Open or update a watchdog failure issue
+        if: always() && steps.local-time.outputs.should_run == 'true' && failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Accountability watchdog failure"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body="$(printf '%s\n'             "The scheduled accountability delivery could not be independently verified."             ""             "- Environment: Production watchdog (read-only)"             "- Dedicated VM: streetsmart-accountability-prod"             "- Run: ${run_url}"             "- Result: failed closed; inspect the redacted workflow evidence"             "- Safety: the watchdog did not start the service or resend the report")"
+          existing="$(gh issue list --state open --limit 100 --json number,title             --jq '.[] | select(.title == "Accountability watchdog failure") | .number'             | head -1)"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "${body}"
+          else
+            gh issue create --title "${title}" --body "${body}"
+          fi

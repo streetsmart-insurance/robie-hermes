@@ -113,13 +113,18 @@ class HitlHonestyTests(unittest.TestCase):
         def boom(**_kwargs):
             raise RuntimeError("signBlob failed")
 
-        sent, error = ping_carlo(
-            _request(),
-            {"email_sender": boom, "chat_sender": lambda _m: True},
-            HitlResponse(source="gemini", suggestion="use the live Department option", actionable=True),
-        )
+        with self.assertLogs("robie.hitl_escalation", level="WARNING") as logs:
+            sent, error = ping_carlo(
+                _request(),
+                {"email_sender": boom, "chat_sender": lambda _m: True},
+                HitlResponse(source="gemini", suggestion="use the live Department option", actionable=True),
+            )
         self.assertTrue(sent)
         self.assertIn("signBlob", error)
+        joined = "\n".join(logs.output)
+        self.assertIn("HITL email send failed", joined)
+        self.assertIn("signBlob", joined)
+        self.assertIn("ping_carlo result", joined)
 
     def test_live_control_match_still_stop_and_ask_never_continuing(self) -> None:
         request = _request(

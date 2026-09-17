@@ -18,14 +18,31 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn('Apply|Done|Select', source)
         self.assertGreaterEqual(source.count('_option_selected'), 4)
 
+    def test_all_interactive_controls_use_visible_target_activation(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        self.assertIn("def _first_visible", source)
+        self.assertIn("def _activate", source)
+        self.assertIn("target.press(key, timeout=5_000)", source)
+        self.assertIn("target.click(timeout=5_000)", source)
+        self.assertNotIn(".first.click()", source)
+        self.assertNotIn(".last.click()", source)
+        self.assertIn('_activate(picker_button, "agency picker")', source)
+        self.assertIn('_activate(next_button, "next Submission Center page")', source)
+
     def test_live_picker_waits_for_async_checkbox_render(self):
         source = (
             Path(__file__).resolve().parents[1]
             / "robie_job_engine"
             / "submission_audit_runner.py"
         ).read_text()
-        self.assertIn('options.first.wait_for(state="visible", timeout=5_000)', source)
+        self.assertIn('for _ in range(10)', source)
         self.assertIn('for selector in (".cdk-overlay-container mat-checkbox", "mat-checkbox")', source)
+        self.assertIn('_exact_visible_option(options, "My Submissions")', source)
+        self.assertIn('page.wait_for_timeout(500)', source)
 
     def test_picker_labels_ignore_presentation_whitespace_only(self):
         source = (
@@ -104,7 +121,7 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn("_set_agency_scope(page)", status_block)
         self.assertIn("_verify_page_size_result(page)", status_block)
         self.assertLess(
-            status_block.index("header.click()"),
+            status_block.index('_activate(header, "Status sort header")'),
             status_block.rindex("ascending sort showed a closed first row"),
         )
 

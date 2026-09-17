@@ -40,6 +40,8 @@ jobs:
           workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
           service_account: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v3
+      - name: Install Gmail verification dependencies
+        run: python -m pip install --quiet google-api-python-client google-auth google-auth-httplib2
 
       - name: Inspect the dedicated VM state
         run: |
@@ -97,54 +99,62 @@ jobs:
           grep -Eq 'flock .*900' "${wrapper}"
           LOCK_EOF
 
-      - name: Repair and preflight Magellan authentication
+      - name: Repair recipients and preflight Magellan authentication
         run: |
           set -euo pipefail
           remote_repair="/tmp/accountability-magellan-repair-${GITHUB_RUN_ID}.py"
           remote_preflight="/tmp/accountability-magellan-preflight-${GITHUB_RUN_ID}.py"
+          remote_recipients="/tmp/accountability-recipient-repair-${GITHUB_RUN_ID}.py"
           gcloud compute scp scripts/repair_dedicated_accountability_magellan.py \
             "${PRODUCTION_VM}:${remote_repair}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
           gcloud compute scp scripts/preflight_dedicated_accountability_magellan.py \
             "${PRODUCTION_VM}:${remote_preflight}" \
             --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          gcloud compute scp scripts/repair_dedicated_accountability_recipients.py \
+            "${PRODUCTION_VM}:${remote_recipients}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
           set -euo pipefail
-          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu"' EXIT
+          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu" "${remote_recipients}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_repair}" "${remote_repair}.ubuntu"
           install -o ubuntu -g ubuntu -m 0755 "${remote_preflight}" "${remote_preflight}.ubuntu"
-          rm -f "${remote_repair}" "${remote_preflight}"
+          install -o ubuntu -g ubuntu -m 0755 "${remote_recipients}" "${remote_recipients}.ubuntu"
+          rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_recipients}.ubuntu" \
+            --path "${APP_ROOT}/src/reporters/email_delivery.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" \
             --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \
             "${APP_ROOT}/venv/bin/python" "${remote_preflight}.ubuntu" --app-root "${APP_ROOT}"
           REMOTE_EOF
 
-      - name: Refuse duplicate prior-business-day delivery
+      - name: Resolve exact prior-business-day target
+        id: report-date
         run: |
           set -euo pipefail
-          remote_verify="/tmp/accountability-delivery-preflight-${GITHUB_RUN_ID}.py"
-          gcloud compute scp scripts/verify_dedicated_accountability_delivery.py \
-            "${PRODUCTION_VM}:${remote_verify}" \
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+          target_date="$(gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet \
+            --command="sudo -u ubuntu env PYTHONPATH=${APP_ROOT} ${APP_ROOT}/venv/bin/python -c 'from datetime import datetime; from zoneinfo import ZoneInfo; from src.engine.date_utils import get_previous_business_day; print(get_previous_business_day(datetime.now(ZoneInfo(\"America/New_York\")).date()).isoformat())'" \
+            2>/dev/null | tail -1 | tr -d '\r')"
+          [[ "${target_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          echo "target_date=${target_date}" >> "${GITHUB_OUTPUT}"
+
+      - name: Refuse duplicate prior-business-day delivery
+        env:
+          ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
+        run: |
           set -euo pipefail
-          trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
-          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
-          delegated_sa=""
-          if [ -r /etc/streetsmart-hermes/robie-accountability.env ]; then
-            delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' /etc/streetsmart-hermes/robie-accountability.env | tail -1)"
-          fi
-          if [ -z "\${delegated_sa}" ]; then
-            delegated_sa="\$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)"
-          fi
-          test -n "\${delegated_sa}"
-          env ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="\${delegated_sa}" PYTHONPATH="${APP_ROOT}" \
-            "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
-            --app-root "${APP_ROOT}" --mode preflight
-          REMOTE_EOF
+          python scripts/verify_dedicated_accountability_delivery.py \
+            --mode preflight \
+            --target-date "${{ steps.report-date.outputs.target_date }}" \
+            --mailbox robie@streetsmart.insurance \
+            --recipient carlo@streetsmart.insurance \
+            --recipient jake@streetsmart.insurance \
+            --recipient ashley@streetsmart.insurance \
+            --recipient gabrielac@streetsmart.insurance \
+            --service-account-email "${ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT}"
 
       - name: Verify installed fail-closed runtime
         run: |
@@ -225,30 +235,20 @@ jobs:
           cat "${RUNNER_TEMP}/accountability-verification.json" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify exact Gmail Sent delivery
+        env:
+          ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
         run: |
           set -euo pipefail
-          remote_verify="/tmp/accountability-delivery-verify-${GITHUB_RUN_ID}.py"
-          gcloud compute scp scripts/verify_dedicated_accountability_delivery.py \
-            "${PRODUCTION_VM}:${remote_verify}" \
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
+          python scripts/verify_dedicated_accountability_delivery.py \
+            --mode verify \
+            --target-date "${{ steps.report-date.outputs.target_date }}" \
+            --mailbox robie@streetsmart.insurance \
+            --recipient carlo@streetsmart.insurance \
+            --recipient jake@streetsmart.insurance \
+            --recipient ashley@streetsmart.insurance \
+            --recipient gabrielac@streetsmart.insurance \
+            --service-account-email "${ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT}" \
             > "${RUNNER_TEMP}/accountability-gmail-verification.json"
-          set -euo pipefail
-          trap 'rm -f "${remote_verify}" "${remote_verify}.ubuntu"' EXIT
-          install -o ubuntu -g ubuntu -m 0755 "${remote_verify}" "${remote_verify}.ubuntu"
-          delegated_sa=""
-          if [ -r /etc/streetsmart-hermes/robie-accountability.env ]; then
-            delegated_sa="\$(sed -n 's/^ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT=//p' /etc/streetsmart-hermes/robie-accountability.env | tail -1)"
-          fi
-          if [ -z "\${delegated_sa}" ]; then
-            delegated_sa="\$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)"
-          fi
-          test -n "\${delegated_sa}"
-          env ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="\${delegated_sa}" PYTHONPATH="${APP_ROOT}" \
-            "${APP_ROOT}/venv/bin/python" "${remote_verify}.ubuntu" \
-            --app-root "${APP_ROOT}" --mode verify
-          REMOTE_EOF
           cat "${RUNNER_TEMP}/accountability-gmail-verification.json" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload redacted verification evidence
