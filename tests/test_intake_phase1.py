@@ -204,7 +204,11 @@ class IntakePhase1Tests(unittest.TestCase):
 
     def test_compiled_applicant_scope_is_preserved(self):
         self.api.candidates = read({'applicant_id': '999', 'policy_id': 'test-policy', 'policy_number': 'TEST-101'})
-        self.assertFalse(self.run_worker(identifiers=Identifiers(applicant_id='999')).succeeded)
+        with patch(
+            "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+            frozenset({"220250093"}),
+        ):
+            self.assertFalse(self.run_worker(identifiers=Identifiers(applicant_id='999')).succeeded)
         self.assertEqual(self.api.writes, 0)
 
     def test_wrong_source_system_cannot_enter_email_flow(self):

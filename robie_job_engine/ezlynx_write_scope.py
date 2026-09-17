@@ -1,11 +1,29 @@
 """Fail-closed applicant scope for consequential EZLynx writes.
 
-The allowlist is fixed at process start: it is read once from the
-``EZLYNX_WRITE_APPLICANT_IDS`` environment variable (comma-separated
-applicant IDs) and falls back to the compiled ``{"220250093"}`` when the
-variable is unset or empty.  A Job payload, prompt, or any other runtime
-input cannot widen it -- authorizing a new account is a deployment-config
-change, reviewed and released like code, and owned by Carlo.
+The allowlist is fixed at process start. It is read once from
+``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` (preferred) or the legacy alias
+``EZLYNX_WRITE_APPLICANT_IDS`` (comma-separated applicant IDs).
+
+Ops flip (Carlo 2026-09-17):
+
+- **Agency-wide** (default): leave the variable unset or empty. Any
+  plausible EZLynx applicant ID is write-eligible for note append,
+  document upload, and other already write-scoped PolicyApi calls.
+- **Restricted**: set the variable to a comma list, e.g.
+  ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=220250093``. Only those IDs pass
+  the compiled allowlist.
+
+A Job payload, prompt, or any other runtime input cannot widen a
+restricted list — authorizing a new account is a deployment-config
+change. Bind, cancel, coverage change, and money moves stay blocked by
+separate guards; this module only decides *which applicant* may receive
+an already-permitted write.
+
+Production Chat jobs stay fail-closed when
+:func:`production_job_applicant` returns a bound applicant: writes are
+limited to that applicant even if the compiled allowlist is
+unrestricted. When no Production job is bound, agency-wide API workers
+use the env policy above.
 
 Deletes are never authorized through this scope; the cardinal no-delete
 rule is enforced separately.
@@ -23,9 +41,15 @@ from urllib.parse import urlparse
 
 
 EZLYNX_WRITE_SCOPE_REFUSED = "EZLYNX_WRITE_SCOPE_REFUSED"
+ROBIE_EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "ROBIE_EZLYNX_WRITE_APPLICANT_IDS"
 EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR = "EZLYNX_WRITE_APPLICANT_IDS"
+# Preferred name first; legacy alias kept so existing Test/CI env still applies.
+EZLYNX_WRITE_APPLICANT_IDS_ENV_VARS = (
+    ROBIE_EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR,
+    EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR,
+)
 EZLYNX_HOSTS = frozenset({"app.ezlynx.com", "app.uatezlynx.com"})
-DEFAULT_ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = frozenset({"220250093"})
+TEST_EZLYNX_WRITE_APPLICANT_ID = "220250093"
 PRODUCTION_JOB_DB = Path("/opt/streetsmart-hermes/robie-job-engine/data/jobs.db")
 _ACCOUNT_PATH = re.compile(r"/web/account/([^/?#]+)(?:/|$)", re.IGNORECASE)
 _APPLICANT_PORTAL_PATH = re.compile(
@@ -41,6 +65,7 @@ _POLICY_FORM_ENTRY_PATH = re.compile(
     re.IGNORECASE,
 )
 _AUTH_PATH_MARKERS = ("/login", "/signin", "/sign-in")
+_PLAUSIBLE_APPLICANT_ID = re.compile(r"[1-9]\d*")
 
 
 class EzlynxWriteScopeError(RuntimeError):
@@ -51,6 +76,12 @@ def normalize_applicant_id(value: object) -> str:
     """Normalize surrounding whitespace only; never rewrite an identifier."""
 
     return str(value or "").strip()
+
+
+def is_plausible_applicant_id(value: object) -> bool:
+    """True for a non-empty EZLynx applicant id that looks like a real account."""
+
+    return bool(_PLAUSIBLE_APPLICANT_ID.fullmatch(normalize_applicant_id(value)))
 
 
 def requested_message_applicant(payload: dict) -> str | None:
@@ -90,7 +121,8 @@ def production_job_applicant() -> str | None:
     """Read scope only from this running job on the actual Production host/release.
 
     Read-only and fail-closed: returns None anywhere else. It resolves which
-    applicant the active job is bound to; it does not widen the write allowlist.
+    applicant the active job is bound to. When set, writes are limited to
+    that applicant even if the compiled allowlist is unrestricted.
     """
     if not _is_installed_production_runtime():
         return None
@@ -124,29 +156,51 @@ def production_job_applicant() -> str | None:
         return None
 
 
-def _load_allowed_applicant_ids() -> frozenset:
-    """Read the allowlist once at import; job payloads can never widen it."""
+def _raw_allowlist_env() -> str | None:
+    """Return the first configured allowlist env value, or None if unset."""
 
-    raw = os.environ.get(EZLYNX_WRITE_APPLICANT_IDS_ENV_VAR, "")
+    for name in EZLYNX_WRITE_APPLICANT_IDS_ENV_VARS:
+        if name in os.environ:
+            return os.environ[name]
+    return None
+
+
+def _load_allowed_applicant_ids() -> frozenset[str] | None:
+    """Read the allowlist once at import; job payloads can never widen it.
+
+    ``None`` means unrestricted (env unset or empty). A frozenset means
+    only those applicant IDs are compiled-allowed.
+    """
+
+    raw = _raw_allowlist_env()
+    if raw is None:
+        return None
     ids = {normalize_applicant_id(part) for part in raw.split(",")}
     ids.discard("")
-    return frozenset(ids) if ids else DEFAULT_ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+    return frozenset(ids) if ids else None
 
 
 ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
 
 
+def write_allowlist_is_unrestricted() -> bool:
+    """True when ops left the allowlist unset/empty (agency-wide writes)."""
+
+    return ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None
+
+
 def applicant_is_write_allowed(value: object) -> bool:
     applicant = normalize_applicant_id(value)
-    if applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
+    if not is_plausible_applicant_id(applicant):
+        return False
+    # A running Production Chat job is fail-closed to its immutable intake
+    # applicant. Worker payloads, prompts, and flags cannot widen this.
+    live = production_job_applicant()
+    if live is not None:
+        return applicant == live
+    if write_allowlist_is_unrestricted():
         return True
-    # A running Production job may write only to the client named by its own
-    # immutable intake record on the real Production host/release. Worker
-    # payloads, prompts, and flags can never widen this: production_job_applicant
-    # is fail-closed everywhere else.
-    return bool(
-        re.fullmatch(r"[1-9]\d*", applicant) and production_job_applicant() == applicant
-    )
+    return applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:
@@ -155,7 +209,7 @@ def require_allowed_ezlynx_write_applicant(value: object) -> str:
         display = applicant_id or "<missing>"
         raise EzlynxWriteScopeError(
             f"{EZLYNX_WRITE_SCOPE_REFUSED}: applicant {display} is not on the "
-            "compiled EZLynx business-write allowlist"
+            "EZLynx business-write allowlist"
         )
     return applicant_id
 
@@ -177,8 +231,7 @@ def is_policy_form_entry_url(url: object) -> bool:
     """True for the numeric FormEntry route whose URL omits applicant id.
 
     This shape alone never authorizes a write. The Playwright guard must also
-    attest the visible account and Test-policy header before permitting a
-    control action.
+    attest the visible account before permitting a control action.
     """
 
     parsed = urlparse(str(url or "").strip())
@@ -197,7 +250,7 @@ def ezlynx_control_scope_block_reason(
 
     Login controls are authentication, not an applicant business-record write.
     Every other generic EZLynx control action must occur on the exact applicant
-    URL named by the bound Job, and both identifiers must be compiled-allowed.
+    URL named by the bound Job, and both identifiers must be write-allowed.
     Dedicated read-only crawlers do not use this generic write executor.
     """
 
@@ -217,7 +270,7 @@ def ezlynx_control_scope_block_reason(
     if not applicant_is_write_allowed(requested):
         return (
             f"{EZLYNX_WRITE_SCOPE_REFUSED}: Job applicant {requested} is not "
-            "compiled-allowed"
+            "write-allowed"
         )
     if not target:
         return (
@@ -232,6 +285,6 @@ def ezlynx_control_scope_block_reason(
     if not applicant_is_write_allowed(target):
         return (
             f"{EZLYNX_WRITE_SCOPE_REFUSED}: page applicant {target} is not "
-            "compiled-allowed"
+            "write-allowed"
         )
     return None

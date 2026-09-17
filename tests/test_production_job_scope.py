@@ -44,6 +44,9 @@ def running_ledger(tmp_path, monkeypatch):
         db.execute('UPDATE jobs SET status=? WHERE id=?', ('RUNNING', job['id']))
     monkeypatch.setattr(scope, 'PRODUCTION_JOB_DB', path)
     monkeypatch.setattr(scope, '_is_installed_production_runtime', lambda: True)
+    # Job-scope tests pin a restricted compiled list so production_job_applicant()
+    # is what grants CLIENT — not the agency-wide unset default.
+    monkeypatch.setattr(scope, 'ALLOWED_EZLYNX_WRITE_APPLICANT_IDS', frozenset({'220250093'}))
     monkeypatch.setenv('ROBIE_JOB_DB', str(path))
     monkeypatch.setenv('ROBIE_CURRENT_JOB_ID', job['id'])
     monkeypatch.delenv('ROBIE_JOB_ID', raising=False)
@@ -60,6 +63,15 @@ def test_running_original_client_allowed_but_other_page_refused(running_ledger):
         f'https://app.ezlynx.com/web/account/{CLIENT}/documents', requested_applicant_id=CLIENT) is None
     assert scope.ezlynx_control_scope_block_reason(
         f'https://app.ezlynx.com/web/account/{OTHER}/documents', requested_applicant_id=CLIENT)
+
+
+def test_bound_production_job_stays_fail_closed_even_when_allowlist_unrestricted(running_ledger, monkeypatch):
+    monkeypatch.setattr(scope, 'ALLOWED_EZLYNX_WRITE_APPLICANT_IDS', None)
+    assert scope.write_allowlist_is_unrestricted()
+    assert scope.production_job_applicant() == CLIENT
+    assert scope.applicant_is_write_allowed(CLIENT)
+    assert not scope.applicant_is_write_allowed(OTHER)
+    assert scope.applicant_is_write_allowed('220250093') is False
 
 
 @pytest.mark.parametrize('status', ['PENDING', 'COMPLETE', 'VERIFYING', 'FAILED', 'PAUSED'])
@@ -109,7 +121,8 @@ def test_form_entry_requires_fresh_exact_client(running_ledger, href, count, vis
     assert (reason is None) == allowed
 
 
-def test_policy_start_resolves_original_request_but_does_not_grant_browser_scope():
+def test_policy_start_resolves_original_request_but_does_not_grant_browser_scope(monkeypatch):
+    monkeypatch.setattr(scope, 'ALLOWED_EZLYNX_WRITE_APPLICANT_IDS', frozenset({'220250093'}))
     job = {'id': 'new-job', 'action_type': 'ezlynx.policy_setup', 'payload': {
         'text': f'Create policy on applicant {CLIENT}', 'applicant_id': CLIENT}}
     assert hold_reason_for_job(job, env='PRODUCTION') is None

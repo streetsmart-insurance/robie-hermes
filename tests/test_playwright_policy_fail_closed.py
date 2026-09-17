@@ -227,11 +227,22 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
                 requested_applicant_id="220250093",
             )
         )
+        self.assertIsNone(
+            attested_test_form_entry_block_reason(
+                EvidencePage(
+                    account="Example Client",
+                    href="https://app.ezlynx.com/web/account/220250094/overview",
+                    header=valid_header,
+                ),
+                url=url,
+                requested_applicant_id="220250094",
+            )
+        )
         for page, applicant, marker in (
             (EvidencePage(account="A Real Client", header=valid_header), "220250093", "ROBIE Test"),
             (EvidencePage(header=valid_header.replace("TEST-HO-08312026-02", "REAL-01")), "220250093", "synthetic"),
             (EvidencePage(header=valid_header.replace("$1.00", "$1,796.00")), "220250093", "$1.00"),
-            (EvidencePage(header=valid_header), "220250094", "compiled Robie Test"),
+            (EvidencePage(header=valid_header), "220250094", "different or unknown client"),
         ):
             reason = attested_test_form_entry_block_reason(
                 page,

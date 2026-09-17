@@ -9,6 +9,7 @@ import io
 import json
 import os
 import unittest
+from unittest.mock import patch
 from urllib import error
 
 from robie_job_engine.ezlynx_api import (
@@ -538,7 +539,7 @@ class DocumentApiClientTests(unittest.TestCase):
         )
         self.assertIn(b"83184565", seen["data"])
 
-    def test_upload_refuses_live_applicant_without_http(self):
+    def test_upload_refuses_live_applicant_without_http_when_allowlist_restricted(self):
         calls = []
 
         def fake_urlopen(url, *, data, headers, timeout):
@@ -546,10 +547,30 @@ class DocumentApiClientTests(unittest.TestCase):
             return FakeResponse(b"ok")
 
         client = EzlynxApiClient(_agency_config(), urlopen=fake_urlopen)
-        with self.assertRaises(EzlynxWriteScopeError) as ctx:
-            client.upload_applicant_document(LIVE_APPLICANT, "nope.pdf", b"x")
+        with patch(
+            "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+            frozenset({TEST_APPLICANT}),
+        ):
+            with self.assertRaises(EzlynxWriteScopeError) as ctx:
+                client.upload_applicant_document(LIVE_APPLICANT, "nope.pdf", b"x")
         self.assertIn(EZLYNX_WRITE_SCOPE_REFUSED, str(ctx.exception))
         self.assertEqual(calls, [])
+
+    def test_upload_allows_live_applicant_when_allowlist_unset(self):
+        seen = {}
+
+        def handler(url, *, data, headers, timeout):
+            seen["url"] = url
+            return FakeResponse(b"818921949", headers={"Content-Type": "text/plain"})
+
+        client = EzlynxApiClient(_agency_config(), urlopen=_token_then(handler))
+        with patch(
+            "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+            None,
+        ):
+            doc_id = client.upload_applicant_document(LIVE_APPLICANT, "note.pdf", b"x")
+        self.assertEqual(doc_id, UPLOADED_ID)
+        self.assertIn(LIVE_APPLICANT, seen["url"])
 
     def test_uat_search_uses_uatezlynx_host(self):
         seen = {}

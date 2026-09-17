@@ -6,6 +6,8 @@ from pathlib import Path
 
 from durable_temp import durable_temporary_directory
 
+from unittest.mock import patch
+
 from robie_job_engine.engine import JobEngine
 from robie_job_engine.ezlynx import EzlynxDestinationVerifier, HermesCuaEzlynxWorker
 from robie_job_engine.models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -118,7 +120,11 @@ class AcceptanceTests(unittest.TestCase):
                 "label": "Renewal",
             },
         }
-        result = worker.perform(job, idempotency_key="must-not-run")
+        with patch(
+            "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+            frozenset({"220250093"}),
+        ):
+            result = worker.perform(job, idempotency_key="must-not-run")
         self.assertFalse(result.succeeded)
         self.assertIn("EZLYNX_WRITE_SCOPE_REFUSED", result.error or "")
         self.assertEqual(browser.calls, [])

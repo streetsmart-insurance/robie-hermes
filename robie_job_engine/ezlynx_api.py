@@ -934,11 +934,12 @@ class EzlynxApiClient:
         policy_master_id: str | int | None = None,
         file_content_type: str = "application/octet-stream",
     ) -> str:
-        """OAuth POST DocumentApi upload. Write-gated to ROBIE Test 220250093.
+        """OAuth POST DocumentApi upload. Write-gated by ezlynx_write_scope.
 
         Proven path: ``/DocumentApi/documents/v1/account/{ApplicantID}/document``.
         Multipart fields: DocumentName, File, PolicyMasterId (default ``0``).
-        200 body is a numeric document id. Never uploads to a live applicant.
+        200 body is a numeric document id. Applicant eligibility follows
+        ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` (unset/empty = agency-wide).
         """
         applicant = require_allowed_ezlynx_write_applicant(applicant_id)
         name = str(document_name or "").strip()
