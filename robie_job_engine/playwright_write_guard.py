@@ -382,18 +382,20 @@ def attested_test_form_entry_block_reason(
     url: str,
     requested_applicant_id: object,
 ) -> str | None:
-    """Fail closed unless an id-less FormEntry visibly belongs to Robie Test.
+    """Fail closed unless an id-less FormEntry matches a write-allowed applicant.
 
     EZLynx's numeric ``/Policy/<id>/FormEntry/Index/<id>`` route omits the
-    applicant id. The URL shape is therefore insufficient. Permit this one
-    Test workflow only after the server-rendered account link and policy
-    header independently identify ROBIE Test LLC, a synthetic Homeowners
-    policy number, and the exact $1 Test premium.
+    applicant id. The URL shape is therefore insufficient. The applicant
+    must already be write-allowed (env allowlist or Production job bind).
+    The visible account overview link must match that applicant. ROBIE
+    Test LLC also requires a synthetic Homeowners policy number and the
+    exact $1 Test premium.
     """
 
     refused = "EZLYNX_WRITE_SCOPE_REFUSED"
     try:
         from robie_job_engine.ezlynx_write_scope import (
+            TEST_EZLYNX_WRITE_APPLICANT_ID,
             applicant_is_write_allowed,
             is_policy_form_entry_url,
             normalize_applicant_id,
@@ -403,27 +405,8 @@ def attested_test_form_entry_block_reason(
     if not is_policy_form_entry_url(url):
         return f"{refused}: page is not a numeric Policy FormEntry route"
     requested = normalize_applicant_id(requested_applicant_id)
-    from robie_job_engine.ezlynx_write_scope import production_job_applicant
-    live_applicant = production_job_applicant()
-    if live_applicant == requested and requested != "220250093":
-        locator_fn = getattr(page, "locator", None)
-        if not callable(locator_fn):
-            return f"{refused}: Production FormEntry account evidence is unavailable"
-        try:
-            account = locator_fn('a[title="Go to Applicant Overview"]')
-            if int(account.count()) != 1 or not bool(account.is_visible()):
-                return f"{refused}: Production FormEntry account link is missing or ambiguous"
-            from urllib.parse import urlparse
-            linked = urlparse(str(account.get_attribute("href") or ""))
-            if ((linked.hostname or '').casefold() != 'app.ezlynx.com' or
-                    linked.path.casefold() != f'/web/account/{requested}/overview' or
-                    not str(account.inner_text() or '').strip()):
-                return f"{refused}: Production FormEntry belongs to a different or unknown client"
-        except Exception:
-            return f"{refused}: Production FormEntry account attestation failed"
-        return None
-    if requested != "220250093" or not applicant_is_write_allowed(requested):
-        return f"{refused}: FormEntry applicant is not the compiled Robie Test account"
+    if not applicant_is_write_allowed(requested):
+        return f"{refused}: FormEntry applicant is not write-allowed"
     locator_fn = getattr(page, "locator", None)
     if not callable(locator_fn):
         return f"{refused}: FormEntry account evidence is unavailable"
@@ -431,16 +414,24 @@ def attested_test_form_entry_block_reason(
         account = locator_fn('a[title="Go to Applicant Overview"]')
         if int(account.count()) != 1 or not bool(account.is_visible()):
             return f"{refused}: FormEntry account link is missing or ambiguous"
-        account_name = " ".join(str(account.inner_text() or "").split())
-        href = str(account.get_attribute("href") or "").strip()
         from urllib.parse import urlparse
 
-        account_url = urlparse(href)
+        linked = urlparse(str(account.get_attribute("href") or ""))
         if (
-            account_name != "ROBIE Test LLC"
-            or (account_url.hostname or "").casefold() != "app.ezlynx.com"
-            or account_url.path.casefold() != "/web/account/220250093/overview"
+            (linked.hostname or "").casefold() != "app.ezlynx.com"
+            or linked.path.casefold() != f"/web/account/{requested}/overview"
+            or not str(account.inner_text() or "").strip()
         ):
+            return f"{refused}: FormEntry belongs to a different or unknown client"
+    except Exception:
+        return f"{refused}: FormEntry account attestation failed"
+    # ROBIE Test LLC FormEntry keeps the synthetic HO / $1.00 header checks.
+    # Other write-allowed applicants use the account-link attestation above.
+    if requested != TEST_EZLYNX_WRITE_APPLICANT_ID:
+        return None
+    try:
+        account_name = " ".join(str(account.inner_text() or "").split())
+        if account_name != "ROBIE Test LLC":
             return f"{refused}: FormEntry is not visibly scoped to ROBIE Test LLC"
         body = locator_fn("body")
         if int(body.count()) != 1:

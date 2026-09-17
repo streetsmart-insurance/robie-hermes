@@ -57,8 +57,10 @@ against injected fixtures.
 - Jake's reply authorized using his login for this work. It did not identify
   numerical assignment IDs or long-term service credentials. Assignee IDs must
   be supplied and freshly resolved to exactly one active user before creation.
-- The repository's compiled EZLynx write allowlist remains in force. Its current
-  ID is used only by synthetic fixtures here; no live test against it occurred.
+- The repository's EZLynx write allowlist remains in force. Unset/empty
+  `ROBIE_EZLYNX_WRITE_APPLICANT_IDS` is agency-wide; a comma list restricts.
+  Synthetic fixtures here still use 220250093; no live test against the
+  allowlist occurred. See [EZLYNX_WRITE_SCOPE.md](EZLYNX_WRITE_SCOPE.md).
 
 ## Live EZLynx adapter contract — required from Carlo/integration owner
 
