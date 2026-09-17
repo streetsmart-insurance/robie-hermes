@@ -1,12 +1,21 @@
+import sys
+import types
+import unittest
 from datetime import datetime, timezone
 
 import pytest
 
 from robie_job_engine.gmail_accountability import (
+    GMAIL_METADATA_SCOPE,
+    GMAIL_MODIFY_SCOPE,
+    GMAIL_READONLY_SCOPE,
     GmailAccountabilityError,
     approved_mailboxes_from_role_registry,
+    build_keyless_delegated_service,
+    build_notice_gmail_service,
     collect_agency_summary,
     mailbox_allowlist,
+    notice_gmail_scopes,
     summarize_mailbox_threads,
 )
 
@@ -126,3 +135,151 @@ def test_agency_summary_fails_closed_on_delegated_mailbox_mismatch():
             service_factory=lambda *_args: _Service("someone-else@streetsmart.insurance"),
             as_of=AS_OF,
         )
+
+
+def test_notice_gmail_scopes_are_readonly_unless_modify_requested():
+    assert notice_gmail_scopes() == (GMAIL_READONLY_SCOPE,)
+    assert notice_gmail_scopes(modify=False) == (GMAIL_READONLY_SCOPE,)
+    assert notice_gmail_scopes(modify=True) == (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE)
+    assert GMAIL_METADATA_SCOPE not in notice_gmail_scopes()
+    assert GMAIL_METADATA_SCOPE not in notice_gmail_scopes(modify=True)
+
+
+def _install_fake_google_modules(monkeypatch, captured):
+    class FakeSigner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class FakeRequest:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class FakeCredentials:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    def fake_default(**_kwargs):
+        return (object(), "project")
+
+    def fake_build(api, version, *, credentials, cache_discovery):
+        captured["build"] = {
+            "api": api,
+            "version": version,
+            "credentials": credentials,
+            "cache_discovery": cache_discovery,
+        }
+        return {"service": True}
+
+    google = types.ModuleType("google")
+    google_auth = types.ModuleType("google.auth")
+    google_auth.default = fake_default
+    iam = types.ModuleType("google.auth.iam")
+    iam.Signer = FakeSigner
+    transport = types.ModuleType("google.auth.transport")
+    requests = types.ModuleType("google.auth.transport.requests")
+    requests.Request = FakeRequest
+    oauth2 = types.ModuleType("google.oauth2")
+    service_account = types.ModuleType("google.oauth2.service_account")
+    service_account.Credentials = FakeCredentials
+    gapiclient = types.ModuleType("googleapiclient")
+    discovery = types.ModuleType("googleapiclient.discovery")
+    discovery.build = fake_build
+
+    google.auth = google_auth
+    google.oauth2 = oauth2
+    google_auth.iam = iam
+    google_auth.transport = transport
+    transport.requests = requests
+    oauth2.service_account = service_account
+    gapiclient.discovery = discovery
+    for name in (
+        "google",
+        "google.auth",
+        "google.auth.iam",
+        "google.auth.transport",
+        "google.auth.transport.requests",
+        "google.oauth2",
+        "google.oauth2.service_account",
+        "googleapiclient",
+        "googleapiclient.discovery",
+    ):
+        module = {
+            "google": google,
+            "google.auth": google_auth,
+            "google.auth.iam": iam,
+            "google.auth.transport": transport,
+            "google.auth.transport.requests": requests,
+            "google.oauth2": oauth2,
+            "google.oauth2.service_account": service_account,
+            "googleapiclient": gapiclient,
+            "googleapiclient.discovery": discovery,
+        }[name]
+        if "." not in name or name.count(".") == 1:
+            module.__path__ = []
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_build_keyless_delegated_service_defaults_to_metadata(monkeypatch):
+    captured = {}
+    _install_fake_google_modules(monkeypatch, captured)
+    service = build_keyless_delegated_service(
+        "hermes-poc@example.test", "jackie@streetsmart.insurance"
+    )
+    assert service == {"service": True}
+    assert captured["scopes"] == [GMAIL_METADATA_SCOPE]
+    assert captured["subject"] == "jackie@streetsmart.insurance"
+    assert captured["service_account_email"] == "hermes-poc@example.test"
+
+
+def test_build_keyless_delegated_service_honors_explicit_scopes(monkeypatch):
+    captured = {}
+    _install_fake_google_modules(monkeypatch, captured)
+    build_keyless_delegated_service(
+        "hermes-poc@example.test",
+        "hello@streetsmart.insurance",
+        scopes=(GMAIL_READONLY_SCOPE,),
+    )
+    assert captured["scopes"] == [GMAIL_READONLY_SCOPE]
+    assert captured["subject"] == "hello@streetsmart.insurance"
+
+
+def test_build_notice_gmail_service_requests_readonly_by_default(monkeypatch):
+    captured = {}
+    _install_fake_google_modules(monkeypatch, captured)
+    build_notice_gmail_service("hermes-poc@example.test", "hello@streetsmart.insurance")
+    assert captured["scopes"] == [GMAIL_READONLY_SCOPE]
+    assert GMAIL_METADATA_SCOPE not in captured["scopes"]
+
+
+def test_build_notice_gmail_service_requests_modify_when_enabled(monkeypatch):
+    captured = {}
+    _install_fake_google_modules(monkeypatch, captured)
+    build_notice_gmail_service(
+        "hermes-poc@example.test",
+        "hello@streetsmart.insurance",
+        modify=True,
+    )
+    assert captured["scopes"] == [GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE]
+    assert GMAIL_METADATA_SCOPE not in captured["scopes"]
+
+
+class TestDelegatedGmailScopeSelection(unittest.TestCase):
+    """Unittest discover collects this; pytest-style helpers above stay too."""
+
+    def test_notice_scopes_never_include_metadata(self):
+        self.assertEqual(notice_gmail_scopes(), (GMAIL_READONLY_SCOPE,))
+        self.assertEqual(
+            notice_gmail_scopes(modify=True),
+            (GMAIL_READONLY_SCOPE, GMAIL_MODIFY_SCOPE),
+        )
+        self.assertNotIn(GMAIL_METADATA_SCOPE, notice_gmail_scopes(modify=True))
+
+    def test_accountability_summary_stays_metadata_only(self):
+        summary = collect_agency_summary(
+            environment={"ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT": "hermes@test.invalid"},
+            approved_users=["karla@streetsmart.insurance"],
+            service_factory=lambda _service_account, mailbox: _Service(mailbox),
+            as_of=AS_OF,
+        )
+        self.assertTrue(summary["scope"].endswith("gmail.metadata"))
+        self.assertFalse(summary["body_access"])

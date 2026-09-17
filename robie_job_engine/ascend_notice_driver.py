@@ -34,6 +34,12 @@ Safety (non-negotiable):
 - Gmail is read-only except in LIVE mode, where a fully processed email is
   marked read (UNREAD label removed) so the next run does not re-file the
   same note. Dry-run never touches labels.
+- Delegated Gmail scopes: dry-run requests ``gmail.readonly`` (unread
+  search + body). ``gmail.metadata`` cannot use ``messages.list?q=``.
+  Live mark-read also requests ``gmail.modify``. Set
+  ``ASCEND_DRIVER_GMAIL_MODIFY=1`` to request modify without ``--live``.
+  Workspace Admin DWD client ``112650695780807418521`` must authorize
+  those scopes for the delegation SA.
 
 Known wiring gaps (documented, not silently worked around):
 
@@ -152,10 +158,11 @@ def _gmail_text_from_payload(payload: dict[str, Any]) -> str:
 class GmailNoticeSource:
     """Unread-notice source backed by a delegated Gmail service.
 
-    ``service_factory`` defaults to the repo's keyless domain-wide-delegation
-    builder (same as the accountability Gmail path). Read-only except
-    ``mark_processed``, which removes the UNREAD label and is only called in
-    live mode.
+    ``service_factory`` defaults to the notice-specific keyless domain-wide
+    delegation builder, which requests ``gmail.readonly`` (search + body).
+    Accountability's metadata-only factory cannot use ``messages.list?q=``.
+    ``mark_processed`` removes the UNREAD label and is only called in live
+    mode; that path requests ``gmail.modify`` in addition to readonly.
     """
 
     def __init__(
@@ -166,21 +173,34 @@ class GmailNoticeSource:
         service_account_email: str = "",
         service_factory: Callable[[str, str], Any] | None = None,
         max_results: int = 25,
+        allow_modify: bool = False,
     ) -> None:
         self.mailbox = mailbox
         self.query = query
         self.service_account_email = service_account_email
         self._service_factory = service_factory
         self.max_results = max_results
+        self.allow_modify = allow_modify
         self._service: Any = None
+
+    @property
+    def requested_scopes(self) -> tuple[str, ...]:
+        from .gmail_accountability import notice_gmail_scopes
+
+        return notice_gmail_scopes(modify=self.allow_modify)
 
     def _service_client(self) -> Any:
         if self._service is None:
             factory = self._service_factory
             if factory is None:
-                from .gmail_accountability import build_keyless_delegated_service
+                from .gmail_accountability import build_notice_gmail_service
 
-                factory = build_keyless_delegated_service
+                allow_modify = self.allow_modify
+
+                def factory(service_account_email: str, mailbox: str) -> Any:
+                    return build_notice_gmail_service(
+                        service_account_email, mailbox, modify=allow_modify
+                    )
             if not self.service_account_email:
                 raise RuntimeError(
                     "ROBIE_GMAIL_DELEGATION_SA is not configured; "
@@ -485,6 +505,11 @@ def run_driver(ctx: DriverContext) -> dict[str, Any]:
     return summary
 
 
+def _notice_allow_modify(*, dry_run: bool) -> bool:
+    """Request gmail.modify for live mark-read, or when the env flag is set."""
+    return (not dry_run) or _truthy(os.environ.get("ASCEND_DRIVER_GMAIL_MODIFY"))
+
+
 def discussion_config_from_api_config(api_config: Any) -> DiscussionApiConfig:
     """Build the Discussion API config from the shared EZLynx API secret payload.
 
@@ -521,6 +546,7 @@ def build_live_context(
         mailbox=mailbox,
         query=query,
         service_account_email=service_account,
+        allow_modify=_notice_allow_modify(dry_run=dry_run),
     )
     return DriverContext(
         ascend_client=ascend_client,
