@@ -149,14 +149,22 @@ class TestSignedAgreementMoneyMapping(unittest.TestCase):
 
 class TestAscendProgramReadUrls(unittest.TestCase):
     def test_fetch_program_billables_uses_query_not_nested_path(self) -> None:
-        client = AscendApiClient(api_key="test-key", origin="https://api.useascend.com")
+        client = AscendApiClient(
+            api_key="test-key",
+            origin="https://api.useascend.com",
+            secret_accessor=MagicMock(),
+        )
         client.get = MagicMock(return_value={"data": [{"policy_number": "ISCA-1"}]})
         items = client.fetch_program_billables("prog-isca")
         client.get.assert_called_once_with("/v1/billables", {"program_id": "prog-isca"})
         self.assertEqual(items[0]["policy_number"], "ISCA-1")
 
     def test_fetch_program_loans_uses_program_id_query(self) -> None:
-        client = AscendApiClient(api_key="test-key", origin="https://api.useascend.com")
+        client = AscendApiClient(
+            api_key="test-key",
+            origin="https://api.useascend.com",
+            secret_accessor=MagicMock(),
+        )
         client.get = MagicMock(return_value={"data": [{"downpayment_cents": 334116}]})
         items = client.fetch_program_loans("prog-isca")
         client.get.assert_called_once_with("/v1/loans", {"program_id": "prog-isca"})
