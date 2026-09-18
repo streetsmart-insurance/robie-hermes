@@ -49,6 +49,129 @@ from .store import utc_now
 
 logger = logging.getLogger("robie.report_fetcher")
 
+
+def _slug_header(value: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").casefold()).strip("_")
+
+
+def _looker_frame(page: Any):
+    for frame in page.frames:
+        url = str(getattr(frame, "url", "") or "")
+        if "looker.ezlynx.com/embed/looks" in url:
+            return frame
+    return None
+
+
+def _scrape_looker_ag_grid_csv(page: Any, *, report_id: str) -> str:
+    """Scrape Looker embed ag-grid into CSV text (Export UI is unreliable)."""
+    import csv
+    import io
+    import time
+
+    looker = None
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline and looker is None:
+        looker = _looker_frame(page)
+        if looker is None:
+            page.wait_for_timeout(500)
+    if looker is None:
+        raise RuntimeError(
+            f"report {report_id}: Looker embed iframe did not appear"
+        )
+    rows_loc = looker.locator(".ag-center-cols-container .ag-row")
+    try:
+        rows_loc.first.wait_for(timeout=45_000)
+    except Exception as exc:
+        raise RuntimeError(
+            f"report {report_id}: no Looker ag-grid rows: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    # Allow virtualized rows to settle
+    page.wait_for_timeout(2_000)
+    headers = looker.eval_on_selector_all(
+        ".ag-header-cell-text, [role=columnheader]",
+        "els => els.map(e => (e.innerText||'').replace(/\\s+/g,' ').trim()).filter(Boolean)",
+    )
+    if not headers:
+        raise RuntimeError(f"report {report_id}: Looker grid has no headers")
+    raw_rows = looker.eval_on_selector_all(
+        ".ag-center-cols-container .ag-row",
+        """els => els.map(r => [...r.querySelectorAll('.ag-cell')].map(c => {
+          const a = c.querySelector('a.cell-clickable-content');
+          const t = ((a && a.innerText) || c.innerText || '').replace(/\\s+/g,' ').trim();
+          return t.replace(/\\.+$/, m => m === '...' ? '' : m).replace(/\\.\\.\\.$/,'').trim();
+        }))""",
+    )
+    # Prefer anchor text without trailing ellipsis bauble
+    cleaned = []
+    for row in raw_rows:
+        cleaned.append([
+            (cell[:-3].rstrip() if isinstance(cell, str) and cell.endswith("...") else cell)
+            for cell in row
+        ])
+    if not cleaned:
+        raise RuntimeError(f"report {report_id}: Looker grid scrape returned 0 rows")
+    slug_headers = [_slug_header(h) for h in headers]
+    # Alias Looker display headers onto worker-expected field names.
+    # Values may be a string or an ordered list of source fallbacks.
+    ALIASES: dict[str, str | list[str]] = {
+        "insured_name": ["account_name", "account_name_ascending"],
+        "carrier_name": "master_company",
+        "carrier": "master_company",
+        "expiration_date": "policy_expiration_date",
+        "source": "policy_source",
+        "expiring_premium": "premium_annualized",
+        "assigned_agent": "assigned_producer",
+    }
+    # Shared Audit look 4604 has no audit_id column; worker already falls back
+    # to policy_number for durable keys, but registry identity requires the
+    # column to exist in the CSV.
+    if str(report_id) == "4246":
+        ALIASES["audit_id"] = "policy_number"
+        ALIASES["insured_name"] = ["account_name_ascending", "account_name"]
+    # Always emit these keys even when Looker has no matching column.
+    EXTRA_EMPTY = ("underwriter_name", "underwriter_email", "policy_aliases")
+    out_headers = list(slug_headers)
+    for alias, src in ALIASES.items():
+        if alias not in out_headers:
+            out_headers.append(alias)
+    for name in EXTRA_EMPTY:
+        if name not in out_headers:
+            out_headers.append(name)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(out_headers)
+    width = len(slug_headers)
+    for row in cleaned:
+        cells = list(row)[:width]
+        while len(cells) < width:
+            cells.append("")
+        if not any(str(c).strip() for c in cells):
+            continue
+        by_slug = {slug_headers[i]: cells[i] for i in range(len(slug_headers))}
+        out_row = []
+        for header in out_headers:
+            if header in by_slug:
+                out_row.append(by_slug[header])
+            elif header in ALIASES:
+                src = ALIASES[header]
+                if isinstance(src, list):
+                    val = ""
+                    for key in src:
+                        val = by_slug.get(key, "")
+                        if str(val).strip():
+                            break
+                    out_row.append(val)
+                else:
+                    out_row.append(by_slug.get(src, ""))
+            else:
+                out_row.append("")
+        writer.writerow(out_row)
+    return buf.getvalue()
+
+
+
 REPORT_DOWNLOAD_DIR = Path(
     os.environ.get("ROBIE_EZLYNX_REPORTS_DIR", "/tmp/ezlynx_reports")
 )
@@ -165,82 +288,123 @@ def _export_looker_report_csv(
             f"{REPORTS_5_BASE_URL}: {type(exc).__name__}: {exc}"
         ) from exc
 
-    # Open the saved report by id. DOM refinement: verify selectors on Test.
-    entry = _unique(
-        page.locator(f"a[href*='{report_id}'], [data-report-id='{report_id}']"),
-        f"saved-report link for {report_id}",
-    )
-    try:
-        entry.click()
-        page.wait_for_load_state("domcontentloaded", timeout=30_000)
-    except Exception as exc:
-        raise RuntimeError(
-            f"report {report_id}: failed to open the saved report: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    result_rows = page.locator("table tbody tr, [role='row']")
-    try:
-        result_rows.first.wait_for(timeout=30_000)
-    except Exception as exc:
-        raise RuntimeError(
-            f"report {report_id}: no result rows rendered after opening the "
-            f"saved report: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    # Apply the report's registered saved filter (e.g. "ROBIE Intake" for 4372).
-    # Rows must never be returned from the wrong filter scope.
-    if spec.filter_name:
+    # Open the saved report. Prefer known Looker look ids (Shared Reports),
+    # because SSRobie Saved Reports often has zero a[href*=report_id] links.
+    LOOK_ID_BY_REPORT = {
+        "4247": "4603",  # Manual Renewal Queue - ROBIE
+        "4246": "4604",  # Audit Verification Queue - ROBIE
+        "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
+        "4372": "4601",  # Mortgagee Verification Queue - ROBIE
+    }
+    look_id = LOOK_ID_BY_REPORT.get(str(report_id))
+    if look_id:
+        look_url = f"{REPORTS_5_BASE_URL.rstrip('/')}/report/{look_id}"
         try:
-            body_text = page.locator("body").inner_text(timeout=10_000)
+            page.goto(look_url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
         except Exception as exc:
             raise RuntimeError(
-                f"report {report_id}: could not read page text to confirm saved "
-                f"filter {spec.filter_name!r}: {type(exc).__name__}: {exc}"
+                f"report {report_id}: failed to open Looker look {look_id} at "
+                f"{look_url}: {type(exc).__name__}: {exc}"
             ) from exc
-        if spec.filter_name.casefold() not in body_text.casefold():
-            raise RuntimeError(
-                f"report {report_id}: saved filter {spec.filter_name!r} is not "
-                "visible on the report page; refusing to return unfiltered rows"
-            )
-
-    export_btn = _unique(
-        page.locator(
-            "button:has-text('Export'), a:has-text('Export'), [aria-label*='Export']"
-        ),
-        "Export control",
-    )
-    try:
-        export_btn.click()
-        # Valid Playwright selector list: text-engine locators for the visible
-        # "CSV" option plus CSS attribute fallbacks. (A bare ``text=CSV`` mixed
-        # with CSS in one string is not valid; keep each alternative well-formed.)
-        csv_option = _unique(
-            page.locator(
-                "button:has-text('CSV'), a:has-text('CSV'), "
-                "[role='menuitem']:has-text('CSV'), "
-                "[data-format='csv'], [data-export-format='csv']"
-            ),
-            "CSV export option",
+    else:
+        entry = _unique(
+            page.locator(f"a[href*='{report_id}'], [data-report-id='{report_id}']"),
+            f"saved-report link for {report_id}",
         )
+        try:
+            entry.click()
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: failed to open the saved report: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+    if look_id:
+        # Shared Reports Looker embed: scrape ag-grid (Export/Download is flaky).
+        try:
+            csv_text = _scrape_looker_ag_grid_csv(page, report_id=report_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: Looker scrape failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if spec.filter_name:
+            try:
+                looker = _looker_frame(page)
+                body_text = (looker or page).locator("body").inner_text(timeout=10_000)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"report {report_id}: could not read page text to confirm saved "
+                    f"filter {spec.filter_name!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+            if spec.filter_name.casefold() not in body_text.casefold():
+                raise RuntimeError(
+                    f"report {report_id}: saved filter {spec.filter_name!r} is not "
+                    "visible on the report page; refusing to return unfiltered rows"
+                )
         download_dir.mkdir(parents=True, exist_ok=True)
         dest = download_dir / f"robie-report-{report_id}-{run['run_id']}.csv"
-        with page.expect_download(timeout=60_000) as download_info:
-            csv_option.click()
-        download = download_info.value
-        download.save_as(str(dest))
-    except Exception as exc:
-        raise RuntimeError(
-            f"report {report_id}: CSV export failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        dest.write_text(csv_text, encoding="utf-8")
+    else:
+        result_rows = page.locator("table tbody tr, [role='row']")
+        try:
+            result_rows.first.wait_for(timeout=30_000)
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: no result rows rendered after opening the "
+                f"saved report: {type(exc).__name__}: {exc}"
+            ) from exc
 
-    try:
-        csv_text = dest.read_text(encoding="utf-8-sig")
-    except Exception as exc:
-        raise RuntimeError(
-            f"report {report_id}: could not read exported CSV {dest}: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
+        if spec.filter_name:
+            try:
+                body_text = page.locator("body").inner_text(timeout=10_000)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"report {report_id}: could not read page text to confirm saved "
+                    f"filter {spec.filter_name!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+            if spec.filter_name.casefold() not in body_text.casefold():
+                raise RuntimeError(
+                    f"report {report_id}: saved filter {spec.filter_name!r} is not "
+                    "visible on the report page; refusing to return unfiltered rows"
+                )
+
+        export_btn = _unique(
+            page.locator(
+                "button:has-text('Export'), a:has-text('Export'), [aria-label*='Export']"
+            ),
+            "Export control",
+        )
+        try:
+            export_btn.click()
+            csv_option = _unique(
+                page.locator(
+                    "button:has-text('CSV'), a:has-text('CSV'), "
+                    "[role='menuitem']:has-text('CSV'), "
+                    "[data-format='csv'], [data-export-format='csv']"
+                ),
+                "CSV export option",
+            )
+            download_dir.mkdir(parents=True, exist_ok=True)
+            dest = download_dir / f"robie-report-{report_id}-{run['run_id']}.csv"
+            with page.expect_download(timeout=60_000) as download_info:
+                csv_option.click()
+            download = download_info.value
+            download.save_as(str(dest))
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: CSV export failed: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        try:
+            csv_text = dest.read_text(encoding="utf-8-sig")
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: could not read exported CSV {dest}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     # Parse with the CALLER's requested fields, not start_run()'s resolved
     # fields: when fields=None, start_run() resolves to the registry identity
     # fields only, which would silently drop every other exported column.
