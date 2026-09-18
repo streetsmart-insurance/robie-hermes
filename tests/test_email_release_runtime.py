@@ -120,7 +120,12 @@ class EmailProcessBoundaryTests(TestCase):
         from robie_job_engine.message_verification import MessageOutcomeVerifier
         from robie_job_engine.chat_ezlynx_destination_verifier import HermesChatEzlynxDestinationVerifier
         from test_chat_ezlynx_destination_verifier import FakePort, real_policy_row, BOND_POLICY, BOND_APPLICANT
-        tree=ast.parse((ROOT/'scripts/robie_email_agent.py').read_text())
+        source = (ROOT/'scripts/robie_email_agent.py').read_text()
+        self.assertLess(
+            source.find('try_process_ascend_notice'),
+            source.find('if not is_allowed_sender(sender)'),
+        )
+        tree=ast.parse(source)
         function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='process_inbox')
         body=f'Verify policy {BOND_POLICY} exists on applicant {BOND_APPLICANT}'
         service=Mock(); api=service.users.return_value.messages.return_value
@@ -147,3 +152,46 @@ class EmailProcessBoundaryTests(TestCase):
             self.assertEqual(len(calls),1)
             self.assertEqual(JobStore(db).get_job(calls[0])['status'],'COMPLETE')
             api.send.assert_called_once()
+
+    def test_ascend_notice_is_triaged_and_never_replied(self):
+        import ast
+        from pathlib import Path
+        from unittest.mock import Mock, patch
+        from robie_job_engine import email_notice_hook
+        tree=ast.parse((ROOT/'scripts/robie_email_agent.py').read_text())
+        function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='process_inbox')
+        service=Mock(); api=service.users.return_value.messages.return_value
+        api.list.return_value.execute.return_value={'messages':[{'id':'m-notice'}]}
+        api.get.return_value.execute.return_value={
+            'id':'m-notice','threadId':'thread',
+            'payload':{'headers':[
+                {'name':'from','value':'Ascend <notifications@useascend.com>'},
+                {'name':'subject','value':'Coverage canceled for non-payment'},
+            ]},
+        }
+        saved=[]
+        handled=[]
+        def fake_notice(**kwargs):
+            handled.append(kwargs)
+            return {'consumed':True,'mark_read':True,'status':'done','reason':'ok'}
+        ns={'get_gmail_service':lambda:service,'load_processed_ids':lambda:set(),
+            'save_processed_ids':lambda ids: saved.append(set(ids)),
+            'extract_sender_email':lambda v:'notifications@useascend.com',
+            'is_allowed_sender':Mock(side_effect=AssertionError('notice must not use sender gate')),
+            'is_self_sender':Mock(side_effect=AssertionError('notice must not reply')),
+            'should_skip_send':Mock(side_effect=AssertionError('notice must not send')),
+            'extract_body_text':lambda p:'Policy ID HO-998877 Effective 01/01/2026',
+            'download_attachments':Mock(side_effect=AssertionError('notice must not download for LLM')),
+            'logger':Mock(),'JOB_DB':'/unused',
+            'run_guarded_email_task':Mock(side_effect=AssertionError('notice must not open an email job')),
+            'run_email_job':Mock(side_effect=AssertionError('notice must not run finance/LLM')),
+            'run_agent_task':Mock(side_effect=AssertionError('notice must not run agent'))}
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'intake','exec'),ns)
+        with patch.object(email_notice_hook,'try_process_ascend_notice',fake_notice):
+            ns['process_inbox']()
+        self.assertEqual(len(handled),1)
+        self.assertEqual(handled[0]['sender'],'notifications@useascend.com')
+        self.assertEqual(handled[0]['message_id'],'m-notice')
+        self.assertEqual(saved,[{'m-notice'}])
+        api.send.assert_not_called()
+        api.modify.assert_called_once()

@@ -221,6 +221,7 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert detail["csr_username"] == "KarlaSS"
     assert detail["notice_type"] == triage.CANCELLATION
     assert "Ascend notice: cancellation." in detail["note_text"]
+    assert driver.ROBIE_WAS_HERE in detail["note_text"]
     assert detail["task_payload"]["task_title"].startswith("Ascend cancellation notice")
 
 
@@ -359,6 +360,59 @@ def test_write_scope_refusal_fails_closed(no_zap_fire):
     assert "write_scope_refused" in result["reason"]
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
+
+
+def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
+    rows = [
+        {"discussionId": "d0", "title": "Untitled"},
+        {"discussionId": "d1", "title": "New Business"},
+        {"discussionId": "d2", "title": "Service-Cancellation"},
+    ]
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=rows,
+        dry_run=False,
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "done"
+    assert result["detail"]["discussion_id"] == "d2"
+    assert result["detail"]["discussion_title"] == "Service-Cancellation"
+    assert driver.ROBIE_WAS_HERE in result["detail"]["note_text"]
+    posts = discussion_client._urlopen.posts_to("/notes")
+    assert len(posts) == 1
+    assert "/v8/discussions/d2/notes" in posts[0]["url"]
+    body = json.loads(posts[0]["data"].decode("utf-8"))
+    assert driver.ROBIE_WAS_HERE in body["body"]
+    assert "bind" not in body["body"].lower()
+
+
+def test_untitled_only_discussions_are_not_filed(no_zap_fire):
+    rows = [{"discussionId": "d1", "title": "Untitled"}]
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        discussion_rows=rows,
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert "note_not_filed" in result["reason"]
+    assert "UNTITLED_FORBIDDEN" in result["reason"]
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert no_zap_fire == []
+
+
+def test_signed_notice_note_is_plain_and_idempotent():
+    raw = "Ascend notice: cancellation.\nInsured: Test LLC"
+    signed = driver.signed_notice_note(raw)
+    assert signed.endswith(driver.ROBIE_WAS_HERE)
+    assert driver.signed_notice_note(signed) == signed
+    assert driver.signed_notice_note("") == ""
+    assert driver.discussion_title_hint(triage.CANCELLATION) == "cancellation"
+    assert driver.discussion_title_hint(triage.LATE_PAYMENT) == "noc"
+    assert driver.discussion_title_hint(triage.RETURN_PREMIUM) is None
 
 
 def test_ambiguous_discussions_are_pending_not_filed(no_zap_fire):

@@ -69,6 +69,7 @@ class DiscussionSelectionError(RuntimeError):
 
 NO_DISCUSSIONS = "NO_DISCUSSIONS"
 AMBIGUOUS_DISCUSSIONS = "AMBIGUOUS_DISCUSSIONS"
+UNTITLED_FORBIDDEN = "UNTITLED_FORBIDDEN"
 
 
 @dataclass(frozen=True)
@@ -309,18 +310,33 @@ def discussion_title_of(record: dict[str, Any]) -> str:
     return ""
 
 
+def is_untitled_discussion(record: dict[str, Any]) -> bool:
+    """True when the card has no usable title or is literally Untitled."""
+    title = discussion_title_of(record)
+    return (not title) or title.casefold() == "untitled"
+
+
 def select_discussion_for_note(
     discussions: list[dict[str, Any]] | None, *, title_hint: str | None = None
 ) -> dict[str, Any]:
-    """Choose the single existing discussion to append to, or raise.
+    """Choose the single existing titled discussion to append to, or raise.
 
-    - Exactly one discussion -> it wins.
-    - Several discussions + a ``title_hint`` matching exactly one -> it wins.
+    Untitled cards are never selected. A discussion is never created.
+
+    - Exactly one titled discussion -> it wins.
+    - Several titled discussions + a ``title_hint`` matching exactly one -> it wins.
     - Anything else -> :class:`DiscussionSelectionError`. The caller must not
       fall back to creating a discussion.
     """
-    rows = [row for row in (discussions or []) if isinstance(row, dict)]
+    raw_rows = [row for row in (discussions or []) if isinstance(row, dict)]
+    rows = [row for row in raw_rows if not is_untitled_discussion(row)]
     if not rows:
+        if raw_rows:
+            raise DiscussionSelectionError(
+                UNTITLED_FORBIDDEN,
+                "applicant has only Untitled or untitled discussions; "
+                "refusing to write there or to create one",
+            )
         raise DiscussionSelectionError(
             NO_DISCUSSIONS,
             "applicant has no discussions; refusing to create one (untitled "
