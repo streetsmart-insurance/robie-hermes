@@ -40,11 +40,11 @@ except ImportError:  # pytest / PYTHONPATH=.
 def _ctx(*, dry_run=True, discussion_rows=None, policy_rows=None):
     discussion_rows = discussion_rows or [{"discussionId": "d1", "title": "Cancellation"}]
     discussion_client = make_discussion_client(discussion_rows)
+    if policy_rows is None:
+        policy_rows = {"HO-998877": [policy_row()]}
     ctx = driver.DriverContext(
         ascend_client=FakeAscendClient(),
-        ezlynx_client=FakeEzlynxClient(
-            rows_by_number=policy_rows or {"HO-998877": [policy_row()]}
-        ),
+        ezlynx_client=FakeEzlynxClient(rows_by_number=policy_rows),
         discussion_client=discussion_client,
         source=FakeSource([]),
         dry_run=dry_run,
@@ -109,7 +109,10 @@ class WatcherHookTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run")
         self.assertEqual(result["detail"]["notice_type"], triage.CANCELLATION)
         self.assertIn(driver.ROBIE_WAS_HERE, result["detail"]["note_text"])
+        self.assertEqual(result["detail"]["label"]["label_name"], "Ascend NOC")
+        self.assertEqual(result["detail"]["label"]["status"], "dry_run")
         self.assertEqual(discussion_client._urlopen.posts_to("/notes"), [])
+        self.assertEqual(ctx.ezlynx_client.applied_labels, [])
 
     def test_live_success_requests_mark_read(self):
         ctx, discussion_client = _ctx(dry_run=False)
@@ -127,6 +130,12 @@ class WatcherHookTests(unittest.TestCase):
         self.assertTrue(result["consumed"])
         self.assertEqual(len(discussion_client._urlopen.posts_to("/notes")), 1)
         self.assertEqual(ctx.source.marked, ["m-live"])
+        self.assertEqual(result["detail"]["label"]["label_name"], "Ascend NOC")
+        self.assertEqual(result["detail"]["label"]["method"], "api")
+        self.assertEqual(
+            ctx.ezlynx_client.applied_labels,
+            [{"applicant_id": "220250093", "label_id": "noc-1"}],
+        )
 
     def test_fail_closed_is_consumed_but_left_unread(self):
         ctx, discussion_client = _ctx()
@@ -142,6 +151,22 @@ class WatcherHookTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertIn("needs_human_review", result["reason"])
         self.assertEqual(discussion_client._urlopen.posts_to("/notes"), [])
+
+    def test_missing_policy_does_not_apply_label(self):
+        ctx, discussion_client = _ctx(policy_rows={})
+        result = hook.try_process_ascend_notice(
+            sender="notifications@useascend.com",
+            subject=CANCELLATION_SUBJECT,
+            body=CANCELLATION_BODY,
+            message_id="m-nopolicy",
+            ctx=ctx,
+        )
+        self.assertTrue(result["consumed"])
+        self.assertFalse(result["mark_read"])
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("applicant_unresolved", result["reason"])
+        self.assertEqual(discussion_client._urlopen.posts_to("/notes"), [])
+        self.assertEqual(ctx.ezlynx_client.applied_labels, [])
 
     def test_missing_clients_are_not_consumed(self):
         with mock.patch.object(

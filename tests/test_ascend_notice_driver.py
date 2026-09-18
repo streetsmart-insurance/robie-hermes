@@ -63,10 +63,23 @@ class FakeAscendClient:
 class FakeEzlynxClient:
     """PolicyApi search_policy_by_number with canned rows."""
 
-    def __init__(self, rows_by_number=None, fail_with=None):
+    def __init__(
+        self,
+        rows_by_number=None,
+        fail_with=None,
+        org_labels=None,
+        apply_label_error=None,
+    ):
         self.rows_by_number = rows_by_number or {}
         self.fail_with = fail_with
         self.searched = []
+        self.org_labels = (
+            list(org_labels)
+            if org_labels is not None
+            else [{"id": "noc-1", "name": "Ascend NOC"}]
+        )
+        self.apply_label_error = apply_label_error
+        self.applied_labels = []
 
     def search_policy_by_number(self, policy_number):
         self.searched.append(policy_number)
@@ -74,6 +87,15 @@ class FakeEzlynxClient:
             raise self.fail_with
         rows = self.rows_by_number.get(policy_number, [])
         return {"status": "success", "data": rows}
+
+    def list_organization_labels(self):
+        return list(self.org_labels)
+
+    def apply_applicant_organization_label(self, applicant_id, label_id):
+        if self.apply_label_error is not None:
+            raise self.apply_label_error
+        self.applied_labels.append({"applicant_id": applicant_id, "label_id": label_id})
+        return {"status": "applied"}
 
 
 class FakeResponse:
@@ -142,6 +164,8 @@ def make_ctx(
     dry_run=True,
     ascend_client=None,
     fail_policy_search_with=None,
+    org_labels=None,
+    apply_label_error=None,
 ):
     discussion_rows = (
         discussion_rows
@@ -152,7 +176,10 @@ def make_ctx(
     ctx = driver.DriverContext(
         ascend_client=ascend_client or FakeAscendClient(),
         ezlynx_client=FakeEzlynxClient(
-            rows_by_number=policy_rows or {}, fail_with=fail_policy_search_with
+            rows_by_number=policy_rows or {},
+            fail_with=fail_policy_search_with,
+            org_labels=org_labels,
+            apply_label_error=apply_label_error,
         ),
         discussion_client=discussion_client,
         source=FakeSource(notices),
@@ -223,6 +250,10 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert "Ascend notice: cancellation." in detail["note_text"]
     assert driver.ROBIE_WAS_HERE in detail["note_text"]
     assert detail["task_payload"]["task_title"].startswith("Ascend cancellation notice")
+    assert detail["label_name"] == "Ascend NOC"
+    assert detail["label"]["status"] == "dry_run"
+    assert detail["label"]["method"] == "api"
+    assert ctx.ezlynx_client.applied_labels == []
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +270,7 @@ def test_missing_applicant_fails_closed(no_zap_fire):
     assert result["status"] == "skipped"
     assert "applicant_unresolved" in result["reason"]
     assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.applied_labels == []
     assert no_zap_fire == []
 
 
@@ -392,6 +424,10 @@ def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
     body = json.loads(posts[0]["data"].decode("utf-8"))
     assert driver.ROBIE_WAS_HERE in body["body"]
     assert "bind" not in body["body"].lower()
+    assert result["detail"]["label"]["label_name"] == "Ascend NOC"
+    assert ctx.ezlynx_client.applied_labels == [
+        {"applicant_id": ALLOWED_APPLICANT, "label_id": "noc-1"}
+    ]
 
 
 def test_untitled_only_discussions_are_not_filed(no_zap_fire):
@@ -408,6 +444,47 @@ def test_untitled_only_discussions_are_not_filed(no_zap_fire):
     assert "UNTITLED_FORBIDDEN" in result["reason"]
     assert discussion_client._urlopen.posts_to("/notes") == []
     assert no_zap_fire == []
+
+
+def test_missing_or_ambiguous_ascend_noc_does_not_file_or_label(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        org_labels=[{"id": "c1", "name": "Cancellation"}, {"id": "n1", "name": "Ascend noc"}],
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert "label_not_applied" in result["reason"]
+    assert "LABEL_NOT_FOUND" in result["reason"]
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.applied_labels == []
+    assert no_zap_fire == []
+
+
+def test_duplicate_ascend_noc_labels_fail_closed(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        org_labels=[
+            {"id": "a", "name": "Ascend NOC"},
+            {"id": "b", "name": "Ascend NOC"},
+        ],
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert "LABEL_NOT_UNIQUE" in result["reason"]
+    assert discussion_client._urlopen.posts_to("/notes") == []
+    assert ctx.ezlynx_client.applied_labels == []
+
+
+def test_driver_label_path_is_api_not_playwright():
+    source = Path(driver.__file__).read_text(encoding="utf-8")
+    assert "ezlynx_org_labels" in source
+    assert "apply_account_label" not in source
+    assert "playwright" not in source.casefold()
+    assert "bland" not in source.casefold()
 
 
 def test_signed_notice_note_is_plain_and_idempotent():
@@ -460,6 +537,8 @@ def test_late_payment_files_note_but_skips_task(no_zap_fire):
     assert discussion_client._urlopen.posts_to("/notes") == []  # dry-run: validated only
     assert no_zap_fire == []  # no task builder for late_payment
     assert "no task builder" in result["detail"]["task_skipped"]
+    assert "label" not in result["detail"]
+    assert ctx.ezlynx_client.applied_labels == []
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +561,11 @@ def test_live_mode_files_note_fires_task_and_marks_read(no_zap_fire):
     assert len(no_zap_fire) == 1
     assert no_zap_fire[0]["dry_run"] is False
     assert ctx.source.marked == ["m1"]
+    assert result["detail"]["label"]["label_name"] == "Ascend NOC"
+    assert result["detail"]["label"]["status"] == "applied"
+    assert ctx.ezlynx_client.applied_labels == [
+        {"applicant_id": ALLOWED_APPLICANT, "label_id": "noc-1"}
+    ]
 
 
 def test_live_mode_leaves_failed_email_unread(no_zap_fire):

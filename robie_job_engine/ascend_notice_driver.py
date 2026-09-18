@@ -71,6 +71,7 @@ from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
 from . import ezlynx_discussions as discussions
+from . import ezlynx_org_labels as org_labels
 from . import zapier_tasks
 from .ascend_api import AscendApiClient, configured_client as configured_ascend_client
 from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
@@ -447,6 +448,22 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["csr_username"] = resolution.csr_username
     result.detail["notice_type"] = notice_type
 
+    # Cancellation notices also get the exact org label "Ascend NOC" so
+    # existing email/text automation can fire. Late-pay / return-premium
+    # stay note-only. Resolve the unique label before filing so a missing
+    # or ambiguous label does not leave an orphan note.
+    label_plan: dict[str, str] | None = None
+    if notice_type == triage.CANCELLATION:
+        try:
+            label_plan = org_labels.plan_exact_label(
+                ctx.ezlynx_client, org_labels.ASCEND_NOC_LABEL
+            )
+        except org_labels.OrgLabelError as exc:
+            result.reason = f"label_not_applied: {exc.code}: {exc}"
+            return result
+        result.detail["label_name"] = label_plan["name"]
+        result.detail["label_id"] = label_plan["id"]
+
     note_text = signed_notice_note(str(triaged.get("note_text") or "").strip())
     if not note_text:
         result.reason = "empty_note_text"
@@ -479,6 +496,25 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["discussion_title"] = filed.get("discussion_title")
     result.detail["note_id"] = filed.get("note_id")
     result.detail["note_text"] = note_text
+
+    if label_plan is not None:
+        try:
+            labeled = org_labels.apply_planned_label(
+                ctx.ezlynx_client,
+                resolution.applicant_id,
+                label_plan,
+                dry_run=ctx.dry_run,
+            )
+        except EzlynxWriteScopeError as exc:
+            result.reason = f"write_scope_refused: {exc}"
+            return result
+        except org_labels.OrgLabelError as exc:
+            result.reason = f"label_not_applied: {exc.code}: {exc}"
+            return result
+        if labeled.get("status") not in {"applied", "dry_run"}:
+            result.reason = f"label_not_applied: {labeled.get('status')}"
+            return result
+        result.detail["label"] = labeled
 
     # Zapier task: only cancellation notices have a builder. Anything else
     # gets its note and a logged skip — never an invented payload.

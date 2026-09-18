@@ -975,3 +975,50 @@ class EzlynxApiClient:
             error_label="EZLynx DocumentApi",
         )
         return parse_uploaded_document_id(raw)
+
+    def list_organization_labels(self) -> list[dict[str, Any]]:
+        """OAuth GET of agency org labels. Read-only. Never creates a label.
+
+        Path: ``/EZLynxPortalAPI/Organizations/GetOrganizationLabels``.
+        This is HTTP API (Bearer), not Playwright.
+        """
+        from .ezlynx_org_labels import ORG_LABELS_LIST_PATH, normalize_org_label_rows
+
+        url = (
+            self._origin()
+            + ORG_LABELS_LIST_PATH
+            + "?"
+            + parse.urlencode({"includeNonActive": "false"})
+        )
+        headers = {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Accept": "application/json",
+        }
+        parsed = self._request_json("GET", url, data=None, headers=headers)
+        return normalize_org_label_rows(parsed)
+
+    def apply_applicant_organization_label(
+        self, applicant_id: str, label_id: str
+    ) -> dict[str, Any]:
+        """OAuth POST of one org label onto an applicant. Write-scoped.
+
+        Path: ``/EZLynxPortalAPI/Applicants/{applicantId}/OrganizationLabels``.
+        Applies the already-resolved label id only — no name search here,
+        no Playwright, no label creation.
+        """
+        from .ezlynx_org_labels import applicant_labels_path
+
+        applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+        resolved_id = str(label_id or "").strip()
+        if not resolved_id:
+            raise EzlynxApiError(None, "organization label id is required")
+        parsed = self.post_json(
+            applicant_labels_path(applicant),
+            {
+                "applicantId": applicant,
+                "organizationLabelIds": [resolved_id],
+            },
+        )
+        if isinstance(parsed, dict):
+            return parsed
+        return {"result": parsed}
