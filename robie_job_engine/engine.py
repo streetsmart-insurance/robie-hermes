@@ -299,6 +299,34 @@ class JobEngine:
         heartbeat_stop = threading.Event()
         heartbeat_errors: list[Exception] = []
 
+        def _write_gateway_progress() -> None:
+            # The post-job audit reads checkpoints.kind=gateway_progress.
+            # Write it from the engine lease heartbeat so every action type
+            # leaves a liveness trail, and write once before the loop so
+            # short jobs that finish before the first interval also record it.
+            import time as _time
+
+            now = _time.time()
+            started = getattr(self, "_gateway_progress_started_at", None)
+            if started is None:
+                started = now
+                self._gateway_progress_started_at = started
+            existing = self.store.get_checkpoint(job_id, "gateway_progress") or {}
+            first_at = existing.get("first_at") if isinstance(existing, dict) else None
+            self.store.checkpoint(
+                job_id,
+                "gateway_progress",
+                {
+                    "action_type": job["action_type"],
+                    "started_at": started,
+                    "first_at": first_at or now,
+                    "last_at": now,
+                    "elapsed_s": round(max(0.0, now - started), 3),
+                    "status": "running",
+                    "source": "engine_lease_heartbeat",
+                },
+            )
+
         def maintain_leases() -> None:
             interval = max(0.1, min(float(self.lease_seconds) / 3.0, 30.0))
             while not heartbeat_stop.wait(interval):
@@ -319,6 +347,7 @@ class JobEngine:
                         owner=lease_owner,
                         timeout_seconds=self.lease_seconds,
                     )
+                    _write_gateway_progress()
                 except Exception as exc:
                     heartbeat_errors.append(exc)
                     heartbeat_stop.set()
@@ -328,6 +357,7 @@ class JobEngine:
             name=f"robie-job-lease:{job_id}",
             daemon=True,
         )
+        _write_gateway_progress()
         heartbeat.start()
         try:
             from .playwright_observability import maybe_snapshot_and_bind
