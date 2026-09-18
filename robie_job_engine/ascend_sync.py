@@ -79,6 +79,39 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def program_total_cents(prog: Dict[str, Any]) -> int:
+    """Checkout total from documented Ascend Program money fields.
+
+    Program exposes ``sub_total_cents`` (premium + fees payable by the insured)
+    and ``premium_cents`` (premium sum only). It does not have
+    ``downpayment_amount_cents`` or ``total_payable_amount_cents``.
+    """
+    raw = prog.get("sub_total_cents")
+    if raw is None:
+        raw = prog.get("premium_cents")
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def loan_downpayment_cents(loans: Any, default_cents: int) -> int:
+    """Down payment from the first Loan, else the program total (pay-in-full).
+
+    Loan.downpayment_cents is the financed up-front amount. Annual pay-in-full
+    programs have no loan, so Down equals Total.
+    """
+    if not isinstance(loans, list) or not loans:
+        return default_cents
+    first = loans[0]
+    if not isinstance(first, dict) or "downpayment_cents" not in first:
+        return default_cents
+    try:
+        return int(first.get("downpayment_cents") or 0)
+    except (TypeError, ValueError):
+        return default_cents
+
+
 @dataclass
 class AscendCancellationEvent:
     id: str
@@ -351,6 +384,21 @@ class AscendApiClient:
         """Fetch payouts (supplier remittances and agency commissions)."""
         data = self.get("/v1/payouts", {"page_size": page_size})
         return data.get("data", [])
+
+    def fetch_program_billables(self, program_id: str) -> List[Dict[str, Any]]:
+        """List billables for a program via GET /v1/billables?program_id=…
+
+        Nested GET /v1/programs/{id}/billables is not an Ascend list route (404).
+        """
+        data = self.get("/v1/billables", {"program_id": program_id})
+        items = data.get("data", []) if isinstance(data, dict) else []
+        return items if isinstance(items, list) else []
+
+    def fetch_program_loans(self, program_id: str) -> List[Dict[str, Any]]:
+        """List loans for a program via GET /v1/loans?program_id=…"""
+        data = self.get("/v1/loans", {"program_id": program_id})
+        items = data.get("data", []) if isinstance(data, dict) else []
+        return items if isinstance(items, list) else []
 
 
 class EZLynxAccountMatcher:
@@ -729,15 +777,18 @@ class AscendEZLynxSyncManager:
             if not prog_id or self.store.is_event_processed(event_id):
                 continue
 
-            billables = prog.get("billables") or []
+            billables = prog.get("billables") if isinstance(prog.get("billables"), list) else []
             if not billables:
                 try:
-                    b_resp = self.api.get(f"/v1/programs/{prog_id}/billables")
-                    billables = b_resp.get("data") or []
+                    billables = self.api.fetch_program_billables(prog_id)
+                    if not isinstance(billables, list):
+                        billables = []
                 except Exception:
                     billables = []
 
             first_b = billables[0] if billables else {}
+            if not isinstance(first_b, dict):
+                first_b = {}
             carrier_info = first_b.get("carrier") or {}
             wholesaler_info = first_b.get("wholesaler") or {}
             coverage_info = first_b.get("coverage_type") or {}
@@ -755,8 +806,15 @@ class AscendEZLynxSyncManager:
 
             payment_option = prog.get("selected_payment_option_type") or "pay_in_full"
             checkedout_at = prog.get("checkedout_at") or _now_iso()
-            downpayment_cents = int(prog.get("downpayment_amount_cents") or prog.get("total_payable_amount_cents") or 0)
-            total_cents = int(prog.get("total_payable_amount_cents") or downpayment_cents)
+            total_cents = program_total_cents(prog)
+            downpayment_cents = total_cents
+            try:
+                downpayment_cents = loan_downpayment_cents(
+                    self.api.fetch_program_loans(prog_id),
+                    default_cents=total_cents,
+                )
+            except Exception:
+                pass
 
             downpayment_text = f"${downpayment_cents / 100:,.2f}"
             total_text = f"${total_cents / 100:,.2f}"

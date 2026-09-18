@@ -8,10 +8,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from robie_job_engine.ascend_sync import (
+    AscendApiClient,
     AscendCancellationEvent,
     AscendEZLynxSyncManager,
     AscendPastDueEvent,
     AscendSyncStore,
+    loan_downpayment_cents,
+    program_total_cents,
 )
 from robie_job_engine.ezlynx_note_poster import (
     ROBIE_SIGNATURE,
@@ -107,6 +110,65 @@ class TestAscendSyncStore(unittest.TestCase):
             status="SUCCESS",
         )
         self.assertTrue(self.store.is_event_processed(event_id))
+
+
+class TestSignedAgreementMoneyMapping(unittest.TestCase):
+    def test_program_total_uses_sub_total_not_invented_keys(self) -> None:
+        self.assertEqual(
+            program_total_cents(
+                {
+                    "sub_total_cents": 1261465,
+                    "premium_cents": 1200000,
+                    "downpayment_amount_cents": 1,
+                    "total_payable_amount_cents": 2,
+                }
+            ),
+            1261465,
+        )
+
+    def test_program_total_falls_back_to_premium_cents(self) -> None:
+        self.assertEqual(program_total_cents({"premium_cents": 125000}), 125000)
+        self.assertEqual(program_total_cents({}), 0)
+        self.assertEqual(
+            program_total_cents(
+                {"downpayment_amount_cents": 150000, "total_payable_amount_cents": 600000}
+            ),
+            0,
+        )
+
+    def test_loan_downpayment_for_monthly_financed(self) -> None:
+        self.assertEqual(
+            loan_downpayment_cents([{"downpayment_cents": 334116}], default_cents=1261465),
+            334116,
+        )
+
+    def test_annual_pay_in_full_down_equals_total_when_no_loan(self) -> None:
+        self.assertEqual(loan_downpayment_cents([], default_cents=1261465), 1261465)
+        self.assertEqual(loan_downpayment_cents(None, default_cents=50000), 50000)
+
+
+class TestAscendProgramReadUrls(unittest.TestCase):
+    def test_fetch_program_billables_uses_query_not_nested_path(self) -> None:
+        client = AscendApiClient(
+            api_key="test-key",
+            origin="https://api.useascend.com",
+            secret_accessor=MagicMock(),
+        )
+        client.get = MagicMock(return_value={"data": [{"policy_number": "ISCA-1"}]})
+        items = client.fetch_program_billables("prog-isca")
+        client.get.assert_called_once_with("/v1/billables", {"program_id": "prog-isca"})
+        self.assertEqual(items[0]["policy_number"], "ISCA-1")
+
+    def test_fetch_program_loans_uses_program_id_query(self) -> None:
+        client = AscendApiClient(
+            api_key="test-key",
+            origin="https://api.useascend.com",
+            secret_accessor=MagicMock(),
+        )
+        client.get = MagicMock(return_value={"data": [{"downpayment_cents": 334116}]})
+        items = client.fetch_program_loans("prog-isca")
+        client.get.assert_called_once_with("/v1/loans", {"program_id": "prog-isca"})
+        self.assertEqual(items[0]["downpayment_cents"], 334116)
 
 
 class TestAscendEZLynxSyncManager(unittest.TestCase):
@@ -232,13 +294,17 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
         mock_api.fetch_cancelation_returns.return_value = []
         mock_api.fetch_invoices.return_value = []
         mock_api.fetch_payouts.return_value = []
+        mock_api.fetch_program_billables.return_value = []
+        mock_api.fetch_program_loans.return_value = [
+            {"downpayment_cents": 150000, "program_id": "prog_signed_123"}
+        ]
         mock_api.fetch_programs.return_value = [
             {
                 "id": "prog_signed_123",
                 "status": "checked_out",
                 "selected_payment_option_type": "monthly_financed",
-                "downpayment_amount_cents": 150000,
-                "total_payable_amount_cents": 600000,
+                "sub_total_cents": 600000,
+                "premium_cents": 550000,
                 "checkedout_at": "2026-09-07T10:00:00Z",
                 "program_url": "https://checkout.useascend.com/streetsmart/overview?program_id=prog_signed_123",
                 "insured": {"business_name": "Apex Builders LLC"},
@@ -291,8 +357,157 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
             due_days_out=0,
         )
 
-        # Verify Google Chat alert called
+        note_text = mock_poster.post_custom_note.call_args.kwargs["note_text"]
+        self.assertIn("$1,500.00", note_text)
+        self.assertIn("$6,000.00", note_text)
+        task_desc = mock_poster.create_task.call_args.kwargs["description"]
+        self.assertIn("$1,500.00", task_desc)
+        self.assertIn("$6,000.00", task_desc)
+
+        # Verify Google Chat alert called with real Down/Total (not $0.00)
         mock_chat.assert_called_once()
+        chat_text = mock_chat.call_args.args[0]
+        self.assertIn("Down Payment: $1,500.00", chat_text)
+        self.assertIn("Total: $6,000.00", chat_text)
+        self.assertNotIn("$0.00", chat_text)
+
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT amount_cents, policy_number, status FROM ascend_synced_events WHERE event_id = ?",
+                ("signed_prog_signed_123",),
+            ).fetchone()
+        self.assertEqual(row["amount_cents"], 600000)
+        self.assertEqual(row["policy_number"], "POL-APEX-777")
+
+    @patch("robie_job_engine.ascend_sync.send_google_chat_alert")
+    def test_sync_signed_agreements_monthly_financed_lists_billables_and_loan(self, mock_chat) -> None:
+        """ISCA-shaped live mapping: Total from sub_total_cents, Down from loan."""
+        mock_api = MagicMock()
+        mock_api.fetch_cancelation_returns.return_value = []
+        mock_api.fetch_invoices.return_value = []
+        mock_api.fetch_payouts.return_value = []
+        mock_api.fetch_program_billables.return_value = [
+            {
+                "policy_number": "ISCA-7781",
+                "billable_identifier": "ISCA-Q",
+                "carrier": {"title": "ISCA"},
+                "coverage_type": {"title": "Commercial Package"},
+            }
+        ]
+        mock_api.fetch_program_loans.return_value = [
+            {"downpayment_cents": 334116, "program_id": "prog_isca"}
+        ]
+        mock_api.fetch_programs.return_value = [
+            {
+                "id": "prog_isca",
+                "status": "checked_out",
+                "selected_payment_option_type": "monthly_financed",
+                "sub_total_cents": 1261465,
+                "premium_cents": 1200000,
+                "checkedout_at": "2026-09-18T10:00:00Z",
+                "program_url": "https://checkout.useascend.com/streetsmart/overview?program_id=prog_isca",
+                "insured": {"business_name": "ISCA Demo LLC"},
+                "producer": {"first_name": "Carlo", "last_name": "Ferrara"},
+            }
+        ]
+
+        mock_matcher = MagicMock()
+        mock_matcher.match_account.return_value = (None, None)
+
+        manager = AscendEZLynxSyncManager(
+            api_client=mock_api,
+            store=self.store,
+            matcher=mock_matcher,
+            poster=MagicMock(),
+        )
+
+        res = manager.sync_once()
+        self.assertEqual(res["signed_agreements_found"], 1)
+        self.assertEqual(res["signed_agreements_synced"], 1)
+
+        mock_api.fetch_program_billables.assert_called_once_with("prog_isca")
+        mock_api.fetch_program_loans.assert_called_once_with("prog_isca")
+        mock_api.get.assert_not_called()
+
+        mock_matcher.match_account.assert_called()
+        self.assertEqual(mock_matcher.match_account.call_args.kwargs["policy_number"], "ISCA-7781")
+
+        chat_text = mock_chat.call_args.args[0]
+        self.assertIn("ISCA-7781", chat_text)
+        self.assertIn("Down Payment: $3,341.16", chat_text)
+        self.assertIn("Total: $12,614.65", chat_text)
+        self.assertNotIn("Pending", chat_text)
+        self.assertNotIn("$0.00", chat_text)
+
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT amount_cents, policy_number, status FROM ascend_synced_events WHERE event_id = ?",
+                ("signed_prog_isca",),
+            ).fetchone()
+        self.assertEqual(row["amount_cents"], 1261465)
+        self.assertEqual(row["policy_number"], "ISCA-7781")
+        self.assertEqual(row["status"], "UNMATCHED")
+
+    @patch("robie_job_engine.ascend_sync.send_google_chat_alert")
+    def test_sync_signed_agreements_annual_pay_in_full_down_equals_total(self, mock_chat) -> None:
+        """KJB-shaped live mapping: no loan, Down = Total from sub_total_cents."""
+        mock_api = MagicMock()
+        mock_api.fetch_cancelation_returns.return_value = []
+        mock_api.fetch_invoices.return_value = []
+        mock_api.fetch_payouts.return_value = []
+        mock_api.fetch_program_billables.return_value = [
+            {
+                "policy_number": "KJB-4410",
+                "carrier": {"title": "KJB"},
+                "coverage_type": {"title": "General Liability"},
+            }
+        ]
+        mock_api.fetch_program_loans.return_value = []
+        mock_api.fetch_programs.return_value = [
+            {
+                "id": "prog_kjb",
+                "status": "purchased",
+                "selected_payment_option_type": "annual_pay_in_full",
+                "sub_total_cents": 1261465,
+                "checkedout_at": "2026-09-18T11:00:00Z",
+                "program_url": "https://checkout.useascend.com/streetsmart/overview?program_id=prog_kjb",
+                "insured": {"business_name": "KJB Holdings LLC"},
+                "producer": {"first_name": "Jake", "last_name": "Ferrara"},
+            }
+        ]
+
+        mock_matcher = MagicMock()
+        mock_matcher.match_account.return_value = ("app-kjb", "Jake Ferrara")
+
+        mock_poster = MagicMock()
+        manager = AscendEZLynxSyncManager(
+            api_client=mock_api,
+            store=self.store,
+            matcher=mock_matcher,
+            poster=mock_poster,
+        )
+
+        res = manager.sync_once()
+        self.assertEqual(res["signed_agreements_found"], 1)
+        self.assertEqual(res["signed_agreements_synced"], 1)
+
+        chat_text = mock_chat.call_args.args[0]
+        self.assertIn("KJB-4410", chat_text)
+        self.assertIn("Down Payment: $12,614.65", chat_text)
+        self.assertIn("Total: $12,614.65", chat_text)
+        self.assertNotIn("$0.00", chat_text)
+
+        note_text = mock_poster.post_custom_note.call_args.kwargs["note_text"]
+        self.assertIn("$12,614.65", note_text)
+        self.assertIn("KJB-4410", note_text)
+
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT amount_cents, policy_number FROM ascend_synced_events WHERE event_id = ?",
+                ("signed_prog_kjb",),
+            ).fetchone()
+        self.assertEqual(row["amount_cents"], 1261465)
+        self.assertEqual(row["policy_number"], "KJB-4410")
 
     @patch("robie_job_engine.ascend_sync.send_google_chat_alert")
     def test_sync_reinstatement_paid(self, mock_chat) -> None:
