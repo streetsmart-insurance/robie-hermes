@@ -2,9 +2,10 @@ name: Verify scheduled accountability delivery
 
 on:
   schedule:
-    # GitHub cron is UTC. Running both slots plus the New York hour gate
-    # keeps this at 10:15 Eastern across daylight-saving changes.
-    - cron: "15 14,15 * * 1-5"
+    # GitHub cron is UTC. Separate slots let the job identify the intended
+    # 10:15 Eastern run even when GitHub starts a scheduled job hours late.
+    - cron: "15 14 * * 1-5"
+    - cron: "15 15 * * 1-5"
   workflow_dispatch:
     inputs:
       confirmation:
@@ -50,14 +51,18 @@ jobs:
             echo "qualifying_scheduled_proof=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          local_hour="$(TZ=America/New_York date +%H)"
-          if [ "${local_hour}" = "10" ]; then
+          schedule_date="$(date -u +%F)"
+          expected_utc_hour="$(
+            TZ=America/New_York date -u -d "${schedule_date} 10:15" +%H
+          )"
+          expected_schedule="15 ${expected_utc_hour} * * 1-5"
+          if [ "${GITHUB_EVENT_SCHEDULE}" = "${expected_schedule}" ]; then
             echo "should_run=true" >> "${GITHUB_OUTPUT}"
             echo "qualifying_scheduled_proof=true" >> "${GITHUB_OUTPUT}"
           else
             echo "should_run=false" >> "${GITHUB_OUTPUT}"
             echo "qualifying_scheduled_proof=false" >> "${GITHUB_OUTPUT}"
-            echo "Skipping the duplicate UTC slot; local hour is ${local_hour}."
+            echo "Skipping the duplicate UTC slot ${GITHUB_EVENT_SCHEDULE}; canonical slot is ${expected_schedule}."
           fi
 
       - uses: google-github-actions/auth@v3

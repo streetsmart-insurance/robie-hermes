@@ -126,9 +126,12 @@ def test_report_content_gate_fails_closed_for_missing_or_unverified_evidence(tex
 
 def test_watchdog_schedule_is_dst_safe_and_read_only():
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert 'cron: "15 14,15 * * 1-5"' in text
+    assert 'cron: "15 14 * * 1-5"' in text
+    assert 'cron: "15 15 * * 1-5"' in text
     assert "TZ=America/New_York" in text
-    assert 'local_hour}" = "10"' in text
+    assert 'expected_schedule="15 ${expected_utc_hour} * * 1-5"' in text
+    assert 'GITHUB_EVENT_SCHEDULE' in text
+    assert 'date +%H' not in text
     assert "environment: Production" in text
     assert "VERIFY_ACCOUNTABILITY_DELIVERY" in text
     assert "systemctl start" not in text
