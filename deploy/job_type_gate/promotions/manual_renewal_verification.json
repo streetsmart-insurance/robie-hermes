@@ -1,0 +1,25 @@
+{
+  "job_type": "manual_renewal_verification",
+  "jobs": [
+    {
+      "environment": "TEST",
+      "job_id": "85cf7523-71b4-497e-b5c2-24ecba4c5718",
+      "job_status": "UNVERIFIED",
+      "verdict": "PASS"
+    },
+    {
+      "environment": "TEST",
+      "job_id": "e0035cfc-8eb9-4ec6-b126-eab9514e7c8c",
+      "job_status": "UNVERIFIED",
+      "verdict": "PASS"
+    },
+    {
+      "environment": "TEST",
+      "job_id": "e56dfa1d-e62d-44c3-8c6d-489cd7c10b02",
+      "job_status": "UNVERIFIED",
+      "verdict": "PASS"
+    }
+  ],
+  "passing_count": 3,
+  "required_clean_test_jobs": 3
+}

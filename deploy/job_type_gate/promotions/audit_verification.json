@@ -1,0 +1,25 @@
+{
+  "job_type": "audit_verification",
+  "jobs": [
+    {
+      "environment": "TEST",
+      "job_id": "5b6172a8-1412-4b7a-8a57-fc438f9aacee",
+      "job_status": "UNVERIFIED",
+      "verdict": "PASS"
+    },
+    {
+      "environment": "TEST",
+      "job_id": "96059385-f5e4-4baa-acca-16e45c8b83d3",
+      "job_status": "UNVERIFIED",
+      "verdict": "PASS"
+    },
+    {
+      "environment": "TEST",
+      "job_id": "bf2e47b9-3de5-49d5-a373-826605ddfcf0",
+      "job_status": "UNVERIFIED",
+      "verdict": "PASS"
+    }
+  ],
+  "passing_count": 3,
+  "required_clean_test_jobs": 3
+}
