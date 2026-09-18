@@ -71,11 +71,14 @@ from typing import Any, Callable, Protocol
 
 from . import ascend_notice_triage as triage
 from . import ezlynx_discussions as discussions
+from . import ezlynx_org_labels as org_labels
 from . import zapier_tasks
 from .ascend_api import AscendApiClient, configured_client as configured_ascend_client
 from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
 from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig
 from .ezlynx_write_scope import EzlynxWriteScopeError
+
+ROBIE_WAS_HERE = "Robie was here"
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +156,16 @@ def _gmail_text_from_payload(payload: dict[str, Any]) -> str:
     if isinstance(payload, dict):
         walk(payload)
     return "\n".join(texts).strip()
+
+
+class NullNoticeSource:
+    """No-op source for callers that already hold the email (mailbox watcher)."""
+
+    def fetch_notices(self) -> list[EmailNotice]:
+        return []
+
+    def mark_processed(self, message_id: str) -> None:
+        return None
 
 
 class GmailNoticeSource:
@@ -371,6 +384,30 @@ def _due_date(today: date, due_days: int) -> str:
     return (today + timedelta(days=max(int(due_days), 0))).isoformat()
 
 
+def discussion_title_hint(notice_type: str) -> str | None:
+    """Prefer the SOP-titled card for this notice; never Untitled.
+
+    Substring match against existing titles. ``cancellation`` hits both
+    ``Cancellation`` and ``Service-Cancellation``. ``noc`` hits ``Ascend NOC``.
+    Other notice types leave the hint empty so a single titled discussion wins.
+    """
+    if notice_type == triage.CANCELLATION:
+        return "cancellation"
+    if notice_type == triage.LATE_PAYMENT:
+        return "noc"
+    return None
+
+
+def signed_notice_note(note_text: str) -> str:
+    """Append the agency signature without inventing LOB or bind steps."""
+    text = str(note_text or "").strip()
+    if not text:
+        return ""
+    if ROBIE_WAS_HERE.casefold() in text.casefold():
+        return text
+    return f"{text}\n\n{ROBIE_WAS_HERE}"
+
+
 def process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     """Run one email through triage -> note -> task. Never raises."""
     try:
@@ -411,12 +448,29 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["csr_username"] = resolution.csr_username
     result.detail["notice_type"] = notice_type
 
-    note_text = str(triaged.get("note_text") or "").strip()
+    # Cancellation notices also get the exact org label "Ascend NOC" so
+    # existing email/text automation can fire. Late-pay / return-premium
+    # stay note-only. Resolve the unique label before filing so a missing
+    # or ambiguous label does not leave an orphan note.
+    label_plan: dict[str, str] | None = None
+    if notice_type == triage.CANCELLATION:
+        try:
+            label_plan = org_labels.plan_exact_label(
+                ctx.ezlynx_client, org_labels.ASCEND_NOC_LABEL
+            )
+        except org_labels.OrgLabelError as exc:
+            result.reason = f"label_not_applied: {exc.code}: {exc}"
+            return result
+        result.detail["label_name"] = label_plan["name"]
+        result.detail["label_id"] = label_plan["id"]
+
+    note_text = signed_notice_note(str(triaged.get("note_text") or "").strip())
     if not note_text:
         result.reason = "empty_note_text"
         return result
 
-    # Append to the EXISTING discussion. The write-scope guard inside refuses
+    # Append to an EXISTING titled discussion. Untitled is refused inside
+    # select_discussion_for_note. The write-scope guard refuses
     # non-allowlisted applicants; phone numbers in the body raise. Both are
     # caught below and become a skip, never a silent write.
     try:
@@ -424,6 +478,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
             ctx.discussion_client,
             resolution.applicant_id,
             note_text,
+            title_hint=discussion_title_hint(notice_type),
             dry_run=ctx.dry_run,
         )
     except EzlynxWriteScopeError as exc:
@@ -441,6 +496,25 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["discussion_title"] = filed.get("discussion_title")
     result.detail["note_id"] = filed.get("note_id")
     result.detail["note_text"] = note_text
+
+    if label_plan is not None:
+        try:
+            labeled = org_labels.apply_planned_label(
+                ctx.ezlynx_client,
+                resolution.applicant_id,
+                label_plan,
+                dry_run=ctx.dry_run,
+            )
+        except EzlynxWriteScopeError as exc:
+            result.reason = f"write_scope_refused: {exc}"
+            return result
+        except org_labels.OrgLabelError as exc:
+            result.reason = f"label_not_applied: {exc.code}: {exc}"
+            return result
+        if labeled.get("status") not in {"applied", "dry_run"}:
+            result.reason = f"label_not_applied: {labeled.get('status')}"
+            return result
+        result.detail["label"] = labeled
 
     # Zapier task: only cancellation notices have a builder. Anything else
     # gets its note and a logged skip — never an invented payload.
@@ -528,6 +602,31 @@ def discussion_config_from_api_config(api_config: Any) -> DiscussionApiConfig:
     )
 
 
+def build_processing_context(
+    *,
+    dry_run: bool,
+    due_days: int = DEFAULT_DUE_DAYS,
+    source: NoticeSource | None = None,
+) -> DriverContext:
+    """Assemble Ascend + EZLynx clients. No Gmail delegation required.
+
+    The mailbox watcher already holds the email via OAuth; it passes a
+    :class:`NullNoticeSource` (or omits ``source``) and marks mail itself.
+    """
+    api_config = load_ezlynx_api_config()
+    ezlynx_client = EzlynxApiClient(api_config)
+    discussion_client = DiscussionApiClient(discussion_config_from_api_config(api_config))
+    ascend_client = configured_ascend_client()
+    return DriverContext(
+        ascend_client=ascend_client,
+        ezlynx_client=ezlynx_client,
+        discussion_client=discussion_client,
+        source=source if source is not None else NullNoticeSource(),
+        dry_run=dry_run,
+        due_days=due_days,
+    )
+
+
 def build_live_context(
     *,
     mailbox: str,
@@ -537,10 +636,6 @@ def build_live_context(
 ) -> DriverContext:
     """Assemble real clients from Secret Manager / env. Raises with a clear
     message when required configuration is missing (fail closed)."""
-    api_config = load_ezlynx_api_config()
-    ezlynx_client = EzlynxApiClient(api_config)
-    discussion_client = DiscussionApiClient(discussion_config_from_api_config(api_config))
-    ascend_client = configured_ascend_client()
     service_account = str(os.environ.get("ROBIE_GMAIL_DELEGATION_SA") or "").strip()
     source = GmailNoticeSource(
         mailbox=mailbox,
@@ -548,14 +643,7 @@ def build_live_context(
         service_account_email=service_account,
         allow_modify=_notice_allow_modify(dry_run=dry_run),
     )
-    return DriverContext(
-        ascend_client=ascend_client,
-        ezlynx_client=ezlynx_client,
-        discussion_client=discussion_client,
-        source=source,
-        dry_run=dry_run,
-        due_days=due_days,
-    )
+    return build_processing_context(dry_run=dry_run, due_days=due_days, source=source)
 
 
 def main(argv: list[str] | None = None) -> int:

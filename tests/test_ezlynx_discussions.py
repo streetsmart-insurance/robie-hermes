@@ -188,6 +188,28 @@ def test_select_hint_matching_none_raises():
     assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
 
 
+def test_select_untitled_only_is_refused():
+    rows = [{"id": "d1", "title": "Untitled"}, {"id": "d2", "Title": ""}]
+    with pytest.raises(disc.DiscussionSelectionError) as excinfo:
+        disc.select_discussion_for_note(rows)
+    assert excinfo.value.code == disc.UNTITLED_FORBIDDEN
+
+
+def test_select_filters_untitled_and_keeps_titled():
+    rows = [
+        {"id": "d0", "title": "Untitled"},
+        {"id": "d1", "title": "Cancellation"},
+    ]
+    assert disc.select_discussion_for_note(rows)["id"] == "d1"
+
+
+def test_is_untitled_discussion():
+    assert disc.is_untitled_discussion({"title": "Untitled"}) is True
+    assert disc.is_untitled_discussion({"title": "untitled"}) is True
+    assert disc.is_untitled_discussion({"title": ""}) is True
+    assert disc.is_untitled_discussion({"title": "Cancellation"}) is False
+
+
 # ---------------------------------------------------------------------------
 # orchestrator: file_note_to_existing_discussion
 
@@ -219,6 +241,15 @@ def test_file_note_rejects_non_allowlisted_applicant_before_any_http():
         with pytest.raises(EzlynxWriteScopeError):
             disc.file_note_to_existing_discussion(client, "999999999", "Filed note")
     assert client._urlopen.calls == []
+
+
+def test_file_note_untitled_only_is_pending_and_writes_nothing():
+    client = make_client(_file_routes([{"discussionId": "d1", "title": "Untitled"}]))
+    result = disc.file_note_to_existing_discussion(client, ALLOWED_APPLICANT, "Filed note")
+    assert result["status"] == "pending"
+    assert result["reason_code"] == disc.UNTITLED_FORBIDDEN
+    assert result["discussion_id"] is None
+    assert client._urlopen.posts_to("/notes") == []
 
 
 def test_file_note_no_discussions_is_pending_and_writes_nothing():

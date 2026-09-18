@@ -600,6 +600,40 @@ def process_inbox():
         subject = headers.get("subject", "No Subject")
         thread_id = msg.get("threadId", msg_id)
 
+        # Ascend has no cancel webhook. Notice mail in this mailbox is
+        # triaged by the existing driver and filed on a titled EZLynx
+        # discussion. Never reply, never bind, never run finance/LLM.
+        from robie_job_engine.email_notice_hook import (
+            is_ascend_notice_sender,
+            try_process_ascend_notice,
+        )
+
+        if is_ascend_notice_sender(sender):
+            payload = msg.get("payload", {})
+            body = extract_body_text(payload) or msg.get("snippet", "")
+            notice_result = try_process_ascend_notice(
+                sender=sender,
+                subject=subject,
+                body=body,
+                message_id=msg_id,
+            ) or {}
+            if notice_result.get("consumed"):
+                if notice_result.get("mark_read"):
+                    service.users().messages().modify(
+                        userId="me",
+                        id=msg_id,
+                        body={"removeLabelIds": ["UNREAD"]},
+                    ).execute()
+                processed_ids.add(msg_id)
+                save_processed_ids(processed_ids)
+            logger.info(
+                "Ascend notice mailbox triage %s status=%s reason=%s",
+                msg_id,
+                notice_result.get("status"),
+                notice_result.get("reason"),
+            )
+            continue
+
         if not is_allowed_sender(sender):
             logger.info("Skipping email from unauthorized sender: %s", sender)
             continue
