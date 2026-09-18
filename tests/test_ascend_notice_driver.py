@@ -350,11 +350,17 @@ def test_phone_number_in_note_text_is_rejected(no_zap_fire):
 
 
 def test_write_scope_refusal_fails_closed(no_zap_fire):
+    # Agency-wide is the unset default (PR 468). Pin a restricted list so
+    # this still proves the driver skips when the applicant is not allowed.
     row = policy_row(applicant_id="999999999", csr_username="KarlaSS")
     ctx, discussion_client = make_ctx(
         notices=[make_notice()], policy_rows={"HO-998877": [row]}
     )
-    summary = driver.run_driver(ctx)
+    with mock.patch(
+        "robie_job_engine.ezlynx_write_scope.ALLOWED_EZLYNX_WRITE_APPLICANT_IDS",
+        frozenset({ALLOWED_APPLICANT}),
+    ):
+        summary = driver.run_driver(ctx)
     result = summary["results"][0]
     assert result["status"] == "skipped"
     assert "write_scope_refused" in result["reason"]
