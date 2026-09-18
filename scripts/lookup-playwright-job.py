@@ -7,6 +7,9 @@ port, deploy, or authorize COMPLETE.
 
     PYTHONPATH=. python3 scripts/lookup-playwright-job.py <job-id>
     PYTHONPATH=. python3 -m robie_job_engine.playwright_observability <job-id>
+
+For the full jobs.db + destination dump (not Playwright-only):
+    PYTHONPATH=. python3 scripts/job_debug_dump.py <job-id>
 """
 
 from __future__ import annotations
