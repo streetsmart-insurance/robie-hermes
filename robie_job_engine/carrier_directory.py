@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+"""Carrier directory: carriers, endpoints, credentials, appetite rules.
+
+Browser runtime policies (permanent, Carlo 2026-09-18):
+  Hartford ("hartford") is SANDBOX-ONLY for browser work. thehartford.com /
+  the EBC agent portal is unreachable from the ROBIE servers (proven by curl
+  probes on hermes-poc-01 on 2026-09-18, direct and via the residential proxy;
+  independently re-proven by Dusty the same day). The job engine refuses
+  Hartford Playwright starts on hermes-* hosts — fail closed — with a
+  plain-English reason; see robie_job_engine/carrier_browser_policy.py, which
+  owns and enforces the rule. Run Hartford jobs in the sandbox browser, or get
+  documents by email / IVANS. Do not debug proxy or stealth settings for
+  Hartford on the servers. All other carriers keep the designed
+  stealth+proxy browser path.
+"""
+
 import json
 import sqlite3
 import uuid
@@ -10,6 +25,21 @@ from typing import Any, Iterable
 
 
 UTC = timezone.utc
+
+
+# Browser runtime notes keyed by carrier slug. Documentation-grade: the
+# enforcement lives in robie_job_engine/carrier_browser_policy.py, which is
+# the single owner of the rule. Read this when looking up a carrier here.
+CARRIER_BROWSER_RUNTIME_NOTES = {
+    "hartford": (
+        "SANDBOX-ONLY for browser work. thehartford.com / EBC is unreachable "
+        "from the ROBIE servers (proven 2026-09-18, hermes-poc-01, direct and "
+        "via residential proxy; independently re-proven by Dusty). Hartford "
+        "Playwright jobs fail closed on hermes-* hosts — run them in the "
+        "sandbox browser, or get documents by email / IVANS. Do not debug "
+        "proxy or stealth settings for Hartford on the servers."
+    ),
+}
 
 
 def _now() -> str:
