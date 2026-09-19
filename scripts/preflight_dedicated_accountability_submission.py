@@ -80,6 +80,7 @@ SAFE_FAILURE_CODES = (
     ("non-closed group exceeded", "pagination_boundary_missing"),
     ("next Submission Center page did not load", "next_page_failed"),
     ("page rendered no statuses", "page_statuses_missing"),
+    ("pager range exceeded rendered Submission Center statuses", "pager_range_rows_missing"),
     ("no visible non-closed first row", "non_closed_boundary_missing"),
     ("required evidence mismatch", "required_evidence_mismatch"),
     ("exactly one Submission Center terminal boundary", "terminal_boundary_conflict"),
