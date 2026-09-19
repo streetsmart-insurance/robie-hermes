@@ -77,12 +77,11 @@ jobs:
       - name: Install the canonical weekday timer
         run: |
           set -euo pipefail
-          remote_timer="/tmp/streetsmart-accountability-${GITHUB_RUN_ID}.timer"
-          gcloud compute scp deploy/systemd/streetsmart-accountability.timer \
-            "${PRODUCTION_VM}:${remote_timer}" \
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
+          timer_path=deploy/systemd/streetsmart-accountability.timer
+          timer_sha="$(sha256sum "${timer_path}" | awk '{print $1}')"
+          timer_b64="$(base64 -w0 "${timer_path}")"
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="sudo install -o root -g root -m 0644 ${remote_timer} /etc/systemd/system/streetsmart-accountability.timer && sudo rm -f ${remote_timer} && sudo systemctl daemon-reload"
+            --tunnel-through-iap --quiet --command="printf '%s' '${timer_b64}' | base64 -d | sudo tee /etc/systemd/system/streetsmart-accountability.timer >/dev/null && sudo chown root:root /etc/systemd/system/streetsmart-accountability.timer && sudo chmod 0644 /etc/systemd/system/streetsmart-accountability.timer && test \"\$(sudo sha256sum /etc/systemd/system/streetsmart-accountability.timer | awk '{print \$1}')\" = '${timer_sha}' && sudo systemctl daemon-reload"
 
       - name: Repair the installed lock timeout
         run: |
