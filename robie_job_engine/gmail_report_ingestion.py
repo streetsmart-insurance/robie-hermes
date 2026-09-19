@@ -47,8 +47,8 @@ Created Date RAISES (requests cannot be distinguished). The exports
 contain no literal audit-ID / loan-number column, so Applicant ID stays
 on as a descriptor and Task ID (4372) stays on as the row descriptor.
 Mortgagee lender/loan number is NOT in the export — it is a manual
-enrichment the worker adds per item as it goes. 4359 additionally
-remains blocked by the schema_verified=False gate.
+enrichment the worker adds per item as it goes. 4359 schema was
+verified against the 2026-09-19 delivery.
 
 Gmail access uses the SAME domain-wide-delegation service-account pattern
 as gmail_accountability.build_keyless_delegated_service (IAM signer +
@@ -205,7 +205,6 @@ EXPECTED_HEADERS: dict[str, list[str]] = {
     # 4359 Policy Change Request Confirmation Queue - ROBIE: 19 cols
     # (viewer had shown 18 — the export adds "Change Request Created
     # Date"); 2026-09-19 test CSV had 69 data rows, no totals row.
-    # Blocked by the schema gate until verified (see SCHEMA_VERIFIED).
     "4359": [
         "Account Name",
         "Applicant ID",
@@ -260,7 +259,6 @@ IDENTITY_COLUMNS: dict[str, str] = {
     "4247": "Policy Number",
     "4246": "Policy Number",
     "4372": "Policy Number",
-    # 4359 additionally gated by schema_verified=False regardless.
     "4359": "Policy Number",
 }
 
@@ -827,9 +825,9 @@ def _self_test() -> None:
         parse_and_validate_csv("4372", "\n".join(content).encode("utf-8"))
     expect_raises("ragged row is rejected (4372)", ragged_row)
 
-    def gate_blocks_4359():
+    def gate_open_4359():
         check_report_gate("4359")
-    expect_raises("4359 blocked while schema_verified=False", gate_blocks_4359)
+    check("4359 gate open after 2026-09-19 schema verification", gate_open_4359)
 
     def check_gate_override():
         check_report_gate("4359", allow_unverified=True)

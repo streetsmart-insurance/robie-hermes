@@ -30,7 +30,7 @@ MODES:
       hours, no bind/quote/cancel, every action in the morning report).
       Requires --live AND ROBIE_LIVE_OUTREACH=1 in the environment.
 
-Branch: ralph/gmail-scheduled-report-ingestion (draft PR #495 — no merge).
+Branch: ralph/gmail-scheduled-report-ingestion (PR #495).
 """
 
 from __future__ import annotations
