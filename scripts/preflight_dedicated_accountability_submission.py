@@ -241,6 +241,15 @@ def validate_observation(observed: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _evidence_changed_between_attempts(
+    summaries: list[Mapping[str, Any]],
+) -> bool:
+    if len(summaries) < 2:
+        return False
+    baseline = summaries[0].get("evidence_sha256")
+    return any(item.get("evidence_sha256") != baseline for item in summaries[1:])
+
+
 def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
     root = app_root.expanduser().resolve()
     if root != EXPECTED_ROOT or not (root / "src" / "production_main.py").is_file():
@@ -276,10 +285,7 @@ def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
             wrapped.safe_metrics = _safe_failure_metrics(observed)
             raise wrapped from exc
 
-    evidence_changed = any(
-        item["evidence_sha256"] != summaries[0]["evidence_sha256"]
-        for item in summaries[1:]
-    )
+    evidence_changed = _evidence_changed_between_attempts(summaries)
 
     return {
         "ready": True,
