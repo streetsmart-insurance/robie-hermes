@@ -85,6 +85,17 @@ def test_repairs_helperless_publisher_variant(tmp_path: Path):
     assert repair(target) == "already_repaired"
 
 
+
+def test_returns_not_applicable_for_unrelated_helperless_publisher(tmp_path: Path):
+    target = tmp_path / "production_main.py"
+    source = "def main():\n    return None\n"
+    target.write_text(source, encoding="utf-8")
+
+    assert repair(target) == "not_applicable"
+    assert target.read_text(encoding="utf-8") == source
+    assert not target.with_suffix(".py.pre-utf16-index-repair").exists()
+
+
 def test_refuses_unknown_source_shape(tmp_path: Path):
     target = tmp_path / "production_main.py"
     target.write_text("def unrelated():\n    return 1\n", encoding="utf-8")
