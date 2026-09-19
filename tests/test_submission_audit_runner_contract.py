@@ -165,6 +165,19 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn('"qualifying_records": qualifying', audit_block)
         self.assertIn('"email_delivery_enabled": False', audit_block)
 
+    def test_pagination_reports_perform_progress_to_job_engine(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        self.assertIn("def _report_pagination_progress", source)
+        self.assertIn("report_current_job_perform_progress", source)
+        audit_block = source.split("def audit", 1)[1]
+        self.assertIn("_report_pagination_progress(", audit_block)
+        self.assertIn("pages_reviewed=pages_reviewed", audit_block)
+        self.assertIn("rows_inspected=rows_inspected", audit_block)
+
 
 if __name__ == "__main__":
     unittest.main()

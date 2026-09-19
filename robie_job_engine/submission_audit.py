@@ -36,6 +36,31 @@ PYTHON = os.environ.get(
 )
 RUNNER_TIMEOUT_SECONDS = 90
 LOGIN_TIMEOUT_SECONDS = 180
+JOB_BOUND_RUNNER_CEILING_SECONDS = 3600
+
+
+def job_bound_runner_timeout(default: int = RUNNER_TIMEOUT_SECONDS) -> int:
+    """Keep standalone CLI helpers short; Job Engine is the stuck detector.
+
+    A bound job already has a progress-aware perform idle window. The
+    Playwright helper may therefore wait up to the job's perform ceiling
+    (or 3600s) instead of dying at 90s mid-pagination.
+    """
+    job_id = (
+        os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("ROBIE_CURRENT_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    if not job_id:
+        return default
+    raw = os.environ.get("ROBIE_PERFORM_MAX_SECONDS")
+    if raw:
+        try:
+            return max(default, int(float(raw)))
+        except ValueError:
+            pass
+    return max(default, JOB_BOUND_RUNNER_CEILING_SECONDS)
 
 
 class BoundedProcessError(RuntimeError):
@@ -117,7 +142,10 @@ def _runner_command(*, fresh: bool, weekly_report: bool = False) -> list[str]:
 
 
 def run_submission_read(*, fresh: bool) -> dict[str, Any]:
-    proc = _run_bounded(_runner_command(fresh=fresh), timeout=RUNNER_TIMEOUT_SECONDS)
+    proc = _run_bounded(
+        _runner_command(fresh=fresh),
+        timeout=job_bound_runner_timeout(RUNNER_TIMEOUT_SECONDS),
+    )
     if proc.returncode != 0:
         status = _safe_status(proc)
         if status == "NEEDS_AUTH":
@@ -135,7 +163,7 @@ def run_submission_read(*, fresh: bool) -> dict[str, Any]:
 def run_weekly_submission_read(*, fresh: bool = True) -> dict[str, Any]:
     proc = _run_bounded(
         _runner_command(fresh=fresh, weekly_report=True),
-        timeout=max(RUNNER_TIMEOUT_SECONDS, 300),
+        timeout=job_bound_runner_timeout(max(RUNNER_TIMEOUT_SECONDS, 300)),
     )
     if proc.returncode != 0:
         status = _safe_status(proc)

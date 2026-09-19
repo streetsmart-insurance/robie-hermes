@@ -23,6 +23,8 @@ class ExecutableSkillContract:
     maximum_attempts: int
     success_conditions: tuple[str, ...]
     failure_conditions: tuple[str, ...]
+    perform_timeout_seconds: float | None = None
+    perform_max_seconds: float | None = None
 
     def validate(self) -> None:
         if not self.expected_destination_result.strip():
@@ -37,9 +39,26 @@ class ExecutableSkillContract:
             raise ValueError("success conditions are required")
         if not self.failure_conditions:
             raise ValueError("failure conditions are required")
+        if self.perform_timeout_seconds is not None and self.perform_timeout_seconds <= 0:
+            raise ValueError("perform timeout must be positive")
+        if self.perform_max_seconds is not None and self.perform_max_seconds <= 0:
+            raise ValueError("perform max must be positive")
+        if (
+            self.perform_timeout_seconds is not None
+            and self.perform_max_seconds is not None
+            and self.perform_max_seconds < self.perform_timeout_seconds
+        ):
+            raise ValueError("perform max must be at least the perform timeout")
 
 
-def _contract(result: str, verifier: str, *, attempts: int = 3) -> ExecutableSkillContract:
+def _contract(
+    result: str,
+    verifier: str,
+    *,
+    attempts: int = 3,
+    perform_timeout_seconds: float | None = None,
+    perform_max_seconds: float | None = None,
+) -> ExecutableSkillContract:
     contract = ExecutableSkillContract(
         expected_destination_result=result,
         recording_policy="REQUIRED",
@@ -55,6 +74,8 @@ def _contract(result: str, verifier: str, *, attempts: int = 3) -> ExecutableSki
             "worker or verifier exhausts the attempt limit",
             "recording upload fails",
         ),
+        perform_timeout_seconds=perform_timeout_seconds,
+        perform_max_seconds=perform_max_seconds,
     )
     contract.validate()
     return contract
@@ -124,6 +145,7 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
     "ezlynx.submission_audit": _contract(
         "a fresh authenticated Submission Center read matches the requested scope and postcondition",
         "EzlynxSubmissionAuditVerifier",
+        perform_max_seconds=3600,
     ),
     "ezlynx.overdue_submission_reports": ExecutableSkillContract(
         expected_destination_result=(
@@ -143,6 +165,10 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
             "email delivery is not explicitly authorized by the job contract",
             "any Gmail delivery receipt cannot be independently reread",
         ),
+        # Agency-wide pagination often exceeds the 120s starting budget while
+        # pages and rows are still advancing. The engine refreshes the idle
+        # deadline on that progress; this ceiling is the hard cap, not a hang.
+        perform_max_seconds=3600,
     ),
     "ezlynx.session_refresh": ExecutableSkillContract(
         expected_destination_result=(

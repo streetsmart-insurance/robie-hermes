@@ -30,3 +30,11 @@ def test_skill_fails_closed_before_email_when_auth_or_recipient_lookup_is_unavai
     assert "Never guess an address" in content
     assert "Do not change submission statuses" in content
 
+
+def test_skill_documents_why_agency_wide_pagination_may_run_longer():
+    content = REPOSITORY_SKILL.read_text(encoding="utf-8")
+    assert "## Perform time" in content
+    assert "120-second starting budget" in content
+    assert "durable progress" in content
+    assert "3600-second" in content
+
