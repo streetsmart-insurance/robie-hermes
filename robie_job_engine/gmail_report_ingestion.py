@@ -229,11 +229,15 @@ REPORT_DISPLAY_NAMES: dict[str, str] = {
 # Mirrored from report_registry.VERIFIED_REPORTS (keep in sync).
 # schema_verified=False blocks ingestion, mirroring
 # ReportRunRegistry.start_run's gate.
+# 4359 verified 2026-09-19 ~10:15 EDT against the real 2026-09-19 delivery
+# (Gmail 1a0b9a359d14407a, ROBIE_daily_CSV_2026-09-19T0827.csv): exact
+# 19-column header match, 69 rows, zero blank Policy Number, zero blank
+# Change Request Created Date, 69 unique per-request identity keys.
 SCHEMA_VERIFIED: dict[str, bool] = {
     "4247": True,
     "4246": True,
     "4372": True,
-    "4359": False,
+    "4359": True,
 }
 
 # Work-item identity column per report. Decided 2026-09-19 by Carlo:

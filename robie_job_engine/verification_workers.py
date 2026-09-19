@@ -458,6 +458,68 @@ class WorkerRun:
     errors: list = field(default_factory=list)
 
 
+def _execute_live_action(pa: PlannedAction, item: WorkItem | None) -> str:
+    """Execute one planned action via real adapters. Returns evidence note.
+
+    Raises AdapterError if the action cannot be performed — the caller
+    catches it and leaves the action pending with the error as reason.
+    Only real destination evidence (message ID, call ID, note ID) counts
+    as done. Nothing here ever claims work it didn't do.
+    """
+    from worker_adapters import (
+        AdapterError,
+        BlandCallAdapter,
+        EZLynxNoteAdapter,
+        ROBIE_EMAIL,
+        RobieEmailAdapter,
+    )
+    kind = pa.action.kind
+    if kind == "email":
+        # Target email must come from the work item row (carrier desk).
+        to = (item.row.get("Carrier Email") or item.row.get("Underwriter Email")
+              or "").strip() if item else ""
+        if not to:
+            raise AdapterError(
+                "no carrier desk email on file for this item — "
+                "cannot send")
+        adapter = RobieEmailAdapter()
+        ev = adapter.send(
+            to=to,
+            subject=f"[{pa.worker}] Policy {pa.policy_number}",
+            body=f"Hello,\n\n{pa.action.detail}\n\n"
+                 f"— Robie, producer assistant with StreetSmart Insurance\n"
+                 f"{ROBIE_EMAIL}",
+        )
+        return f"EMAIL sent: {ev.detail} (id {ev.destination_id})"
+    if kind == "call":
+        # Calls go to carriers/MGAs/lenders ONLY — never clients.
+        # The number must be on file; we never dial the insured.
+        to = (item.row.get("Carrier Phone") or item.row.get("Lender Phone")
+              or "").strip() if item else ""
+        if not to:
+            raise AdapterError(
+                "no carrier/lender phone on file for this item — "
+                "cannot call")
+        adapter = BlandCallAdapter()
+        ev = adapter.call(to=to, task=pa.action.detail)
+        return f"CALL placed: {ev.detail}"
+    if kind in ("note", "file"):
+        applicant_id = (item.row.get("Applicant ID") or "").strip() if item else ""
+        if not applicant_id:
+            raise AdapterError("no Applicant ID on file — cannot file note")
+        adapter = EZLynxNoteAdapter()
+        ev = adapter.file_note(
+            applicant_id=applicant_id,
+            discussion_title=f"{pa.worker} — {pa.policy_number}",
+            body=pa.action.detail,
+        )
+        return f"NOTE filed: {ev.detail} (id {ev.destination_id})"
+    # portal / verify / wait / sweep / escalate are human or scheduled
+    # steps — live mode records them as pending, never as done.
+    raise AdapterError(
+        f"action kind {kind!r} has no live adapter — held for manual step")
+
+
 def _record_evidence(run: WorkerRun, action: PlannedAction, note: str) -> None:
     run.evidence.append({
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -541,9 +603,26 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             pa = PlannedAction(item.key, item.policy_number, item.account_name,
                                _dept(item), worker, action, status, reason, mode)
             run.actions.append(pa)
-            _record_evidence(run, pa,
-                             "EXECUTED via integration adapter" if live
-                             else "planned — dry_run, no outreach performed")
+            if live and status == "in_progress":
+                # Live: actually execute via adapters. Only real destination
+                # evidence marks an action done; any adapter failure leaves
+                # it pending with the error as the reason. Nothing here
+                # ever claims work it didn't do.
+                try:
+                    evidence_note = _execute_live_action(pa, item)
+                    pa.status = "done"
+                    pa.reason = evidence_note
+                    _record_evidence(run, pa, evidence_note)
+                except Exception as exc:  # AdapterError and friends
+                    pa.status = "pending"
+                    pa.reason = (f"live execution failed: {exc} — "
+                                 f"original plan: {reason}")
+                    _record_evidence(run, pa, pa.reason)
+            else:
+                _record_evidence(run, pa,
+                                 "planned — dry_run, no outreach performed"
+                                 if not live else
+                                 f"held: {reason}")
     return run
 
 
