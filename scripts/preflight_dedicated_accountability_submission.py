@@ -26,7 +26,6 @@ REQUIRED_EXACT = {
     "pager_total_present": True,
     "status_aria_sort": "ascending",
     "first_row_non_closed": True,
-    "first_closed_row_inspected": True,
     "day_31_qualifies": True,
     "headers_present": True,
 }
@@ -102,24 +101,41 @@ def validate_observation(observed: Mapping[str, Any]) -> dict[str, Any]:
     non_closed = _require_int(
         observed, "non_closed_rows_inspected", minimum=1
     )
-    first_closed_page = _require_int(
-        observed, "first_closed_row_page", minimum=1
-    )
-    first_closed_index = _require_int(
-        observed, "first_closed_row_index", minimum=0
-    )
     open_count = _require_int(observed, "open_over_30_count", minimum=0)
-
-    if first_closed_page > pages_reviewed:
-        raise SubmissionPreflightError("first closed row was outside reviewed pages")
-    if rows_inspected != non_closed + 1:
+    closed_boundary = observed.get("first_closed_row_inspected") is True
+    exhausted_boundary = observed.get("full_dataset_exhausted") is True
+    if closed_boundary == exhausted_boundary:
         raise SubmissionPreflightError(
-            "rows inspected did not reconcile through the first closed row"
+            "exactly one Submission Center terminal boundary was required"
         )
+    if closed_boundary:
+        first_closed_page = _require_int(
+            observed, "first_closed_row_page", minimum=1
+        )
+        _require_int(observed, "first_closed_row_index", minimum=0)
+        if first_closed_page > pages_reviewed:
+            raise SubmissionPreflightError("first closed row was outside reviewed pages")
+        if rows_inspected != non_closed + 1:
+            raise SubmissionPreflightError(
+                "rows inspected did not reconcile through the first closed row"
+            )
+        if str(observed.get("first_closed_row_status") or "") not in CLOSED:
+            raise SubmissionPreflightError("first closed-row status was not recognized")
+        boundary_kind = "first_closed_row"
+    else:
+        if rows_inspected != pager_total or non_closed != pager_total:
+            raise SubmissionPreflightError(
+                "fully exhausted pager rows did not reconcile"
+            )
+        if observed.get("first_closed_row_page") is not None:
+            raise SubmissionPreflightError("exhausted pager reported a closed-row page")
+        if observed.get("first_closed_row_index") is not None:
+            raise SubmissionPreflightError("exhausted pager reported a closed-row index")
+        if str(observed.get("first_closed_row_status") or ""):
+            raise SubmissionPreflightError("exhausted pager reported a closed-row status")
+        boundary_kind = "pager_exhausted"
     if rows_inspected > pager_total:
         raise SubmissionPreflightError("rows inspected exceeded the live pager total")
-    if str(observed.get("first_closed_row_status") or "") not in CLOSED:
-        raise SubmissionPreflightError("first closed-row status was not recognized")
 
     records = observed.get("qualifying_records")
     if not isinstance(records, list) or len(records) != open_count:
@@ -174,6 +190,7 @@ def validate_observation(observed: Mapping[str, Any]) -> dict[str, Any]:
         "all_submissions_verified": True,
         "page_size_verified": True,
         "pagination_boundary_verified": True,
+        "boundary_kind": boundary_kind,
         "red_overdue_verified": True,
         "day_31_verified": True,
         "pages_reviewed": pages_reviewed,
@@ -223,6 +240,7 @@ def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
         "rows_inspected_through_boundary",
         "open_over_30_count",
         "evidence_sha256",
+        "boundary_kind",
     )
     baseline = tuple(summaries[0][key] for key in stable_keys)
     if any(tuple(item[key] for key in stable_keys) != baseline for item in summaries[1:]):
