@@ -181,6 +181,8 @@ def test_workflows_run_two_attempt_submission_preflight_before_delivery():
         ("PLAYWRIGHT_BLOCKED: 100-row selection rendered 10 mat-row elements", "page_size_rows_mismatch"),
         ("PLAYWRIGHT_BLOCKED: next Submission Center page did not load", "next_page_failed"),
         ("NEEDS_AUTH", "session_not_authenticated"),
+        ("fully exhausted pager rows did not reconcile", "exhausted_boundary_count_mismatch"),
+        ("required evidence mismatch: mat_row_count", "required_evidence_mismatch"),
     ],
 )
 def test_failure_codes_are_bounded_and_privacy_safe(message, expected):
