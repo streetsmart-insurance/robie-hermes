@@ -507,9 +507,15 @@ def audit(*, fresh: bool) -> dict[str, Any]:
 
         while first_closed_page is None:
             pages_reviewed += 1
-            start, _, _ = _pager_range(page)
+            start, end, _ = _pager_range(page)
+            expected_page_rows = end - start + 1
             rows = page.locator("mat-row")
-            statuses = _row_statuses(page, positions["status"])
+            rendered_statuses = _row_statuses(page, positions["status"])
+            if len(rendered_statuses) < expected_page_rows:
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: pager range exceeded rendered Submission Center statuses"
+                )
+            statuses = rendered_statuses[:expected_page_rows]
             if not statuses:
                 raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center page rendered no statuses")
             for index, status in enumerate(statuses):
