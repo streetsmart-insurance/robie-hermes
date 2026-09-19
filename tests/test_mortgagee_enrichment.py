@@ -59,10 +59,12 @@ def _ports(policy=None, documents=None):
     return menc.EnrichmentPorts(policy=policy, documents=documents)
 
 
-def _policy_payload(*mortgages, include_empty_list=False):
+def _policy_payload(*mortgages, include_empty_list=False, property_zip=""):
     body = {"policyNumber": "HO-1", "status": "Active"}
     if mortgages or include_empty_list:
         body["mortgagees"] = list(mortgages)
+    if property_zip:
+        body["property_zip"] = property_zip
     return {"status": "success", "data": body}
 
 
@@ -467,11 +469,12 @@ class TestWorkerWiring:
         assert run.actions[0].policy_number == "OPEN1"
         assert [e["policy_number"] for e in run.enrichment] == ["OPEN1"]
 
-    def test_injected_ports_ready_lists_each_mortgage(self, tmp_path):
-        ports = _ports(
+    def _ready_ports(self, *, property_zip="08527"):
+        return _ports(
             FakePolicy(_policy_payload(
                 {"MortgageeName": "Alpha", "LoanNumber": "A-1"},
                 {"MortgageeName": "Beta", "LoanNumber": "B-2"},
+                property_zip=property_zip,
             )),
             FakeDocs({
                 "results": [
@@ -482,18 +485,26 @@ class TestWorkerWiring:
                 ]
             }),
         )
+
+    def test_injected_ports_ready_runs_verify_lender_per_mortgage(self, tmp_path):
         run = vw.run_worker(
             "4372", day=DAY, mode="dry_run", queue_dir=str(tmp_path),
             csv_bytes=_csv_bytes([_row4372("HO-1")]),
-            enrichment_ports=ports,
+            enrichment_ports=self._ready_ports(),
         )
         assert run.enrichment[0]["status"] == menc.STATUS_READY
+        checks = run.enrichment[0]["lender_checks"]
+        assert len(checks) == 2
+        assert [c["loan_number"] for c in checks] == ["A-1", "B-2"]
+        assert all(c["verify_ok"] is True for c in checks)
+        assert all(c["property_zip"] == "08527" for c in checks)
+        # Producer gate still blocks delivery (CSV has no review flag).
         assert run.actions[0].status == "blocked"
+        assert "producer_review_complete" in run.actions[0].reason
+        assert "lender/loan not on file" not in run.actions[0].reason
         detail = run.actions[0].action.detail
         assert "mortgage 1:" in detail and "mortgage 2:" in detail
-        assert "Alpha" in detail and "Beta" in detail
-        assert "Bland" in detail
-        assert run.actions[0].reason.startswith("enriched")
+        assert "verify_lender=pass" in detail
 
     def test_injected_conflict_marks_hitl(self, tmp_path):
         ports = _ports(
@@ -539,3 +550,220 @@ class TestWorkerWiring:
         assert all(a.status == "blocked" for a in run.actions)
         assert all("lender" in a.reason.casefold() for a in run.actions)
         assert all(e["dry_run"] is True for e in run.enrichment)
+
+
+# ---------------------------------------------------------------------------
+# Ready → verify_lender; HITL / zero / incomplete do not
+# ---------------------------------------------------------------------------
+
+
+def _ready_result(**kwargs):
+    mortgages = [
+        menc.MortgageRecord("Alpha", "A-1", "agreed"),
+        menc.MortgageRecord("Beta", "B-2", "agreed"),
+    ]
+    return menc.EnrichmentResult(
+        policy_number="HO-1",
+        applicant_id="220250093",
+        status=menc.STATUS_READY,
+        reason="enriched 2 mortgage(s)",
+        dry_run=True,
+        mortgages=mortgages,
+        property_zip="08527",
+        **kwargs,
+    )
+
+
+class TestReadyLenderChecks:
+    def test_verify_lender_called_once_per_mortgage(self):
+        calls = []
+
+        def spy(company, loan, zip_code):
+            calls.append((company, loan, zip_code))
+            return True, "lender verified"
+
+        def of_record(*_args):
+            return False, "portal lookup not performed"
+
+        checks = menc.check_ready_mortgages(
+            _ready_result().mortgages,
+            property_zip="08527",
+            verify_lender_fn=spy,
+            verify_of_record_fn=of_record,
+        )
+        assert calls == [("Alpha", "A-1", "08527"), ("Beta", "B-2", "08527")]
+        assert [c.verify_ok for c in checks] == [True, True]
+        assert all("portal" in c.of_record_reason for c in checks)
+
+    def test_ready_plus_producer_clear_is_waiting_not_missing_lender(self):
+        kind, detail, target, status, reason = menc.plan_from_enrichment(
+            _ready_result(),
+            due_txt="task due 2026-10-15",
+            property_zip="08527",
+            producer_state={"producer_review_complete": True},
+        )
+        assert status == "waiting"
+        assert "lender inputs verified" in reason
+        assert "lender/loan not on file" not in reason
+        assert "verify_lender=pass" in detail
+        assert target == "Alpha"
+
+    def test_conflict_hitl_does_not_call_verify_lender(self):
+        def boom(*_args, **_kwargs):
+            raise AssertionError("verify_lender must not run on HITL")
+
+        result = menc.EnrichmentResult(
+            policy_number="HO-1", applicant_id="1",
+            status=menc.STATUS_HITL, reason=menc.REASON_HITL_CONFLICT,
+            dry_run=True,
+        )
+        _kind, _detail, target, status, reason = menc.plan_from_enrichment(
+            result, due_txt="x", verify_lender_fn=boom,
+        )
+        assert status == "blocked"
+        assert target == "HITL"
+        assert "HITL" in reason
+
+    def test_proven_zero_still_skips_without_verify_lender(self):
+        def boom(*_args, **_kwargs):
+            raise AssertionError("verify_lender must not run on proven_zero")
+
+        result = menc.EnrichmentResult(
+            policy_number="HO-1", applicant_id="1",
+            status=menc.STATUS_PROVEN_ZERO, reason=menc.REASON_PROVEN_ZERO,
+            dry_run=True,
+        )
+        _kind, _detail, _target, status, reason = menc.plan_from_enrichment(
+            result, due_txt="x", verify_lender_fn=boom,
+        )
+        assert status == "waiting"
+        assert "zero mortgages proven" in reason
+
+    def test_incomplete_still_blocked_without_verify_lender(self):
+        def boom(*_args, **_kwargs):
+            raise AssertionError("verify_lender must not run on incomplete")
+
+        result = menc.EnrichmentResult(
+            policy_number="HO-1", applicant_id="1",
+            status=menc.STATUS_INCOMPLETE,
+            reason=menc.REASON_LENDER_NOT_ON_FILE,
+            dry_run=True,
+        )
+        _kind, _detail, _target, status, reason = menc.plan_from_enrichment(
+            result, due_txt="x", verify_lender_fn=boom,
+        )
+        assert status == "blocked"
+        assert "lender/loan not on file" in reason
+
+
+class TestTestOnlyClientFactory:
+    def test_resolve_default_is_unbound(self, monkeypatch):
+        monkeypatch.delenv(menc.ENRICHMENT_LIVE_TEST_FLAG, raising=False)
+        monkeypatch.setenv("ROBIE_ENV", "TEST")
+        ports = menc.resolve_enrichment_ports()
+        assert ports.policy is None
+        assert ports.documents is None
+
+    def test_bind_refuses_production_env_and_never_loads_config(self, monkeypatch):
+        monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+        loaded = []
+
+        def load(environment=None, accessor=None):
+            loaded.append(environment)
+            return object()
+
+        with pytest.raises(menc.ProductionClientRefused, match="Production"):
+            menc.bind_test_enrichment_ports(
+                load_config=load, client_cls=lambda config: config,
+            )
+        assert loaded == []
+
+    def test_bind_refuses_explicit_prod_request(self, monkeypatch):
+        monkeypatch.setenv("ROBIE_ENV", "TEST")
+        with pytest.raises(menc.ProductionClientRefused, match="Production"):
+            menc.bind_test_enrichment_ports(environment="PRODUCTION")
+
+    def test_bind_test_passes_TEST_not_prod_to_loader(self, monkeypatch):
+        monkeypatch.setenv("ROBIE_ENV", "TEST")
+        loaded = []
+
+        class Client:
+            def __init__(self, config):
+                self.config = config
+
+        def load(environment=None, accessor=None):
+            loaded.append(environment)
+            assert environment == "TEST"
+            return {"environment": environment}
+
+        ports = menc.bind_test_enrichment_ports(
+            load_config=load, client_cls=Client,
+        )
+        assert loaded == ["TEST"]
+        assert ports.policy is not None
+        assert ports.documents is not None
+
+    def test_run_worker_test_flag_refuses_prod(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+        with pytest.raises(menc.ProductionClientRefused):
+            vw.run_worker(
+                "4372", day=DAY, mode="dry_run", queue_dir=str(tmp_path),
+                csv_bytes=_csv_bytes([_row4372("HO-1")]),
+                test_enrichment=True,
+            )
+
+
+class TestMetadataProbe:
+    def test_collect_and_classify_keys_does_not_invent(self):
+        keys = menc.collect_payload_keys({
+            "results": [
+                {"id": "1", "documentName": "HO Declaration",
+                 "MortgageeName": "A", "LoanNumber": "1", "extraField": "x"},
+            ]
+        })
+        assert "MortgageeName" in keys
+        assert "LoanNumber" in keys
+        assert "extraField" in keys
+        classified = menc.classify_metadata_keys(keys)
+        assert "MortgageeName" in classified["allowlisted"]
+        assert "LoanNumber" in classified["allowlisted"]
+        assert "extraField" in classified["unknown"]
+
+    def test_probe_refuses_production_host_and_wrong_applicant(self, monkeypatch):
+        from robie_job_engine.probe_4372_mortgagee_metadata import (
+            probe_metadata,
+            refuse_production_host,
+            require_test_applicant,
+        )
+
+        with pytest.raises(menc.ProductionClientRefused, match="hermes-poc-01"):
+            refuse_production_host("hermes-poc-01.c.streetsmart-hermes-poc.internal")
+        with pytest.raises(menc.ProductionClientRefused, match="220250093"):
+            require_test_applicant("221398001")
+        monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+        with pytest.raises(menc.ProductionClientRefused, match="Production"):
+            probe_metadata(ports=_ports())
+
+    def test_probe_reads_keys_from_fake_ports(self, monkeypatch):
+        from robie_job_engine.probe_4372_mortgagee_metadata import probe_metadata
+
+        monkeypatch.setenv("ROBIE_ENV", "TEST")
+        ports = _ports(
+            FakePolicy(_policy_payload(
+                {"MortgageeName": "Alpha", "LoanNumber": "A-1"},
+                property_zip="08527",
+            )),
+            FakeDocs({"results": [_dec_row("1", "HO Declaration")]}),
+        )
+        summary = probe_metadata(
+            ports=ports,
+            policy_number="HO-1",
+            hostname="hermes-test-01",
+        )
+        assert summary["document_search"]["ok"] is True
+        assert summary["policy_search"]["ok"] is True
+        assert summary["writes"] is False
+        assert summary["downloads"] is False
+        assert "MortgageeName" in summary["classification"]["allowlisted"]
+        assert ports.documents.downloads == []
+        assert ports.policy.downloads == []

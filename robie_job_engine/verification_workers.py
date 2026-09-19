@@ -433,12 +433,19 @@ def plan_4372(
     item: WorkItem,
     today: date,
     enrichment: menc.EnrichmentResult | None = None,
+    *,
+    lender_checks: list[menc.MortgageLenderCheck] | None = None,
+    verify_lender_fn=None,
+    verify_of_record_fn=None,
+    producer_gate_fn=None,
 ) -> tuple[ActionPlan, str, str]:
-    """Mortgagee: structured enrichment first; flag until lender/loan proven.
+    """Mortgagee: structured enrichment first, then lender input checks.
 
     Closed tasks never reach this planner (see ``_4372_closed_reason``).
-    Portal / Bland delivery stays out of this scaffold. HITL on source
-    conflict. Proven-zero is an explicit empty result, never a silent skip.
+    ``ready`` runs ``verify_lender`` per mortgage (not blocked forever for
+    missing lender/loan). Producer gate still blocks delivery. Portal /
+    Bland stay out of this scaffold. HITL on source conflict. Proven-zero
+    is an explicit empty result, never a silent skip.
     """
     due = parse_csv_date(_cell(item.row, "Task Due Date"))
     due_txt = f"task due {due.isoformat()}" if due else "no task due date"
@@ -453,7 +460,19 @@ def plan_4372(
             dry_run=True,
         )
     kind, detail, target, status, reason = menc.plan_from_enrichment(
-        result, due_txt=due_txt,
+        result,
+        due_txt=due_txt,
+        property_zip=menc.property_zip_from_row(item.row) or (
+            result.property_zip if result is not None else ""
+        ),
+        portal_lookup=item.row.get("portal_lender_lookup")
+        if isinstance(item.row.get("portal_lender_lookup"), dict)
+        else None,
+        producer_state=item.row,
+        lender_checks=lender_checks,
+        verify_lender_fn=verify_lender_fn,
+        verify_of_record_fn=verify_of_record_fn,
+        producer_gate_fn=producer_gate_fn,
     )
     return (ActionPlan(kind, detail, target=target, due=today.isoformat()),
             status, reason)
@@ -584,7 +603,8 @@ def _record_evidence(run: WorkerRun, action: PlannedAction, note: str) -> None:
 def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                queue_dir: str = ".", csv_bytes: bytes | None = None,
                gmail_service=None, allow_unverified: bool = False,
-               enrichment_ports: menc.EnrichmentPorts | None = None) -> WorkerRun:
+               enrichment_ports: menc.EnrichmentPorts | None = None,
+               test_enrichment: bool = False) -> WorkerRun:
     """Run one verification worker for one day. Fail-closed throughout."""
     worker = WORKERS[report_id]["name"]
     run = WorkerRun(report_id=report_id, worker=worker,
@@ -669,16 +689,40 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
         for item in items:
             enrichment = None
             if report_id == "4372":
+                ports = menc.resolve_enrichment_ports(
+                    enrichment_ports, live_test=test_enrichment,
+                )
                 enrichment = menc.enrich_work_item(
                     policy_number=item.policy_number,
                     applicant_id=_cell(item.row, "Applicant ID"),
                     row=item.row,
-                    ports=enrichment_ports or menc.EnrichmentPorts(),
+                    ports=ports,
                     dry_run=(mode != "live"),
                 )
-                item.row["_mortgagee_enrichment"] = enrichment.to_dict()
-                run.enrichment.append(enrichment.to_dict())
-                action, status, reason = plan_4372(item, day, enrichment=enrichment)
+                payload = enrichment.to_dict()
+                lender_checks = None
+                if enrichment.status == menc.STATUS_READY:
+                    zip_code = (
+                        menc.property_zip_from_row(item.row) or enrichment.property_zip
+                    )
+                    lender_checks = menc.check_ready_mortgages(
+                        enrichment.mortgages,
+                        property_zip=zip_code,
+                        portal_lookup=item.row.get("portal_lender_lookup")
+                        if isinstance(item.row.get("portal_lender_lookup"), dict)
+                        else None,
+                    )
+                    payload["lender_checks"] = [c.to_dict() for c in lender_checks]
+                    clear, gate_reason = menc.producer_gate_from_row(item.row)
+                    payload["producer"] = {
+                        "clear": clear,
+                        "reason": gate_reason,
+                    }
+                item.row["_mortgagee_enrichment"] = payload
+                run.enrichment.append(payload)
+                action, status, reason = plan_4372(
+                    item, day, enrichment=enrichment, lender_checks=lender_checks,
+                )
             else:
                 action, status, reason = planner(item, day)
             pa = PlannedAction(item.key, item.policy_number, item.account_name,
@@ -767,6 +811,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="write digest markdown here (default: stdout)")
     parser.add_argument("--allow-unverified", action="store_true",
                         help="bypass the schema gate (4359 until verified)")
+    parser.add_argument("--test-enrichment", action="store_true",
+                        help="bind Test-only EzlynxApiClient (ROBIE_ENV=TEST required; "
+                             "never Production)")
     args = parser.parse_args(argv)
 
     day = datetime.strptime(args.day, "%Y-%m-%d").date()
@@ -776,7 +823,8 @@ def main(argv: list[str] | None = None) -> int:
             csv_bytes = fh.read()
     run = run_worker(args.report, day=day, mode=args.mode,
                      queue_dir=args.queue_dir, csv_bytes=csv_bytes,
-                     allow_unverified=args.allow_unverified)
+                     allow_unverified=args.allow_unverified,
+                     test_enrichment=args.test_enrichment)
     digest = build_digest([run])
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

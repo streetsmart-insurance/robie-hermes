@@ -8,9 +8,15 @@ or loan number. Today ``plan_4372`` flags every open item as
 scaffold** that sits in front of that planner.
 
 It is NOT live production delivery. Portal upload and Bland dials stay
-out of this PR. Dry-run is the default. No live EZLynx write is issued
-unless a later live-prove step injects a real DiscussionApi /
-DocumentApi write client **and** an operator enables it.
+out of this PR. Dry-run / unbound ports are the default.
+
+Carlo GO (Test only): ``bind_test_enrichment_ports`` / env flag
+``ROBIE_4372_ENRICHMENT_TEST=1`` constructs a real ``EzlynxApiClient``
+from the **UAT / TEST** Secret Manager pattern in ``ezlynx_api.py``.
+It never constructs a Production client. After status ``ready``, each
+``MortgageRecord`` is handed to ``verify_lender`` (and
+``verify_lender_of_record`` with portal lookup still ``None``). The
+producer gate still blocks delivery until ``producer_review_complete``.
 
 How it plugs in
 ---------------
@@ -20,7 +26,10 @@ already excluded). The result is stored on the item and passed to
 ``plan_4372``:
 
 * ``ready`` — every mortgage has a unique structured lender + loan from
-  agreeing sources. Planner still holds delivery (portal/Bland TODO).
+  agreeing sources. Planner then runs ``verify_lender`` per mortgage
+  (ZIP from the work item / policy row). Not "blocked forever" for
+  missing lender/loan. Producer gate still blocks delivery. Portal
+  lookup stays unset (out of scope).
 * ``hitl`` — declaration structured fields disagree with policy fields.
   Halt. Do not pick a side.
 * ``proven_zero`` — both structured sources returned an **explicit**
@@ -44,24 +53,31 @@ Rules this scaffold enforces
 7. Notes/docs writes stay API-only. Playwright/CDP helpers call
    ``refuse_playwright_note_or_doc`` and cannot authorize COMPLETE.
 
-TODO — next live-prove step (not this PR)
------------------------------------------
-* Bind a real ``EzlynxApiClient`` on Test only; prove DocumentApi search
-  + PolicyApi search against the ROBIE Test applicant.
-* Confirm which PolicyApi / DocumentApi metadata keys actually carry
-  mortgagee name and loan number (do not guess new keys in prod).
-* Wire producer-gate + lender-of-record portal lookup (existing
-  ``mortgagee_verification_worker``) **after** enrichment is READY.
+TODO — still out of this PR
+---------------------------
 * Portal agent-section delivery and Bland mortgage-company dials.
 * DiscussionApi note of enrichment outcome with ``note_id`` read-back.
+* Do not invent Production allowlist keys; Dusty's hermes-test-01 probe
+  (``scripts/probe_4372_mortgagee_metadata.py``) prints live keys.
 * No Production zip / deploy from this scaffold.
 """
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
+
+try:
+    from .runtime_env import PRODUCTION_ENV_NAMES, TEST_ENV_NAME, current_robie_env
+except ImportError:  # pragma: no cover - script-style import
+    from runtime_env import (  # type: ignore
+        PRODUCTION_ENV_NAMES,
+        TEST_ENV_NAME,
+        current_robie_env,
+    )
 
 # Unique structured field names only. Folded: lowercase, no separators.
 # "lender" is included because EZLynx / portal payloads already use it as
@@ -150,9 +166,22 @@ REASON_PDF_SCRAPE = (
 REASON_NO_INVENT = "refused: no unique structured field match — will not invent values"
 REASON_SSN = "refused: SSN / full SSN is never used for mortgagee enrichment"
 
+# Test-only live bind. Default remains unbound / dry-run.
+ROBIE_TEST_APPLICANT_ID = "220250093"
+ENRICHMENT_LIVE_TEST_FLAG = "ROBIE_4372_ENRICHMENT_TEST"
+REASON_PRODUCER_GATE = "producer review blocks delivery until producer_review_complete"
+REASON_LENDER_INPUTS_VERIFIED = (
+    "lender inputs verified per mortgage; portal lender-of-record lookup "
+    "and Bland are out of this scaffold"
+)
+
 
 class MortgageeEnrichmentError(ValueError):
     """Fail-closed enrichment refusal (SSN, PDF scrape, Playwright write)."""
+
+
+class ProductionClientRefused(MortgageeEnrichmentError):
+    """4372 enrichment must never construct a Production EzlynxApiClient."""
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +237,7 @@ class SourceSnapshot:
     conflict: str = ""
     error: str = ""
     read_back: dict[str, Any] = field(default_factory=dict)
+    property_zip: str = ""
 
 
 @dataclass
@@ -223,6 +253,7 @@ class EnrichmentResult:
     declaration_docs: list[DeclarationDoc] = field(default_factory=list)
     policy_snapshot: dict[str, Any] = field(default_factory=dict)
     declaration_snapshot: dict[str, Any] = field(default_factory=dict)
+    property_zip: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -235,6 +266,7 @@ class EnrichmentResult:
             "declaration_docs": [asdict(d) for d in self.declaration_docs],
             "policy_snapshot": dict(self.policy_snapshot),
             "declaration_snapshot": dict(self.declaration_snapshot),
+            "property_zip": self.property_zip,
         }
         _assert_no_forbidden_keys(payload)
         return payload
@@ -310,6 +342,65 @@ class ThinPolicyApiLookup:
             raise MortgageeEnrichmentError("PolicyApi client cannot search policies")
         payload = search(number)
         return payload if isinstance(payload, dict) else {"data": payload}
+
+
+def bind_test_enrichment_ports(
+    *,
+    environment: str | None = None,
+    client: Any = None,
+    load_config: Callable[..., Any] | None = None,
+    client_cls: Any = None,
+) -> EnrichmentPorts:
+    """Construct real DocumentApi / PolicyApi ports for **TEST only**.
+
+    Uses ``load_ezlynx_api_config(environment=TEST)`` →
+    ``ROBIE_EZLYNX_API_UAT_SECRET``. Refuses when ``ROBIE_ENV`` is
+    Production, when the caller asks for Production, or when the env is
+    unset. Never reads ``ROBIE_EZLYNX_API_PROD_SECRET``.
+    """
+    current = current_robie_env()
+    requested = (environment or current or "").strip().upper()
+    if current in PRODUCTION_ENV_NAMES:
+        raise ProductionClientRefused(
+            "4372 enrichment client bind is Test-only; ROBIE_ENV is Production"
+        )
+    if requested in PRODUCTION_ENV_NAMES:
+        raise ProductionClientRefused(
+            "refused Production EzlynxApiClient for 4372 enrichment"
+        )
+    if requested != TEST_ENV_NAME:
+        raise ProductionClientRefused(
+            "ROBIE_ENV must be TEST to bind the 4372 enrichment client "
+            f"(got {requested or 'unset'})"
+        )
+    if client is None:
+        if load_config is None or client_cls is None:
+            try:
+                from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
+            except ImportError:  # pragma: no cover
+                from ezlynx_api import EzlynxApiClient, load_ezlynx_api_config  # type: ignore
+            load_config = load_config or load_ezlynx_api_config
+            client_cls = client_cls or EzlynxApiClient
+        config = load_config(environment=TEST_ENV_NAME)
+        client = client_cls(config)
+    return EnrichmentPorts(
+        policy=ThinPolicyApiLookup(client),
+        documents=ThinDocumentApiLookup(client),
+    )
+
+
+def resolve_enrichment_ports(
+    explicit: EnrichmentPorts | None = None,
+    *,
+    live_test: bool = False,
+) -> EnrichmentPorts:
+    """Default unbound. Live Test bind only when flag or ``live_test``."""
+    if explicit is not None:
+        return explicit
+    flag = str(os.environ.get(ENRICHMENT_LIVE_TEST_FLAG) or "").strip().lower()
+    if live_test or flag in {"1", "true", "yes"}:
+        return bind_test_enrichment_ports()
+    return EnrichmentPorts()
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +706,7 @@ def read_policy_source(
         )
     try:
         mortgages, conflict, saw = extract_structured_mortgages(payload, source="policy")
+        zip_code = extract_property_zip(payload)
     except MortgageeEnrichmentError as exc:
         return _snapshot(
             "policy", available=True, explicit_empty=False,
@@ -627,11 +719,13 @@ def read_policy_source(
         explicit_empty=bool(saw and not mortgages and not conflict),
         mortgages=mortgages,
         conflict=conflict,
+        property_zip=zip_code,
         read_back={
             "search": "PolicyApi/policy/v1/search",
             "policy_number": number,
             "explicit_collection": saw,
             "mortgage_count": len(mortgages),
+            "property_zip": zip_code,
         },
     )
 
@@ -846,6 +940,7 @@ def enrich_work_item(
         dry_run=bool(dry_run),
         mortgages=mortgages,
         declaration_docs=list(declaration.declaration_docs),
+        property_zip=policy.property_zip,
         policy_snapshot={
             "available": policy.available,
             "explicit_empty": policy.explicit_empty,
@@ -867,10 +962,221 @@ def enrich_work_item(
     return result
 
 
+@dataclass
+class MortgageLenderCheck:
+    """One ``verify_lender`` (+ of-record placeholder) result per mortgage."""
+
+    lender_name: str
+    loan_number: str
+    property_zip: str
+    verify_ok: bool
+    verify_reason: str
+    of_record_ok: bool
+    of_record_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        _assert_no_forbidden_keys(payload)
+        return payload
+
+
+_ZIP_STRUCTURED_KEYS = frozenset({
+    "propertyzip",
+    "propertyzipcode",
+    "zipcode",
+    "postalcode",
+    "zip",
+})
+
+_ZIP_ROW_KEYS = (
+    "Property ZIP",
+    "Property Zip",
+    "property_zip",
+    "property_zip_code",
+    "Property ZIP Code",
+    "Postal Code",
+    "zip",
+    "Zip",
+    "ZIP",
+)
+
+
+def property_zip_from_row(row: dict[str, Any] | None) -> str:
+    """Unique structured ZIP from the work item / policy row. Never invent."""
+    if not isinstance(row, dict):
+        return ""
+    found: list[str] = []
+    blobs: list[dict[str, Any]] = [row]
+    nested = row.get("payer_info")
+    if isinstance(nested, dict):
+        blobs.append(nested)
+    for blob in blobs:
+        for key in _ZIP_ROW_KEYS:
+            text = _clean_text(blob.get(key))
+            if text:
+                found.append(text)
+    unique = list(dict.fromkeys(found))
+    if len(unique) == 1:
+        return unique[0]
+    return ""
+
+
+def extract_property_zip(payload: Any) -> str:
+    """Unique structured ZIP from a PolicyApi payload. Never invent."""
+    found: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, raw in node.items():
+                if _fold_key(key) in _ZIP_STRUCTURED_KEYS:
+                    if isinstance(raw, (dict, list, tuple, bool)):
+                        continue
+                    text = _clean_text(raw)
+                    if text and not _looks_like_ssn(text):
+                        found.append(text)
+                else:
+                    _walk(raw)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    unique = list(dict.fromkeys(found))
+    if len(unique) == 1:
+        return unique[0]
+    return ""
+
+
+def producer_gate_from_row(
+    row: dict[str, Any] | None,
+    *,
+    producer_gate_fn: Callable[[dict[str, Any]], tuple[bool, str]] | None = None,
+) -> tuple[bool, str]:
+    """Producer clearance. Delivery stays blocked until review is recorded."""
+    gate = producer_gate_fn
+    if gate is None:
+        try:
+            from .mortgagee_verification_worker import producer_gate as gate
+        except ImportError:  # pragma: no cover
+            from mortgagee_verification_worker import producer_gate as gate  # type: ignore
+    return gate(dict(row or {}))
+
+
+def check_ready_mortgages(
+    mortgages: Sequence[MortgageRecord],
+    *,
+    property_zip: str = "",
+    portal_lookup: dict[str, Any] | None = None,
+    verify_lender_fn: Callable[[Any, Any, Any], tuple[bool, str]] | None = None,
+    verify_of_record_fn: Callable[..., tuple[bool, str]] | None = None,
+) -> list[MortgageLenderCheck]:
+    """Hand each ready mortgage to ``verify_lender``.
+
+    ``verify_lender_of_record`` is called with the injected portal lookup
+    (default ``None``) so a later portal step can plug in. Portal is out
+    of this scaffold — a ``None`` lookup is recorded, not treated as an
+    input-verification failure.
+    """
+    verify = verify_lender_fn
+    of_record = verify_of_record_fn
+    if verify is None:
+        try:
+            from .mortgagee_verification_worker import verify_lender as verify
+        except ImportError:  # pragma: no cover
+            from mortgagee_verification_worker import verify_lender as verify  # type: ignore
+    if of_record is None:
+        try:
+            from .mortgagee_verification_worker import (
+                verify_lender_of_record as of_record,
+            )
+        except ImportError:  # pragma: no cover
+            from mortgagee_verification_worker import (  # type: ignore
+                verify_lender_of_record as of_record,
+            )
+    zip_code = _clean_text(property_zip)
+    checks: list[MortgageLenderCheck] = []
+    for mortgage in mortgages:
+        ok, reason = verify(mortgage.lender_name, mortgage.loan_number, zip_code)
+        rec_ok, rec_reason = of_record(
+            mortgage.lender_name,
+            mortgage.loan_number,
+            zip_code,
+            portal_lookup,
+        )
+        checks.append(
+            MortgageLenderCheck(
+                lender_name=mortgage.lender_name,
+                loan_number=mortgage.loan_number,
+                property_zip=zip_code,
+                verify_ok=bool(ok),
+                verify_reason=reason,
+                of_record_ok=bool(rec_ok),
+                of_record_reason=rec_reason,
+            )
+        )
+    return checks
+
+
+def collect_payload_keys(payload: Any) -> list[str]:
+    """Literal key names seen in a DocumentApi / PolicyApi payload.
+
+    Values are not returned (no SSN / loan / name leakage).
+    """
+    seen: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                text = str(key or "").strip()
+                if text:
+                    seen.add(text)
+                _walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    return sorted(seen)
+
+
+def classify_metadata_keys(keys: Sequence[str]) -> dict[str, list[str]]:
+    """Compare live keys to the fail-closed allowlist. Do not invent keys."""
+    allow = _LENDER_KEYS | _LOAN_KEYS | _LIST_KEYS
+    folded = {_fold_key(key): key for key in keys if str(key).strip()}
+    allowlisted_originals = sorted(
+        orig for folded_name, orig in folded.items() if folded_name in allow
+    )
+    unknown = sorted(
+        orig
+        for folded_name, orig in folded.items()
+        if folded_name not in allow
+        and folded_name not in _ENVELOPE_KEYS
+        and folded_name not in _SSN_KEYS
+        and folded_name not in _SCRAPE_KEYS
+    )
+    forbidden = sorted(
+        orig
+        for folded_name, orig in folded.items()
+        if folded_name in _SSN_KEYS or folded_name in _SCRAPE_KEYS
+    )
+    return {
+        "allowlisted": allowlisted_originals,
+        "unknown": unknown,
+        "forbidden_seen": forbidden,
+    }
+
+
 def plan_from_enrichment(
     result: EnrichmentResult,
     *,
     due_txt: str,
+    property_zip: str = "",
+    portal_lookup: dict[str, Any] | None = None,
+    producer_state: dict[str, Any] | None = None,
+    lender_checks: list[MortgageLenderCheck] | None = None,
+    verify_lender_fn: Callable[[Any, Any, Any], tuple[bool, str]] | None = None,
+    verify_of_record_fn: Callable[..., tuple[bool, str]] | None = None,
+    producer_gate_fn: Callable[[dict[str, Any]], tuple[bool, str]] | None = None,
 ) -> tuple[str, str, str, str, str]:
     """Map enrichment to planner (kind, detail, target, status, reason)."""
     if result.status == STATUS_HITL:
@@ -890,24 +1196,61 @@ def plan_from_enrichment(
             REASON_PROVEN_ZERO,
         )
     if result.status == STATUS_READY and result.mortgages:
+        checks = lender_checks
+        if checks is None:
+            checks = check_ready_mortgages(
+                result.mortgages,
+                property_zip=property_zip,
+                portal_lookup=portal_lookup,
+                verify_lender_fn=verify_lender_fn,
+                verify_of_record_fn=verify_of_record_fn,
+            )
+        producer_clear, producer_reason = producer_gate_from_row(
+            producer_state, producer_gate_fn=producer_gate_fn,
+        )
         lines = []
-        for index, mortgage in enumerate(result.mortgages, start=1):
+        for index, (mortgage, check) in enumerate(
+            zip(result.mortgages, checks), start=1
+        ):
+            flag = "pass" if check.verify_ok else "fail"
             lines.append(
                 f"mortgage {index}: lender={mortgage.lender_name!r} "
-                f"loan={mortgage.loan_number!r}"
+                f"loan={mortgage.loan_number!r} verify_lender={flag} "
+                f"({check.verify_reason}); of_record={check.of_record_reason}"
             )
-        detail = (
-            "Structured enrichment ready — handle each mortgage separately: "
-            + "; ".join(lines)
-            + ". Portal / Bland delivery is out of this scaffold "
-            f"(never SSN). ({due_txt})"
-        )
+        failed = [c for c in checks if not c.verify_ok]
+        if failed:
+            reason = failed[0].verify_reason
+            return (
+                "verify",
+                "Structured enrichment ready — lender input check failed: "
+                + "; ".join(lines)
+                + f" ({due_txt})",
+                result.mortgages[0].lender_name,
+                "blocked",
+                reason,
+            )
+        if not producer_clear:
+            return (
+                "verify",
+                "Lender inputs verified per mortgage; "
+                + producer_reason
+                + ". "
+                + "; ".join(lines)
+                + f" ({due_txt})",
+                result.mortgages[0].lender_name,
+                "blocked",
+                producer_reason,
+            )
         return (
             "verify",
-            detail,
+            REASON_LENDER_INPUTS_VERIFIED
+            + " — handle each mortgage separately: "
+            + "; ".join(lines)
+            + f" ({due_txt})",
             result.mortgages[0].lender_name,
-            "blocked",
-            "enriched; portal/Bland delivery not in this scaffold",
+            "waiting",
+            REASON_LENDER_INPUTS_VERIFIED,
         )
     return (
         "verify",
