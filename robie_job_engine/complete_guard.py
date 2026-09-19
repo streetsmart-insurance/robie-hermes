@@ -86,6 +86,11 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
         "authenticated",
         "scope",
         "postcondition",
+        "exists_in_sent_mailbox",
+        "gmail_receipt_count",
+        "producer_count",
+        "qualifying_count",
+        "message_id",
     )
 )
 

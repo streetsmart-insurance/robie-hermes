@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from robie_job_engine.models import JobStatus
+from robie_job_engine.complete_guard import (
+    expected_postcondition_missing,
+    postcondition_mismatch,
+    require_complete_postcondition,
+)
+from robie_job_engine.google_sheets_accountability import classify_sheets_auth_error
+from robie_job_engine.models import VERIFIER_AUTHORITY, JobStatus
 from robie_job_engine.overdue_submission_reports import (
     ACTION,
     CC,
     JOB_TYPE,
+    RESOURCE_ID,
     SOP_URL,
     SUBJECT,
     OverdueSubmissionReportVerifier,
     OverdueSubmissionReportWorker,
+    SubmissionReportContractError,
     build_producer_report,
+    load_approved_producer_directory,
     resolve_recipients,
     validate_submission_observation,
 )
@@ -193,6 +202,134 @@ def test_verifier_freshly_reads_all_gmail_receipts():
     )
     assert result.verified is True
     assert result.evidence.method == "GMAIL_SENT_READBACK"
+    assert result.evidence.expected["exists_in_sent_mailbox"] is True
+    assert result.evidence.expected["resource_id"] == RESOURCE_ID
+    assert result.evidence.observed["exists_in_sent_mailbox"] is True
+    assert expected_postcondition_missing(result.evidence.expected) is None
+    assert postcondition_mismatch(result.evidence.expected, result.evidence.observed) is None
+
+
+def test_verified_gmail_readback_authorizes_complete():
+    expected = {
+        "resource_id": RESOURCE_ID,
+        "exists_in_sent_mailbox": True,
+        "gmail_receipt_count": 2,
+        "producer_count": 2,
+        "qualifying_count": 2,
+    }
+    observed = {
+        **expected,
+        "unique_message_ids": 2,
+        "delivery": [{"exists_in_sent_mailbox": True}, {"exists_in_sent_mailbox": True}],
+    }
+    require_complete_postcondition(
+        current=JobStatus.VERIFYING,
+        authority=VERIFIER_AUTHORITY,
+        verified=True,
+        authoritative=True,
+        expected=expected,
+        observed=observed,
+        captured_at=datetime.now(timezone.utc).isoformat(),
+        evidence_ref="sha",
+        locator=RESOURCE_ID,
+        job_id="overdue-complete-1",
+        verifier_authority=VERIFIER_AUTHORITY,
+        intended=RESOURCE_ID,
+    )
+
+
+def test_gmail_readback_without_mailbox_evidence_cannot_complete():
+    receipts = [{"kind": "gmail", "message_id": "m-1", "sender": "robie@streetsmart.insurance"}]
+    verifier = OverdueSubmissionReportVerifier(
+        delivery_readback=lambda value: (True, [{"exists_in_sent_mailbox": False}])
+    )
+    result = verifier.verify(
+        _job(),
+        {"destination": {"delivery_receipts": receipts, "producer_count": 1, "qualifying_count": 1}},
+    )
+    assert result.verified is False
+    assert result.evidence.observed["exists_in_sent_mailbox"] is False
+    assert postcondition_mismatch(result.evidence.expected, result.evidence.observed)
+
+
+def test_zero_result_fresh_read_is_complete_postcondition():
+    verifier = OverdueSubmissionReportVerifier(
+        delivery_readback=lambda value: (True, []),
+        audit_reader=lambda: _observation([]),
+    )
+    result = verifier.verify(
+        _job(),
+        {"destination": {"delivery_receipts": [], "producer_count": 0, "qualifying_count": 0}},
+    )
+    assert result.verified is True
+    assert result.evidence.method == "EZLYNX_PLAYWRIGHT_FRESH_READBACK"
+    assert expected_postcondition_missing(result.evidence.expected) is None
+    assert postcondition_mismatch(result.evidence.expected, result.evidence.observed) is None
+    require_complete_postcondition(
+        current=JobStatus.VERIFYING,
+        authority=VERIFIER_AUTHORITY,
+        verified=True,
+        authoritative=True,
+        expected=result.evidence.expected,
+        observed=result.evidence.observed,
+        captured_at=datetime.now(timezone.utc).isoformat(),
+        evidence_ref="sha",
+        locator=RESOURCE_ID,
+        job_id="overdue-zero-1",
+        verifier_authority=VERIFIER_AUTHORITY,
+        intended=RESOURCE_ID,
+    )
+
+
+def test_sheets_scope_error_is_fail_closed_and_never_invents_emails():
+    classified = classify_sheets_auth_error(RuntimeError("ACCESS_TOKEN_SCOPE_INSUFFICIENT"))
+    assert "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in str(classified)
+    assert "spreadsheets.readonly" in str(classified)
+    assert "Never invent producer emails" in str(classified)
+    forbidden = classify_sheets_auth_error(RuntimeError("HttpError 403 PERMISSION_DENIED"))
+    assert "403" in str(forbidden)
+    assert "Never invent producer emails" in str(forbidden)
+
+
+def test_roster_load_fails_closed_when_sheets_scope_is_insufficient(tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"google_sheets": {"enabled": True, "spreadsheet_id": "sheet-1", "tables": {"employees": {"range": "A:Z", "allowed_columns": ["name"]}}}}),
+        encoding="utf-8",
+    )
+    with patch(
+        "robie_job_engine.google_sheets_accountability.collect_allowlisted_tables",
+        side_effect=RuntimeError("ACCESS_TOKEN_SCOPE_INSUFFICIENT"),
+    ):
+        try:
+            load_approved_producer_directory(str(manifest))
+        except SubmissionReportContractError as exc:
+            assert "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in str(exc)
+            assert "Never invent producer emails" in str(exc)
+        else:
+            raise AssertionError("roster load invented a directory after a Sheets scope miss")
+
+
+def test_test_sink_does_not_send_when_roster_resolve_fails():
+    sent = []
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation([_record()]),
+        directory_loader=lambda _path: (_ for _ in ()).throw(
+            SubmissionReportContractError(
+                "approved active-employee roster is unavailable: ACCESS_TOKEN_SCOPE_INSUFFICIENT. "
+                "Never invent producer emails."
+            )
+        ),
+        mailer=lambda **kwargs: sent.append(kwargs),
+    )
+    with patch.dict(
+        "os.environ",
+        {"ROBIE_ENV": "TEST", "ROBIE_OVERDUE_SUBMISSION_TEST_RECIPIENT": "carlo@streetsmart.insurance"},
+        clear=False,
+    ):
+        result = worker.perform(_job(), idempotency_key="report-sheets-fail")
+    assert result.succeeded is False
+    assert sent == []
 
 
 def test_routing_separates_send_from_read_only_audit():

@@ -95,7 +95,18 @@ def _chat_chunks(text: str, limit: int = 3500) -> list[str]:
 
 
 def verify_delivery_receipts(receipts: list[dict[str, Any]]) -> tuple[bool, list[dict[str, Any]]]:
-    """Fresh destination read-back; a create response alone is not verification."""
+    """Fresh destination read-back; a create response alone is not verification.
+
+    Gmail sent-mailbox proof uses ``users.messages.get`` by the send receipt
+    id with ``format=minimal``. ``gmail.metadata`` cannot use
+    ``messages.list?q=`` (HttpError 403: Metadata scope does not support the
+    ``q`` parameter). The standing design is this ID existence check: the
+    delegated sent mailbox must return that exact id. It does not re-read
+    subject, body, or recipients. COMPLETE still requires
+    ``exists_in_sent_mailbox`` from that get — never invent COMPLETE from the
+    send response alone, and never treat a ``q=`` search as evidence under
+    the metadata scope.
+    """
     observed: list[dict[str, Any]] = []
     for receipt in receipts:
         if receipt.get("kind") == "google_chat":
