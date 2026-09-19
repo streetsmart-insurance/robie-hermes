@@ -467,12 +467,19 @@ class EzlynxApiClient:
         config: EzlynxApiConfig,
         urlopen: Callable[..., Any] | None = None,
         clock: Callable[[], float] | None = None,
+        session_cookie_header: str | None = None,
+        session_cookie_loader: Callable[[], str] | None = None,
+        session_cookies: list[dict[str, Any]] | None = None,
     ) -> None:
         self._config = config
         self._urlopen = urlopen or _urlopen
         self._clock = clock or time.time
         self._token: str | None = None
         self._token_expires_at: float = 0.0
+        # Portal org-label writes use CDP session cookies, not OAuth Bearer.
+        self._session_cookie_header = str(session_cookie_header or "").strip()
+        self._session_cookie_loader = session_cookie_loader
+        self._session_cookies = list(session_cookies or [])
 
     def _agency_document_api_username(self) -> str:
         """Secret Manager ``username`` (SSRobie). Never ``vendor_username`` / ssr_userPROD."""
@@ -1000,11 +1007,13 @@ class EzlynxApiClient:
     def apply_applicant_organization_label(
         self, applicant_id: str, label_id: str
     ) -> dict[str, Any]:
-        """OAuth POST of one org label onto an applicant. Write-scoped.
+        """OAuth POST of one org label onto an applicant.
 
-        Path: ``/EZLynxPortalAPI/Applicants/{applicantId}/OrganizationLabels``.
-        Applies the already-resolved label id only — no name search here,
-        no Playwright, no label creation.
+        Proven 2026-09-18: this Bearer Portal write returns HTTP 403 for
+        SSRobie (``x-ezlynx-user u438318``). DiscussionApi note writes with
+        the same token succeed. Do not use this for Ascend NOC — call
+        :meth:`apply_note_organization_label` (CDP session cookies).
+        Kept so tests can assert the 403 is fail-closed.
         """
         from .ezlynx_org_labels import applicant_labels_path
 
@@ -1018,6 +1027,52 @@ class EzlynxApiClient:
                 "applicantId": applicant,
                 "organizationLabelIds": [resolved_id],
             },
+        )
+        if isinstance(parsed, dict):
+            return parsed
+        return {"result": parsed}
+
+    def _portal_session_cookie_header(self) -> str:
+        if self._session_cookie_header:
+            return self._session_cookie_header
+        if self._session_cookie_loader is not None:
+            header = str(self._session_cookie_loader() or "").strip()
+            if header:
+                return header
+        from .ezlynx_portal_session import load_cdp_session_cookie_header
+
+        return load_cdp_session_cookie_header()
+
+    def apply_note_organization_label(
+        self, note_id: str, label_id: str
+    ) -> dict[str, Any]:
+        """Apply one org label onto a discussion note via CDP session cookies.
+
+        Path: ``POST /EZLynxPortalAPI/Notes/{noteId}/OrganizationLabels``.
+        This is the UI / working-CDP path for Activities-enabled ``Ascend NOC``.
+        No OAuth Bearer. No Playwright clicking. Fail-closed on HTTP 403.
+        """
+        from .ezlynx_org_labels import note_labels_path
+        from .ezlynx_portal_session import portal_session_headers, portal_session_json
+
+        note = str(note_id or "").strip()
+        resolved_id = str(label_id or "").strip()
+        if not note:
+            raise EzlynxApiError(None, "note id is required for organization label apply")
+        if not resolved_id:
+            raise EzlynxApiError(None, "organization label id is required")
+        origin = self._origin()
+        headers = portal_session_headers(
+            self._portal_session_cookie_header(),
+            origin,
+            cookies=self._session_cookies or None,
+        )
+        parsed = portal_session_json(
+            self._urlopen,
+            "POST",
+            origin + note_labels_path(note),
+            {"organizationLabelIds": [resolved_id]},
+            headers,
         )
         if isinstance(parsed, dict):
             return parsed

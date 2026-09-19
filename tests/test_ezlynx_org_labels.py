@@ -46,10 +46,16 @@ class SelectUniqueOrgLabelTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, labels.LABEL_NOT_UNIQUE)
 
+    def test_note_labels_path_is_portal_notes_endpoint(self):
+        self.assertEqual(
+            labels.note_labels_path("1128873902"),
+            "/EZLynxPortalAPI/Notes/1128873902/OrganizationLabels",
+        )
+
 
 def test_apply_planned_label_dry_run_writes_nothing():
     class Client:
-        def apply_applicant_organization_label(self, *args, **kwargs):
+        def apply_note_organization_label(self, *args, **kwargs):
             raise AssertionError("dry-run must not apply")
 
     plan = {"name": "Ascend NOC", "id": "noc-1"}
@@ -59,11 +65,13 @@ def test_apply_planned_label_dry_run_writes_nothing():
     assert result["status"] == "dry_run"
     assert result["label_name"] == "Ascend NOC"
     assert result["method"] == "api"
+    assert result["auth_path"] == labels.AUTH_PATH_CDP_SESSION
+    assert result["endpoint"] == labels.NOTE_LABELS_PATH
 
 
 def test_apply_planned_label_refuses_cancellation_name():
     class Client:
-        def apply_applicant_organization_label(self, *args, **kwargs):
+        def apply_note_organization_label(self, *args, **kwargs):
             raise AssertionError("must not apply")
 
     with pytest.raises(labels.OrgLabelError) as caught:
@@ -78,7 +86,7 @@ def test_apply_planned_label_refuses_cancellation_name():
 
 def test_apply_planned_label_enforces_write_scope():
     class Client:
-        def apply_applicant_organization_label(self, *args, **kwargs):
+        def apply_note_organization_label(self, *args, **kwargs):
             raise AssertionError("must not apply")
 
     with pytest.raises(EzlynxWriteScopeError):
@@ -91,4 +99,69 @@ def test_apply_planned_label_enforces_write_scope():
                 "999999999",
                 {"name": "Ascend NOC", "id": "noc-1"},
                 dry_run=False,
+                note_id="1128873902",
             )
+
+
+class ApplyPlannedLabelSessionTests(unittest.TestCase):
+    def test_session_success_uses_note_path(self):
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def apply_note_organization_label(self, note_id, label_id):
+                self.calls.append({"note_id": note_id, "label_id": label_id})
+
+            def apply_applicant_organization_label(self, *args, **kwargs):
+                raise AssertionError("OAuth applicant path must not run")
+
+        client = Client()
+        result = labels.apply_planned_label(
+            client,
+            "220250093",
+            {"name": "Ascend NOC", "id": "110248"},
+            dry_run=False,
+            note_id="1128873902",
+        )
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["auth_path"], labels.AUTH_PATH_CDP_SESSION)
+        self.assertEqual(result["endpoint"], labels.NOTE_LABELS_PATH)
+        self.assertEqual(result["note_id"], "1128873902")
+        self.assertEqual(result["label_id"], "110248")
+        self.assertEqual(client.calls, [{"note_id": "1128873902", "label_id": "110248"}])
+
+    def test_http_403_is_fail_closed(self):
+        class Client:
+            def apply_note_organization_label(self, *args, **kwargs):
+                exc = RuntimeError("forbidden")
+                exc.status = 403
+                raise exc
+
+            def apply_applicant_organization_label(self, *args, **kwargs):
+                raise AssertionError("must not fall back to OAuth applicant apply")
+
+        with self.assertRaises(labels.OrgLabelError) as caught:
+            labels.apply_planned_label(
+                Client(),
+                "220250093",
+                {"name": "Ascend NOC", "id": "110248"},
+                dry_run=False,
+                note_id="1128873902",
+            )
+        self.assertEqual(caught.exception.code, labels.LABEL_APPLY_FAILED)
+        self.assertIn("403", str(caught.exception))
+
+    def test_live_without_note_id_is_fail_closed(self):
+        class Client:
+            def apply_note_organization_label(self, *args, **kwargs):
+                raise AssertionError("must not apply without a note id")
+
+        with self.assertRaises(labels.OrgLabelError) as caught:
+            labels.apply_planned_label(
+                Client(),
+                "220250093",
+                {"name": "Ascend NOC", "id": "noc-1"},
+                dry_run=False,
+            )
+        self.assertEqual(caught.exception.code, labels.LABEL_APPLY_FAILED)
+        self.assertIn("note", str(caught.exception).casefold())

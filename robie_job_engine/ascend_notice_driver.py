@@ -13,6 +13,7 @@ Pipeline per email::
       -> resolve applicant_id                  (EZLynx PolicyApi, by policy number)
       -> resolve CSR login username            (never a display name)
       -> file_note_to_existing_discussion()    (EXISTING discussion only)
+      -> apply Ascend NOC on that note         (CDP session cookies; cancel only)
       -> build_cancellation_task_payload()     (cancellation notices only)
       -> zapier_tasks.fire_task()              (Zapier catch-hook Zap)
 
@@ -448,10 +449,12 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
     result.detail["csr_username"] = resolution.csr_username
     result.detail["notice_type"] = notice_type
 
-    # Cancellation notices also get the exact org label "Ascend NOC" so
-    # existing email/text automation can fire. Late-pay / return-premium
-    # stay note-only. Resolve the unique label before filing so a missing
-    # or ambiguous label does not leave an orphan note.
+    # Cancellation notices also get the exact org label "Ascend NOC" on
+    # the filed note (Activities; UI path) so existing email/text
+    # automation can fire. Late-pay / return-premium stay note-only.
+    # Resolve the unique label before filing so a missing or ambiguous
+    # label does not leave an orphan note. Apply uses CDP session
+    # cookies — OAuth Portal OrganizationLabels is HTTP 403.
     label_plan: dict[str, str] | None = None
     if notice_type == triage.CANCELLATION:
         try:
@@ -504,6 +507,7 @@ def _process_notice(notice: EmailNotice, ctx: DriverContext) -> NoticeResult:
                 resolution.applicant_id,
                 label_plan,
                 dry_run=ctx.dry_run,
+                note_id=str(filed.get("note_id") or "") or None,
             )
         except EzlynxWriteScopeError as exc:
             result.reason = f"write_scope_refused: {exc}"
