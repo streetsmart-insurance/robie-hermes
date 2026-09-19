@@ -503,6 +503,7 @@ def audit(*, fresh: bool) -> dict[str, Any]:
         first_closed_page: int | None = None
         first_closed_index: int | None = None
         first_closed_status = ""
+        full_dataset_exhausted = False
 
         while first_closed_page is None:
             pages_reviewed += 1
@@ -539,7 +540,13 @@ def audit(*, fresh: bool) -> dict[str, Any]:
                     # candidate. Do not retain every current non-closed applicant.
                     dispositions.append(record)
             if first_closed_page is None:
-                _advance_page(page, start)
+                try:
+                    _advance_page(page, start)
+                except RuntimeError as exc:
+                    if "non-closed group exceeded the available live pages" not in str(exc):
+                        raise
+                    full_dataset_exhausted = True
+                    break
 
         if not non_closed_statuses:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: no visible non-closed first row")
@@ -561,7 +568,9 @@ def audit(*, fresh: bool) -> dict[str, Any]:
             "status_aria_sort": "ascending",
             "first_row_non_closed": non_closed_statuses[0] not in CLOSED,
             "first_row_status": non_closed_statuses[0],
-            "first_closed_row_inspected": True,
+            "first_closed_row_inspected": first_closed_page is not None,
+            "full_dataset_exhausted": full_dataset_exhausted,
+            "boundary_kind": "first_closed_row" if first_closed_page is not None else "pager_exhausted",
             "first_closed_row_index": first_closed_index,
             "first_closed_row_page": first_closed_page,
             "first_closed_row_status": first_closed_status,
