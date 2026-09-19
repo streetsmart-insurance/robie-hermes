@@ -3,9 +3,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from robie_job_engine.google_sheets_accountability import (
+    DRIVE_READONLY_SCOPE,
+    SHEETS_READONLY_SCOPE,
+    TEST_ACCOUNTABILITY_SA,
+    classify_sheets_auth_error,
     collect_allowlisted_tables,
     previous_business_day,
     previous_business_week_tab,
+    required_roster_scopes,
     role_registry_from_snapshot,
     write_allowlisted_table_csv,
 )
@@ -37,6 +42,15 @@ class _Service:
 
     def spreadsheets(self):
         return self._spreadsheets
+
+
+def test_roster_scopes_are_explicit_and_scope_errors_fail_closed():
+    assert required_roster_scopes() == (SHEETS_READONLY_SCOPE, DRIVE_READONLY_SCOPE)
+    assert TEST_ACCOUNTABILITY_SA.endswith("@streetsmart-hermes-poc.iam.gserviceaccount.com")
+    error = classify_sheets_auth_error(RuntimeError("ACCESS_TOKEN_SCOPE_INSUFFICIENT"))
+    assert "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in str(error)
+    assert SHEETS_READONLY_SCOPE in str(error)
+    assert "Never invent producer emails" in str(error)
 
 
 def test_sheet_collector_persists_only_allowlisted_columns():

@@ -26,6 +26,10 @@ from .ezlynx_session_lock import EzlynxSessionLockTimeout, exclusive_session
 from .verification_common import is_action_authorized
 from .verification_mailer import send_verification_email
 from .runtime_env import TEST_ENV_NAME, current_robie_env
+from .google_sheets_accountability import (
+    SheetsRosterAccessError,
+    classify_sheets_auth_error,
+)
 
 
 JOB_TYPE = "ezlynx.overdue_submission_reports"
@@ -147,8 +151,15 @@ def load_approved_producer_directory(manifest_path: str) -> dict[str, str]:
         raise SubmissionReportContractError("approved active-employee roster is not enabled")
     from .google_sheets_accountability import collect_allowlisted_tables, role_registry_from_snapshot
 
-    snapshot = collect_allowlisted_tables(config, as_of=datetime.now(timezone.utc))
-    registry = role_registry_from_snapshot(snapshot, config)
+    try:
+        snapshot = collect_allowlisted_tables(config, as_of=datetime.now(timezone.utc))
+        registry = role_registry_from_snapshot(snapshot, config)
+    except SheetsRosterAccessError as exc:
+        raise SubmissionReportContractError(str(exc)) from exc
+    except SubmissionReportContractError:
+        raise
+    except Exception as exc:
+        raise SubmissionReportContractError(str(classify_sheets_auth_error(exc))) from exc
     if registry.get("source_status") != "available":
         raise SubmissionReportContractError("approved active-employee roster is unavailable or partial")
     directory: dict[str, str] = {}
@@ -266,6 +277,9 @@ class OverdueSubmissionReportWorker:
                     raise SubmissionReportContractError(
                         "Test delivery requires an approved agency test recipient"
                     )
+            # Test remaps To: to the sink only after every producer resolved
+            # against the live roster. A Sheets/IAM miss is fail-closed — never
+            # invent producer emails or a producers→carlo@ map.
             receipts: list[dict[str, Any]] = []
             for producer in sorted(grouped):
                 subject = SUBJECT
@@ -314,13 +328,38 @@ class OverdueSubmissionReportVerifier:
         destination = dict(action.get("destination") or {})
         receipts = list(destination.get("delivery_receipts") or [])
         expected_count = int(destination.get("producer_count") or 0)
-        expected = {"producer_count": expected_count, "qualifying_count": int(destination.get("qualifying_count") or 0), "gmail_receipt_count": expected_count}
+        qualifying_count = int(destination.get("qualifying_count") or 0)
         try:
             if expected_count:
                 unique_ids = {str(item.get("message_id") or "") for item in receipts}
                 delivery_ok, observed_receipts = self.delivery_readback(receipts)
-                verified = len(receipts) == expected_count and len(unique_ids) == expected_count and "" not in unique_ids and delivery_ok
-                observed = {"gmail_receipt_count": len(receipts), "unique_message_ids": len(unique_ids), "delivery": observed_receipts}
+                mailbox_ok = bool(observed_receipts) and all(
+                    bool(item.get("exists_in_sent_mailbox") or item.get("exists"))
+                    for item in observed_receipts
+                )
+                verified = (
+                    len(receipts) == expected_count
+                    and len(unique_ids) == expected_count
+                    and "" not in unique_ids
+                    and delivery_ok
+                    and mailbox_ok
+                )
+                expected = {
+                    "resource_id": RESOURCE_ID,
+                    "exists_in_sent_mailbox": True,
+                    "gmail_receipt_count": expected_count,
+                    "producer_count": expected_count,
+                    "qualifying_count": qualifying_count,
+                }
+                observed = {
+                    "resource_id": RESOURCE_ID,
+                    "exists_in_sent_mailbox": verified,
+                    "gmail_receipt_count": len(receipts),
+                    "producer_count": expected_count,
+                    "qualifying_count": qualifying_count,
+                    "unique_message_ids": len(unique_ids),
+                    "delivery": observed_receipts,
+                }
             else:
                 if self.audit_reader is None:
                     with exclusive_session():
@@ -330,9 +369,26 @@ class OverdueSubmissionReportVerifier:
                     current = self.audit_reader()
                 summary = validate_submission_observation(current)
                 verified = summary["qualifying_count"] == 0 and not receipts
-                observed = {"gmail_receipt_count": len(receipts), "fresh_qualifying_count": summary["qualifying_count"]}
+                expected = {
+                    "resource_id": RESOURCE_ID,
+                    "qualifying_count": 0,
+                    "gmail_receipt_count": 0,
+                }
+                observed = {
+                    "resource_id": RESOURCE_ID,
+                    "qualifying_count": summary["qualifying_count"],
+                    "gmail_receipt_count": len(receipts),
+                    "fresh_qualifying_count": summary["qualifying_count"],
+                }
             error = None if verified else "Gmail delivery or zero-result source read-back did not verify"
         except Exception as exc:
+            expected = {
+                "resource_id": RESOURCE_ID,
+                "exists_in_sent_mailbox": True,
+                "gmail_receipt_count": expected_count,
+                "producer_count": expected_count,
+                "qualifying_count": qualifying_count,
+            }
             observed = {"error": f"{type(exc).__name__}: {exc}"}
             verified = False
             error = "producer report destination could not be independently verified"
