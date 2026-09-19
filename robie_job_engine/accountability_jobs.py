@@ -179,7 +179,67 @@ class AccountabilityReportWorker:
                     write_allowlisted_table_csv(snapshot, tracker_key, tracker_path)
                     sources["trackers"][tracker_key] = str(tracker_path)
             ringcentral_email = dict(collection.get("ringcentral_email") or {})
-            if ringcentral_email.get("enabled"):
+            ringcentral_api = dict(collection.get("ringcentral_api") or {})
+            if mode == "daily" and ringcentral_api.get("enabled"):
+                if report_date is None:
+                    raise RuntimeError("RingCentral daily API collection requires a resolved report date")
+                from .ringcentral_accountability_api import collect_ringcentral_api_evidence
+                from .ringcentral_client import RingCentralClient
+
+                roster_config = {**ringcentral_email, **ringcentral_api}
+                required_users = [
+                    str(value).strip()
+                    for value in roster_config.get("required_users", [])
+                    if str(value).strip()
+                ]
+                if not required_users:
+                    role_source = Path(str(sources.get("roles_json") or "")).expanduser()
+                    if role_source.is_file():
+                        role_data = _manifest(role_source)
+                        required_users = [
+                            str(value).strip()
+                            for value in (role_data.get("employees") or {})
+                            if str(value).strip()
+                        ]
+                excluded_users = {
+                    str(value).strip().casefold()
+                    for value in roster_config.get("excluded_users", [])
+                }
+                required_users = [
+                    value for value in required_users
+                    if value.casefold() not in excluded_users
+                ]
+                required_queues = [
+                    str(value).strip()
+                    for value in roster_config.get("required_queues", [])
+                    if str(value).strip()
+                ]
+                required_queue_members = {
+                    str(queue).strip(): [
+                        str(member).strip()
+                        for member in members
+                        if str(member).strip()
+                    ]
+                    for queue, members in dict(
+                        roster_config.get("required_queue_members") or {}
+                    ).items()
+                }
+                api_path = output_dir / (
+                    f"ringcentral-api-{report_date.isoformat()}-"
+                    f"{run_at:%Y%m%dT%H%M%SZ}.json"
+                )
+                sources["ringcentral"] = str(
+                    collect_ringcentral_api_evidence(
+                        RingCentralClient.from_env(),
+                        output_path=api_path,
+                        report_kind="daily",
+                        target_date=report_date,
+                        required_users=required_users,
+                        required_queues=required_queues,
+                        required_queue_members=required_queue_members,
+                    )
+                )
+            if ringcentral_email.get("enabled") and not sources.get("ringcentral"):
                 from .ringcentral_email_sync import collect_scheduled_ringcentral_report
 
                 mailbox = str(ringcentral_email.get("mailbox") or os.environ.get("ACCOUNTABILITY_REPORT_MAILBOX", "")).strip()
