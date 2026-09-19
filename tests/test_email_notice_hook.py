@@ -132,9 +132,10 @@ class WatcherHookTests(unittest.TestCase):
         self.assertEqual(ctx.source.marked, ["m-live"])
         self.assertEqual(result["detail"]["label"]["label_name"], "Ascend NOC")
         self.assertEqual(result["detail"]["label"]["method"], "api")
+        self.assertEqual(result["detail"]["label"]["auth_path"], "cdp_session_cookie")
         self.assertEqual(
             ctx.ezlynx_client.applied_labels,
-            [{"applicant_id": "220250093", "label_id": "noc-1"}],
+            [{"note_id": "n7", "label_id": "noc-1"}],
         )
 
     def test_fail_closed_is_consumed_but_left_unread(self):

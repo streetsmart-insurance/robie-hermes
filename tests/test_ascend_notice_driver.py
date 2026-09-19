@@ -18,6 +18,7 @@ import pytest
 from robie_job_engine import ascend_notice_driver as driver
 from robie_job_engine import ascend_notice_triage as triage
 from robie_job_engine import ezlynx_discussions as discussions
+from robie_job_engine import ezlynx_org_labels as org_labels
 from robie_job_engine.gmail_accountability import (
     GMAIL_METADATA_SCOPE,
     GMAIL_MODIFY_SCOPE,
@@ -92,9 +93,14 @@ class FakeEzlynxClient:
         return list(self.org_labels)
 
     def apply_applicant_organization_label(self, applicant_id, label_id):
+        raise AssertionError(
+            "OAuth applicant OrganizationLabels is the 403 path; do not call"
+        )
+
+    def apply_note_organization_label(self, note_id, label_id):
         if self.apply_label_error is not None:
             raise self.apply_label_error
-        self.applied_labels.append({"applicant_id": applicant_id, "label_id": label_id})
+        self.applied_labels.append({"note_id": note_id, "label_id": label_id})
         return {"status": "applied"}
 
 
@@ -253,6 +259,7 @@ def test_dry_run_logs_what_it_would_do(no_zap_fire):
     assert detail["label_name"] == "Ascend NOC"
     assert detail["label"]["status"] == "dry_run"
     assert detail["label"]["method"] == "api"
+    assert detail["label"]["auth_path"] == "cdp_session_cookie"
     assert ctx.ezlynx_client.applied_labels == []
 
 
@@ -425,8 +432,9 @@ def test_cancellation_prefers_titled_cancellation_discussion(no_zap_fire):
     assert driver.ROBIE_WAS_HERE in body["body"]
     assert "bind" not in body["body"].lower()
     assert result["detail"]["label"]["label_name"] == "Ascend NOC"
+    assert result["detail"]["label"]["auth_path"] == "cdp_session_cookie"
     assert ctx.ezlynx_client.applied_labels == [
-        {"applicant_id": ALLOWED_APPLICANT, "label_id": "noc-1"}
+        {"note_id": "n7", "label_id": "noc-1"}
     ]
 
 
@@ -563,8 +571,9 @@ def test_live_mode_files_note_fires_task_and_marks_read(no_zap_fire):
     assert ctx.source.marked == ["m1"]
     assert result["detail"]["label"]["label_name"] == "Ascend NOC"
     assert result["detail"]["label"]["status"] == "applied"
+    assert result["detail"]["label"]["auth_path"] == "cdp_session_cookie"
     assert ctx.ezlynx_client.applied_labels == [
-        {"applicant_id": ALLOWED_APPLICANT, "label_id": "noc-1"}
+        {"note_id": "n7", "label_id": "noc-1"}
     ]
 
 
@@ -579,6 +588,26 @@ def test_live_mode_leaves_failed_email_unread(no_zap_fire):
     assert summary["done"] == 1
     assert summary["skipped"] == 1
     assert ctx.source.marked == ["m1"]  # the failed one stays unread
+
+
+def test_label_apply_403_fail_closed_leaves_unread(no_zap_fire):
+    ctx, discussion_client = make_ctx(
+        notices=[make_notice()],
+        policy_rows={"HO-998877": [policy_row()]},
+        dry_run=False,
+        apply_label_error=org_labels.OrgLabelError(
+            org_labels.LABEL_APPLY_FAILED, "organization label apply failed: HTTP 403"
+        ),
+    )
+    summary = driver.run_driver(ctx)
+    result = summary["results"][0]
+    assert result["status"] == "skipped"
+    assert "LABEL_APPLY_FAILED" in result["reason"]
+    assert "403" in result["reason"]
+    assert ctx.source.marked == []
+    assert ctx.ezlynx_client.applied_labels == []
+    assert len(discussion_client._urlopen.posts_to("/notes")) == 1
+    assert no_zap_fire == []
 
 
 # ---------------------------------------------------------------------------

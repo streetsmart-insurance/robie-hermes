@@ -665,5 +665,64 @@ class DocumentApiConfigLoadTests(unittest.TestCase):
         self.assertFalse(hasattr(cfg, "password") and getattr(cfg, "password", ""))
 
 
+class OrgLabelSessionApplyTests(unittest.TestCase):
+    """Portal org-label write: session cookies succeed; OAuth 403 is fail-closed."""
+
+    def test_note_apply_uses_session_cookie_not_bearer(self):
+        seen = {}
+
+        def fake_urlopen(url, *, data, headers, timeout):
+            seen["url"] = url
+            seen["headers"] = dict(headers or {})
+            seen["data"] = json.loads(data.decode("utf-8"))
+            return FakeResponse(json.dumps({"ok": True}).encode(), headers={})
+
+        client = EzlynxApiClient(
+            _agency_config(),
+            urlopen=fake_urlopen,
+            session_cookie_header="sid=fake-session",
+        )
+        result = client.apply_note_organization_label("1128873902", "110248")
+        self.assertEqual(result, {"ok": True})
+        self.assertIn("/EZLynxPortalAPI/Notes/1128873902/OrganizationLabels", seen["url"])
+        self.assertEqual(seen["headers"].get("Cookie"), "sid=fake-session")
+        self.assertNotIn("Authorization", seen["headers"])
+        self.assertNotIn("x-ezlynx-user", {k.casefold() for k in seen["headers"]})
+        self.assertEqual(seen["data"], {"organizationLabelIds": ["110248"]})
+
+    def test_note_apply_http_403_is_fail_closed(self):
+        def fake_urlopen(url, *, data, headers, timeout):
+            raise error.HTTPError(
+                url, 403, "Forbidden", {}, io.BytesIO(b"no label write scope")
+            )
+
+        client = EzlynxApiClient(
+            _agency_config(),
+            urlopen=fake_urlopen,
+            session_cookie_header="sid=fake-session",
+        )
+        with self.assertRaises(EzlynxApiError) as ctx:
+            client.apply_note_organization_label("1128873902", "110248")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertIn("403", str(ctx.exception))
+        self.assertNotIn("fake-session", str(ctx.exception))
+        self.assertNotIn("no label write scope", str(ctx.exception))
+
+    def test_oauth_applicant_apply_403_is_fail_closed(self):
+        seen = {}
+
+        def handler(url, *, data, headers, timeout):
+            seen["url"] = url
+            seen["auth"] = (headers or {}).get("Authorization")
+            raise error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b""))
+
+        client = EzlynxApiClient(_agency_config(), urlopen=_token_then(handler))
+        with self.assertRaises(EzlynxApiError) as ctx:
+            client.apply_applicant_organization_label(TEST_APPLICANT, "110248")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertIn("/EZLynxPortalAPI/Applicants/", seen["url"])
+        self.assertTrue(str(seen["auth"] or "").startswith("Bearer "))
+
+
 if __name__ == "__main__":
     unittest.main()

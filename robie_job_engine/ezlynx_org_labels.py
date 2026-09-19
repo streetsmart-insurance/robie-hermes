@@ -1,13 +1,26 @@
 """Apply the exact EZLynx org label ``Ascend NOC`` via HTTP API.
 
 This is the mailbox-notice path for cancellation emails. It is not
-Playwright, does not create labels, does not guess among matches, and
-never applies the bare name ``Cancellation``. Live voice dial is frozen
-agency-wide; applying this label is only so existing email/text
-automation can fire.
+Playwright clicking, does not create labels, does not guess among
+matches, and never applies the bare name ``Cancellation``. Live voice
+dial is frozen agency-wide; applying this label is only so existing
+email/text automation can fire.
 
-List + apply use the same OAuth Bearer token as PolicyApi / DiscussionApi
-(``EzlynxApiClient``). Portal org-label routes live on the EZLynx origin.
+Auth (Ralph 2026-09-18, Buster Brown note 1128873902):
+
+- **Working path:** CDP session cookies (same persistent SSRobie browser
+  the UI / working CDP ``fetch()`` uses). Portal ``OrganizationLabels``
+  writes succeed this way. Label id ``110248``, name exactly
+  ``Ascend NOC``, ``enabledIn`` Activities.
+- **Broken path:** OAuth ``vendor_data_access`` Bearer on Portal
+  ``Notes/{id}/OrganizationLabels`` and
+  ``Applicants/{id}/OrganizationLabels`` (HTTP 403 for SSRobie /
+  ``x-ezlynx-user u438318``). Same token still writes DiscussionApi
+  notes. Not a role problem — SSRobie applies the label in the UI.
+- List may still use OAuth GET (read). Apply never sends Bearer.
+
+Apply target is the filed note (Activities), not the applicant card.
+Fail-closed if the label is missing, ambiguous, or apply returns 403.
 """
 
 from __future__ import annotations
@@ -23,6 +36,11 @@ FORBIDDEN_LABELS = frozenset({"Cancellation", "cancellation", "CANCELATION", "Ca
 
 ORG_LABELS_LIST_PATH = "/EZLynxPortalAPI/Organizations/GetOrganizationLabels"
 APPLICANT_LABELS_PATH = "/EZLynxPortalAPI/Applicants/{applicant_id}/OrganizationLabels"
+NOTE_LABELS_PATH = "/EZLynxPortalAPI/Notes/{note_id}/OrganizationLabels"
+
+# Auth path ids recorded on the apply receipt. oauth_bearer is the 403 path.
+AUTH_PATH_CDP_SESSION = "cdp_session_cookie"
+AUTH_PATH_OAUTH_BEARER = "oauth_bearer"
 
 LABEL_NOT_FOUND = "LABEL_NOT_FOUND"
 LABEL_NOT_UNIQUE = "LABEL_NOT_UNIQUE"
@@ -130,10 +148,14 @@ def apply_planned_label(
     plan: dict[str, str],
     *,
     dry_run: bool,
+    note_id: str | None = None,
 ) -> dict[str, Any]:
-    """Apply a previously unique-resolved label to the applicant.
+    """Apply a previously unique-resolved label to the filed note.
 
     Write-scope is enforced first. Dry-run validates and writes nothing.
+    Live apply uses the CDP session-cookie Portal path on
+    ``Notes/{noteId}/OrganizationLabels``. The OAuth Bearer applicant
+    path is not used (proven HTTP 403).
     """
     applicant = require_allowed_ezlynx_write_applicant(applicant_id)
     name = str((plan or {}).get("name") or "")
@@ -145,30 +167,51 @@ def apply_planned_label(
         )
     if not label_id:
         raise OrgLabelError(LABEL_NOT_UNIQUE, "planned label has no id; refusing to guess")
+    note = str(note_id or "").strip()
     result = {
         "status": "dry_run" if dry_run else "applied",
         "applicant_id": applicant,
+        "note_id": note or None,
         "label_name": name,
         "label_id": label_id,
         "method": "api",
+        "auth_path": AUTH_PATH_CDP_SESSION,
+        "endpoint": NOTE_LABELS_PATH,
     }
     if dry_run:
         return result
-    if not hasattr(client, "apply_applicant_organization_label"):
+    if not note:
         raise OrgLabelError(
             LABEL_APPLY_FAILED,
-            "EZLynx client cannot apply organization labels",
+            "filed note has no id; refusing org-label apply",
+        )
+    if not hasattr(client, "apply_note_organization_label"):
+        raise OrgLabelError(
+            LABEL_APPLY_FAILED,
+            "EZLynx client cannot apply note organization labels via session cookies",
         )
     try:
-        client.apply_applicant_organization_label(applicant, label_id)
+        client.apply_note_organization_label(note, label_id)
     except OrgLabelError:
         raise
-    except Exception as exc:  # noqa: BLE001 - fail closed
+    except Exception as exc:  # noqa: BLE001 - fail closed, including HTTP 403
+        status = getattr(exc, "status", None)
+        if status == 403:
+            raise OrgLabelError(
+                LABEL_APPLY_FAILED,
+                "organization label apply failed: HTTP 403 "
+                "(OAuth Portal token lacks label write; session-cookie path also forbidden)",
+            ) from exc
         raise OrgLabelError(
             LABEL_APPLY_FAILED, f"organization label apply failed: {type(exc).__name__}"
         ) from exc
+    result["note_id"] = note
     return result
 
 
 def applicant_labels_path(applicant_id: str) -> str:
     return APPLICANT_LABELS_PATH.format(applicant_id=quote(str(applicant_id), safe=""))
+
+
+def note_labels_path(note_id: str) -> str:
+    return NOTE_LABELS_PATH.format(note_id=quote(str(note_id), safe=""))
