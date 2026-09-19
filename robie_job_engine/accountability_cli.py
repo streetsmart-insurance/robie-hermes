@@ -495,7 +495,7 @@ def _daily_submission_data(args: argparse.Namespace, as_of: datetime) -> dict[st
         data = _json(args.submissions_json)
         records = list(data.get("qualifying_records") or [])
         data.update({
-            "source_status": "available" if data.get("first_closed_row_inspected") else "partial: closed-row boundary not verified",
+            "source_status": "available" if (data.get("first_closed_row_inspected") or data.get("full_dataset_exhausted")) else "partial: terminal boundary not verified",
             "open_over_30_count": len(records),
             "exceptions": [
                 {
@@ -621,7 +621,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.submissions_json and args.submissions_json.exists():
             raw_records = list(submissions.get("qualifying_records") or [])
             submissions.update({
-                "source_status": "available" if submissions.get("first_closed_row_inspected") else "partial: closed-row boundary not verified",
+                "source_status": "available" if (submissions.get("first_closed_row_inspected") or submissions.get("full_dataset_exhausted")) else "partial: terminal boundary not verified",
                 "open_over_30_count": len(raw_records),
                 "exceptions": [
                     {
