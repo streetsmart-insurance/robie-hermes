@@ -56,6 +56,7 @@ jobs:
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py \
             tests/test_run_daily_accountability_vm.py \
+            tests/test_accountability_timer_install_workflow.py \
             tests/test_accountability_delivery_watchdog.py \
             tests/test_repair_dedicated_accountability_google_docs.py \
             tests/test_repair_dedicated_accountability_submission_gate.py \
