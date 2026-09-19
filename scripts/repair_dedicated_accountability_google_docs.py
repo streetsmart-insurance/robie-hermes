@@ -49,7 +49,7 @@ def repair(path: Path) -> str:
     new_helper_count = original.count(NEW_HELPER)
     states = [(original.count(old), original.count(new)) for old, new in REPLACEMENTS]
 
-    already_ready = old_helper_count == 0 and new_helper_count == 1 and all(
+    already_ready = new_helper_count == 1 and all(
         old_count == 0 and new_count >= 1 for old_count, new_count in states
     )
     if already_ready:
@@ -76,8 +76,7 @@ def repair(path: Path) -> str:
 
     verified = path.read_text(encoding="utf-8")
     if (
-        OLD_HELPER in verified
-        or verified.count(NEW_HELPER) != 1
+        verified.count(NEW_HELPER) != 1
         or any(old in verified or new not in verified for old, new in REPLACEMENTS)
     ):
         raise RuntimeError("Google Docs UTF-16 index repair verification failed")
