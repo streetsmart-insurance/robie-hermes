@@ -68,8 +68,10 @@ def repair(path: Path) -> str:
     # after the canonical UTF-16 helper is inserted.
     helper_ready = (
         utf16_helper_count == 1
-        and final_helper_count == 1
-        and final_return_count == 1
+        and (
+            (final_helper_count == 1 and final_return_count == 1)
+            or (final_helper_count == 0 and final_return_count == 0 and main_count == 1)
+        )
     )
     helper_legacy = (
         utf16_helper_count == 0
