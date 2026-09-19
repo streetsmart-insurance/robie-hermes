@@ -36,6 +36,44 @@ class SubmissionPreflightError(RuntimeError):
     """The live Submission Center evidence did not satisfy the release gate."""
 
 
+SAFE_FAILURE_CODES = (
+    ("Persistent Robie Chrome is unavailable", "chrome_unavailable"),
+    ("Persistent Robie Chrome has no browser context", "browser_context_missing"),
+    ("NEEDS_AUTH", "session_not_authenticated"),
+    ("agency options not found", "agency_options_missing"),
+    ("agency field not found", "agency_field_missing"),
+    ("agency scope did not apply", "agency_scope_not_applied"),
+    ("My Submissions remained selected", "my_submissions_still_selected"),
+    ("paginator not found", "paginator_missing"),
+    ("page-size control not found", "page_size_control_missing"),
+    ("100 page-size option not found", "page_size_option_missing"),
+    ("100-row selection rendered", "page_size_rows_mismatch"),
+    ("page-size control did not retain 100", "page_size_not_retained"),
+    ("paginator did not confirm rows 1-100", "page_size_range_mismatch"),
+    ("Status header not found", "status_header_missing"),
+    ("Status cell missing", "status_cell_missing"),
+    ("ascending sort showed a closed first row", "status_boundary_wrong"),
+    ("Status sort did not reach ascending", "status_sort_failed"),
+    ("live pager total not found", "pager_total_missing"),
+    ("live pager range not found", "pager_range_missing"),
+    ("header not found", "required_header_missing"),
+    ("row is missing required cells", "required_cell_missing"),
+    ("next-page control not found", "next_page_control_missing"),
+    ("non-closed group exceeded", "pagination_boundary_missing"),
+    ("next Submission Center page did not load", "next_page_failed"),
+    ("page rendered no statuses", "page_statuses_missing"),
+    ("no visible non-closed first row", "non_closed_boundary_missing"),
+)
+
+
+def _safe_failure_code(exc: Exception) -> str:
+    message = str(exc).splitlines()[0]
+    for fragment, code in SAFE_FAILURE_CODES:
+        if fragment in message:
+            return code
+    return type(exc).__name__
+
+
 def _require_int(observed: Mapping[str, Any], key: str, *, minimum: int = 0) -> int:
     value = observed.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -159,9 +197,25 @@ def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
     from src.extractors.ezlynx_submission_browser import audit
 
     summaries: list[dict[str, Any]] = []
-    for _ in range(reliability_attempts):
-        ensure_ezlynx_authenticated()
-        summaries.append(validate_observation(audit(fresh=True)))
+    for attempt in range(1, reliability_attempts + 1):
+        try:
+            ensure_ezlynx_authenticated()
+        except Exception as exc:
+            raise SubmissionPreflightError(
+                f"attempt_{attempt}_authentication:{_safe_failure_code(exc)}"
+            ) from exc
+        try:
+            observed = audit(fresh=True)
+        except Exception as exc:
+            raise SubmissionPreflightError(
+                f"attempt_{attempt}_audit:{_safe_failure_code(exc)}"
+            ) from exc
+        try:
+            summaries.append(validate_observation(observed))
+        except SubmissionPreflightError as exc:
+            raise SubmissionPreflightError(
+                f"attempt_{attempt}_validation:{_safe_failure_code(exc)}"
+            ) from exc
 
     stable_keys = (
         "pager_total",
@@ -195,13 +249,16 @@ def main() -> int:
     try:
         result = run_preflight(args.app_root, args.reliability_attempts)
     except Exception as exc:
+        safe = str(exc).splitlines()[0]
+        stage, separator, code = safe.partition(":")
         print(json.dumps({
             "ready": False,
-            "authenticated": False,
+            "authenticated": "authentication" not in stage,
             "read_only": True,
             "delivery_attempted": False,
             "records_exposed": False,
-            "error_type": type(exc).__name__,
+            "failure_stage": stage if separator else "setup_or_stability",
+            "failure_code": code if separator else _safe_failure_code(exc),
         }, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
