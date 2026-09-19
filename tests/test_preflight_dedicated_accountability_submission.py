@@ -126,6 +126,7 @@ def test_workflows_run_two_attempt_submission_preflight_before_delivery():
     script = "preflight_dedicated_accountability_submission.py"
     assert script in diagnostic
     assert script in manual
+    assert "timeout-minutes: 30" in diagnostic
     assert "--reliability-attempts 2" in diagnostic
     assert "--reliability-attempts 2" in manual
     diagnostic_step = diagnostic.index(
