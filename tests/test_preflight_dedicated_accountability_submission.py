@@ -83,6 +83,40 @@ def test_proven_zero_is_allowed_only_with_complete_boundary_evidence():
     assert summary["pagination_boundary_verified"] is True
 
 
+def test_fully_exhausted_pager_is_a_complete_terminal_boundary():
+    observed = _observation()
+    observed.update({
+        "first_closed_row_inspected": False,
+        "full_dataset_exhausted": True,
+        "first_closed_row_index": None,
+        "first_closed_row_page": None,
+        "first_closed_row_status": "",
+        "pager_total": 1,
+        "pages_reviewed": 1,
+        "rows_inspected_through_boundary": 1,
+        "non_closed_rows_inspected": 1,
+    })
+    summary = validate_observation(observed)
+    assert summary["pagination_boundary_verified"] is True
+    assert summary["boundary_kind"] == "pager_exhausted"
+
+
+def test_exhausted_pager_must_reconcile_every_row():
+    observed = _observation()
+    observed.update({
+        "first_closed_row_inspected": False,
+        "full_dataset_exhausted": True,
+        "first_closed_row_index": None,
+        "first_closed_row_page": None,
+        "first_closed_row_status": "",
+        "pager_total": 2,
+        "rows_inspected_through_boundary": 1,
+        "non_closed_rows_inspected": 1,
+    })
+    with pytest.raises(SubmissionPreflightError, match="did not reconcile"):
+        validate_observation(observed)
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
