@@ -106,6 +106,7 @@ jobs:
           mkdir -p "${bundle_dir}"
           cp scripts/repair_dedicated_accountability_magellan.py "${bundle_dir}/"
           cp scripts/preflight_dedicated_accountability_magellan.py "${bundle_dir}/"
+          cp scripts/preflight_dedicated_accountability_submission.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_recipients.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_google_docs.py "${bundle_dir}/"
           cp scripts/repair_dedicated_accountability_submission_gate.py "${bundle_dir}/"
@@ -125,6 +126,7 @@ jobs:
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan.py" --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_submission_gate.py" --path "${APP_ROOT}/src/production_main.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_google_docs.py" --path "${APP_ROOT}/src/production_main.py"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_submission.py" --app-root "${APP_ROOT}" --reliability-attempts 2
           sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_magellan.py" --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
