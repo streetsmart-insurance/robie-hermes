@@ -6,6 +6,7 @@ import pytest
 from scripts.preflight_dedicated_accountability_submission import (
     EXPECTED_RED,
     SubmissionPreflightError,
+    _safe_failure_code,
     validate_observation,
 )
 
@@ -137,3 +138,21 @@ def test_workflows_run_two_attempt_submission_preflight_before_delivery():
     manual_step = manual.index(script)
     service_step = manual.index("Run the dedicated accountability service")
     assert manual_step < service_step
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("PLAYWRIGHT_BLOCKED: agency scope did not apply", "agency_scope_not_applied"),
+        ("PLAYWRIGHT_BLOCKED: 100-row selection rendered 10 mat-row elements", "page_size_rows_mismatch"),
+        ("PLAYWRIGHT_BLOCKED: next Submission Center page did not load", "next_page_failed"),
+        ("NEEDS_AUTH", "session_not_authenticated"),
+    ],
+)
+def test_failure_codes_are_bounded_and_privacy_safe(message, expected):
+    assert _safe_failure_code(RuntimeError(message)) == expected
+
+
+def test_unknown_failure_does_not_echo_exception_message():
+    secret_message = "applicant and credential must never be emitted"
+    assert _safe_failure_code(RuntimeError(secret_message)) == "RuntimeError"
