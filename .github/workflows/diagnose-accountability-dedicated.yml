@@ -73,6 +73,27 @@ jobs:
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
+      - name: Verify reusable EZLynx Submission Center session without delivery
+        run: |
+          set -euo pipefail
+          script_path=scripts/preflight_dedicated_accountability_submission.py
+          script_sha="$(sha256sum "${script_path}" | awk '{print $1}')"
+          script_b64="$(base64 -w0 "${script_path}")"
+          remote_script="/tmp/preflight-dedicated-accountability-submission-${GITHUB_RUN_ID}.py"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
+            | tee "${RUNNER_TEMP}/accountability-submission-preflight.txt"
+          set -euo pipefail
+          remote_script="/tmp/preflight-dedicated-accountability-submission-${GITHUB_RUN_ID}.py"
+          trap 'rm -f "${remote_script}"' EXIT
+          printf '%s' '${script_b64}' | base64 -d > "${remote_script}"
+          chown ubuntu:ubuntu "${remote_script}"
+          chmod 0700 "${remote_script}"
+          test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+            --app-root "${APP_ROOT}" --reliability-attempts 2
+          REMOTE_EOF
+
       - name: Capture DWD identity mapping and redacted failure tracebacks
         run: |
           set -euo pipefail
@@ -159,6 +180,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: accountability-readonly-diagnostic-${{ github.run_id }}
-          path: ${{ runner.temp }}/accountability-readonly-diagnostic.txt
+          path: |
+            ${{ runner.temp }}/accountability-readonly-diagnostic.txt
+            ${{ runner.temp }}/accountability-submission-preflight.txt
           if-no-files-found: warn
           retention-days: 30
