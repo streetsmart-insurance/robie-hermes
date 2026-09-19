@@ -35,6 +35,25 @@ class SubmissionPreflightError(RuntimeError):
     """The live Submission Center evidence did not satisfy the release gate."""
 
 
+SAFE_METRIC_KEYS = (
+    "pager_total",
+    "pages_reviewed",
+    "rows_inspected_through_boundary",
+    "non_closed_rows_inspected",
+    "mat_row_count",
+    "first_closed_row_inspected",
+    "full_dataset_exhausted",
+)
+
+
+def _safe_failure_metrics(observed: Mapping[str, Any]) -> dict[str, int | bool]:
+    return {
+        key: observed.get(key)
+        for key in SAFE_METRIC_KEYS
+        if isinstance(observed.get(key), (bool, int))
+    }
+
+
 SAFE_FAILURE_CODES = (
     ("Persistent Robie Chrome is unavailable", "chrome_unavailable"),
     ("Persistent Robie Chrome has no browser context", "browser_context_missing"),
@@ -250,9 +269,11 @@ def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
         try:
             summaries.append(validate_observation(observed))
         except SubmissionPreflightError as exc:
-            raise SubmissionPreflightError(
+            wrapped = SubmissionPreflightError(
                 f"attempt_{attempt}_validation:{_safe_failure_code(exc)}"
-            ) from exc
+            )
+            wrapped.safe_metrics = _safe_failure_metrics(observed)
+            raise wrapped from exc
 
     stable_keys = (
         "pager_total",
@@ -289,7 +310,7 @@ def main() -> int:
     except Exception as exc:
         safe = str(exc).splitlines()[0]
         stage, separator, code = safe.partition(":")
-        print(json.dumps({
+        payload = {
             "ready": False,
             "authenticated": "authentication" not in stage,
             "read_only": True,
@@ -297,7 +318,11 @@ def main() -> int:
             "records_exposed": False,
             "failure_stage": stage if separator else "setup_or_stability",
             "failure_code": code if separator else _safe_failure_code(exc),
-        }, sort_keys=True))
+        }
+        metrics = getattr(exc, "safe_metrics", None)
+        if isinstance(metrics, dict):
+            payload["failure_metrics"] = metrics
+        print(json.dumps(payload, sort_keys=True))
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0

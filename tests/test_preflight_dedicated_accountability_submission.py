@@ -7,6 +7,7 @@ from scripts.preflight_dedicated_accountability_submission import (
     EXPECTED_RED,
     SubmissionPreflightError,
     _safe_failure_code,
+    _safe_failure_metrics,
     validate_observation,
 )
 
@@ -192,3 +193,20 @@ def test_failure_codes_are_bounded_and_privacy_safe(message, expected):
 def test_unknown_failure_does_not_echo_exception_message():
     secret_message = "applicant and credential must never be emitted"
     assert _safe_failure_code(RuntimeError(secret_message)) == "RuntimeError"
+
+
+def test_failure_metrics_expose_only_numeric_reconciliation_evidence():
+    observed = _observation()
+    observed["applicant"] = "must not escape"
+    observed["submission_url"] = "https://example.invalid/private"
+    metrics = _safe_failure_metrics(observed)
+    assert metrics == {
+        "pager_total": 240,
+        "pages_reviewed": 1,
+        "rows_inspected_through_boundary": 2,
+        "non_closed_rows_inspected": 1,
+        "mat_row_count": 100,
+        "first_closed_row_inspected": True,
+    }
+    assert "applicant" not in metrics
+    assert "submission_url" not in metrics
