@@ -153,30 +153,11 @@ async def run_production_setup() -> None:
         await page.screenshot(path=screenshot_path)
         print(f"✓ Screenshot saved to {screenshot_path}")
 
-        # Step 6: Add Discussion Note
-        print("[LIVE STEP 6] Logging verified Discussion Note...")
-        add_note_btn = page.locator("#add-note-header, [data-testid='add-note-header']")
-        if await add_note_btn.count() > 0:
-            await add_note_btn.first.click()
-            await page.wait_for_timeout(1000)
+        # Step 6: Discussion notes are API-only (Carlo 2026-09-19).
+        print("[LIVE STEP 6] EZLynx notes must use DiscussionApi, not Playwright.")
+        from robie_job_engine.ezlynx_api_only_writes import refuse_playwright_note_or_doc
 
-            title_input = page.locator("#txtDiscussionTitle, [name='discussionTitle']")
-            if await title_input.count() > 0:
-                await title_input.first.fill(f"New Policy Setup - {POLICY_NUM}")
-
-            body_input = page.locator("#txtDiscussionBody, textarea.k-editor-textarea, [name='discussionBody'], .note-editor textarea, [contenteditable='true']")
-            if await body_input.count() > 0:
-                await body_input.first.fill(
-                    f"Completed Commercial Auto policy setup for Policy #{POLICY_NUM} with Progressive Commercial.\n"
-                    f"Premium: $2,450.00 | Term: 09/01/2026 - 09/01/2027 | State: NJ\n\n"
-                    f"ROBIE was here"
-                )
-
-            save_note = page.locator("#btnSaveNote, button:has-text('Save')")
-            if await save_note.count() > 0:
-                await save_note.first.click()
-                await page.wait_for_timeout(2000)
-                print("Discussion note logged successfully.")
+        refuse_playwright_note_or_doc("scripts/run_live_commercial_auto_setup discussion note")
 
 
 if __name__ == "__main__":

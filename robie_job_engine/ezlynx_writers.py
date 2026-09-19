@@ -242,7 +242,18 @@ def post_note(
         payload["policyNumber"] = str(expected_policy_number).strip()
     # NOTE POST PATH UNVERIFIED -- see DISCUSSION_NOTE_POST_PATH.
     response = live.post_json(DISCUSSION_NOTE_POST_PATH, payload)
-    return {"verification": evidence, "note_response": response}
+    note_id = ""
+    if isinstance(response, dict):
+        for key in ("noteId", "NoteId", "id", "Id"):
+            value = str(response.get(key) or "").strip()
+            if value:
+                note_id = value
+                break
+    return {
+        "verification": evidence,
+        "note_response": response,
+        "note_id": note_id or None,
+    }
 
 
 def upload_document(
@@ -284,7 +295,14 @@ def upload_document(
         policy_master_id=policy_master_id,
         file_content_type=file_content_type,
     )
-    return {"verification": evidence, "document_id": document_id}
+    from .ezlynx_api_only_writes import confirm_uploaded_document_id
+
+    confirm_uploaded_document_id(live, target, document_id)
+    return {
+        "verification": evidence,
+        "document_id": document_id,
+        "read_back": True,
+    }
 
 
 __all__ = [

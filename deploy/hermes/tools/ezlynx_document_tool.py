@@ -117,11 +117,15 @@ def _upload_document(args: dict) -> dict:
         filename=os.path.basename(os.path.expanduser(file_path)),
         **kwargs,
     )
+    from robie_job_engine.ezlynx_api_only_writes import confirm_uploaded_document_id
+
+    confirm_uploaded_document_id(client, applicant_id, document_id)
     return {
         "ok": True,
         "document_id": document_id,
         "applicant_id": applicant_id,
         "document_name": document_name,
+        "read_back": True,
     }
 
 

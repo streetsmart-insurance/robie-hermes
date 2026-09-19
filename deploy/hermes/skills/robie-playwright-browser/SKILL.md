@@ -49,6 +49,14 @@ URL-guessing.
    obtain any confirmation required by the task Skill.
 7. Preserve assertion results and appropriate screenshots as diagnostic evidence.
 
+## EZLynx notes and documents are API only
+
+Never file an EZLynx note or upload an EZLynx document with
+`playwright_exec`. Use `ezlynx_discussion_note` (DiscussionApi) and
+`ezlynx_document_upload` (DocumentApi). COMPLETE requires the API
+`note_id` or `document_id` after read-back. Browser file choosers on
+`ezlynx.com` and Add Note / Save Note clicks are `PLAYWRIGHT_BLOCKED`.
+
 ## Never delete (cardinal rule)
 
 ROBIE never deletes. Do not click Delete / Remove / Void / Terminate /

@@ -80,11 +80,9 @@ EZLynx browser work is playwright_exec calls only, never execute_code, never a P
 
 ## Add Note pane behavior
 
-EZLynx opens Add Note as a separate right-side website pane over the current
-page. Keep it closed unless the user or approved workflow explicitly requests
-a note. If it obscures the working form, close it with its X. When a note is
-required, the pane or surrounding UI may be temporarily condensed; restore the
-view and return to the underlying page after the note is saved and verified.
+Do not use the Add Note pane. EZLynx notes are API-only
+(`ezlynx_discussion_note` / DiscussionApi). If the pane opens over a form,
+close it with its X and continue the form. Never Save Note from Playwright.
 
 ## Authoritative sources
 

@@ -28,25 +28,10 @@ async def log_final_note() -> None:
         if scope_block:
             raise RuntimeError(scope_block)
 
-        # Open discussion note
-        add_note_btn = page.locator("#add-note-header, button:has-text('note_add'), a:has-text('Add Note')")
-        if await add_note_btn.count() > 0:
-            await add_note_btn.first.click()
-            await page.wait_for_timeout(1000)
+        # EZLynx notes are API-only (Carlo 2026-09-19). Playwright must not file.
+        from robie_job_engine.ezlynx_api_only_writes import refuse_playwright_note_or_doc
 
-            title_input = page.locator("#txtDiscussionTitle, input[name='txtDiscussionTitle']")
-            if await title_input.count() > 0:
-                await title_input.first.fill("Commercial Auto - Schedules Complete")
-
-            note_input = page.locator("#txtNote, textarea[name='txtNote'], #DiscussionNotes")
-            if await note_input.count() > 0:
-                await note_input.first.fill("Completed Commercial Auto policy schedules (Vehicle + Driver) for Policy #CA-ROBIE-LIVE-02.\n\nROBIE was here")
-
-            save_note = page.locator("#btnSaveNote, button:has-text('Save')")
-            if await save_note.count() > 0:
-                await save_note.first.click()
-                print("Discussion note logged successfully.")
-                await page.wait_for_timeout(2000)
+        refuse_playwright_note_or_doc("scripts/run_complete_schedules_setup discussion note")
 
 
 if __name__ == "__main__":

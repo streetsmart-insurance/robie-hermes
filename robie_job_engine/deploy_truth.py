@@ -92,6 +92,11 @@ CHAT_RUNTIME_FILES: tuple[ChatRuntimeFile, ...] = (
         zip_relpath="deploy/hermes/tools/ezlynx_document_tool.py",
         dest_relpath="hermes-agent/tools/ezlynx_document_tool.py",
     ),
+    ChatRuntimeFile(
+        name="discussion-note-tool",
+        zip_relpath="deploy/hermes/tools/ezlynx_note_tool.py",
+        dest_relpath="hermes-agent/tools/ezlynx_note_tool.py",
+    ),
 )
 
 # Zip PYTHONPATH only — Hermes does not load these from .hermes.

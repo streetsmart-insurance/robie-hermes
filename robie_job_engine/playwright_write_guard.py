@@ -678,6 +678,20 @@ def _wrap_write(
             if destructive:
                 raise RuntimeError(destructive)
         selector = args[0] if page_level and args else None
+        # Carlo 2026-09-19: EZLynx notes/docs are API-only. Hard refusal —
+        # no Gemini fallback, no HITL override, no COMPLETE.
+        from robie_job_engine.ezlynx_api_only_writes import (
+            playwright_note_doc_block_reason,
+        )
+
+        note_doc = playwright_note_doc_block_reason(
+            self,
+            method_name=method_name,
+            selector=selector,
+            page_url=_page_url_text(_page_from_target(self, page_level=page_level)),
+        )
+        if note_doc:
+            raise RuntimeError(note_doc)
         scope_reason = _ezlynx_write_scope_block_reason(
             self,
             page_level=page_level,

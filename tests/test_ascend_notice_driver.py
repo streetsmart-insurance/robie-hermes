@@ -133,6 +133,10 @@ def make_discussion_client(discussion_rows, note_id="n7"):
         ("connect/token", {"access_token": "tok123", "expires_in": 3600}),
         ("by-applicant", discussion_rows),
         ("/notes", {"noteId": note_id}),
+        (
+            "v8/discussions/",
+            {"discussionId": "d1", "notes": [{"noteId": note_id, "body": "filed"}]},
+        ),
     ]
     config = discussions.DiscussionApiConfig(
         discussion_base_url=API_BASE,
