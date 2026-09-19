@@ -605,6 +605,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="inject CSV bytes instead of reading Gmail")
     parser.add_argument("--out", default=None,
                         help="write digest markdown here (default: stdout)")
+    parser.add_argument("--allow-unverified", action="store_true",
+                        help="bypass the schema gate (4359 until verified)")
     args = parser.parse_args(argv)
 
     day = datetime.strptime(args.day, "%Y-%m-%d").date()
@@ -613,7 +615,8 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.csv, "rb") as fh:
             csv_bytes = fh.read()
     run = run_worker(args.report, day=day, mode=args.mode,
-                     queue_dir=args.queue_dir, csv_bytes=csv_bytes)
+                     queue_dir=args.queue_dir, csv_bytes=csv_bytes,
+                     allow_unverified=args.allow_unverified)
     digest = build_digest([run])
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
