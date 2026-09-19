@@ -62,3 +62,20 @@ def test_safe_state_contains_no_query_or_fragment(tmp_path: Path):
     assert state["path"] == "/login"
     assert "secret" not in str(state)
     assert state["storage_state_mode"] == "0o600"
+
+
+def test_workflows_require_two_contexts_and_preserve_redacted_evidence():
+    root = Path(__file__).resolve().parents[1]
+    run_workflow = (root / ".github/workflows/run-accountability-now.yml").read_text(
+        encoding="utf-8"
+    )
+    diagnose_workflow = (
+        root / ".github/workflows/diagnose-accountability-dedicated.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "--reliability-attempts 2" in run_workflow
+    assert "accountability-magellan-preflight.txt" in run_workflow
+    assert "Verify reusable Magellan session without delivery" in diagnose_workflow
+    assert "--reliability-attempts 2" in diagnose_workflow
+    assert "systemctl start" not in diagnose_workflow
+    assert "--publish" not in diagnose_workflow
