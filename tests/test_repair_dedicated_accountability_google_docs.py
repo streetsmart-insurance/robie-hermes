@@ -6,6 +6,7 @@ from scripts.repair_dedicated_accountability_google_docs import (
     NEW_HELPER,
     OLD_HELPER,
     REPLACEMENTS,
+    UTF16_HELPER,
     _utf16_len,
     repair,
 )
@@ -44,6 +45,25 @@ def test_repairs_legacy_index_math_and_is_idempotent(tmp_path: Path):
     backup = target.with_suffix(".py.pre-utf16-index-repair")
     assert backup.read_text(encoding="utf-8") == _legacy_source()
     assert backup.stat().st_mode & 0o777 == 0o600
+
+
+
+def test_repairs_equivalent_legacy_helper_formatting_variant(tmp_path: Path):
+    target = tmp_path / "production_main.py"
+    variant = _legacy_source().replace(
+        '"""Translate a pre-insert index after reverse-ordered cell text inserts."""',
+        '"""Translate a pre-insert index after reverse-ordered inserts."""',
+        1,
+    )
+    target.write_text(variant, encoding="utf-8")
+
+    assert repair(target) == "repaired"
+    repaired = target.read_text(encoding="utf-8")
+    assert repaired.count(UTF16_HELPER) == 1
+    for old, new in REPLACEMENTS:
+        assert old not in repaired
+        assert new in repaired
+    assert repair(target) == "already_repaired"
 
 
 def test_refuses_unknown_source_shape(tmp_path: Path):
