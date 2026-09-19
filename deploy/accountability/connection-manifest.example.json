@@ -185,6 +185,10 @@
   },
   "google_sheets": {
     "enabled": false,
+    "required_scopes": [
+      "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/drive.readonly"
+    ],
     "spreadsheet_id": "REPLACE_WITH_PRIVATE_APPSHEET_BACKING_SHEET_ID",
     "employee_role_table": "employees",
     "employee_role_columns": {

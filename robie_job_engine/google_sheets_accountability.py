@@ -12,14 +12,74 @@ from .business_calendar import previous_business_day
 
 
 SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+REQUIRED_ROSTER_SCOPES = (SHEETS_READONLY_SCOPE, DRIVE_READONLY_SCOPE)
+TEST_ACCOUNTABILITY_SA = (
+    "robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com"
+)
+
+
+class SheetsRosterAccessError(RuntimeError):
+    """Fail-closed roster read. Never invent producer emails."""
+
+
+def required_roster_scopes() -> tuple[str, ...]:
+    """OAuth scopes the Test/cloud ADC identity must present for the roster."""
+    return REQUIRED_ROSTER_SCOPES
+
+
+def classify_sheets_auth_error(exc: BaseException) -> SheetsRosterAccessError:
+    """Name the missing Sheets grant. Do not invent a producer directory."""
+    text = f"{type(exc).__name__}: {exc}"
+    upper = text.upper()
+    if "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in upper or (
+        "INSUFFICIENT" in upper and "SCOPE" in upper
+    ):
+        return SheetsRosterAccessError(
+            "approved active-employee roster is unavailable: "
+            "ACCESS_TOKEN_SCOPE_INSUFFICIENT. The Test/cloud ADC identity "
+            f"(typically {TEST_ACCOUNTABILITY_SA}, or whichever identity the "
+            "accountability manifest / VM uses) must request "
+            f"{SHEETS_READONLY_SCOPE}. Shared Drive-hosted sheets also need "
+            f"{DRIVE_READONLY_SCOPE}. Carlo must grant those OAuth scopes on "
+            "the VM-attached SA (cloud-platform or the explicit Sheets+Drive "
+            "scopes) and share the roster spreadsheet with that SA as Viewer. "
+            "Never invent producer emails."
+        )
+    if "403" in text or "PERMISSION_DENIED" in upper:
+        return SheetsRosterAccessError(
+            "approved active-employee roster is forbidden (403). Share the "
+            "allowlisted spreadsheet with the Test accountability SA "
+            f"({TEST_ACCOUNTABILITY_SA} or the identity the manifest/ADC "
+            "uses) as Viewer. Never invent producer emails."
+        )
+    return SheetsRosterAccessError(
+        "approved active-employee roster could not be read "
+        f"({type(exc).__name__}). Never invent producer emails."
+    )
 
 
 def _sheets_client() -> Any:
     import google.auth
+    from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
 
-    credentials, _ = google.auth.default(scopes=[SHEETS_READONLY_SCOPE])
-    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    try:
+        # Request only the Sheets API scope on the token so a Production SA
+        # that already has spreadsheets.readonly is not broken by also
+        # demanding drive.readonly. Shared Drive hosting is documented as a
+        # Carlo grant; SCOPE_INSUFFICIENT names both required scopes.
+        credentials, _ = google.auth.default(scopes=[SHEETS_READONLY_SCOPE])
+        if getattr(credentials, "requires_scopes", False):
+            credentials = credentials.with_scopes([SHEETS_READONLY_SCOPE])
+        refresh = getattr(credentials, "refresh", None)
+        if callable(refresh) and not getattr(credentials, "valid", True):
+            refresh(Request())
+        return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    except SheetsRosterAccessError:
+        raise
+    except Exception as exc:
+        raise classify_sheets_auth_error(exc) from exc
 
 
 def previous_business_week_tab(value: date, *, holiday_calendar: str | None = None) -> str:

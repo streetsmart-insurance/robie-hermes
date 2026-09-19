@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -18,6 +20,13 @@ from .models import (
     VerificationEvidence,
 )
 from .secrets import redact_mapping, redact_text
+
+logger = logging.getLogger(__name__)
+PERFORM_PROGRESS_KINDS = (
+    "gateway_progress",
+    "perform_progress",
+    "worker_progress",
+)
 
 
 def utc_now() -> str:
@@ -637,6 +646,87 @@ class JobStore:
                 (job_id, phase, number, outcome, canonical_json(redact_mapping(detail)), utc_now()),
             )
 
+    def report_perform_progress(
+        self,
+        job_id: str,
+        data: dict[str, Any] | None = None,
+        *,
+        source: str = "worker",
+    ) -> dict[str, Any]:
+        """Record that the worker is still making progress on this Job.
+
+        Lease renewals are not progress. Call this when a page advances,
+        ``rows_inspected`` increases, or another durable detail changes.
+        The Job Engine uses this row to refresh the perform idle deadline.
+        """
+        stamp = utc_now()
+        incoming = redact_mapping(dict(data or {}))
+        existing = self.get_checkpoint(job_id, "perform_progress") or {}
+        first_at = str(existing.get("first_at") or "").strip() or stamp
+        payload = {
+            **incoming,
+            "source": str(incoming.get("source") or source),
+            "first_at": first_at,
+            "last_at": stamp,
+        }
+        self.checkpoint(job_id, "perform_progress", payload)
+        return payload
+
+    def latest_perform_progress_fingerprint(self, job_id: str) -> tuple[Any, ...] | None:
+        """Comparable token for perform-progress detection.
+
+        Includes progress checkpoints, the newest attempt, and the newest
+        ``playwright_exec`` row. ``jobs.updated_at`` and lease expiry are
+        ignored so the lease heartbeat cannot keep a hung worker alive.
+        """
+        resolved = str(job_id or "").strip()
+        if not resolved:
+            return None
+        parts: list[tuple[Any, ...]] = []
+        placeholders = ",".join("?" for _ in PERFORM_PROGRESS_KINDS)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT kind, created_at, data_json FROM checkpoints
+                    WHERE job_id=? AND kind IN ({placeholders})
+                    ORDER BY kind""",
+                (resolved, *PERFORM_PROGRESS_KINDS),
+            ).fetchall()
+            for row in rows:
+                parts.append(
+                    ("checkpoint", row["kind"], row["created_at"], row["data_json"])
+                )
+            attempt = conn.execute(
+                """SELECT id, created_at, detail_json FROM attempts
+                   WHERE job_id=? ORDER BY id DESC LIMIT 1""",
+                (resolved,),
+            ).fetchone()
+            if attempt is not None:
+                parts.append(
+                    (
+                        "attempt",
+                        int(attempt["id"]),
+                        attempt["created_at"],
+                        attempt["detail_json"],
+                    )
+                )
+            try:
+                exec_row = conn.execute(
+                    """SELECT id, updated_at, created_at FROM playwright_exec
+                       WHERE job_id=? ORDER BY id DESC LIMIT 1""",
+                    (resolved,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                exec_row = None
+            if exec_row is not None:
+                parts.append(
+                    (
+                        "playwright_exec",
+                        int(exec_row["id"]),
+                        exec_row["updated_at"] or exec_row["created_at"],
+                    )
+                )
+        return tuple(parts) if parts else None
+
     def latest_running_chat_job_id(self) -> str | None:
         """Newest RUNNING generic Chat job. Used when playwright_exec has no env id."""
         with self.connect() as conn:
@@ -846,3 +936,31 @@ class JobStore:
         result = dict(row)
         result["payload"] = json.loads(result.pop("payload_json"))
         return result
+
+
+def report_current_job_perform_progress(
+    data: dict[str, Any] | None = None,
+    *,
+    source: str = "worker",
+) -> bool:
+    """Best-effort progress heartbeat for the Job Engine-bound job.
+
+    Missing ``ROBIE_JOB_ID`` / ``ROBIE_JOB_DB`` is a no-op so helper
+    subprocesses can call this without knowing whether a Job is bound.
+    A write failure does not raise: the idle deadline then fails closed.
+    """
+    job_id = (
+        os.environ.get("ROBIE_JOB_ID")
+        or os.environ.get("ROBIE_CURRENT_JOB_ID")
+        or os.environ.get("JOB_ID")
+        or ""
+    ).strip()
+    db_path = str(os.environ.get("ROBIE_JOB_DB") or "").strip()
+    if not job_id or not db_path:
+        return False
+    try:
+        JobStore(db_path).report_perform_progress(job_id, data, source=source)
+    except Exception:
+        logger.exception("perform progress heartbeat failed job=%s", job_id)
+        return False
+    return True

@@ -21,6 +21,12 @@ from playwright.sync_api import (
 )
 
 from .ezlynx_auth_evidence import authenticated_app_evidence
+from .store import report_current_job_perform_progress
+from .submission_center_controls import (
+    activate_mdc_checkbox,
+    activate_mdc_combobox,
+    activate_sort_header,
+)
 
 
 CDP_URL = "http://127.0.0.1:9222"
@@ -35,6 +41,23 @@ REQUIRED_HEADERS = {
     "quote_due_date": "Quote Due Date",
     "effective_date": "Effective Date",
 }
+
+
+def _report_pagination_progress(
+    *,
+    pages_reviewed: int,
+    rows_inspected: int,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Tell Job Engine the Submission Center walk is still advancing."""
+    payload = {
+        "source": "submission_audit_runner",
+        "pages_reviewed": pages_reviewed,
+        "rows_inspected": rows_inspected,
+    }
+    if extra:
+        payload.update(extra)
+    report_current_job_perform_progress(payload, source="submission_audit_runner")
 
 
 def _matching_page(browser) -> Page:
@@ -163,9 +186,10 @@ def _set_agency_scope(page: Page) -> None:
     if mine is None or agency is None:
         raise RuntimeError("PLAYWRIGHT_BLOCKED: agency options not found")
     if _option_selected(mine):
-        _activate(mine, "My Submissions checkbox", key="Space")
+        # Live mat-mdc-checkbox ignores Space/Enter. Force-click the nested input.
+        activate_mdc_checkbox(mine, "My Submissions checkbox")
     if not _option_selected(agency):
-        _activate(agency, "Streetsmart Insurance checkbox", key="Space")
+        activate_mdc_checkbox(agency, "Streetsmart Insurance checkbox")
     apply_button = page.get_by_role(
         "button", name=re.compile(r"^(Apply|Done|Select)$", re.I)
     )
@@ -216,16 +240,16 @@ def _set_page_size(page: Page) -> None:
     )
     if selected_value.count() and selected_value.first.inner_text().strip() == "100":
         return
-    # The live MDC paginator renders a touch-target layer above the visible
-    # select, which intercepts pointer clicks. Activate the accessible
-    # combobox with its native keyboard behavior instead of forcing a click.
-    selector.first.press("Enter")
+    # Live MDC paginator: a touch-target layer intercepts pointer clicks and
+    # Enter is a no-op. Force-click the combobox and option 100, then the
+    # caller verifies rendered row count fail-closed.
+    activate_mdc_combobox(selector.first, "page-size control")
     option = page.get_by_role("option", name=re.compile(r"^100$"))
     if not option.count():
         option = page.locator("mat-option").filter(has_text=re.compile(r"^100$"))
     if not option.count():
         raise RuntimeError("PLAYWRIGHT_BLOCKED: 100 page-size option not found")
-    _activate(option, "100 page-size option")
+    activate_mdc_combobox(option, "100 page-size option")
     page.wait_for_timeout(1_000)
 
 
@@ -315,7 +339,7 @@ def _normalize_status_sort(page: Page) -> tuple[int, list[str]]:
             # the server reapplies the sort to the refreshed 100-row result.
             last_statuses = statuses
         before = page.locator("mat-row").first.inner_text() if page.locator("mat-row").count() else ""
-        _activate(header, "Status sort header")
+        activate_sort_header(header, "Status sort header")
         page.wait_for_timeout(1_000)
         try:
             page.wait_for_function(
@@ -545,6 +569,14 @@ def audit(*, fresh: bool) -> dict[str, Any]:
                     # Preserve only evidence needed to explain an old/red/ambiguous
                     # candidate. Do not retain every current non-closed applicant.
                     dispositions.append(record)
+            _report_pagination_progress(
+                pages_reviewed=pages_reviewed,
+                rows_inspected=rows_inspected,
+                extra={
+                    "non_closed_rows_inspected": non_closed_inspected,
+                    "first_closed_row_inspected": first_closed_page is not None,
+                },
+            )
             if first_closed_page is None:
                 try:
                     _advance_page(page, start)

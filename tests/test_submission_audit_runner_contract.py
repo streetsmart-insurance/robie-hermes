@@ -16,6 +16,8 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn('.cdk-overlay-container mat-checkbox', source)
         self.assertIn('"mat-checkbox"', source)
         self.assertIn('Apply|Done|Select', source)
+        self.assertIn('activate_mdc_checkbox(mine, "My Submissions checkbox")', source)
+        self.assertIn('activate_mdc_checkbox(agency, "Streetsmart Insurance checkbox")', source)
         self.assertGreaterEqual(source.count('_option_selected'), 4)
 
     def test_all_interactive_controls_use_visible_target_activation(self):
@@ -30,6 +32,9 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn("target.click(timeout=5_000)", source)
         self.assertNotIn(".first.click()", source)
         self.assertNotIn(".last.click()", source)
+        self.assertIn("activate_mdc_checkbox", source)
+        self.assertIn("activate_mdc_combobox", source)
+        self.assertIn("activate_sort_header", source)
         self.assertIn('_activate(picker_button, "agency picker")', source)
         self.assertIn('_activate(next_button, "next Submission Center page")', source)
 
@@ -72,7 +77,7 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
             normalize("Streetsmart Insurance"),
         )
 
-    def test_page_size_uses_accessible_keyboard_activation(self):
+    def test_page_size_force_clicks_mdc_combobox_and_option_100(self):
         source = (
             Path(__file__).resolve().parents[1]
             / "robie_job_engine"
@@ -81,7 +86,9 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         page_size_block = source.split("def _set_page_size", 1)[1].split(
             "def _headers", 1
         )[0]
-        self.assertIn('selector.first.press("Enter")', page_size_block)
+        self.assertIn('activate_mdc_combobox(selector.first, "page-size control")', page_size_block)
+        self.assertIn('activate_mdc_combobox(option, "100 page-size option")', page_size_block)
+        self.assertNotIn('selector.first.press("Enter")', page_size_block)
         self.assertNotIn("selector.first.click()", page_size_block)
         self.assertIn(".mat-mdc-select-value-text", page_size_block)
 
@@ -121,7 +128,7 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn("_set_agency_scope(page)", status_block)
         self.assertIn("_verify_page_size_result(page)", status_block)
         self.assertLess(
-            status_block.index('_activate(header, "Status sort header")'),
+            status_block.index('activate_sort_header(header, "Status sort header")'),
             status_block.rindex("ascending sort showed a closed first row"),
         )
 
@@ -164,6 +171,19 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         self.assertIn("_advance_page(page, start)", audit_block)
         self.assertIn('"qualifying_records": qualifying', audit_block)
         self.assertIn('"email_delivery_enabled": False', audit_block)
+
+    def test_pagination_reports_perform_progress_to_job_engine(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "robie_job_engine"
+            / "submission_audit_runner.py"
+        ).read_text()
+        self.assertIn("def _report_pagination_progress", source)
+        self.assertIn("report_current_job_perform_progress", source)
+        audit_block = source.split("def audit", 1)[1]
+        self.assertIn("_report_pagination_progress(", audit_block)
+        self.assertIn("pages_reviewed=pages_reviewed", audit_block)
+        self.assertIn("rows_inspected=rows_inspected", audit_block)
 
 
 if __name__ == "__main__":

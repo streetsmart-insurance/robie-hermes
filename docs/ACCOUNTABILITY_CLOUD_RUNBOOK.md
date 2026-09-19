@@ -171,6 +171,14 @@ presented as top performance.
 ### Google Sheets trackers
 
 Share only the required spreadsheets with the cloud service identity. The
+Test VM ADC identity (typically
+`robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com`)
+must present `https://www.googleapis.com/auth/spreadsheets.readonly` and,
+for Shared Drive-hosted sheets,
+`https://www.googleapis.com/auth/drive.readonly`.
+`ACCESS_TOKEN_SCOPE_INSUFFICIENT` / 403 is fail-closed: never invent
+producer emails. See [OVERDUE_SUBMISSION_TEST_FIXES.md](OVERDUE_SUBMISSION_TEST_FIXES.md).
+The
 connection manifest maps every tracker key to a normalized export path. Each
 finding keeps its tracker name and source row.
 The COI source is spreadsheet `1LXer2SjkQGvj1dsaRGmFnkB_hGBQeJolagw1oFbycZY`.
