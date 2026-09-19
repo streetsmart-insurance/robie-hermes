@@ -8,6 +8,7 @@ from scripts.preflight_dedicated_accountability_submission import (
     SubmissionPreflightError,
     _safe_failure_code,
     _safe_failure_metrics,
+    _evidence_changed_between_attempts,
     validate_observation,
 )
 
@@ -211,3 +212,10 @@ def test_failure_metrics_expose_only_numeric_reconciliation_evidence():
     }
     assert "applicant" not in metrics
     assert "submission_url" not in metrics
+
+
+def test_two_complete_live_attempts_may_observe_legitimate_changes():
+    first = {"verified": True, "evidence_sha256": "a" * 64}
+    second = {"verified": True, "evidence_sha256": "b" * 64}
+    assert _evidence_changed_between_attempts([first, second]) is True
+    assert _evidence_changed_between_attempts([first, dict(first)]) is False
