@@ -76,6 +76,8 @@ def test_workflows_require_two_contexts_and_preserve_redacted_evidence():
     assert "--reliability-attempts 2" in run_workflow
     assert "accountability-magellan-preflight.txt" in run_workflow
     assert "Verify reusable Magellan session without delivery" in diagnose_workflow
+    assert 'remote_script="/tmp/preflight-dedicated-accountability-magellan-${GITHUB_RUN_ID}.py"' in diagnose_workflow
+    assert diagnose_workflow.index('remote_script="/tmp/preflight-dedicated-accountability-magellan-') < diagnose_workflow.index("gcloud compute ssh", diagnose_workflow.index("Verify reusable Magellan session"))
     assert "--reliability-attempts 2" in diagnose_workflow
     assert "systemctl start" not in diagnose_workflow
     assert "--publish" not in diagnose_workflow
