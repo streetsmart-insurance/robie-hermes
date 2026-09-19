@@ -1,0 +1,112 @@
+# ROBIE capabilities registry — the team-facing source of truth for
+# "what Robie can and can't do" in the StreetSmart app.
+#
+# A sandbox sync (capabilities_sync.py) reads this file from the main branch
+# and writes the "Skills" tab of the ROBIE Operations Control Center sheet.
+# To add or change a capability: edit this file in a PR. No sheet edits needed.
+# Fields:
+#   name:             display name (must stay stable — the app keys off it)
+#   team_description: plain English, written for non-technical agency staff
+#   how_it_works:     one plain-English sentence on the mechanism
+#   limitations:      what it CAN'T do — be honest, this is the point
+#   status:           Working | Built — not yet proven live | Blocked — <reason>
+#   source:           repo path or folder backing it (informational)
+
+capabilities:
+  - name: "EZLynx Policy API — search"
+    team_description: "Looks up any policy by its policy number and pulls back the details — carrier, term dates, premium, and status."
+    how_it_works: "Robie asks the EZLynx API for the policy number and reads back the answer."
+    limitations: "It can't list every policy on an account, and it can't see coverage limits or deductibles — those need a person clicking in EZLynx."
+    status: "Working"
+    source: "robie_job_engine/ezlynx_api.py"
+
+  - name: "EZLynx Document API — search/download"
+    team_description: "Finds and downloads documents filed on a policy or applicant in EZLynx — dec pages, audits, quotes, anything stored there."
+    how_it_works: "Robie searches the EZLynx document index and downloads the matching file."
+    limitations: "It can't read what's inside a scanned image (no text recognition). It needs the right applicant record to search."
+    status: "Working"
+    source: "robie_job_engine/ezlynx_api.py"
+
+  - name: "EZLynx Discussion API — append note"
+    team_description: "Adds a note to an existing EZLynx discussion thread. It only ever adds to existing threads — it never creates new ones, and it never deletes anything."
+    how_it_works: "Robie finds the right existing thread and appends the note through the EZLynx API."
+    limitations: "It can't create a new discussion, edit a note, or delete one. If two threads have the same name it may need a person to sort out which is which."
+    status: "Built — live POST not yet proven"
+    source: "robie_job_engine/ezlynx_discussions.py"
+
+  - name: "EZLynx Document API — upload"
+    team_description: "Files a document (PDF, image, and so on) onto an applicant's record in EZLynx, then checks that it actually landed there."
+    how_it_works: "Robie uploads the file through the EZLynx API and reads the record back to confirm it arrived."
+    limitations: "The file name must end in .pdf (or the right extension). It can't choose which folder the file lands in."
+    status: "Built — live upload not yet proven"
+    source: "robie_job_engine/ezlynx_api.py"
+
+  - name: "Gmail as robie@streetsmart.insurance"
+    team_description: "Sends and searches agency email as robie@streetsmart.insurance. It can create premium finance agreements and spot cancellation notices coming into the hello inbox — it can search all the agency inboxes, not just one. Every email it sends is saved to a file."
+    how_it_works: "Robie uses the Gmail API with agency-wide access, and files a copy of every sent email."
+    limitations: "It never emails clients from the four verification workers — those are carriers and vendors only. It can't open attachments it doesn't recognize."
+    status: "Working"
+    source: "robie_job_engine/gmail_client.py"
+
+  - name: "Bland AI voice calls"
+    team_description: "Makes outbound phone calls when an EZLynx label triggers one — for example, calling a carrier about an audit. If the call needs a person, it transfers back to the producer."
+    how_it_works: "Robie places the call through Bland AI, follows a script, and hands off to a person when needed."
+    limitations: "It never calls clients from the four verification workers. Live calling is currently paused after a September incident until the fix is proven."
+    status: "Built — deploy pending"
+    source: "src/voice/"
+
+  - name: "GitHub automation"
+    team_description: "Merges code changes, starts automated checks, and reads build logs across the Robie codebases."
+    how_it_works: "Robie talks to the GitHub API to manage pull requests and workflows."
+    limitations: "Robie never merges to the main branch or deploys on its own — Carlo approves every merge and every production release."
+    status: "Working"
+    source: ".github/workflows/"
+
+  - name: "GCP Secret Manager"
+    team_description: "Stores and retrieves logins and API keys securely — the actual passwords are never written down anywhere else."
+    how_it_works: "Logins live in Google's Secret Manager; Robie reads them only when it needs to sign in somewhere."
+    limitations: "Robie can use a login but can never show it to anyone — not even Carlo sees the values, only the names."
+    status: "Working"
+    source: "docs/ (secret names only)"
+
+  - name: "Ascend dashboard"
+    team_description: "Signs in to the Ascend premium-finance dashboard as robie@ and reads the daily pay batch."
+    how_it_works: "Robie signs in with a code emailed to robie@, then reads the batch totals."
+    limitations: "Ascend emails a fresh sign-in code every time, so each run needs that code. It can read the batch but can't approve payouts on its own."
+    status: "Working"
+    source: "robie_job_engine/ascend_client.py"
+
+  - name: "Zapier webhooks"
+    team_description: "Triggers Zapier automations — for example, automatically creating an EZLynx follow-up task."
+    how_it_works: "Robie fires a webhook that Zapier picks up and runs."
+    limitations: "A 'success' reply from Zapier alone proves nothing — Robie always checks the destination (e.g., that the task actually exists) before calling it done."
+    status: "Working"
+    source: "integrations/zapier/"
+
+  - name: "Browser automation (Playwright)"
+    team_description: "Drives EZLynx and carrier websites in a real browser on Robie's servers — the same clicks a person would make, done automatically."
+    how_it_works: "Robie runs a real Chrome browser on its own servers and operates the sites step by step."
+    limitations: "Some carrier sites block automated browsers — those run through a special setup, and one (Hartford) only works from a different location. Logins with two-factor codes need a person or an emailed code."
+    status: "Working"
+    source: "robie_job_engine/browser/"
+
+  - name: "QuickBooks API"
+    team_description: "Reads company and accounting info from QuickBooks."
+    how_it_works: "Robie queries the QuickBooks API for company data."
+    limitations: "Currently working in the test sandbox only — the live agency QuickBooks is not connected yet."
+    status: "Working in sandbox"
+    source: "integrations/quickbooks/"
+
+  - name: "This control center (Sheets + AppSheet)"
+    team_description: "Reads and writes the spreadsheet behind this very app — that is how this page stays up to date."
+    how_it_works: "Sync jobs copy data from Robie's systems into the sheet, and the app displays the sheet."
+    limitations: "Tabs that a sync job owns get rewritten on every run — typing into those tabs by hand gets overwritten. Hand-editable tabs are the exception, not the rule."
+    status: "Working"
+    source: "capabilities.yaml (this file)"
+
+  - name: "Daily accountability email"
+    team_description: "Sends the previous-day accountability report to the five recipients every weekday morning at 9 AM."
+    how_it_works: "A timer on Robie's server builds the report from the previous day and emails it."
+    limitations: "Delivery is currently blocked waiting on one final Google email approval. The timer itself is on and ready."
+    status: "Blocked — waiting on email approval"
+    source: "systemd streetsmart-accountability.timer"
