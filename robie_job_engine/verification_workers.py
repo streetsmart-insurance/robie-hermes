@@ -205,6 +205,28 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
     return items
 
 
+def _4372_closed_reason(item: WorkItem) -> str | None:
+    """Return the exclusion reason when a 4372 task is closed; None = keep.
+
+    Added 2026-09-19: the 4372 daily CSV can deliver CLOSED tasks (the
+    report filter does not exclude them — proven on the 2026-09-19
+    delivery, all 4 rows Closed). A closed task is finished work and must
+    never become a work item, regardless of its due date. Only an exact
+    "Closed" status (case-insensitive) excludes; any other status (Open,
+    blank, unknown) keeps the item so missing data never silently drops
+    work.
+    """
+    status = _cell(item.row, "Task Status").strip().casefold()
+    if status == "closed":
+        closed_date = _cell(item.row, "Task Closed Date")
+        closed_by = _cell(item.row, "Task Closed By")
+        detail = f"closed {closed_date}" if closed_date else "closed"
+        if closed_by:
+            detail += f" by {closed_by}"
+        return f"task already {detail} — no work remaining"
+    return None
+
+
 # --- 4246 incremental audit queue ------------------------------------------
 
 
@@ -456,6 +478,7 @@ class WorkerRun:
     audit_carried: list = field(default_factory=list)
     evidence: list = field(default_factory=list)
     errors: list = field(default_factory=list)
+    excluded_stale: list = field(default_factory=list)
 
 
 def _execute_live_action(pa: PlannedAction, item: WorkItem | None) -> str:
@@ -569,6 +592,25 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
 
     # 2. WORK ITEMS
     items = build_work_items(report_id, ingested)
+
+    # 2b. 4372 closed/stale exclusion. A closed task is finished work and
+    # never becomes a work item; an old task due date is a prior cycle's
+    # work (active policy status alone does NOT make it current).
+    # Excluded items are recorded with a reason, never silently dropped.
+    if report_id == "4372":
+        kept: list[WorkItem] = []
+        for item in items:
+            reason = _4372_closed_reason(item)
+            if reason:
+                run.excluded_stale.append({
+                    "item_key": item.key,
+                    "policy_number": item.policy_number,
+                    "account_name": item.account_name,
+                    "reason": reason,
+                })
+            else:
+                kept.append(item)
+        items = kept
     run.work_items = len(items)
 
     # 3/4. PLAN per item

@@ -99,3 +99,59 @@ def test_4246_rejects_old_19col_format(tmp_path):
         vw.run_worker("4246", day=DAY, mode="dry_run",
                       queue_dir=str(tmp_path),
                       csv_bytes=buffer.getvalue().encode("utf-8"))
+
+
+# --- Fix 5: 4372 excludes closed tasks --------------------------------------
+# The 4372 daily CSV can deliver CLOSED tasks (report filter does not
+# exclude them). A closed task is finished work and must never become a
+# work item, regardless of due date.
+
+
+def _row4372(policy, account, due, **overrides):
+    row = {
+        "Applicant ID": "220250093",
+        "Account Name": account,
+        "Policy Number": policy,
+        "Task Due Date": due,
+        "Task Status": "Open",
+        "Department": "Personal Lines",
+    }
+    row.update(overrides)
+    return row
+
+
+def _row4372_closed(policy, account, closed_date, closed_by):
+    return _row4372(policy, account, "12/20/2026",
+                    **{"Task Status": "Closed",
+                       "Task Closed Date": closed_date,
+                       "Task Closed By": closed_by})
+
+
+def test_4372_closed_tasks_excluded_not_worked(tmp_path):
+    rows = [
+        _row4372_closed("SAHO581361", "Saeed Abbaszadeh",
+                        "2025-12-12", "Daniela Aguilar"),
+        _row4372("NEW123", "Current Person", "10/15/2026",
+                 **{"Task Status": "Open"}),
+    ]
+    run = vw.run_worker("4372", day=DAY, mode="dry_run",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4372", rows))
+    assert run.work_items == 1
+    assert len(run.excluded_stale) == 1
+    ex = run.excluded_stale[0]
+    assert ex["policy_number"] == "SAHO581361"
+    assert "closed 2025-12-12 by Daniela Aguilar" in ex["reason"]
+    assert run.actions[0].policy_number == "NEW123"
+
+
+def test_4372_non_closed_status_never_excluded_by_this_rule(tmp_path):
+    # Blank or Open status must not be treated as closed — missing data
+    # never silently drops work.
+    rows = [_row4372("OPEN1", "Open Person", "10/15/2026",
+                     **{"Task Status": ""})]
+    run = vw.run_worker("4372", day=DAY, mode="dry_run",
+                        queue_dir=str(tmp_path),
+                        csv_bytes=_csv_bytes("4372", rows))
+    assert run.work_items == 1
+    assert not run.excluded_stale
