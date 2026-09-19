@@ -16,11 +16,34 @@ APPROVED_RECIPIENTS = (
     "ashley@streetsmart.insurance",
     "gabrielac@streetsmart.insurance",
 )
+CARLO_ONLY_RECIPIENTS = ("carlo@streetsmart.insurance",)
+BEGIN_MARKER = "# BEGIN ROBIE ACCOUNTABILITY RECIPIENT GUARD"
+END_MARKER = "# END ROBIE ACCOUNTABILITY RECIPIENT GUARD"
 
 
 def _block() -> str:
     values = ",\n".join(f'    "{address}"' for address in APPROVED_RECIPIENTS)
-    return f"RECIPIENTS = [\n{values},\n]"
+    carlo = CARLO_ONLY_RECIPIENTS[0]
+    return f'''{BEGIN_MARKER}
+import os as _accountability_os
+
+DEFAULT_RECIPIENTS = [
+{values},
+]
+_recipient_override = _accountability_os.environ.get(
+    "ACCOUNTABILITY_DELIVERY_RECIPIENTS", ""
+).strip()
+if _recipient_override:
+    RECIPIENTS = [
+        address.strip()
+        for address in _recipient_override.split(",")
+        if address.strip()
+    ]
+    if RECIPIENTS != ["{carlo}"]:
+        raise RuntimeError("refusing unapproved accountability recipient override")
+else:
+    RECIPIENTS = list(DEFAULT_RECIPIENTS)
+{END_MARKER}'''
 
 
 def repair(path: Path) -> str:
@@ -29,6 +52,8 @@ def repair(path: Path) -> str:
     expected = _block()
     if expected in original:
         return "already_repaired"
+    if BEGIN_MARKER in original or END_MARKER in original:
+        raise RuntimeError("refusing partial or unexpected recipient guard")
     pattern = re.compile(r"RECIPIENTS\s*=\s*\[(?:.|\n)*?\]", re.MULTILINE)
     matches = list(pattern.finditer(original))
     if len(matches) != 1:
