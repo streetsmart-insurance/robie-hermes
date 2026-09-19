@@ -26,6 +26,7 @@ jobs:
       TIMER: streetsmart-accountability.timer
       UNIT: streetsmart-accountability.service
     steps:
+      - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/751771086524/locations/global/workloadIdentityPools/github-production/providers/github-main
@@ -50,6 +51,26 @@ jobs:
           host="$(printf '%s\n' "${ssh_output}" | tail -1 | tr -d '\r')"
           test "${host}" = "streetsmart-accountability-prod"
           echo "ssh_hostname_verified=true"
+
+      - name: Verify reusable Magellan session without delivery
+        run: |
+          set -euo pipefail
+          script_path=scripts/preflight_dedicated_accountability_magellan.py
+          script_sha="$(sha256sum "${script_path}" | awk '{print $1}')"
+          script_b64="$(base64 -w0 "${script_path}")"
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
+            | tee -a "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          set -euo pipefail
+          remote_script="/tmp/preflight-dedicated-accountability-magellan-${GITHUB_RUN_ID}.py"
+          trap 'rm -f "${remote_script}"' EXIT
+          printf '%s' '${script_b64}' | base64 -d > "${remote_script}"
+          chown ubuntu:ubuntu "${remote_script}"
+          chmod 0700 "${remote_script}"
+          test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+            --app-root "${APP_ROOT}" --reliability-attempts 2
+          REMOTE_EOF
 
       - name: Capture DWD identity mapping and redacted failure tracebacks
         run: |
