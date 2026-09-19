@@ -1,0 +1,807 @@
+"""Gmail ingestion for ROBIE's scheduled EZLynx report CSVs.
+
+Replaces the Reports 5.0 UI scraping path (which fails closed with
+"0 saved-report links") with the scheduled-email path: each of the four
+ROBIE reports is saved as a Look in EZLynx with a "ROBIE daily CSV"
+schedule that emails a full CSV (Data Limit: All Results) to
+robie@streetsmart.insurance daily at 5:00 AM Eastern.
+
+Fail-closed throughout: missing email, duplicate emails for one
+report/day, missing/multiple CSV attachments, header mismatch, ragged
+rows, zero data rows, or a blank identity on a row that carries real
+data all RAISE GmailReportIngestionError. Never returns partial or empty
+data silently.
+
+PROVENANCE of expected headers: the REAL CSV attachments received
+2026-09-19 (test sends triggered ~07:13-07:17 ET from the four
+"ROBIE daily CSV" schedules). Important: the CSV headers do NOT carry
+the Looker view-name prefixes shown in the report viewer ("Applicant
+Data Account Name" on screen == "Account Name" in the CSV). Header
+lists below are the exact ordered CSV headers.
+
+ENVELOPE (observed 2026-09-19, no longer provisional):
+- From: Applied Reporting <DoNotReply@appliedsystems.com>
+- Subject: "ROBIE daily CSV" (identical on all four — carries NO report
+  name or ID, so routing is by CSV header fingerprint, never by subject)
+- Body: "Results are attached. This email was scheduled by
+  Carlo@streetsmart.insurance to robie@streetsmart.insurance."
+  (no report-identifying content)
+- Attachment: ROBIE_daily_CSV_2026-09-19T0713.csv (schedule name with
+  underscores + Eastern send timestamp — 0713 matched the 07:13 ET send
+  time, not 11:13 UTC), MIME text/csv.
+
+TOTALS ROWS (observed): the 4247 and 4246 exports end with a totals row
+(blank identity; only "Total *"-prefixed columns populated). Such rows
+are SKIPPED and counted (never fed to a worker); a blank identity on a
+row carrying any non-total data RAISES.
+
+IDENTITY (decided 2026-09-19 by Carlo): Policy Number is the work-item
+identity for all four reports — it is the client's account, and the
+worker tracks one item per policy. The exports contain no literal
+audit-ID / loan-number column, so Applicant ID stays on as a descriptor
+and Task ID (4372) stays on as the row descriptor; rows sharing a Policy
+Number are linked as a single work item. Note: 4359 has 3 policies with
+2 open requests each (66 unique policy numbers / 69 rows) — edge
+handling for those dupes is decided at worker-wiring time.
+Mortgagee lender/loan number is NOT in the export — it is a manual
+enrichment the worker adds per item as it goes. 4359 additionally
+remains blocked by the schema_verified=False gate.
+
+Gmail access uses the SAME domain-wide-delegation service-account pattern
+as gmail_accountability.build_keyless_delegated_service (IAM signer +
+delegated subject), but with the gmail.readonly scope: the metadata-only
+scope proven there CANNOT read attachments. gmail.readonly over DWD was
+proven 2026-09-18 (SA impersonated hello@ and robie@ for getProfile +
+messages.list with the readonly scope); the first live attachment
+download still needs a run to confirm end to end.
+
+Branch: ralph/gmail-scheduled-report-ingestion (draft only — no merge,
+no PR, no deploy).
+"""
+
+from __future__ import annotations
+
+import base64
+import csv
+import hashlib
+import io
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Mapping, Sequence
+
+
+ROBIE_MAILBOX = "robie@streetsmart.insurance"
+
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
+# --- Observed envelope (2026-09-19 test sends) ------------------------------
+# From: Applied Reporting <DoNotReply@appliedsystems.com>
+# Subject: "ROBIE daily CSV" (same on every report — routing is by header
+# fingerprint, see fingerprint_report_id, never by subject/body/filename).
+# Attachment filename pattern: ROBIE_daily_CSV_YYYY-MM-DDTHHMM.csv
+# (Eastern send time — the test filename's 0713 matched 07:13 ET).
+DEFAULT_SUBJECT_CONTAINS = "ROBIE daily CSV"
+DEFAULT_ALLOWED_SENDERS = ("donotreply@appliedsystems.com",)
+# --------------------------------------------------------------------------
+
+MAX_ATTACHMENT_BYTES = 20_000_000
+MAX_ROWS = 250_000
+MAX_COLUMNS = 256
+
+# Columns starting with this prefix carry report totals, never row data.
+TOTAL_COLUMN_PREFIX = "Total "
+
+
+class GmailReportIngestionError(RuntimeError):
+    """A scheduled report email is missing, ambiguous, malformed, or unverified."""
+
+
+# --- Expected headers: exact ordered CSV headers, observed 2026-09-19 -----
+# NOTE: the Looker viewer shows view-name prefixes ("Applicant Data ...",
+# "Policy Expiration ...", "Activity Task ..."); the CSV export strips
+# them. These lists are the real CSV headers, byte-relevant.
+
+EXPECTED_HEADERS: dict[str, list[str]] = {
+    # 4247 Manual Renewal Queue - ROBIE: 22 cols; 2026-09-19 test CSV had
+    # 176 data rows + 1 totals row.
+    "4247": [
+        "Account Name",
+        "Applicant ID",
+        "Policy Number",
+        "Policy Effective Date",
+        "Policy Expiration Date",
+        "Master Company",
+        "Line Of Business",
+        "Premium - Annualized",
+        "Premium - Written",
+        "Branch",
+        "Department",
+        "Service Team",
+        "Assigned Producer",
+        "CSR",
+        "Preferred Language",
+        "Applicant Labels",
+        "Policy Labels",
+        "Policy Source",
+        "Total Policies",
+        "Total Customers",
+        "Total Annualized Premium",
+        "Total Written Premium",
+    ],
+    # 4246 Audit Verification Queue - ROBIE: 19 cols; 2026-09-19 test CSV
+    # had 454 data rows + 1 totals row (viewer had shown 47 — UNRESOLVED
+    # discrepancy, see module docstring / test log).
+    "4246": [
+        "Account Name",
+        "Applicant ID",
+        "Policy Number",
+        "Policy Type",
+        "Master Company",
+        "Line Of Business",
+        "Policy Term",
+        "Premium - Annualized",
+        "Premium - Written",
+        "Branch",
+        "Department",
+        "Service Team",
+        "Assigned Producer",
+        "CSR",
+        "Policy Labels",
+        "Applicant Labels",
+        "Preferred Language",
+        "Total Annualized Premium",
+        "Total Written Premium",
+    ],
+    # 4372 Mortgagee Verification Queue - ROBIE: 32 cols; 2026-09-19 test
+    # CSV had 4 data rows, no totals row.
+    "4372": [
+        "Applicant ID",
+        "Account Name",
+        "Task Assigned To",
+        "Branch",
+        "Activity Type",
+        "Note Created by",
+        "Task Status",
+        "Assigned Producer",
+        "CSR",
+        "Task Created By",
+        "Created Date",
+        "Task Due Date",
+        "Task Last Modified Date",
+        "Task Last Modified By",
+        "Note",
+        "Comment",
+        "Task Closed By",
+        "Policy Master ID",
+        "Task Priority",
+        "Sticky",
+        "Task Created By ID",
+        "Task Created Date",
+        "Task ID",
+        "Task Closed Date",
+        "Policy Number",
+        "Producer Code",
+        "Producer Code Override",
+        "Activity Labels",
+        "Lead Source",
+        "Discussion ID",
+        "Department",
+        "Service Team",
+    ],
+    # 4359 Policy Change Request Confirmation Queue - ROBIE: 19 cols
+    # (viewer had shown 18 — the export adds "Change Request Created
+    # Date"); 2026-09-19 test CSV had 69 data rows, no totals row.
+    # Blocked by the schema gate until verified (see SCHEMA_VERIFIED).
+    "4359": [
+        "Account Name",
+        "Applicant ID",
+        "Policy Number",
+        "Line Of Business",
+        "Effective Date",
+        "Master Company",
+        "Request Status",
+        "Created By",
+        "Written Premium",
+        "Premium - Annualized",
+        "Branch",
+        "Department",
+        "Service Team",
+        "Assigned Producer",
+        "CSR",
+        "Preferred Language",
+        "Applicant Labels",
+        "Policy Labels",
+        "Change Request Created Date",
+    ],
+}
+
+REPORT_DISPLAY_NAMES: dict[str, str] = {
+    "4247": "Manual Renewal Queue - ROBIE",
+    "4246": "Audit Verification Queue - ROBIE",
+    "4372": "Mortgagee Verification Queue - ROBIE",
+    "4359": "Policy Change Request Confirmation Queue - ROBIE",
+}
+
+# Mirrored from report_registry.VERIFIED_REPORTS (keep in sync).
+# schema_verified=False blocks ingestion, mirroring
+# ReportRunRegistry.start_run's gate.
+SCHEMA_VERIFIED: dict[str, bool] = {
+    "4247": True,
+    "4246": True,
+    "4372": True,
+    "4359": False,
+}
+
+# Work-item identity column per report. Decided 2026-09-19 by Carlo:
+# Policy Number (the client's account) is the identity the worker tracks
+# day to day. Rows sharing one Policy Number are linked as a single
+# work item; Applicant ID / Task ID stay on as descriptors.
+# Mortgagee lender is NOT in the export — manual worker enrichment.
+IDENTITY_COLUMNS: dict[str, str] = {
+    "4247": "Policy Number",
+    "4246": "Policy Number",
+    "4372": "Policy Number",
+    # 4359 additionally gated by schema_verified=False regardless.
+    "4359": "Policy Number",
+}
+
+
+@dataclass(frozen=True)
+class IngestedReport:
+    report_id: str
+    display_name: str
+    received_at: str  # ISO-8601 UTC
+    message_id_sha256: str
+    filename_sha256: str
+    attachment_sha256: str
+    row_count: int
+    skipped_rows: int  # blank-identity totals rows skipped, never fed to workers
+    rows: list[dict[str, str]]
+
+
+# --- Gmail service (same DWD pattern as gmail_accountability) --------------
+
+
+def build_readonly_delegated_service(
+    service_account_email: str,
+    user: str,
+    *,
+    scopes: Sequence[str] = (GMAIL_READONLY_SCOPE,),
+) -> Any:
+    """Domain-wide-delegation Gmail client able to read message attachments.
+
+    Same IAM-signer construction as
+    gmail_accountability.build_keyless_delegated_service, but requests
+    gmail.readonly: the metadata-only scope cannot download attachments.
+    gmail.readonly over DWD was proven 2026-09-18 (SA impersonated hello@
+    and robie@ for getProfile + messages.list); the first live attachment
+    download still needs a run to confirm end to end.
+    No network call is made here; credentials are minted on first use.
+    """
+    import google.auth
+    from google.auth import iam
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    request = Request()
+    signer = iam.Signer(request, source, service_account_email)
+    delegated = service_account.Credentials(
+        signer=signer,
+        service_account_email=service_account_email,
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=list(scopes),
+        subject=user,
+    )
+    return build("gmail", "v1", credentials=delegated, cache_discovery=False)
+
+
+# --- Pure helpers (no network; fully unit-testable) ------------------------
+
+
+def expected_headers(report_id: str) -> list[str]:
+    try:
+        return list(EXPECTED_HEADERS[report_id])
+    except KeyError:
+        raise GmailReportIngestionError(f"unknown report id {report_id}") from None
+
+
+def identity_column(report_id: str) -> str:
+    try:
+        return IDENTITY_COLUMNS[report_id]
+    except KeyError:
+        raise GmailReportIngestionError(f"unknown report id {report_id}") from None
+
+
+def check_report_gate(report_id: str, *, allow_unverified: bool = False) -> None:
+    """Mirror report_registry's schema gate: unverified reports block."""
+    if report_id not in SCHEMA_VERIFIED:
+        raise GmailReportIngestionError(f"unknown report id {report_id}")
+    if not SCHEMA_VERIFIED[report_id] and not allow_unverified:
+        raise GmailReportIngestionError(
+            f"report {report_id} schema is unverified and must block "
+            f"(mirrors report_registry.ReportRunRegistry.start_run gate)"
+        )
+
+
+def validate_headers(report_id: str, actual: Sequence[str]) -> list[str]:
+    """Require the exact ordered header list for the report.
+
+    Returns the validated header list. Raises with a precise diff on any
+    mismatch (missing / extra / out-of-order / renamed columns).
+    """
+    wanted = expected_headers(report_id)
+    actual_list = [str(value) for value in actual]
+    problems: list[str] = []
+    if len(actual_list) != len(wanted):
+        problems.append(
+            f"column count {len(actual_list)} != expected {len(wanted)}"
+        )
+    for position, (got, want) in enumerate(zip(actual_list, wanted)):
+        if got != want:
+            problems.append(f"col {position}: got {got!r}, want {want!r}")
+    if len(actual_list) > len(wanted):
+        problems.append(f"extra columns: {actual_list[len(wanted):]!r}")
+    if problems:
+        raise GmailReportIngestionError(
+            f"report {report_id} header mismatch: " + "; ".join(problems)
+        )
+    return actual_list
+
+
+def fingerprint_report_id(headers: Sequence[str]) -> str:
+    """Route a CSV to its report by exact header fingerprint.
+
+    The scheduled emails carry no report name or ID in the subject, body,
+    or filename (all four say "ROBIE daily CSV"), so the CSV's ordered
+    header list is the routing key. Raises when zero or multiple reports
+    match, so a misrouted or foreign CSV can never be ingested silently.
+    """
+    actual = [str(value) for value in headers]
+    matches = [
+        report_id
+        for report_id, wanted in EXPECTED_HEADERS.items()
+        if actual == wanted
+    ]
+    if not matches:
+        raise GmailReportIngestionError(
+            f"CSV headers match no known ROBIE report "
+            f"({len(actual)} cols, first={actual[0]!r} last={actual[-1]!r})"
+        )
+    if len(matches) > 1:
+        raise GmailReportIngestionError(
+            f"CSV headers match multiple reports: {', '.join(matches)}"
+        )
+    return matches[0]
+
+
+def _is_totals_row(row: dict[str, str], id_col: str) -> bool:
+    """A totals row has a blank identity and data ONLY in Total* columns."""
+    if row[id_col].strip():
+        return False
+    for header, value in row.items():
+        if not str(value).strip():
+            continue
+        if header == id_col or not header.startswith(TOTAL_COLUMN_PREFIX):
+            return False
+    return True
+
+
+def parse_and_validate_csv(
+    report_id: str, content: bytes, *, source_label: str = "csv"
+) -> tuple[list[dict[str, str]], int]:
+    """Parse a scheduled-report CSV with csv.DictReader and validate fully.
+
+    - Rejects NUL bytes and non-UTF-8 content.
+    - Requires the exact ordered header list (see validate_headers).
+    - Skips fully-blank lines (common CSV artifact); raises on zero data
+      rows after skipping.
+    - Rejects ragged rows (wrong width).
+    - Skips totals rows (blank identity, only Total* columns populated)
+      and counts them; RAISES on a blank identity where any non-total
+      column carries data (that would be a real row losing its identity).
+    Returns (rows, skipped_totals_rows). Rows are dicts keyed by the exact
+    header names.
+    """
+    if b"\x00" in content:
+        raise GmailReportIngestionError(f"report {report_id} {source_label} contains NUL bytes")
+    if not content or len(content) > MAX_ATTACHMENT_BYTES:
+        raise GmailReportIngestionError(
+            f"report {report_id} {source_label} size is outside the allowed range"
+        )
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise GmailReportIngestionError(
+            f"report {report_id} {source_label} is not UTF-8"
+        ) from exc
+    reader = csv.reader(io.StringIO(text))
+    raw_rows = [row for row in reader if any(str(cell).strip() for cell in row)]
+    if not raw_rows:
+        raise GmailReportIngestionError(f"report {report_id} {source_label} has no header row")
+    headers = validate_headers(report_id, [str(cell) for cell in raw_rows[0]])
+    if len(headers) > MAX_COLUMNS:
+        raise GmailReportIngestionError(f"report {report_id} {source_label} has too many columns")
+    if len(raw_rows) - 1 > MAX_ROWS:
+        raise GmailReportIngestionError(f"report {report_id} {source_label} has too many rows")
+    id_col = identity_column(report_id)
+    rows: list[dict[str, str]] = []
+    skipped = 0
+    for lineno, raw in enumerate(raw_rows[1:], start=2):
+        if len(raw) != len(headers):
+            raise GmailReportIngestionError(
+                f"report {report_id} {source_label} line {lineno}: "
+                f"ragged row ({len(raw)} cells, {len(headers)} headers)"
+            )
+        row = {headers[i]: str(raw[i]) for i in range(len(headers))}
+        if not row[id_col].strip():
+            if _is_totals_row(row, id_col):
+                skipped += 1
+                continue
+            raise GmailReportIngestionError(
+                f"report {report_id} {source_label} line {lineno}: "
+                f"identity column {id_col!r} is empty on a row carrying data"
+            )
+        rows.append(row)
+    if not rows:
+        raise GmailReportIngestionError(
+            f"report {report_id} {source_label} has no data rows"
+        )
+    return rows, skipped
+
+
+# --- Gmail search / download (network; thin wrappers over the API) ---------
+
+
+def _payload_headers(payload: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(item.get("name") or "").casefold(): str(item.get("value") or "")
+        for item in payload.get("headers", []) or []
+    }
+
+
+def _iter_parts(part: Mapping[str, Any]):
+    yield part
+    for child in part.get("parts", []) or []:
+        yield from _iter_parts(child)
+
+
+def _sender_address(from_header: str) -> str:
+    text = str(from_header or "")
+    match = re.search(r"<([^<>]+)>", text)
+    return (match.group(1) if match else text).strip().casefold()
+
+
+def _sender_allowed(
+    from_header: str,
+    allowed_senders: Sequence[str],
+    allowed_sender_domains: Sequence[str],
+) -> bool:
+    address = _sender_address(from_header)
+    senders = {str(v).strip().casefold() for v in allowed_senders if str(v).strip()}
+    domains = {str(v).strip().casefold().lstrip("@") for v in allowed_sender_domains if str(v).strip()}
+    domain = address.rsplit("@", 1)[-1] if "@" in address else ""
+    return address in senders or (domain != "" and domain in domains)
+
+
+def _decode_part(service: Any, message_id: str, part: Mapping[str, Any]) -> bytes:
+    body = part.get("body", {}) or {}
+    attachment_id = body.get("attachmentId")
+    if attachment_id:
+        response = (
+            service.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=message_id, id=attachment_id)
+            .execute()
+        )
+        encoded = str(response.get("data") or "")
+    else:
+        encoded = str(body.get("data") or "")
+    if not encoded:
+        raise GmailReportIngestionError("scheduled report attachment has no data")
+    try:
+        return base64.urlsafe_b64decode(encoded + "===")
+    except Exception as exc:
+        raise GmailReportIngestionError("scheduled report attachment is not valid base64") from exc
+
+
+def list_candidate_emails(
+    service: Any,
+    *,
+    day: date,
+    subject_contains: str = DEFAULT_SUBJECT_CONTAINS,
+    allowed_senders: Sequence[str] = DEFAULT_ALLOWED_SENDERS,
+    allowed_sender_domains: Sequence[str] = (),
+) -> list[Mapping[str, Any]]:
+    """List scheduled-report emails in ROBIE_MAILBOX for one day.
+
+    Envelope filter only (subject + sender allowlist + date window +
+    has:attachment). Report routing happens by CSV header fingerprint in
+    ingest_daily_reports — the envelope carries no report identity.
+    """
+    if not allowed_senders and not allowed_sender_domains:
+        raise GmailReportIngestionError(
+            "sender allowlist is empty: refusing to scan the mailbox"
+        )
+    start = day.strftime("%Y/%m/%d")
+    end = (day + timedelta(days=1)).strftime("%Y/%m/%d")
+    query = f'subject:"{subject_contains}" after:{start} before:{end} has:attachment'
+    candidates: list[Mapping[str, Any]] = []
+    page_token = None
+    for _ in range(10):
+        request: dict[str, Any] = {"userId": "me", "q": query, "maxResults": 100}
+        if page_token:
+            request["pageToken"] = page_token
+        response = service.users().messages().list(**request).execute()
+        for meta in response.get("messages", []) or []:
+            message_id = str(meta.get("id") or "")
+            if not message_id:
+                continue
+            message = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+            payload = message.get("payload", {}) or {}
+            headers = _payload_headers(payload)
+            if not _sender_allowed(headers.get("from", ""), allowed_senders, allowed_sender_domains):
+                continue
+            candidates.append(message)
+        page_token = str(response.get("nextPageToken") or "").strip() or None
+        if not page_token:
+            break
+    if page_token:
+        raise GmailReportIngestionError("scheduled report mailbox scan exceeded the bounded page limit")
+    return candidates
+
+
+def download_csv_attachment(
+    service: Any, message: Mapping[str, Any], *, report_id: str = "?"
+) -> tuple[str, bytes]:
+    """Download the single CSV attachment from a scheduled-report email."""
+    message_id = str(message.get("id") or "")
+    payload = message.get("payload", {}) or {}
+    csv_parts = [
+        part
+        for part in _iter_parts(payload)
+        if str(part.get("filename") or "").casefold().endswith(".csv")
+    ]
+    if not csv_parts:
+        raise GmailReportIngestionError(f"report {report_id} email has no CSV attachment")
+    if len(csv_parts) > 1:
+        raise GmailReportIngestionError(
+            f"report {report_id} email has {len(csv_parts)} CSV attachments — refusing to pick one"
+        )
+    part = csv_parts[0]
+    filename = str(part.get("filename") or "")
+    content = _decode_part(service, message_id, part)
+    if not content or len(content) > MAX_ATTACHMENT_BYTES:
+        raise GmailReportIngestionError(
+            f"report {report_id} attachment {filename!r} size is outside the allowed range"
+        )
+    return filename, content
+
+
+def ingest_daily_reports(
+    service: Any,
+    *,
+    day: date,
+    report_ids: Sequence[str] = ("4247", "4246", "4372", "4359"),
+    subject_contains: str = DEFAULT_SUBJECT_CONTAINS,
+    allowed_senders: Sequence[str] = DEFAULT_ALLOWED_SENDERS,
+    allowed_sender_domains: Sequence[str] = (),
+    allow_unverified: bool = False,
+) -> dict[str, IngestedReport]:
+    """Ingest one day's scheduled report CSVs into validated row dicts.
+
+    Each candidate email is routed to its report by CSV header fingerprint
+    (the envelope carries no report identity). Returns
+    {report_id: IngestedReport}. Fails loudly on any missing, duplicate,
+    malformed, or unverified report — never partial.
+    """
+    candidates = list_candidate_emails(
+        service,
+        day=day,
+        subject_contains=subject_contains,
+        allowed_senders=allowed_senders,
+        allowed_sender_domains=allowed_sender_domains,
+    )
+    bucketed: dict[str, list[tuple[Mapping[str, Any], str, bytes]]] = {}
+    for message in candidates:
+        filename, content = download_csv_attachment(service, message)
+        header_line = content.decode("utf-8-sig").splitlines()[0] if content else ""
+        headers = next(csv.reader(io.StringIO(header_line)))
+        report_id = fingerprint_report_id(headers)
+        bucketed.setdefault(report_id, []).append((message, filename, content))
+    ingested: dict[str, IngestedReport] = {}
+    for report_id in report_ids:
+        found = bucketed.get(report_id, [])
+        if not found:
+            raise GmailReportIngestionError(
+                f"no scheduled report email found for {report_id} "
+                f"({REPORT_DISPLAY_NAMES[report_id]}) on {day.isoformat()}"
+            )
+        if len(found) > 1:
+            raise GmailReportIngestionError(
+                f"duplicate scheduled report emails for {report_id} "
+                f"({REPORT_DISPLAY_NAMES[report_id]}) on {day.isoformat()}: "
+                f"{len(found)} candidates — refusing to pick one"
+            )
+        check_report_gate(report_id, allow_unverified=allow_unverified)
+        message, filename, content = found[0]
+        message_id = str(message.get("id") or "")
+        received_at = datetime.fromtimestamp(
+            int(message.get("internalDate") or 0) / 1000, tz=timezone.utc
+        ).isoformat()
+        rows, skipped = parse_and_validate_csv(report_id, content, source_label=filename)
+        ingested[report_id] = IngestedReport(
+            report_id=report_id,
+            display_name=REPORT_DISPLAY_NAMES[report_id],
+            received_at=received_at,
+            message_id_sha256=hashlib.sha256(message_id.encode()).hexdigest(),
+            filename_sha256=hashlib.sha256(filename.encode()).hexdigest()[:16],
+            attachment_sha256=hashlib.sha256(content).hexdigest(),
+            row_count=len(rows),
+            skipped_rows=skipped,
+            rows=rows,
+        )
+    return ingested
+
+
+# --- Self-test (no network) -------------------------------------------------
+
+
+def _synthetic_csv(
+    report_id: str,
+    *,
+    n_rows: int = 2,
+    header_override=None,
+    with_totals_row: bool = False,
+) -> bytes:
+    headers = list(header_override) if header_override is not None else expected_headers(report_id)
+    id_col = identity_column(report_id)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    for n in range(1, n_rows + 1):
+        row = []
+        for col in headers:
+            if col == id_col:
+                row.append(f"ID-{report_id}-{n}")
+            else:
+                row.append(f"{col} :: r{n}")
+        writer.writerow(row)
+    if with_totals_row:
+        totals = []
+        for col in headers:
+            if col.startswith(TOTAL_COLUMN_PREFIX):
+                totals.append("123")
+            else:
+                totals.append("")
+        writer.writerow(totals)
+    return buffer.getvalue().encode("utf-8")
+
+
+def _self_test() -> None:
+    failures: list[str] = []
+    passes: list[str] = []
+
+    def check(name: str, fn) -> None:
+        try:
+            fn()
+        except AssertionError as exc:
+            failures.append(f"{name}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - self-test reports, never hides
+            failures.append(f"{name}: unexpected {type(exc).__name__}: {exc}")
+        else:
+            passes.append(name)
+
+    def expect_raises(name: str, fn) -> None:
+        try:
+            fn()
+        except GmailReportIngestionError:
+            passes.append(name)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{name}: wrong error {type(exc).__name__}: {exc}")
+        else:
+            failures.append(f"{name}: expected GmailReportIngestionError, got success")
+
+    expected_counts = {"4247": 22, "4246": 19, "4372": 32, "4359": 19}
+
+    for report_id, count in expected_counts.items():
+        def make_ok(rid=report_id, want=count):
+            assert len(expected_headers(rid)) == want, (
+                f"header count {len(expected_headers(rid))} != {want}"
+            )
+            has_totals = any(
+                h.startswith(TOTAL_COLUMN_PREFIX) for h in expected_headers(rid)
+            )
+            rows, skipped = parse_and_validate_csv(
+                rid, _synthetic_csv(rid, with_totals_row=True), source_label="selftest"
+            )
+            assert len(rows) == 2, f"row count {len(rows)} != 2"
+            # Only reports with Total* columns produce a totals row; without
+            # them the synthetic totals row is fully blank and dropped as a
+            # blank line — both are correct behavior.
+            assert skipped == (1 if has_totals else 0), (
+                f"skipped {skipped} != {(1 if has_totals else 0)}"
+            )
+            id_col = identity_column(rid)
+            assert rows[0][id_col] == f"ID-{rid}-1", "identity value mismatch"
+            assert set(rows[0].keys()) == set(expected_headers(rid)), "row keys != headers"
+        check(f"parse+validate {report_id} ({REPORT_DISPLAY_NAMES[report_id]}) + totals-row skip", make_ok)
+
+    def fingerprint_routes_all():
+        for report_id in expected_counts:
+            routed = fingerprint_report_id(expected_headers(report_id))
+            assert routed == report_id, f"fingerprint routed {report_id} -> {routed}"
+    check("header fingerprint routes all four reports", fingerprint_routes_all)
+
+    def fingerprint_rejects_unknown():
+        fingerprint_report_id(["Nope", "Unknown", "Headers"])
+    expect_raises("unknown headers are rejected by fingerprint", fingerprint_rejects_unknown)
+
+    def renamed_header():
+        bad = expected_headers("4247")
+        bad[2] = "Policy Number RENAMED"
+        parse_and_validate_csv("4247", _synthetic_csv("4247", header_override=bad))
+    expect_raises("header rename is rejected (4247)", renamed_header)
+
+    def swapped_order():
+        bad = expected_headers("4246")
+        bad[0], bad[1] = bad[1], bad[0]
+        parse_and_validate_csv("4246", _synthetic_csv("4246", header_override=bad))
+    expect_raises("header reorder is rejected (4246)", swapped_order)
+
+    def dropped_column():
+        bad = expected_headers("4372")[:-1]
+        parse_and_validate_csv("4372", _synthetic_csv("4372", header_override=bad))
+    expect_raises("dropped column is rejected (4372)", dropped_column)
+
+    def blank_identity_with_data():
+        content = _synthetic_csv("4247")
+        lines = content.decode("utf-8").splitlines()
+        headers = expected_headers("4247")
+        idx = headers.index(identity_column("4247"))
+        cells = next(csv.reader([lines[2]]))
+        cells[idx] = "   "  # blank identity but the row still carries data
+        lines[2] = ",".join(f'"{c}"' for c in cells)
+        parse_and_validate_csv("4247", "\n".join(lines).encode("utf-8"))
+    expect_raises("blank identity on a data row is rejected (4247)", blank_identity_with_data)
+
+    def no_data_rows():
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(expected_headers("4246"))
+        parse_and_validate_csv("4246", buffer.getvalue().encode("utf-8"))
+    expect_raises("header-only CSV is rejected (4246)", no_data_rows)
+
+    def ragged_row():
+        content = _synthetic_csv("4372").decode("utf-8").splitlines()
+        content[1] = content[1] + ",EXTRA_CELL"
+        parse_and_validate_csv("4372", "\n".join(content).encode("utf-8"))
+    expect_raises("ragged row is rejected (4372)", ragged_row)
+
+    def gate_blocks_4359():
+        check_report_gate("4359")
+    expect_raises("4359 blocked while schema_verified=False", gate_blocks_4359)
+
+    def check_gate_override():
+        check_report_gate("4359", allow_unverified=True)
+        check_report_gate("4247")
+    check("gate passes verified reports and explicit override", check_gate_override)
+
+    def gate_unknown():
+        check_report_gate("9999")
+    expect_raises("unknown report id is rejected by gate", gate_unknown)
+
+    print(f"SELF-TEST passes={len(passes)} failures={len(failures)}")
+    for name in passes:
+        print(f"  PASS {name}")
+    for name in failures:
+        print(f"  FAIL {name}")
+    if failures:
+        raise SystemExit(f"SELF-TEST FAILED: {len(failures)} failure(s)")
+
+
+if __name__ == "__main__":
+    _self_test()
