@@ -290,6 +290,36 @@ class CompleteGateTests(unittest.TestCase):
             )
         )
 
+    def test_apply_label_document_name_is_not_an_upload_claim(self):
+        self.assertFalse(
+            claimed_ezlynx_document_write(
+                expected={
+                    "resource_id": "test-document-1",
+                    "document_name": "je-kill-1.pdf",
+                    "label": "JE-KILL-01",
+                },
+                observed={
+                    "resource_id": "test-document-1",
+                    "document_name": "je-kill-1.pdf",
+                    "label": "JE-KILL-01",
+                },
+                payload={"document_name": "je-kill-1.pdf", "action_type": "ezlynx.apply_label"},
+            )
+        )
+        self.assertIsNone(
+            note_or_document_write_missing_api_id(
+                expected={
+                    "resource_id": "test-document-1",
+                    "document_name": "je-kill-1.pdf",
+                },
+                observed={
+                    "resource_id": "test-document-1",
+                    "document_name": "je-kill-1.pdf",
+                },
+                payload={"document_name": "je-kill-1.pdf"},
+            )
+        )
+
 
 class ApiPathStillWorksTests(unittest.TestCase):
     def test_add_note_to_discussion_files_and_reads_back(self):

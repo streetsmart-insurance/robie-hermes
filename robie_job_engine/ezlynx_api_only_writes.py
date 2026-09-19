@@ -27,7 +27,9 @@ EZLYNX_NOTE_DOC_API_ONLY = "EZLYNX_NOTE_DOC_API_ONLY"
 NOTE_API_ID_KEYS = ("note_id", "ezlynx_note_id", "discussion_note_id")
 DOCUMENT_API_ID_KEYS = ("document_id", "document_ids")
 NOTE_CLAIM_EXTRA_KEYS = ("note_body", "filed_note", "posted_note")
-DOCUMENT_CLAIM_EXTRA_KEYS = ("document_names", "document_name")
+# Plural only: a chat/destination claim that files were uploaded.
+# ``document_name`` is also used by apply_label / move jobs and is not a write claim.
+DOCUMENT_CLAIM_EXTRA_KEYS = ("document_names",)
 PLAYWRIGHT_WRITE_FLAGS = (
     "playwright_note_or_doc_write",
     "playwright_note_write",
@@ -47,7 +49,6 @@ DOCUMENT_ACTION_TYPES = frozenset(
     {
         "ezlynx.document_upload",
         "ezlynx.upload_document",
-        "ezlynx.move_document",
     }
 )
 
@@ -230,15 +231,19 @@ def _iter_claim_blobs(
     action: dict[str, Any] | None,
     payload: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    """Evidence and destination claims only.
+
+    Do not scan the raw Job payload: apply_label fixtures and email
+    attachment lists carry ``document_name`` / ``document_names`` without
+    having uploaded to EZLynx.
+    """
     blobs = [
         _as_dict(expected),
         _as_dict(observed),
         _as_dict(action),
-        _as_dict(payload),
         _as_dict((_as_dict(action)).get("destination")),
-        _as_dict((_as_dict(payload)).get("destination")),
-        _as_dict((_as_dict(payload)).get("locator")),
     ]
+    del payload
     return [blob for blob in blobs if blob]
 
 
@@ -318,7 +323,7 @@ def claimed_ezlynx_note_write(
         return True
     if _nonempty_extra(blobs, NOTE_CLAIM_EXTRA_KEYS):
         return True
-    action_type = _action_type_of(action, payload, expected, observed)
+    action_type = _action_type_of(action, payload)
     if action_type in NOTE_ACTION_TYPES:
         return True
     if action_type.endswith(".note") or "discussion_note" in action_type:
@@ -337,10 +342,10 @@ def claimed_ezlynx_document_write(
         return True
     if _nonempty_extra(blobs, DOCUMENT_CLAIM_EXTRA_KEYS):
         return True
-    action_type = _action_type_of(action, payload, expected, observed)
+    action_type = _action_type_of(action, payload)
     if action_type in DOCUMENT_ACTION_TYPES:
         return True
-    if "document_upload" in action_type or action_type.endswith(".document"):
+    if "document_upload" in action_type:
         return True
     return False
 
