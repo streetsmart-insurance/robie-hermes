@@ -58,6 +58,7 @@ jobs:
           script_path=scripts/preflight_dedicated_accountability_magellan.py
           script_sha="$(sha256sum "${script_path}" | awk '{print $1}')"
           script_b64="$(base64 -w0 "${script_path}")"
+          remote_script="/tmp/preflight-dedicated-accountability-magellan-${GITHUB_RUN_ID}.py"
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
             | tee -a "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
