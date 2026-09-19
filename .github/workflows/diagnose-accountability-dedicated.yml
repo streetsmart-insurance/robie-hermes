@@ -16,7 +16,7 @@ jobs:
   diagnose:
     if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DIAGNOSE_ACCOUNTABILITY_PROD'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment: Production
     env:
       PROJECT_ID: streetsmart-hermes-poc
