@@ -52,6 +52,25 @@ BROWSER_RESULT_NEW = '''            "first_closed_row_inspected": first_closed_p
             "first_closed_row_status": first_closed_status,
 '''
 
+BROWSER_RANGE_OLD = '''            start, _, _ = _pager_range(page)
+            rows = page.locator("mat-row")
+            statuses = _row_statuses(page, positions["status"])
+            if not statuses:
+                raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center page rendered no statuses")
+'''
+BROWSER_RANGE_NEW = '''            start, end, _ = _pager_range(page)
+            expected_page_rows = end - start + 1
+            rows = page.locator("mat-row")
+            rendered_statuses = _row_statuses(page, positions["status"])
+            if len(rendered_statuses) < expected_page_rows:
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: pager range exceeded rendered Submission Center statuses"
+                )
+            statuses = rendered_statuses[:expected_page_rows]
+            if not statuses:
+                raise RuntimeError("PLAYWRIGHT_BLOCKED: Submission Center page rendered no statuses")
+'''
+
 ADAPTER_REQUIRED_OLD = '''        "first_row_non_closed": True,
         "first_closed_row_inspected": True,
         "day_31_qualifies": True,
@@ -130,6 +149,7 @@ def repair_browser(path: Path) -> str:
     updated = _replace_once(original, BROWSER_INIT_OLD, BROWSER_INIT_NEW, "browser-init")
     updated = _replace_once(updated, BROWSER_LOOP_OLD, BROWSER_LOOP_NEW, "browser-loop")
     updated = _replace_once(updated, BROWSER_RESULT_OLD, BROWSER_RESULT_NEW, "browser-result")
+    updated = _replace_once(updated, BROWSER_RANGE_OLD, BROWSER_RANGE_NEW, "browser-range")
     if updated == original:
         return "already_repaired"
     _write_repaired(path, updated, ".pre-full-exhaustion-boundary")
@@ -138,6 +158,7 @@ def repair_browser(path: Path) -> str:
         BROWSER_INIT_NEW,
         BROWSER_LOOP_NEW,
         BROWSER_RESULT_NEW,
+        BROWSER_RANGE_NEW,
         '"full_dataset_exhausted": full_dataset_exhausted',
     ):
         if verified.count(required) != 1:

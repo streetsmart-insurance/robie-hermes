@@ -9,6 +9,8 @@ from scripts.repair_dedicated_accountability_submission_boundary import (
     BROWSER_INIT_OLD,
     BROWSER_LOOP_NEW,
     BROWSER_LOOP_OLD,
+    BROWSER_RANGE_NEW,
+    BROWSER_RANGE_OLD,
     BROWSER_RESULT_NEW,
     BROWSER_RESULT_OLD,
     repair_adapter,
@@ -28,12 +30,14 @@ def test_repairs_browser_boundary_and_is_idempotent(tmp_path):
         BROWSER_INIT_OLD,
         BROWSER_LOOP_OLD,
         BROWSER_RESULT_OLD,
+        BROWSER_RANGE_OLD,
     )
     assert repair_browser(path) == "repaired"
     text = path.read_text(encoding="utf-8")
     assert BROWSER_INIT_NEW in text
     assert BROWSER_LOOP_NEW in text
     assert BROWSER_RESULT_NEW in text
+    assert BROWSER_RANGE_NEW in text
     assert repair_browser(path) == "already_repaired"
     backup = path.with_suffix(path.suffix + ".pre-full-exhaustion-boundary")
     assert backup.is_file()
