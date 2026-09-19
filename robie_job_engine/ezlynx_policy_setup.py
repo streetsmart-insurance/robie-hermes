@@ -1080,56 +1080,35 @@ class EzlynxPolicySetupPage:
                 await self.page.locator("#IM_ItemLimit, input[name='ItemLimit']").fill(clean_currency(im.limit))
 
     async def add_discussion_note(self, title: str, body: str, policy_number: str = "") -> None:
+        """Playwright must never file EZLynx notes (Carlo 2026-09-19).
+
+        Call :meth:`add_discussion_note_via_api` / ``add_note_to_discussion``.
+        """
+        del title, body, policy_number
+        from .ezlynx_api_only_writes import refuse_playwright_note_or_doc
+
+        refuse_playwright_note_or_doc("ezlynx_policy_setup.add_discussion_note")
+
+    def add_discussion_note_via_api(
+        self,
+        title: str,
+        body: str,
+        *,
+        applicant_id: str | None = None,
+        discussion_client: Any | None = None,
+    ) -> dict[str, Any]:
+        """File the note through DiscussionApi and read back ``note_id``."""
+        from .ezlynx_api_only_writes import add_note_to_discussion
+
         final_body = body if "ROBIE was here" in body else f"{body}\n\nROBIE was here"
-        
-        # 1. Check in-form tab
-        disc_tab = self.page.locator("a[data-target='#discussions-tab'], #tab-discussions")
-        if await disc_tab.count() > 0:
-            await disc_tab.click()
-            add_note_btn = self.page.locator("#add-note-btn, button[data-action='add-note']")
-            if await add_note_btn.count() > 0:
-                await add_note_btn.click()
-                await self.page.locator("#Discussion_Title, input[name='DiscussionTitle']").fill(title)
-                await self.page.locator("#Discussion_Body, textarea[name='DiscussionBody']").fill(final_body)
-                save_note = self.page.locator("#save-note-btn, button[data-action='save-note']")
-                if await save_note.count() > 0:
-                    await save_note.click()
-                    return
-
-        # 2. Header Flyout with Direct Policy Association (#btnAssociatetoAPolicy)
-        header_note_btn = self.page.locator("#add-note-header")
-        if await header_note_btn.count() > 0:
-            await header_note_btn.click()
-            await self.page.wait_for_timeout(300)
-            
-            # Associate to actual Policy record
-            if policy_number:
-                btn_assoc = self.page.locator("#btnAssociatetoAPolicy")
-                if await btn_assoc.count() > 0:
-                    await btn_assoc.click()
-                    await self.page.wait_for_timeout(250)
-                    select_policy_btn = self.page.locator("button:has-text('Select a policy')")
-                    if await select_policy_btn.count() > 0:
-                        await select_policy_btn.click()
-                        await self.page.wait_for_timeout(250)
-                        opt = self.page.locator(f"mat-option:has-text('{policy_number}'), [role='option']:has-text('{policy_number}')")
-                        if await opt.count() > 0:
-                            await opt.click()
-
-            title_input = self.page.locator("#txtDiscussionTitle")
-            if await title_input.count() > 0:
-                await title_input.fill(title)
-            body_input = self.page.locator("#txtNote")
-            if await body_input.count() > 0:
-                await body_input.fill(final_body)
-            save_btn = self.page.locator("#btnSaveNote")
-            if await save_btn.count() > 0:
-                await save_btn.click()
-                await self.page.wait_for_timeout(300)
-                # Close workspace flyout
-                close_btn = self.page.locator("#close-workspace-button")
-                if await close_btn.count() > 0:
-                    await close_btn.click()
+        applicant = str(applicant_id or getattr(self, "applicant_id", "") or "").strip()
+        return add_note_to_discussion(
+            applicant,
+            final_body,
+            discussion_title=title,
+            title_hint=title,
+            discussion_client=discussion_client,
+        )
 
     async def save_and_close_form_entry(self) -> None:
         save_close_btn = self.page.locator("#finishButton-header")

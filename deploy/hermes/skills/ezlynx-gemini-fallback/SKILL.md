@@ -56,11 +56,13 @@ This is a backend workflow Skill, not Chat small talk.
 
 This note rule applies to every EZLynx note write, not only commercial auto.
 
+- File notes through DiscussionApi only (`ezlynx_discussion_note`).
+  Playwright Add Note / Save Note is `PLAYWRIGHT_BLOCKED`.
 - Notes belong on an existing titled discussion only (New Business, New
   Policy, Renewal, Cancellation, Submission Center, or another existing
   titled discussion).
 - Never write a note on Untitled.
-- If the right title is missing, create a properly named discussion first.
+- If the right title is missing, HITL Carlo. Do not create Untitled.
 - Always include the exact phrase `Robie was here`.
 
 ## Result

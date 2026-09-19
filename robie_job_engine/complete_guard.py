@@ -43,6 +43,8 @@ IDENTITY_KEYS = (
     "report_id",
     "locator",
     "id",
+    "note_id",
+    "ezlynx_note_id",
 )
 IDENTITY_FALLBACK_KEYS = (
     "url",
@@ -51,6 +53,7 @@ IDENTITY_FALLBACK_KEYS = (
     "destination_root",
     "destination_id",
     "policy_number",
+    "ezlynx_note_id",
 )
 WEAK_ONLY_EXPECTED_KEYS = frozenset({"ok"})
 WORKFLOW_EXPECTED_KEYS = frozenset(
@@ -68,6 +71,8 @@ WORKFLOW_EXPECTED_KEYS = frozenset(
         "applicant_id",
         "policy_number",
         "document_id",
+        "note_id",
+        "ezlynx_note_id",
         "assignee_id",
         "assignee_name",
         "destination_id",
@@ -285,6 +290,8 @@ def require_complete_postcondition(
     stored_at: str | None = None,
     stored_not_before: str | None = None,
     intended: str | None = None,
+    action: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> None:
     if current != JobStatus.VERIFYING or authority != verifier_authority:
         raise PermissionError(
@@ -310,6 +317,16 @@ def require_complete_postcondition(
     )
     if identity:
         raise PermissionError(identity)
+    from .ezlynx_api_only_writes import note_or_document_write_missing_api_id
+
+    note_doc = note_or_document_write_missing_api_id(
+        expected=expected,
+        observed=observed,
+        action=action,
+        payload=payload,
+    )
+    if note_doc:
+        raise PermissionError(note_doc)
     prohibited = complete_is_prohibited(observed)
     if prohibited:
         raise PermissionError(prohibited)

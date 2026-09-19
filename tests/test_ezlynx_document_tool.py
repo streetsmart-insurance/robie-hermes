@@ -48,6 +48,7 @@ class DocumentToolVisibilityTests(unittest.TestCase):
             with self.subTest(action=action):
                 schema = email_chat_job_schema(offered)
                 self.assertIn("ezlynx_document_upload", schema)
+                self.assertIn("ezlynx_discussion_note", schema)
                 self.assertIn("playwright_exec", schema)
                 self.assertIn("ezlynx_policy_setup", schema)
                 self.assertNotIn("execute_code", schema)
@@ -61,6 +62,7 @@ class DocumentToolVisibilityTests(unittest.TestCase):
             runtime, action_type="hermes.email_task", env={}, argv=["hermes", "chat"]
         )
         self.assertIn("ezlynx_document_upload", runtime._HERMES_CORE_TOOLS)
+        self.assertIn("ezlynx_discussion_note", runtime._HERMES_CORE_TOOLS)
         self.assertNotIn("execute_code", runtime._HERMES_CORE_TOOLS)
         self.assertNotIn("terminal", runtime._HERMES_CORE_TOOLS)
 
@@ -170,6 +172,13 @@ class DocumentToolHandlerTests(unittest.TestCase):
                         }
                         return "987654321"
 
+                    def search_applicant_documents(self, applicant_id):
+                        return {
+                            "results": [
+                                {"id": "987654321", "name": "dec.pdf"}
+                            ]
+                        }
+
                 with (
                     patch(
                         "robie_job_engine.ezlynx_api.EzlynxApiClient", FakeClient
@@ -189,6 +198,7 @@ class DocumentToolHandlerTests(unittest.TestCase):
                     )
                 self.assertTrue(result["ok"])
                 self.assertEqual(result["document_id"], "987654321")
+                self.assertTrue(result["read_back"])
                 self.assertEqual(result["applicant_id"], "220250093")
                 upload = calls["upload"]
                 self.assertEqual(upload["applicant_id"], "220250093")

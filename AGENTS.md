@@ -48,6 +48,13 @@ and durable checkpoints. Visual or model-driven clicking is a documented
 fallback only. Prevent duplicate customer, EZLynx, email, payment, bind, and
 carrier actions.
 
+**EZLynx notes and documents are API only.** File notes through DiscussionApi
+(`add_note_to_discussion` / `file_note_to_existing_discussion`) and upload
+files through DocumentApi (`upload_applicant_document`). Playwright and CDP
+are for forms and portals only — never Add Note, Save Note, or a file chooser
+against EZLynx. COMPLETE is refused without a read-back `note_id` or
+`document_id`. See `docs/EZLYNX_NOTES_DOCS_API_ONLY.md`.
+
 ## Required handoff
 
 Every candidate handoff must identify the requirement, issue, branch, PR,

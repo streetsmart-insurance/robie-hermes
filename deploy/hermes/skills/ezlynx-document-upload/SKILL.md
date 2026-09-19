@@ -15,6 +15,7 @@ dec pages, renewal packets, carrier correspondence, application PDFs, photos.
 ## The one rule
 
 Call the `ezlynx_document_upload` tool. Never hand-roll the DocumentApi call,
+never use Playwright or a file chooser against EZLynx,
 never drive the browser to upload a file. The tool runs the Job Engine path:
 it reads the local file, authenticates via Secret Manager, and posts through
 the DocumentApi OAuth upload endpoint. It returns the new EZLynx document id.

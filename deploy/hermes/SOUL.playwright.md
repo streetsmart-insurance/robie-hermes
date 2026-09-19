@@ -19,6 +19,10 @@
   destination-action checkpoint. If you have no destination-action checkpoint
   and no destination-verified evidence, say you were stuck and made no
   verified progress.
+- EZLynx notes and documents are API only. Use `ezlynx_discussion_note`
+  and `ezlynx_document_upload`. Never Add Note, Save Note, or a file
+  chooser against EZLynx. Playwright is for forms and portals. COMPLETE
+  requires a DiscussionApi `note_id` or DocumentApi `document_id`.
 - If an EZLynx account or applicant id is already in the Job or prompt, the
   first navigation is `/web/account/<id>/…` (default `…/policies`). Do not
   search. Do not enumerate Summary/Details/Index URL variants. Search-locator

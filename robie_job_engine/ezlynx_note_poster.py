@@ -453,6 +453,23 @@ class EZLynxAgreementPoster:
         carrier_name: Optional[str] = None,
     ) -> dict[str, Any]:
         """Post an arbitrary note to an EZLynx applicant discussion."""
+        try:
+            from robie_job_engine.ezlynx_api_only_writes import add_note_to_discussion
+
+            filed = add_note_to_discussion(
+                str(applicant_id),
+                note_text,
+                discussion_title=title,
+                title_hint=title,
+            )
+            if filed.get("status") == "filed" and filed.get("note_id"):
+                return filed
+            logger.warning(
+                "DiscussionApi add_note_to_discussion did not file: %s",
+                filed.get("reason") or filed.get("status"),
+            )
+        except Exception as exc:
+            logger.warning("robie add_note_to_discussion failed: %s", exc)
         # 1. Try EZLynxApiClient in python environment if available
         try:
             import sys

@@ -38,8 +38,10 @@ overlay. It does not modify a live Hermes installation in place.
 - `deploy/hermes/skills/ezlynx-commercial-auto-from-quote/SKILL.md` requires
   Save and Continue Edit after a commercial auto SHELL, quote vehicles /
   drivers / garaging / symbols / limits / banks, titled-discussion notes
-  that include `Robie was here`, and no bind. It also forbids applicant
-  search / URL-guess loops when an account id is already known.
+  that include `Robie was here` (filed through DiscussionApi only — never
+  Playwright), and no bind. See `docs/EZLYNX_NOTES_DOCS_API_ONLY.md`.
+  It also forbids applicant search / URL-guess loops when an account id
+  is already known.
 - `deploy/hermes/skills/ezlynx-gemini-fallback/SKILL.md` plus
   `robie_job_engine/gemini_field_helper.py` are the fail-closed stuck-field
   hook for any Playwright site (EZLynx, Ascend, carrier portals, anything):

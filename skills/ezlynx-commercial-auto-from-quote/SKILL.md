@@ -70,6 +70,9 @@ Creating the commercial auto policy record is only the shell. It is not done.
 
 This note rule applies to every EZLynx note write, not only commercial auto.
 
+- File notes only through the Discussion API (`ezlynx_discussion_note` /
+  `add_note_to_discussion`). Playwright must never click Add Note or
+  Save Note.
 - Write notes only on an existing titled discussion.
 - Allowed titles include **New Business**, **New Policy**, **Renewal**,
   **Cancellation**, **Submission Center**, and other existing titled

@@ -219,6 +219,10 @@ def _file_routes(discussions):
         [
             ("by-applicant", discussions),
             ("/notes", {"noteId": "n7"}),
+            (
+                "v8/discussions/",
+                {"discussionId": "d1", "notes": [{"noteId": "n7", "body": "Filed note"}]},
+            ),
         ]
     )
 
@@ -229,6 +233,7 @@ def test_file_note_happy_path():
     assert result["status"] == "filed"
     assert result["discussion_id"] == "d1"
     assert result["note_id"] == "n7"
+    assert result["read_back"] is True
     assert len(client._urlopen.posts_to("/notes")) == 1
 
 

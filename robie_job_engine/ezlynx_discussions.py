@@ -425,6 +425,15 @@ def file_note_to_existing_discussion(
             if value:
                 note_id = value
                 break
+    if not note_id:
+        raise DiscussionApiError(
+            None,
+            "DiscussionApi append returned no note_id; refusing success",
+        )
+    # Fresh GET before success. Playwright/DOM is never this proof.
+    from .ezlynx_api_only_writes import confirm_discussion_note
+
+    confirm_discussion_note(client, discussion_id, note_id)
     return {
         "status": "filed",
         "reason_code": None,
@@ -432,6 +441,7 @@ def file_note_to_existing_discussion(
         "applicant_id": applicant,
         "discussion_id": discussion_id,
         "discussion_title": discussion_title_of(record),
-        "note_id": note_id or None,
+        "note_id": note_id,
+        "read_back": True,
         "response": created,
     }

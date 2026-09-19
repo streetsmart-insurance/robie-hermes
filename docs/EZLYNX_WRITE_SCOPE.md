@@ -40,3 +40,7 @@ targeted. The Test-account header checks remain for `220250093`.
 - `robie_job_engine/ezlynx_write_scope.py`
 - Note append (`ezlynx_discussions`) and document upload (`ezlynx_api`)
 - Playwright generic writes and FormEntry (`playwright_write_guard.py`)
+
+EZLynx notes and documents themselves are API-only (Carlo 2026-09-19).
+Playwright must never file a note or upload a document. See
+`docs/EZLYNX_NOTES_DOCS_API_ONLY.md`.

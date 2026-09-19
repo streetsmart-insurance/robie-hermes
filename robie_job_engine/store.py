@@ -501,6 +501,8 @@ class JobStore:
                     intended=intended_destination_identity(
                         action=action_data, payload=payload
                     ),
+                    action=action_data,
+                    payload=payload,
                 )
             completed_at = now if status == JobStatus.COMPLETE else None
             conn.execute(
