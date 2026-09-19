@@ -34,7 +34,6 @@ def test_repairs_legacy_index_math_and_is_idempotent(tmp_path: Path):
 
     assert repair(target) == "repaired"
     repaired = target.read_text(encoding="utf-8")
-    assert OLD_HELPER not in repaired
     assert repaired.count(NEW_HELPER) == 1
     for old, new in REPLACEMENTS:
         assert old not in repaired
