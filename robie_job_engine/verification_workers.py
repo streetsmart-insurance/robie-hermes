@@ -17,6 +17,9 @@ Pipeline per worker run:
   4. NEXT ACTION — per-SOP contact ladder: PORTAL first, then EMAIL, then
      CALL. Carriers/MGAs/mortgage companies ONLY — never clients.
      Business hours only (weekdays 9 AM-5 PM ET). Never bind/quote/cancel.
+     4372 runs mortgagee_enrichment (DocumentApi + structured fields,
+     dry-run by default) before planning. Portal/Bland stay out of that
+     scaffold. HITL on source conflict; skip only on proven-zero.
   5. EVIDENCE — every action records destination evidence; in dry-run the
      planned action is recorded as evidence of intent.
   6. DIGEST — done / not done / pending + reason, per policy, grouped by
@@ -47,6 +50,10 @@ from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gmail_report_ingestion as ing  # noqa: E402
+try:
+    from . import mortgagee_enrichment as menc  # noqa: E402
+except ImportError:  # script-style: python robie_job_engine/verification_workers.py
+    import mortgagee_enrichment as menc  # noqa: E402
 
 WORKERS = {
     "4247": {
@@ -422,17 +429,34 @@ def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str
             "due_now", f"day {days_since} — audit papers outstanding")
 
 
-def plan_4372(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
-    """Mortgagee: lender/loan are manual enrichment — flag until provided."""
+def plan_4372(
+    item: WorkItem,
+    today: date,
+    enrichment: menc.EnrichmentResult | None = None,
+) -> tuple[ActionPlan, str, str]:
+    """Mortgagee: structured enrichment first; flag until lender/loan proven.
+
+    Closed tasks never reach this planner (see ``_4372_closed_reason``).
+    Portal / Bland delivery stays out of this scaffold. HITL on source
+    conflict. Proven-zero is an explicit empty result, never a silent skip.
+    """
     due = parse_csv_date(_cell(item.row, "Task Due Date"))
     due_txt = f"task due {due.isoformat()}" if due else "no task due date"
-    return (ActionPlan("verify",
-                       "Lender name and loan number are NOT in the export — add them manually, "
-                       "verify the lender of record, then pull the dec and deliver via the "
-                       "lender portal (agent section, no login; never SSN). "
-                       f"({due_txt})",
-                       target="lender TBD", due=today.isoformat()),
-            "blocked", "lender/loan not on file — manual enrichment needed")
+    result = enrichment
+    if result is None:
+        applicant_id = _cell(item.row, "Applicant ID")
+        result = menc.enrich_work_item(
+            policy_number=item.policy_number,
+            applicant_id=applicant_id,
+            row=item.row,
+            ports=menc.EnrichmentPorts(),
+            dry_run=True,
+        )
+    kind, detail, target, status, reason = menc.plan_from_enrichment(
+        result, due_txt=due_txt,
+    )
+    return (ActionPlan(kind, detail, target=target, due=today.isoformat()),
+            status, reason)
 
 
 def plan_4359(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
@@ -479,6 +503,7 @@ class WorkerRun:
     evidence: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     excluded_stale: list = field(default_factory=list)
+    enrichment: list = field(default_factory=list)
 
 
 def _execute_live_action(pa: PlannedAction, item: WorkItem | None) -> str:
@@ -558,7 +583,8 @@ def _record_evidence(run: WorkerRun, action: PlannedAction, note: str) -> None:
 
 def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                queue_dir: str = ".", csv_bytes: bytes | None = None,
-               gmail_service=None, allow_unverified: bool = False) -> WorkerRun:
+               gmail_service=None, allow_unverified: bool = False,
+               enrichment_ports: menc.EnrichmentPorts | None = None) -> WorkerRun:
     """Run one verification worker for one day. Fail-closed throughout."""
     worker = WORKERS[report_id]["name"]
     run = WorkerRun(report_id=report_id, worker=worker,
@@ -641,7 +667,20 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             items.sort(key=lambda it: (parse_csv_date(it.expiration_date)
                                        or date.max))
         for item in items:
-            action, status, reason = planner(item, day)
+            enrichment = None
+            if report_id == "4372":
+                enrichment = menc.enrich_work_item(
+                    policy_number=item.policy_number,
+                    applicant_id=_cell(item.row, "Applicant ID"),
+                    row=item.row,
+                    ports=enrichment_ports or menc.EnrichmentPorts(),
+                    dry_run=(mode != "live"),
+                )
+                item.row["_mortgagee_enrichment"] = enrichment.to_dict()
+                run.enrichment.append(enrichment.to_dict())
+                action, status, reason = plan_4372(item, day, enrichment=enrichment)
+            else:
+                action, status, reason = planner(item, day)
             pa = PlannedAction(item.key, item.policy_number, item.account_name,
                                _dept(item), worker, action, status, reason, mode)
             run.actions.append(pa)
