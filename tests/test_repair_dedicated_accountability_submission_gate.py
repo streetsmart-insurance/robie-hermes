@@ -39,6 +39,21 @@ def test_repair_removes_unverified_fallback_and_is_idempotent(tmp_path: Path):
     assert backup.stat().st_mode & 0o777 == 0o600
 
 
+
+def test_repairs_partial_shape_after_fallback_was_already_removed(tmp_path: Path):
+    target = tmp_path / "production_main.py"
+    partial = _legacy_source().replace(OLD_FALLBACK_BLOCK, "")
+    target.write_text(partial, encoding="utf-8")
+
+    assert repair(target) == "repaired"
+    repaired = target.read_text(encoding="utf-8")
+    assert repaired.count(NEW_FETCH_BLOCK) == 1
+    assert OLD_FETCH_BLOCK not in repaired
+    assert "except SubmissionCenterSourceError" not in repaired
+    assert "submission_error =" not in repaired
+    assert repair(target) == "already_repaired"
+
+
 def test_repaired_source_does_not_catch_submission_collection_failure(tmp_path: Path):
     target = tmp_path / "production_main.py"
     target.write_text(_legacy_source(), encoding="utf-8")
