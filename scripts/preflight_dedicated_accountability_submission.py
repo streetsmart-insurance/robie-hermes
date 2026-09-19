@@ -253,7 +253,7 @@ def main() -> int:
         stage, separator, code = safe.partition(":")
         print(json.dumps({
             "ready": False,
-            "authenticated": stage != "attempt_1_authentication",
+            "authenticated": "authentication" not in stage,
             "read_only": True,
             "delivery_attempted": False,
             "records_exposed": False,
