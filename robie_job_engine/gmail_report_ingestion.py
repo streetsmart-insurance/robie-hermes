@@ -36,13 +36,16 @@ are SKIPPED and counted (never fed to a worker); a blank identity on a
 row carrying any non-total data RAISES.
 
 IDENTITY (decided 2026-09-19 by Carlo): Policy Number is the work-item
-identity for all four reports — it is the client's account, and the
-worker tracks one item per policy. The exports contain no literal
-audit-ID / loan-number column, so Applicant ID stays on as a descriptor
-and Task ID (4372) stays on as the row descriptor; rows sharing a Policy
-Number are linked as a single work item. Note: 4359 has 3 policies with
-2 open requests each (66 unique policy numbers / 69 rows) — edge
-handling for those dupes is decided at worker-wiring time.
+identity — it is the client's account. For 4247/4246/4372 the worker
+tracks one item per policy; rows sharing a Policy Number are linked as a
+single work item. For 4359 Carlo decided 2026-09-19 to WORK EVERY
+REQUEST: one work item per row (3 policies have 2 open requests each, 66
+unique policy numbers / 69 rows — each request is worked). The 4359
+export has no request-ID column, so the 4359 work-item key is
+Policy Number + Change Request Created Date; a 4359 row with a blank
+Created Date RAISES (requests cannot be distinguished). The exports
+contain no literal audit-ID / loan-number column, so Applicant ID stays
+on as a descriptor and Task ID (4372) stays on as the row descriptor.
 Mortgagee lender/loan number is NOT in the export — it is a manual
 enrichment the worker adds per item as it goes. 4359 additionally
 remains blocked by the schema_verified=False gate.
@@ -236,7 +239,8 @@ SCHEMA_VERIFIED: dict[str, bool] = {
 # Work-item identity column per report. Decided 2026-09-19 by Carlo:
 # Policy Number (the client's account) is the identity the worker tracks
 # day to day. Rows sharing one Policy Number are linked as a single
-# work item; Applicant ID / Task ID stay on as descriptors.
+# work item — EXCEPT 4359, where Carlo decided every request is worked:
+# 4359 identity is composite (see identity_value).
 # Mortgagee lender is NOT in the export — manual worker enrichment.
 IDENTITY_COLUMNS: dict[str, str] = {
     "4247": "Policy Number",
@@ -245,6 +249,10 @@ IDENTITY_COLUMNS: dict[str, str] = {
     # 4359 additionally gated by schema_verified=False regardless.
     "4359": "Policy Number",
 }
+
+# 4359 has no request-ID column; requests on one policy are told apart by
+# when they were created.
+IDENTITY_4359_CREATED_COLUMN = "Change Request Created Date"
 
 
 @dataclass(frozen=True)
@@ -313,6 +321,28 @@ def identity_column(report_id: str) -> str:
         return IDENTITY_COLUMNS[report_id]
     except KeyError:
         raise GmailReportIngestionError(f"unknown report id {report_id}") from None
+
+
+def identity_value(report_id: str, row: Mapping[str, str]) -> str:
+    """Work-item key for one validated row — what the worker tracks day to day.
+
+    Decided 2026-09-19 by Carlo: 4247/4246/4372 track one item per Policy
+    Number; 4359 works EVERY request, so its key is Policy Number + the
+    request's created date (the export has no request-ID column). A 4359
+    row with a blank created date RAISES — the requests could not be told
+    apart, and silently merging two requests is worse than failing closed.
+    """
+    policy = str(row.get(identity_column(report_id), "")).strip()
+    if report_id == "4359":
+        created = str(row.get(IDENTITY_4359_CREATED_COLUMN, "")).strip()
+        if not created:
+            raise GmailReportIngestionError(
+                "report 4359: Change Request Created Date is empty — "
+                "this request cannot be distinguished from another request "
+                "on the same policy"
+            )
+        return f"{policy} | {created}"
+    return policy
 
 
 def check_report_gate(report_id: str, *, allow_unverified: bool = False) -> None:
@@ -444,6 +474,8 @@ def parse_and_validate_csv(
                 f"report {report_id} {source_label} line {lineno}: "
                 f"identity column {id_col!r} is empty on a row carrying data"
             )
+        # Validates the work-item key (4359: raises on blank created date).
+        identity_value(report_id, row)
         rows.append(row)
     if not rows:
         raise GmailReportIngestionError(
@@ -793,6 +825,43 @@ def _self_test() -> None:
     def gate_unknown():
         check_report_gate("9999")
     expect_raises("unknown report id is rejected by gate", gate_unknown)
+
+    def identity_4359_per_request():
+        # Carlo 2026-09-19: 4359 works EVERY request. Two open requests on
+        # the same policy must produce two distinct work-item keys.
+        headers = expected_headers("4359")
+        rows, _ = parse_and_validate_csv(
+            "4359", _synthetic_csv("4359", n_rows=2), source_label="selftest"
+        )
+        key1 = identity_value("4359", rows[0])
+        key2 = identity_value("4359", rows[1])
+        assert key1 != key2, f"4359 keys collided: {key1!r}"
+        assert rows[0]["Policy Number"] == "ID-4359-1"
+        assert key1.startswith("ID-4359-1 | "), f"unexpected 4359 key: {key1!r}"
+    check("4359 identity is per-request (policy + created date)", identity_4359_per_request)
+
+    def identity_4359_blank_created():
+        content = _synthetic_csv("4359", n_rows=1).decode("utf-8").splitlines()
+        headers = expected_headers("4359")
+        idx = headers.index(IDENTITY_4359_CREATED_COLUMN)
+        cells = next(csv.reader([content[1]]))
+        cells[idx] = "   "
+        content[1] = ",".join(f'"{c}"' for c in cells)
+        parse_and_validate_csv("4359", "\n".join(content).encode("utf-8"))
+    expect_raises(
+        "4359 blank created date is rejected (requests indistinguishable)",
+        identity_4359_blank_created,
+    )
+
+    def identity_other_reports_per_policy():
+        for rid in ("4247", "4246", "4372"):
+            rows, _ = parse_and_validate_csv(
+                rid, _synthetic_csv(rid, n_rows=1), source_label="selftest"
+            )
+            assert identity_value(rid, rows[0]) == f"ID-{rid}-1", (
+                f"{rid} identity should be the policy number alone"
+            )
+    check("4247/4246/4372 identity stays per-policy", identity_other_reports_per_policy)
 
     print(f"SELF-TEST passes={len(passes)} failures={len(failures)}")
     for name in passes:
