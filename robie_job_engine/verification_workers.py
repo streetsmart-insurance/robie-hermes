@@ -18,8 +18,9 @@ Pipeline per worker run:
      CALL. Carriers/MGAs/mortgage companies ONLY — never clients.
      Business hours only (weekdays 9 AM-5 PM ET). Never bind/quote/cancel.
      4372 runs mortgagee_enrichment (DocumentApi + structured fields,
-     dry-run by default) before planning. Portal/Bland stay out of that
-     scaffold. HITL on source conflict; skip only on proven-zero.
+     then Additional Interests browser fallback on API miss; dry-run by
+     default) before planning. Portal/Bland stay out of that scaffold.
+     HITL on source conflict; skip only on proven-zero empty table.
   5. EVIDENCE — every action records destination evidence; in dry-run the
      planned action is recorded as evidence of intent.
   6. DIGEST — done / not done / pending + reason, per policy, grouped by
@@ -604,7 +605,8 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                queue_dir: str = ".", csv_bytes: bytes | None = None,
                gmail_service=None, allow_unverified: bool = False,
                enrichment_ports: menc.EnrichmentPorts | None = None,
-               test_enrichment: bool = False) -> WorkerRun:
+               test_enrichment: bool = False,
+               browser_read: bool = False) -> WorkerRun:
     """Run one verification worker for one day. Fail-closed throughout."""
     worker = WORKERS[report_id]["name"]
     run = WorkerRun(report_id=report_id, worker=worker,
@@ -690,7 +692,9 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             enrichment = None
             if report_id == "4372":
                 ports = menc.resolve_enrichment_ports(
-                    enrichment_ports, live_test=test_enrichment,
+                    enrichment_ports,
+                    live_test=test_enrichment,
+                    live_browser=browser_read,
                 )
                 enrichment = menc.enrich_work_item(
                     policy_number=item.policy_number,
@@ -814,6 +818,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--test-enrichment", action="store_true",
                         help="bind Test-only EzlynxApiClient (ROBIE_ENV=TEST required; "
                              "never Production)")
+    parser.add_argument("--browser-read", action="store_true",
+                        help="bind Test-only Additional Interests CDP read "
+                             "(ROBIE_ENV=TEST; attaches existing SSRobie Chrome; "
+                             "never launches a browser; never Production)")
     args = parser.parse_args(argv)
 
     day = datetime.strptime(args.day, "%Y-%m-%d").date()
@@ -824,7 +832,8 @@ def main(argv: list[str] | None = None) -> int:
     run = run_worker(args.report, day=day, mode=args.mode,
                      queue_dir=args.queue_dir, csv_bytes=csv_bytes,
                      allow_unverified=args.allow_unverified,
-                     test_enrichment=args.test_enrichment)
+                     test_enrichment=args.test_enrichment,
+                     browser_read=args.browser_read)
     digest = build_digest([run])
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

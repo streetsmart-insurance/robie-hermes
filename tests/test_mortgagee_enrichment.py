@@ -1,7 +1,9 @@
-"""4372 mortgagee enrichment scaffold — no network, no live EZLynx.
+"""4372 mortgagee enrichment — no network, no live EZLynx.
 
-Locks: multi-mortgage, conflict→HITL, empty→prove zero, no invented
-fields, no PDF scrape, no SSN, Playwright note/doc writes fail closed.
+Locks: API first then Additional Interests table fallback, multi-mortgage,
+conflict→HITL, empty table→prove zero, no invented fields, no PDF scrape,
+no SSN, Playwright note/doc writes fail closed. Unbound ports never open
+a live browser.
 """
 
 from __future__ import annotations
@@ -55,8 +57,35 @@ class FakeDocs:
         raise AssertionError("PDF download must not be used for field fill")
 
 
-def _ports(policy=None, documents=None):
-    return menc.EnrichmentPorts(policy=policy, documents=documents)
+class FakeBrowser:
+    def __init__(self, payload, *, explode=None):
+        self.payload = payload
+        self.explode = explode
+        self.calls = []
+
+    def read_additional_interests(self, policy_number, applicant_id=""):
+        self.calls.append((policy_number, applicant_id))
+        if self.explode is not None:
+            raise self.explode
+        return self.payload
+
+
+def _ports(policy=None, documents=None, browser=None):
+    return menc.EnrichmentPorts(policy=policy, documents=documents, browser=browser)
+
+
+def _table(*rows, headers=None):
+    default_headers = ["Name", "Type", "Loan Number"]
+    return {
+        "table_found": True,
+        "tab_visible": True,
+        "headers": headers or default_headers,
+        "rows": list(rows),
+    }
+
+
+def _empty_table():
+    return _table(headers=["Name", "Type", "Loan Number"])
 
 
 def _policy_payload(*mortgages, include_empty_list=False, property_zip=""):
@@ -237,15 +266,30 @@ class TestConflictHitl:
 
 
 class TestProveZero:
-    def test_explicit_empty_collections_on_both_sources_is_proven_zero(self):
+    def test_api_empty_collections_are_not_proven_zero(self):
         policy = FakePolicy(_policy_payload(include_empty_list=True))
         docs = FakeDocs({"results": [], "mortgagees": []})
         result = menc.enrich_work_item(
             policy_number="HO-1", applicant_id="1", ports=_ports(policy, docs),
         )
+        assert result.status == menc.STATUS_INCOMPLETE
+        assert result.status != menc.STATUS_PROVEN_ZERO
+        assert result.browser_invoked is True
+        assert result.mortgages == []
+
+    def test_empty_additional_interests_table_is_proven_zero(self):
+        policy = FakePolicy(_policy_payload(include_empty_list=True))
+        docs = FakeDocs({"results": [], "mortgagees": []})
+        browser = FakeBrowser(_empty_table())
+        result = menc.enrich_work_item(
+            policy_number="HO-1",
+            applicant_id="1",
+            ports=_ports(policy, docs, browser),
+        )
         assert result.status == menc.STATUS_PROVEN_ZERO
         assert result.mortgages == []
-        assert "explicit empty" in result.reason
+        assert "explicitly empty" in result.reason
+        assert browser.calls == [("HO-1", "1")]
 
     def test_unbound_ports_are_incomplete_not_zero(self):
         result = menc.enrich_work_item(
@@ -528,9 +572,11 @@ class TestWorkerWiring:
         assert "HITL" in run.actions[0].reason
 
     def test_proven_zero_waits_and_keeps_the_work_item(self, tmp_path):
+        browser = FakeBrowser(_empty_table())
         ports = _ports(
             FakePolicy(_policy_payload(include_empty_list=True)),
             FakeDocs({"results": [], "mortgagees": []}),
+            browser,
         )
         run = vw.run_worker(
             "4372", day=DAY, mode="dry_run", queue_dir=str(tmp_path),
@@ -540,6 +586,7 @@ class TestWorkerWiring:
         assert run.work_items == 1
         assert run.actions[0].status == "waiting"
         assert "zero mortgages proven" in run.actions[0].reason
+        assert browser.calls == [("HO-1", "220250093")]
 
     def test_default_dry_run_stays_blocked_on_lender(self, tmp_path):
         run = vw.run_worker(
@@ -659,10 +706,12 @@ class TestReadyLenderChecks:
 class TestTestOnlyClientFactory:
     def test_resolve_default_is_unbound(self, monkeypatch):
         monkeypatch.delenv(menc.ENRICHMENT_LIVE_TEST_FLAG, raising=False)
+        monkeypatch.delenv(menc.ENRICHMENT_BROWSER_TEST_FLAG, raising=False)
         monkeypatch.setenv("ROBIE_ENV", "TEST")
         ports = menc.resolve_enrichment_ports()
         assert ports.policy is None
         assert ports.documents is None
+        assert ports.browser is None
 
     def test_bind_refuses_production_env_and_never_loads_config(self, monkeypatch):
         monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
@@ -702,6 +751,7 @@ class TestTestOnlyClientFactory:
         assert loaded == ["TEST"]
         assert ports.policy is not None
         assert ports.documents is not None
+        assert ports.browser is None
 
     def test_run_worker_test_flag_refuses_prod(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
@@ -767,3 +817,262 @@ class TestMetadataProbe:
         assert "MortgageeName" in summary["classification"]["allowlisted"]
         assert ports.documents.downloads == []
         assert ports.policy.downloads == []
+
+
+# ---------------------------------------------------------------------------
+# API miss → Additional Interests browser fallback
+# ---------------------------------------------------------------------------
+
+
+class TestAdditionalInterestsFallback:
+    def test_api_miss_invokes_browser_and_reads_table(self):
+        policy = FakePolicy({"data": {"policyNumber": "SAHO581361", "status": "Active"}})
+        docs = FakeDocs({"results": [_dec_row("1", "HO Declaration")]})
+        browser = FakeBrowser(_table(
+            {"Name": "Wells Fargo", "Type": "Mortgagee", "Loan Number": "987654"},
+        ))
+        result = menc.enrich_work_item(
+            policy_number="SAHO581361",
+            applicant_id="220250093",
+            ports=_ports(policy, docs, browser),
+        )
+        assert result.browser_invoked is True
+        assert browser.calls == [("SAHO581361", "220250093")]
+        assert result.status == menc.STATUS_READY
+        assert [m.lender_name for m in result.mortgages] == ["Wells Fargo"]
+        assert [m.loan_number for m in result.mortgages] == ["987654"]
+        assert result.mortgages[0].source == "additional_interests"
+        assert result.mortgages[0].interest_type == "Mortgagee"
+
+    def test_api_ready_does_not_open_browser(self):
+        policy = FakePolicy(_policy_payload(
+            {"MortgageeName": "Alpha", "LoanNumber": "A-1"},
+        ))
+        docs = FakeDocs({
+            "results": [
+                _dec_row("1", "Declaration", MortgageeName="Alpha", LoanNumber="A-1"),
+            ]
+        })
+        browser = FakeBrowser(_table(
+            {"Name": "Should Not Run", "Type": "Mortgagee", "Loan Number": "X"},
+        ))
+        result = menc.enrich_work_item(
+            policy_number="HO-1",
+            applicant_id="1",
+            ports=_ports(policy, docs, browser),
+        )
+        assert result.status == menc.STATUS_READY
+        assert result.browser_invoked is False
+        assert browser.calls == []
+        assert result.mortgages[0].lender_name == "Alpha"
+
+    def test_unbound_browser_never_connects_cdp(self):
+        constructed = []
+
+        class BoomPort:
+            def __init__(self):
+                constructed.append("cdp")
+
+            def read_additional_interests(self, *_a, **_k):
+                raise AssertionError("unbound dry-run must not open CDP")
+
+        result = menc.enrich_work_item(
+            policy_number="SAHO581361",
+            applicant_id="220250093",
+            ports=_ports(
+                FakePolicy({"data": {"policyNumber": "SAHO581361"}}),
+                FakeDocs({"results": [_dec_row("1", "HO Declaration")]}),
+            ),
+            dry_run=True,
+        )
+        assert constructed == []
+        assert result.browser_invoked is True
+        assert result.status == menc.STATUS_INCOMPLETE
+        assert result.browser_snapshot["available"] is False
+
+    def test_table_parse_multi_mortgage(self):
+        html = """
+        <table>
+          <thead><tr><th>Name</th><th>Type</th><th>Loan Number</th></tr></thead>
+          <tbody>
+            <tr><td>Wells Fargo</td><td>Mortgagee</td><td>LN-111</td></tr>
+            <tr><td>Chase</td><td>Second Mortgagee</td><td>LN-222</td></tr>
+          </tbody>
+        </table>
+        """
+        mortgages, conflict, explicit_empty, table_found = (
+            menc.parse_additional_interests_table(html)
+        )
+        assert table_found is True
+        assert explicit_empty is False
+        assert conflict == ""
+        assert [m.loan_number for m in mortgages] == ["LN-111", "LN-222"]
+        assert [m.lender_name for m in mortgages] == ["Wells Fargo", "Chase"]
+        assert [m.interest_type for m in mortgages] == ["Mortgagee", "Second Mortgagee"]
+
+    def test_empty_table_is_proven_zero_not_invented(self):
+        mortgages, conflict, explicit_empty, table_found = (
+            menc.parse_additional_interests_table(_empty_table())
+        )
+        assert table_found is True
+        assert explicit_empty is True
+        assert mortgages == []
+        assert conflict == ""
+
+    def test_browser_vs_api_conflict_is_hitl(self):
+        policy = FakePolicy(_policy_payload(
+            {"MortgageeName": "Wells Fargo", "LoanNumber": "LN-1"},
+        ))
+        docs = FakeDocs({"results": [_dec_row("1", "HO Declaration")]})
+        browser = FakeBrowser(_table(
+            {"Name": "Chase", "Type": "Mortgagee", "Loan Number": "LN-1"},
+        ))
+        result = menc.enrich_work_item(
+            policy_number="HO-1",
+            applicant_id="1",
+            ports=_ports(policy, docs, browser),
+        )
+        assert result.browser_invoked is True
+        assert result.status == menc.STATUS_HITL
+        assert "HITL" in result.reason
+        assert result.mortgages == []
+
+    def test_intra_table_name_conflict_is_hitl(self):
+        browser = FakeBrowser({
+            "table_found": True,
+            "tab_visible": True,
+            "rows": [{
+                "Name": "Wells Fargo",
+                "Lender": "Chase",
+                "Type": "Mortgagee",
+                "Loan Number": "LN-1",
+            }],
+        })
+        result = menc.enrich_work_item(
+            policy_number="HO-1",
+            applicant_id="1",
+            ports=_ports(
+                FakePolicy({"data": {"policyNumber": "HO-1"}}),
+                FakeDocs({"results": [_dec_row("1", "Declaration")]}),
+                browser,
+            ),
+        )
+        assert result.status == menc.STATUS_HITL
+        assert "not picking a side" in result.reason
+        assert result.mortgages == []
+
+    def test_table_scrape_keys_are_refused(self):
+        with pytest.raises(menc.MortgageeEnrichmentError, match="scrape"):
+            menc.parse_additional_interests_table({
+                "table_found": True,
+                "ocr_text": "MORTGAGEE: Guessed Bank LOAN: 999",
+                "rows": [{"Name": "Guessed Bank", "Loan Number": "999", "Type": "Mortgagee"}],
+            })
+        result = menc.enrich_work_item(
+            policy_number="HO-1",
+            applicant_id="1",
+            ports=_ports(
+                FakePolicy({"data": {"policyNumber": "HO-1"}}),
+                FakeDocs({"results": [_dec_row("1", "Declaration")]}),
+                FakeBrowser({
+                    "pdf_text": "do not scrape",
+                    "table_found": True,
+                    "rows": [{"Name": "Scraped", "Loan Number": "1", "Type": "Mortgagee"}],
+                }),
+            ),
+        )
+        assert result.status == menc.STATUS_HITL
+        assert result.mortgages == []
+        assert "scrape" in result.reason.casefold() or "pdf" in result.reason.casefold()
+
+    def test_missing_tab_is_incomplete_not_zero(self):
+        browser = FakeBrowser({
+            "table_found": False,
+            "tab_visible": False,
+            "headers": [],
+            "rows": [],
+        })
+        result = menc.enrich_work_item(
+            policy_number="HO-1",
+            applicant_id="1",
+            ports=_ports(
+                FakePolicy({"data": {"policyNumber": "HO-1"}}),
+                FakeDocs({"results": [_dec_row("1", "Declaration")]}),
+                browser,
+            ),
+        )
+        assert result.status == menc.STATUS_INCOMPLETE
+        assert result.status != menc.STATUS_PROVEN_ZERO
+        assert result.mortgages == []
+
+    def test_bind_test_browser_refuses_prod(self, monkeypatch):
+        monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+        with pytest.raises(menc.ProductionClientRefused, match="Production"):
+            menc.bind_test_browser_port(page=object())
+
+    def test_cdp_port_with_injected_page_does_not_connect(self):
+        from robie_job_engine.additional_interests_read import (
+            CdpAdditionalInterestsPort,
+        )
+
+        class _Loc:
+            def __init__(self, count):
+                self._count = count
+                self.clicked = False
+
+            def count(self):
+                return self._count
+
+            def click(self, timeout=0):
+                self.clicked = True
+
+        tab = _Loc(1)
+
+        class FakePage:
+            def get_by_role(self, role, name=None, exact=True):
+                if role == "tab" and name == "Additional Interests":
+                    return tab
+                return _Loc(0)
+
+            def evaluate(self, _js):
+                return _table(
+                    {"Name": "Wells Fargo", "Type": "Mortgagee", "Loan Number": "55"},
+                )
+
+        port = CdpAdditionalInterestsPort(page=FakePage())
+        snap = port.read_additional_interests("HO-1", "220250093")
+        assert tab.clicked is True
+        assert snap["locator"] == 'get_by_role("tab", name="Additional Interests", exact=True)'
+        assert snap["rows"][0]["Name"] == "Wells Fargo"
+        mortgages, conflict, _empty, found = menc.parse_additional_interests_table(snap)
+        assert found is True
+        assert conflict == ""
+        assert mortgages[0].lender_name == "Wells Fargo"
+
+    def test_probe_refuses_prod_and_reads_fake_page(self, monkeypatch):
+        from robie_job_engine.probe_4372_additional_interests import (
+            probe_additional_interests,
+            refuse_production_host,
+        )
+
+        with pytest.raises(menc.ProductionClientRefused, match="hermes-poc-01"):
+            refuse_production_host("hermes-poc-01")
+        monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+        with pytest.raises(menc.ProductionClientRefused, match="Production"):
+            probe_additional_interests(
+                policy_number="HO-1",
+                ports=_ports(browser=FakeBrowser(_empty_table())),
+            )
+        monkeypatch.setenv("ROBIE_ENV", "TEST")
+        summary = probe_additional_interests(
+            policy_number="HO-CANARY",
+            ports=_ports(browser=FakeBrowser(_table(
+                {"Name": "Wells Fargo", "Type": "Mortgagee", "Loan Number": "1"},
+            ))),
+            hostname="hermes-test-01",
+        )
+        assert summary["writes"] is False
+        assert summary["pdf_scrape"] is False
+        assert summary["cdp_launched_chrome"] is False
+        assert summary["mortgage_count"] == 1
+        assert summary["mortgages"][0]["lender_name"] == "Wells Fargo"

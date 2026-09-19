@@ -1,4 +1,4 @@
-"""4372 mortgagee enrichment scaffold (Document API + structured fields).
+"""4372 mortgagee enrichment (API first, Additional Interests browser fallback).
 
 Carlo / Ralph
 ==============
@@ -7,16 +7,27 @@ or loan number. Today ``plan_4372`` flags every open item as
 "lender/loan not on file." This module is the **read-only enrichment
 scaffold** that sits in front of that planner.
 
+Carlo 2026-09-19 (definitive): PolicyApi cannot see Additional Interests
+/ mortgagee / loan. Policy-by-ID detail endpoints do not exist. The API
+path is still attempted first; when it returns incomplete / no mortgagee
+fields the sanctioned fallback is a **read-only** browser read of the
+policy Additional Interests tab table (lender name, loan number, type).
+Not a PDF scrape. Not OCR.
+
 It is NOT live production delivery. Portal upload and Bland dials stay
-out of this PR. Dry-run / unbound ports are the default.
+out of this PR. Dry-run / unbound ports are the default. Unbound
+browser ports never open a live browser.
 
 Carlo GO (Test only): ``bind_test_enrichment_ports`` / env flag
 ``ROBIE_4372_ENRICHMENT_TEST=1`` constructs a real ``EzlynxApiClient``
 from the **UAT / TEST** Secret Manager pattern in ``ezlynx_api.py``.
-It never constructs a Production client. After status ``ready``, each
-``MortgageRecord`` is handed to ``verify_lender`` (and
-``verify_lender_of_record`` with portal lookup still ``None``). The
-producer gate still blocks delivery until ``producer_review_complete``.
+It never constructs a Production client and never attaches Chrome.
+``bind_test_browser_port`` / ``ROBIE_4372_BROWSER_READ=1`` attaches the
+existing SSRobie Chrome CDP session only when explicitly requested.
+After status ``ready``, each ``MortgageRecord`` is handed to
+``verify_lender`` (and ``verify_lender_of_record`` with portal lookup
+still ``None``). The producer gate still blocks delivery until
+``producer_review_complete``.
 
 How it plugs in
 ---------------
@@ -26,31 +37,37 @@ already excluded). The result is stored on the item and passed to
 ``plan_4372``:
 
 * ``ready`` — every mortgage has a unique structured lender + loan from
-  agreeing sources. Planner then runs ``verify_lender`` per mortgage
+  agreeing API sources, or from the Additional Interests table after an
+  API miss. Planner then runs ``verify_lender`` per mortgage
   (ZIP from the work item / policy row). Not "blocked forever" for
   missing lender/loan. Producer gate still blocks delivery. Portal
   lookup stays unset (out of scope).
-* ``hitl`` — declaration structured fields disagree with policy fields.
+* ``hitl`` — sources disagree (API vs API, API vs table, or intra-table).
   Halt. Do not pick a side.
-* ``proven_zero`` — both structured sources returned an **explicit**
-  empty mortgage collection. Skip is allowed only then.
-* ``incomplete`` — lookup missing, failed, or no unique structured
-  match. Same as today's "lender/loan not on file" — never a silent skip.
+* ``proven_zero`` — Additional Interests table is present and
+  **explicitly empty**. API-only empty collections are not proof
+  (PolicyApi cannot see that tab). Skip is allowed only then.
+* ``incomplete`` — lookup missing, failed, tab missing, or no unique
+  structured match. Same as today's "lender/loan not on file" — never
+  a silent skip.
 
 Rules this scaffold enforces
 ----------------------------
 1. Look up current declarations via EZLynx DocumentApi search (metadata
    + numeric ``document_id`` read-back). Look up structured policy /
    mortgagee fields the codebase already has (PolicyApi search shape).
-2. Emit **one record per mortgage**. Never merge two loans into one.
-3. Never invent or guess. Never scrape a PDF / OCR blob into fields
+2. If API returns incomplete / no mortgagee fields, read the Additional
+   Interests tab table via existing Hermes CDP / locator infra.
+3. Emit **one record per mortgage**. Never merge two loans into one.
+4. Never invent or guess. Never scrape a PDF / OCR blob into fields
    unless a **unique structured field name** matches (``MortgageeName``,
    ``LoanNumber``, …). Document *title* is not a lender name.
-4. If declaration structured fields disagree with policy fields → HITL.
-5. Zero mortgages must be **proven** (explicit empty collection on a
-   successful read). A missing key or failed lookup is incomplete.
-6. Never use SSN / full SSN (field names or ``NNN-NN-NNNN`` values).
-7. Notes/docs writes stay API-only. Playwright/CDP helpers call
+5. If sources disagree → HITL. Do not pick a side.
+6. Zero mortgages must be **proven** (explicit empty Additional
+   Interests table). A missing key, failed lookup, or missing tab is
+   incomplete. API ``mortgagees: []`` is not proof.
+7. Never use SSN / full SSN (field names or ``NNN-NN-NNNN`` values).
+8. Notes/docs writes stay API-only. Playwright/CDP helpers call
    ``refuse_playwright_note_or_doc`` and cannot authorize COMPLETE.
 
 TODO — still out of this PR
@@ -59,7 +76,9 @@ TODO — still out of this PR
 * DiscussionApi note of enrichment outcome with ``note_id`` read-back.
 * Do not invent Production allowlist keys; Dusty's hermes-test-01 probe
   (``scripts/probe_4372_mortgagee_metadata.py``) prints live keys.
-* No Production zip / deploy from this scaffold.
+* Live browser prove on hermes-test-01 with SSRobie already on the
+  policy FormEntry page (``scripts/probe_4372_additional_interests.py``).
+* No Production zip / deploy from this scaffold. No merge until live-proven.
 """
 
 from __future__ import annotations
@@ -159,7 +178,13 @@ REASON_HITL_CONFLICT = (
     "HITL: declaration structured fields disagree with policy fields — "
     "not picking a side"
 )
-REASON_PROVEN_ZERO = "zero mortgages proven — explicit empty structured result"
+REASON_PROVEN_ZERO = (
+    "zero mortgages proven — Additional Interests table is explicitly empty"
+)
+REASON_API_NO_MORTGAGEE = (
+    "PolicyApi/DocumentApi have no mortgagee fields — "
+    "Additional Interests browser fallback required"
+)
 REASON_PDF_SCRAPE = (
     "refused: will not scrape a PDF/OCR blob into lender or loan fields"
 )
@@ -169,6 +194,7 @@ REASON_SSN = "refused: SSN / full SSN is never used for mortgagee enrichment"
 # Test-only live bind. Default remains unbound / dry-run.
 ROBIE_TEST_APPLICANT_ID = "220250093"
 ENRICHMENT_LIVE_TEST_FLAG = "ROBIE_4372_ENRICHMENT_TEST"
+ENRICHMENT_BROWSER_TEST_FLAG = "ROBIE_4372_BROWSER_READ"
 REASON_PRODUCER_GATE = "producer review blocks delivery until producer_review_complete"
 REASON_LENDER_INPUTS_VERIFIED = (
     "lender inputs verified per mortgage; portal lender-of-record lookup "
@@ -195,14 +221,23 @@ class MortgageRecord:
 
     lender_name: str
     loan_number: str
-    source: str  # policy | declaration | agreed
+    source: str  # policy | declaration | agreed | additional_interests
     document_ids: tuple[str, ...] = ()
+    interest_type: str = ""
 
     def __post_init__(self) -> None:
-        if _looks_like_ssn(self.lender_name) or _looks_like_ssn(self.loan_number):
+        if (
+            _looks_like_ssn(self.lender_name)
+            or _looks_like_ssn(self.loan_number)
+            or _looks_like_ssn(self.interest_type)
+        ):
             raise MortgageeEnrichmentError(REASON_SSN)
         for key in ("ssn", "full_ssn"):
-            if key in (self.lender_name.casefold(), self.loan_number.casefold()):
+            if key in (
+                self.lender_name.casefold(),
+                self.loan_number.casefold(),
+                self.interest_type.casefold(),
+            ):
                 raise MortgageeEnrichmentError(REASON_SSN)
 
 
@@ -253,6 +288,8 @@ class EnrichmentResult:
     declaration_docs: list[DeclarationDoc] = field(default_factory=list)
     policy_snapshot: dict[str, Any] = field(default_factory=dict)
     declaration_snapshot: dict[str, Any] = field(default_factory=dict)
+    browser_snapshot: dict[str, Any] = field(default_factory=dict)
+    browser_invoked: bool = False
     property_zip: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,6 +303,8 @@ class EnrichmentResult:
             "declaration_docs": [asdict(d) for d in self.declaration_docs],
             "policy_snapshot": dict(self.policy_snapshot),
             "declaration_snapshot": dict(self.declaration_snapshot),
+            "browser_snapshot": dict(self.browser_snapshot),
+            "browser_invoked": self.browser_invoked,
             "property_zip": self.property_zip,
         }
         _assert_no_forbidden_keys(payload)
@@ -291,12 +330,28 @@ class DeclarationDocumentPort(Protocol):
         """DocumentApi document-search payload."""
 
 
+class AdditionalInterestsReadPort(Protocol):
+    """Read-only Additional Interests table. Never writes. Never launches Chrome."""
+
+    def read_additional_interests(
+        self,
+        policy_number: str,
+        applicant_id: str = "",
+    ) -> dict[str, Any]:
+        """Structured table snapshot (headers + rows), not a PDF."""
+
+
 @dataclass
 class EnrichmentPorts:
-    """Optional bound clients. Missing ports → incomplete, not proven-zero."""
+    """Optional bound clients. Missing ports → incomplete, not proven-zero.
+
+    ``browser`` is never auto-attached by ``bind_test_enrichment_ports``.
+    Unbound ``browser`` never opens CDP.
+    """
 
     policy: PolicyMortgageePort | None = None
     documents: DeclarationDocumentPort | None = None
+    browser: AdditionalInterestsReadPort | None = None
 
 
 class ThinDocumentApiLookup:
@@ -386,21 +441,81 @@ def bind_test_enrichment_ports(
     return EnrichmentPorts(
         policy=ThinPolicyApiLookup(client),
         documents=ThinDocumentApiLookup(client),
+        browser=None,
     )
+
+
+def _flag_on(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes"}
+
+
+def bind_test_browser_port(
+    *,
+    environment: str | None = None,
+    page: Any = None,
+    cdp_url: str | None = None,
+) -> AdditionalInterestsReadPort:
+    """Attach existing SSRobie Chrome for Additional Interests (Test only).
+
+    Does not launch Chrome. ``__init__`` does not connect. Refuses
+    Production / unset ``ROBIE_ENV``. Pass ``page=`` in unit tests so CDP
+    is never opened.
+    """
+    current = current_robie_env()
+    requested = (environment or current or "").strip().upper()
+    if current in PRODUCTION_ENV_NAMES:
+        raise ProductionClientRefused(
+            "4372 Additional Interests browser bind is Test-only; "
+            "ROBIE_ENV is Production"
+        )
+    if requested in PRODUCTION_ENV_NAMES:
+        raise ProductionClientRefused(
+            "refused Production browser bind for 4372 Additional Interests"
+        )
+    if requested != TEST_ENV_NAME:
+        raise ProductionClientRefused(
+            "ROBIE_ENV must be TEST to bind the 4372 Additional Interests "
+            f"browser (got {requested or 'unset'})"
+        )
+    try:
+        from .additional_interests_read import CdpAdditionalInterestsPort
+    except ImportError:  # pragma: no cover
+        from additional_interests_read import CdpAdditionalInterestsPort  # type: ignore
+    return CdpAdditionalInterestsPort(cdp_url=cdp_url, page=page)
 
 
 def resolve_enrichment_ports(
     explicit: EnrichmentPorts | None = None,
     *,
     live_test: bool = False,
+    live_browser: bool = False,
 ) -> EnrichmentPorts:
-    """Default unbound. Live Test bind only when flag or ``live_test``."""
+    """Default unbound. Live Test / browser bind only when flag or requested.
+
+    ``live_test`` / ``ROBIE_4372_ENRICHMENT_TEST`` never opens a browser.
+    ``live_browser`` / ``ROBIE_4372_BROWSER_READ`` never constructs the
+    API client by itself.
+    """
+    want_api = live_test or _flag_on(ENRICHMENT_LIVE_TEST_FLAG)
+    want_browser = live_browser or _flag_on(ENRICHMENT_BROWSER_TEST_FLAG)
     if explicit is not None:
+        if want_browser and explicit.browser is None:
+            return EnrichmentPorts(
+                policy=explicit.policy,
+                documents=explicit.documents,
+                browser=bind_test_browser_port(),
+            )
         return explicit
-    flag = str(os.environ.get(ENRICHMENT_LIVE_TEST_FLAG) or "").strip().lower()
-    if live_test or flag in {"1", "true", "yes"}:
-        return bind_test_enrichment_ports()
-    return EnrichmentPorts()
+    ports = EnrichmentPorts()
+    if want_api:
+        ports = bind_test_enrichment_ports()
+    if want_browser:
+        ports = EnrichmentPorts(
+            policy=ports.policy,
+            documents=ports.documents,
+            browser=bind_test_browser_port(),
+        )
+    return ports
 
 
 # ---------------------------------------------------------------------------
@@ -834,9 +949,10 @@ def reconcile_sources(
     if not policy_ok and not dec_ok:
         return STATUS_INCOMPLETE, REASON_LENDER_NOT_ON_FILE, []
 
-    # Both succeeded with explicit empty collections → proven zero.
+    # Carlo 2026-09-19: PolicyApi cannot see Additional Interests.
+    # API-only empty collections are NOT proven zero.
     if policy_ok and dec_ok and policy.explicit_empty and declaration.explicit_empty:
-        return STATUS_PROVEN_ZERO, REASON_PROVEN_ZERO, []
+        return STATUS_INCOMPLETE, REASON_API_NO_MORTGAGEE, []
 
     # One side proven empty, the other has mortgages → they disagree.
     if policy_ok and declaration.available:
@@ -904,18 +1020,190 @@ def reconcile_sources(
         ), []
 
     if policy_ok and dec_ok and not policy.mortgages and not declaration.mortgages:
-        # Both reads succeeded but neither proved an empty collection.
-        return STATUS_INCOMPLETE, (
-            f"{REASON_LENDER_NOT_ON_FILE} (lookups succeeded; no explicit "
-            "empty mortgage collection — will not treat as zero)"
-        ), []
+        # Both reads succeeded but neither produced mortgagee fields.
+        # PolicyApi cannot see Additional Interests — not proven zero.
+        return STATUS_INCOMPLETE, REASON_API_NO_MORTGAGEE, []
 
     return STATUS_INCOMPLETE, REASON_LENDER_NOT_ON_FILE, []
 
 
 # ---------------------------------------------------------------------------
-# Public entry
+# Additional Interests browser fallback (read-only table DOM)
 # ---------------------------------------------------------------------------
+
+
+def needs_browser_fallback(status: str) -> bool:
+    """API HITL / ready stay terminal. Incomplete (including API-empty) falls back."""
+    return status == STATUS_INCOMPLETE
+
+
+def parse_additional_interests_table(
+    payload: Any,
+) -> tuple[list[MortgageRecord], str, bool, bool]:
+    """Parse a structured Additional Interests table. Not a PDF scrape."""
+    try:
+        from .additional_interests_read import (
+            parse_additional_interests_table as _parse,
+        )
+    except ImportError:  # pragma: no cover
+        from additional_interests_read import (  # type: ignore
+            parse_additional_interests_table as _parse,
+        )
+    return _parse(payload)
+
+
+def read_additional_interests_source(
+    ports: EnrichmentPorts,
+    policy_number: str,
+    applicant_id: str = "",
+) -> SourceSnapshot:
+    """Read the Additional Interests tab. Unbound port never opens CDP."""
+    number = _clean_text(policy_number)
+    if ports.browser is None:
+        return _snapshot(
+            "additional_interests",
+            available=False,
+            explicit_empty=False,
+            error="no Additional Interests browser port bound (dry-run scaffold)",
+        )
+    try:
+        payload = ports.browser.read_additional_interests(number, applicant_id)
+    except Exception as exc:
+        return _snapshot(
+            "additional_interests",
+            available=False,
+            explicit_empty=False,
+            error=(
+                "Additional Interests browser read failed: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+    try:
+        mortgages, conflict, explicit_empty, table_found = (
+            parse_additional_interests_table(payload)
+        )
+    except MortgageeEnrichmentError as exc:
+        return _snapshot(
+            "additional_interests",
+            available=True,
+            explicit_empty=False,
+            conflict=str(exc),
+            error=str(exc),
+            read_back={"policy_number": number, "source": "additional_interests"},
+        )
+    tab_visible = True
+    if isinstance(payload, dict) and "tab_visible" in payload:
+        tab_visible = bool(payload.get("tab_visible"))
+    available = bool(tab_visible and (table_found or conflict))
+    return _snapshot(
+        "additional_interests",
+        available=available,
+        explicit_empty=bool(available and explicit_empty and not conflict),
+        mortgages=mortgages,
+        conflict=conflict,
+        read_back={
+            "policy_number": number,
+            "source": "additional_interests",
+            "table_found": table_found,
+            "tab_visible": tab_visible,
+            "explicit_empty": explicit_empty,
+            "mortgage_count": len(mortgages),
+            "locator": (
+                payload.get("locator") if isinstance(payload, dict) else ""
+            ),
+        },
+    )
+
+
+def _api_mortgages(policy: SourceSnapshot, declaration: SourceSnapshot) -> list[MortgageRecord]:
+    seen: set[tuple[str, str]] = set()
+    out: list[MortgageRecord] = []
+    for record in (*policy.mortgages, *declaration.mortgages):
+        key = (
+            normalize_loan_number(record.loan_number),
+            normalize_lender_name(record.lender_name),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(record)
+    return out
+
+
+def _mortgage_sets_disagree(
+    left: list[MortgageRecord],
+    right: list[MortgageRecord],
+) -> bool:
+    left_idx = _index_by_loan(left)
+    right_idx = _index_by_loan(right)
+    if set(left_idx) != set(right_idx):
+        return True
+    for loan, left_rows in left_idx.items():
+        right_rows = right_idx[loan]
+        left_lenders = {normalize_lender_name(r.lender_name) for r in left_rows}
+        right_lenders = {normalize_lender_name(r.lender_name) for r in right_rows}
+        if left_lenders != right_lenders:
+            return True
+        if len(left_rows) != 1 or len(right_rows) != 1:
+            return True
+    return False
+
+
+def apply_browser_fallback(
+    api_status: str,
+    api_reason: str,
+    api_mortgages: list[MortgageRecord],
+    policy: SourceSnapshot,
+    declaration: SourceSnapshot,
+    browser: SourceSnapshot,
+) -> tuple[str, str, list[MortgageRecord]]:
+    """Merge Additional Interests table after an API miss. Never pick a side."""
+    del api_mortgages
+    if browser.conflict:
+        return STATUS_HITL, browser.conflict, []
+    if not browser.available:
+        extra = browser.error or "Additional Interests tab/table not available"
+        return STATUS_INCOMPLETE, f"{REASON_LENDER_NOT_ON_FILE} ({extra})", []
+
+    api_seen = _api_mortgages(policy, declaration)
+    if browser.explicit_empty:
+        if api_seen:
+            return STATUS_HITL, REASON_HITL_CONFLICT, []
+        return STATUS_PROVEN_ZERO, REASON_PROVEN_ZERO, []
+
+    if not browser.mortgages:
+        return STATUS_INCOMPLETE, (
+            f"{REASON_LENDER_NOT_ON_FILE} (Additional Interests table "
+            "present; no unique lender+loan — will not invent)"
+        ), []
+
+    if api_seen and _mortgage_sets_disagree(api_seen, browser.mortgages):
+        return STATUS_HITL, REASON_HITL_CONFLICT, []
+
+    if api_seen:
+        agreed: list[MortgageRecord] = []
+        browser_idx = _index_by_loan(browser.mortgages)
+        for record in api_seen:
+            match = browser_idx[normalize_loan_number(record.loan_number)][0]
+            agreed.append(
+                MortgageRecord(
+                    lender_name=record.lender_name,
+                    loan_number=record.loan_number,
+                    source="agreed",
+                    document_ids=record.document_ids,
+                    interest_type=match.interest_type or record.interest_type,
+                )
+            )
+        return STATUS_READY, (
+            f"enriched {len(agreed)} mortgage(s) — API structured fields "
+            "and Additional Interests table agree"
+        ), agreed
+
+    del api_status, api_reason
+    return STATUS_READY, (
+        f"enriched {len(browser.mortgages)} mortgage(s) — "
+        "Additional Interests table (API had no mortgagee fields)"
+    ), list(browser.mortgages)
 
 
 def enrich_work_item(
@@ -932,6 +1220,21 @@ def enrich_work_item(
     policy = read_policy_source(bound, policy_number)
     declaration = read_declaration_source(bound, applicant_id)
     status, reason, mortgages = reconcile_sources(policy, declaration)
+    browser = _snapshot(
+        "additional_interests",
+        available=False,
+        explicit_empty=False,
+        error="browser fallback not attempted",
+    )
+    browser_invoked = False
+    if needs_browser_fallback(status):
+        browser_invoked = True
+        browser = read_additional_interests_source(
+            bound, policy_number, applicant_id,
+        )
+        status, reason, mortgages = apply_browser_fallback(
+            status, reason, mortgages, policy, declaration, browser,
+        )
     result = EnrichmentResult(
         policy_number=_clean_text(policy_number),
         applicant_id=_clean_text(applicant_id),
@@ -941,6 +1244,7 @@ def enrich_work_item(
         mortgages=mortgages,
         declaration_docs=list(declaration.declaration_docs),
         property_zip=policy.property_zip,
+        browser_invoked=browser_invoked,
         policy_snapshot={
             "available": policy.available,
             "explicit_empty": policy.explicit_empty,
@@ -956,6 +1260,15 @@ def enrich_work_item(
             "conflict": declaration.conflict,
             "error": declaration.error,
             "read_back": declaration.read_back,
+        },
+        browser_snapshot={
+            "available": browser.available,
+            "explicit_empty": browser.explicit_empty,
+            "mortgage_count": len(browser.mortgages),
+            "conflict": browser.conflict,
+            "error": browser.error,
+            "read_back": browser.read_back,
+            "invoked": browser_invoked,
         },
     )
     result.to_dict()  # fail closed if a forbidden key slipped in
@@ -1255,8 +1568,9 @@ def plan_from_enrichment(
     return (
         "verify",
         "Lender name and loan number are NOT in the export — "
-        "DocumentApi / PolicyApi structured enrichment did not produce a "
-        "unique match (never invent; never scrape a PDF; never SSN). "
+        "DocumentApi / PolicyApi had no mortgagee fields and the "
+        "Additional Interests browser read did not produce a unique "
+        "match (never invent; never scrape a PDF; never SSN). "
         f"({due_txt})",
         "lender TBD",
         "blocked",
