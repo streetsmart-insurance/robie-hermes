@@ -106,23 +106,23 @@ jobs:
           remote_recipients="/tmp/accountability-recipient-repair-${GITHUB_RUN_ID}.py"
           remote_docs="/tmp/accountability-google-docs-repair-${GITHUB_RUN_ID}.py"
           remote_submission="/tmp/accountability-submission-gate-repair-${GITHUB_RUN_ID}.py"
-          gcloud compute scp scripts/repair_dedicated_accountability_magellan.py \\
-            "${PRODUCTION_VM}:${remote_repair}" \\
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute scp scripts/preflight_dedicated_accountability_magellan.py \\
-            "${PRODUCTION_VM}:${remote_preflight}" \\
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute scp scripts/repair_dedicated_accountability_recipients.py \\
-            "${PRODUCTION_VM}:${remote_recipients}" \\
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute scp scripts/repair_dedicated_accountability_google_docs.py \\
-            "${PRODUCTION_VM}:${remote_docs}" \\
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute scp scripts/repair_dedicated_accountability_submission_gate.py \\
-            "${PRODUCTION_VM}:${remote_submission}" \\
-            --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \\
-            --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+
+          upload_python() {
+            local source="$1"
+            local remote="$2"
+            local payload source_sha
+            payload="$(base64 -w0 "${source}")"
+            source_sha="$(sha256sum "${source}" | awk '{print $1}')"
+            gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="umask 077; printf '%s' '${payload}' | base64 -d > '${remote}'; test \"\$(sha256sum '${remote}' | awk '{print \$1}')\" = '${source_sha}'"
+          }
+
+          upload_python scripts/repair_dedicated_accountability_magellan.py "${remote_repair}"
+          upload_python scripts/preflight_dedicated_accountability_magellan.py "${remote_preflight}"
+          upload_python scripts/repair_dedicated_accountability_recipients.py "${remote_recipients}"
+          upload_python scripts/repair_dedicated_accountability_google_docs.py "${remote_docs}"
+          upload_python scripts/repair_dedicated_accountability_submission_gate.py "${remote_submission}"
+
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
           set -euo pipefail
           trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}" "${remote_docs}" "${remote_submission}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu" "${remote_recipients}.ubuntu" "${remote_docs}.ubuntu" "${remote_submission}.ubuntu"' EXIT
           install -o ubuntu -g ubuntu -m 0755 "${remote_repair}" "${remote_repair}.ubuntu"
@@ -131,16 +131,11 @@ jobs:
           install -o ubuntu -g ubuntu -m 0755 "${remote_docs}" "${remote_docs}.ubuntu"
           install -o ubuntu -g ubuntu -m 0755 "${remote_submission}" "${remote_submission}.ubuntu"
           rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}" "${remote_docs}" "${remote_submission}"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_recipients}.ubuntu" \\
-            --path "${APP_ROOT}/src/reporters/email_delivery.py"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" \\
-            --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_submission}.ubuntu" \\
-            --path "${APP_ROOT}/src/production_main.py"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_docs}.ubuntu" \\
-            --path "${APP_ROOT}/src/production_main.py"
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" \\
-            "${APP_ROOT}/venv/bin/python" "${remote_preflight}.ubuntu" --app-root "${APP_ROOT}"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_recipients}.ubuntu" --path "${APP_ROOT}/src/reporters/email_delivery.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_submission}.ubuntu" --path "${APP_ROOT}/src/production_main.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_docs}.ubuntu" --path "${APP_ROOT}/src/production_main.py"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_preflight}.ubuntu" --app-root "${APP_ROOT}"
           REMOTE_EOF
 
       - name: Resolve exact prior-business-day target
