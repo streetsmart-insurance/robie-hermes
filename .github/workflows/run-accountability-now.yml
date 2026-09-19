@@ -7,8 +7,16 @@ name: Run accountability now (dedicated server)
 on:
   workflow_dispatch:
     inputs:
+      delivery_scope:
+        description: Delivery scope
+        required: true
+        type: choice
+        default: leadership
+        options:
+          - leadership
+          - carlo_only_test
       confirmation:
-        description: Type RUN_ACCOUNTABILITY_NOW
+        description: Type RUN_ACCOUNTABILITY_NOW or RUN_ACCOUNTABILITY_CARLO_ONLY_TEST
         required: true
         type: string
 
@@ -22,7 +30,10 @@ concurrency:
 
 jobs:
   run-accountability:
-    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'RUN_ACCOUNTABILITY_NOW'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      ((inputs.delivery_scope == 'leadership' && inputs.confirmation == 'RUN_ACCOUNTABILITY_NOW') ||
+       (inputs.delivery_scope == 'carlo_only_test' && inputs.confirmation == 'RUN_ACCOUNTABILITY_CARLO_ONLY_TEST'))
     runs-on: ubuntu-latest
     timeout-minutes: 75
     environment: Production
@@ -33,6 +44,7 @@ jobs:
       APP_ROOT: /opt/streetsmart-daily-accountability
       UNIT: streetsmart-accountability.service
       TIMER: streetsmart-accountability.timer
+      DELIVERY_SCOPE: ${{ inputs.delivery_scope }}
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v3
@@ -148,14 +160,17 @@ jobs:
           ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
         run: |
           set -euo pipefail
+          recipient_args=(--recipient carlo@streetsmart.insurance)
+          if [ "${DELIVERY_SCOPE}" = "leadership" ]; then
+            recipient_args+=(--recipient jake@streetsmart.insurance)
+            recipient_args+=(--recipient ashley@streetsmart.insurance)
+            recipient_args+=(--recipient gabrielac@streetsmart.insurance)
+          fi
           python scripts/verify_dedicated_accountability_delivery.py \
             --mode preflight \
             --target-date "${{ steps.report-date.outputs.target_date }}" \
             --mailbox robie@streetsmart.insurance \
-            --recipient carlo@streetsmart.insurance \
-            --recipient jake@streetsmart.insurance \
-            --recipient ashley@streetsmart.insurance \
-            --recipient gabrielac@streetsmart.insurance \
+            "${recipient_args[@]}" \
             --service-account-email "${ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT}"
 
       - name: Verify installed fail-closed runtime
@@ -188,11 +203,23 @@ jobs:
       - name: Run the dedicated accountability service
         run: |
           set -euo pipefail
+          if [ "${DELIVERY_SCOPE}" = "carlo_only_test" ]; then
+            transient_unit="streetsmart-accountability-carlo-test-${GITHUB_RUN_ID}"
+            remote_command="sudo systemd-run --quiet --wait --collect --unit=${transient_unit} --uid=ubuntu --gid=ubuntu --working-directory=${APP_ROOT} --property=Environment=ACCOUNTABILITY_DELIVERY_RECIPIENTS=carlo@streetsmart.insurance --property=Environment=GOOGLE_DWD_SECRET=accountability-google-dwd-key --property=TimeoutStartSec=65min ${APP_ROOT}/scripts/run_daily_accountability_vm.sh"
+          else
+            transient_unit=""
+            remote_command="sudo systemctl start ${UNIT}"
+          fi
           if ! gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --command="sudo systemctl start ${UNIT}"; then
+            --tunnel-through-iap --command="${remote_command}"; then
             echo "::error::Accountability service failed; systemd result metadata follows."
+            if [ -n "${transient_unit}" ]; then
+              inspect_unit="${transient_unit}.service"
+            else
+              inspect_unit="${UNIT}"
+            fi
             gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-              --tunnel-through-iap --command="sudo systemctl show ${UNIT} --no-pager -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p StatusText; sudo systemctl status ${UNIT} --no-pager --lines=25 2>&1 | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/[redacted-email]/g; s/(\\+?1[-. ]?)?\\(?[0-9]{3}\\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g; s/[0-9]{7,}/[redacted-number]/g'" || true
+              --tunnel-through-iap --command="sudo systemctl show ${inspect_unit} --no-pager -p Result -p ExecMainCode -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p StatusText; sudo systemctl status ${inspect_unit} --no-pager --lines=25 2>&1 | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/[redacted-email]/g; s/(\\+?1[-. ]?)?\\(?[0-9]{3}\\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g; s/[0-9]{7,}/[redacted-number]/g'" || true
             exit 1
           fi
           echo "accountability service completed"
@@ -241,14 +268,17 @@ jobs:
           ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT: robie-production-deployer@streetsmart-hermes-poc.iam.gserviceaccount.com
         run: |
           set -euo pipefail
+          recipient_args=(--recipient carlo@streetsmart.insurance)
+          if [ "${DELIVERY_SCOPE}" = "leadership" ]; then
+            recipient_args+=(--recipient jake@streetsmart.insurance)
+            recipient_args+=(--recipient ashley@streetsmart.insurance)
+            recipient_args+=(--recipient gabrielac@streetsmart.insurance)
+          fi
           python scripts/verify_dedicated_accountability_delivery.py \
             --mode verify \
             --target-date "${{ steps.report-date.outputs.target_date }}" \
             --mailbox robie@streetsmart.insurance \
-            --recipient carlo@streetsmart.insurance \
-            --recipient jake@streetsmart.insurance \
-            --recipient ashley@streetsmart.insurance \
-            --recipient gabrielac@streetsmart.insurance \
+            "${recipient_args[@]}" \
             --service-account-email "${ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT}" \
             > "${RUNNER_TEMP}/accountability-gmail-verification.json"
           cat "${RUNNER_TEMP}/accountability-gmail-verification.json" >> "${GITHUB_STEP_SUMMARY}"
