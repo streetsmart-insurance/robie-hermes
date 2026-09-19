@@ -20,6 +20,10 @@ from .idempotency import IdempotencyError
 from .models import TERMINAL_STATUSES, WAITING_STATUSES, JobStatus
 from .request_routing import BOUNDED_ENGINE_ACTIONS
 from .submission_audit import EzlynxSubmissionAuditWorker, SubprocessSubmissionReadback
+from .overdue_submission_reports import (
+    OverdueSubmissionReportVerifier,
+    OverdueSubmissionReportWorker,
+)
 from .ezlynx_session import EzlynxSessionRefreshWorker, EzlynxSessionVerifier
 from .runtime_env import (
     PRODUCTION_ENV_NAMES,
@@ -111,6 +115,7 @@ def build_runtime_engine(
         ),
         "hermes-cua": ezlynx_worker,
         "submission-audit": EzlynxSubmissionAuditWorker(),
+        "overdue-submission-reports": OverdueSubmissionReportWorker(),
         "session-refresh": EzlynxSessionRefreshWorker(),
     }
     verifiers: dict[str, Any] = {}
@@ -152,6 +157,7 @@ def build_runtime_engine(
     verifiers["ezlynx.submission_audit"] = EzlynxSubmissionAuditVerifier(
         submission_readback or SubprocessSubmissionReadback()
     )
+    verifiers["ezlynx.overdue_submission_reports"] = OverdueSubmissionReportVerifier()
     verifiers["ezlynx.session_refresh"] = EzlynxSessionVerifier()
     # Daily verification workers (EZLynx reports 4247/4246/4372/4359 + digest).
     # The policy-change worker stays kill-switched off (POLICY_CHANGE_ENABLED

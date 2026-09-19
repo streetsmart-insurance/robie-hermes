@@ -52,6 +52,8 @@ jobs:
             tests/test_operational_trackers.py \
             tests/test_submission_audit_runtime.py \
             tests/test_submission_audit_runner_contract.py \
+            tests/test_overdue_submission_reports.py \
+            tests/test_ezlynx_overdue_submission_skill.py \
             tests/test_reporting_suite.py \
             tests/test_role_accountability.py \
             tests/test_productivity_engine.py

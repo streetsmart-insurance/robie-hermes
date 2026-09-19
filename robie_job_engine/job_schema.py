@@ -125,6 +125,25 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
         "a fresh authenticated Submission Center read matches the requested scope and postcondition",
         "EzlynxSubmissionAuditVerifier",
     ),
+    "ezlynx.overdue_submission_reports": ExecutableSkillContract(
+        expected_destination_result=(
+            "one individualized Gmail report exists in Robie's sent mailbox for every "
+            "producer with a live, red, 31+ day overdue open submission"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="OverdueSubmissionReportVerifier",
+        maximum_attempts=1,
+        success_conditions=(
+            "the live Submission Center evidence satisfies the full pagination and day-31 contract",
+            "every producer resolves uniquely through the current approved active-employee roster",
+            "every Gmail message id is independently reread from Robie's sent mailbox",
+        ),
+        failure_conditions=(
+            "the live audit, roster, or producer recipient is missing or ambiguous",
+            "email delivery is not explicitly authorized by the job contract",
+            "any Gmail delivery receipt cannot be independently reread",
+        ),
+    ),
     "ezlynx.session_refresh": ExecutableSkillContract(
         expected_destination_result=(
             "Robie's Gmail API identity is verified and the canonical EZLynx "
@@ -237,6 +256,11 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "schema_verified": True,
         "required": ("resource_id", "expected_postcondition"),
         "identity": ("resource_id",),
+    },
+    "ezlynx.overdue_submission_reports": {
+        "schema_verified": True,
+        "required": ("resource_id", "manifest_path", "authorized_actions"),
+        "identity": ("resource_id", "manifest_path"),
     },
     "ezlynx.session_refresh": {
         "schema_verified": True,

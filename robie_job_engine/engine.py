@@ -945,6 +945,7 @@ class JobEngine:
             "ezlynx.move_document",
             "ezlynx.apply_label",
             "ezlynx.submission_audit",
+            "ezlynx.overdue_submission_reports",
             "ezlynx.session_refresh",
         }:
             return True
@@ -952,4 +953,3 @@ class JobEngine:
             text = " ".join(job_text(job).casefold().split())
             return any(marker in text for marker in PLAYWRIGHT_REQUEST_MARKERS)
         return False
-

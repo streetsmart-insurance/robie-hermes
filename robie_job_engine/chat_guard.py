@@ -339,6 +339,18 @@ def _submission_audit_payload() -> dict[str, Any]:
     }
 
 
+def _overdue_submission_report_payload() -> dict[str, Any]:
+    """Return the server-owned scope and authorization for producer reports."""
+    payload = _submission_audit_payload()
+    payload.update(
+        {
+            "manifest_path": os.environ.get("ROBIE_ACCOUNTABILITY_MANIFEST", "").strip(),
+            "authorized_actions": ["send_producer_reports"],
+        }
+    )
+    return payload
+
+
 def _retarget_bounded_correction(
     store: JobStore,
     db_path: str,
@@ -1150,6 +1162,8 @@ def open_chat_job(
         )
     if classification.action_type == "ezlynx.submission_audit":
         server_payload.update(_submission_audit_payload())
+    if classification.action_type == "ezlynx.overdue_submission_reports":
+        server_payload.update(_overdue_submission_report_payload())
     server_payload.update(dict(action_payload or {}))
     if continued_job is None:
         from .engine import is_retry_text, leftover_retry_hold_reason

@@ -16,6 +16,7 @@ WORKER_FOR_ACTION = {
     "ezlynx.move_document": "hermes-cua",
     "ezlynx.apply_label": "hermes-cua",
     "ezlynx.submission_audit": "submission-audit",
+    "ezlynx.overdue_submission_reports": "overdue-submission-reports",
     "ezlynx.session_refresh": "session-refresh",
     "filesystem.skill_update": "hermes-cua",
     "appsheet.smart_reward": "hermes-cua",
@@ -43,6 +44,7 @@ BOUNDED_ENGINE_ACTIONS = frozenset(
         "ezlynx.move_document",
         "ezlynx.apply_label",
         "ezlynx.submission_audit",
+        "ezlynx.overdue_submission_reports",
         "ezlynx.session_refresh",
         # appsheet.smart_reward / appsheet.qa_audit were bounded but have never
         # had a verifier class, so every such job terminated UNVERIFIED by
@@ -146,6 +148,11 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification("ezlynx.move_document", WORKER_FOR_ACTION["ezlynx.move_document"])
     if "ezlynx" in normalized and "label" in normalized:
         return RequestClassification("ezlynx.apply_label", WORKER_FOR_ACTION["ezlynx.apply_label"])
+    if _is_overdue_submission_report(normalized):
+        return RequestClassification(
+            "ezlynx.overdue_submission_reports",
+            WORKER_FOR_ACTION["ezlynx.overdue_submission_reports"],
+        )
     if _is_submission_audit(normalized):
         return RequestClassification(
             "ezlynx.submission_audit", WORKER_FOR_ACTION["ezlynx.submission_audit"]
@@ -222,12 +229,25 @@ def _is_ascend_request(text: str) -> bool:
 def _is_submission_audit(text: str) -> bool:
     if "submission center" not in text:
         return False
-    if any(
-        re.search(rf"\b{word}\b", _positive_request_text(text))
-        for word in ("upload", "move", "delete", "send", "submit")
-    ):
+    if _has_positive_mutation(text, ("upload", "move", "delete", "send", "submit")):
         return False
     return any(word in text for word in ("audit", "review", "check", "read", "overdue"))
+
+
+def _is_overdue_submission_report(text: str) -> bool:
+    if "submission center" not in text or "overdue" not in text:
+        return False
+    return _has_positive_mutation(text, ("send", "email", "contact", "notify"))
+
+
+def _has_positive_mutation(text: str, words: tuple[str, ...]) -> bool:
+    positive = _positive_request_text(text)
+    pattern = r"\b(?:" + "|".join(re.escape(word) for word in words) + r")\b"
+    for match in re.finditer(pattern, positive):
+        prefix = positive[max(0, match.start() - 24):match.start()]
+        if not re.search(r"(?:do not|don't|never)\s+$", prefix):
+            return True
+    return False
 
 
 def _positive_request_text(text: str) -> str:
@@ -286,4 +306,3 @@ def _is_qa_entry(text: str) -> bool:
             "enter qa",
         )
     )
-
