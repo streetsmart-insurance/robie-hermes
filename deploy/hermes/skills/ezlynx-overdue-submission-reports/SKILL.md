@@ -63,6 +63,10 @@ Use Gmail for delivery. An explicit request to run this workflow, or its approve
 
 The approved recurring cadence is Monday at 9:00 AM `America/New_York`. Installation and Test validation must not send producer email. Production scheduling remains blocked until three clean Test runs, independent post-job audits, and approval of the exact QA-certified release digest.
 
+## Perform time
+
+Agency-wide Submission Center pagination often runs longer than the Job Engine's 120-second starting budget while pages are still advancing and rows are still being inspected. This job is not given a free hang: the engine refreshes the perform deadline only while durable progress is reported (`pages_reviewed`, `rows_inspected`, `gateway_progress`, attempt detail, or `perform_progress`). Silence for that idle window still fails closed so a hung browser cannot loop forever. The skill contract's 3600-second `perform_max_seconds` is the hard ceiling for a run that keeps reporting progress — the same Job Engine mechanism used by other long workers, not an overdue-only exception.
+
 ## Finish
 
 Report the total qualifying submissions over 30 days overdue, counts by producer, statuses found, and confirmed email delivery results. If there are no qualifying submissions, do not send staff emails; report that the over-30-day queue is clear.

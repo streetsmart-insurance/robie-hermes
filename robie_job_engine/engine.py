@@ -18,6 +18,12 @@ from .complete_guard import (
 )
 from .idempotency import DurableWorkLedger, IdempotencyError
 from .job_schema import bounded_schema_hold_reason, get_executable_skill_contract
+from .perform_deadline import (
+    bind_perform_job_context,
+    resolve_perform_idle_seconds,
+    resolve_perform_max_seconds,
+    wait_for_perform_result,
+)
 from .models import (
     ACTION_OUTCOME_UNKNOWN,
     VERIFIER_AUTHORITY,
@@ -816,16 +822,27 @@ class JobEngine:
         )
 
     def _call_worker(self, worker: ComputerWorker, job: dict[str, Any]) -> WorkerResult:
-        timeout = float(job["payload"].get("perform_timeout_seconds", self.perform_timeout_seconds))
+        idle_seconds = resolve_perform_idle_seconds(
+            job, engine_default=self.perform_timeout_seconds
+        )
+        max_seconds = resolve_perform_max_seconds(job, idle_seconds=idle_seconds)
         if self.call_worker_on_calling_thread:
             return worker.perform(job, idempotency_key=job["idempotency_key"])
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = pool.submit(worker.perform, job, idempotency_key=job["idempotency_key"])
-            try:
-                return future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError as exc:
-                raise TimeoutError(f"worker perform exceeded {timeout}s") from exc
+            with bind_perform_job_context(
+                self.store, job, idle_seconds=idle_seconds, max_seconds=max_seconds
+            ):
+                future = pool.submit(
+                    worker.perform, job, idempotency_key=job["idempotency_key"]
+                )
+                return wait_for_perform_result(
+                    future,
+                    self.store,
+                    job,
+                    idle_seconds=idle_seconds,
+                    max_seconds=max_seconds,
+                )
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 

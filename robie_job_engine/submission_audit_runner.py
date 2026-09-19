@@ -21,6 +21,7 @@ from playwright.sync_api import (
 )
 
 from .ezlynx_auth_evidence import authenticated_app_evidence
+from .store import report_current_job_perform_progress
 
 
 CDP_URL = "http://127.0.0.1:9222"
@@ -35,6 +36,23 @@ REQUIRED_HEADERS = {
     "quote_due_date": "Quote Due Date",
     "effective_date": "Effective Date",
 }
+
+
+def _report_pagination_progress(
+    *,
+    pages_reviewed: int,
+    rows_inspected: int,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Tell Job Engine the Submission Center walk is still advancing."""
+    payload = {
+        "source": "submission_audit_runner",
+        "pages_reviewed": pages_reviewed,
+        "rows_inspected": rows_inspected,
+    }
+    if extra:
+        payload.update(extra)
+    report_current_job_perform_progress(payload, source="submission_audit_runner")
 
 
 def _matching_page(browser) -> Page:
@@ -545,6 +563,14 @@ def audit(*, fresh: bool) -> dict[str, Any]:
                     # Preserve only evidence needed to explain an old/red/ambiguous
                     # candidate. Do not retain every current non-closed applicant.
                     dispositions.append(record)
+            _report_pagination_progress(
+                pages_reviewed=pages_reviewed,
+                rows_inspected=rows_inspected,
+                extra={
+                    "non_closed_rows_inspected": non_closed_inspected,
+                    "first_closed_row_inspected": first_closed_page is not None,
+                },
+            )
             if first_closed_page is None:
                 try:
                     _advance_page(page, start)
