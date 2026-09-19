@@ -123,7 +123,9 @@ class PerformDeadlineTests(unittest.TestCase):
         )
         finished = engine.run(job["id"])
         self.assertNotEqual(finished["status"], JobStatus.COMPLETE)
-        self.assertIn(ACTION_OUTCOME_UNKNOWN, str(finished.get("last_error") or ""))
+        action = self.store.get_checkpoint(job["id"], "action")
+        self.assertEqual(action["detail"]["outcome"], ACTION_OUTCOME_UNKNOWN)
+        self.assertIn("without progress", str(action["detail"].get("error") or ""))
         self.assertEqual(started["n"], 1)
 
     def test_progress_heartbeat_extends_deadline_and_completes(self):
@@ -180,7 +182,9 @@ class PerformDeadlineTests(unittest.TestCase):
         )
         finished = engine.run(job["id"])
         self.assertNotEqual(finished["status"], JobStatus.COMPLETE)
-        self.assertIn("without progress", str(finished.get("last_error") or ""))
+        action = self.store.get_checkpoint(job["id"], "action")
+        self.assertEqual(action["detail"]["outcome"], ACTION_OUTCOME_UNKNOWN)
+        self.assertIn("without progress", str(action["detail"].get("error") or ""))
 
     def test_lease_renewal_does_not_count_as_progress(self):
         job = self.store.create_job(
@@ -270,7 +274,9 @@ class PerformDeadlineTests(unittest.TestCase):
         )
         finished = engine.run(job["id"])
         self.assertNotEqual(finished["status"], JobStatus.COMPLETE)
-        self.assertIn("ceiling", str(finished.get("last_error") or ""))
+        action = self.store.get_checkpoint(job["id"], "action")
+        self.assertEqual(action["detail"]["outcome"], ACTION_OUTCOME_UNKNOWN)
+        self.assertIn("ceiling", str(action["detail"].get("error") or ""))
 
     def test_bound_worker_env_lets_helpers_report_progress(self):
         reported = threading.Event()
