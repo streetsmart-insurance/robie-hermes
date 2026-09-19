@@ -60,6 +60,7 @@ jobs:
             tests/test_accountability_delivery_watchdog.py \
             tests/test_repair_dedicated_accountability_google_docs.py \
             tests/test_repair_dedicated_accountability_submission_gate.py \
+            tests/test_repair_dedicated_accountability_submission_boundary.py \
             tests/test_preflight_dedicated_accountability_submission.py \
             tests/test_ezlynx_api.py \
             tests/test_browser_proxy_units.py
