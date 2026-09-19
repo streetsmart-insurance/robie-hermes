@@ -18,7 +18,7 @@ def test_timer_install_uses_verified_ssh_transport_not_scp():
     assert "sudo systemctl daemon-reload" in step
 
 
-def test_repair_install_uses_verified_ssh_transport_not_scp():
+def test_repair_install_uses_one_verified_ssh_session():
     source = WORKFLOW.read_text(encoding="utf-8")
     start = source.index(
         "      - name: Repair recipients, Submission Center gate, Docs indexes, and preflight Magellan authentication"
@@ -27,9 +27,10 @@ def test_repair_install_uses_verified_ssh_transport_not_scp():
     step = source[start:end]
 
     assert "gcloud compute scp" not in step
-    assert "upload_python()" in step
-    assert 'source_sha="$(sha256sum' in step
-    assert "base64 -d >" in step
-    assert "sha256sum" in step
+    assert step.count("gcloud compute ssh") == 1
+    assert "sha256sum *.py > SHA256SUMS" in step
+    assert "sha256sum -c SHA256SUMS" in step
+    assert "tar -xzf - -C" in step
     assert "repair_dedicated_accountability_submission_gate.py" in step
+    assert "preflight_dedicated_accountability_magellan.py" in step
     assert 'sudo bash -s" <<REMOTE_EOF' in step
