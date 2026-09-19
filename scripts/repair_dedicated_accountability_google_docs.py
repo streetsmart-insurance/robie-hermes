@@ -62,9 +62,10 @@ def repair(path: Path) -> str:
     final_return_count = original.count(FINAL_HELPER_RETURN)
     states = [(original.count(old), original.count(new)) for old, new in REPLACEMENTS]
 
+    # OLD_HELPER is a textual suffix of NEW_HELPER, so its count remains one
+    # after the canonical UTF-16 helper is inserted.
     helper_ready = (
-        old_helper_count == 0
-        and utf16_helper_count == 1
+        utf16_helper_count == 1
         and final_helper_count == 1
         and final_return_count == 1
     )
