@@ -74,6 +74,7 @@ POLICY_STATUSES = ("done", "not_done", "pending")
 # ---------------------------------------------------------------------------
 
 CONTRACT_ACTIONS: dict[str, frozenset[str]] = {
+    "ezlynx.overdue_submission_reports": frozenset({"send_producer_reports"}),
     "manual_renewal_verification": frozenset(
         {
             "send_underwriter_email",

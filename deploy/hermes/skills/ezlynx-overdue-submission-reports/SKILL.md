@@ -1,7 +1,7 @@
 ---
 name: "ezlynx-overdue-submission-reports"
 description: "Review every assigned producer in the StreetSmart EZLynx Submission Center, identify red open submissions whose Quote Due Date is more than 30 days old, and send verified individualized close-out reports."
-version: "0.1.0-draft"
+version: "0.2.0-draft"
 status: "Testing"
 job_type: "ezlynx.overdue_submission_reports"
 production_ready: false
@@ -43,24 +43,26 @@ Review every results page. Prefer the largest available page size. Confirm the r
 
 ## Resolve recipients
 
-Verify each producer's active work email using EZLynx **Admin -> Manage Users** or another authoritative current staff directory. Resolve each producer individually and never guess an address. Do not email a producer with no qualifying records.
+Verify each producer's active work email using the current approved active-employee roster. Resolve each producer individually and never guess an address. If any qualifying producer is unresolved or ambiguous, stop before sending any producer email. Do not email a producer with no qualifying records.
 
 ## Email each producer
 
 Send one individualized email per producer with:
 
-- Subject: `Action Required: [COUNT] EZLynx submission(s) over 30 days overdue`
+- Subject: `Action required: EZLynx submissions 31+ days overdue`
 - A statement that the listed records are shown in red, are more than 30 days past their Quote Due Date, and have not been closed.
 - Instructions to open the [EZLynx Submission Center](https://app.ezlynx.com/web/submission-center/overview/submissions), choose **My Submissions**, and sort by **Quote Due Date**.
 - Instructions to review every item and select **Closed - Not Sold** or **Closed - Bound**, as appropriate.
-- A link to [Step 7 of the Submission Center SOP](https://sites.google.com/streetsmart.insurance/siteswiki/employee-hub/ezlynx/submission-center#h.lnepijyzf63).
+- A link to the [Submission Center cleanup SOP](https://docs.google.com/document/d/1nggrFQY-q9PEDOjGcje04qYKUTx-qTGTx3Wv-4qD80M/edit).
 - The submission link, applicant, current status, quote due date, and effective date for every item.
 - A concise request to complete the close-outs as soon as possible.
-- Sign the email as Carlo.
+- CC Carlo and Jake.
+- Sign exactly as `-ROBIE AI on behalf of Carlo`.
 
 Use Gmail for delivery. An explicit request to run this workflow, or its approved schedule, authorizes sending only these individualized reports to the verified assigned producers.
+
+The approved recurring cadence is Monday at 9:00 AM `America/New_York`. Installation and Test validation must not send producer email. Production scheduling remains blocked until three clean Test runs, independent post-job audits, and approval of the exact QA-certified release digest.
 
 ## Finish
 
 Report the total qualifying submissions over 30 days overdue, counts by producer, statuses found, and confirmed email delivery results. If there are no qualifying submissions, do not send staff emails; report that the over-30-day queue is clear.
-

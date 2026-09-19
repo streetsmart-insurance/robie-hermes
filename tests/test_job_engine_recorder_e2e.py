@@ -221,7 +221,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
         return JobEngine(self.store, workers, verifiers, recordings=self.recordings)
 
     def test_every_executable_skill_has_complete_contract(self):
-        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 17)
+        self.assertEqual(len(EXECUTABLE_SKILL_CONTRACTS), 18)
         for action_type, contract in EXECUTABLE_SKILL_CONTRACTS.items():
             contract.validate()
             expected_policy = (
@@ -233,6 +233,7 @@ class JobEngineRecorderE2ETests(unittest.TestCase):
                     "accountability.daily",
                     "accountability.weekly",
                     "accountability.monthly",
+                    "ezlynx.overdue_submission_reports",
                     "daily_verification_digest",
                 }
                 else "REQUIRED"
