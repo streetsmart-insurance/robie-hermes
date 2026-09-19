@@ -33,6 +33,8 @@ def test_repair_install_uses_one_verified_ssh_session():
     assert "tar -xzf - -C" in step
     assert "repair_dedicated_accountability_submission_gate.py" in step
     assert "repair_dedicated_accountability_submission_boundary.py" in step
+    assert '--path "${APP_ROOT}/src/reporters/stable_google_doc.py"' in step
+    assert '--path "${APP_ROOT}/src/production_main.py"' not in step
     assert "ezlynx_submission_browser.py" in step
     assert "ezlynx_submission_center.py" in step
     assert "preflight_dedicated_accountability_magellan.py" in step
