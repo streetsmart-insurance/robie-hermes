@@ -138,15 +138,15 @@ def test_4359_per_request_and_turnaround():
     assert len(keys) == 2, "work-item keys must differ per request"
 
 
-def test_4359_gate_blocks_without_override():
-    data = make_csv("4359", [{}])
-    try:
-        vw.run_worker("4359", day=TODAY, mode="dry_run",
-                      queue_dir=tempfile.mkdtemp(), csv_bytes=data)
-    except ing.GmailReportIngestionError:
-        passes.append("4359 gate blocks worker without override")
-    else:
-        failures.append("4359 gate blocks worker without override: no error raised")
+def test_4359_gate_open_after_verification():
+    # 4359 schema verified 2026-09-19 against the real 2026-09-19 delivery:
+    # the gate is now OPEN — no override flag needed.
+    data = make_csv("4359", [{"Policy Number": "TEST-001",
+                              "Change Request Created Date": "09/19/2026"}])
+    run = vw.run_worker("4359", day=TODAY, mode="dry_run",
+                        queue_dir=tempfile.mkdtemp(), csv_bytes=data)
+    assert run.work_items == 1, f"expected 1 work item, got {run.work_items}"
+    passes.append("4359 gate open after 2026-09-19 verification (no override needed)")
 
 
 def test_digest_shape():
@@ -167,7 +167,7 @@ check("4246 incremental queue: add-new-only, carry-forward, day-45 escalate",
       test_4246_incremental_queue)
 check("4372 blocked pending lender/loan enrichment", test_4372_blocked_on_lender)
 check("4359 per-request items + turnaround window", test_4359_per_request_and_turnaround)
-test_4359_gate_blocks_without_override()
+test_4359_gate_open_after_verification()
 check("digest groups by department with plain-English labels", test_digest_shape)
 
 print(f"WORKER SELF-TEST passes={len(passes)} failures={len(failures)}")
