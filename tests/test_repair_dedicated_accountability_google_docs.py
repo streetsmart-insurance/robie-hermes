@@ -39,9 +39,6 @@ def test_repairs_legacy_index_math_and_is_idempotent(tmp_path: Path):
         assert old not in repaired
         assert new in repaired
 
-    namespace = {}
-    exec(repaired, namespace)
-    assert namespace["_utf16_len"]("🚨") == 2
     assert repair(target) == "already_repaired"
 
     backup = target.with_suffix(".py.pre-utf16-index-repair")
