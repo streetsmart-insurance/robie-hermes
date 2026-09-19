@@ -54,7 +54,7 @@ def repair(path: Path) -> str:
     if (
         old_fetch_count != 1
         or new_fetch_count != 0
-        or old_fallback_count != 1
+        or old_fallback_count not in (0, 1)
     ):
         raise RuntimeError(
             "refusing unexpected Submission Center source shape: "
@@ -68,7 +68,8 @@ def repair(path: Path) -> str:
         os.chmod(backup, 0o600)
 
     updated = original.replace(OLD_FETCH_BLOCK, NEW_FETCH_BLOCK, 1)
-    updated = updated.replace(OLD_FALLBACK_BLOCK, "", 1)
+    if old_fallback_count == 1:
+        updated = updated.replace(OLD_FALLBACK_BLOCK, "", 1)
 
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(updated, encoding="utf-8")

@@ -29,6 +29,18 @@ def _final_insert_index(original: int, inserted_lengths: Sequence[Tuple[int, int
     return original + sum(length for index, length in inserted_lengths if index < original)
 '''
 
+UTF16_HELPER = '''def _utf16_len(value: str) -> int:
+    """Return the Google Docs API index width for a Python string."""
+    return len(value.encode("utf-16-le")) // 2
+
+
+'''
+
+FINAL_HELPER_MARKER = "def _final_insert_index("
+FINAL_HELPER_RETURN = "return original + sum(length for index, length in inserted_lengths if index < original)"
+MAIN_MARKER = "def main("
+
+
 REPLACEMENTS = (
     ("at + len(heading_text)", "at + _utf16_len(heading_text)"),
     ("(idx, len(value)) for idx, value in inserts", "(idx, _utf16_len(value)) for idx, value in inserts"),
@@ -46,18 +58,57 @@ def repair(path: Path) -> str:
     original = path.read_text(encoding="utf-8")
 
     old_helper_count = original.count(OLD_HELPER)
-    new_helper_count = original.count(NEW_HELPER)
+    utf16_helper_count = original.count(UTF16_HELPER)
+    final_helper_count = original.count(FINAL_HELPER_MARKER)
+    final_return_count = original.count(FINAL_HELPER_RETURN)
+    main_count = original.count(MAIN_MARKER)
     states = [(original.count(old), original.count(new)) for old, new in REPLACEMENTS]
 
-    already_ready = new_helper_count == 1 and all(
+    not_applicable = (
+        utf16_helper_count == 0
+        and final_helper_count == 0
+        and final_return_count == 0
+        and main_count == 1
+        and all(old_count == 0 and new_count == 0 for old_count, new_count in states)
+    )
+    if not_applicable:
+        return "not_applicable"
+
+    # OLD_HELPER is a textual suffix of NEW_HELPER, so its count remains one
+    # after the canonical UTF-16 helper is inserted.
+    helper_ready = (
+        utf16_helper_count == 1
+        and (
+            (final_helper_count == 1 and final_return_count == 1)
+            or (final_helper_count == 0 and final_return_count == 0 and main_count == 1)
+        )
+    )
+    helper_legacy = (
+        utf16_helper_count == 0
+        and (
+            (final_helper_count == 1 and final_return_count == 1)
+            or (final_helper_count == 0 and final_return_count == 0 and main_count == 1)
+        )
+    )
+    expressions_ready = all(
         old_count == 0 and new_count >= 1 for old_count, new_count in states
     )
-    if already_ready:
+    if helper_ready and expressions_ready:
         return "already_repaired"
 
-    if old_helper_count != 1 or new_helper_count != 0:
-        raise RuntimeError("refusing unexpected Google Docs index helper source shape")
-    if any(old_count < 1 or new_count != 0 for old_count, new_count in states):
+    if not (helper_ready or helper_legacy):
+        raise RuntimeError(
+            "refusing unexpected Google Docs index helper source shape: "
+            f"old={old_helper_count}, utf16={utf16_helper_count}, "
+            f"final={final_helper_count}, return={final_return_count}, main={main_count}"
+        )
+    if any(
+        not (
+            (old_count >= 1 and new_count == 0)
+            or (old_count == 0 and new_count >= 1)
+        )
+        for old_count, new_count in states
+    ):
         raise RuntimeError(f"refusing unexpected Google Docs index expression shape: {states}")
 
     backup = path.with_suffix(path.suffix + ".pre-utf16-index-repair")
@@ -65,9 +116,19 @@ def repair(path: Path) -> str:
         shutil.copy2(path, backup)
         os.chmod(backup, 0o600)
 
-    updated = original.replace(OLD_HELPER, NEW_HELPER, 1)
+    updated = original
+    if helper_legacy:
+        if old_helper_count == 1:
+            updated = updated.replace(OLD_HELPER, NEW_HELPER, 1)
+        elif old_helper_count == 0 and final_helper_count == 1:
+            updated = updated.replace(FINAL_HELPER_MARKER, UTF16_HELPER + FINAL_HELPER_MARKER, 1)
+        elif old_helper_count == 0 and final_helper_count == 0 and main_count == 1:
+            updated = updated.replace(MAIN_MARKER, UTF16_HELPER + MAIN_MARKER, 1)
+        else:
+            raise RuntimeError("refusing duplicate legacy Google Docs index helpers")
     for old, new in REPLACEMENTS:
-        updated = updated.replace(old, new)
+        if old in updated:
+            updated = updated.replace(old, new)
 
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(updated, encoding="utf-8")
@@ -76,7 +137,9 @@ def repair(path: Path) -> str:
 
     verified = path.read_text(encoding="utf-8")
     if (
-        verified.count(NEW_HELPER) != 1
+        verified.count(UTF16_HELPER) != 1
+        or verified.count(FINAL_HELPER_MARKER) != final_helper_count
+        or verified.count(FINAL_HELPER_RETURN) != final_return_count
         or any(old in verified or new not in verified for old, new in REPLACEMENTS)
     ):
         raise RuntimeError("Google Docs UTF-16 index repair verification failed")
