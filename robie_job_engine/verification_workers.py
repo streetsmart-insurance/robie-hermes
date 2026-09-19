@@ -183,7 +183,7 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
             report_id=report_id,
             policy_number=policy,
             account_name=_cell(row, "Account Name"),
-            department=_cell(row, "Department") or "Unassigned",
+            department=_cell(row, "Department", "Branch") or "Unassigned",
             carrier=_cell(row, "Master Company"),
             producer=_cell(row, "Assigned Producer"),
             csr=_cell(row, "CSR"),
@@ -191,8 +191,8 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
             expiration_date=_cell(row, "Policy Expiration Date"),
             row=dict(row),
         )
-        # 4246 has no effective-date column; Policy Term carries the range
-        # ("MM/DD/YYYY - MM/DD/YYYY") — the renewal date is the term START.
+        # 4246's daily feed (4360 format) carries Effective Date directly;
+        # the Policy Term range fallback below covers only feeds without it.
         if report_id == "4246" and not item.effective_date:
             term = _cell(row, "Policy Term")
             m = re.findall(r"(\d{1,2}/\d{1,2}/\d{2,4})", term)
