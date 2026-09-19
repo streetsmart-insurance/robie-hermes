@@ -64,6 +64,16 @@ def repair(path: Path) -> str:
     main_count = original.count(MAIN_MARKER)
     states = [(original.count(old), original.count(new)) for old, new in REPLACEMENTS]
 
+    not_applicable = (
+        utf16_helper_count == 0
+        and final_helper_count == 0
+        and final_return_count == 0
+        and main_count == 1
+        and all(old_count == 0 and new_count == 0 for old_count, new_count in states)
+    )
+    if not_applicable:
+        return "not_applicable"
+
     # OLD_HELPER is a textual suffix of NEW_HELPER, so its count remains one
     # after the canonical UTF-16 helper is inserted.
     helper_ready = (
