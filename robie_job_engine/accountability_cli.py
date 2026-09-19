@@ -192,6 +192,41 @@ def load_ringcentral_source(
         }
     if path.suffix.casefold() != ".json":
         raise ValueError("RingCentral evidence must be CSV, XLSX, or a collector JSON manifest")
+    raw_evidence = json.loads(path.read_text(encoding="utf-8"))
+    if raw_evidence.get("source_type") == "ringcentral_api":
+        if raw_evidence.get("report_kind") != expected_kind:
+            raise ValueError("RingCentral API evidence kind does not match the requested report")
+        if raw_evidence.get("complete") is not True:
+            raise ValueError("RingCentral API evidence is not marked complete")
+        try:
+            collected = datetime.fromisoformat(
+                str(raw_evidence.get("collected_at") or "").replace("Z", "+00:00")
+            )
+            collected = collected if collected.tzinfo else collected.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise ValueError("RingCentral API evidence lacks a valid collection timestamp") from exc
+        reference = as_of or datetime.now(timezone.utc)
+        age_hours = (reference - collected).total_seconds() / 3600
+        if age_hours < 0 or age_hours > 36:
+            raise ValueError("RingCentral API evidence is stale or future-dated")
+        required_users = list(raw_evidence.get("required_users") or [])
+        required_queues = list(raw_evidence.get("required_queues") or [])
+        if not required_users or not required_queues:
+            raise ValueError("RingCentral API evidence lacks the approved user or queue roster")
+        call_rows = list(raw_evidence.get("calls") or [])
+        calls, errors = _calls_from_rows(call_rows)
+        if not calls:
+            errors.append("RingCentral API evidence contains no call legs")
+        return calls, errors, {
+            "format": "api",
+            "coverage_verified": True,
+            "queue_rows": list(raw_evidence.get("queues") or []),
+            "user_rows": list(raw_evidence.get("users") or []),
+            "evidence_sha256": raw_evidence.get("evidence_sha256"),
+            "call_columns": sorted({key for row in call_rows for key in row}),
+            "pages": dict(raw_evidence.get("pages") or {}),
+            "record_counts": dict(raw_evidence.get("record_counts") or {}),
+        }
     evidence = load_evidence_manifest(path, expected_kind=expected_kind, as_of=as_of)
     call_rows = [
         row
