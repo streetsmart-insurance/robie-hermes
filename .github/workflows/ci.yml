@@ -44,6 +44,8 @@ jobs:
             tests/test_business_calendar.py \
             tests/test_department_accountability.py \
             tests/test_google_sheets_accountability.py \
+            tests/test_gmail_sent_readback_metadata.py \
+            tests/test_submission_center_controls.py \
             tests/test_magellan_collection.py \
             tests/test_accountability_dashboard.py \
             tests/test_accountability_connections.py \
