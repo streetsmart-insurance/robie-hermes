@@ -35,6 +35,25 @@ class SubmissionPreflightError(RuntimeError):
     """The live Submission Center evidence did not satisfy the release gate."""
 
 
+SAFE_METRIC_KEYS = (
+    "pager_total",
+    "pages_reviewed",
+    "rows_inspected_through_boundary",
+    "non_closed_rows_inspected",
+    "mat_row_count",
+    "first_closed_row_inspected",
+    "full_dataset_exhausted",
+)
+
+
+def _safe_failure_metrics(observed: Mapping[str, Any]) -> dict[str, int | bool]:
+    return {
+        key: observed.get(key)
+        for key in SAFE_METRIC_KEYS
+        if isinstance(observed.get(key), (bool, int))
+    }
+
+
 SAFE_FAILURE_CODES = (
     ("Persistent Robie Chrome is unavailable", "chrome_unavailable"),
     ("Persistent Robie Chrome has no browser context", "browser_context_missing"),
@@ -253,19 +272,7 @@ def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
             wrapped = SubmissionPreflightError(
                 f"attempt_{attempt}_validation:{_safe_failure_code(exc)}"
             )
-            wrapped.safe_metrics = {
-                key: observed.get(key)
-                for key in (
-                    "pager_total",
-                    "pages_reviewed",
-                    "rows_inspected_through_boundary",
-                    "non_closed_rows_inspected",
-                    "mat_row_count",
-                    "first_closed_row_inspected",
-                    "full_dataset_exhausted",
-                )
-                if isinstance(observed.get(key), (bool, int))
-            }
+            wrapped.safe_metrics = _safe_failure_metrics(observed)
             raise wrapped from exc
 
     stable_keys = (
