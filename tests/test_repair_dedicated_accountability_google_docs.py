@@ -66,6 +66,25 @@ def test_repairs_equivalent_legacy_helper_formatting_variant(tmp_path: Path):
     assert repair(target) == "already_repaired"
 
 
+
+def test_repairs_helperless_publisher_variant(tmp_path: Path):
+    target = tmp_path / "production_main.py"
+    expressions = "\n".join(
+        f"value_{index} = {old}" for index, (old, _) in enumerate(REPLACEMENTS)
+    )
+    helperless = expressions + "\n\ndef main():\n    return None\n"
+    target.write_text(helperless, encoding="utf-8")
+
+    assert repair(target) == "repaired"
+    repaired = target.read_text(encoding="utf-8")
+    assert repaired.count(UTF16_HELPER) == 1
+    assert "def _final_insert_index(" not in repaired
+    for old, new in REPLACEMENTS:
+        assert old not in repaired
+        assert new in repaired
+    assert repair(target) == "already_repaired"
+
+
 def test_refuses_unknown_source_shape(tmp_path: Path):
     target = tmp_path / "production_main.py"
     target.write_text("def unrelated():\n    return 1\n", encoding="utf-8")
