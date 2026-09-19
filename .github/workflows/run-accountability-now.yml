@@ -101,41 +101,30 @@ jobs:
       - name: Repair recipients, Submission Center gate, Docs indexes, and preflight Magellan authentication
         run: |
           set -euo pipefail
-          remote_repair="/tmp/accountability-magellan-repair-${GITHUB_RUN_ID}.py"
-          remote_preflight="/tmp/accountability-magellan-preflight-${GITHUB_RUN_ID}.py"
-          remote_recipients="/tmp/accountability-recipient-repair-${GITHUB_RUN_ID}.py"
-          remote_docs="/tmp/accountability-google-docs-repair-${GITHUB_RUN_ID}.py"
-          remote_submission="/tmp/accountability-submission-gate-repair-${GITHUB_RUN_ID}.py"
-
-          upload_python() {
-            local source="$1"
-            local remote="$2"
-            local payload source_sha
-            payload="$(base64 -w0 "${source}")"
-            source_sha="$(sha256sum "${source}" | awk '{print $1}')"
-            gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="umask 077; printf '%s' '${payload}' | base64 -d > '${remote}'; test \"\$(sha256sum '${remote}' | awk '{print \$1}')\" = '${source_sha}'"
-          }
-
-          upload_python scripts/repair_dedicated_accountability_magellan.py "${remote_repair}"
-          upload_python scripts/preflight_dedicated_accountability_magellan.py "${remote_preflight}"
-          upload_python scripts/repair_dedicated_accountability_recipients.py "${remote_recipients}"
-          upload_python scripts/repair_dedicated_accountability_google_docs.py "${remote_docs}"
-          upload_python scripts/repair_dedicated_accountability_submission_gate.py "${remote_submission}"
+          bundle_dir="${RUNNER_TEMP}/accountability-repair-bundle"
+          remote_dir="/tmp/accountability-repairs-${GITHUB_RUN_ID}"
+          mkdir -p "${bundle_dir}"
+          cp scripts/repair_dedicated_accountability_magellan.py "${bundle_dir}/"
+          cp scripts/preflight_dedicated_accountability_magellan.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_recipients.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_google_docs.py "${bundle_dir}/"
+          cp scripts/repair_dedicated_accountability_submission_gate.py "${bundle_dir}/"
+          (cd "${bundle_dir}" && sha256sum *.py > SHA256SUMS)
+          archive_b64="$(tar -C "${bundle_dir}" -czf - . | base64 -w0)"
 
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
           set -euo pipefail
-          trap 'rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}" "${remote_docs}" "${remote_submission}" "${remote_repair}.ubuntu" "${remote_preflight}.ubuntu" "${remote_recipients}.ubuntu" "${remote_docs}.ubuntu" "${remote_submission}.ubuntu"' EXIT
-          install -o ubuntu -g ubuntu -m 0755 "${remote_repair}" "${remote_repair}.ubuntu"
-          install -o ubuntu -g ubuntu -m 0755 "${remote_preflight}" "${remote_preflight}.ubuntu"
-          install -o ubuntu -g ubuntu -m 0755 "${remote_recipients}" "${remote_recipients}.ubuntu"
-          install -o ubuntu -g ubuntu -m 0755 "${remote_docs}" "${remote_docs}.ubuntu"
-          install -o ubuntu -g ubuntu -m 0755 "${remote_submission}" "${remote_submission}.ubuntu"
-          rm -f "${remote_repair}" "${remote_preflight}" "${remote_recipients}" "${remote_docs}" "${remote_submission}"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_recipients}.ubuntu" --path "${APP_ROOT}/src/reporters/email_delivery.py"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}.ubuntu" --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_submission}.ubuntu" --path "${APP_ROOT}/src/production_main.py"
-          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_docs}.ubuntu" --path "${APP_ROOT}/src/production_main.py"
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_preflight}.ubuntu" --app-root "${APP_ROOT}"
+          remote_dir="${remote_dir}"
+          trap 'rm -rf "${remote_dir}"' EXIT
+          install -d -o ubuntu -g ubuntu -m 0700 "${remote_dir}"
+          printf '%s' '${archive_b64}' | base64 -d | tar -xzf - -C "${remote_dir}"
+          chown -R ubuntu:ubuntu "${remote_dir}"
+          sudo -u ubuntu bash -c 'cd "${remote_dir}" && sha256sum -c SHA256SUMS'
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_recipients.py" --path "${APP_ROOT}/src/reporters/email_delivery.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan.py" --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_submission_gate.py" --path "${APP_ROOT}/src/production_main.py"
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_google_docs.py" --path "${APP_ROOT}/src/production_main.py"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_magellan.py" --app-root "${APP_ROOT}"
           REMOTE_EOF
 
       - name: Resolve exact prior-business-day target
