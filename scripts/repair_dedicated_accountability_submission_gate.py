@@ -37,7 +37,9 @@ def repair(path: Path) -> str:
     original = path.read_text(encoding="utf-8")
 
     old_fetch_count = original.count(OLD_FETCH_BLOCK)
-    new_fetch_count = original.count(NEW_FETCH_BLOCK)
+    # The direct block is a textual suffix of the legacy try block, so count
+    # only occurrences that are not contained inside the legacy block.
+    new_fetch_count = original.count(NEW_FETCH_BLOCK) - old_fetch_count
     old_fallback_count = original.count(OLD_FALLBACK_BLOCK)
 
     already_ready = (
