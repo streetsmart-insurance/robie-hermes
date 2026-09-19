@@ -132,29 +132,39 @@ EXPECTED_HEADERS: dict[str, list[str]] = {
         "Total Annualized Premium",
         "Total Written Premium",
     ],
-    # 4246 Audit Verification Queue - ROBIE: 19 cols; 2026-09-19 test CSV
-    # had 454 data rows + 1 totals row (viewer had shown 47 — UNRESOLVED
-    # discrepancy, see module docstring / test log).
+    # 4246 audit worker: the DAILY EMAIL delivers the transaction-level CSV
+    # from scheduled report 4360 ("Workers Comp Renewal Audit Queue -
+    # ROBIE"), NOT the 19-col policy-level saved report 4246 ("Audit
+    # Verification Queue - ROBIE", which is view-only). Verified 2026-09-19
+    # ~13:00 EDT against the real 2026-09-19 06:05 delivery: 24 cols,
+    # 7 data rows + 1 blank trailing line, all rows Current Policy
+    # Status = Active (down from 454 rows pre-fix). The old 19-col
+    # fingerprint was built from a misidentified test file — removed.
     "4246": [
-        "Account Name",
         "Applicant ID",
-        "Policy Number",
-        "Policy Type",
-        "Master Company",
-        "Line Of Business",
-        "Policy Term",
-        "Premium - Annualized",
-        "Premium - Written",
         "Branch",
-        "Department",
-        "Service Team",
+        "Account Name",
+        "Account Type",
         "Assigned Producer",
         "CSR",
-        "Policy Labels",
-        "Applicant Labels",
-        "Preferred Language",
-        "Total Annualized Premium",
+        "Policy Number",
+        "Policy ID",
+        "Policy Transaction ID",
+        "Transaction Type",
+        "Transaction Date",
+        "Line of Business",
+        "Master Company",
+        "Download Date",
+        "Effective Date",
+        "Expiration Date",
+        "Current Policy Status",
+        "Policy Term",
+        "Policy Type",
+        "Transaction Deleted",
+        "Service Team",
         "Total Written Premium",
+        "Total Customers",
+        "Total Transactions",
     ],
     # 4372 Mortgagee Verification Queue - ROBIE: 32 cols; 2026-09-19 test
     # CSV had 4 data rows, no totals row.
@@ -741,7 +751,7 @@ def _self_test() -> None:
         else:
             failures.append(f"{name}: expected GmailReportIngestionError, got success")
 
-    expected_counts = {"4247": 22, "4246": 19, "4372": 32, "4359": 19}
+    expected_counts = {"4247": 22, "4246": 24, "4372": 32, "4359": 19}
 
     for report_id, count in expected_counts.items():
         def make_ok(rid=report_id, want=count):
