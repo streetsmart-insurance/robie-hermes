@@ -112,7 +112,8 @@ jobs:
           (cd "${bundle_dir}" && sha256sum *.py > SHA256SUMS)
           archive_b64="$(tar -C "${bundle_dir}" -czf - . | base64 -w0)"
 
-          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
+            | tee "${RUNNER_TEMP}/accountability-magellan-preflight.txt"
           set -euo pipefail
           remote_dir="${remote_dir}"
           trap 'rm -rf "${remote_dir}"' EXIT
@@ -124,7 +125,7 @@ jobs:
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_magellan.py" --path "${APP_ROOT}/src/extractors/magellan_playwright.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_submission_gate.py" --path "${APP_ROOT}/src/production_main.py"
           sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_dir}/repair_dedicated_accountability_google_docs.py" --path "${APP_ROOT}/src/production_main.py"
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_magellan.py" --app-root "${APP_ROOT}"
+          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_dir}/preflight_dedicated_accountability_magellan.py" --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
       - name: Resolve exact prior-business-day target
@@ -256,5 +257,6 @@ jobs:
           path: |
             ${{ runner.temp }}/accountability-verification.json
             ${{ runner.temp }}/accountability-gmail-verification.json
+            ${{ runner.temp }}/accountability-magellan-preflight.txt
           if-no-files-found: warn
           retention-days: 30
