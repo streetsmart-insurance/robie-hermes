@@ -6,6 +6,8 @@
 - Look 4601 has no Custom Filter Set named ``ROBIE Intake``. The look
   title itself is the fail-closed scope marker: refuse if that title is
   not visible rather than returning an unfiltered explore.
+- Open Looker look 4601 by look id (and that title). Do not search the
+  Reports 5.0 hub for a saved-report link named or numbered 4372.
 """
 
 from __future__ import annotations
@@ -26,6 +28,17 @@ FactKind = Literal["observed", "configured", "inferred", "user_supplied"]
 # there is no "ROBIE Intake" Custom Filter Set on that look.
 MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
 
+# Shared Looker look ids (agency SharedReports-Streetsmart Insurance-36748).
+# These are Looker look ids, not EZLynx saved-report numbers. SSRobie Saved
+# Reports has zero ``a[href*=report_id]`` links for these queues.
+LOOK_ID_BY_REPORT: dict[str, str] = {
+    "4372": "4601",  # Mortgagee Verification Queue - ROBIE
+    # Test-confirmed siblings; wire when they hit the same 0-link miss:
+    # "4247": "4603",  # Manual Renewal Queue - ROBIE
+    # "4246": "4604",  # Audit Verification Queue - ROBIE
+    # "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
+}
+
 
 @dataclass(frozen=True)
 class ReportSpec:
@@ -34,6 +47,7 @@ class ReportSpec:
     schema_verified: bool
     identity_fields: tuple[str, ...]
     filter_name: str | None = None
+    look_id: str | None = None
     metadata_only: bool = False
     alias_of: str | None = None
 
@@ -48,6 +62,7 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
         True,
         ("policy_number",),
         filter_name=MORTGAGEE_4372_SCOPE_MARKER,
+        look_id=LOOK_ID_BY_REPORT["4372"],
     ),
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)
@@ -93,6 +108,7 @@ def config_fingerprint(spec: ReportSpec, filters: dict[str, Any], fields: list[s
         {
             "report_id": spec.report_id,
             "filter_name": spec.filter_name,
+            "look_id": spec.look_id,
             "filters": filters,
             "fields": fields,
             "schema_verified": spec.schema_verified,
@@ -159,6 +175,7 @@ class ReportRunRegistry:
             "report_id": spec.report_id,
             "name": spec.name,
             "filter_name": spec.filter_name,
+            "look_id": spec.look_id,
             "fingerprint": fingerprint,
             "filters": filters or {},
             "fields": resolved_fields,

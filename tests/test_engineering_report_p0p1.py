@@ -310,6 +310,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
             get_report_spec("4372").filter_name,
             "Mortgagee Verification Queue - ROBIE",
         )
+        self.assertEqual(get_report_spec("4372").look_id, "4601")
         self.assertNotEqual(get_report_spec("4372").filter_name, "ROBIE Intake")
         self.assertEqual(get_report_spec("4246").name, "Audit")
         with self.assertRaises(ReportRegistryError):
@@ -340,6 +341,7 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
             started_4372["filter_name"],
             "Mortgagee Verification Queue - ROBIE",
         )
+        self.assertEqual(started_4372["look_id"], "4601")
         with self.assertRaises(ReportRegistryError):
             registry.start_run(
                 run_id="run-4372-loan",
