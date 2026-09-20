@@ -1,0 +1,103 @@
+name: One-shot fix hermes-test-01 Sheets/Drive scopes
+
+# Temporary: Carlo GO 2026-09-19 — Test VM only. Do not use for Production.
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type FIX_HERMES_TEST_01_SCOPES
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: hermes-test-01-scope-fix
+  cancel-in-progress: false
+
+jobs:
+  fix-scopes:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'FIX_HERMES_TEST_01_SCOPES'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      TEST_SA: robie-test-drive-reader@streetsmart-hermes-poc.iam.gserviceaccount.com
+    steps:
+      - name: Authenticate with short-lived Test identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = "hermes-test-01"
+          test "${PROJECT_ID}" = "streetsmart-hermes-poc"
+          test "${ZONE}" = "us-east1-b"
+          name="$(gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(name)')"
+          test "${name}" = "hermes-test-01"
+
+      - name: Record scopes before
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          scopes="$(gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(serviceAccounts[0].scopes)')"
+          echo "scopes_before=${scopes}" >>"${GITHUB_OUTPUT}"
+          echo "SCOPES_BEFORE=${scopes}"
+
+      - name: Set service account scopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute instances set-service-account "${TEST_VM}" \
+            --project="${PROJECT_ID}" \
+            --zone="${ZONE}" \
+            --service-account="${TEST_SA}" \
+            --scopes=cloud-platform,https://www.googleapis.com/auth/spreadsheets.readonly,https://www.googleapis.com/auth/drive.readonly
+
+      - name: Stop Test VM for scope refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute instances stop "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}"
+
+      - name: Start Test VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute instances start "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}"
+          for i in $(seq 1 30); do
+            status="$(gcloud compute instances describe "${TEST_VM}" \
+              --project="${PROJECT_ID}" --zone="${ZONE}" --format='value(status)')"
+            echo "status=${status}"
+            if [ "${status}" = "RUNNING" ]; then
+              break
+            fi
+            sleep 5
+          done
+          test "${status}" = "RUNNING"
+
+      - name: Record scopes after
+        shell: bash
+        run: |
+          set -euo pipefail
+          scopes="$(gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='yaml(serviceAccounts)')"
+          echo "${scopes}"
