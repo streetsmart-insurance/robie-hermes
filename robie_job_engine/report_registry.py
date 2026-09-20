@@ -1,4 +1,12 @@
-"""Verified report config registry. IDs and filters only; no secrets."""
+"""Verified report config registry. IDs and filters only; no secrets.
+
+4372 / look 4601 notes (do not "fix" the Looker look):
+- Identity is Policy Number. The export has no Loan Number column.
+  Loan numbers come from #504 Additional Interests enrichment, not CSV.
+- Look 4601 has no Custom Filter Set named ``ROBIE Intake``. The look
+  title itself is the fail-closed scope marker: refuse if that title is
+  not visible rather than returning an unfiltered explore.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +21,10 @@ from .store import canonical_json, utc_now
 
 
 FactKind = Literal["observed", "configured", "inferred", "user_supplied"]
+
+# Look 4601 title / Gmail display name. Visible on the scoped 4372 look;
+# there is no "ROBIE Intake" Custom Filter Set on that look.
+MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
 
 
 @dataclass(frozen=True)
@@ -31,7 +43,11 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
         "4247", "Manual Renewals", True, ("policy_number",)
     ),
     "4372": ReportSpec(
-        "4372", "Mortgagee", True, ("loan_number",), filter_name="ROBIE Intake"
+        "4372",
+        "Mortgagee",
+        True,
+        ("policy_number",),
+        filter_name=MORTGAGEE_4372_SCOPE_MARKER,
     ),
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)

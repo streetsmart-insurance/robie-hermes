@@ -214,7 +214,7 @@ def _as_outcome_dict(outcome: PolicyOutcome | dict[str, Any]) -> dict[str, Any]:
 _JOB_TYPE_IDENTITY_HINTS: dict[str, tuple[str, ...]] = {
     "manual_renewal_verification": ("policy_number",),
     "audit_verification": ("audit_id",),
-    "mortgagee_verification": ("loan_number",),
+    "mortgagee_verification": ("policy_number",),
     "policy_change_verification": ("request_id",),
     "daily_verification_digest": ("policy_number",),
 }

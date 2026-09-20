@@ -47,6 +47,26 @@ from .report_registry import (
 )
 from .store import utc_now
 
+
+def _normalize_column_name(name: str) -> str:
+    """Fold CSV / registry column names so ``Policy Number`` == ``policy_number``."""
+    return "".join(ch for ch in str(name).casefold() if ch.isalnum())
+
+
+def _column_lookup(columns: list[str]) -> dict[str, str]:
+    """Map a normalized column name to the first matching original header."""
+    lookup: dict[str, str] = {}
+    for column in columns:
+        key = _normalize_column_name(column)
+        if key and key not in lookup:
+            lookup[key] = column
+    return lookup
+
+
+def _resolve_column(name: str, lookup: dict[str, str]) -> str | None:
+    return lookup.get(_normalize_column_name(name))
+
+
 logger = logging.getLogger("robie.report_fetcher")
 
 REPORT_DOWNLOAD_DIR = Path(
@@ -109,14 +129,29 @@ def _parse_report_csv(
     """
     reader = csv.DictReader(io.StringIO(csv_text))
     columns = list(reader.fieldnames or [])
-    missing_identity = [name for name in spec.identity_fields if name not in columns]
+    lookup = _column_lookup(columns)
+    identity_actual: list[str] = []
+    missing_identity: list[str] = []
+    for name in spec.identity_fields:
+        actual = _resolve_column(name, lookup)
+        if actual is None:
+            missing_identity.append(name)
+        else:
+            identity_actual.append(actual)
     if missing_identity:
         raise RuntimeError(
             f"report {spec.report_id}: exported CSV is missing identity columns "
             f"{missing_identity} (columns seen: {columns}); refusing to return rows"
         )
-    wanted = list(fields) if fields else columns
-    missing_fields = [name for name in wanted if name not in columns]
+    wanted = list(fields) if fields else list(columns)
+    # Always expose registry identity names (snake_case) so workers can key
+    # rows even when Looker/Gmail CSV uses "Policy Number".
+    for name in spec.identity_fields:
+        if name not in wanted:
+            wanted.append(name)
+    missing_fields = [
+        name for name in wanted if _resolve_column(name, lookup) is None
+    ]
     if missing_fields:
         raise RuntimeError(
             f"report {spec.report_id}: exported CSV is missing requested fields "
@@ -130,7 +165,9 @@ def _parse_report_csv(
         row = {key: (value.strip() if isinstance(value, str) else value) for key, value in raw.items()}
         if not any(str(value or "").strip() for value in row.values()):
             continue  # skip fully blank lines
-        identity = tuple(str(row.get(name) or "").strip() for name in spec.identity_fields)
+        identity = tuple(
+            str(row.get(actual) or "").strip() for actual in identity_actual
+        )
         if not all(identity):
             raise RuntimeError(
                 f"report {spec.report_id}: row {line_no} is missing an identity value "
@@ -139,7 +176,11 @@ def _parse_report_csv(
         if identity in seen:
             continue  # dedupe on the registry identity key
         seen.add(identity)
-        rows.append({name: row.get(name) for name in wanted})
+        emitted: dict[str, Any] = {}
+        for name in wanted:
+            actual = _resolve_column(name, lookup) or name
+            emitted[name] = row.get(actual)
+        rows.append(emitted)
     return rows
 
 
@@ -188,8 +229,8 @@ def _export_looker_report_csv(
             f"saved report: {type(exc).__name__}: {exc}"
         ) from exc
 
-    # Apply the report's registered saved filter (e.g. "ROBIE Intake" for 4372).
-    # Rows must never be returned from the wrong filter scope.
+    # Require the registered scope marker on the page (saved Custom Filter
+    # Set, or the 4372 look-4601 title). Do not return unfiltered rows.
     if spec.filter_name:
         try:
             body_text = page.locator("body").inner_text(timeout=10_000)

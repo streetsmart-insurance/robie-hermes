@@ -330,7 +330,7 @@ class TestWorkerFlows:
         try:
             db_row = conn.execute(
                 "SELECT outcome FROM durable_work_items WHERE namespace=? AND work_item_key=?",
-                (DURABLE_NAMESPACE, f"{DURABLE_NAMESPACE}:LN-000111"),
+                (DURABLE_NAMESPACE, f"{DURABLE_NAMESPACE}:HO 1234567"),
             ).fetchone()
         finally:
             conn.close()
