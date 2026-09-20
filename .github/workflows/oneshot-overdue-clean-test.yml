@@ -1,0 +1,165 @@
+name: One-shot overdue clean Test job (Carlo sink)
+
+# Temporary: land #513 proof on hermes-test-01 only. No Prod. No Monday schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN_OVERDUE_CLEAN_ON_HERMES_TEST_01
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: overdue-clean-hermes-test-01
+  cancel-in-progress: false
+
+jobs:
+  run-clean-overdue:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'RUN_OVERDUE_CLEAN_ON_HERMES_TEST_01'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: Test
+    env:
+      PROJECT_ID: streetsmart-hermes-poc
+      ZONE: us-east1-b
+      TEST_VM: hermes-test-01
+      OUT: /opt/streetsmart-hermes-test/test-tmp/overdue-job-run-513.out
+      SCRIPT: /opt/streetsmart-hermes-test/test-tmp/run_one_overdue_clean_sheets.py
+      STAGING: /var/tmp/robie-overdue-clean-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: projects/1036123102831/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: robie-test-deployer@streetsmart-robie-test.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+
+      - name: Refuse every target except Test
+        run: |
+          set -euo pipefail
+          test "${TEST_VM}" = hermes-test-01
+          test "${PROJECT_ID}" = streetsmart-hermes-poc
+          gcloud compute instances describe "${TEST_VM}" \
+            --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
+
+      - name: Confirm release pointer includes #513
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -euo pipefail; host=\$(hostname -s); test \"\$host\" = hermes-test-01; rel=\$(readlink -f /opt/streetsmart-hermes-test/releases/current); echo RELEASE=\$rel; echo \"\$rel\" | grep -q b92c571; grep -q 'non-agency work email' \"\$rel/robie_job_engine/overdue_submission_reports.py\""
+
+      - name: Confirm Carlo sink + session
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command='set -euo pipefail
+              sink=$(sudo grep -E "^ROBIE_OVERDUE_SUBMISSION_TEST_RECIPIENT=" /etc/streetsmart-hermes-test/robie-accountability.env | cut -d= -f2-)
+              echo SINK=$sink
+              test "$sink" = "carlo@streetsmart.insurance"
+              drop=$(sudo grep ROBIE_OVERDUE_SUBMISSION_TEST_RECIPIENT /etc/systemd/system/robie-gateway.service.d/40-overdue-test-sink.conf)
+              echo DROP=$drop
+              export ROBIE_ENV=TEST HOME=/opt/streetsmart-hermes-test HERMES_HOME=/opt/streetsmart-hermes-test/.hermes
+              export PYTHONPATH=/opt/streetsmart-hermes-test/releases/current
+              /opt/streetsmart-hermes-test/venv/bin/python /opt/streetsmart-hermes-test/releases/current/scripts/check_ezlynx_session.py
+            '
+
+      - name: Bootstrap EZLynx if session not usable
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command='set -euo pipefail
+              export ROBIE_ENV=TEST HOME=/opt/streetsmart-hermes-test HERMES_HOME=/opt/streetsmart-hermes-test/.hermes
+              export PYTHONPATH=/opt/streetsmart-hermes-test/releases/current
+              set +e
+              out=$(/opt/streetsmart-hermes-test/venv/bin/python /opt/streetsmart-hermes-test/releases/current/scripts/check_ezlynx_session.py 2>&1)
+              rc=$?
+              set -e
+              echo "$out"
+              if echo "$out" | grep -q "exit    : 0 (usable)"; then
+                echo SESSION_OK
+                exit 0
+              fi
+              echo BOOTSTRAP_NEEDED
+              # Assemble env like gateway
+              ENVFILE=/tmp/robie-bootstrap-env.$$
+              : > "$ENVFILE"; chmod 600 "$ENVFILE"
+              systemctl show robie-gateway -p Environment --value | tr " " "\n" | grep -E "^[A-Za-z_]" >> "$ENVFILE" || true
+              for f in /etc/streetsmart-hermes-test/robie-message-runtime.env /etc/streetsmart-hermes-test/accountability.env; do
+                [ -f "$f" ] && grep -E "^[A-Za-z_]" "$f" >> "$ENVFILE" || true
+              done
+              grep -q "^ROBIE_ENV=" "$ENVFILE" || echo ROBIE_ENV=TEST >> "$ENVFILE"
+              grep -q "^HERMES_HOME=" "$ENVFILE" || echo HERMES_HOME=/opt/streetsmart-hermes-test/.hermes >> "$ENVFILE"
+              chown streetsmart-hermes-test:streetsmart-hermes-test "$ENVFILE"
+              sudo -u streetsmart-hermes-test bash -c "
+                set -a; . $ENVFILE; set +a
+                export HOME=/opt/streetsmart-hermes-test ROBIE_ENV=TEST
+                cd /opt/streetsmart-hermes-test
+                /opt/streetsmart-hermes-test/venv/bin/python /opt/streetsmart-hermes-test/releases/current/ezlynx_login_bootstrap.py
+              "
+            '
+
+      - name: Stage clean runner + launch script
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="test \"\$(hostname -s)\" = hermes-test-01 && mkdir -p '${STAGING}'"
+          # Prefer existing VM runner if present; refresh from checkout helper if needed
+          test -f scripts/run_one_overdue_clean_sheets.py
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/run_one_overdue_clean_sheets.py scripts/launch_clean_overdue_513.sh scripts/poll_overdue_513_outcome.py \
+            "${TEST_VM}:${STAGING}/"
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="set -euo pipefail
+              sudo cp '${STAGING}/run_one_overdue_clean_sheets.py' '${SCRIPT}'
+              sudo cp '${STAGING}/launch_clean_overdue_513.sh' /tmp/launch_clean_overdue_513.sh
+              sudo chmod 755 '${SCRIPT}' /tmp/launch_clean_overdue_513.sh
+              sudo chown streetsmart-hermes-test:streetsmart-hermes-test '${SCRIPT}'
+              # Prove no cheat map
+              ! grep -q map_observed_producers_to_carlo '${SCRIPT}'
+              grep -q load_approved_producer_directory '${SCRIPT}'
+            "
+
+      - name: Launch ONE clean overdue Test job
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="sudo bash /tmp/launch_clean_overdue_513.sh" | tee "${RUNNER_TEMP}/launch.txt"
+
+      - name: Wait for job outcome
+        run: |
+          set -euo pipefail
+          gcloud compute scp --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            scripts/poll_overdue_513_outcome.py "${TEST_VM}:/tmp/poll_overdue_513_outcome.py"
+          for i in $(seq 1 60); do
+            status=$(gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+              --command="python3 /tmp/poll_overdue_513_outcome.py --mode status --out '${OUT}'" || echo SSH_FAIL)
+            echo "poll=$i status=$status"
+            if [ "$status" = DONE ]; then break; fi
+            if [ "$status" = SSH_FAIL ]; then sleep 15; continue; fi
+            sleep 30
+          done
+          gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
+            --command="python3 /tmp/poll_overdue_513_outcome.py --mode report --out '${OUT}' --db /opt/streetsmart-hermes-test/robie-job-engine/data/jobs.db" \
+            | tee "${RUNNER_TEMP}/outcome.txt"
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## One-shot overdue clean Test (#513)"
+            echo
+            echo "- Target: hermes-test-01 only"
+            echo "- Sink: carlo@streetsmart.insurance"
+            echo "- Sheets: load_approved_producer_directory (no cheat map)"
+            echo
+            echo '```'
+            tail -n 200 "${RUNNER_TEMP}/outcome.txt" 2>/dev/null || tail -n 80 "${RUNNER_TEMP}/launch.txt" 2>/dev/null || true
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
