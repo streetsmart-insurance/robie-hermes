@@ -33,9 +33,10 @@ MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
 # Reports has zero ``a[href*=report_id]`` links for these queues.
 LOOK_ID_BY_REPORT: dict[str, str] = {
     "4372": "4601",  # Mortgagee Verification Queue - ROBIE
-    # Test-confirmed siblings; wire when they hit the same 0-link miss:
-    # "4247": "4603",  # Manual Renewal Queue - ROBIE
-    # "4246": "4604",  # Audit Verification Queue - ROBIE
+    # 4246 / 4247 live fetch prefers today's robie@ morning email CSV
+    # (report_email_source). Do not wire Looker favorites 4603/4604 — SSRobie
+    # has zero saved-report links and emails are the system of record.
+    # 4246's daily email is the 4360 Active-filtered transaction feed.
     # "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
 }
 
