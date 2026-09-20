@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import hashlib
 import json
 import os
+import time
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -58,6 +60,8 @@ SAFE_FAILURE_CODES = (
     ("Persistent Robie Chrome is unavailable", "chrome_unavailable"),
     ("Google delegation credential is unavailable", "google_delegation_unavailable"),
     ("EZLynx verification email was not received", "otp_email_not_received"),
+    ("audit exceeded time budget before the closed-row boundary", "audit_deadline_exceeded"),
+    ("preflight wall-clock budget exhausted", "preflight_deadline_exceeded"),
     ("EZLynx authentication reached an unsupported state", "auth_state_unsupported"),
     ("Persistent Robie Chrome has no browser context", "browser_context_missing"),
     ("NEEDS_AUTH", "session_not_authenticated"),
@@ -253,62 +257,111 @@ def _evidence_changed_between_attempts(
     return any(item.get("evidence_sha256") != baseline for item in summaries[1:])
 
 
-def run_preflight(app_root: Path, reliability_attempts: int) -> dict[str, Any]:
+def run_preflight(
+    app_root: Path,
+    reliability_attempts: int,
+    *,
+    deadline_seconds: int = 400,
+) -> dict[str, Any]:
     root = app_root.expanduser().resolve()
     if root != EXPECTED_ROOT or not (root / "src" / "production_main.py").is_file():
         raise SubmissionPreflightError("unexpected or incomplete accountability app root")
     if reliability_attempts < 2:
         raise SubmissionPreflightError("at least two reliability attempts are required")
+    if deadline_seconds < 60:
+        raise SubmissionPreflightError("deadline_seconds must be at least 60")
 
     os.chdir(root)
     sys.path.insert(0, str(root))
     from src.extractors.ezlynx_login_bootstrap import ensure_ezlynx_authenticated
     from src.extractors.ezlynx_submission_browser import audit
 
-    summaries: list[dict[str, Any]] = []
-    for attempt in range(1, reliability_attempts + 1):
-        try:
-            ensure_ezlynx_authenticated()
-        except Exception as exc:
-            raise SubmissionPreflightError(
-                f"attempt_{attempt}_authentication:{_safe_failure_code(exc)}"
-            ) from exc
-        try:
-            observed = audit(fresh=True)
-        except Exception as exc:
-            raise SubmissionPreflightError(
-                f"attempt_{attempt}_audit:{_safe_failure_code(exc)}"
-            ) from exc
-        try:
-            summaries.append(validate_observation(observed))
-        except SubmissionPreflightError as exc:
-            wrapped = SubmissionPreflightError(
-                f"attempt_{attempt}_validation:{_safe_failure_code(exc)}"
-            )
-            wrapped.safe_metrics = _safe_failure_metrics(observed)
-            raise wrapped from exc
+    deadline = time.monotonic() + deadline_seconds
 
-    evidence_changed = _evidence_changed_between_attempts(summaries)
+    def _raise_if_deadline(stage: str) -> None:
+        if time.monotonic() >= deadline:
+            raise SubmissionPreflightError(f"{stage}:preflight wall-clock budget exhausted")
 
-    return {
-        "ready": True,
-        "authenticated": True,
-        "read_only": True,
-        "delivery_attempted": False,
-        "records_exposed": False,
-        "reliability_attempts_passed": len(summaries),
-        "evidence_changed_between_attempts": evidence_changed,
-        "evidence": summaries[-1],
-    }
+    def _alarm_handler(_signum, _frame) -> None:
+        raise SubmissionPreflightError(
+            "setup_or_stability:preflight wall-clock budget exhausted"
+        )
+
+    previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    # Fail closed with JSON before the workflow `timeout 480s` can SIGKILL us
+    # mid-walk and leave an empty accountability-submission-preflight.txt.
+    signal.setitimer(signal.ITIMER_REAL, float(deadline_seconds))
+    try:
+        summaries: list[dict[str, Any]] = []
+        for attempt in range(1, reliability_attempts + 1):
+            _raise_if_deadline(f"attempt_{attempt}_authentication")
+            try:
+                ensure_ezlynx_authenticated()
+            except Exception as exc:
+                raise SubmissionPreflightError(
+                    f"attempt_{attempt}_authentication:{_safe_failure_code(exc)}"
+                ) from exc
+            _raise_if_deadline(f"attempt_{attempt}_audit")
+            try:
+                remaining = max(1, int(deadline - time.monotonic()))
+                try:
+                    observed = audit(fresh=True, deadline_seconds=remaining)
+                except TypeError:
+                    # Production browser before deadline support: fall back; the
+                    # SIGALRM budget still fails closed with JSON.
+                    observed = audit(fresh=True)
+            except Exception as exc:
+                raise SubmissionPreflightError(
+                    f"attempt_{attempt}_audit:{_safe_failure_code(exc)}"
+                ) from exc
+            try:
+                summaries.append(validate_observation(observed))
+            except SubmissionPreflightError as exc:
+                wrapped = SubmissionPreflightError(
+                    f"attempt_{attempt}_validation:{_safe_failure_code(exc)}"
+                )
+                wrapped.safe_metrics = _safe_failure_metrics(observed)
+                raise wrapped from exc
+
+        evidence_changed = _evidence_changed_between_attempts(summaries)
+        return {
+            "ready": True,
+            "authenticated": True,
+            "read_only": True,
+            "delivery_attempted": False,
+            "records_exposed": False,
+            "reliability_attempts_passed": len(summaries),
+            "evidence_changed_between_attempts": evidence_changed,
+            "evidence": summaries[-1],
+        }
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app-root", type=Path, default=EXPECTED_ROOT)
     parser.add_argument("--reliability-attempts", type=int, default=2)
+    parser.add_argument(
+        "--deadline-seconds",
+        type=int,
+        default=400,
+        help="Wall-clock budget so the workflow timeout cannot kill an empty artifact",
+    )
     args = parser.parse_args()
+
+    def _emit(payload: dict[str, Any], code: int) -> int:
+        print(json.dumps(payload, sort_keys=True), flush=True)
+        return code
+
     try:
-        result = run_preflight(args.app_root, args.reliability_attempts)
+        result = run_preflight(
+            args.app_root,
+            args.reliability_attempts,
+            deadline_seconds=args.deadline_seconds,
+        )
     except Exception as exc:
         safe = str(exc).splitlines()[0]
         stage, separator, code = safe.partition(":")
@@ -324,10 +377,8 @@ def main() -> int:
         metrics = getattr(exc, "safe_metrics", None)
         if isinstance(metrics, dict):
             payload["failure_metrics"] = metrics
-        print(json.dumps(payload, sort_keys=True))
-        return 1
-    print(json.dumps(result, sort_keys=True))
-    return 0
+        return _emit(payload, 1)
+    return _emit(result, 0)
 
 
 if __name__ == "__main__":

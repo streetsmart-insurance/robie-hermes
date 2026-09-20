@@ -45,3 +45,7 @@ def test_dedicated_ezlynx_preflight_receives_production_dwd_secret():
         'GOOGLE_DWD_SECRET=accountability-google-dwd-key'
     ) in block
 
+    assert "repair_dedicated_accountability_submission_audit_budget.py" in block
+    assert "--deadline-seconds 400" in block
+    assert "PYTHONUNBUFFERED=1" in block
+

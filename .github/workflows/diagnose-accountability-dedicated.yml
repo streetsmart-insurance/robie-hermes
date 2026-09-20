@@ -145,22 +145,35 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          repair_path=scripts/repair_dedicated_accountability_submission_audit_budget.py
+          repair_sha="$(sha256sum "${repair_path}" | awk '{print $1}')"
+          repair_b64="$(base64 -w0 "${repair_path}")"
           script_path=scripts/preflight_dedicated_accountability_submission.py
           script_sha="$(sha256sum "${script_path}" | awk '{print $1}')"
           script_b64="$(base64 -w0 "${script_path}")"
+          remote_repair="/tmp/repair-dedicated-accountability-submission-audit-budget-${GITHUB_RUN_ID}.py"
           remote_script="/tmp/preflight-dedicated-accountability-submission-${GITHUB_RUN_ID}.py"
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
             | tee "${RUNNER_TEMP}/accountability-submission-preflight.txt"
           set -euo pipefail
+          remote_repair="/tmp/repair-dedicated-accountability-submission-audit-budget-${GITHUB_RUN_ID}.py"
           remote_script="/tmp/preflight-dedicated-accountability-submission-${GITHUB_RUN_ID}.py"
-          trap 'rm -f "${remote_script}"' EXIT
+          trap 'rm -f "${remote_repair}" "${remote_script}"' EXIT
+          printf '%s' '${repair_b64}' | base64 -d > "${remote_repair}"
+          chown ubuntu:ubuntu "${remote_repair}"
+          chmod 0700 "${remote_repair}"
+          test "\$(sha256sum "${remote_repair}" | awk '{print \$1}')" = '${repair_sha}'
+          # Install audit deadline + bulk page read before preflight so the
+          # 480s timeout cannot SIGKILL an empty JSON artifact again.
+          sudo -u ubuntu "${APP_ROOT}/venv/bin/python" "${remote_repair}" \
+            --browser-path "${APP_ROOT}/src/extractors/ezlynx_submission_browser.py"
           printf '%s' '${script_b64}' | base64 -d > "${remote_script}"
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key "${APP_ROOT}/venv/bin/python" "${remote_script}" \
-            --app-root "${APP_ROOT}" --reliability-attempts 2
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key PYTHONUNBUFFERED=1 "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+            --app-root "${APP_ROOT}" --reliability-attempts 2 --deadline-seconds 400
           REMOTE_EOF
 
       - name: Capture DWD identity mapping and redacted failure tracebacks

@@ -166,6 +166,9 @@ def test_workflows_run_two_attempt_submission_preflight_before_delivery():
     assert "timeout-minutes: 30" in diagnostic
     assert "--reliability-attempts 2" in diagnostic
     assert "--reliability-attempts 2" in manual
+    assert "--deadline-seconds" in Path("scripts/preflight_dedicated_accountability_submission.py").read_text(encoding="utf-8")
+    assert "SIGALRM" in Path("scripts/preflight_dedicated_accountability_submission.py").read_text(encoding="utf-8")
+    assert "flush=True" in Path("scripts/preflight_dedicated_accountability_submission.py").read_text(encoding="utf-8")
     diagnostic_step = diagnostic.index(
         "Verify reusable EZLynx Submission Center session without delivery"
     )
