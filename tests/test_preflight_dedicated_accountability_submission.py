@@ -186,6 +186,9 @@ def test_workflows_run_two_attempt_submission_preflight_before_delivery():
         ("fully exhausted pager rows did not reconcile", "exhausted_boundary_count_mismatch"),
         ("pager range exceeded rendered Submission Center statuses", "pager_range_rows_missing"),
         ("required evidence mismatch: mat_row_count", "required_evidence_mismatch"),
+        ("Google delegation credential is unavailable", "google_delegation_unavailable"),
+        ("EZLynx verification email was not received", "otp_email_not_received"),
+        ("EZLynx authentication reached an unsupported state", "auth_state_unsupported"),
     ],
 )
 def test_failure_codes_are_bounded_and_privacy_safe(message, expected):

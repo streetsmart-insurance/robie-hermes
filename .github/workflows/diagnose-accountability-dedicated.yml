@@ -137,7 +137,7 @@ jobs:
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key "${APP_ROOT}/venv/bin/python" "${remote_script}" \
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
@@ -159,7 +159,7 @@ jobs:
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key "${APP_ROOT}/venv/bin/python" "${remote_script}" \
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 

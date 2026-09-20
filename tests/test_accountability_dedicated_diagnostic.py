@@ -34,3 +34,14 @@ def test_dedicated_auth_checks_run_independently_and_preserve_evidence():
         run = text.index("        run: |", step)
         assert "        if: always()" in text[step:run]
 
+def test_dedicated_ezlynx_preflight_receives_production_dwd_secret():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    step = text.index("Verify reusable EZLynx Submission Center session without delivery")
+    next_step = text.index("- name:", step + 1)
+    block = text[step:next_step]
+    assert 'GOOGLE_DWD_SECRET=accountability-google-dwd-key' in block
+    assert (
+        'sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" '
+        'GOOGLE_DWD_SECRET=accountability-google-dwd-key'
+    ) in block
+
