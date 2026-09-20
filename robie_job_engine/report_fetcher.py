@@ -10,11 +10,13 @@ workers import. It:
    report 4359 (``schema_verified=False``). The flag is never flipped here;
    the error propagates and no browser is touched.
 3. For email-first report ids (4247 manual renewals, 4246 audits / 4360
-   Active daily feed, 4372 mortgagee) prefers today's ``ROBIE daily CSV``
-   from robie@ via :mod:`robie_job_engine.report_email_source`. Looker
-   saved-report favorites are not the system of record. 4372 may fall back
-   to Shared look 4601 only when the email is missing — never when the CSV
-   is present but stale or the wrong schema.
+   Active daily feed, 4372 mortgagee) prefers today's robie@ CSV via
+   :mod:`robie_job_engine.report_email_source`. 4372 requires the
+   ``Mortgagee Verification Queue - ROBIE`` subject; 4246/4247 keep
+   ``ROBIE daily CSV`` + header fingerprint. Looker saved-report
+   favorites are not the system of record. 4372 may fall back to Shared
+   look 4601 only when the mortgagee email is missing — never when that
+   subject is present but the CSV is stale or the wrong schema.
 4. Other reports still drive the Reports 5.0 Looker UI
    (https://app.ezlynx.com/web/looker-reports). Mapped reports open the
    Shared Looker look by look id (4372 → look 4601) instead of searching

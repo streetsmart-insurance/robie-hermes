@@ -1,17 +1,23 @@
 """Morning email CSV source for live verification report fetch.
 
 EZLynx Reports 5.0 saved-report favorites are not the system of record.
-Scheduled ``ROBIE daily CSV`` mail to robie@streetsmart.insurance is.
+Scheduled mail to robie@streetsmart.insurance is.
+
+4246 / 4247 still use the generic ``ROBIE daily CSV`` envelope and
+header fingerprint. 4372 accepts only the email whose subject matches
+``Mortgagee Verification Queue - ROBIE`` (durable fingerprint). Another
+robie@ daily CSV is not 4372.
+
 This module turns today's validated Gmail attachment (or an injected CSV)
 into worker-facing row dicts.
 
 Used by :func:`robie_job_engine.report_fetcher.fetch_report_rows` for
-report ids 4247 (manual renewals) and 4246 (audits; daily feed is the
-4360 Active-filtered transaction CSV). 4372 can use the same path when
-the email is present.
+report ids 4247 (manual renewals), 4246 (audits; daily feed is the
+4360 Active-filtered transaction CSV), and 4372 (mortgagee).
 
 Fail closed: missing email, stale delivery, or a header/schema mismatch
-raises. Rows are never guessed.
+raises. Rows are never guessed. A wrong-subject robie@ CSV is ignored
+for 4372 (treated as missing), not ingested.
 """
 
 from __future__ import annotations

@@ -32,11 +32,53 @@ class HeaderFingerprintTests(unittest.TestCase):
         self.assertNotIn("Department", headers)
 
     def test_unknown_headers_are_rejected(self):
-        with self.assertRaises(ing.GmailReportIngestionError):
-            ing.fingerprint_report_id(["Nope", "Unknown", "Headers"])
+        with self.assertRaises(ing.GmailReportIngestionError) as ctx:
+            ing.fingerprint_report_id(
+                ["Account Name"] + [f"Col{i}" for i in range(2, 19)] + ["Total Written Premium"]
+            )
+        self.assertIn("19-col CSV Account Name…Total Written Premium", str(ctx.exception))
+        self.assertIn("no known ROBIE fingerprint", str(ctx.exception))
 
     def test_missing_email_error_is_distinct_from_schema(self):
         self.assertTrue(issubclass(ing.GmailReportMissingError, ing.GmailReportIngestionError))
+
+
+class SubjectFingerprintTests(unittest.TestCase):
+    def test_4372_requires_mortgagee_queue_subject(self):
+        self.assertTrue(ing.subject_matches_report(ing.MORTGAGEE_4372_SUBJECT, "4372"))
+        self.assertTrue(
+            ing.subject_matches_report("Fwd: Mortgagee Verification Queue – ROBIE", "4372")
+        )
+        self.assertTrue(
+            ing.subject_matches_report(
+                "Mortgagee Verification Queue - ROBIE 2026-09-20", "4372"
+            )
+        )
+        self.assertFalse(ing.subject_matches_report("ROBIE daily CSV", "4372"))
+        self.assertFalse(ing.subject_matches_report("Manual Renewal Queue - ROBIE", "4372"))
+        self.assertFalse(ing.subject_matches_report("Mortgagee Verification Queue", "4372"))
+        self.assertFalse(ing.subject_matches_report("", "4372"))
+
+    def test_4246_4247_keep_generic_daily_csv_subject(self):
+        for report_id in ("4246", "4247", "4359"):
+            self.assertTrue(ing.subject_matches_report("ROBIE daily CSV", report_id))
+            self.assertFalse(
+                ing.subject_matches_report(ing.MORTGAGEE_4372_SUBJECT, report_id)
+            )
+
+    def test_4372_gmail_query_is_mortgagee_subject_not_daily_csv(self):
+        self.assertEqual(ing.gmail_subject_queries(["4372"]), [ing.MORTGAGEE_4372_SUBJECT])
+        self.assertEqual(
+            ing.gmail_subject_queries(["4247", "4246"]), [ing.DEFAULT_SUBJECT_CONTAINS]
+        )
+        self.assertEqual(
+            ing.gmail_subject_queries(["4247", "4372"]),
+            [ing.DEFAULT_SUBJECT_CONTAINS, ing.MORTGAGEE_4372_SUBJECT],
+        )
+        self.assertEqual(
+            ing.gmail_subject_queries(["4372"], subject_contains="ROBIE daily CSV"),
+            ["ROBIE daily CSV"],
+        )
 
 
 class SchemaGateTests(unittest.TestCase):
