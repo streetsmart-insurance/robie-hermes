@@ -92,6 +92,16 @@ class DocumentToolVisibilityTests(unittest.TestCase):
 
 
 class DocumentToolHandlerTests(unittest.TestCase):
+    def setUp(self):
+        # Other engine tests bind process-level job context. These are standalone
+        # handler tests; durable job behavior is covered in its own suite.
+        env = dict(os.environ)
+        for key in ('ROBIE_JOB_ID', 'ROBIE_CURRENT_JOB_ID', 'JOB_ID', 'ROBIE_JOB_DB'):
+            env.pop(key, None)
+        context = patch.dict(os.environ, env, clear=True)
+        context.start()
+        self.addCleanup(context.stop)
+
     def _write_tmp_file(self, tmp_dir, name, data: bytes) -> str:
         path = os.path.join(str(tmp_dir), name)
         with open(path, "wb") as handle:
@@ -178,6 +188,9 @@ class DocumentToolHandlerTests(unittest.TestCase):
                                 {"id": "987654321", "name": "dec.pdf"}
                             ]
                         }
+
+                    def download_document(self, document_id):
+                        return b"%PDF-1.4 fake"
 
                 with (
                     patch(

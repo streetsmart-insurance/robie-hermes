@@ -38,6 +38,10 @@ class MessageOutcomeVerifier:
         result = self.reader.verify(job, action)
         if not result.verified:
             return result
+        from .document_upload_reliability import document_request
+        if (result.evidence.method == 'EZLYNX_DOCUMENT_CONTENT_READBACK'
+                and document_request(job.get('payload') or {})):
+            return result
         payload = job.get('payload') or {}
         request = str(payload.get('request_text') or payload.get('text') or payload.get('prompt') or '')
         match = presence_request(request)

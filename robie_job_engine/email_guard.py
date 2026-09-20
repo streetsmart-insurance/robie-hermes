@@ -25,6 +25,9 @@ class HermesEmailWorker:
             response = self.run_agent_with_context(job["payload"]["prompt"], job["id"], self.store.path)
         else:
             response = self.run_agent(job["payload"]["prompt"])
+        # Tools can persist a document ID and source fingerprint during the
+        # worker turn. Reload before constructing the action used for verification.
+        job = self.store.get_job(job['id'])
         from .chat_destination_binding import claimed_from_job, derive_destination, read_exec_rows
         binding = derive_destination(read_exec_rows(self.store, job["id"]), claimed_from_job(job, response))
         destination = {"gmail_message_id": job["payload"]["gmail_message_id"]}
@@ -37,6 +40,9 @@ class HermesEmailWorker:
         existing = self.store.get_checkpoint(job["id"], "action") or {}
         existing_dest = dict(existing.get("destination") or {})
         payload = dict(job.get("payload") or {})
+        from .document_upload_reliability import document_request
+        if document_request(payload):
+            destination.update(existing_dest)
         for key in ("policy_number", "policy_id", "applicant_id"):
             value = str(existing_dest.get(key) or payload.get(key) or "").strip()
             if value:

@@ -92,6 +92,9 @@ class HermesChatEzlynxDestinationVerifier:
     # ------------------------------------------------------------------ #
 
     def verify(self, job: dict[str, Any], action: dict[str, Any]) -> VerificationResult:
+        from .document_upload_reliability import document_request, verify_document_request
+        if document_request(job.get('payload') or {}):
+            return verify_document_request(self._port, job, action)
         claimed = dict((action or {}).get("destination") or {})
         payload = dict(job.get("payload") or {})
 

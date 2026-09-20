@@ -179,6 +179,7 @@ HITL_BLOCKER = (
 
 NAMED_SCENARIO_IDS = frozenset(
     {
+        "document-upload:content-and-retry",
         "mortgagee:email-metadata-before-lob",
         "same-day:named-scenario-before-close",
         "message-intake:queue-during-active-work",
@@ -1407,6 +1408,55 @@ def _mortgagee_email_scope_isolated(*, work_dir: Path) -> dict[str, Any]:
         return _fail(scenario, f"{type(exc).__name__}: {exc}")
 
 
+def run_document_upload_scenario(*, work_dir: Path) -> dict[str, Any]:
+    """Exercise document-only verification and saved-ID retry without network."""
+    from .document_upload_reliability import upload_with_receipt, verify_document_request
+    from .store import JobStore
+    from .models import JobStatus
+
+    class Destination:
+        posts = 0
+        body = b'synthetic-document-regression'
+
+        def upload_applicant_document(self, *args, **kwargs):
+            self.posts += 1
+            return '12345'
+
+        def search_applicant_documents(self, applicant):
+            return {'results': self.documents_for_applicant(applicant)}
+
+        def documents_for_applicant(self, applicant):
+            return [{'id': '12345', 'name': 'synthetic.txt'}]
+
+        def download_document(self, doc_id):
+            return self.body
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    store = JobStore(work_dir / 'jobs.db')
+    job = store.create_job('hermes.email_task', {
+        'request_text': 'Upload document "synthetic.txt" to applicant 220250093.',
+        'applicant_id': '220250093',
+    })
+    store.transition(job['id'], JobStatus.RUNNING)
+    destination = Destination()
+    env = {'ROBIE_JOB_ID': job['id'], 'ROBIE_JOB_DB': store.path}
+    try:
+        for _ in range(2):
+            upload_with_receipt(destination, '220250093', 'synthetic.txt',
+                                b'synthetic-document-regression', env=env)
+        job = store.get_job(job['id'])
+        action = store.get_checkpoint(job['id'], 'action')
+        positive = verify_document_request(destination, job, action)
+        destination.body = b'wrong-but-nonempty'
+        negative = verify_document_request(destination, job, action)
+        ok = positive.verified and not negative.verified and destination.posts == 1
+    except Exception:
+        ok = False
+    return {'id': 'document-upload:content-and-retry', 'kind': 'logic', 'ok': ok,
+            'outcome': 'PASS' if ok else 'FAILED',
+            'evidence': 'Synthetic document-only read-back, wrong-content refusal, and repeat-call single POST.'}
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -1414,6 +1464,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
             f"refusing named scenarios on live Hermes path: {work_dir}"
         )
     results = [run_same_day_scenario_rule()]
+    results.append(run_document_upload_scenario(work_dir=work_dir / 'document-upload'))
     results.append(run_mortgagee_email_scope_scenario(work_dir=work_dir / "mortgagee-scope"))
     results.append(run_message_intake_scenario(work_dir=work_dir / "message-intake"))
     results.extend(run_hitl_resume_scenarios(work_dir=work_dir / "hitl"))

@@ -4,6 +4,14 @@
   "maintain": "Add a named scenario the same day a NEW Production failure mode is found. Do not mark the incident closed until the scenario id exists in the battery. Update this list when a deploy or HITL shows a new class.",
   "incidents": [
     {
+      "id": "802682ec-document-upload-20260919",
+      "class": "document-upload-verification-and-recovery",
+      "new_failure_mode": true,
+      "scenario": "document-upload:content-and-retry",
+      "closed": false,
+      "note": "Document-only email timed out and was routed to policy verification. Bounded single-upload requests now have durable intent/ID, exact source-content read-back, and deterministic email execution. Synthetic coverage is not live acceptance; leave open until Test and approved Production verification."
+    },
+    {
       "id": "4372-email-empty-lob-20260920",
       "class": "mortgagee-email-scope",
       "new_failure_mode": true,
