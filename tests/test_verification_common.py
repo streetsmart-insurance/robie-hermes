@@ -358,6 +358,12 @@ class RecordOutcomesTests(_StoreMixin, unittest.TestCase):
             self.assertEqual(len(back), 1)
             self.assertEqual(back[0]["status"], "done")
 
+    def test_mortgagee_identity_hint_is_policy_number(self):
+        self.assertEqual(
+            vc._JOB_TYPE_IDENTITY_HINTS["mortgagee_verification"],
+            ("policy_number",),
+        )
+
     def test_identity_key_uses_report_identity_from_evidence(self):
         with durable_temporary_directory() as tmp:
             store, job_id = self._new_store(tmp)

@@ -458,11 +458,16 @@ def _work_item_key(policy_identity: str) -> str:
 
 
 def _policy_identity(row: dict[str, Any]) -> str:
-    """Stable per-policy key: 4372 identity field (loan_number), else policy #."""
-    loan = str(row.get("loan_number") or "").strip()
-    if loan:
-        return loan
-    return str(row.get("policy_number") or "").strip()
+    """Stable per-policy key: 4372 identity is Policy Number, not loan number.
+
+    Loan numbers come from #504 Additional Interests enrichment, not the
+    look-4601 / Gmail CSV (which has no Loan Number column).
+    """
+    for key in ("policy_number", "Policy Number"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _read_policy_state(ledger, work_item_key: str) -> dict[str, Any]:

@@ -305,7 +305,12 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
 
     def test_phase05_report_registry_blocks_unverified_schema(self):
         self.assertEqual(get_report_spec("4247").name, "Manual Renewals")
-        self.assertEqual(get_report_spec("4372").filter_name, "ROBIE Intake")
+        self.assertEqual(get_report_spec("4372").identity_fields, ("policy_number",))
+        self.assertEqual(
+            get_report_spec("4372").filter_name,
+            "Mortgagee Verification Queue - ROBIE",
+        )
+        self.assertNotEqual(get_report_spec("4372").filter_name, "ROBIE Intake")
         self.assertEqual(get_report_spec("4246").name, "Audit")
         with self.assertRaises(ReportRegistryError):
             get_report_spec("4244")
@@ -325,6 +330,22 @@ class EngineeringReportP0P1Tests(unittest.TestCase):
             registry.start_run(run_id="run-4359", report_id="4359")
         with self.assertRaises(ReportRegistryError):
             registry.start_run(run_id="run-missing", report_id="4247", fields=["unrelated"])
+        started_4372 = registry.start_run(
+            run_id="run-4372",
+            report_id="4372",
+            fields=["policy_number"],
+        )
+        self.assertEqual(started_4372["fields"], ["policy_number"])
+        self.assertEqual(
+            started_4372["filter_name"],
+            "Mortgagee Verification Queue - ROBIE",
+        )
+        with self.assertRaises(ReportRegistryError):
+            registry.start_run(
+                run_id="run-4372-loan",
+                report_id="4372",
+                fields=["loan_number"],
+            )
 
     def test_phase06_typed_output_and_append_only_audit(self):
         outputs = TypedOutputStore(self.db)

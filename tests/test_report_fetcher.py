@@ -21,7 +21,11 @@ rf = ensure_real_module("robie_job_engine.report_fetcher")
 
 from durable_temp import durable_temporary_directory
 
-from robie_job_engine.report_registry import ReportRegistryError, get_report_spec
+from robie_job_engine.report_registry import (
+    MORTGAGEE_4372_SCOPE_MARKER,
+    ReportRegistryError,
+    get_report_spec,
+)
 
 
 class _NoTouch:
@@ -194,12 +198,33 @@ class ParseCsvTests(unittest.TestCase):
             rf._parse_report_csv(csv_text, spec=spec, fields=None)
         self.assertIn("missing an identity value", str(ctx.exception))
 
-    def test_loan_number_identity_for_mortgagee(self):
+    def test_policy_number_identity_for_mortgagee(self):
         spec = get_report_spec("4372")
-        csv_text = "loan_number,policy_number\nL1,P1\nL1,P1-dup\n"
+        self.assertEqual(spec.identity_fields, ("policy_number",))
+        csv_text = "loan_number,policy_number\nL1,P1\nL2,P1\n"
         rows = rf._parse_report_csv(csv_text, spec=spec, fields=None)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["loan_number"], "L1")
+        self.assertEqual(rows[0]["policy_number"], "P1")
+
+    def test_policy_number_identity_accepts_looker_display_header(self):
+        spec = get_report_spec("4372")
+        csv_text = (
+            "Applicant ID,Account Name,Policy Number\n"
+            "A1,Acme,P1\n"
+            "A1,Acme Duplicate,P1\n"
+        )
+        rows = rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Policy Number"], "P1")
+        self.assertEqual(rows[0]["policy_number"], "P1")
+
+    def test_loan_number_only_csv_is_not_4372_identity(self):
+        spec = get_report_spec("4372")
+        csv_text = "loan_number,account_name\nL1,Acme\n"
+        with self.assertRaises(RuntimeError) as ctx:
+            rf._parse_report_csv(csv_text, spec=spec, fields=None)
+        self.assertIn("missing identity columns", str(ctx.exception))
+        self.assertIn("policy_number", str(ctx.exception))
 
 
 class ExportFailClosedTests(unittest.TestCase):
@@ -215,34 +240,49 @@ class ExportFailClosedTests(unittest.TestCase):
         self.assertTrue(page.visited)
         self.assertIn("looker-reports", page.visited[0])
 
-    def test_saved_filter_not_visible_fails_closed(self):
-        spec = get_report_spec("4372")  # filter_name="ROBIE Intake"
+    def test_look_title_not_visible_fails_closed(self):
+        spec = get_report_spec("4372")
+        self.assertEqual(spec.filter_name, MORTGAGEE_4372_SCOPE_MARKER)
         page = _FakePage(
-            csv_text="loan_number\nL1\n",
-            body_text="some report without the saved filter",
+            csv_text="policy_number\nP1\n",
+            body_text="some report without the look title or ROBIE Intake",
         )
         with durable_temporary_directory() as tmp:
             with self.assertRaises(RuntimeError) as ctx:
                 rf._export_looker_report_csv(
                     page, spec=spec, run=_run(), download_dir=Path(tmp)
                 )
-        self.assertIn("ROBIE Intake", str(ctx.exception))
+        self.assertIn(MORTGAGEE_4372_SCOPE_MARKER, str(ctx.exception))
+        self.assertIn("unfiltered", str(ctx.exception))
 
-    def test_saved_filter_visible_exports_rows(self):
+    def test_robie_intake_alone_is_not_look_4601_scope(self):
         spec = get_report_spec("4372")
         page = _FakePage(
-            csv_text="loan_number,policy_number\nL1,P1\n",
-            body_text="filtered by ROBIE Intake",
+            csv_text="policy_number\nP1\n",
+            body_text="Custom Filter Set: ROBIE Intake",
+        )
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                rf._export_looker_report_csv(
+                    page, spec=spec, run=_run(), download_dir=Path(tmp)
+                )
+        self.assertIn(MORTGAGEE_4372_SCOPE_MARKER, str(ctx.exception))
+
+    def test_look_4601_title_visible_exports_rows(self):
+        spec = get_report_spec("4372")
+        page = _FakePage(
+            csv_text="policy_number,account_name\nP1,Acme\n",
+            body_text=f"Look 4601 — {MORTGAGEE_4372_SCOPE_MARKER}",
         )
         with durable_temporary_directory() as tmp:
             rows = rf._export_looker_report_csv(
                 page,
                 spec=spec,
-                run=_run(fields=["loan_number"]),
+                run=_run(fields=["policy_number"]),
                 download_dir=Path(tmp),
-                fields=["loan_number"],
+                fields=["policy_number"],
             )
-        self.assertEqual(rows, [{"loan_number": "L1"}])
+        self.assertEqual(rows, [{"policy_number": "P1"}])
 
     def test_fields_none_returns_all_exported_columns(self):
         # Regression: the parser must use the CALLER's fields, not start_run()'s
@@ -251,7 +291,7 @@ class ExportFailClosedTests(unittest.TestCase):
         spec = get_report_spec("4372")
         page = _FakePage(
             csv_text="loan_number,policy_number\nL1,P1\n",
-            body_text="filtered by ROBIE Intake",
+            body_text=MORTGAGEE_4372_SCOPE_MARKER,
         )
         with durable_temporary_directory() as tmp:
             rows = rf._export_looker_report_csv(
