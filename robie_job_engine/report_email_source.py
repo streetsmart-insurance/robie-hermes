@@ -102,7 +102,8 @@ COLUMN_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "Department": ("department",),
         "Branch": ("branch",),
         "Task ID": ("task_id",),
-        "Task Due Date": ("expiration_date", "due_date"),
+        "Task Due Date": ("due_date",),
+        "Policy Master ID": ("policy_master_id",),
         "Task Status": ("task_status",),
         "Assigned Producer": ("assigned_agent",),
         "CSR": ("csr",),
@@ -231,8 +232,9 @@ def project_email_rows(
 ) -> list[dict[str, Any]]:
     """Copy validated email rows and add worker snake_case aliases.
 
-    Dedupes on :func:`gmail_report_ingestion.identity_value` (Policy Number
-    for 4246/4247/4372). First row wins. Does not invent missing values.
+    Dedupes on :func:`gmail_report_ingestion.identity_value` for 4246/4247.
+    4372 keeps task rows so its worker can exclude Closed before grouping
+    policy work. Does not invent missing values.
     """
     report_id = str(report_id).strip()
     aliases = COLUMN_ALIASES.get(report_id, {})
@@ -244,7 +246,10 @@ def project_email_rows(
     seen: set[str] = set()
     for raw in working:
         key = ing.identity_value(report_id, raw)
-        if key in seen:
+        # 4372 is a task report: a Closed row must not hide a later Open
+        # task for the same policy. Its worker excludes closed tasks before
+        # grouping the remaining policy work.
+        if key in seen and report_id != "4372":
             continue
         seen.add(key)
         row: dict[str, Any] = dict(raw)

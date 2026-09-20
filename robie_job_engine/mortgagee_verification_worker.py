@@ -4,7 +4,8 @@ Builds on the Home/Flood renewal mortgagee SOP (``.agents/skills/`` SOP;
 rebuild brief sections 2.3/3.3). The worker:
 
 1. Fetches EZLynx report 4372 (Home Flood Renewal Queue - ROBIE) rows.
-2. Filters LOB in {Homeowners, Flood}; buckets by days-to-expiration:
+2. Excludes closed tasks, resolves policy metadata, and filters property LOBs
+   (Homeowners, Flood, Dwelling Fire, Condo); buckets by actual expiration:
    >45d waits, 30-45d is the work window, <30d is an overdue exception.
 3. Enforces the PRODUCER GATE: nothing is ever sent to a lender without a
    recorded ``producer_review_complete`` for that policy.
@@ -39,6 +40,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
+from .mortgagee_policy_scope import (
+    PROPERTY_LOBS, PolicyScopeUnavailable, default_policy_lookup, field,
+    normalize_lob, resolve_policy_metadata,
+)
 
 # ---------------------------------------------------------------------------
 # Imports provided by sibling agents (fail-closed when unavailable).
@@ -50,7 +55,7 @@ try:  # Sibling-built report row fetcher; exact signature per contract.
 except ImportError:  # pragma: no cover - sibling module not yet landed
     _REPORT_FETCHER_AVAILABLE = False
 
-    def fetch_report_rows(*, report_id, fields=None, filters=None, db_path=None, session=None):  # type: ignore
+    def fetch_report_rows(*, report_id, fields=None, filters=None, db_path=None, session=None, source=None):  # type: ignore
         raise NotImplementedError(
             "report_fetcher.fetch_report_rows is not yet installed; "
             "mortgagee_verification cannot fetch report 4372"
@@ -102,7 +107,7 @@ WORKER_NAME = "mortgagee-verification"
 DURABLE_NAMESPACE = "mortgagee_verification"
 REPORT_ID_4372 = "4372"
 
-ALLOWED_LOBS = {"Homeowners", "Flood"}
+ALLOWED_LOBS = PROPERTY_LOBS
 WINDOW_MIN_DAYS = 30
 WINDOW_MAX_DAYS = 45
 PAYMENT_ESCALATION_DAYS = 20
@@ -1005,8 +1010,9 @@ def _process_row(
 class MortgageeVerificationWorker:
     """Work the 4372 mortgagee queue for job type ``mortgagee_verification``."""
 
-    def __init__(self, store: Any | None = None):
+    def __init__(self, store: Any | None = None, *, policy_lookup: Any = None):
         self._store = store
+        self._policy_lookup = policy_lookup
 
     def _db_path(self, job: dict[str, Any]) -> Optional[str]:
         payload = job.get("payload") or {}
@@ -1023,6 +1029,9 @@ class MortgageeVerificationWorker:
         action = str(job.get("action_type") or JOB_TYPE)
         payload = dict(job.get("payload") or {})
         report_id = str(payload.get("report_id") or REPORT_ID_4372)
+        if report_id != REPORT_ID_4372:
+            return WorkerResult(False, action, {"report_id": report_id},
+                                retryable=False, error="mortgagee worker requires report 4372")
         today = _parse_date(payload.get("as_of")) or date.today()
         db_path = self._db_path(job)
         authorized_actions = payload.get("authorized_actions")
@@ -1034,6 +1043,7 @@ class MortgageeVerificationWorker:
                 filters=None,
                 db_path=db_path,
                 session=payload.get("session"),
+                source="email",
             )
         except Exception as exc:
             return WorkerResult(
@@ -1050,17 +1060,60 @@ class MortgageeVerificationWorker:
         except Exception:
             ledger = None
 
-        in_scope = [
-            r for r in rows
-            if str(r.get("lob") or r.get("line_of_business") or "").strip() in ALLOWED_LOBS
-        ]
-        skipped = len(rows) - len(in_scope)
-
-        outcomes = [
-            _process_row(r, job, ledger, today=today,
-                         authorized_actions=authorized_actions, db_path=db_path)
-            for r in in_scope
-        ]
+        in_scope, outcomes, exclusions = [], [], []
+        skipped = unresolved = 0
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            status = str(row.get("task_status") or row.get("Task Status") or "").strip().casefold()
+            if status == "closed":
+                exclusions.append({"policy_number": _policy_identity(row),
+                                   "task_id": row.get("task_id") or row.get("Task ID"),
+                                   "reason": "task already closed"})
+                continue
+            grouped.setdefault(_policy_identity(row), []).append(row)
+        lookup = self._policy_lookup
+        lookup_error = None
+        for policy_rows in grouped.values():
+            row = dict(policy_rows[0])
+            try:
+                identities = {(field(r, "applicant_id", "Applicant ID"),
+                               field(r, "policy_master_id", "Policy Master ID"))
+                              for r in policy_rows}
+                if len(identities) != 1:
+                    raise PolicyScopeUnavailable("conflicting queue policy identities")
+                email_row = row.get("_fetch_source") == "gmail_email_csv"
+                if email_row and any(str(r.get("task_status") or r.get("Task Status") or "").strip().casefold() != "open"
+                                     for r in policy_rows):
+                    raise PolicyScopeUnavailable("task status is not confirmed Open")
+                if email_row or not (row.get("lob") or row.get("line_of_business")):
+                    if lookup is None and lookup_error is None:
+                        try:
+                            lookup = default_policy_lookup()
+                        except Exception as exc:
+                            lookup_error = f"PolicyApi client unavailable ({type(exc).__name__})"
+                    if lookup_error:
+                        raise PolicyScopeUnavailable(lookup_error)
+                    row.update(resolve_policy_metadata(row, lookup))
+                lob = normalize_lob(row.get("lob") or row.get("line_of_business"))
+                if lob is None:
+                    raise PolicyScopeUnavailable("policy LOB missing or unrecognized")
+                if lob not in ALLOWED_LOBS:
+                    skipped += 1
+                    continue
+                row["lob"] = lob
+                in_scope.append(row)
+                outcome = _process_row(row, job, ledger, today=today,
+                                       authorized_actions=authorized_actions, db_path=db_path)
+                if row.get("_policy_scope_evidence"):
+                    outcome.setdefault("evidence", {})["policy_scope"] = row["_policy_scope_evidence"]
+                outcomes.append(outcome)
+            except PolicyScopeUnavailable as exc:
+                unresolved += 1
+                outcomes.append(_outcome_dict(
+                    row, status="not_done", waiting_on="csr",
+                    reason=f"policy scope unresolved: {exc}",
+                    actions_taken=["policy_scope_blocked"],
+                ))
         recorded = record_outcomes(job, outcomes, db_path=db_path)
 
         counts: dict[str, int] = {}
@@ -1076,11 +1129,14 @@ class MortgageeVerificationWorker:
                 "row_count": len(rows),
                 "in_scope_count": len(in_scope),
                 "skipped_lob": skipped,
+                "skipped_closed": len(exclusions),
+                "unresolved_scope": unresolved,
             },
             {
                 "report_id": report_id,
                 "policy_outcomes": recorded,
                 "counts": counts,
+                "excluded_tasks": exclusions,
                 "idempotency_key": idempotency_key,
             },
             retryable=False,
@@ -1226,6 +1282,13 @@ class MortgageeVerificationVerifier:
         delivered_checked = 0
         if not outcomes:
             problems.append("no per-policy outcomes in the action checkpoint")
+        scope = checkpoint.get("destination") or {}
+        if "in_scope_count" in scope and not scope["in_scope_count"]:
+            problems.append("no in-scope policy work; empty queues do not prove this worker")
+        if scope.get("unresolved_scope") or any(
+            "policy_scope_blocked" in (o.get("actions_taken") or []) for o in outcomes
+        ):
+            problems.append("unresolved policy scope requires authoritative metadata")
 
         for outcome in outcomes:
             checked += 1

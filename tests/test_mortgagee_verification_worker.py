@@ -28,8 +28,9 @@ if str(REPO_ROOT) not in sys.path:
 _FAKE_ROWS: list[dict] = []
 _AUTHORIZED: dict[str, bool] = {}
 
-def _fake_fetch_report_rows(*, report_id, fields=None, filters=None, db_path=None, session=None):
+def _fake_fetch_report_rows(*, report_id, fields=None, filters=None, db_path=None, session=None, source=None):
     assert report_id == "4372"
+    assert source == "email"
     return [dict(r) for r in _FAKE_ROWS]
 
 @dataclass
@@ -496,6 +497,19 @@ def _seed_durable(db_path, key, state):
     ledger = _ledger_for_job({"payload": {"jobs_db_path": db_path}})
     _merge_policy_state(ledger, key, state)
 
+def _verify_persisted(job, outcomes):
+    """Exercise the real independent read, not a worker-supplied snapshot."""
+    from robie_job_engine.store import JobStore
+    from robie_job_engine.idempotency import DurableWorkLedger
+    store = JobStore(job["payload"]["jobs_db_path"])
+    DurableWorkLedger(store.path)
+    persisted = store.create_job("mortgagee_verification", job["payload"],
+                                 idempotency_key="verifier-fixture")
+    job = {**job, "id": persisted["id"]}
+    action = _action_for(outcomes)
+    store.checkpoint(job["id"], "action", action)
+    return MortgageeVerificationVerifier(store=store).verify(job, action)
+
 class TestVerifier:
     def test_verifies_clean_outcomes(self, job, durable_db):
         outcomes = [{
@@ -504,7 +518,7 @@ class TestVerifier:
             "evidence": {}, "updated_at": "2026-09-10T00:00:00Z",
         }]
         job["payload"]["jobs_db_path"] = durable_db
-        result = MortgageeVerificationVerifier().verify(job, _action_for(outcomes))
+        result = _verify_persisted(job, outcomes)
         assert result.verified is True, result.error
 
     def test_catches_delivery_without_producer_clearance(self, job, durable_db):
@@ -520,7 +534,7 @@ class TestVerifier:
             "updated_at": "2026-09-10T00:00:00Z",
         }]
         job["payload"]["jobs_db_path"] = durable_db
-        result = MortgageeVerificationVerifier().verify(job, _action_for(outcomes))
+        result = _verify_persisted(job, outcomes)
         assert result.verified is False
         assert "producer_review_complete" in (result.error or "")
 
@@ -537,7 +551,7 @@ class TestVerifier:
             "updated_at": "2026-09-10T00:00:00Z",
         }]
         job["payload"]["jobs_db_path"] = durable_db
-        result = MortgageeVerificationVerifier().verify(job, _action_for(outcomes))
+        result = _verify_persisted(job, outcomes)
         assert result.verified is True, result.error
 
     def test_done_without_evidence_fails(self, job, durable_db):
@@ -547,7 +561,7 @@ class TestVerifier:
             "evidence": {}, "updated_at": "2026-09-10T00:00:00Z",
         }]
         job["payload"]["jobs_db_path"] = durable_db
-        result = MortgageeVerificationVerifier().verify(job, _action_for(outcomes))
+        result = _verify_persisted(job, outcomes)
         assert result.verified is False
         assert "evidence" in (result.error or "")
 
@@ -558,7 +572,7 @@ class TestVerifier:
             "evidence": {}, "updated_at": "2026-09-10T00:00:00Z",
         }]
         job["payload"]["jobs_db_path"] = durable_db
-        result = MortgageeVerificationVerifier().verify(job, _action_for(outcomes))
+        result = _verify_persisted(job, outcomes)
         assert result.verified is False
 
     def test_invalid_status_fails(self, job, durable_db):
@@ -568,7 +582,7 @@ class TestVerifier:
             "evidence": {}, "updated_at": "2026-09-10T00:00:00Z",
         }]
         job["payload"]["jobs_db_path"] = durable_db
-        result = MortgageeVerificationVerifier().verify(job, _action_for(outcomes))
+        result = _verify_persisted(job, outcomes)
         assert result.verified is False
 
 # ---------------------------------------------------------------------------
