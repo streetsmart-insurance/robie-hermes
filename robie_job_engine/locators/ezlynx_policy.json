@@ -982,6 +982,26 @@
       "exact": true,
       "description": "Save discussion note button",
       "last_updated": "2026-08-29"
+    },
+    "tab_additional_interest": {
+      "name": "tab_additional_interest",
+      "primary_strategy": "role",
+      "primary_selector": "tab:Additional Interests",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Additional Interest",
+      "exact": true,
+      "description": "FormEntry / policy Additional Interests tab (read-only mortgagee table)",
+      "last_updated": "2026-09-19"
+    },
+    "additional_interests_table": {
+      "name": "additional_interests_table",
+      "primary_strategy": "role",
+      "primary_selector": "table:Additional Interests",
+      "fallback_strategy": "css",
+      "fallback_selector": "table[aria-label='Additional Interests']",
+      "exact": true,
+      "description": "Structured Additional Interests table. Never positional .first. Score headers in JS.",
+      "last_updated": "2026-09-19"
     }
   }
 }

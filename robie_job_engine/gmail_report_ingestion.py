@@ -254,7 +254,9 @@ SCHEMA_VERIFIED: dict[str, bool] = {
 # day to day. Rows sharing one Policy Number are linked as a single
 # work item — EXCEPT 4359, where Carlo decided every request is worked:
 # 4359 identity is composite (see identity_value).
-# Mortgagee lender is NOT in the export — manual worker enrichment.
+# Mortgagee lender is NOT in the export — see mortgagee_enrichment
+# (DocumentApi + structured fields, then Additional Interests table
+# read on API miss; never invent / never PDF-scrape).
 IDENTITY_COLUMNS: dict[str, str] = {
     "4247": "Policy Number",
     "4246": "Policy Number",
