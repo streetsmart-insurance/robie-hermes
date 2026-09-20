@@ -52,6 +52,28 @@ jobs:
           test "${host}" = "streetsmart-accountability-prod"
           echo "ssh_hostname_verified=true"
 
+      - name: Capture the latest redacted runtime failure first
+        if: always()
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo bash -s" <<'REMOTE_EOF' \
+            | tee "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          set -u
+          redact() {
+            sed -E \
+              -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[redacted-email]/g' \
+              -e 's/(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g' \
+              -e 's/[0-9]{7,}/[redacted-number]/g'
+          }
+          echo "latest_daily_log_begin"
+          tail -n 500 /opt/streetsmart-daily-accountability/data/logs/daily_run.log 2>&1 | redact
+          echo "latest_daily_log_end"
+          echo "recent_service_journal_begin"
+          journalctl -u streetsmart-accountability.service --since "2 days ago" --no-pager 2>&1 | tail -300 | redact
+          echo "recent_service_journal_end"
+          REMOTE_EOF
+
       - name: Verify reusable Magellan session without delivery
         run: |
           set -euo pipefail
@@ -69,7 +91,7 @@ jobs:
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
