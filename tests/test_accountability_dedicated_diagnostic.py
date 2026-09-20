@@ -20,3 +20,17 @@ def test_dedicated_accountability_diagnostic_is_read_only_and_host_locked():
     assert "systemctl enable" not in text
     assert "gmail" not in text.casefold()
     assert "secrets versions access" not in text
+
+
+def test_dedicated_auth_checks_run_independently_and_preserve_evidence():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for step_name in (
+        "Verify reusable Magellan session without delivery",
+        "Verify reusable EZLynx Submission Center session without delivery",
+        "Capture DWD identity mapping and redacted failure tracebacks",
+        "Read timer, runtime, and last-success metadata",
+    ):
+        step = text.index(f"- name: {step_name}")
+        run = text.index("        run: |", step)
+        assert "        if: always()" in text[step:run]
+

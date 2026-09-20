@@ -120,6 +120,7 @@ jobs:
           PYEOF
 
       - name: Verify reusable Magellan session without delivery
+        if: always()
         run: |
           set -euo pipefail
           script_path=scripts/preflight_dedicated_accountability_magellan.py
@@ -141,6 +142,7 @@ jobs:
           REMOTE_EOF
 
       - name: Verify reusable EZLynx Submission Center session without delivery
+        if: always()
         run: |
           set -euo pipefail
           script_path=scripts/preflight_dedicated_accountability_submission.py
@@ -162,6 +164,7 @@ jobs:
           REMOTE_EOF
 
       - name: Capture DWD identity mapping and redacted failure tracebacks
+        if: always()
         run: |
           set -euo pipefail
           attached="$(gcloud compute instances describe "${PRODUCTION_VM}" \
@@ -200,6 +203,7 @@ jobs:
           REMOTE_EOF
 
       - name: Read timer, runtime, and last-success metadata
+        if: always()
         run: |
           set -euo pipefail
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
