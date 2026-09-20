@@ -324,6 +324,21 @@ class ExportFailClosedTests(unittest.TestCase):
         self.assertEqual(rows, [{"policy_number": "P1"}])
         self.assertTrue(any("/report/4601" in url for url in page.visited))
 
+    def test_fields_none_returns_all_exported_columns(self):
+        # Regression: the parser must use the CALLER's fields, not start_run()'s
+        # resolved fields (identity fields only when omitted); otherwise every
+        # non-identity column would be silently dropped.
+        spec = get_report_spec("4372")
+        page = _FakePage(
+            csv_text="loan_number,policy_number\nL1,P1\n",
+            body_text=MORTGAGEE_4372_SCOPE_MARKER,
+        )
+        with durable_temporary_directory() as tmp:
+            rows = rf._export_looker_report_csv(
+                page, spec=spec, run=_run(), download_dir=Path(tmp), fields=None
+            )
+        self.assertEqual(rows, [{"loan_number": "L1", "policy_number": "P1"}])
+
 
 class LookIdMapTests(unittest.TestCase):
     def test_4372_maps_to_look_4601(self):
@@ -399,21 +414,6 @@ class LookIdMapTests(unittest.TestCase):
                 )
         self.assertIn("saved-report link for 4247", str(ctx.exception))
         self.assertIn("found 0", str(ctx.exception))
-
-    def test_fields_none_returns_all_exported_columns(self):
-        # Regression: the parser must use the CALLER's fields, not start_run()'s
-        # resolved fields (identity fields only when omitted); otherwise every
-        # non-identity column would be silently dropped.
-        spec = get_report_spec("4372")
-        page = _FakePage(
-            csv_text="loan_number,policy_number\nL1,P1\n",
-            body_text=MORTGAGEE_4372_SCOPE_MARKER,
-        )
-        with durable_temporary_directory() as tmp:
-            rows = rf._export_looker_report_csv(
-                page, spec=spec, run=_run(), download_dir=Path(tmp), fields=None
-            )
-        self.assertEqual(rows, [{"loan_number": "L1", "policy_number": "P1"}])
 
 
 if __name__ == "__main__":
