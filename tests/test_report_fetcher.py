@@ -22,6 +22,7 @@ rf = ensure_real_module("robie_job_engine.report_fetcher")
 from durable_temp import durable_temporary_directory
 
 from robie_job_engine.report_registry import (
+    LOOK_ID_BY_REPORT,
     MORTGAGEE_4372_SCOPE_MARKER,
     ReportRegistryError,
     get_report_spec,
@@ -86,20 +87,58 @@ class _FakePage:
         self.csv_text = csv_text
         self.body_text = body_text
         self.visited = []
+        self.locators_seen = []
+        self.url = ""
 
     def goto(self, url, **kwargs):
         self.visited.append(url)
+        self.url = url
 
     def locator(self, selector):
+        self.locators_seen.append(selector)
         if selector == "body":
             return _FakeLocator(text=self.body_text)
         return _FakeLocator(count=1)
+
+    def get_by_text(self, text, exact=False):
+        self.locators_seen.append(f"get_by_text:{text}")
+        return self.locator(f"text={text}")
 
     def expect_download(self, timeout=None):
         return _FakeDownloadCtx(self.csv_text)
 
     def wait_for_load_state(self, *args, **kwargs):
         return None
+
+
+class _HubWithZeroSavedReport4372(_FakePage):
+    """Hub that has 0 saved-report links for 4372 — the live Test miss."""
+
+    def locator(self, selector):
+        self.locators_seen.append(selector)
+        if selector == "body":
+            return _FakeLocator(text=self.body_text)
+        if "4372" in selector and "4601" not in selector:
+            return _FakeLocator(count=0)
+        return _FakeLocator(count=1)
+
+
+class _ZeroLook4601(_FakePage):
+    """Look 4601 / title is not uniquely present after navigation."""
+
+    def locator(self, selector):
+        self.locators_seen.append(selector)
+        if selector == "body":
+            return _FakeLocator(text=self.body_text)
+        if "4601" in selector or MORTGAGEE_4372_SCOPE_MARKER in selector:
+            return _FakeLocator(count=0)
+        return _FakeLocator(count=1)
+
+    def get_by_text(self, text, exact=False):
+        self.locators_seen.append(f"get_by_text:{text}")
+        if text == MORTGAGEE_4372_SCOPE_MARKER:
+            return _FakeLocator(count=0)
+        return self.locator(f"text={text}")
 
 
 def _run(run_id="run-1", fields=None):
@@ -283,6 +322,83 @@ class ExportFailClosedTests(unittest.TestCase):
                 fields=["policy_number"],
             )
         self.assertEqual(rows, [{"policy_number": "P1"}])
+        self.assertTrue(any("/report/4601" in url for url in page.visited))
+
+
+class LookIdMapTests(unittest.TestCase):
+    def test_4372_maps_to_look_4601(self):
+        self.assertEqual(LOOK_ID_BY_REPORT["4372"], "4601")
+        self.assertEqual(rf.LOOK_ID_BY_REPORT["4372"], "4601")
+        self.assertEqual(get_report_spec("4372").look_id, "4601")
+        self.assertEqual(rf.look_id_for_report("4372"), "4601")
+        self.assertEqual(rf.looker_look_url("4601"), f"{rf.REPORTS_5_BASE_URL}/report/4601")
+        self.assertIn("looker-reports", rf.looker_look_url("4601"))
+
+    def test_unmapped_report_has_no_look_id(self):
+        self.assertNotIn("4247", LOOK_ID_BY_REPORT)
+        self.assertIsNone(get_report_spec("4247").look_id)
+        self.assertIsNone(rf.look_id_for_report("4247"))
+
+    def test_mapped_look_succeeds_when_saved_report_4372_links_are_zero(self):
+        # Live Test miss after #515: hub has 0 href*=4372 links. The map
+        # must open look 4601 instead of raising the saved-report error.
+        spec = get_report_spec("4372")
+        page = _HubWithZeroSavedReport4372(
+            csv_text="policy_number\nP1\n",
+            body_text=MORTGAGEE_4372_SCOPE_MARKER,
+        )
+        with durable_temporary_directory() as tmp:
+            rows = rf._export_looker_report_csv(
+                page, spec=spec, run=_run(), download_dir=Path(tmp), fields=None
+            )
+        self.assertEqual(rows, [{"policy_number": "P1"}])
+        self.assertTrue(any("/report/4601" in url for url in page.visited))
+        saved_report_queries = [
+            selector
+            for selector in page.locators_seen
+            if "4372" in selector and "4601" not in selector
+        ]
+        self.assertEqual(
+            saved_report_queries,
+            [],
+            "mapped 4372 must not search the hub for saved-report 4372 links",
+        )
+
+    def test_mapped_look_zero_title_matches_fails_closed(self):
+        spec = get_report_spec("4372")
+        page = _ZeroLook4601(
+            csv_text="policy_number\nP1\n",
+            body_text="some other Shared look",
+        )
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                rf._export_looker_report_csv(
+                    page, spec=spec, run=_run(), download_dir=Path(tmp)
+                )
+        message = str(ctx.exception)
+        self.assertIn("4601", message)
+        self.assertIn("found 0", message)
+        self.assertIn(MORTGAGEE_4372_SCOPE_MARKER, message)
+        self.assertNotIn("saved-report link for 4372", message)
+
+    def test_unmapped_report_still_fails_on_zero_saved_report_links(self):
+        spec = get_report_spec("4247")
+
+        class _ZeroSaved4247(_FakePage):
+            def locator(self, selector):
+                self.locators_seen.append(selector)
+                if "4247" in selector:
+                    return _FakeLocator(count=0)
+                return super().locator(selector)
+
+        page = _ZeroSaved4247(csv_text="policy_number\nP1\n")
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                rf._export_looker_report_csv(
+                    page, spec=spec, run=_run(), download_dir=Path(tmp)
+                )
+        self.assertIn("saved-report link for 4247", str(ctx.exception))
+        self.assertIn("found 0", str(ctx.exception))
 
     def test_fields_none_returns_all_exported_columns(self):
         # Regression: the parser must use the CALLER's fields, not start_run()'s

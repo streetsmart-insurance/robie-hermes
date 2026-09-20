@@ -11,8 +11,11 @@ workers import. It:
    the error propagates and no browser is touched.
 3. Ensures an authenticated EZLynx session (:func:`ensure_ezlynx_session`;
    fail closed on auth failure), drives the Reports 5.0 Looker UI
-   (https://app.ezlynx.com/web/looker-reports), applies the report's saved
-   filter when one is registered, and exports the rows as CSV.
+   (https://app.ezlynx.com/web/looker-reports). Mapped reports open the
+   Shared Looker look by look id (4372 → look 4601) instead of searching
+   the hub for a saved-report link named or numbered with the report id.
+   Applies the report's saved filter / look title when one is registered,
+   and exports the rows as CSV.
 4. Parses and validates the CSV: every row is keyed by the registry's
    ``identity_fields`` (dedupe key); missing identity columns or missing
    identity values fail closed — rows are never guessed.
@@ -41,6 +44,8 @@ from .ezlynx_session import (
     ensure_ezlynx_session,
 )
 from .report_registry import (
+    LOOK_ID_BY_REPORT,
+    ReportRegistryError,
     ReportRunRegistry,
     ReportSpec,
     get_report_spec,
@@ -95,6 +100,25 @@ def _resolve_db_path(db_path: str | None) -> str:
     return resolved
 
 
+def look_id_for_report(report_id: str) -> str | None:
+    """Return the Shared Looker look id for a registered report, if mapped."""
+    report_id = str(report_id).strip()
+    mapped = str(LOOK_ID_BY_REPORT.get(report_id) or "").strip()
+    if mapped:
+        return mapped
+    try:
+        spec = get_report_spec(report_id)
+    except ReportRegistryError:
+        return None
+    look_id = str(spec.look_id or "").strip()
+    return look_id or None
+
+
+def looker_look_url(look_id: str) -> str:
+    """Reports 5.0 URL for a Shared Looker look (Test-proven ``/report/{id}``)."""
+    return f"{REPORTS_5_BASE_URL.rstrip('/')}/report/{str(look_id).strip()}"
+
+
 def _unique(locator: Any, description: str) -> Any:
     """Require exactly one match for a read-only locator; fail closed otherwise."""
     count = locator.count()
@@ -104,6 +128,31 @@ def _unique(locator: Any, description: str) -> Any:
             "refusing to drive an ambiguous Looker UI"
         )
     return locator
+
+
+def _look_title_locator(page: Any, title: str) -> Any:
+    """Exact look-title locator. ``get_by_text`` when present; CSS text engine else."""
+    getter = getattr(page, "get_by_text", None)
+    if callable(getter):
+        return getter(title, exact=True)
+    return page.locator(f"text={title}")
+
+
+def _require_unique_mapped_look(page: Any, *, spec: ReportSpec, look_id: str) -> None:
+    """Fail closed unless look ``look_id`` / registered title is uniquely present."""
+    title = str(spec.filter_name or "").strip()
+    current_url = str(getattr(page, "url", "") or "")
+    if look_id not in current_url:
+        raise RuntimeError(
+            f"expected exactly one look {look_id} for report {spec.report_id}, "
+            f"found 0 (opened {current_url!r}); refusing to drive an ambiguous Looker UI"
+        )
+    if not title:
+        return
+    _unique(
+        _look_title_locator(page, title),
+        f"look {look_id} title {title!r}",
+    )
 
 
 def _page_of(browser: Any) -> Any:
@@ -198,27 +247,43 @@ def _export_looker_report_csv(
     failure. Never returns guessed rows.
     """
     report_id = spec.report_id
-    try:
-        page.goto(REPORTS_5_BASE_URL, wait_until="domcontentloaded", timeout=60_000)
-    except Exception as exc:
-        raise RuntimeError(
-            f"report {report_id}: failed to open Reports 5.0 hub "
-            f"{REPORTS_5_BASE_URL}: {type(exc).__name__}: {exc}"
-        ) from exc
+    look_id = look_id_for_report(report_id)
+    if look_id:
+        # Shared Looker look: open by look id. Do not search the hub for a
+        # saved-report link named/numbered with the EZLynx report id (4372
+        # is look 4601; SSRobie Saved Reports has zero href*=4372 links).
+        look_url = looker_look_url(look_id)
+        try:
+            page.goto(look_url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: failed to open Looker look {look_id} at "
+                f"{look_url}: {type(exc).__name__}: {exc}"
+            ) from exc
+        _require_unique_mapped_look(page, spec=spec, look_id=look_id)
+    else:
+        try:
+            page.goto(REPORTS_5_BASE_URL, wait_until="domcontentloaded", timeout=60_000)
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: failed to open Reports 5.0 hub "
+                f"{REPORTS_5_BASE_URL}: {type(exc).__name__}: {exc}"
+            ) from exc
 
-    # Open the saved report by id. DOM refinement: verify selectors on Test.
-    entry = _unique(
-        page.locator(f"a[href*='{report_id}'], [data-report-id='{report_id}']"),
-        f"saved-report link for {report_id}",
-    )
-    try:
-        entry.click()
-        page.wait_for_load_state("domcontentloaded", timeout=30_000)
-    except Exception as exc:
-        raise RuntimeError(
-            f"report {report_id}: failed to open the saved report: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
+        # Open the saved report by id. DOM refinement: verify selectors on Test.
+        entry = _unique(
+            page.locator(f"a[href*='{report_id}'], [data-report-id='{report_id}']"),
+            f"saved-report link for {report_id}",
+        )
+        try:
+            entry.click()
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception as exc:
+            raise RuntimeError(
+                f"report {report_id}: failed to open the saved report: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     result_rows = page.locator("table tbody tr, [role='row']")
     try:
