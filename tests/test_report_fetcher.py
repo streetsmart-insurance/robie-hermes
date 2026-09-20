@@ -481,6 +481,22 @@ def _row4360(status="Active"):
 class EmailCsvLiveFetchTests(unittest.TestCase):
     """4246/4247 live fetch prefers robie@ morning CSVs over Looker favorites."""
 
+    def test_production_defaults_read_gmail_without_injected_csv_or_service(self):
+        from robie_job_engine import report_email_source as email_source
+        from tests.test_report_email_source import FakeScheduledReportGmail, DAY, NOW
+        for report_id, row in (("4247", _row4247()), ("4246", _row4360())):
+            service = FakeScheduledReportGmail(
+                csv_bytes=_email_csv(report_id, [row]),
+                filename="ROBIE_daily_CSV_2026-09-20T0600.csv", received_at=NOW)
+            with self.subTest(report_id=report_id), durable_temporary_directory() as tmp, \
+                 unittest.mock.patch.dict("os.environ", {"ROBIE_ENV": "PRODUCTION"}), \
+                 unittest.mock.patch.object(email_source, "build_default_gmail_service", return_value=service) as factory, \
+                 unittest.mock.patch.object(rf, "_looker_fetch_report_rows", side_effect=AssertionError("Looker touched")):
+                rows = rf.fetch_report_rows(report_id=report_id, db_path=f"{tmp}/jobs.db", day=DAY, now=NOW)
+                factory.assert_called_once_with()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["_fetch_source"], "gmail_email_csv")
+
     def test_4247_email_csv_succeeds_without_touching_looker(self):
         class _ZeroSaved4247(_FakePage):
             def locator(self, selector):
@@ -611,4 +627,3 @@ class EmailCsvLiveFetchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

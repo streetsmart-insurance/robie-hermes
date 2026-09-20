@@ -4,6 +4,14 @@
   "maintain": "Add a named scenario the same day a NEW Production failure mode is found. Do not mark the incident closed until the scenario id exists in the battery. Update this list when a deploy or HITL shows a new class.",
   "incidents": [
     {
+      "id": "4372-email-empty-lob-20260920",
+      "class": "mortgagee-email-scope",
+      "new_failure_mode": true,
+      "scenario": "mortgagee:email-metadata-before-lob",
+      "closed": false,
+      "note": "4372 task CSV has no LOB or policy expiration. Exclude Closed before policy grouping, resolve identity-matched metadata before LOB, and never use task due as expiration. Three live Test audits remain required; offline regression is not deployment proof."
+    },
+    {
       "id": "bd5b832e-browser-tool-discovery",
       "class": "browser-tool-visibility",
       "new_failure_mode": true,

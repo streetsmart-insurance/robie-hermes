@@ -179,6 +179,7 @@ HITL_BLOCKER = (
 
 NAMED_SCENARIO_IDS = frozenset(
     {
+        "mortgagee:email-metadata-before-lob",
         "same-day:named-scenario-before-close",
         "message-intake:queue-during-active-work",
         "hitl-resume:re-lease-after-gateway-restart",
@@ -1341,6 +1342,71 @@ def run_message_intake_scenario(*, work_dir: Path) -> dict[str, Any]:
             runs.terminate(active["id"], "COMPLETE")
 
 
+def run_mortgagee_email_scope_scenario(*, work_dir: Path) -> dict[str, Any]:
+    # Legacy worker test modules install sibling fakes during discovery.
+    # A fresh interpreter proves the real shared-module persistence contract.
+    import subprocess
+    import sys
+    scenario = "mortgagee:email-metadata-before-lob"
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "from robie_job_engine.regression_scenarios import _mortgagee_email_scope_isolated; "
+        "print(json.dumps(_mortgagee_email_scope_isolated(work_dir=Path(sys.argv[1]))))"
+    )
+    try:
+        result = subprocess.run([sys.executable, "-c", code, str(work_dir.resolve())],
+                                capture_output=True, text=True, timeout=30, check=True)
+        return json.loads(result.stdout)
+    except Exception as exc:
+        return _fail(scenario, f"isolated scenario failed: {type(exc).__name__}")
+
+
+def _mortgagee_email_scope_isolated(*, work_dir: Path) -> dict[str, Any]:
+    """Exercise the real worker and durable outcome path with offline reads."""
+    from . import mortgagee_verification_worker as worker
+    from .report_email_source import project_email_rows
+
+    scenario = "mortgagee:email-metadata-before-lob"
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        store = JobStore(work_dir / "jobs.db")
+        job = store.create_job("mortgagee_verification", {
+            "as_of": "2026-09-20", "voice_enabled": False,
+            "authorized_actions": [], "jobs_db_path": store.path,
+        }, idempotency_key="mortgagee-scope-regression")
+        raw = {"Policy Number": "TEST-SCOPE", "Applicant ID": "TEST-A",
+               "Policy Master ID": "TEST-M", "Task Due Date": "01/01/2025"}
+        rows = project_email_rows("4372", [
+            {**raw, "Task Status": "Closed", "Task ID": "CLOSED"},
+            {**raw, "Task Status": "Open", "Task ID": "OPEN"},
+        ])
+
+        class Lookup:
+            def search_policy_by_number(self, number):
+                assert number == "TEST-SCOPE"
+                return {"data": [{"policyNumber": number, "applicantId": "TEST-A",
+                                  "policyMasterId": "TEST-M", "lineOfBusiness": "Flood",
+                                  "expirationDate": "2026-10-30"}]}
+
+        with patch.object(worker, "fetch_report_rows", return_value=rows) as fetch:
+            result = worker.MortgageeVerificationWorker(store, policy_lookup=Lookup()).perform(
+                job, idempotency_key="mortgagee-scope-regression")
+        assert fetch.call_args.kwargs["source"] == "email"
+        assert result.destination["skipped_closed"] == 1
+        assert result.destination["in_scope_count"] == 1
+        assert result.destination["skipped_lob"] == 0
+        outcome, = result.detail["policy_outcomes"]
+        assert outcome["status"] == "pending"
+        assert outcome["evidence"]["policy_scope"]["lob"] == "Flood"
+        assert "retrieval_intent_recorded" in outcome["actions_taken"]
+        saved = store.get_checkpoint(job["id"], "action")
+        assert saved["detail"]["policies"][0]["policy_number"] == "TEST-SCOPE"
+        return _result(scenario, ok=True, outcome="PASS",
+                       evidence="Closed task excluded; open Flood resolved by identity; true expiration used; outcome persisted; no outreach")
+    except Exception as exc:
+        return _fail(scenario, f"{type(exc).__name__}: {exc}")
+
+
 def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
     """Same-day catalog + HITL resume + false-success + Ascend audit. Isolated only."""
     if is_live_hermes_path(work_dir):
@@ -1348,6 +1414,7 @@ def run_named_scenarios(*, work_dir: Path) -> list[dict[str, Any]]:
             f"refusing named scenarios on live Hermes path: {work_dir}"
         )
     results = [run_same_day_scenario_rule()]
+    results.append(run_mortgagee_email_scope_scenario(work_dir=work_dir / "mortgagee-scope"))
     results.append(run_message_intake_scenario(work_dir=work_dir / "message-intake"))
     results.extend(run_hitl_resume_scenarios(work_dir=work_dir / "hitl"))
     results.append(run_false_success_scenario(work_dir=work_dir / "false-success"))
