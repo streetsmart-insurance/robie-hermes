@@ -133,10 +133,21 @@ except Exception as exc:  # noqa: BLE001 — surface any CDP failure
 pages = [t for t in tabs if isinstance(t, dict) and t.get("type") == "page"]
 eligible = [t for t in pages if "ezlynx.com" in str(t.get("url") or "").casefold()]
 if len(eligible) != 1:
+    blank_only = pages and all(
+        str(t.get("url") or "").casefold() in {"about:blank", "about:blank/", ""}
+        for t in pages
+    )
+    detail = (
+        "CDP shows only about:blank — Test Chrome has no EZLynx tab. "
+        if blank_only
+        else ""
+    )
     errors.append(
-        "expected exactly one EZLynx page tab for JE-KILL; "
-        f"observed {len(eligible)}. Carlo: authenticate Test Chrome to "
-        "app.ezlynx.com/web/ (not login)."
+        "CDP AUTHENTICATED required: expected exactly one EZLynx page tab "
+        f"for JE-KILL; observed {len(eligible)}. {detail}"
+        "Carlo/Dusty: login SSRobie on hermes-test-01 "
+        "(robie-ezlynx-browser-test) to app.ezlynx.com/web/ (not login) "
+        "and leave one authenticated tab open."
     )
 elif True:
     url = str(eligible[0].get("url") or "").casefold()

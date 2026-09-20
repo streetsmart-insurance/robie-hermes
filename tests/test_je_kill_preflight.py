@@ -101,6 +101,12 @@ class JeKillPreflightTests(unittest.TestCase):
         self.assertTrue(any("CDP AUTHENTICATED required" in e for e in errors))
         self.assertTrue(any("login page" in e for e in errors))
 
+    def test_about_blank_blocks_with_clear_line(self):
+        errors = ezlynx_auth_tab_errors(
+            [{"type": "page", "url": "about:blank", "title": ""}]
+        )
+        self.assertTrue(any("about:blank" in e for e in errors))
+
     def test_authenticated_tab_passes(self):
         tabs = [
             {

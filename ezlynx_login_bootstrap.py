@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CDP_URL = "http://127.0.0.1:9222"
-TOKEN_PATH = Path("/opt/streetsmart-hermes/.hermes/robie_google_token.json")
+DEFAULT_TOKEN_PATH = Path("/opt/streetsmart-hermes/.hermes/robie_google_token.json")
 EXPECTED_MAILBOX = "robie@streetsmart.insurance"
 OTP_PATTERNS = (
     re.compile(r"(?:verification|security|authentication|one[- ]time)\s+code\D{0,40}(\d{6})", re.I),
@@ -18,6 +18,26 @@ AUTHENTICATED_APP_PREFIX = "https://app.ezlynx.com/web/"
 SUBMISSION_URL = "https://app.ezlynx.com/web/submission-center/overview/submissions"
 LOGIN_CONTROL_SELECTOR = "#txtUserName, #txtPassword, #btnLogin"
 INTERNAL_WEB_LINK_SELECTOR = 'a[href^="/web/"], a[href*="app.ezlynx.com/web/"]'
+
+
+def gmail_token_path() -> Path:
+    """Resolve the Robie Gmail OAuth token for this environment.
+
+    Production default remains ``/opt/streetsmart-hermes/.hermes/…``.
+    Test must use ``HERMES_HOME`` / ``ROBIE_OPT_ROOT`` (``…-test/.hermes``);
+    a hardcoded Prod path made Test login always report
+    ``ROBIE_MAILBOX_AUTH_REQUIRED`` even when a Test token exists.
+    """
+    explicit = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
+    if explicit:
+        return Path(explicit)
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return Path(hermes_home) / "robie_google_token.json"
+    opt_root = os.environ.get("ROBIE_OPT_ROOT", "").strip()
+    if opt_root:
+        return Path(opt_root) / ".hermes" / "robie_google_token.json"
+    return DEFAULT_TOKEN_PATH
 
 
 def secret(name: str) -> str:
@@ -76,7 +96,7 @@ def build_legacy_mailbox_service():
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
+    creds = Credentials.from_authorized_user_file(str(gmail_token_path()))
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
     return build("gmail", "v1", credentials=creds, cache_discovery=False)

@@ -124,10 +124,22 @@ def ezlynx_auth_tab_errors(tabs: list[dict[str, Any]]) -> list[str]:
         if "ezlynx.com" in str(t.get("url") or "").casefold()
     ]
     if len(eligible) != 1:
+        page_urls = [str(t.get("url") or "") for t in pages[:5]]
+        blank_only = pages and all(
+            str(t.get("url") or "").casefold() in {"about:blank", "about:blank/", ""}
+            for t in pages
+        )
+        detail = (
+            "CDP shows only about:blank — Test Chrome has no EZLynx tab. "
+            if blank_only
+            else f"observed URLs sample={page_urls}. "
+        )
         return [
-            "expected exactly one EZLynx page tab for JE-KILL; "
-            f"observed {len(eligible)}. Carlo: authenticate Test Chrome "
-            "(robie-ezlynx-browser-test) to app.ezlynx.com/web/ (not login)."
+            "CDP AUTHENTICATED required: expected exactly one EZLynx page tab "
+            f"for JE-KILL; observed {len(eligible)}. {detail}"
+            "Carlo/Dusty: login SSRobie on hermes-test-01 "
+            "(robie-ezlynx-browser-test) to app.ezlynx.com/web/ (not login) "
+            "and leave one authenticated tab open."
         ]
     url = str(eligible[0].get("url") or "").casefold()
     title = str(eligible[0].get("title") or "").casefold()
