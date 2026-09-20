@@ -407,6 +407,45 @@ class PersistentChromeEzlynxPort:
                     pass
                 return
 
+    def _wait_row_label_state(self) -> str:
+        """Settle fixture row to ``labeled`` or ``clean``.
+
+        Live bug: after ``domcontentloaded``, ``applied_label`` can still be 0
+        while the row already shows JE-KILL-01 (so ``Add label`` never appears).
+        Waiting only on Add label then 0-matches forever. Poll applied text,
+        Add label, and the derived edit control together; never guess.
+        """
+        page = self._connect()
+        applied = self._locator(self.scenario.applied_label)
+        add = self._locator(self.scenario.label_control)
+        edit = self._edit_labels_locator(page)
+        deadline = time.monotonic() + max(0.0, LABEL_CONTROL_SETTLE_TIMEOUT_MS / 1000.0)
+        last = (0, 0, 0)
+        while True:
+            applied_n = applied.count()
+            add_n = add.count()
+            edit_n = edit.count()
+            last = (applied_n, add_n, edit_n)
+            if applied_n > 1:
+                raise self._blocked_count("applied label", applied_n)
+            if add_n > 1:
+                raise self._blocked_count("click target", add_n)
+            if edit_n > 1:
+                raise self._blocked_count("edit labels", edit_n)
+            # Label already on row: applied text and/or row edit (Add label gone).
+            if applied_n == 1 or (edit_n == 1 and add_n == 0):
+                return "labeled"
+            if add_n == 1:
+                return "clean"
+            now = time.monotonic()
+            if now >= deadline:
+                raise RuntimeError(
+                    "PLAYWRIGHT_BLOCKED: destination row never settled "
+                    f"(applied={last[0]}, add_label={last[1]}, edit={last[2]}); "
+                    "refuse to guess"
+                )
+            time.sleep(min(UNIQUE_LOCATOR_POLL_INTERVAL_S, deadline - now))
+
     @_on_playwright_thread
     def ensure_clean_destination(self) -> None:
         """Strip leftover fixture label so kill-before-action still attempts work.
@@ -415,20 +454,14 @@ class PersistentChromeEzlynxPort:
         Restart reconcile then returns APPLIED without calling ``perform`` →
         ``action_attempts=0`` and Stage 2 fails closed. Clear via the row Edit
         control + fixture label option + Apply before spawning the kill child.
+        If the row is already unlabeled (Add label present), treat as clean.
         """
         page = self._connect()
         page.goto(self.scenario.action_url, wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
         self._dismiss_blocking_overlays()
-        applied = self._locator(self.scenario.applied_label)
-        if applied.count() == 0:
-            # Table rows settle after domcontentloaded; do not treat a missing
-            # Add-label control as "still labeled" or we click a non-existent edit.
-            self._wait_unique(
-                self._locator(self.scenario.label_control),
-                "click target",
-                LABEL_CONTROL_SETTLE_TIMEOUT_MS,
-            )
+        state = self._wait_row_label_state()
+        if state == "clean":
             return
         edit = self._edit_labels_locator(page)
         self._require_one(edit, "edit labels").click()
@@ -441,17 +474,12 @@ class PersistentChromeEzlynxPort:
         page.reload(wait_until="domcontentloaded", timeout=30_000)
         self._assert_authenticated()
         self._dismiss_blocking_overlays()
-        applied = self._locator(self.scenario.applied_label)
-        if applied.count() != 0:
+        if self._wait_row_label_state() != "clean":
+            applied_n = self._locator(self.scenario.applied_label).count()
             raise RuntimeError(
                 "JE-KILL REFUSED: disposable destination still labeled after clear; "
-                f"applied_label count={applied.count()}"
+                f"applied_label count={applied_n}"
             )
-        self._wait_unique(
-            self._locator(self.scenario.label_control),
-            "click target",
-            LABEL_CONTROL_SETTLE_TIMEOUT_MS,
-        )
 
     def _edit_labels_locator(self, page: Any) -> Any:
         """Row edit control derived from fixture label_control, never invented."""
@@ -694,8 +722,71 @@ def run_phase(fixture_path: Path, fixture: LiveFixture, phase: str, run_root: Pa
     )
     preflight = PersistentChromeEzlynxPort(scenario, cdp_url=cdp_url)
     try:
-        preflight.preflight()
-        preflight.ensure_clean_destination()
+        try:
+            preflight.preflight()
+            preflight.ensure_clean_destination()
+            store.add_playwright_exec(
+                job["id"],
+                "ensure_clean_destination",
+                "ok",
+                code_preview=json.dumps(
+                    {
+                        "label_control": scenario.label_control,
+                        "applied_label": scenario.applied_label,
+                        "action_url": scenario.action_url,
+                    },
+                    sort_keys=True,
+                ),
+                result={
+                    "status": "ok",
+                    "action_url": scenario.action_url,
+                    "phase": phase,
+                    "note": "destination unlabeled; past Add-label 0-match",
+                },
+            )
+        except Exception as exc:
+            # Persist fail-closed evidence into the phase jobs.db so
+            # job_debug_dump shows LAST_ERROR + playwright_exec instead of
+            # an empty PENDING row after a preflight/clean abort.
+            err = str(exc)
+            tool = (
+                "ensure_clean_destination"
+                if "ensure_clean" in err
+                or "click target" in err
+                or "destination row never settled" in err
+                or "PLAYWRIGHT_BLOCKED" in err
+                or "still labeled" in err
+                else "preflight"
+            )
+            try:
+                store.add_playwright_exec(
+                    job["id"],
+                    tool,
+                    "error",
+                    code_preview=json.dumps(
+                        {
+                            "label_control": scenario.label_control,
+                            "applied_label": scenario.applied_label,
+                            "action_url": scenario.action_url,
+                        },
+                        sort_keys=True,
+                    ),
+                    result={
+                        "error": err,
+                        "action_url": scenario.action_url,
+                        "phase": phase,
+                    },
+                )
+                store.transition(
+                    job["id"],
+                    JobStatus.FAILED,
+                    expected={JobStatus.PENDING},
+                    error=err,
+                    release_lease=True,
+                )
+            except Exception:
+                pass
+            raise
     finally:
         preflight.close()
     context = multiprocessing.get_context("spawn")

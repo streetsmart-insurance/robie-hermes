@@ -671,6 +671,7 @@ class _DirtyFixturePage:
         self.clicks: list[str] = []
         self.keyboard = self
         self.settle_add_after_s: float | None = None
+        self.settle_applied_after_s: float | None = None
         self.nav_at: float | None = None
 
     def press(self, key: str) -> None:
@@ -714,11 +715,15 @@ class _DirtyFixturePage:
 
     def locator(self, selector: str):
         sel = str(selector)
-        if "edit" in sel:
-            return _DirtyLocator(self, kind="edit", count=1)
         if "Add label" in sel:
             return _DirtyLocator(
                 self, kind="add", count=0 if self.labeled else 1
+            )
+        if 'button:has-text("edit")' in sel or (
+            "edit" in sel.casefold() and "add label" not in sel.casefold()
+        ):
+            return _DirtyLocator(
+                self, kind="edit", count=1 if self.labeled else 0
             )
         if ":text-is" in sel or "JE-KILL-01" in sel:
             return _DirtyLocator(
@@ -739,6 +744,16 @@ class _DirtyLocator:
 
     def count(self):
         if self.kind == "applied":
+            if not self.page.labeled:
+                return 0
+            delay = self.page.settle_applied_after_s
+            if delay is not None:
+                if self.page.nav_at is None:
+                    return 0
+                if time.monotonic() - self.page.nav_at < delay:
+                    return 0
+            return 1
+        if self.kind == "edit":
             return 1 if self.page.labeled else 0
         if self.kind == "add":
             if self.page.labeled:
@@ -846,13 +861,43 @@ class JeKillEnsureCleanDestinationTests(unittest.TestCase):
         action_clicks = [c for c in page.clicks if not c.startswith("key:")]
         self.assertEqual(action_clicks[:3], ["edit", "option", "apply"])
 
+    def test_ensure_clean_clears_when_applied_text_settles_late_but_edit_present(self):
+        """Live Stage 4 bug: JE-KILL-01 already on row → Add label never appears.
+
+        applied_label can still read 0 right after domcontentloaded while the
+        row edit control is already there. Must clear via edit, not 0-match Add.
+        """
+        scenario = self._scenario_css()
+        page = _DirtyFixturePage()
+        page.labeled = True
+        page.settle_applied_after_s = 10.0  # applied text stays 0 for this test window
+        port = self._port(scenario, page)
+        port.ensure_clean_destination()
+        self.assertFalse(page.labeled)
+        action_clicks = [c for c in page.clicks if not c.startswith("key:")]
+        self.assertEqual(action_clicks[:3], ["edit", "option", "apply"])
+
     def test_run_phase_calls_ensure_clean_before_kill_child(self):
         source = Path("robie_job_engine/je_kill_live.py").read_text(encoding="utf-8")
         self.assertIn("ensure_clean_destination", source)
+        self.assertIn("_wait_row_label_state", source)
         self.assertLess(
             source.index("preflight.ensure_clean_destination()"),
             source.index("context.Process("),
         )
+        # Fail-closed abort must leave dumpable evidence in the phase DB.
+        self.assertIn('store.add_playwright_exec(', source)
+        self.assertIn('JobStatus.FAILED', source)
+        self.assertLess(
+            source.index("preflight.ensure_clean_destination()"),
+            source.index("store.add_playwright_exec("),
+        )
+        self.assertLess(
+            source.index("store.add_playwright_exec("),
+            source.index("context.Process("),
+        )
+        self.assertIn('"ok"', source)
+        self.assertIn("past Add-label 0-match", source)
 
 
 class JeKillLabelControlSettleTests(unittest.TestCase):
