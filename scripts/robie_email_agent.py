@@ -278,6 +278,10 @@ def execute_email_work(sender, subject, body, attachments, thread_id, job_id, db
     """Execute either route only after the Job Engine has claimed this email."""
     from robie_job_engine.store import JobStore
     store = JobStore(db_path)
+    from robie_job_engine.document_upload_reliability import run_document_email
+    document_result = run_document_email(store, job_id, attachments)
+    if document_result is not None:
+        return document_result
     # Check active Ascend sessions for this thread
     sessions = load_ascend_sessions()
     existing_session = sessions.get(thread_id)
