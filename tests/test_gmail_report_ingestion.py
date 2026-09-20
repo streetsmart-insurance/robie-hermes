@@ -35,6 +35,9 @@ class HeaderFingerprintTests(unittest.TestCase):
         with self.assertRaises(ing.GmailReportIngestionError):
             ing.fingerprint_report_id(["Nope", "Unknown", "Headers"])
 
+    def test_missing_email_error_is_distinct_from_schema(self):
+        self.assertTrue(issubclass(ing.GmailReportMissingError, ing.GmailReportIngestionError))
+
 
 class SchemaGateTests(unittest.TestCase):
     def test_4359_gate_is_open_after_2026_09_19_verification(self):

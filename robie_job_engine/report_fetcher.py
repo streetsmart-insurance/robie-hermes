@@ -9,16 +9,20 @@ workers import. It:
 2. Opens a run via ``ReportRunRegistry.start_run()`` — which FAILS CLOSED for
    report 4359 (``schema_verified=False``). The flag is never flipped here;
    the error propagates and no browser is touched.
-3. Ensures an authenticated EZLynx session (:func:`ensure_ezlynx_session`;
-   fail closed on auth failure), drives the Reports 5.0 Looker UI
+3. For email-first report ids (4247 manual renewals, 4246 audits / 4360
+   Active daily feed, 4372 mortgagee) prefers today's ``ROBIE daily CSV``
+   from robie@ via :mod:`robie_job_engine.report_email_source`. Looker
+   saved-report favorites are not the system of record. 4372 may fall back
+   to Shared look 4601 only when the email is missing — never when the CSV
+   is present but stale or the wrong schema.
+4. Other reports still drive the Reports 5.0 Looker UI
    (https://app.ezlynx.com/web/looker-reports). Mapped reports open the
    Shared Looker look by look id (4372 → look 4601) instead of searching
    the hub for a saved-report link named or numbered with the report id.
-   Applies the report's saved filter / look title when one is registered,
-   and exports the rows as CSV.
-4. Parses and validates the CSV: every row is keyed by the registry's
-   ``identity_fields`` (dedupe key); missing identity columns or missing
-   identity values fail closed — rows are never guessed.
+5. Parses and validates the CSV: email path uses the Gmail header
+   fingerprint; Looker path keys rows by the registry ``identity_fields``.
+   Missing identity columns or missing identity values fail closed — rows
+   are never guessed.
 
 The Playwright driving below follows the proven ``ezlynx_reports_crawler.py``
 pattern (CDP-attached persistent Chrome, ``expect_download`` export). DOM
@@ -34,6 +38,7 @@ import io
 import logging
 import os
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +47,11 @@ from .ezlynx_session import (
     EzlynxSessionPort,
     PlaywrightEzlynxSession,
     ensure_ezlynx_session,
+)
+from .gmail_report_ingestion import GmailReportMissingError, IngestedReport
+from .report_email_source import (
+    fetch_email_report_rows,
+    uses_email_source,
 )
 from .report_registry import (
     LOOK_ID_BY_REPORT,
@@ -355,44 +365,14 @@ def _export_looker_report_csv(
     return rows
 
 
-def fetch_report_rows(
+def _looker_fetch_report_rows(
     *,
-    report_id: str,
-    fields: list[str] | None = None,
-    filters: dict[str, Any] | None = None,
-    db_path: str | None = None,
-    session: EzlynxSessionPort | Any | None = None,
+    spec: ReportSpec,
+    run: dict[str, Any],
+    fields: list[str] | None,
+    session: EzlynxSessionPort | Any | None,
 ) -> list[dict[str, Any]]:
-    """Fetch work-queue rows for a registered Reports 5.0 report.
-
-    ``session`` may be an :class:`EzlynxSessionPort` (or anything exposing
-    ``.page``); when omitted, a :class:`PlaywrightEzlynxSession` is attached to
-    the persistent Hermes Chrome over CDP. Fails closed (raises, never returns
-    guessed rows) on unknown reports, unverified schemas (4359), auth failure,
-    or missing columns.
-    """
-    spec = get_report_spec(report_id)  # raises ReportRegistryError for unknown ids
-    # Runtime filters are fingerprinted by start_run() but are NOT applied in
-    # the Looker UI (the saved report's own filter scope is authoritative).
-    # Silently ignoring caller-supplied filters would return wrong-scope rows,
-    # so fail closed instead of pretending to filter.
-    if filters:
-        raise ValueError(
-            f"report {spec.report_id}: runtime filters are not supported by the "
-            "Looker CSV export path (saved-report scope is authoritative); "
-            "refusing to fetch rather than silently ignoring filters"
-        )
-    db = _resolve_db_path(db_path)
-    run_id = f"report-run:{spec.report_id}:{uuid.uuid4().hex[:12]}:{utc_now()}"
-    # start_run() FAILS CLOSED for schema_verified=False (report 4359).
-    # Do NOT flip that flag; let the error propagate before any browser work.
-    run = ReportRunRegistry(db).start_run(
-        run_id=run_id,
-        report_id=spec.report_id,
-        filters=filters,
-        fields=fields,
-    )
-
+    """Drive Reports 5.0 / a mapped look and export CSV rows."""
     browser = session
     close_browser = False
     if browser is None:
@@ -411,3 +391,99 @@ def fetch_report_rows(
                 browser.close()
             except Exception:
                 pass
+
+
+def fetch_report_rows(
+    *,
+    report_id: str,
+    fields: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
+    db_path: str | None = None,
+    session: EzlynxSessionPort | Any | None = None,
+    csv_bytes: bytes | None = None,
+    gmail_service: Any | None = None,
+    ingested: IngestedReport | None = None,
+    day: date | None = None,
+    now: datetime | None = None,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch work-queue rows for a registered report.
+
+    Email-first ids (4246, 4247, 4372) ingest today's robie@ CSV and do not
+    open Looker favorites. ``session`` is unused on that path. Optional
+    ``csv_bytes`` / ``gmail_service`` / ``ingested`` inject the email source
+    for tests. ``source="looker"`` forces the Reports 5.0 path;
+    ``source="email"`` refuses Looker fallback.
+
+    ``session`` may be an :class:`EzlynxSessionPort` (or anything exposing
+    ``.page``); when omitted on the Looker path, a
+    :class:`PlaywrightEzlynxSession` is attached to the persistent Hermes
+    Chrome over CDP. Fails closed (raises, never returns guessed rows) on
+    unknown reports, unverified schemas (4359), missing/stale/wrong-schema
+    email CSVs, auth failure, or missing columns.
+    """
+    spec = get_report_spec(report_id)  # raises ReportRegistryError for unknown ids
+    # Runtime filters are fingerprinted by start_run() but are NOT applied in
+    # the email schedule or the Looker UI. Silently ignoring them would return
+    # wrong-scope rows, so fail closed instead of pretending to filter.
+    if filters:
+        raise ValueError(
+            f"report {spec.report_id}: runtime filters are not supported "
+            "(email schedule / saved-report scope is authoritative); "
+            "refusing to fetch rather than silently ignoring filters"
+        )
+    db = _resolve_db_path(db_path)
+    run_id = f"report-run:{spec.report_id}:{uuid.uuid4().hex[:12]}:{utc_now()}"
+    # start_run() FAILS CLOSED for schema_verified=False (report 4359).
+    # Do NOT flip that flag; let the error propagate before any browser work.
+    run = ReportRunRegistry(db).start_run(
+        run_id=run_id,
+        report_id=spec.report_id,
+        filters=filters,
+        fields=fields,
+    )
+
+    source_norm = str(source or "").strip().casefold() or None
+    inject_email = (
+        csv_bytes is not None or gmail_service is not None or ingested is not None
+    )
+    prefer_email = source_norm == "email" or inject_email or (
+        source_norm is None and uses_email_source(spec.report_id)
+    )
+    if prefer_email:
+        try:
+            rows = fetch_email_report_rows(
+                report_id=spec.report_id,
+                fields=fields,
+                csv_bytes=csv_bytes,
+                gmail_service=gmail_service,
+                ingested=ingested,
+                day=day,
+                now=now,
+            )
+            logger.info(
+                "report %s: email CSV source returned %d row(s) (run %s)",
+                spec.report_id,
+                len(rows),
+                run["run_id"],
+            )
+            return rows
+        except GmailReportMissingError:
+            # Email absent: 4372 may use mapped look 4601. 4246/4247 have no
+            # look map — the 0 saved-report-link miss is not a fallback.
+            can_fallback = (
+                source_norm != "email"
+                and not inject_email
+                and look_id_for_report(spec.report_id)
+            )
+            if not can_fallback:
+                raise
+            logger.warning(
+                "report %s: morning email CSV missing; falling back to Looker look %s",
+                spec.report_id,
+                look_id_for_report(spec.report_id),
+            )
+
+    return _looker_fetch_report_rows(
+        spec=spec, run=run, fields=fields, session=session
+    )

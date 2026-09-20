@@ -100,6 +100,15 @@ class GmailReportIngestionError(RuntimeError):
     """A scheduled report email is missing, ambiguous, malformed, or unverified."""
 
 
+class GmailReportMissingError(GmailReportIngestionError):
+    """No scheduled-report email was found for this report/day.
+
+    Distinct from schema/stale failures so live fetch can fall back to a
+    mapped Looker look (4372 → 4601) only when the email is absent — never
+    when the CSV is present but wrong.
+    """
+
+
 # --- Expected headers: exact ordered CSV headers, observed 2026-09-19 -----
 # NOTE: the Looker viewer shows view-name prefixes ("Applicant Data ...",
 # "Policy Expiration ...", "Activity Task ..."); the CSV export strips
@@ -662,7 +671,7 @@ def ingest_daily_reports(
     for report_id in report_ids:
         found = bucketed.get(report_id, [])
         if not found:
-            raise GmailReportIngestionError(
+            raise GmailReportMissingError(
                 f"no scheduled report email found for {report_id} "
                 f"({REPORT_DISPLAY_NAMES[report_id]}) on {day.isoformat()}"
             )

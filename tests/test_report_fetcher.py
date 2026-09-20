@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 import sys
 import unittest
 import unittest.mock
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from _sibling_fakes import ensure_real_module
@@ -17,10 +20,13 @@ from _sibling_fakes import ensure_real_module
 # (The worker test modules already bound their fakes into their worker
 # namespaces at their own import time, so this does not disturb them.)
 ensure_real_module("robie_job_engine.verification_common")
+ensure_real_module("robie_job_engine.gmail_report_ingestion")
+ensure_real_module("robie_job_engine.report_email_source")
 rf = ensure_real_module("robie_job_engine.report_fetcher")
 
 from durable_temp import durable_temporary_directory
 
+from robie_job_engine import gmail_report_ingestion as ing
 from robie_job_engine.report_registry import (
     LOOK_ID_BY_REPORT,
     MORTGAGEE_4372_SCOPE_MARKER,
@@ -416,5 +422,193 @@ class LookIdMapTests(unittest.TestCase):
         self.assertIn("found 0", str(ctx.exception))
 
 
+def _email_csv(report_id: str, rows: list[dict]) -> bytes:
+    headers = ing.expected_headers(report_id)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=headers, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({header: row.get(header, "") for header in headers})
+    return buffer.getvalue().encode("utf-8")
+
+
+def _row4247():
+    return {
+        "Account Name": "Acme LLC",
+        "Applicant ID": "A1",
+        "Policy Number": "P-4247",
+        "Policy Effective Date": "10/30/2025",
+        "Policy Expiration Date": "10/30/2026",
+        "Master Company": "Coterie",
+        "Line Of Business": "Commercial",
+        "Premium - Annualized": "1200",
+        "Assigned Producer": "Carlo",
+        "Department": "Commercial Lines",
+        "CSR": "Pat",
+        "Policy Source": "Manual",
+    }
+
+
+def _row4360(status="Active"):
+    return {
+        "Applicant ID": "220250093",
+        "Branch": "Commercial Lines",
+        "Account Name": "Audit Co",
+        "Account Type": "Commercial",
+        "Assigned Producer": "P",
+        "CSR": "C",
+        "Policy Number": "WC-4246",
+        "Policy ID": "PID-1",
+        "Policy Transaction ID": "PTX-9",
+        "Transaction Type": "Renewal",
+        "Transaction Date": "08/15/2026",
+        "Line of Business": "Workers Comp",
+        "Master Company": "Test Carrier",
+        "Download Date": "09/19/2026",
+        "Effective Date": "08/15/2026",
+        "Expiration Date": "08/15/2027",
+        "Current Policy Status": status,
+        "Policy Term": "08/15/2026 - 08/15/2027",
+        "Policy Type": "Workers Comp",
+        "Transaction Deleted": "No",
+        "Service Team": "Commercial",
+        "Total Written Premium": "1000",
+        "Total Customers": "1",
+        "Total Transactions": "1",
+    }
+
+
+class EmailCsvLiveFetchTests(unittest.TestCase):
+    """4246/4247 live fetch prefers robie@ morning CSVs over Looker favorites."""
+
+    def test_4247_email_csv_succeeds_without_touching_looker(self):
+        class _ZeroSaved4247(_FakePage):
+            def locator(self, selector):
+                self.locators_seen.append(selector)
+                if "4247" in selector:
+                    return _FakeLocator(count=0)
+                return super().locator(selector)
+
+        zero = _ZeroSaved4247(csv_text="policy_number\nP1\n")
+        with durable_temporary_directory() as tmp:
+            rows = rf.fetch_report_rows(
+                report_id="4247",
+                db_path=f"{tmp}/jobs.db",
+                session=zero,
+                csv_bytes=_email_csv("4247", [_row4247()]),
+            )
+        self.assertEqual(rows[0]["policy_number"], "P-4247")
+        self.assertEqual(rows[0]["expiration_date"], "10/30/2026")
+        self.assertEqual(zero.visited, [])
+
+    def test_4247_looker_missing_no_longer_hard_fails_when_email_csv_available(self):
+        class _ZeroSaved4247(_NoTouch):
+            """Would raise on any browser use — email path must not fall through."""
+
+        with durable_temporary_directory() as tmp:
+            rows = rf.fetch_report_rows(
+                report_id="4247",
+                db_path=f"{tmp}/jobs.db",
+                session=_ZeroSaved4247(),
+                csv_bytes=_email_csv("4247", [_row4247()]),
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["_fetch_source"], "gmail_email_csv")
+
+    def test_4246_email_is_4360_active_feed(self):
+        with durable_temporary_directory() as tmp:
+            rows = rf.fetch_report_rows(
+                report_id="4246",
+                db_path=f"{tmp}/jobs.db",
+                session=_NoTouch(),
+                csv_bytes=_email_csv("4246", [_row4360()]),
+            )
+        self.assertEqual(rows[0]["policy_number"], "WC-4246")
+        self.assertEqual(rows[0]["audit_id"], "PTX-9")
+        self.assertEqual(rows[0]["renewal_effective_date"], "08/15/2026")
+
+    def test_email_missing_fails_closed_for_unmapped_4247(self):
+        class _EmptyGmail:
+            def users(self):
+                return self
+
+            def messages(self):
+                return self
+
+            def list(self, **kwargs):
+                class _Exec:
+                    def execute(self_inner):
+                        return {"messages": []}
+
+                return _Exec()
+
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ing.GmailReportMissingError) as ctx:
+                rf.fetch_report_rows(
+                    report_id="4247",
+                    db_path=f"{tmp}/jobs.db",
+                    session=_NoTouch(),
+                    gmail_service=_EmptyGmail(),
+                    day=date(2026, 9, 20),
+                    now=datetime(2026, 9, 20, 14, 30, tzinfo=timezone.utc),
+                )
+        self.assertIn("no scheduled report email found for 4247", str(ctx.exception))
+
+    def test_wrong_schema_does_not_fall_back_to_looker(self):
+        with durable_temporary_directory() as tmp:
+            with self.assertRaises(ing.GmailReportIngestionError) as ctx:
+                rf.fetch_report_rows(
+                    report_id="4246",
+                    db_path=f"{tmp}/jobs.db",
+                    session=_NoTouch(),
+                    csv_bytes=b"Account Name,Applicant ID,Policy Number\nX,1,P1\n",
+                )
+        self.assertIn("header mismatch", str(ctx.exception))
+
+    def test_4247_still_has_no_looker_look_id(self):
+        self.assertNotIn("4247", LOOK_ID_BY_REPORT)
+        self.assertNotIn("4246", LOOK_ID_BY_REPORT)
+        self.assertIsNone(rf.look_id_for_report("4247"))
+
+    def test_4372_falls_back_to_look_4601_when_email_missing(self):
+        page = _HubWithZeroSavedReport4372(
+            csv_text="policy_number\nP1\n",
+            body_text=MORTGAGEE_4372_SCOPE_MARKER,
+        )
+        missing = ing.GmailReportMissingError(
+            "no scheduled report email found for 4372"
+        )
+        with durable_temporary_directory() as tmp:
+            with unittest.mock.patch.object(
+                rf, "fetch_email_report_rows", side_effect=missing
+            ), unittest.mock.patch.object(
+                rf, "ensure_ezlynx_session", return_value=None
+            ):
+                rows = rf.fetch_report_rows(
+                    report_id="4372",
+                    db_path=f"{tmp}/jobs.db",
+                    session=page,
+                )
+        self.assertEqual(rows, [{"policy_number": "P1"}])
+        self.assertTrue(any("/report/4601" in url for url in page.visited))
+
+    def test_source_email_refuses_looker_fallback(self):
+        missing = ing.GmailReportMissingError(
+            "no scheduled report email found for 4372"
+        )
+        with durable_temporary_directory() as tmp:
+            with unittest.mock.patch.object(
+                rf, "fetch_email_report_rows", side_effect=missing
+            ):
+                with self.assertRaises(ing.GmailReportMissingError):
+                    rf.fetch_report_rows(
+                        report_id="4372",
+                        db_path=f"{tmp}/jobs.db",
+                        session=_NoTouch(),
+                        source="email",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
+
