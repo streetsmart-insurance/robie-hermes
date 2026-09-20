@@ -56,6 +56,9 @@ def _safe_failure_metrics(observed: Mapping[str, Any]) -> dict[str, int | bool]:
 
 SAFE_FAILURE_CODES = (
     ("Persistent Robie Chrome is unavailable", "chrome_unavailable"),
+    ("Google delegation credential is unavailable", "google_delegation_unavailable"),
+    ("EZLynx verification email was not received", "otp_email_not_received"),
+    ("EZLynx authentication reached an unsupported state", "auth_state_unsupported"),
     ("Persistent Robie Chrome has no browser context", "browser_context_missing"),
     ("NEEDS_AUTH", "session_not_authenticated"),
     ("agency options not found", "agency_options_missing"),

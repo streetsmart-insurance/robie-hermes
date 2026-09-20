@@ -39,3 +39,13 @@ def test_manual_accountability_workflow_exposes_actionable_ssh_failure():
     assert '--quiet --command="hostname -s" 2>&1' in text
     assert "2>/dev/null" not in text
     assert "distinguishes OS Login, IAP, instance-state, and network failures" in text
+
+def test_manual_preflight_receives_production_dwd_secret():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert (
+        'sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" '
+        'GOOGLE_DWD_SECRET=accountability-google-dwd-key '
+        '"${APP_ROOT}/venv/bin/python" '
+        '"${remote_dir}/preflight_dedicated_accountability_submission.py"'
+    ) in text
+
