@@ -43,6 +43,57 @@ def _row4247(policy="P-4247", account="Acme LLC", expiration="10/30/2026"):
     }
 
 
+def _nineteen_col_daily_csv() -> bytes:
+    """The foreign robie@ CSV that #517 4372 jobs fingerprinted and failed on."""
+    headers = (
+        ["Account Name"]
+        + [f"Col{i}" for i in range(2, 19)]
+        + ["Total Written Premium"]
+    )
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    writer.writerow(["Acme"] + ["x"] * 17 + ["1000"])
+    return buffer.getvalue().encode("utf-8")
+
+
+def _row4372(policy="P-4372", account="Mortgagee Co"):
+    return {
+        "Applicant ID": "A-4372",
+        "Account Name": account,
+        "Task Assigned To": "CSR",
+        "Branch": "Personal",
+        "Activity Type": "Task",
+        "Note Created by": "Carlo",
+        "Task Status": "Open",
+        "Assigned Producer": "Carlo",
+        "CSR": "Pat",
+        "Task Created By": "Carlo",
+        "Created Date": "09/19/2026",
+        "Task Due Date": "10/30/2026",
+        "Task Last Modified Date": "09/19/2026",
+        "Task Last Modified By": "Carlo",
+        "Note": "verify mortgagee",
+        "Comment": "",
+        "Task Closed By": "",
+        "Policy Master ID": "PM-1",
+        "Task Priority": "Normal",
+        "Sticky": "No",
+        "Task Created By ID": "1",
+        "Task Created Date": "09/19/2026",
+        "Task ID": "T-4372",
+        "Task Closed Date": "",
+        "Policy Number": policy,
+        "Producer Code": "",
+        "Producer Code Override": "",
+        "Activity Labels": "",
+        "Lead Source": "",
+        "Discussion ID": "D-1",
+        "Department": "Personal Lines",
+        "Service Team": "Personal",
+    }
+
+
 def _row4360(policy, account, effective, status="Active", txn="PTX-1"):
     return {
         "Applicant ID": "220250093",
@@ -83,7 +134,15 @@ class _Exec:
 class FakeScheduledReportGmail:
     """Minimal Gmail surface for ingest_daily_reports. No network."""
 
-    def __init__(self, *, csv_bytes: bytes, filename: str, received_at: datetime, sender=None):
+    def __init__(
+        self,
+        *,
+        csv_bytes: bytes,
+        filename: str,
+        received_at: datetime,
+        sender=None,
+        subject="ROBIE daily CSV",
+    ):
         self.csv_bytes = csv_bytes
         self.filename = filename
         encoded = base64.urlsafe_b64encode(csv_bytes).decode("ascii")
@@ -94,7 +153,7 @@ class FakeScheduledReportGmail:
             "payload": {
                 "headers": [
                     {"name": "From", "value": sender},
-                    {"name": "Subject", "value": "ROBIE daily CSV"},
+                    {"name": "Subject", "value": subject},
                 ],
                 "parts": [
                     {
@@ -124,6 +183,68 @@ class FakeScheduledReportGmail:
         if id == self.message["id"]:
             return _Exec(self.message)
         return _Exec({})
+
+
+class FakeMailboxGmail:
+    """Multi-message Gmail surface. list() returns every id; subject post-filter applies."""
+
+    def __init__(self, messages: list[dict]):
+        self._messages = {item["id"]: item["message"] for item in messages}
+        self._attachments = {item["att_id"]: item["attachment"] for item in messages}
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def attachments(self):
+        return self
+
+    def list(self, **kwargs):
+        return _Exec({"messages": [{"id": message_id} for message_id in self._messages]})
+
+    def get(self, userId=None, id=None, format=None, messageId=None):
+        if messageId in self._attachments:
+            return _Exec(self._attachments[messageId])
+        if id in self._attachments:
+            return _Exec(self._attachments[id])
+        if id in self._messages:
+            return _Exec(self._messages[id])
+        return _Exec({})
+
+
+def _mailbox_item(
+    *,
+    message_id: str,
+    att_id: str,
+    csv_bytes: bytes,
+    filename: str,
+    received_at: datetime,
+    subject: str,
+    sender="Applied Reporting <DoNotReply@appliedsystems.com>",
+):
+    return {
+        "id": message_id,
+        "att_id": att_id,
+        "message": {
+            "id": message_id,
+            "internalDate": str(int(received_at.timestamp() * 1000)),
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": sender},
+                    {"name": "Subject", "value": subject},
+                ],
+                "parts": [
+                    {
+                        "filename": filename,
+                        "body": {"attachmentId": att_id},
+                    }
+                ],
+            },
+        },
+        "attachment": {"data": base64.urlsafe_b64encode(csv_bytes).decode("ascii")},
+    }
 
 
 class EmailSourceGateTests(unittest.TestCase):
@@ -314,6 +435,157 @@ class GmailWiringTests(unittest.TestCase):
                 report_id="4247", gmail_service=_Empty(), day=DAY, now=NOW
             )
         self.assertIn("no scheduled report email found for 4247", str(ctx.exception))
+
+
+class Mortgagee4372SubjectPickerTests(unittest.TestCase):
+    """4372 must pick Mortgagee Verification Queue - ROBIE, not any robie@ CSV."""
+
+    received = datetime(2026, 9, 20, 10, 5, tzinfo=timezone.utc)
+
+    def test_correct_mortgagee_subject_and_schema_are_accepted(self):
+        service = FakeScheduledReportGmail(
+            csv_bytes=_csv_bytes("4372", [_row4372()]),
+            filename="Mortgagee_Verification_Queue_ROBIE_2026-09-20T0605.csv",
+            received_at=self.received,
+            subject=ing.MORTGAGEE_4372_SUBJECT,
+        )
+        rows = src.fetch_email_report_rows(
+            report_id="4372", gmail_service=service, day=DAY, now=NOW
+        )
+        self.assertEqual(rows[0]["policy_number"], "P-4372")
+        self.assertEqual(rows[0]["task_id"], "T-4372")
+        self.assertEqual(rows[0]["_fetch_source"], "gmail_email_csv")
+
+    def test_wrong_subject_19col_daily_csv_is_not_4372(self):
+        service = FakeScheduledReportGmail(
+            csv_bytes=_nineteen_col_daily_csv(),
+            filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+            received_at=self.received,
+            subject="ROBIE daily CSV",
+        )
+        with self.assertRaises(ing.GmailReportMissingError) as ctx:
+            src.fetch_email_report_rows(
+                report_id="4372", gmail_service=service, day=DAY, now=NOW
+            )
+        self.assertIn("no scheduled report email found for 4372", str(ctx.exception))
+        self.assertNotIn("no known ROBIE fingerprint", str(ctx.exception))
+
+    def test_4372_schema_under_generic_daily_subject_is_rejected(self):
+        service = FakeScheduledReportGmail(
+            csv_bytes=_csv_bytes("4372", [_row4372()]),
+            filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+            received_at=self.received,
+            subject="ROBIE daily CSV",
+        )
+        with self.assertRaises(ing.GmailReportMissingError) as ctx:
+            src.fetch_email_report_rows(
+                report_id="4372", gmail_service=service, day=DAY, now=NOW
+            )
+        self.assertIn("no scheduled report email found for 4372", str(ctx.exception))
+
+    def test_mortgagee_subject_with_wrong_schema_fails_closed(self):
+        service = FakeScheduledReportGmail(
+            csv_bytes=_nineteen_col_daily_csv(),
+            filename="Mortgagee_Verification_Queue_ROBIE.csv",
+            received_at=self.received,
+            subject=ing.MORTGAGEE_4372_SUBJECT,
+        )
+        with self.assertRaises(ing.GmailReportIngestionError) as ctx:
+            src.fetch_email_report_rows(
+                report_id="4372", gmail_service=service, day=DAY, now=NOW
+            )
+        self.assertNotIsInstance(ctx.exception, ing.GmailReportMissingError)
+        self.assertIn("19-col CSV Account Name…Total Written Premium", str(ctx.exception))
+        self.assertIn("no known ROBIE fingerprint", str(ctx.exception))
+
+    def test_mixed_mailbox_4372_picks_mortgagee_not_other_daily_csv(self):
+        service = FakeMailboxGmail(
+            [
+                _mailbox_item(
+                    message_id="msg-wrong",
+                    att_id="att-wrong",
+                    csv_bytes=_nineteen_col_daily_csv(),
+                    filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+                    received_at=self.received,
+                    subject="ROBIE daily CSV",
+                ),
+                _mailbox_item(
+                    message_id="msg-mortgagee",
+                    att_id="att-mortgagee",
+                    csv_bytes=_csv_bytes("4372", [_row4372()]),
+                    filename="Mortgagee_Verification_Queue_ROBIE.csv",
+                    received_at=self.received,
+                    subject=ing.MORTGAGEE_4372_SUBJECT,
+                ),
+            ]
+        )
+        rows = src.fetch_email_report_rows(
+            report_id="4372", gmail_service=service, day=DAY, now=NOW
+        )
+        self.assertEqual(rows[0]["policy_number"], "P-4372")
+
+    def test_4247_still_uses_generic_daily_csv_when_mortgagee_mail_is_present(self):
+        service = FakeMailboxGmail(
+            [
+                _mailbox_item(
+                    message_id="msg-4247",
+                    att_id="att-4247",
+                    csv_bytes=_csv_bytes("4247", [_row4247()]),
+                    filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+                    received_at=self.received,
+                    subject="ROBIE daily CSV",
+                ),
+                _mailbox_item(
+                    message_id="msg-mortgagee",
+                    att_id="att-mortgagee",
+                    csv_bytes=_csv_bytes("4372", [_row4372()]),
+                    filename="Mortgagee_Verification_Queue_ROBIE.csv",
+                    received_at=self.received,
+                    subject=ing.MORTGAGEE_4372_SUBJECT,
+                ),
+            ]
+        )
+        rows = src.fetch_email_report_rows(
+            report_id="4247",
+            gmail_service=service,
+            day=DAY,
+            now=NOW,
+            filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+        )
+        self.assertEqual(rows[0]["policy_number"], "P-4247")
+
+    def test_4246_still_uses_4360_fingerprint_not_mortgagee_subject(self):
+        service = FakeMailboxGmail(
+            [
+                _mailbox_item(
+                    message_id="msg-4246",
+                    att_id="att-4246",
+                    csv_bytes=_csv_bytes(
+                        "4246", [_row4360("WC999", "Test Co", "08/15/2026")]
+                    ),
+                    filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+                    received_at=self.received,
+                    subject="ROBIE daily CSV",
+                ),
+                _mailbox_item(
+                    message_id="msg-mortgagee",
+                    att_id="att-mortgagee",
+                    csv_bytes=_csv_bytes("4372", [_row4372()]),
+                    filename="Mortgagee_Verification_Queue_ROBIE.csv",
+                    received_at=self.received,
+                    subject=ing.MORTGAGEE_4372_SUBJECT,
+                ),
+            ]
+        )
+        rows = src.fetch_email_report_rows(
+            report_id="4246",
+            gmail_service=service,
+            day=DAY,
+            now=NOW,
+            filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
+        )
+        self.assertEqual(rows[0]["policy_number"], "WC999")
+        self.assertEqual(rows[0]["audit_id"], "PTX-1")
 
 
 if __name__ == "__main__":
