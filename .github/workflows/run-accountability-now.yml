@@ -205,7 +205,7 @@ jobs:
           set -euo pipefail
           if [ "${DELIVERY_SCOPE}" = "carlo_only_test" ]; then
             transient_unit="streetsmart-accountability-carlo-test-${GITHUB_RUN_ID}"
-            remote_command="sudo systemd-run --quiet --wait --collect --unit=${transient_unit} --uid=ubuntu --gid=ubuntu --working-directory=${APP_ROOT} --property=Environment=ACCOUNTABILITY_DELIVERY_RECIPIENTS=carlo@streetsmart.insurance --property=Environment=GOOGLE_DWD_SECRET=accountability-google-dwd-key --property=TimeoutStartSec=65min ${APP_ROOT}/scripts/run_daily_accountability_vm.sh"
+            remote_command="sudo systemd-run --quiet --wait --unit=${transient_unit} --uid=ubuntu --gid=ubuntu --working-directory=${APP_ROOT} --property=Environment=ACCOUNTABILITY_DELIVERY_RECIPIENTS=carlo@streetsmart.insurance --property=Environment=GOOGLE_DWD_SECRET=accountability-google-dwd-key --property=TimeoutStartSec=65min ${APP_ROOT}/scripts/run_daily_accountability_vm.sh"
           else
             transient_unit=""
             remote_command="sudo systemctl start ${UNIT}"
