@@ -52,6 +52,73 @@ jobs:
           test "${host}" = "streetsmart-accountability-prod"
           echo "ssh_hostname_verified=true"
 
+      - name: Capture classified runtime failure first
+        if: always()
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
+            --tunnel-through-iap --quiet --command="sudo python3 -s" <<'PYEOF' \
+            | tee "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
+          import json
+          import re
+          from pathlib import Path
+
+          path = Path("/opt/streetsmart-daily-accountability/data/logs/daily_run.log")
+          result = {
+              "log_present": path.is_file(),
+              "failure_timestamps": [],
+              "exit_codes": [],
+              "exception_types": [],
+              "source_frames": [],
+              "evidence_categories": [],
+          }
+          if path.is_file():
+              text = path.read_text(encoding="utf-8", errors="replace")
+              tail = "\n".join(text.splitlines()[-1000:])
+              failures = re.findall(
+                  r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] "
+                  r"Accountability run FAILED \(exit (\d+)\)",
+                  tail,
+              )
+              result["failure_timestamps"] = [item[0] for item in failures[-5:]]
+              result["exit_codes"] = [int(item[1]) for item in failures[-5:]]
+              result["exception_types"] = sorted(set(re.findall(
+                  r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):",
+                  tail,
+              )))
+              frames = re.findall(
+                  r'File "/opt/streetsmart-daily-accountability/(src/[^"]+\.py)", '
+                  r'line (\d+), in ([A-Za-z_][A-Za-z0-9_]*)',
+                  tail,
+              )
+              result["source_frames"] = [
+                  {"path": item[0], "line": int(item[1]), "function": item[2]}
+                  for item in frames[-20:]
+              ]
+              lowered = tail.lower()
+              categories = {
+                  "ringcentral": ("ringcentral",),
+                  "ezlynx": ("ezlynx",),
+                  "submission_center": ("submission center", "submission_center"),
+                  "magellan": ("magellan",),
+                  "gmail": ("gmail",),
+                  "google_docs": ("google docs", "stable_google_doc"),
+                  "policy_change": ("policy change", "policy_change"),
+                  "certificate_coi": ("certificate", "coi"),
+                  "retention": ("retention",),
+                  "sales": ("sales center", "sales_center"),
+                  "stale_evidence": ("stale",),
+                  "missing_evidence": ("missing", "required"),
+                  "timeout": ("timeout", "timed out"),
+              }
+              result["evidence_categories"] = sorted(
+                  name
+                  for name, needles in categories.items()
+                  if any(needle in lowered for needle in needles)
+              )
+          print(json.dumps(result, sort_keys=True))
+          PYEOF
+
       - name: Verify reusable Magellan session without delivery
         run: |
           set -euo pipefail
@@ -69,7 +136,7 @@ jobs:
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
@@ -90,7 +157,7 @@ jobs:
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
