@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
@@ -40,6 +41,8 @@ CC = ("carlo@streetsmart.insurance", "jake@streetsmart.insurance")
 SOP_URL = "https://docs.google.com/document/d/1nggrFQY-q9PEDOjGcje04qYKUTx-qTGTx3Wv-4qD80M/edit"
 CLOSED = {"Closed - Not Sold", "Closed - Bound"}
 EXPECTED_RED = "rgb(211, 47, 47)"
+AGENCY_EMAIL_SUFFIX = "@streetsmart.insurance"
+logger = logging.getLogger(__name__)
 
 
 class SubmissionReportContractError(RuntimeError):
@@ -142,6 +145,49 @@ def validate_submission_observation(observed: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _roster_skip_reason(name: str, raw: Mapping[str, Any] | None) -> str | None:
+    """Return why an Active row is excluded from the agency email directory."""
+    details = dict(raw or {})
+    email = str(details.get("email") or "").strip().casefold()
+    display = " ".join(str(name).split()) or "unnamed"
+    extras = []
+    for field in ("role", "department"):
+        value = str(details.get(field) or "").strip()
+        if value:
+            extras.append(f"{field}={value}")
+    extra = f"; {'; '.join(extras)}" if extras else ""
+    if not email:
+        return f"{display}: missing work email{extra}"
+    if not email.endswith(AGENCY_EMAIL_SUFFIX):
+        return f"{display}: non-agency work email ({email}){extra}"
+    return None
+
+
+def agency_email_directory_from_registry(registry: Mapping[str, Any]) -> dict[str, str]:
+    """Keep Active @streetsmart.insurance mailboxes; skip missing or non-agency emails.
+
+    External Producer / 1099 rows with personal mailboxes (for example gmail)
+    are logged and excluded. The directory still fails closed when no usable
+    agency emails remain after those skips.
+    """
+    if registry.get("source_status") != "available":
+        raise SubmissionReportContractError("approved active-employee roster is unavailable or partial")
+    directory: dict[str, str] = {}
+    for name, raw in dict(registry.get("employees") or {}).items():
+        skip_reason = _roster_skip_reason(name, raw)
+        if skip_reason:
+            logger.warning("Skipping Active roster row from agency email directory: %s", skip_reason)
+            continue
+        email = str((raw or {}).get("email") or "").strip().casefold()
+        key = " ".join(str(name).casefold().split())
+        if not key or key in directory:
+            raise SubmissionReportContractError("approved roster contains an ambiguous employee name")
+        directory[key] = email
+    if not directory:
+        raise SubmissionReportContractError("approved roster contains no active employees")
+    return directory
+
+
 def load_approved_producer_directory(manifest_path: str) -> dict[str, str]:
     """Fetch the current allowlisted employee roster from its approved Sheet."""
     path = Path(manifest_path).expanduser().resolve()
@@ -160,20 +206,7 @@ def load_approved_producer_directory(manifest_path: str) -> dict[str, str]:
         raise
     except Exception as exc:
         raise SubmissionReportContractError(str(classify_sheets_auth_error(exc))) from exc
-    if registry.get("source_status") != "available":
-        raise SubmissionReportContractError("approved active-employee roster is unavailable or partial")
-    directory: dict[str, str] = {}
-    for name, raw in dict(registry.get("employees") or {}).items():
-        email = str((raw or {}).get("email") or "").strip().casefold()
-        if not email.endswith("@streetsmart.insurance"):
-            raise SubmissionReportContractError("approved roster has a missing or non-agency work email")
-        key = " ".join(str(name).casefold().split())
-        if not key or key in directory:
-            raise SubmissionReportContractError("approved roster contains an ambiguous employee name")
-        directory[key] = email
-    if not directory:
-        raise SubmissionReportContractError("approved roster contains no active employees")
-    return directory
+    return agency_email_directory_from_registry(registry)
 
 
 def resolve_recipients(records: list[Mapping[str, Any]], directory: Mapping[str, str]) -> dict[str, str]:
