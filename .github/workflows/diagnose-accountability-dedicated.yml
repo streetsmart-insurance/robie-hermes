@@ -52,27 +52,72 @@ jobs:
           test "${host}" = "streetsmart-accountability-prod"
           echo "ssh_hostname_verified=true"
 
-      - name: Capture the latest redacted runtime failure first
+      - name: Capture classified runtime failure first
         if: always()
         run: |
           set -euo pipefail
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
-            --tunnel-through-iap --quiet --command="sudo bash -s" <<'REMOTE_EOF' \
+            --tunnel-through-iap --quiet --command="sudo python3 -s" <<'PYEOF' \
             | tee "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
-          set -u
-          redact() {
-            sed -E \
-              -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[redacted-email]/g' \
-              -e 's/(\+?1[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}/[redacted-phone]/g' \
-              -e 's/[0-9]{7,}/[redacted-number]/g'
+          import json
+          import re
+          from pathlib import Path
+
+          path = Path("/opt/streetsmart-daily-accountability/data/logs/daily_run.log")
+          result = {
+              "log_present": path.is_file(),
+              "failure_timestamps": [],
+              "exit_codes": [],
+              "exception_types": [],
+              "source_frames": [],
+              "evidence_categories": [],
           }
-          echo "latest_daily_log_begin"
-          tail -n 500 /opt/streetsmart-daily-accountability/data/logs/daily_run.log 2>&1 | redact
-          echo "latest_daily_log_end"
-          echo "recent_service_journal_begin"
-          journalctl -u streetsmart-accountability.service --since "2 days ago" --no-pager 2>&1 | tail -300 | redact
-          echo "recent_service_journal_end"
-          REMOTE_EOF
+          if path.is_file():
+              text = path.read_text(encoding="utf-8", errors="replace")
+              tail = "\n".join(text.splitlines()[-1000:])
+              failures = re.findall(
+                  r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] "
+                  r"Accountability run FAILED \(exit (\d+)\)",
+                  tail,
+              )
+              result["failure_timestamps"] = [item[0] for item in failures[-5:]]
+              result["exit_codes"] = [int(item[1]) for item in failures[-5:]]
+              result["exception_types"] = sorted(set(re.findall(
+                  r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):",
+                  tail,
+              )))
+              frames = re.findall(
+                  r'File "/opt/streetsmart-daily-accountability/(src/[^"]+\.py)", '
+                  r'line (\d+), in ([A-Za-z_][A-Za-z0-9_]*)',
+                  tail,
+              )
+              result["source_frames"] = [
+                  {"path": item[0], "line": int(item[1]), "function": item[2]}
+                  for item in frames[-20:]
+              ]
+              lowered = tail.lower()
+              categories = {
+                  "ringcentral": ("ringcentral",),
+                  "ezlynx": ("ezlynx",),
+                  "submission_center": ("submission center", "submission_center"),
+                  "magellan": ("magellan",),
+                  "gmail": ("gmail",),
+                  "google_docs": ("google docs", "stable_google_doc"),
+                  "policy_change": ("policy change", "policy_change"),
+                  "certificate_coi": ("certificate", "coi"),
+                  "retention": ("retention",),
+                  "sales": ("sales center", "sales_center"),
+                  "stale_evidence": ("stale",),
+                  "missing_evidence": ("missing", "required"),
+                  "timeout": ("timeout", "timed out"),
+              }
+              result["evidence_categories"] = sorted(
+                  name
+                  for name, needles in categories.items()
+                  if any(needle in lowered for needle in needles)
+              )
+          print(json.dumps(result, sort_keys=True))
+          PYEOF
 
       - name: Verify reusable Magellan session without delivery
         run: |
