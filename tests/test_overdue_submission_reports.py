@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from robie_job_engine.overdue_submission_reports import (
     OverdueSubmissionReportVerifier,
     OverdueSubmissionReportWorker,
     SubmissionReportContractError,
+    agency_email_directory_from_registry,
     build_producer_report,
     load_approved_producer_directory,
     resolve_recipients,
@@ -368,3 +370,170 @@ def test_recipient_resolution_is_exact_casefolded_name_match():
     assert resolve_recipients([_record("Producer One")], {"producer one": "one@streetsmart.insurance"}) == {
         "Producer One": "one@streetsmart.insurance"
     }
+
+
+def test_agency_directory_skips_active_gmail_external_producer(caplog):
+    registry = {
+        "source_status": "available",
+        "employees": {
+            "Connie Dejesus": {
+                "email": "conniesbusinesssolutionsllc@gmail.com",
+                "role": "External Producer",
+                "department": "Sales",
+                "status": "Active",
+            },
+            "Jazmin Molina": {
+                "email": "Jazmin@StreetSmart.Insurance",
+                "role": "Sales Producer",
+                "status": "Active",
+            },
+            "Missing Email": {
+                "email": "",
+                "role": "Producer",
+                "status": "Active",
+            },
+        },
+    }
+    with caplog.at_level(logging.WARNING):
+        directory = agency_email_directory_from_registry(registry)
+    assert directory == {"jazmin molina": "jazmin@streetsmart.insurance"}
+    assert "connie dejesus" not in directory
+    assert "missing email" not in directory
+    assert "Connie Dejesus" in caplog.text
+    assert "conniesbusinesssolutionsllc@gmail.com" in caplog.text
+    assert "non-agency work email" in caplog.text
+    assert "External Producer" in caplog.text
+    assert "Missing Email: missing work email" in caplog.text
+
+
+def test_agency_directory_keeps_active_streetsmart_email():
+    directory = agency_email_directory_from_registry(
+        {
+            "source_status": "available",
+            "employees": {
+                "Jazmin Molina": {
+                    "email": "Jazmin@StreetSmart.Insurance",
+                    "role": "Sales Producer",
+                    "status": "Active",
+                }
+            },
+        }
+    )
+    assert directory == {"jazmin molina": "jazmin@streetsmart.insurance"}
+
+
+def test_skipped_external_producer_still_blocks_when_they_need_a_mailbox():
+    directory = agency_email_directory_from_registry(
+        {
+            "source_status": "available",
+            "employees": {
+                "Connie Dejesus": {
+                    "email": "conniesbusinesssolutionsllc@gmail.com",
+                    "role": "External Producer",
+                    "status": "Active",
+                },
+                "Jazmin Molina": {
+                    "email": "jazmin@streetsmart.insurance",
+                    "role": "Sales Producer",
+                    "status": "Active",
+                },
+            },
+        }
+    )
+    try:
+        resolve_recipients([_record("Connie Dejesus")], directory)
+    except SubmissionReportContractError as exc:
+        assert "producer work email could not be resolved for: Connie Dejesus" in str(exc)
+    else:
+        raise AssertionError("skipped 1099 producer was emailed from a non-agency address")
+
+
+def test_agency_directory_fails_closed_when_skips_leave_no_agency_emails():
+    try:
+        agency_email_directory_from_registry(
+            {
+                "source_status": "available",
+                "employees": {
+                    "Connie Dejesus": {
+                        "email": "conniesbusinesssolutionsllc@gmail.com",
+                        "role": "External Producer",
+                        "status": "Active",
+                    },
+                    "Missing Email": {"email": "", "role": "Producer", "status": "Active"},
+                },
+            }
+        )
+    except SubmissionReportContractError as exc:
+        assert str(exc) == "approved roster contains no active employees"
+    else:
+        raise AssertionError("empty post-skip directory was accepted")
+
+
+def test_roster_load_succeeds_with_mixed_active_external_and_agency_rows(tmp_path, caplog):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "google_sheets": {
+                    "enabled": True,
+                    "spreadsheet_id": "sheet-1",
+                    "employee_role_table": "employees",
+                    "employee_role_columns": {
+                        "name": "Name",
+                        "role": "Position",
+                        "email": "Email",
+                        "department": "Department",
+                        "status": "Status",
+                        "active_value": "Active",
+                    },
+                    "tables": {
+                        "employees": {
+                            "range": "Employees!A:Z",
+                            "allowed_columns": ["Name", "Position", "Email", "Department", "Status"],
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot = {
+        "source_status": "available",
+        "tables": {
+            "employees": {
+                "source_status": "available",
+                "rows": [
+                    {
+                        "Name": "Connie Dejesus",
+                        "Position": "External Producer",
+                        "Email": "conniesbusinesssolutionsllc@gmail.com",
+                        "Department": "Sales",
+                        "Status": "Active",
+                    },
+                    {
+                        "Name": "Jazmin Molina",
+                        "Position": "Sales Producer",
+                        "Email": "Jazmin@StreetSmart.Insurance",
+                        "Department": "Sales",
+                        "Status": "Active",
+                    },
+                    {
+                        "Name": "Former Person",
+                        "Position": "Producer",
+                        "Email": "former@streetsmart.insurance",
+                        "Department": "Sales",
+                        "Status": "Terminated",
+                    },
+                ],
+            }
+        },
+    }
+    with patch(
+        "robie_job_engine.google_sheets_accountability.collect_allowlisted_tables",
+        return_value=snapshot,
+    ), caplog.at_level(logging.WARNING):
+        directory = load_approved_producer_directory(str(manifest))
+    assert directory == {"jazmin molina": "jazmin@streetsmart.insurance"}
+    assert "connie dejesus" not in directory
+    assert "Connie Dejesus" in caplog.text
+    assert "non-agency work email" in caplog.text
