@@ -547,29 +547,39 @@ def test_dwd_fetcher_missing_report_raises():
 
 
 # --- note adapter: exact-title success + API-only failure -------------------
+# The adapter uses robie_job_engine.ezlynx_discussions (get_discussions +
+# append_note), not the legacy src.ezlynx.api_client interface.
 
 
 def _fake_ezlynx_client(monkeypatch, **behaviors):
     calls = {}
-    module = types.ModuleType("src.ezlynx.api_client")
+    module = types.ModuleType("robie_job_engine.ezlynx_discussions")
+    discussion_title = behaviors.get(
+        "discussion_title", "ROBIE worker adapter test 2")
+    note_id = behaviors.get("note_id", "1128931520")
+    posted: list[dict] = []
 
-    class EZLynxApiClient:
-        def add_note_to_discussion(self, **kwargs):
-            calls.update(kwargs)
-            calls["use_playwright_fallback"] = kwargs.get("use_playwright_fallback")
-            if behaviors.get("raise"):
-                raise RuntimeError("Classic REST exploded")
-            return dict(behaviors.get("result", {
-                "status": "success",
-                "note_id": "1128931520",
-                "discussion_title": kwargs.get("discussion_title"),
-                "method": "api",
-            }))
+    def get_discussions(applicant_id):
+        calls["applicant_id"] = applicant_id
+        if behaviors.get("raise"):
+            raise RuntimeError("Discussion API exploded")
+        # The discussion list the adapter searches by exact title. Posted
+        # notes appear here so the adapter's read-back verification passes.
+        return [{"id": "D1", "title": discussion_title,
+                 "notes": list(posted)}]
 
-    module.EZLynxApiClient = EZLynxApiClient
-    monkeypatch.setitem(sys.modules, "src", types.ModuleType("src"))
-    monkeypatch.setitem(sys.modules, "src.ezlynx", types.ModuleType("src.ezlynx"))
-    monkeypatch.setitem(sys.modules, "src.ezlynx.api_client", module)
+    def append_note(discussion_id, body):
+        calls["discussion_id"] = discussion_id
+        calls["body"] = body
+        if behaviors.get("result", {}).get("status") == "error":
+            return None
+        posted.append({"id": note_id})
+        return note_id
+
+    module.get_discussions = get_discussions
+    module.append_note = append_note
+    monkeypatch.setitem(
+        sys.modules, "robie_job_engine.ezlynx_discussions", module)
     return calls
 
 
@@ -583,28 +593,32 @@ def test_note_adapter_exact_title_success(monkeypatch):
         body="hello")
     assert ev.channel == "note"
     assert ev.destination_id == "1128931520"
-    # Exact title wins: passed through verbatim, never fuzzy-matched.
-    assert calls["discussion_title"] == "ROBIE worker adapter test 2"
+    # Exact title wins: the note was filed to the discussion carrying the
+    # exact title (D1), never a fuzzy match, and the applicant id was passed
+    # through to the API.
+    assert calls["discussion_id"] == "D1"
     assert calls["applicant_id"] == "220250093"
-    # API-only: no browser fallback, ever.
-    assert calls["use_playwright_fallback"] is False
+    # API-only: the ezlynx_discussions interface has no browser fallback.
     assert "ROBIE worker adapter test 2" in ev.detail
 
 
 def test_note_adapter_api_failure_fails_closed(monkeypatch):
     from robie_job_engine import worker_adapters as wa
-    _fake_ezlynx_client(monkeypatch, result={"status": "error", "note_id": None})
+    _fake_ezlynx_client(monkeypatch, result={"status": "error", "note_id": None},
+                        discussion_title="Some Title")
     adapter = wa.EZLynxNoteAdapter()
-    with pytest.raises(wa.AdapterError, match="note POST failed"):
+    with pytest.raises(wa.AdapterError, match="no note ID"):
         adapter.file_note(applicant_id="220250093",
                           discussion_title="Some Title", body="x")
 
 
 def test_note_adapter_api_exception_fails_closed(monkeypatch):
     from robie_job_engine import worker_adapters as wa
-    _fake_ezlynx_client(monkeypatch, **{"raise": True})
+    _fake_ezlynx_client(monkeypatch, **{"raise": True,
+                                        "discussion_title": "Some Title"})
     adapter = wa.EZLynxNoteAdapter()
-    with pytest.raises(wa.AdapterError):
+    # The API exception propagates (fails closed) — no false success.
+    with pytest.raises(RuntimeError, match="Discussion API exploded"):
         adapter.file_note(applicant_id="220250093",
                           discussion_title="Some Title", body="x")
 

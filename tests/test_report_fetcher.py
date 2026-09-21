@@ -153,14 +153,25 @@ def _run(run_id="run-1", fields=None):
 
 class StartRunRefusalTests(unittest.TestCase):
     def test_4359_start_run_refuses_before_browser(self):
-        with durable_temporary_directory() as tmp:
-            with self.assertRaises(ReportRegistryError) as ctx:
-                rf.fetch_report_rows(
-                    report_id="4359",
-                    db_path=f"{tmp}/jobs.db",
-                    session=_NoTouch(),
-                )
-            self.assertIn("4359", str(ctx.exception))
+        # The registry's unverified-schema block is tested with a
+        # temporarily patched unverified copy; the real 4359 entry is
+        # schema_verified=True (see test_4359_registry_in_sync_with_ingestion_gate).
+        import dataclasses
+        from robie_job_engine import report_registry
+        real_spec = report_registry.get_report_spec("4359")
+        unverified = dataclasses.replace(real_spec, schema_verified=False)
+        # Patch via the registry's internal mapping for a contained test.
+        with unittest.mock.patch.dict(
+            report_registry.VERIFIED_REPORTS, {"4359": unverified}, clear=False
+        ):
+            with durable_temporary_directory() as tmp:
+                with self.assertRaises(ReportRegistryError) as ctx:
+                    rf.fetch_report_rows(
+                        report_id="4359",
+                        db_path=f"{tmp}/jobs.db",
+                        session=_NoTouch(),
+                    )
+                self.assertIn("4359", str(ctx.exception))
 
     def test_unknown_report_id_refuses(self):
         with durable_temporary_directory() as tmp:

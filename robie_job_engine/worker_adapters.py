@@ -183,14 +183,14 @@ class EZLynxNoteAdapter:
 
     def __init__(self):
         try:
-            import ezlynx_discussions as _d  # noqa: F401
+            from robie_job_engine import ezlynx_discussions as _d  # noqa: F401
         except ImportError as exc:
             raise NotConfiguredError(
                 "ezlynx_discussions module not importable") from exc
 
     def file_note(self, *, applicant_id: str, discussion_title: str,
                   body: str) -> DestinationEvidence:
-        import ezlynx_discussions as d
+        from robie_job_engine import ezlynx_discussions as d
         discussions = d.get_discussions(applicant_id)
         target = None
         for disc in discussions:
