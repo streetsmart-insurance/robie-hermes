@@ -49,11 +49,12 @@ jobs:
             --project="${PROJECT_ID}" --zone="${ZONE}" \
             --format='value(name,status)' | grep -q '^hermes-test-01[[:space:]]\+RUNNING$'
 
-      - name: Confirm release pointer includes #513
+      - name: Confirm exact current release includes overdue fixes
         run: |
           set -euo pipefail
+          expected="${GITHUB_SHA:0:12}"
           gcloud compute ssh "${TEST_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" --tunnel-through-iap \
-            --command="set -euo pipefail; host=\$(hostname -s); test \"\$host\" = hermes-test-01; rel=\$(readlink -f /opt/streetsmart-hermes-test/releases/current); echo RELEASE=\$rel; echo \"\$rel\" | grep -q b92c571; grep -q 'non-agency work email' \"\$rel/robie_job_engine/overdue_submission_reports.py\""
+            --command="set -euo pipefail; host=\$(hostname -s); test \"\$host\" = hermes-test-01; rel=\$(readlink -f /opt/streetsmart-hermes-test/releases/current); echo RELEASE=\$rel; echo \"\$rel\" | grep -q \"${expected}\"; grep -q 'non-agency work email' \"\$rel/robie_job_engine/overdue_submission_reports.py\""
 
       - name: Confirm Carlo sink + session
         run: |

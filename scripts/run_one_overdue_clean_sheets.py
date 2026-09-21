@@ -181,6 +181,7 @@ job = store.create_job(
     idempotency_key=key,
 )
 job_id = str(job["id"])
+store.heartbeat_generic_chat_job(job_id, source="overdue-one-shot-test")
 print(
     json.dumps(
         {
@@ -215,6 +216,8 @@ try:
     engine.run(job_id)
 except Exception as exc:
     print(f"ENGINE_EXCEPTION {type(exc).__name__}: {exc}", flush=True)
+finally:
+    store.heartbeat_generic_chat_job(job_id, source="overdue-one-shot-test")
 elapsed = round(time.time() - t0, 1)
 final = store.get_job(job_id) or {}
 
