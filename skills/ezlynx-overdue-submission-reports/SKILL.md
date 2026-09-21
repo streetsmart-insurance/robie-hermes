@@ -54,7 +54,7 @@ Send one individualized email per producer with:
 - Instructions to open the [EZLynx Submission Center](https://app.ezlynx.com/web/submission-center/overview/submissions), choose **My Submissions**, and sort by **Quote Due Date**.
 - Instructions to review every item and select **Closed - Not Sold** or **Closed - Bound**, as appropriate.
 - A link to the [Submission Center cleanup SOP](https://docs.google.com/document/d/1nggrFQY-q9PEDOjGcje04qYKUTx-qTGTx3Wv-4qD80M/edit).
-- The submission link, applicant, current status, quote due date, and effective date for every item.
+- The applicant name is the submission link. Include current status, quote due date, and effective date for every item. Do not use a separate name column and link column.
 - A concise request to complete the close-outs as soon as possible.
 - CC Carlo and Jake.
 - Sign exactly as `-ROBIE AI on behalf of Carlo`.

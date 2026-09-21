@@ -7,6 +7,7 @@ approved employee roster, or producer-to-mailbox resolution is incomplete.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import os
@@ -226,24 +227,35 @@ def resolve_recipients(records: list[Mapping[str, Any]], directory: Mapping[str,
     return resolved
 
 
+def _sorted_report_records(records: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return sorted(records, key=lambda row: (str(row.get("quote_due_date") or ""), str(row.get("applicant") or "")))
+
+
+def _applicant_link_label(item: Mapping[str, Any]) -> tuple[str, str]:
+    name = str(item.get("applicant") or "")
+    url = str(item.get("submission_url") or "").strip()
+    return name, url
+
+
 def build_producer_report(producer: str, records: list[Mapping[str, Any]]) -> str:
     lines = [
         f"Hi {producer},",
         "",
         "The following EZLynx submissions assigned to you are 31 or more days overdue and still open:",
         "",
-        "Applicant | Status | Quote Due Date | Effective Date | Submission",
-        "--- | --- | --- | --- | ---",
+        "Applicant | Status | Quote Due Date | Effective Date",
+        "--- | --- | --- | ---",
     ]
-    for item in sorted(records, key=lambda row: (str(row.get("quote_due_date") or ""), str(row.get("applicant") or ""))):
+    for item in _sorted_report_records(records):
+        name, url = _applicant_link_label(item)
+        applicant = f"{name} ({url})" if url else name
         lines.append(
             " | ".join(
                 (
-                    str(item.get("applicant") or ""),
+                    applicant,
                     str(item.get("status") or ""),
                     str(item.get("quote_due_date") or ""),
                     str(item.get("effective_date") or ""),
-                    str(item.get("submission_url") or ""),
                 )
             )
         )
@@ -258,6 +270,46 @@ def build_producer_report(producer: str, records: list[Mapping[str, Any]]) -> st
         ]
     )
     return "\n".join(lines)
+
+
+def build_producer_report_html(producer: str, records: list[Mapping[str, Any]]) -> str:
+    """HTML table whose applicant cell is the submission link.
+
+    There is no separate name or link column. The visible name is the anchor.
+    """
+    rows: list[str] = []
+    for item in _sorted_report_records(records):
+        name, url = _applicant_link_label(item)
+        if url.startswith("https://"):
+            name_cell = f'<a href="{html.escape(url, quote=True)}">{html.escape(name)}</a>'
+        else:
+            name_cell = html.escape(name)
+        rows.append(
+            "<tr>"
+            f"<td>{name_cell}</td>"
+            f"<td>{html.escape(str(item.get('status') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('quote_due_date') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('effective_date') or ''))}</td>"
+            "</tr>"
+        )
+    table_rows = "\n".join(rows)
+    return "\n".join(
+        [
+            "<div>",
+            f"<p>Hi {html.escape(producer)},</p>",
+            "<p>The following EZLynx submissions assigned to you are 31 or more days overdue and still open:</p>",
+            "<table>",
+            "<thead><tr><th>Applicant</th><th>Status</th><th>Quote Due Date</th><th>Effective Date</th></tr></thead>",
+            "<tbody>",
+            table_rows,
+            "</tbody>",
+            "</table>",
+            "<p>Please open My Submissions, sort by Quote Due Date, and update each item. Close inactive opportunities as Closed - Not Sold or completed business as Closed - Bound.</p>",
+            f'<p>Submission Center cleanup SOP: <a href="{html.escape(SOP_URL, quote=True)}">Submission Center cleanup SOP</a></p>',
+            "<p>-ROBIE AI on behalf of Carlo</p>",
+            "</div>",
+        ]
+    )
 
 
 class OverdueSubmissionReportWorker:
@@ -317,12 +369,14 @@ class OverdueSubmissionReportWorker:
             for producer in sorted(grouped):
                 subject = SUBJECT
                 body = build_producer_report(producer, grouped[producer])
+                html_body = build_producer_report_html(producer, grouped[producer])
                 to = [recipients[producer]]
                 cc = list(CC)
                 if test_sink:
                     producer_key = hashlib.sha256(producer.casefold().encode("utf-8")).hexdigest()[:10]
                     subject = f"TEST ONLY - {SUBJECT} - {producer_key}"
                     body = "TEST ONLY - no producer delivery\n\n" + body
+                    html_body = "<p>TEST ONLY - no producer delivery</p>\n" + html_body
                     to = [test_sink]
                     cc = []
                 receipts.append(
@@ -331,7 +385,8 @@ class OverdueSubmissionReportWorker:
                         cc=cc,
                         subject=subject,
                         text_body=body,
-                        plain_only=True,
+                        html_body=html_body,
+                        plain_only=False,
                     )
                 )
         except EzlynxSessionLockTimeout:
