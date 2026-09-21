@@ -755,3 +755,56 @@ def test_4372_policy_column_takes_precedence_over_note():
         "Note": "Test note with TEST-HO-99999999 inside",
     }
     assert ing.identity_value("4372", row) == "SAHO581361"
+
+
+def _make_4372_csv(rows_data):
+    """Build a 4372-format CSV bytes object from list of (applicant, account,
+    status, policy_number, note) tuples."""
+    hdrs = ing.expected_headers("4372")
+
+    def make_row(applicant, account, status, policy_num, note):
+        row = [""] * len(hdrs)
+        row[0] = applicant
+        row[1] = account
+        row[6] = status
+        row[14] = note
+        row[24] = policy_num
+        row[30] = "Personal Lines"
+        return row
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(hdrs)
+    for rd in rows_data:
+        w.writerow(make_row(*rd))
+    return buf.getvalue().encode()
+
+
+def test_4372_parser_accepts_test_ho_note_fallback_row():
+    """Regression (2026-09-21): parse_and_validate_csv must not reject a
+    4372 row with an empty Policy Number column when the Note carries a
+    TEST-HO identity. The parser previously raised before identity_value's
+    fallback could run, which is what failed the three Mortgagee Test jobs
+    on feed 1a0c0ae6d8d69dc4."""
+    csv_bytes = _make_4372_csv([
+        ("220250093", "ROBIE Test LLC", "Open", "",
+         "Task note with TEST-HO-08312026-01 for mortgagee verification"),
+        ("220250094", "Test Acct 2", "Closed", "HO-11111", "Closed task"),
+    ])
+    rows, skipped = ing.parse_and_validate_csv("4372", csv_bytes)
+    assert len(rows) == 2
+    assert skipped == 0
+    # The canary row survives parsing with its TEST-HO identity
+    assert ing.identity_value("4372", rows[0]) == "TEST-HO-08312026-01"
+
+
+def test_4372_parser_still_rejects_truly_identityless_row():
+    """The parser must still fail closed on a 4372 row with no Policy Number
+    AND no TEST-HO identity in the Note — the fallback is not a blanket
+    pass for empty identities."""
+    csv_bytes = _make_4372_csv([
+        ("220250093", "ROBIE Test LLC", "Open", "",
+         "Regular note with no test identity"),
+    ])
+    with pytest.raises(ing.GmailReportIngestionError, match="identity column"):
+        ing.parse_and_validate_csv("4372", csv_bytes)

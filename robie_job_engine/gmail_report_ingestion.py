@@ -496,10 +496,17 @@ def parse_and_validate_csv(
             if _is_totals_row(row, id_col):
                 skipped += 1
                 continue
-            raise GmailReportIngestionError(
-                f"report {report_id} {source_label} line {lineno}: "
-                f"identity column {id_col!r} is empty on a row carrying data"
-            )
+            # TEST-ONLY (2026-09-21): for 4372, a row with an empty Policy
+            # Number column may still carry its identity in the Note as a
+            # TEST-HO number. identity_value() applies that fallback; only
+            # raise here if the fallback also yields nothing.
+            if report_id == "4372" and identity_value(report_id, row):
+                pass
+            else:
+                raise GmailReportIngestionError(
+                    f"report {report_id} {source_label} line {lineno}: "
+                    f"identity column {id_col!r} is empty on a row carrying data"
+                )
         # Validates the work-item key (4359: raises on blank created date).
         identity_value(report_id, row)
         rows.append(row)
