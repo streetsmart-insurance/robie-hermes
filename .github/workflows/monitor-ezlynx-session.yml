@@ -6,7 +6,7 @@
 #
 # Read-only. It never logs in, never writes, never restarts anything.
 #
-name: Monitor EZLynx session on Production
+name: Monitor main ROBIE EZLynx session (hermes-poc-01)
 
 on:
   schedule:
@@ -58,7 +58,7 @@ jobs:
           echo "$OUTPUT"
           echo "exit_code=${STATUS}" >> "$GITHUB_OUTPUT"
           {
-            echo "### EZLynx session check"
+            echo "### Main ROBIE EZLynx session check (`hermes-poc-01`)"
             echo ""
             echo '```json'
             echo "$OUTPUT"
@@ -68,10 +68,10 @@ jobs:
       - name: Fail loudly when the session is provably logged out
         if: steps.session.outputs.exit_code == '2'
         run: |
-          echo "::error title=EZLynx session logged out::The persistent Chrome on hermes-poc-01 is logged out of EZLynx. Policy work through the browser will fail until it is re-authenticated through the Secret Manager credential path."
+          echo "::error title=Main ROBIE EZLynx session logged out::The persistent Chrome on hermes-poc-01 is logged out of EZLynx. Policy work through the browser will fail until it is re-authenticated through the Secret Manager credential path."
           exit 1
 
       - name: Warn when the session state could not be determined
         if: steps.session.outputs.exit_code == '1'
         run: |
-          echo "::warning title=EZLynx session undetermined::Could not establish session state. This is a different failure from a logged-out session - check CDP on 127.0.0.1:9222 and whether playwright is importable."
+          echo "::warning title=Main ROBIE EZLynx session undetermined::Could not establish session state. This is a different failure from a logged-out session - check CDP on 127.0.0.1:9222 and whether playwright is importable."
