@@ -31,7 +31,7 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
         "4247", "Manual Renewals", True, ("policy_number",)
     ),
     "4372": ReportSpec(
-        "4372", "Mortgagee", True, ("policy_number",), filter_name="ROBIE Intake"
+        "4372", "Mortgagee", True, ("policy_number",), filter_name="Mortgagee Verification Queue - ROBIE"
     ),
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)
