@@ -54,19 +54,20 @@ def main() -> None:
     if not m:
         return
     jid = m.group(1)
-    conn = sqlite3.connect(args.db)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "select id,status,last_error,attempt_count,verification_count from jobs where id=?",
-        (jid,),
-    ).fetchone()
-    print(dict(row) if row else None)
-    atts = conn.execute(
-        "select attempt_number,phase,outcome,substr(coalesce(detail_json,''),1,500) d from attempts where job_id=? order by rowid",
-        (jid,),
-    ).fetchall()
-    for a in atts:
-        print(dict(a))
+    db_uri = f"file:{Path(args.db).expanduser().resolve()}?mode=ro"
+    with sqlite3.connect(db_uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "select id,status,last_error,attempt_count,verification_count from jobs where id=?",
+            (jid,),
+        ).fetchone()
+        print(dict(row) if row else None)
+        atts = conn.execute(
+            "select attempt_number,phase,outcome,substr(coalesce(detail_json,''),1,500) d from attempts where job_id=? order by rowid",
+            (jid,),
+        ).fetchall()
+        for a in atts:
+            print(dict(a))
 
 
 if __name__ == "__main__":
