@@ -46,24 +46,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "should_run=true" >> "${GITHUB_OUTPUT}"
-            echo "qualifying_scheduled_proof=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-          schedule_date="$(date -u +%F)"
-          expected_utc_hour="$(
-            TZ=America/New_York date -u -d "${schedule_date} 10:15" +%H
-          )"
-          expected_schedule="15 ${expected_utc_hour} * * 1-5"
-          if [ "${GITHUB_EVENT_SCHEDULE}" = "${expected_schedule}" ]; then
-            echo "should_run=true" >> "${GITHUB_OUTPUT}"
-            echo "qualifying_scheduled_proof=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "should_run=false" >> "${GITHUB_OUTPUT}"
-            echo "qualifying_scheduled_proof=false" >> "${GITHUB_OUTPUT}"
-            echo "Skipping the duplicate UTC slot ${GITHUB_EVENT_SCHEDULE}; canonical slot is ${expected_schedule}."
-          fi
+          python scripts/select_accountability_watchdog_slot.py \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --event-schedule "${GITHUB_EVENT_SCHEDULE:-}" \
+            --schedule-date "$(date -u +%F)" \
+            --github-output "${GITHUB_OUTPUT}"
 
       - uses: google-github-actions/auth@v3
         if: steps.local-time.outputs.should_run == 'true'

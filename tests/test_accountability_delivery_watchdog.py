@@ -6,12 +6,23 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "verify_accountability_watchdog.py"
+SLOT_SCRIPT = ROOT / "scripts" / "select_accountability_watchdog_slot.py"
 REPORT_SCRIPT = ROOT / "scripts" / "verify_accountability_report_content.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "accountability-delivery-watchdog.yml"
 
 
 def _module():
     spec = importlib.util.spec_from_file_location("accountability_watchdog", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _slot_module():
+    spec = importlib.util.spec_from_file_location(
+        "accountability_watchdog_slot", SLOT_SCRIPT
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -128,10 +139,10 @@ def test_watchdog_schedule_is_dst_safe_and_read_only():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert 'cron: "15 14 * * 1-5"' in text
     assert 'cron: "15 15 * * 1-5"' in text
-    assert "TZ=America/New_York" in text
-    assert 'expected_schedule="15 ${expected_utc_hour} * * 1-5"' in text
+    assert "select_accountability_watchdog_slot.py" in text
     assert 'GITHUB_EVENT_SCHEDULE' in text
     assert 'date +%H' not in text
+    assert "TZ=America/New_York date" not in text
     assert "environment: Production" in text
     assert "VERIFY_ACCOUNTABILITY_DELIVERY" in text
     assert "systemctl start" not in text
@@ -139,6 +150,40 @@ def test_watchdog_schedule_is_dst_safe_and_read_only():
     assert "--publish" not in text
     assert "--deliver" not in text
     assert "gmail.send" not in text
+
+
+def test_watchdog_slot_selection_handles_dst_and_never_false_greens():
+    from datetime import date
+
+    module = _slot_module()
+    assert module.expected_schedule(date(2026, 7, 15)) == "15 14 * * 1-5"
+    assert module.expected_schedule(date(2026, 1, 15)) == "15 15 * * 1-5"
+
+    assert module.select_slot(
+        event_name="schedule",
+        event_schedule="15 14 * * 1-5",
+        schedule_date=date(2026, 7, 15),
+    )[:2] == (True, True)
+    assert module.select_slot(
+        event_name="schedule",
+        event_schedule="15 15 * * 1-5",
+        schedule_date=date(2026, 7, 15),
+    )[:2] == (False, False)
+    assert module.select_slot(
+        event_name="schedule",
+        event_schedule="15 15 * * 1-5",
+        schedule_date=date(2026, 1, 15),
+    )[:2] == (True, True)
+
+
+def test_manual_watchdog_verification_never_counts_as_scheduled_proof():
+    from datetime import date
+
+    assert _slot_module().select_slot(
+        event_name="workflow_dispatch",
+        event_schedule="",
+        schedule_date=date(2026, 9, 21),
+    )[:2] == (True, False)
 
 
 def test_watchdog_requires_marker_doc_and_exact_gmail_delivery():
