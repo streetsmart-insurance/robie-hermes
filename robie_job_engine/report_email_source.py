@@ -31,7 +31,6 @@ from typing import Any, Mapping
 from . import gmail_report_ingestion as ing
 from .gmail_report_ingestion import (
     GmailReportIngestionError,
-    GmailReportMissingError,
     IngestedReport,
     ROBIE_MAILBOX,
 )
