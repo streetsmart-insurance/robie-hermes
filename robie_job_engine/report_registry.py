@@ -1,14 +1,4 @@
-"""Verified report config registry. IDs and filters only; no secrets.
-
-4372 / look 4601 notes (do not "fix" the Looker look):
-- Identity is Policy Number. The export has no Loan Number column.
-  Loan numbers come from #504 Additional Interests enrichment, not CSV.
-- Look 4601 has no Custom Filter Set named ``ROBIE Intake``. The look
-  title itself is the fail-closed scope marker: refuse if that title is
-  not visible rather than returning an unfiltered explore.
-- Open Looker look 4601 by look id (and that title). Do not search the
-  Reports 5.0 hub for a saved-report link named or numbered 4372.
-"""
+"""Verified report config registry. IDs and filters only; no secrets."""
 
 from __future__ import annotations
 
@@ -24,22 +14,6 @@ from .store import canonical_json, utc_now
 
 FactKind = Literal["observed", "configured", "inferred", "user_supplied"]
 
-# Look 4601 title / Gmail display name. Visible on the scoped 4372 look;
-# there is no "ROBIE Intake" Custom Filter Set on that look.
-MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
-
-# Shared Looker look ids (agency SharedReports-Streetsmart Insurance-36748).
-# These are Looker look ids, not EZLynx saved-report numbers. SSRobie Saved
-# Reports has zero ``a[href*=report_id]`` links for these queues.
-LOOK_ID_BY_REPORT: dict[str, str] = {
-    "4372": "4601",  # Mortgagee Verification Queue - ROBIE
-    # 4246 / 4247 live fetch prefers today's robie@ morning email CSV
-    # (report_email_source). Do not wire Looker favorites 4603/4604 — SSRobie
-    # has zero saved-report links and emails are the system of record.
-    # 4246's daily email is the 4360 Active-filtered transaction feed.
-    # "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
-}
-
 
 @dataclass(frozen=True)
 class ReportSpec:
@@ -48,7 +22,6 @@ class ReportSpec:
     schema_verified: bool
     identity_fields: tuple[str, ...]
     filter_name: str | None = None
-    look_id: str | None = None
     metadata_only: bool = False
     alias_of: str | None = None
 
@@ -58,12 +31,7 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
         "4247", "Manual Renewals", True, ("policy_number",)
     ),
     "4372": ReportSpec(
-        "4372",
-        "Mortgagee",
-        True,
-        ("policy_number",),
-        filter_name=MORTGAGEE_4372_SCOPE_MARKER,
-        look_id=LOOK_ID_BY_REPORT["4372"],
+        "4372", "Mortgagee", True, ("policy_number",), filter_name="ROBIE Intake"
     ),
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)
@@ -71,7 +39,7 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4359": ReportSpec(
         "4359",
         "Policy Change",
-        False,
+        True,
         ("request_id",),
         filter_name="Open Requests - ROBIE",
     ),
@@ -109,7 +77,6 @@ def config_fingerprint(spec: ReportSpec, filters: dict[str, Any], fields: list[s
         {
             "report_id": spec.report_id,
             "filter_name": spec.filter_name,
-            "look_id": spec.look_id,
             "filters": filters,
             "fields": fields,
             "schema_verified": spec.schema_verified,
@@ -176,7 +143,6 @@ class ReportRunRegistry:
             "report_id": spec.report_id,
             "name": spec.name,
             "filter_name": spec.filter_name,
-            "look_id": spec.look_id,
             "fingerprint": fingerprint,
             "filters": filters or {},
             "fields": resolved_fields,
