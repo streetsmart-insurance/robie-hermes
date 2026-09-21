@@ -26,6 +26,7 @@ from robie_job_engine.overdue_submission_reports import (
     SubmissionReportContractError,
     agency_email_directory_from_registry,
     build_producer_report,
+    build_producer_report_html,
     load_approved_producer_directory,
     resolve_recipients,
     validate_submission_observation,
@@ -98,12 +99,31 @@ def test_report_contract_and_email_content():
     record = _record()
     summary = validate_submission_observation(_observation([record]))
     body = build_producer_report("Producer One", [record])
+    html_body = build_producer_report_html("Producer One", [record])
     assert summary["qualifying_count"] == 1
     assert SUBJECT == "Action required: EZLynx submissions 31+ days overdue"
     assert record["submission_url"] in body
     assert SOP_URL in body
     assert "-ROBIE AI on behalf of Carlo" in body
     assert CC == ("carlo@streetsmart.insurance", "jake@streetsmart.insurance")
+    header = next(line for line in body.splitlines() if line.startswith("Applicant |"))
+    assert header == "Applicant | Status | Quote Due Date | Effective Date"
+    assert f'<a href="{record["submission_url"]}">Applicant one</a>' in html_body
+    assert "<th>Link</th>" not in html_body
+    assert "<th>Submission</th>" not in html_body
+    assert f"<td>{record['submission_url']}</td>" not in html_body
+
+
+def test_producer_report_puts_hyperlink_on_escaped_applicant_name():
+    record = _record()
+    record["applicant"] = 'A & B <script>'
+    text = build_producer_report("Producer One", [record])
+    html_body = build_producer_report_html("Producer One", [record])
+    assert "Applicant | Status | Quote Due Date | Effective Date | Submission" not in text
+    assert f"A & B <script> ({record['submission_url']})" in text
+    assert f'<a href="{record["submission_url"]}">A &amp; B &lt;script&gt;</a>' in html_body
+    assert "<script>" not in html_body
+    assert html_body.count("<th>") == 4
 
 
 def test_unresolved_producer_blocks_all_email():
@@ -139,6 +159,9 @@ def test_authorized_worker_sends_one_email_per_producer_and_redacts_destination(
     assert result.succeeded is True
     assert len(sent) == 2
     assert all(item["cc"] == list(CC) and item["subject"] == SUBJECT for item in sent)
+    assert all(item["plain_only"] is False for item in sent)
+    assert '<a href="https://app.ezlynx.com/web/submission-center/submissions/one">Applicant one</a>' in sent[0]["html_body"]
+    assert "<th>Submission</th>" not in sent[0]["html_body"]
     assert "one@streetsmart.insurance" not in str(result.destination)
     assert "two@streetsmart.insurance" not in str(result.destination)
 
