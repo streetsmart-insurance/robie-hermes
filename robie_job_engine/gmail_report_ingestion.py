@@ -100,6 +100,10 @@ class GmailReportIngestionError(RuntimeError):
     """A scheduled report email is missing, ambiguous, malformed, or unverified."""
 
 
+class GmailReportMissingError(GmailReportIngestionError):
+    """The expected scheduled report email was not found in the mailbox."""
+
+
 # --- Expected headers: exact ordered CSV headers, observed 2026-09-19 -----
 # NOTE: the Looker viewer shows view-name prefixes ("Applicant Data ...",
 # "Policy Expiration ...", "Activity Task ..."); the CSV export strips
@@ -423,7 +427,8 @@ def fingerprint_report_id(headers: Sequence[str]) -> str:
     ]
     if not matches:
         raise GmailReportIngestionError(
-            f"CSV headers match no known ROBIE report "
+            f"{len(actual)}-col CSV {actual[0]}…{actual[-1]}: "
+            f"no known ROBIE fingerprint "
             f"({len(actual)} cols, first={actual[0]!r} last={actual[-1]!r})"
         )
     if len(matches) > 1:
