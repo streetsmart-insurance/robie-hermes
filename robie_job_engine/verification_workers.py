@@ -679,6 +679,10 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
         allow_unverified = report_id == "4359"
         got = ing.ingest_daily_reports(gmail_service, day=day,
                                        report_ids=[report_id],
+                                       # 4372's email lives under the mortgagee
+                                       # subject; the generic daily-CSV query
+                                       # would never see it.
+                                       subject_contains=ing.gmail_subject_queries([report_id])[0],
                                        allow_unverified=allow_unverified)
         ingested = got[report_id]
     else:

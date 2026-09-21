@@ -300,6 +300,9 @@ def ingest_report_from_gmail(
         service,
         day=day,
         report_ids=[report_id],
+        # 4372's scheduled email lives under the mortgagee subject; the
+        # generic daily-CSV query would never see it.
+        subject_contains=ing.gmail_subject_queries([report_id])[0],
         allow_unverified=allow_unverified,
     )
     return got[report_id]

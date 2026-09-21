@@ -24,6 +24,26 @@ class ReportSpec:
     filter_name: str | None = None
     metadata_only: bool = False
     alias_of: str | None = None
+    # Reports 5.0 look id for the Looker fallback path (report_fetcher).
+    # Only reports listed in LOOK_ID_BY_REPORT have one.
+    look_id: str | None = None
+
+
+# Look 4601 title / Gmail display name. Visible on the scoped 4372 look;
+# there is no "ROBIE Intake" Custom Filter Set on that look.
+MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
+
+# Shared Looker look ids (agency SharedReports-Streetsmart Insurance-36748).
+# These are Looker look ids, not EZLynx saved-report numbers. SSRobie Saved
+# Reports has zero ``a[href*=report_id]`` links for these queues.
+LOOK_ID_BY_REPORT: dict[str, str] = {
+    "4372": "4601",  # Mortgagee Verification Queue - ROBIE
+    # 4246 / 4247 live fetch prefers today's robie@ morning email CSV
+    # (report_email_source). Do not wire Looker favorites 4603/4604 — SSRobie
+    # has zero saved-report links and emails are the system of record.
+    # 4246's daily email is the 4360 Active-filtered transaction feed.
+    # "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
+}
 
 
 VERIFIED_REPORTS: dict[str, ReportSpec] = {
@@ -31,7 +51,8 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
         "4247", "Manual Renewals", True, ("policy_number",)
     ),
     "4372": ReportSpec(
-        "4372", "Mortgagee", True, ("policy_number",), filter_name="Mortgagee Verification Queue - ROBIE"
+        "4372", "Mortgagee", True, ("policy_number",), filter_name=MORTGAGEE_4372_SCOPE_MARKER,
+        look_id=LOOK_ID_BY_REPORT["4372"],
     ),
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)
@@ -39,7 +60,7 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4359": ReportSpec(
         "4359",
         "Policy Change",
-        True,
+        False,
         ("request_id",),
         filter_name="Open Requests - ROBIE",
     ),
@@ -77,6 +98,7 @@ def config_fingerprint(spec: ReportSpec, filters: dict[str, Any], fields: list[s
         {
             "report_id": spec.report_id,
             "filter_name": spec.filter_name,
+            "look_id": spec.look_id,
             "filters": filters,
             "fields": fields,
             "schema_verified": spec.schema_verified,
@@ -143,6 +165,7 @@ class ReportRunRegistry:
             "report_id": spec.report_id,
             "name": spec.name,
             "filter_name": spec.filter_name,
+            "look_id": spec.look_id,
             "fingerprint": fingerprint,
             "filters": filters or {},
             "fields": resolved_fields,
