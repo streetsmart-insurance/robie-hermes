@@ -1,6 +1,6 @@
 {
   "required_clean_test_jobs": 3,
-  "notes": "Already live on Production hermes-poc-01. New LOB/job types are not listed here and must pass the Test-N-clean-jobs gate before production_ready.",
+  "notes": "Already live on Production hermes-poc-01. New LOB/job types are not listed here and must pass the Test-N-clean-jobs gate before production_ready. Carlo GO 2026-09-21: grandfather ezlynx.overdue_submission_reports for live Monday producer schedule on hermes-poc-01.",
   "job_types": [
     "drive.skill_sync",
     "carrier.proposal",
@@ -17,13 +17,15 @@
     "hermes.plain_english",
     "hermes.needs_clarification",
     "ezlynx.commercial_auto",
-    "ascend.create_program"
+    "ascend.create_program",
+    "ezlynx.overdue_submission_reports"
   ],
   "skills": [
     "ezlynx-commercial-auto-from-quote",
     "ezlynx-gemini-fallback",
     "robie-playwright-browser",
     "ezlynx-session-login",
-    "ascend-api-create-program"
+    "ascend-api-create-program",
+    "ezlynx-overdue-submission-reports"
   ]
 }
