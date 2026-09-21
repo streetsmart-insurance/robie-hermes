@@ -3,7 +3,8 @@
 Runs on Chat/Job Engine terminal close-out and answers four factual checks
 from jobs.db, destination evidence rows, and the published recording. Worker
 prose is never treated as destination evidence. A missing jobs.db, recording,
-or session is UNKNOWN/FAIL, not a skip-as-pass.
+or session is UNKNOWN/FAIL unless the server-owned executable contract marks
+that job type recording-exempt and the engine persisted the matching exemption.
 """
 
 from __future__ import annotations
@@ -385,6 +386,22 @@ def audit_recording_motion(
     except Exception as exc:
         return _unknown(f"recording ledger unavailable: {type(exc).__name__}: {exc}")
     if not segments:
+        try:
+            from .job_schema import get_executable_skill_contract
+
+            job_store = JobStore(db_path)
+            job = job_store.get_job(job_id)
+            exemption = job_store.get_checkpoint(job_id, "recording_exemption")
+            contract = get_executable_skill_contract(str(job.get("action_type") or ""))
+        except Exception:
+            exemption = None
+            contract = None
+        if exemption and contract and contract.recording_policy == "EXEMPT":
+            return _pass(
+                exempt=True,
+                policy="EXEMPT",
+                reason=str(exemption.get("reason") or "server-owned recording exemption"),
+            )
         return _fail("missing recording")
     published = [
         item

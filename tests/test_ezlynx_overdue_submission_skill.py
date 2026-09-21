@@ -5,6 +5,7 @@ REPOSITORY_SKILL = Path("skills/ezlynx-overdue-submission-reports/SKILL.md")
 DEPLOY_SKILL = Path("deploy/hermes/skills/ezlynx-overdue-submission-reports/SKILL.md")
 ONESHOT_WORKFLOW = Path(".github/workflows/oneshot-overdue-clean-test.yml")
 ONESHOT_POLLER = Path("scripts/poll_overdue_513_outcome.py")
+ONESHOT_RUNNER = Path("scripts/run_one_overdue_clean_sheets.py")
 
 
 def test_repository_and_deploy_skill_are_exact_mirrors():
@@ -52,3 +53,8 @@ def test_oneshot_reporter_opens_job_ledger_read_only():
     content = ONESHOT_POLLER.read_text(encoding="utf-8")
     assert "?mode=ro" in content
     assert "uri=True" in content
+
+
+def test_oneshot_records_durable_progress_for_post_job_audit():
+    content = ONESHOT_RUNNER.read_text(encoding="utf-8")
+    assert content.count('heartbeat_generic_chat_job(job_id, source="overdue-one-shot-test")') == 2
