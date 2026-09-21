@@ -14,6 +14,73 @@ class EmailTaskPending(RuntimeError):
     """Leave the inbound message available until its durable job is terminal."""
 
 
+# ---------------------------------------------------------------------------
+# Outbound email sanitizer: internal model reasoning must never reach the inbox.
+# ---------------------------------------------------------------------------
+# The hermes email worker can resume mid-response ("Continue the SAME original
+# email job ... Do not restart the task"). On 2026-09-20 a resume dumped the
+# model's private reasoning into the worker response under bold headings like
+# "**Continuing Thought Process**", "**Analyzing Interrupted Process**",
+# "**Investigating Zapier Alert**", each followed by first-person process
+# narration ("I am currently ...", "My goal is ..."). The reply composer then
+# embedded that raw text in an email to Carlo. The composer is the last line
+# of defense: strip reasoning sections here, no matter what the worker emits.
+
+# A bold heading that introduces internal monologue rather than user content.
+_PROCESS_HEADING_RE = re.compile(
+    r"^\s*\*\*\s*("
+    r"thought\s+process|"
+    r"continuing|analy[sz]ing|investigating|reviewing|diagnosing|"
+    r"integrating|clarifying|reconstructing|resuming|processing|"
+    r"examining|assessing|evaluating"
+    r")\b[^*\n]*\*\*\s*$",
+    re.IGNORECASE,
+)
+
+# First-person process narration that follows those headings.
+_PROCESS_NARRATION_RE = re.compile(
+    r"^\s*(I am currently|I['\u2019]m currently|I['\u2019]m\s|I will then|"
+    r"My goal|My focus|My aim|My current focus)\b",
+)
+
+# Fail-closed backstop: this phrase must never survive into an outbound email.
+_THOUGHT_PROCESS_MARKER_RE = re.compile(r"thought\s+process", re.IGNORECASE)
+
+_REASONING_STRIP_FALLBACK = (
+    "The worker's reply contained internal processing text that was removed "
+    "before sending. The underlying job result is recorded in the job log."
+)
+
+
+def _strip_internal_reasoning(text):
+    """Remove internal-reasoning sections from a worker response.
+
+    Drops bold process-talk headings (and their narration paragraphs). If any
+    thought-process marker survives, or nothing user-facing remains, returns a
+    fixed safe notice instead of the raw text. Never raises.
+    """
+    try:
+        if not isinstance(text, str) or not text.strip():
+            return text
+        # Pass 1: drop process-talk heading lines wherever they appear.
+        lines = [ln for ln in text.splitlines() if not _PROCESS_HEADING_RE.match(ln)]
+        # Pass 2: drop paragraphs that are pure process narration.
+        kept_paragraphs = []
+        for paragraph in re.split(r"\n\s*\n", "\n".join(lines)):
+            stripped = paragraph.strip()
+            if not stripped:
+                continue
+            if _PROCESS_NARRATION_RE.match(stripped):
+                continue
+            kept_paragraphs.append(paragraph.strip("\n"))
+        result = "\n\n".join(kept_paragraphs).strip()
+        if not result or _THOUGHT_PROCESS_MARKER_RE.search(result):
+            return _REASONING_STRIP_FALLBACK
+        return result
+    except Exception:
+        return _REASONING_STRIP_FALLBACK
+
+
 class HermesEmailWorker:
     def __init__(self, run_agent: Callable[[str], str], store: JobStore, run_agent_with_context=None):
         self.run_agent = run_agent
@@ -184,8 +251,13 @@ def run_guarded_email_task(
         raise EmailTaskPending(f"ROBIE Job {job['id']} is {status.value}; keep email unread")
     if status == JobStatus.COMPLETE:
         return f"ROBIE Job {job['id']} — COMPLETE\n\n{summary or 'The requested result was independently verified.'}"
+    # The worker response can contain the model's internal reasoning (e.g. a
+    # "**Continuing Thought Process**" dump after a mid-response resume). That
+    # text must never reach the inbox: sanitize before composing the reply.
+    # The raw response stays in the job checkpoints for diagnosis.
+    email_safe_response = _strip_internal_reasoning(response)
     return (
         f"ROBIE Job {job['id']} — {status.value}\n\n"
-        f"Worker report (not proof): {response}{details}\n\n"
+        f"Worker report (not proof): {email_safe_response}{details}\n\n"
         "ROBIE did not independently verify the destination state. This result must not be treated as COMPLETE."
     )
