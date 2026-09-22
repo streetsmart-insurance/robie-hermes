@@ -12,6 +12,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .magellan_sad_identity import build_sad_identity, parse_magellan_party_cell
+
 if TYPE_CHECKING:
     from playwright.sync_api import Browser, Page
 
@@ -94,10 +96,24 @@ def parse_visible_rows(page: "Page", target_date: date) -> tuple[list[dict[str, 
         if occurred.date() != target_date:
             continue
         row_id = str(row.get_attribute("data-testid") or "").removeprefix("call-success-row-")
-        from_link = row.locator('td[data-testid*="-call-from-"] a[href^="tel:"]')
-        to_link = row.locator('td[data-testid*="-call-to-"] a[href^="tel:"]')
+        from_cell = row.locator('td[data-testid*="-call-from-"]')
+        to_cell = row.locator('td[data-testid*="-call-to-"]')
+        from_link = from_cell.locator('a[href^="tel:"]')
+        to_link = to_cell.locator('a[href^="tel:"]')
         if from_link.count() != 1 or to_link.count() != 1:
             raise RuntimeError("Magellan call row requires one From and one To telephone link")
+        from_number = str(from_link.get_attribute("href") or "").removeprefix("tel:")
+        to_number = str(to_link.get_attribute("href") or "").removeprefix("tel:")
+        from_cell_text = " ".join((from_cell.inner_text() or "").split())
+        caller_name, _ = parse_magellan_party_cell(from_cell_text)
+        identity = build_sad_identity(
+            {
+                "from_phone": from_number,
+                "to_phone": to_number,
+                "caller_name": caller_name,
+            },
+            unknown_name="",
+        )
         sentiment_icon = row.locator('td[data-testid*="-sentiment-"] [aria-label]')
         sentiment_label = str(sentiment_icon.get_attribute("aria-label") or "unknown") if sentiment_icon.count() == 1 else "unknown"
         tags_cell = row.locator('td[data-testid*="-summary-items-"]')
@@ -106,8 +122,11 @@ def parse_visible_rows(page: "Page", target_date: date) -> tuple[list[dict[str, 
             {
                 "call_id": row_id,
                 "occurred_at": occurred.isoformat(),
-                "from_number": str(from_link.get_attribute("href") or "").removeprefix("tel:"),
-                "to_number": str(to_link.get_attribute("href") or "").removeprefix("tel:"),
+                "from_number": from_number,
+                "to_number": to_number,
+                "caller_name": caller_name,
+                "client_phone": identity["client_phone"],
+                "client_name": identity["client_name"],
                 "duration_seconds": _seconds(_row_value(row, "duration")),
                 "sentiment": "Sad" if sentiment_label.casefold() == "frown" else sentiment_label.title(),
                 "tags": list(dict.fromkeys(tags)),
@@ -185,7 +204,9 @@ def collect_magellan_snapshot(
         "sad_calls": [
             {
                 **item,
-                "caller_phone_masked": item["from_number"],
+                # Management-facing phone is the Magellan client/ANI, never the agency DID.
+                "caller_phone_masked": item.get("client_phone") or item["from_number"],
+                "account_name": item.get("client_name") or "Unknown",
                 "callback_status": "UNVERIFIED until RingCentral reconciliation",
             }
             for item in collected
