@@ -20,7 +20,11 @@ explicitly -- there is no implicit "last used store".
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -37,6 +41,137 @@ except Exception:  # pragma: no cover - typing convenience only
 
 
 STATUSES = ("PENDING", "APPROVED", "REJECTED", "EXPIRED")
+
+
+# ---------------------------------------------------------------------------
+# Decision tokens
+#
+# A decision typed into an unauthenticated surface (the board sheet, where
+# any editor can type APPROVE and write any name in "Decided by") is not an
+# authorization. Decisions are authorized by an HMAC-signed token that an
+# authenticated adapter (e.g. the Chat HITL ping, where the platform
+# authenticates the user) mints for one confirmation, one decision, and one
+# principal. The token is what the human pastes onto the sheet; ingestion
+# trusts only the token, never the typed name.
+# ---------------------------------------------------------------------------
+
+DECISION_TOKEN_ENV = "ROBIE_DECISION_SIGNING_KEY"
+DECISION_TOKEN_PREFIX = "rbd1"
+DEFAULT_TOKEN_TTL_SECONDS = 7 * 24 * 3600
+_DECISIONS = ("APPROVE", "REJECT")
+
+
+def decision_signing_key(key: str | bytes | None = None) -> bytes | None:
+    """Resolve the HMAC key for decision tokens.
+
+    Explicit ``key`` wins; otherwise the ROBIE_DECISION_SIGNING_KEY env var
+    (a secret mount, never repo-committed). Returns None when no key is
+    configured -- callers must fail closed (display-only surfaces).
+    """
+    if key is None:
+        env = os.environ.get(DECISION_TOKEN_ENV, "").strip()
+        if not env:
+            return None
+        key = env
+    if isinstance(key, str):
+        key = key.encode("utf-8")
+    if len(key) < 16:
+        raise ValueError("decision signing key must be at least 16 bytes")
+    return key
+
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64d(text: str) -> bytes:
+    pad = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + pad)
+
+
+def mint_decision_token(
+    confirmation_id: str,
+    decision: str,
+    principal: str,
+    *,
+    key: str | bytes | None = None,
+    now: datetime | None = None,
+    ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+) -> str:
+    """Mint a signed decision token for one confirmation + decision + principal.
+
+    Only an adapter that has already authenticated ``principal`` may mint.
+    The token expires after ``ttl_seconds`` (default 7 days).
+    """
+    signing = decision_signing_key(key)
+    if signing is None:
+        raise RuntimeError(
+            f"no decision signing key configured ({DECISION_TOKEN_ENV}); "
+            "refusing to mint an unsigned decision"
+        )
+    confirmation_id = _require_nonempty(confirmation_id, "confirmation_id")
+    principal = _require_nonempty(principal, "principal")
+    decision = str(decision or "").strip().upper()
+    if decision not in _DECISIONS:
+        raise ValueError(f"decision must be APPROVE or REJECT, got {decision!r}")
+    if ttl_seconds <= 0:
+        raise ValueError("ttl_seconds must be > 0")
+    moment = now or datetime.now(timezone.utc)
+    expires = int(moment.timestamp()) + int(ttl_seconds)
+    payload = f"{confirmation_id}|{decision}|{principal}|{expires}"
+    sig = hmac.new(signing, payload.encode("utf-8"), hashlib.sha256).digest()
+    return f"{DECISION_TOKEN_PREFIX}.{_b64e(payload.encode('utf-8'))}.{_b64e(sig)}"
+
+
+def verify_decision_token(
+    token: str,
+    *,
+    key: str | bytes | None = None,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Verify a decision token. Returns {confirmation_id, decision, principal}.
+
+    Raises ValueError on a malformed, forged, or expired token, and
+    RuntimeError when no signing key is configured.
+    """
+    signing = decision_signing_key(key)
+    if signing is None:
+        raise RuntimeError(
+            f"no decision signing key configured ({DECISION_TOKEN_ENV}); "
+            "decision tokens cannot be verified"
+        )
+    text = str(token or "").strip()
+    parts = text.split(".")
+    if len(parts) != 3 or parts[0] != DECISION_TOKEN_PREFIX:
+        raise ValueError("malformed decision token")
+    try:
+        payload = _b64d(parts[1]).decode("utf-8")
+        sig = _b64d(parts[2])
+    except Exception as exc:
+        raise ValueError("malformed decision token") from exc
+    expected = hmac.new(signing, payload.encode("utf-8"), hashlib.sha256).digest()
+    if not hmac.compare_digest(sig, expected):
+        raise ValueError("decision token signature mismatch")
+    fields = payload.split("|")
+    if len(fields) != 4:
+        raise ValueError("malformed decision token payload")
+    confirmation_id, decision, principal, expires = fields
+    if decision not in _DECISIONS:
+        raise ValueError(f"token carries invalid decision {decision!r}")
+    try:
+        expires_at = int(expires)
+    except ValueError as exc:
+        raise ValueError("malformed decision token expiry") from exc
+    moment = now or datetime.now(timezone.utc)
+    if int(moment.timestamp()) > expires_at:
+        raise ValueError("decision token expired")
+    if not confirmation_id or not principal:
+        raise ValueError("decision token payload is incomplete")
+    return {
+        "confirmation_id": confirmation_id,
+        "decision": decision,
+        "principal": principal,
+    }
 
 _SHEET_HEADERS = [
     "Confirmation ID",
