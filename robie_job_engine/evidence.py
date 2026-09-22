@@ -32,7 +32,10 @@ to a human on MISMATCH instead of auto-retrying.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -85,6 +88,10 @@ class LockedPlan:
     extractor cannot map to any evidence tier are recorded with tier "B" and
     a note -- never silently dropped.
 
+    ``field_spans`` maps field name -> the EvidenceSpan binding that value
+    to the exact source text it was extracted from (H1). A field without a
+    span has no provenance and must not grade clean.
+
     ``idempotency`` is the job type's declared answer to "is re-running
     this safe" (see Idempotency). It gates automatic retry on MISMATCH.
     Undeclared job types default to NON_IDEMPOTENT: fail closed, no blind
@@ -96,10 +103,194 @@ class LockedPlan:
     fields: dict[str, Any]
     field_tiers: dict[str, str] = field(default_factory=dict)
     field_notes: dict[str, str] = field(default_factory=dict)
+    field_spans: dict[str, EvidenceSpan] = field(default_factory=dict)
     settle_delay_seconds: int = 0
     locked_at: str = ""
     locked_by: str = "planner"
     idempotency: Idempotency = Idempotency.NON_IDEMPOTENT
+
+
+@dataclass(frozen=True)
+class EvidenceSpan:
+    """A provenance pointer binding one plan field to its source text.
+
+    ``source_id`` names the authoritative source the value was extracted
+    from (e.g. "change_request_text" for the requester's message,
+    "agency_context" for identifiers the agency supplied, "policy_api_search"
+    for an API fetch). ``source_hash`` is the SHA-256 hex digest of the
+    exact source bytes the offsets index into -- see
+    :func:`canonical_source_text`; offsets are character positions in that
+    canonical text. ``quote`` is the indexed text verbatim. A span whose
+    hash does not match the source it is checked against fails closed
+    (see :func:`validate_span`): it can never quietly grade a value against
+    text the value did not come from.
+    """
+
+    source_id: str
+    source_hash: str
+    offset_start: int
+    offset_end: int
+    quote: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": str(self.source_id),
+            "source_hash": str(self.source_hash),
+            "offset_start": int(self.offset_start),
+            "offset_end": int(self.offset_end),
+            "quote": str(self.quote),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvidenceSpan":
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                f"evidence span must be a mapping, got {type(data).__name__}"
+            )
+        try:
+            return cls(
+                source_id=str(data["source_id"]),
+                source_hash=str(data["source_hash"]),
+                offset_start=int(data["offset_start"]),
+                offset_end=int(data["offset_end"]),
+                quote=str(data["quote"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed evidence span {data!r}: {exc}") from exc
+
+
+class SpanValidationError(RuntimeError):
+    """An evidence span does not bind to its claimed source.
+
+    Raised -- never swallowed -- so a tampered or misbound span refuses to
+    grade instead of grading against the wrong bytes.
+    """
+
+
+def canonical_source_text(source_text: str | None) -> str:
+    """The canonical bytes evidence-span offsets index into.
+
+    Whitespace (including line breaks) is collapsed to single spaces and
+    the ends are stripped; case is preserved. The canonical text -- not the
+    raw input -- is what ``source_hash`` digests and what ``offset_start``
+    / ``offset_end`` address, so a quote that differs only in line breaks
+    still indexes deterministically.
+    """
+    return re.sub(r"\s+", " ", str(source_text or "")).strip()
+
+
+def span_source_hash(source_text: str | None) -> str:
+    """SHA-256 hex of the canonical source bytes (see canonical_source_text)."""
+    return hashlib.sha256(canonical_source_text(source_text).encode("utf-8")).hexdigest()
+
+
+def span_for_quote(
+    source_text: str,
+    quote: str,
+    *,
+    source_id: str,
+) -> EvidenceSpan:
+    """Build the span binding ``quote`` to its occurrence in ``source_text``.
+
+    Finds the quote in the canonical source text: exact match first, then a
+    case-insensitive match (the extractor's anti-hallucination check is
+    case-insensitive, so a span must be computable for anything it accepts).
+    Raises ValueError when the quote is not found -- the caller turns that
+    into a human-review reason, never a silently span-less field.
+    """
+    canonical = canonical_source_text(source_text)
+    wanted = canonical_source_text(quote)
+    if not wanted:
+        raise ValueError("cannot build an evidence span for an empty quote")
+    start = canonical.find(wanted)
+    if start < 0:
+        # Case-insensitive fallback: mirrors the validator's casefold check.
+        folded = canonical.casefold()
+        start = folded.find(wanted.casefold())
+    if start < 0:
+        raise ValueError("quote not found in the source text")
+    end = start + len(wanted)
+    return EvidenceSpan(
+        source_id=str(source_id),
+        source_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        offset_start=start,
+        offset_end=end,
+        quote=canonical[start:end],
+    )
+
+
+def validate_span(span: EvidenceSpan, source_text: str | None) -> None:
+    """Check one span against its claimed source. Fail closed.
+
+    Raises SpanValidationError when the source bytes no longer hash to the
+    span's ``source_hash`` (tampered or wrong source), when the offsets are
+    out of range, or when the indexed text differs from the span's quote.
+    """
+    if not isinstance(span, EvidenceSpan):
+        raise SpanValidationError(
+            f"expected an EvidenceSpan, got {type(span).__name__}"
+        )
+    canonical = canonical_source_text(source_text)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(digest, str(span.source_hash)):
+        raise SpanValidationError(
+            f"span for source {span.source_id!r}: source hash mismatch -- "
+            "the source text changed (or is not the text the value came "
+            "from); refusing to grade"
+        )
+    start, end = span.offset_start, span.offset_end
+    if (
+        not isinstance(start, int)
+        or not isinstance(end, int)
+        or isinstance(start, bool)
+        or isinstance(end, bool)
+        or start < 0
+        or end < start
+        or end > len(canonical)
+    ):
+        raise SpanValidationError(
+            f"span for source {span.source_id!r}: offsets "
+            f"[{start}:{end}] are out of range for a {len(canonical)}-char "
+            "source; refusing to grade"
+        )
+    if canonical[start:end] != span.quote:
+        raise SpanValidationError(
+            f"span for source {span.source_id!r}: the indexed text "
+            f"{canonical[start:end]!r} does not match the span quote "
+            f"{span.quote!r}; refusing to grade"
+        )
+
+
+def validate_plan_spans(
+    plan: LockedPlan,
+    sources: Mapping[str, str],
+) -> None:
+    """Validate every plan field's span against the authoritative sources.
+
+    ``sources`` maps source_id -> the exact source text as fetched from the
+    authoritative system. Every field in ``plan.fields`` must carry a span;
+    every span's source_id must be present in ``sources``; every span must
+    validate against its source bytes. Any gap raises SpanValidationError:
+    a plan with missing or misbound provenance is ungradable, never clean.
+    """
+    if not isinstance(sources, Mapping):
+        raise SpanValidationError(
+            f"sources must be a mapping, got {type(sources).__name__}"
+        )
+    spans = plan.field_spans or {}
+    for name in plan.fields:
+        span = spans.get(name)
+        if span is None:
+            raise SpanValidationError(
+                f"field {name!r} has no evidence span; refusing to grade"
+            )
+        source_id = span.source_id
+        if source_id not in sources:
+            raise SpanValidationError(
+                f"field {name!r} cites source {source_id!r}, which was not "
+                "supplied; refusing to grade"
+            )
+        validate_span(span, sources[source_id])
 
 
 @dataclass(frozen=True)
@@ -110,6 +301,7 @@ class FieldCheck:
     matched: bool
     note: str = ""
     pending_settle: bool = False
+    span: EvidenceSpan | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +390,7 @@ def compare_plan_to_evidence(
     observed: Mapping[str, Any],
     *,
     now: str | None = None,
+    sources: Mapping[str, str] | None = None,
 ) -> EvidenceResult:
     """Compare a locked plan against freshly fetched evidence.
 
@@ -206,7 +399,18 @@ def compare_plan_to_evidence(
     show it: within the settle window that is PENDING_SETTLEMENT, after the
     window it is MISMATCH. Precedence: any MISMATCH wins, then
     PENDING_SETTLEMENT, otherwise MATCHED.
+
+    Every FieldCheck carries the plan field's evidence span
+    (``plan.field_spans``), so graders and renderers can show and audit the
+    exact source text each expected value came from. When ``sources`` is
+    given (source_id -> authoritative source text), every span is validated
+    first and a missing or misbound span raises SpanValidationError --
+    the comparison is refused, never graded against unproven bytes.
     """
+
+    if sources is not None:
+        # Fail closed: no provenance, no grade.
+        validate_plan_spans(plan, sources)
 
     captured_at = now or utc_now_iso()
     locked_at = _parse_iso(plan.locked_at) if plan.locked_at else None
@@ -218,6 +422,7 @@ def compare_plan_to_evidence(
 
     checks: list[FieldCheck] = []
     for name, expected in plan.fields.items():
+        span = (plan.field_spans or {}).get(name)
         actual = observed.get(name) if isinstance(observed, Mapping) else None
         if actual is None:
             if elapsed < plan.settle_delay_seconds:
@@ -228,6 +433,7 @@ def compare_plan_to_evidence(
                         actual=None,
                         matched=False,
                         pending_settle=True,
+                        span=span,
                         note=(
                             "not yet visible at destination; "
                             f"{int(plan.settle_delay_seconds - elapsed)}s of settle delay remain"
@@ -241,12 +447,13 @@ def compare_plan_to_evidence(
                         expected=expected,
                         actual=None,
                         matched=False,
+                        span=span,
                         note="field not present in destination evidence after settle delay",
                     )
                 )
         elif values_equal(expected, actual):
             checks.append(
-                FieldCheck(field=name, expected=expected, actual=actual, matched=True)
+                FieldCheck(field=name, expected=expected, actual=actual, matched=True, span=span)
             )
         else:
             checks.append(
@@ -255,6 +462,7 @@ def compare_plan_to_evidence(
                     expected=expected,
                     actual=actual,
                     matched=False,
+                    span=span,
                     note="destination value differs from locked plan",
                 )
             )

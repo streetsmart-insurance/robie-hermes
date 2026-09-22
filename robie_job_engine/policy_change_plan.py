@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .evidence import Idempotency, LockedPlan, utc_now_iso
+from .evidence import EvidenceSpan, Idempotency, LockedPlan, utc_now_iso
 from .evidence_fetchers import _POLICY_FIELD_KEYS
 
 JOB_TYPE_POLICY_CHANGE = "policy_change"
@@ -78,11 +78,18 @@ def extract_policy_change_plan(
     changes: dict[str, Any],
     settle_delay_seconds: int = POLICY_CHANGE_SETTLE_DELAY_SECONDS,
     locked_by: str = "planner",
+    field_spans: dict[str, EvidenceSpan] | None = None,
 ) -> LockedPlan:
     """Build the locked checklist for one policy-change job.
 
     ``changes`` maps field name -> expected value after the change, e.g.
     ``{"writtenPremium": 1284.00, "expirationDate": "2027-09-01"}``.
+
+    ``field_spans`` optionally maps field name -> the EvidenceSpan binding
+    the value to its source text; it is stored on the locked plan so
+    graders and renderers can show and check provenance. Plans built
+    without spans simply carry an empty mapping (callers that have
+    provenance -- e.g. ``plan_extraction.draft_to_locked_plan`` -- pass it).
 
     Raises:
         ValueError: applicant/policy/changes missing -- a plan built from
@@ -125,6 +132,7 @@ def extract_policy_change_plan(
         fields=fields,
         field_tiers=field_tiers,
         field_notes=field_notes,
+        field_spans=dict(field_spans) if field_spans else {},
         settle_delay_seconds=int(settle_delay_seconds),
         locked_at=utc_now_iso(),
         locked_by=locked_by,

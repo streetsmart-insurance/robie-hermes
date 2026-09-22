@@ -102,6 +102,9 @@ def _details_text(record: Mapping[str, Any]) -> str:
     changes = confirmations._parse_changes(record)
     policy = str(changes.get("policy_number") or "").strip()
     change_map = changes.get("changes")
+    spans = changes.get("field_spans")
+    if not isinstance(spans, Mapping):
+        spans = {}
     parts: list[str] = []
     if isinstance(change_map, Mapping):
         for field, value in change_map.items():
@@ -116,6 +119,16 @@ def _details_text(record: Mapping[str, Any]) -> str:
                     parts.append(f"{field}: {json.dumps(value, default=str)}")
             else:
                 parts.append(f"{field}: {value}")
+            # Provenance, not just the value: the quote + source for the field.
+            raw_span = spans.get(field)
+            if isinstance(raw_span, Mapping):
+                source = str(raw_span.get("source_id") or "").strip()
+                quote = str(raw_span.get("quote") or "").strip()
+                if source or quote:
+                    snippet = (quote[:70] + "...") if len(quote) > 70 else quote
+                    parts[-1] += f' [source: {source or "unknown"}, "{snippet}"]'
+            elif raw_span:
+                parts[-1] += f' [source: "{str(raw_span)[:70]}"]'
     elif isinstance(change_map, list):
         for entry in change_map:
             parts.append(str(entry)[:120])

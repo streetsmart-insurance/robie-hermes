@@ -20,6 +20,7 @@ from robie_job_engine.confirmations import (
     request_confirmation,
     rows_for_sheet,
 )
+from robie_job_engine.evidence import EvidenceSpan, span_source_hash
 from robie_job_engine.plan_extraction import (
     PlanDraft,
     PlanNeedsHumanReview,
@@ -58,11 +59,22 @@ def _request_with_draft(store, draft, loop_job_id="loop-1", **kwargs):
 
 
 def _review_draft():
+    quote = "written premium to 2450.00"
+    request = f"please increase the {quote} on the policy"
+    start = request.index(quote)
     return PlanDraft(
         applicant_id="220250093",
         policy_number="TEST-HO-1",
         changes={"writtenPremium": "2450.0"},
-        evidence_spans={"writtenPremium": "written premium to 2450.00"},
+        evidence_spans={
+            "writtenPremium": EvidenceSpan(
+                source_id="change_request_text",
+                source_hash=span_source_hash(request),
+                offset_start=start,
+                offset_end=start + len(quote),
+                quote=quote,
+            )
+        },
         uncertainties=["driver add cannot be mapped"],
         needs_human_review=True,
         review_reasons=["model reported 1 uncertainty"],
