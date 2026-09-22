@@ -545,7 +545,16 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
         if str(write["range"]).split("!", 1)[0] in available_sheets
     ]
     api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
-    return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
+    result = {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
+    # The Confirmations tab is the human-facing side of the HITL gate.
+    # Sync it last: decisions are ingested before the tab is rewritten, so a
+    # sync never wipes a decision the human just typed.
+    if "Confirmations" in available_sheets:
+        from . import confirmation_board
+        board_result = confirmation_board.sync_confirmations(db_path, spreadsheet_id)
+        result["confirmations"] = board_result["rows"]
+        result["confirmations_decisions_applied"] = board_result["decisions_applied"]
+    return result
 
 
 def sync_from_env(db_path: str) -> dict[str, int] | None:
