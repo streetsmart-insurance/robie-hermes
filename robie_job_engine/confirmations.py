@@ -462,6 +462,22 @@ def _decide(
                WHERE id = ?""",
             (new_status, decided_by, now, str(reason or ""), confirmation_id),
         )
+        # Append-only audit of the approval decision (H4). Lives in the same
+        # transaction as the status flip, so the audit row commits or rolls
+        # back with the decision itself.
+        from . import plan_lock as _plan_lock
+
+        _plan_lock.append_transition(
+            conn,
+            str(row["loop_job_id"]),
+            "approved" if new_status == "APPROVED" else "rejected",
+            actor=decided_by,
+            detail={
+                "confirmation_id": confirmation_id,
+                "status": new_status,
+                "reason": str(reason or ""),
+            },
+        )
         updated = conn.execute(
             "SELECT * FROM plan_confirmations WHERE id = ?", (confirmation_id,)
         ).fetchone()
@@ -774,5 +790,14 @@ def confirm_and_lock(
                 f"confirmation {confirmation_id!r} was decided concurrently; "
                 "refusing to lock"
             )
+        # Append-only audit of the approval decision (H4): same transaction
+        # as the approval flip and the lock insert below.
+        plan_lock.append_transition(
+            conn,
+            job_id,
+            "approved",
+            actor=decided_by,
+            detail={"confirmation_id": confirmation_id, "status": "APPROVED"},
+        )
         plan_lock._insert_locked_plan(conn, locked)
     return locked
