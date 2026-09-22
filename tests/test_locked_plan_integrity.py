@@ -17,7 +17,7 @@ import sqlite3
 import pytest
 
 from robie_job_engine import board, confirmations, plan_lock, retry
-from robie_job_engine.evidence import Idempotency, LockedPlan
+from robie_job_engine.evidence import EvidenceSpan, Idempotency, LockedPlan, span_source_hash
 from robie_job_engine.grade_registry import GradeResult
 from robie_job_engine.store import JobStore
 
@@ -174,11 +174,22 @@ def test_transitions_appended_in_order_and_append_only(store):
 def test_confirm_and_lock_appends_approved_then_locked(store):
     from robie_job_engine.plan_extraction import PlanDraft
 
+    quote = "written premium to 2450.00"
+    request = f"please increase the {quote} on the policy"
+    start = request.index(quote)
     draft = PlanDraft(
         applicant_id="220250093",
         policy_number="TEST-HO-1",
         changes={"writtenPremium": "2450.0"},
-        evidence_spans={"writtenPremium": "written premium to 2450.00"},
+        evidence_spans={
+            "writtenPremium": EvidenceSpan(
+                source_id="change_request_text",
+                source_hash=span_source_hash(request),
+                offset_start=start,
+                offset_end=start + len(quote),
+                quote=quote,
+            )
+        },
         uncertainties=[],
         needs_human_review=True,
         review_reasons=["test"],
