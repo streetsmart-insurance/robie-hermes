@@ -318,8 +318,9 @@ def sync_confirmations(
     5. When ``notify`` is true, route approval asks on their origin medium
        (``notify_approval_on_origin``: origin wins, no blast) plus the one
        quiet-window Chat nudge for stale EZLynx-origin asks
-       (``maybe_quiet_nudge``). Idempotent; failures are returned, never
-       raised.
+       (``maybe_quiet_nudge``) and the quiet-window backup email for
+       unanswered Chat-origin asks (``maybe_quiet_backup_email``).
+       Idempotent; failures are returned, never raised.
     """
     store = JobStore(db_path)
     expired = confirmations.expire_old(store)
@@ -424,7 +425,9 @@ def _notify_pending(
 
     Origin wins (Carlo 2026-09-22): ``notify_approval_on_origin`` puts the
     ask on the medium where it started instead of blasting Chat + email
-    every time. ``maybe_quiet_nudge`` then posts the one Chat nudge for
+    every time. A successful Chat card does not email; backup email waits
+    for a failed Chat post or for ``maybe_quiet_backup_email`` after the
+    quiet window. ``maybe_quiet_nudge`` then posts the one Chat nudge for
     EZLynx-origin asks whose quiet window has elapsed. ``chat_thread_poster``
     is kept for signature stability (legacy requester pings); the origin
     router uses ``approval_card_poster`` for Chat-origin cards instead.
@@ -461,4 +464,13 @@ def _notify_pending(
         )
         if nudge.get("notified") or nudge.get("errors"):
             results.append(nudge)
+        backup = confirmation_notify.maybe_quiet_backup_email(
+            store,
+            confirmation_id,
+            gmail_sender=gmail_sender,
+            quiet_hours=quiet_hours,
+            given_sheet_id=spreadsheet_id,
+        )
+        if backup.get("notified") or backup.get("errors"):
+            results.append(backup)
     return results

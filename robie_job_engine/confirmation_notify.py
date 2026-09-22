@@ -645,10 +645,14 @@ def assign_requester_task(
 #
 # - chat origin   -> the approval CARD (Approve/Reject buttons, signed
 #                    tokens) goes in the originating Chat thread. That one
-#                    card is the decision surface. Email is a tokenless
-#                    backup heads-up only, never a second live decision
-#                    thread. EZLynx is NEVER touched from a Chat-origin ask --
-#                    not even when an applicant id happens to be on the job.
+#                    card is the decision surface. A tokenless backup email
+#                    is never a second live decision thread, and it is never
+#                    sent at the same time as a successful Chat post. It goes
+#                    out only when (a) the Chat post fails, or (b) the quiet
+#                    window elapses and the ask is still unanswered
+#                    (``maybe_quiet_backup_email``). EZLynx is NEVER touched
+#                    from a Chat-origin ask -- not even when an applicant id
+#                    happens to be on the job.
 # - email origin  -> the approval ask goes by email with signed tokens
 #                    (the live surface, as before). No parallel Chat ask.
 # - ezlynx origin -> EZLynx task only, and only when the applicant id is
@@ -673,7 +677,11 @@ CHANNEL_CHAT_NUDGE = "chat_nudge"
 
 
 def quiet_window_hours() -> float:
-    """Hours of EZLynx silence before the one Chat nudge. Env-overridable."""
+    """Hours before a quiet escalation. Env-overridable.
+
+    Shared by the EZLynx-origin Chat nudge and the Chat-origin backup
+    email that waits until an unanswered card is still pending.
+    """
     raw = _env("ROBIE_CONFIRMATION_QUIET_HOURS", "24")
     try:
         value = float(raw)
@@ -722,6 +730,44 @@ def _real_approval_card_poster() -> Any:
 
 def _backup_email_subject(record: Mapping[str, Any]) -> str:
     return f"[ROBIE] Approval waiting in Chat: {confirmations.confirmation_summary(record)[:90]}"
+
+
+def _chat_card_landed(card_result: Mapping[str, Any]) -> bool:
+    """True when this call posted the card, or a prior post already did."""
+    posted = any(
+        item.get("channel") == CHANNEL_ORIGIN_CHAT_CARD
+        for item in card_result.get("notified") or []
+    )
+    skipped = str(card_result.get("skipped") or "")
+    return posted or skipped in {"already notified", "not PENDING"}
+
+
+def _deliver_chat_backup_email(
+    store: Any,
+    confirmation_id: str,
+    record: Mapping[str, Any],
+    *,
+    gmail_sender: Any = None,
+    given_sheet_id: str | None = None,
+) -> dict[str, Any]:
+    """Send the tokenless Chat-origin backup email once.
+
+    Caller decides the send is allowed (Chat post failed, or the quiet
+    window elapsed with the ask still unanswered). Raises on send failure
+    so the caller can return an error and retry next sync. A prior success
+    is skipped; the ledger records only a send that returned.
+    """
+    if was_notified(store, confirmation_id, CHANNEL_BACKUP_EMAIL):
+        return {"skipped": "already emailed"}
+    tab_url = confirmations_tab_url(given_sheet_id)
+    sender = gmail_sender if gmail_sender is not None else _real_gmail_sender()
+    receipt = sender(
+        notify_email_to(),
+        _backup_email_subject(record),
+        _backup_email_body(record, tab_url),
+    )
+    _record(store, confirmation_id, CHANNEL_BACKUP_EMAIL, receipt)
+    return {"notified": [{"channel": CHANNEL_BACKUP_EMAIL, **receipt}]}
 
 
 def _backup_email_body(record: Mapping[str, Any], tab_url: str) -> str:
@@ -824,6 +870,12 @@ def notify_approval_on_origin(
 
     if origin == "chat":
         # The card in the originating thread is the decision surface.
+        # A successful post does not email. Backup email is immediate only
+        # when that post fails; an unanswered card emails later, after the
+        # quiet window (``maybe_quiet_backup_email``). Never an EZLynx write:
+        # a Chat-origin ask without (or with) an applicant never touches
+        # EZLynx.
+        chat_ok = False
         try:
             card_result = post_origin_approval_card(
                 store,
@@ -832,23 +884,20 @@ def notify_approval_on_origin(
                 decision_key=decision_key,
             )
             notified.extend(card_result.get("notified", []))
+            chat_ok = _chat_card_landed(card_result)
         except Exception as exc:
             errors.append({"channel": CHANNEL_ORIGIN_CHAT_CARD,
                            "error": f"{type(exc).__name__}: {exc}"})
-        # Backup heads-up email: tokenless, points at the Chat thread.
-        # Never a second live decision thread, and never an EZLynx write:
-        # a Chat-origin ask without (or with) an applicant never touches
-        # EZLynx.
-        if not was_notified(store, confirmation_id, CHANNEL_BACKUP_EMAIL):
+        if not chat_ok:
             try:
-                sender = gmail_sender if gmail_sender is not None else _real_gmail_sender()
-                receipt = sender(
-                    notify_email_to(),
-                    _backup_email_subject(record),
-                    _backup_email_body(record, tab_url),
+                delivered = _deliver_chat_backup_email(
+                    store,
+                    confirmation_id,
+                    record,
+                    gmail_sender=gmail_sender,
+                    given_sheet_id=given_sheet_id,
                 )
-                _record(store, confirmation_id, CHANNEL_BACKUP_EMAIL, receipt)
-                notified.append({"channel": CHANNEL_BACKUP_EMAIL, **receipt})
+                notified.extend(delivered.get("notified", []))
             except Exception as exc:
                 errors.append({"channel": CHANNEL_BACKUP_EMAIL,
                                "error": f"{type(exc).__name__}: {exc}"})
@@ -963,4 +1012,69 @@ def maybe_quiet_nudge(
     except Exception as exc:
         return {"confirmation_id": confirmation_id,
                 "errors": [{"channel": CHANNEL_CHAT_NUDGE,
+                            "error": f"{type(exc).__name__}: {exc}"}]}
+
+
+def maybe_quiet_backup_email(
+    store: Any,
+    confirmation_id: str,
+    *,
+    gmail_sender: Any = None,
+    quiet_hours: float | None = None,
+    now: datetime | None = None,
+    given_sheet_id: str | None = None,
+) -> dict[str, Any]:
+    """One tokenless backup email after the quiet window, if still unanswered.
+
+    Chat-origin only, and only after the approval card actually posted.
+    A failed Chat post emails immediately from ``notify_approval_on_origin``
+    and does not wait here. Idempotent via the ``backup_email`` ledger
+    channel. Still PENDING is required: a decision before the window
+    cancels the email.
+    """
+    def _skip(reason: str) -> dict:
+        return {"confirmation_id": confirmation_id, "notified": [],
+                "errors": [], "skipped": reason}
+
+    record = confirmations.get(confirmation_id, store=store)
+    if record is None:
+        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+    if str(record.get("status")) != "PENDING":
+        return _skip("not PENDING")
+    origin = str(record.get("origin_platform") or "").strip().casefold()
+    if origin != "chat":
+        return _skip("not chat origin")
+    if was_notified(store, confirmation_id, CHANNEL_BACKUP_EMAIL):
+        return _skip("already emailed")
+    sent_at = _parse_notified_at(
+        _channel_notified_at(store, confirmation_id, CHANNEL_ORIGIN_CHAT_CARD)
+    )
+    if sent_at is None:
+        return _skip("chat card not sent yet")
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    window = quiet_hours if quiet_hours and quiet_hours > 0 else quiet_window_hours()
+    elapsed = (moment - sent_at).total_seconds() / 3600.0
+    if elapsed < window:
+        return _skip(f"quiet window not elapsed ({elapsed:.1f}h < {window:g}h)")
+    try:
+        delivered = _deliver_chat_backup_email(
+            store,
+            confirmation_id,
+            record,
+            gmail_sender=gmail_sender,
+            given_sheet_id=given_sheet_id,
+        )
+        result: dict[str, Any] = {
+            "confirmation_id": confirmation_id,
+            "notified": delivered.get("notified", []),
+            "errors": [],
+        }
+        if delivered.get("skipped"):
+            result["skipped"] = delivered["skipped"]
+        return result
+    except Exception as exc:
+        return {"confirmation_id": confirmation_id,
+                "errors": [{"channel": CHANNEL_BACKUP_EMAIL,
                             "error": f"{type(exc).__name__}: {exc}"}]}
