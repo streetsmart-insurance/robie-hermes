@@ -21,15 +21,19 @@ can approve or reject with one tap and no sheet paste:
 - ``confirmation_click_response`` -- the UPDATE_MESSAGE payload that
   replaces the card in Chat so it cannot be clicked again.
 
-The click reaches this code as a Chat-app ``CARD_CLICKED`` event. Google
-delivers it to the Chat app's configured HTTP endpoint (the Test
-chat-http-bridge, which forwards to PubSub, or the gateway HTTP-events
-handler). The button's ``action.function`` is the short name
-``robie_confirmation_decision`` -- a Cloud Run URL is not a Chat-app
-function, and Chat answers "That action is not supported." The adapter's
-``_handle_card_event`` still accepts a previously posted bridge URL, via
-``canonical_card_action``, so an already-sent card can be clicked after
-the fix is deployed.
+The designed click path is: button → Cloud Run ``robie-chat-http-bridge``
+→ Pub/Sub topic ``hermes-chat-topic`` → the Hermes gateway that is
+actually subscribed. ``hermes-test-01`` does not see the click while its
+gateway has no messaging platform enabled. A shared subscription with
+Production lets Production answer instead. Enabling Test Chat, on a
+Test-only ``GOOGLE_CHAT_SUBSCRIPTION_NAME``, is configuration for Dusty
+and Ralph — not something this module turns on.
+
+``action.function`` on new cards is the short name
+``robie_confirmation_decision``. ``canonical_card_action`` also accepts a
+full URL ending in ``/actions/robie_confirmation_decision`` (the value
+already-posted cards stored). The adapter folds that URL to the bare name
+before the "That action is not supported." branch.
 
 Fail-closed everywhere: no signing key, malformed/forged/expired token,
 clicking user != token principal, or unknown confirmation all refuse and
@@ -53,10 +57,11 @@ CARD_ACTION = "robie_confirmation_decision"
 def _click_function() -> str:
     """Function name a Chat-app cardsV2 button must use.
 
-    Chat apps do not call ``action.function`` as an HTTP URL. They deliver
-    ``CARD_CLICKED`` to the app's configured endpoint with this string as
-    ``common.invokedFunction``. A full URL is rejected by Chat (or arrives
-    unmatched) as "That action is not supported."
+    Chat apps deliver ``CARD_CLICKED`` with this string as
+    ``common.invokedFunction``. A full URL ending in
+    ``/actions/robie_confirmation_decision`` is still accepted by
+    ``canonical_card_action`` so an already-posted card matches the same
+    branch as the bare name.
     """
     return CARD_ACTION
 
