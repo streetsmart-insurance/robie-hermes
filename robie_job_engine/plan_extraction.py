@@ -16,6 +16,7 @@ fakes and keeps model choice out of the pilot's critical path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -178,6 +179,27 @@ class PlanDraft:
         return draft_to_locked_plan(
             self, job_id, human_confirmed_by=human_confirmed_by
         )
+
+
+def draft_fingerprint(draft: PlanDraft) -> str:
+    """Stable SHA-256 fingerprint of the exact draft content under review.
+
+    The confirmation gate binds a human's approval to this fingerprint
+    (``confirmations.request_confirmation`` stores it,
+    ``confirmations.confirm_and_lock`` re-computes and compares it), so an
+    approval filed against one draft can never lock a different one.
+    Identity fields and the change set are the whole fingerprint: review
+    metadata (reasons, excerpts, timestamps) does not change what executes.
+    """
+    if not isinstance(draft, PlanDraft):
+        raise TypeError("draft_fingerprint requires a PlanDraft")
+    payload = {
+        "applicant_id": str(draft.applicant_id) if draft.applicant_id else None,
+        "policy_number": str(draft.policy_number) if draft.policy_number else None,
+        "changes": draft.changes,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
