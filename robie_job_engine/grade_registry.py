@@ -23,6 +23,12 @@ Evidence item shapes (duck-typed dicts):
 - ``{"kind": "quoted_value_match", "field": str, "matched": bool, ...}``
 - ``{"kind": "call_record", "completed": bool, "disposition": str,
   "recording_ref": str | None, "notes_ref": str | None}``
+
+Items graded through the H2 enforcement point
+(``board.grade_locked_plan`` / ``board.grade_derived_evidence``) must also
+carry provenance -- a non-empty ``provenance`` mapping (fetch citation) or
+a ``span`` object. Items without provenance are UNGRADABLE: the enforcer
+refuses to grade them rather than grading clean.
 """
 
 from __future__ import annotations
@@ -44,6 +50,18 @@ _REQUIRED_SPEC_KEYS = (
     "evidence_kinds",
     "passing_rule",
     "extraction_model",
+)
+
+
+# Required-field-set modes for the H2 enforcement point. Declared per job
+# type via the ``required_fields`` spec key (see grades.yaml):
+#   "plan"              every field in the locked plan's own field set
+#   "document_and_plan" quote document present + every requested value
+#   "call_record"       a completed call record with a disposition
+_REQUIRED_FIELD_MODES = (
+    "plan",
+    "document_and_plan",
+    "call_record",
 )
 
 
@@ -109,11 +127,22 @@ _PASSING_RULES = {
 
 @dataclass
 class GradeResult:
-    """The deterministic verdict for one job's evidence."""
+    """The deterministic verdict for one job's evidence.
+
+    ``grade`` is one of:
+      PASS             every required check evidenced and matched;
+      NEEDS_REVIEW     the check ran and something did not match;
+      UNGRADABLE       the check could not be assessed at all (no locked
+                       plan, caller plan diverges from the lock, no usable
+                       fetch output, a required field with no evidence, or
+                       evidence without provenance). Always passed=False:
+                       an unassessable check must not grade clean.
+      UNKNOWN_JOB_TYPE the job type is not in the registry (fail closed).
+    """
 
     job_type: str
     label: str
-    grade: str  # PASS | NEEDS_REVIEW | UNKNOWN_JOB_TYPE
+    grade: str  # PASS | NEEDS_REVIEW | UNGRADABLE | UNKNOWN_JOB_TYPE
     passed: bool
     reasons: list[str] = field(default_factory=list)
     evidence_summary: dict[str, Any] = field(default_factory=dict)
@@ -168,6 +197,18 @@ class _Registry:
             return None
         model = spec.get("extraction_model")
         return str(model).strip() or None if model is not None else None
+
+    def required_fields_for(self, job_type: str) -> str | None:
+        """The required-field-set mode for a job type.
+
+        Returns one of ``_REQUIRED_FIELD_MODES``, or None when the job
+        type is not in the registry. Specs that omit ``required_fields``
+        default to ``"plan"`` (see ``_validate_spec``).
+        """
+        spec = self.spec_for(job_type)
+        if spec is None:
+            return None
+        return str(spec.get("required_fields") or "plan")
 
     def grade(
         self, job_type: str, evidence: list[Mapping[str, Any]] | None
@@ -229,6 +270,13 @@ def _validate_spec(name: str, spec: Any) -> dict[str, Any]:
         raise ValueError(
             f"job type {name!r}: extraction_model must be a model name or null"
         )
+    mode = str(spec.get("required_fields") or "plan").strip()
+    if mode not in _REQUIRED_FIELD_MODES:
+        raise ValueError(
+            f"job type {name!r}: unknown required_fields {mode!r}; "
+            f"known: {', '.join(_REQUIRED_FIELD_MODES)}"
+        )
+    spec["required_fields"] = mode
     return spec
 
 
@@ -265,6 +313,10 @@ def register_job_type(name: str, spec: Mapping[str, Any]) -> None:
 
 def extraction_model_for(job_type: str) -> str | None:
     return registry.extraction_model_for(job_type)
+
+
+def required_fields_for(job_type: str) -> str | None:
+    return registry.required_fields_for(job_type)
 
 
 def default_extraction_model(job_type: str) -> str:
