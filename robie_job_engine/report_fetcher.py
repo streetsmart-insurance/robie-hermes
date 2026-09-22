@@ -411,7 +411,7 @@ def fetch_report_rows(
 ) -> list[dict[str, Any]]:
     """Fetch work-queue rows for a registered report.
 
-    Email-first ids (4246, 4247, 4372) ingest today's robie@ CSV and do not
+    Email-first ids (4246, 4247, 4359, 4372) ingest today's robie@ CSV and do not
     open Looker favorites. ``session`` is unused on that path. Optional
     ``csv_bytes`` / ``gmail_service`` / ``ingested`` inject the email source
     for tests. ``source="looker"`` forces the Reports 5.0 path;
@@ -421,7 +421,7 @@ def fetch_report_rows(
     ``.page``); when omitted on the Looker path, a
     :class:`PlaywrightEzlynxSession` is attached to the persistent Hermes
     Chrome over CDP. Fails closed (raises, never returns guessed rows) on
-    unknown reports, unverified schemas (4359), missing/stale/wrong-schema
+    unknown reports, unverified schemas, missing/stale/wrong-schema
     email CSVs, auth failure, or missing columns.
     """
     spec = get_report_spec(report_id)  # raises ReportRegistryError for unknown ids
@@ -436,8 +436,10 @@ def fetch_report_rows(
         )
     db = _resolve_db_path(db_path)
     run_id = f"report-run:{spec.report_id}:{uuid.uuid4().hex[:12]}:{utc_now()}"
-    # start_run() FAILS CLOSED for schema_verified=False (report 4359).
-    # Do NOT flip that flag; let the error propagate before any browser work.
+    # start_run() FAILS CLOSED for schema_verified=False reports. Report
+    # 4359's flag was flipped 2026-09-22 (pilot ratified by Carlo after the
+    # 2026-09-19 delivery was verified and re-verified); the gate still
+    # refuses any report whose flag regresses.
     run = ReportRunRegistry(db).start_run(
         run_id=run_id,
         report_id=spec.report_id,
