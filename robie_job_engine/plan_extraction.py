@@ -22,9 +22,20 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-from .evidence import utc_now_iso
+from .evidence import (
+    EvidenceSpan,
+    canonical_source_text,
+    span_for_quote,
+    span_source_hash,
+    utc_now_iso,
+)
 from .evidence_fetchers import _POLICY_FIELD_KEYS
 from .policy_change_plan import extract_policy_change_plan
+
+# Source id stamped on every span extracted from the requester's message.
+SOURCE_CHANGE_REQUEST = "change_request_text"
+# Source id for identity values the agency supplied (not the request text).
+SOURCE_AGENCY_CONTEXT = "agency_context"
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +173,18 @@ class PlanNeedsHumanReview(RuntimeError):
 
 @dataclass
 class PlanDraft:
-    """A structured, validated, but NOT YET locked plan."""
+    """A structured, validated, but NOT YET locked plan.
+
+    ``evidence_spans`` maps field name -> the EvidenceSpan binding that
+    change to the exact request-text bytes it was quoted from. Spans are
+    what keep a value honest: the quote alone is not enough, because a
+    quote with no source identity and no offsets cannot be re-checked.
+    """
 
     applicant_id: str | None
     policy_number: str | None
     changes: dict[str, Any]
-    evidence_spans: dict[str, str] = field(default_factory=dict)
+    evidence_spans: dict[str, EvidenceSpan] = field(default_factory=dict)
     uncertainties: list[str] = field(default_factory=list)
     needs_human_review: bool = False
     review_reasons: list[str] = field(default_factory=list)
@@ -188,8 +205,11 @@ def draft_fingerprint(draft: PlanDraft) -> str:
     (``confirmations.request_confirmation`` stores it,
     ``confirmations.confirm_and_lock`` re-computes and compares it), so an
     approval filed against one draft can never lock a different one.
-    Identity fields and the change set are the whole fingerprint: review
-    metadata (reasons, excerpts, timestamps) does not change what executes.
+    Identity fields, the change set, AND the evidence spans are the whole
+    fingerprint: the human reviews the exact span set, so a draft whose
+    supporting quotes were swapped after review cannot pass as the reviewed
+    one. Review metadata (reasons, excerpts, timestamps) does not change
+    what executes.
     """
     if not isinstance(draft, PlanDraft):
         raise TypeError("draft_fingerprint requires a PlanDraft")
@@ -197,6 +217,10 @@ def draft_fingerprint(draft: PlanDraft) -> str:
         "applicant_id": str(draft.applicant_id) if draft.applicant_id else None,
         "policy_number": str(draft.policy_number) if draft.policy_number else None,
         "changes": draft.changes,
+        "evidence_spans": {
+            name: span.to_dict()
+            for name, span in sorted((draft.evidence_spans or {}).items())
+        },
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -251,7 +275,7 @@ def _validate_extracted(
     )
 
     changes: dict[str, Any] = {}
-    spans: dict[str, str] = {}
+    spans: dict[str, EvidenceSpan] = {}
     seen_fields: set[str] = set()
     raw_changes = data.get("changes")
     if not isinstance(raw_changes, list):
@@ -292,6 +316,13 @@ def _validate_extracted(
                 f"field {canonical!r} quotes text not found in the request"
             )
             continue
+        try:
+            span = span_for_quote(text, quote, source_id=SOURCE_CHANGE_REQUEST)
+        except ValueError:
+            reasons.append(
+                f"field {canonical!r} quotes text not found in the request"
+            )
+            continue
         sane_reason = _sane_value(canonical, value)
         if sane_reason is not None:
             reasons.append(sane_reason)
@@ -300,7 +331,7 @@ def _validate_extracted(
         if canonical in ("writtenPremium", "fullTermPremium"):
             value = str(str(value).replace(",", "").strip().lstrip("$"))
         changes[canonical] = value
-        spans[canonical] = quote
+        spans[canonical] = span
 
     if not changes:
         reasons.append("no usable changes extracted from the request")
@@ -441,12 +472,26 @@ def draft_to_locked_plan(
         )
     if not draft.changes:
         raise PlanNeedsHumanReview("draft has no changes; refusing to lock")
+    # Every locked field carries its evidence span. The policy number comes
+    # from the agency's own context (not the request text), so its span
+    # cites that source -- the identity is bound, not bare.
+    spans = dict(draft.evidence_spans or {})
+    if "policyNumber" not in spans:
+        identity_text = canonical_source_text(draft.policy_number)
+        spans["policyNumber"] = EvidenceSpan(
+            source_id=SOURCE_AGENCY_CONTEXT,
+            source_hash=span_source_hash(identity_text),
+            offset_start=0,
+            offset_end=len(identity_text),
+            quote=identity_text,
+        )
     return extract_policy_change_plan(
         job_id,
         applicant_id=draft.applicant_id,
         policy_number=draft.policy_number,
         changes=dict(draft.changes),
         locked_by=f"human:{confirmed}" if confirmed else "plan_extraction",
+        field_spans=spans,
     )
 
 
@@ -459,7 +504,8 @@ def draft_summary_text(draft: PlanDraft) -> str:
         "  changes:",
     ]
     for name, value in draft.changes.items():
-        quote = draft.evidence_spans.get(name, "")
+        span = (draft.evidence_spans or {}).get(name)
+        quote = span.quote if isinstance(span, EvidenceSpan) else ""
         lines.append(f"    - {name} -> {value}  (request says: {quote[:80]!r})")
     if draft.uncertainties:
         lines.append("  model uncertainties:")

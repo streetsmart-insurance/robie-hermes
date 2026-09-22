@@ -17,7 +17,7 @@ import json
 import sqlite3
 from typing import Any
 
-from .evidence import LockedPlan, utc_now_iso
+from .evidence import EvidenceSpan, LockedPlan, utc_now_iso
 
 
 class PlanAlreadyLocked(RuntimeError):
@@ -45,6 +45,10 @@ def _plan_to_row(plan: LockedPlan) -> dict[str, Any]:
         "fields": plan.fields,
         "field_tiers": plan.field_tiers,
         "field_notes": plan.field_notes,
+        "field_spans": {
+            name: span.to_dict()
+            for name, span in sorted((plan.field_spans or {}).items())
+        },
         "settle_delay_seconds": plan.settle_delay_seconds,
         "locked_at": plan.locked_at,
         "locked_by": plan.locked_by,
@@ -52,12 +56,21 @@ def _plan_to_row(plan: LockedPlan) -> dict[str, Any]:
 
 
 def _plan_from_row(row: dict[str, Any]) -> LockedPlan:
+    raw_spans = row.get("field_spans") or {}
+    if not isinstance(raw_spans, dict):
+        raise ValueError("locked plan row has a malformed field_spans payload")
+    spans: dict[str, EvidenceSpan] = {}
+    for name, raw in raw_spans.items():
+        # Fail closed on a tampered row: a span entry that does not parse
+        # refuses the read instead of silently dropping provenance.
+        spans[str(name)] = EvidenceSpan.from_dict(raw)
     return LockedPlan(
         job_id=str(row.get("job_id") or ""),
         job_type=str(row.get("job_type") or ""),
         fields=dict(row.get("fields") or {}),
         field_tiers=dict(row.get("field_tiers") or {}),
         field_notes=dict(row.get("field_notes") or {}),
+        field_spans=spans,
         settle_delay_seconds=int(row.get("settle_delay_seconds") or 0),
         locked_at=str(row.get("locked_at") or ""),
         locked_by=str(row.get("locked_by") or ""),

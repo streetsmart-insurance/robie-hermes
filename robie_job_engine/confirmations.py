@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Mapping
 
+from .evidence import EvidenceSpan
 from .plan_extraction import draft_fingerprint, draft_to_locked_plan
 
 try:
@@ -326,7 +327,11 @@ def request_confirmation(
     ``draft`` (a PlanDraft) or its ``draft_hash`` binds this confirmation to
     the exact draft under review: ``confirm_and_lock`` later refuses to lock
     any other draft against this approval. Callers that intend to use
-    ``confirm_and_lock`` must file the fingerprint here.
+    ``confirm_and_lock`` must file the fingerprint here. When ``draft`` is
+    given, its evidence spans are also filed on the record (under
+    ``field_spans`` in the changes payload) so the approval surfaces --
+    sheet, Chat ping, email -- can show each value's quote and source, not
+    just the value.
     """
     loop_job_id = _require_nonempty(loop_job_id, "loop_job_id")
     job_type = _require_nonempty(job_type, "job_type")
@@ -338,6 +343,7 @@ def request_confirmation(
                 "draft and draft_hash disagree; pass one canonical draft"
             )
         draft_hash = fingerprint
+        changes_json = _with_draft_spans(changes_json, draft)
     if draft_hash is not None:
         draft_hash = str(draft_hash).strip().lower()
         if len(draft_hash) != 64 or any(
@@ -386,6 +392,43 @@ def request_confirmation(
             ),
         )
     return confirmation_id
+
+
+def _with_draft_spans(changes_json: Any, draft: Any) -> Any:
+    """Merge a draft's evidence spans into the filed changes payload.
+
+    The approval renderers (``confirmation_summary``, the board's Details
+    column) read ``field_spans`` from this payload to show each value's
+    quote and source. Callers that file an explicit changes payload keep
+    it -- spans are added under the ``field_spans`` key, nothing else is
+    reshaped. A legacy string span degrades to a quote-only entry.
+    """
+    spans = getattr(draft, "evidence_spans", None) or {}
+    if not isinstance(spans, Mapping) or not spans:
+        return changes_json
+    span_payload: dict[str, Any] = {}
+    for name, span in spans.items():
+        if isinstance(span, EvidenceSpan):
+            span_payload[str(name)] = span.to_dict()
+        else:
+            span_payload[str(name)] = {"quote": str(span)}
+    base: dict[str, Any] = {}
+    if isinstance(changes_json, str) and changes_json.strip():
+        try:
+            parsed = json.loads(changes_json)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            base = dict(parsed)
+    elif isinstance(changes_json, Mapping):
+        base = dict(changes_json)
+    base["field_spans"] = span_payload
+    base.setdefault("policy_number", getattr(draft, "policy_number", None))
+    base.setdefault("applicant_id", getattr(draft, "applicant_id", None))
+    changes = getattr(draft, "changes", None)
+    if isinstance(changes, Mapping):
+        base.setdefault("changes", dict(changes))
+    return base
 
 
 def _decide(
@@ -532,6 +575,27 @@ def _friendly_datetime(value: Any) -> str:
         return text
 
 
+def _evidence_clause(changes: Mapping[str, Any]) -> str:
+    """Plain-English evidence trailer: each value's quote and source.
+
+    Appended to confirmation summaries so the human reviews provenance,
+    not just bare values. Empty when the record carries no spans.
+    """
+    spans = changes.get("field_spans")
+    if not isinstance(spans, Mapping) or not spans:
+        return ""
+    parts: list[str] = []
+    for name, raw in spans.items():
+        if isinstance(raw, Mapping):
+            source = str(raw.get("source_id") or "").strip() or "unknown source"
+            quote = str(raw.get("quote") or "").strip()
+        else:
+            source, quote = "unknown source", str(raw)
+        snippet = (quote[:60] + "...") if len(quote) > 60 else quote
+        parts.append(f'{name} from {source} ("{snippet}")')
+    return " Evidence: " + "; ".join(parts) + "."
+
+
 def confirmation_summary(record: Mapping[str, Any]) -> str:
     """One plain-English line describing a confirmation record."""
     record = dict(record or {})
@@ -550,6 +614,7 @@ def confirmation_summary(record: Mapping[str, Any]) -> str:
     subject = f"{job_label} for policy {policy} ({change_desc})" if policy else (
         f"{job_label} ({change_desc})"
     )
+    evidence = _evidence_clause(changes)
     status = str(record.get("status") or "")
     requested_by = str(record.get("requested_by") or "unknown")
     decided_by = str(record.get("decided_by") or "unknown")
@@ -558,26 +623,28 @@ def confirmation_summary(record: Mapping[str, Any]) -> str:
         return (
             f"{subject} is waiting for approval "
             f"(requested by {requested_by} on "
-            f"{_friendly_datetime(record.get('created_at'))})."
+            f"{_friendly_datetime(record.get('created_at'))}).{evidence}"
         )
     if status == "APPROVED":
         return (
             f"{subject} was approved by {decided_by} on "
-            f"{_friendly_datetime(record.get('decided_at'))}."
+            f"{_friendly_datetime(record.get('decided_at'))}.{evidence}"
         )
     if status == "REJECTED":
         base = (
             f"{subject} was rejected by {decided_by} on "
             f"{_friendly_datetime(record.get('decided_at'))}."
         )
-        return f"{base} Reason: {reason}." if reason else base
+        if reason:
+            base += f" Reason: {reason}."
+        return base + evidence
     if status == "EXPIRED":
         return (
             f"{subject} expired with no decision "
             f"(requested by {requested_by} on "
-            f"{_friendly_datetime(record.get('created_at'))})."
+            f"{_friendly_datetime(record.get('created_at'))}).{evidence}"
         )
-    return f"{subject} has status {status}."
+    return f"{subject} has status {status}.{evidence}"
 
 
 def rows_for_sheet(store: Any) -> tuple[list[str], list[list[str]]]:
