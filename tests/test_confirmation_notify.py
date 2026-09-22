@@ -188,3 +188,133 @@ def test_assign_requester_task_skips_decided(db):
     )
     assert result["skipped"] == "not PENDING"
     assert zap.payloads == []
+
+
+class FakeThreadPoster:
+    def __init__(self):
+        self.posts: list[tuple[str, str, str | None]] = []
+
+    def __call__(self, space, text, thread=None):
+        self.posts.append((space, text, thread))
+        return {"space": space, "message_name": "spaces/X/messages/2"}
+
+
+def test_origin_chat_posts_back_to_originating_thread(db):
+    store = JobStore(db)
+    cid = _request(
+        store,
+        requested_by="Jake Ferrara",
+        origin_platform="chat",
+        origin_ref={"space": "spaces/AAA", "thread": "spaces/AAA/threads/BBB"},
+    )
+    chat, gmail, thread_poster = FakeChat(), FakeGmail(), FakeThreadPoster()
+    result = notify.notify_requested(
+        store, cid, chat_poster=chat, gmail_sender=gmail,
+        chat_thread_poster=thread_poster, zap_trigger=FakeZap(),
+    )
+    # Carlo still gets his two; the requester gets the thread post.
+    assert len(thread_poster.posts) == 1
+    space, text, thread = thread_poster.posts[0]
+    assert space == "spaces/AAA"
+    assert thread == "spaces/AAA/threads/BBB"
+    assert "waiting on a human decision" in text
+    channels = [n["channel"] for n in result["notified"]]
+    assert "requester_chat" in channels
+
+
+def test_origin_email_goes_to_requester_address(db):
+    store = JobStore(db)
+    cid = _request(
+        store,
+        requested_by="Jake Ferrara",
+        origin_platform="email",
+        origin_ref={"to": "jake@streetsmart.insurance"},
+    )
+    gmail = FakeGmail()
+    result = notify.notify_requested(
+        store, cid, chat_poster=FakeChat(), gmail_sender=gmail,
+        zap_trigger=FakeZap(),
+    )
+    to_addresses = [to for to, _, _ in gmail.sent]
+    assert "jake@streetsmart.insurance" in to_addresses
+    assert "carlo@streetsmart.insurance" in to_addresses
+    channels = [n["channel"] for n in result["notified"]]
+    assert "requester_email" in channels
+
+
+def test_origin_ezlynx_assigns_task_to_requester(db):
+    store = JobStore(db)
+    cid = _request(
+        store,
+        requested_by="Karla Brown",
+        origin_platform="ezlynx",
+        origin_ref={"applicant_id": "220250093"},
+    )
+    zap = FakeZap()
+    result = notify.notify_requested(
+        store, cid, chat_poster=FakeChat(), gmail_sender=FakeGmail(),
+        zap_trigger=zap,
+    )
+    assert len(zap.payloads) == 1
+    assert zap.payloads[0]["assignee"] == "KarlaSS"
+    channels = [n["channel"] for n in result["notified"]]
+    assert "requester_ezlynx" in channels
+
+
+def test_origin_routing_is_idempotent(db):
+    store = JobStore(db)
+    cid = _request(
+        store,
+        requested_by="Jake Ferrara",
+        origin_platform="chat",
+        origin_ref={"space": "spaces/AAA"},
+    )
+    thread_poster = FakeThreadPoster()
+    notify.notify_requested(
+        store, cid, chat_poster=FakeChat(), gmail_sender=FakeGmail(),
+        chat_thread_poster=thread_poster, zap_trigger=FakeZap(),
+    )
+    result = notify.notify_requested(
+        store, cid, chat_poster=FakeChat(), gmail_sender=FakeGmail(),
+        chat_thread_poster=thread_poster, zap_trigger=FakeZap(),
+    )
+    assert len(thread_poster.posts) == 1
+    assert result["notified"] == []
+    assert result["errors"] == []
+
+
+def test_no_origin_platform_skips_requester_routing(db):
+    store = JobStore(db)
+    cid = _request(store)
+    chat, gmail = FakeChat(), FakeGmail()
+    result = notify.notify_requested(store, cid, chat_poster=chat, gmail_sender=gmail)
+    channels = [n["channel"] for n in result["notified"]]
+    assert channels == ["google_chat", "email"]
+
+
+def test_bad_origin_platform_rejected(db):
+    store = JobStore(db)
+    with pytest.raises(ValueError, match="origin_platform must be"):
+        _request(store, origin_platform="smoke-signal")
+
+
+def test_old_rows_without_origin_columns_still_read(db):
+    # A database created before origin_platform/origin_ref existed must
+    # migrate in place and keep working.
+    import sqlite3
+
+    store = JobStore(db)
+    cid = _request(store)
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE plan_confirmations DROP COLUMN origin_platform")
+    conn.execute("ALTER TABLE plan_confirmations DROP COLUMN origin_ref")
+    conn.commit()
+    conn.close()
+    record = confirmations.get(cid, store=store)
+    assert record["id"] == cid
+    assert record.get("origin_platform") is None
+    result = notify.notify_requested(
+        store, cid, chat_poster=FakeChat(), gmail_sender=FakeGmail()
+    )
+    channels = [n["channel"] for n in result["notified"]]
+    assert channels == ["google_chat", "email"]

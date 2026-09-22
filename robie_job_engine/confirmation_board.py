@@ -214,6 +214,8 @@ def sync_confirmations(
     notify: bool = False,
     chat_poster: Any = None,
     gmail_sender: Any = None,
+    chat_thread_poster: Any = None,
+    zap_trigger: Any = None,
 ) -> dict[str, Any]:
     """Full sync of the Confirmations tab. Ingest first, then rewrite.
 
@@ -298,6 +300,7 @@ def sync_confirmations(
         "notifications": _notify_pending(
             store, records, spreadsheet_id,
             notify=notify, chat_poster=chat_poster, gmail_sender=gmail_sender,
+            chat_thread_poster=chat_thread_poster, zap_trigger=zap_trigger,
         ),
     }
 
@@ -310,6 +313,8 @@ def _notify_pending(
     notify: bool,
     chat_poster: Any,
     gmail_sender: Any,
+    chat_thread_poster: Any = None,
+    zap_trigger: Any = None,
 ) -> list[dict[str, Any]]:
     """Fan out Chat + email for PENDING records not yet notified."""
     if not notify:
@@ -329,6 +334,8 @@ def _notify_pending(
                 confirmation_id,
                 chat_poster=chat_poster,
                 gmail_sender=gmail_sender,
+                chat_thread_poster=chat_thread_poster,
+                zap_trigger=zap_trigger,
                 given_sheet_id=spreadsheet_id,
             )
         )

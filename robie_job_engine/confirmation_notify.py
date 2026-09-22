@@ -156,6 +156,117 @@ def _real_chat_poster() -> Any:
     return post
 
 
+def _requester_chat_text(record: Mapping[str, Any], tab_url: str) -> str:
+    summary = confirmations.confirmation_summary(record)
+    return (
+        f"Your ROBIE job is waiting on a human decision and can't continue "
+        f"until it's approved.\n\n{summary}\n\n"
+        f"Track it on the Confirmations tab: {tab_url}"
+    )
+
+
+def _requester_email_subject(record: Mapping[str, Any]) -> str:
+    return f"[ROBIE] Your job is waiting on approval: {confirmations.confirmation_summary(record)[:90]}"
+
+
+def _requester_email_body(record: Mapping[str, Any], tab_url: str) -> str:
+    summary = confirmations.confirmation_summary(record)
+    return (
+        f"Hi,\n\nYour ROBIE job is waiting on a human decision and can't "
+        f"continue until it's approved:\n\n{summary}\n\n"
+        f"Track it on the Confirmations tab:\n{tab_url}\n\n"
+        "You'll get another note here once it's decided.\n"
+    )
+
+
+def _real_chat_thread_poster() -> Any:
+    from .chat_app_post import post_as_chat_app
+
+    def post(space: str, text: str, thread: str | None = None) -> dict[str, Any]:
+        if not str(space or "").startswith("spaces/"):
+            raise ValueError("origin chat post needs a spaces/ space name")
+        result = post_as_chat_app(space, text, thread_name=thread)
+        return {"space": space, "thread": thread, "message_name": result.get("name")}
+    return post
+
+
+def _origin_ref_dict(record: Mapping[str, Any]) -> dict[str, Any]:
+    raw = record.get("origin_ref")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def notify_requester_on_origin(
+    store: Any,
+    confirmation_id: str,
+    *,
+    chat_thread_poster: Any = None,
+    gmail_sender: Any = None,
+    zap_trigger: Any = None,
+    given_sheet_id: str | None = None,
+) -> dict[str, Any]:
+    """Ping the requester back on the platform they started on.
+
+    chat -> the originating Chat thread; email -> a reply to the
+    requester's address; ezlynx -> assign_requester_task (needs a proven
+    applicant_id in origin_ref). Idempotent per (confirmation, platform);
+    failures are returned as errors, never raised.
+    """
+    record = confirmations.get(confirmation_id, store=store)
+    if record is None:
+        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+    if str(record.get("status")) != "PENDING":
+        return {"confirmation_id": confirmation_id, "skipped": "not PENDING"}
+
+    platform = str(record.get("origin_platform") or "").strip().casefold()
+    if not platform:
+        return {"confirmation_id": confirmation_id, "skipped": "no origin platform"}
+    channel = f"requester_{platform}"
+    if was_notified(store, confirmation_id, channel):
+        return {"confirmation_id": confirmation_id, "skipped": "already notified"}
+
+    ref = _origin_ref_dict(record)
+    tab_url = confirmations_tab_url(given_sheet_id)
+    try:
+        if platform == "chat":
+            space = str(ref.get("space") or "").strip()
+            thread = str(ref.get("thread") or "").strip() or None
+            if not space:
+                raise ValueError("chat origin needs origin_ref.space")
+            poster = chat_thread_poster if chat_thread_poster is not None else _real_chat_thread_poster()
+            receipt = poster(space, _requester_chat_text(record, tab_url), thread)
+        elif platform == "email":
+            to = str(ref.get("to") or "").strip()
+            if "@" not in to:
+                raise ValueError("email origin needs origin_ref.to")
+            sender = gmail_sender if gmail_sender is not None else _real_gmail_sender()
+            receipt = sender(to, _requester_email_subject(record), _requester_email_body(record, tab_url))
+        elif platform == "ezlynx":
+            applicant_id = str(ref.get("applicant_id") or "").strip()
+            if not applicant_id:
+                raise ValueError("ezlynx origin needs origin_ref.applicant_id (proven in EZLynx)")
+            receipt = assign_requester_task(
+                store, confirmation_id, applicant_id=applicant_id, zap_trigger=zap_trigger
+            )
+        else:
+            return {"confirmation_id": confirmation_id, "skipped": f"unknown platform {platform!r}"}
+    except Exception as exc:
+        return {
+            "confirmation_id": confirmation_id,
+            "errors": [{"channel": channel, "error": f"{type(exc).__name__}: {exc}"}],
+        }
+
+    _record(store, confirmation_id, channel, receipt)
+    return {"confirmation_id": confirmation_id, "notified": [{"channel": channel, **receipt}]}
+
+
 def _real_gmail_sender() -> Any:
     from .accountability_delivery import _delegated_gmail_sender
 
@@ -198,14 +309,19 @@ def notify_requested(
     *,
     chat_poster: Any = None,
     gmail_sender: Any = None,
+    chat_thread_poster: Any = None,
+    zap_trigger: Any = None,
     given_sheet_id: str | None = None,
 ) -> dict[str, Any]:
-    """Notify Carlo (Chat + email) that a confirmation needs his decision.
+    """Notify Carlo (Chat + email) and the requester on their origin platform.
 
-    Idempotent per (confirmation, channel): already-notified channels are
-    skipped. Channel failures are returned as errors, never raised, so one
-    broken channel cannot block the other -- and the ledger only records
-    successes, so failures retry on the next sync.
+    Carlo's Chat + email are the approval ask. The requester additionally
+    hears back on the platform they started on (Chat thread, email, or an
+    EZLynx task) via ``notify_requester_on_origin``. Idempotent per
+    (confirmation, channel): already-notified channels are skipped. Channel
+    failures are returned as errors, never raised, so one broken channel
+    cannot block the others -- and the ledger only records successes, so
+    failures retry on the next sync.
     """
     record = confirmations.get(confirmation_id, store=store)
     if record is None:
@@ -235,6 +351,18 @@ def notify_requested(
             notified.append({"channel": "email", **receipt})
         except Exception as exc:
             errors.append({"channel": "email", "error": f"{type(exc).__name__}: {exc}"})
+
+    # The requester hears back on the platform they started on.
+    origin_result = notify_requester_on_origin(
+        store,
+        confirmation_id,
+        chat_thread_poster=chat_thread_poster,
+        gmail_sender=gmail_sender,
+        zap_trigger=zap_trigger,
+        given_sheet_id=given_sheet_id,
+    )
+    notified.extend(origin_result.get("notified", []))
+    errors.extend(origin_result.get("errors", []))
 
     return {"confirmation_id": confirmation_id, "notified": notified, "errors": errors}
 

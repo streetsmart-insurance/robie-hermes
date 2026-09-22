@@ -107,6 +107,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Origin platform the requester started on ("chat" | "email" | "ezlynx"),
+    # so the HITL ping goes back on that same platform. Added after the
+    # table first shipped; migrate older databases in place.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(plan_confirmations)")}
+    if "origin_platform" not in columns:
+        conn.execute("ALTER TABLE plan_confirmations ADD COLUMN origin_platform TEXT")
+    if "origin_ref" not in columns:
+        conn.execute("ALTER TABLE plan_confirmations ADD COLUMN origin_ref TEXT")
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_confirmations_loop
            ON plan_confirmations(loop_job_id, status)"""
@@ -148,15 +156,30 @@ def request_confirmation(
     draft_summary: str = "",
     changes_json: Any = None,
     requested_by: str,
+    origin_platform: str | None = None,
+    origin_ref: Any = None,
 ) -> str:
     """File a draft for human decision. Idempotent per loop job.
 
     If a PENDING confirmation already exists for ``loop_job_id``, its id is
     returned instead of creating a duplicate. Returns the confirmation id.
+
+    ``origin_platform`` is where the requester started ("chat" | "email" |
+    "ezlynx") so the HITL ping goes back on that same platform;
+    ``origin_ref`` carries what that platform needs (dict or JSON string):
+    chat -> {"space": ..., "thread": ...}; email -> {"to": ...};
+    ezlynx -> {"applicant_id": ...}.
     """
     loop_job_id = _require_nonempty(loop_job_id, "loop_job_id")
     job_type = _require_nonempty(job_type, "job_type")
     requested_by = _require_nonempty(requested_by, "requested_by")
+    if origin_platform is not None:
+        origin_platform = _require_nonempty(origin_platform, "origin_platform").casefold()
+        if origin_platform not in ("chat", "email", "ezlynx"):
+            raise ValueError(
+                f"origin_platform must be chat, email, or ezlynx, got {origin_platform!r}"
+            )
+    origin_ref_text = _coerce_changes(origin_ref)
     with _session(store) as conn:
         existing = conn.execute(
             """SELECT id FROM plan_confirmations
@@ -172,8 +195,8 @@ def request_confirmation(
             """INSERT INTO plan_confirmations
                (id, loop_job_id, job_type, draft_summary, changes_json,
                 status, requested_by, decided_by, decided_at,
-                decision_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?)""",
+                decision_reason, created_at, origin_platform, origin_ref)
+               VALUES (?, ?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?, ?, ?)""",
             (
                 confirmation_id,
                 loop_job_id,
@@ -182,6 +205,8 @@ def request_confirmation(
                 _coerce_changes(changes_json),
                 requested_by,
                 _utc_now(),
+                origin_platform,
+                origin_ref_text,
             ),
         )
     return confirmation_id
