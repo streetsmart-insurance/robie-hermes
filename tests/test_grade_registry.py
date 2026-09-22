@@ -22,15 +22,15 @@ def test_seed_job_types_present():
     assert "carrier_call" in types
 
 
-def test_extraction_models_pinned_to_light_models():
-    # The model move: extraction runs on light flash-lite, not high reasoning.
+def test_extraction_models_pinned_per_job_type():
+    # Extraction runs on the configured model per job type, not high reasoning.
     assert (
         grade_registry.extraction_model_for("policy_change")
-        == "gemini-3.1-flash-lite-preview"
+        == "gemini-3.8-flash"
     )
     assert (
         grade_registry.extraction_model_for("carrier_quote")
-        == "gemini-3.1-flash-lite-preview"
+        == "gemini-3.8-flash"
     )
     assert grade_registry.extraction_model_for("carrier_call") is None
 
@@ -322,7 +322,7 @@ def test_job_grades_schema_created_on_demand(tmp_path):
 def test_default_extraction_model_uses_registry_pin():
     assert (
         grade_registry.default_extraction_model("policy_change")
-        == "gemini-3.1-flash-lite-preview"
+        == "gemini-3.8-flash"
     )
 
 
