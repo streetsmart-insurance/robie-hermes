@@ -24,7 +24,7 @@ Generate one agency summary, a pageless Google Doc with native department tabs, 
 - When were policy changes and COIs requested, how old are they, and who or what is blocking them?
 - Which open Sales Center opportunities have no verified touch beyond five days, what is the lead source, and who is the Sales Center-assigned producer?
 
-Within every agency and department tab, group the readable findings in this order: Phone & Queue Service, Client Follow-Up, Policy Service, Sales, Tasks & Activities, COIs & Submissions, Customer Sentiment, and Validation. Keep the complete row-level source data in the workbook instead of turning the management narrative into an undifferentiated record wall.
+Within every agency and department tab, group the readable findings in this order: Phone & Queue Service, Client Follow-Up, Policy Service, Sales, Tasks & Activities, COIs & Submissions, Customer sentiment (SAD) — Magellan, and Validation. Keep the complete row-level source data in the workbook instead of turning the management narrative into an undifferentiated record wall.
 
 ## Evidence rules
 
