@@ -343,7 +343,7 @@ def upsert_job_rows(
     if writes:
         api.batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"valueInputOption": "USER_ENTERED", "data": writes},
+            body={"valueInputOption": "RAW", "data": writes},
         ).execute()
     return {"jobs": len(selected), "updated": updated, "appended": appended}
 
@@ -422,7 +422,7 @@ def publish_job_to_control_center(
     if evidence_writes:
         api.batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"valueInputOption": "USER_ENTERED", "data": evidence_writes},
+            body={"valueInputOption": "RAW", "data": evidence_writes},
         ).execute()
 
     job_rows = api.get(
@@ -544,7 +544,7 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
         write for write in writes
         if str(write["range"]).split("!", 1)[0] in available_sheets
     ]
-    api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
+    api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "RAW", "data": writes}).execute()
     result = {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
     # The Confirmations tab is the human-facing side of the HITL gate.
     # Sync it last: decisions are ingested before the tab is rewritten, so a
