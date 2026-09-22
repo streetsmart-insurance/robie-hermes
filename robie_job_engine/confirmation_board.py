@@ -211,6 +211,9 @@ def sync_confirmations(
     spreadsheet_id: str,
     values_api: Any = None,
     sheets_api: Any = None,
+    notify: bool = False,
+    chat_poster: Any = None,
+    gmail_sender: Any = None,
 ) -> dict[str, Any]:
     """Full sync of the Confirmations tab. Ingest first, then rewrite.
 
@@ -219,6 +222,9 @@ def sync_confirmations(
     3. Rewrite the tab (headers + one row per record, pending first),
        carrying over any decision text still sitting on a still-PENDING row.
     4. Read the tab back and verify the write landed.
+    5. When ``notify`` is true, fan out Chat + email for PENDING records
+       Carlo has not been told about yet (idempotent; failures are
+       returned, never raised).
     """
     store = JobStore(db_path)
     expired = confirmations.expire_old(store)
@@ -289,4 +295,41 @@ def sync_confirmations(
         "applied": applied,
         "rows": len(records),
         "read_back_rows": len(read_back) - 1,
+        "notifications": _notify_pending(
+            store, records, spreadsheet_id,
+            notify=notify, chat_poster=chat_poster, gmail_sender=gmail_sender,
+        ),
     }
+
+
+def _notify_pending(
+    store: Any,
+    records: list[dict[str, Any]],
+    spreadsheet_id: str,
+    *,
+    notify: bool,
+    chat_poster: Any,
+    gmail_sender: Any,
+) -> list[dict[str, Any]]:
+    """Fan out Chat + email for PENDING records not yet notified."""
+    if not notify:
+        return []
+    from . import confirmation_notify
+
+    results: list[dict[str, Any]] = []
+    for record in records:
+        if str(record.get("status")) != "PENDING":
+            continue
+        confirmation_id = str(record.get("id") or "")
+        if not confirmation_id:
+            continue
+        results.append(
+            confirmation_notify.notify_requested(
+                store,
+                confirmation_id,
+                chat_poster=chat_poster,
+                gmail_sender=gmail_sender,
+                given_sheet_id=spreadsheet_id,
+            )
+        )
+    return results

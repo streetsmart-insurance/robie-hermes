@@ -551,7 +551,9 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
     # sync never wipes a decision the human just typed.
     if "Confirmations" in available_sheets:
         from . import confirmation_board
-        board_result = confirmation_board.sync_confirmations(db_path, spreadsheet_id)
+        board_result = confirmation_board.sync_confirmations(
+            db_path, spreadsheet_id, notify=True
+        )
         result["confirmations"] = board_result["rows"]
         result["confirmations_decisions_applied"] = board_result["decisions_applied"]
     return result
