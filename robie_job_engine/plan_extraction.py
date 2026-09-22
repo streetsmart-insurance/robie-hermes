@@ -20,6 +20,8 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 
 from .evidence import utc_now_iso
@@ -207,23 +209,31 @@ def draft_fingerprint(draft: PlanDraft) -> str:
 # ---------------------------------------------------------------------------
 
 _MONEY_RE = re.compile(r"^\d+(\.\d{1,2})?$")
-_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
 def _sane_value(field_name: str, value: Any) -> str | None:
-    """Return a reason string when a value is not sane for its field."""
+    """Return a reason string when a value is not sane for its field.
+
+    M3 hardening: money negativity is checked with ``Decimal`` (never
+    float), and dates are validated with ``date.fromisoformat`` (never a
+    shape-only regex) -- an impossible calendar date goes to human review.
+    """
     if field_name in ("writtenPremium", "fullTermPremium"):
         text = str(value).replace(",", "").strip().lstrip("$")
         if not _MONEY_RE.match(text):
             return f"{field_name} value {value!r} is not a plain non-negative amount"
-        if float(text) < 0:
+        try:
+            amount = Decimal(text)
+        except InvalidOperation:
+            return f"{field_name} value {value!r} is not a valid amount"
+        if amount < 0:
             return f"{field_name} value {value!r} is negative"
         return None
     if field_name in ("effectiveDate", "expirationDate"):
-        if not _DATE_RE.match(str(value).strip()):
-            return (
-                f"{field_name} value {value!r} is not a YYYY-MM-DD date"
-            )
+        try:
+            date.fromisoformat(str(value).strip())
+        except (ValueError, TypeError):
+            return f"{field_name} value {value!r} is not a valid YYYY-MM-DD date"
         return None
     if not str(value or "").strip():
         return f"{field_name} has an empty value"

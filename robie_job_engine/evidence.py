@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Callable, Mapping
 
@@ -168,20 +169,60 @@ def _to_float(value: Any) -> float | None:
     return result
 
 
-def values_equal(expected: Any, actual: Any) -> bool:
+def values_equal(expected: Any, actual: Any, field_name: str | None = None) -> bool:
     """Compare one planned value against one observed value.
 
-    Rules, in order:
+    Comparison is TYPE-DRIVEN by the field name (M3 hardening): the rules
+    below apply when the caller passes ``field_name`` (``compare_plan_to_evidence``
+    always does). When ``field_name`` is None the legacy coercion order is
+    kept for backward compatibility.
+
+    Typed rules, in order:
     - both missing (None) -> equal
-    - both numeric-like ("100.00" vs 100 vs "$100") -> numeric compare
-    - both date-like ("2026-09-01" vs "2026-09-01T00:00:00") -> date-part compare
-    - otherwise -> stripped, case-insensitive string compare
+    - identifier fields (policyNumber/policy_number, loan/discussion IDs, and
+      anything ending in _id/_number) -> exact string compare (stripped,
+      case-insensitive, matching the module's long-standing string contract).
+      Identifiers never go through the numeric branch: "007" != "7", and
+      20+ digit IDs keep full precision (float() would round them equal).
+    - date fields (effectiveDate/expirationDate, *_date) -> ``date.fromisoformat``
+      on both sides; an invalid date on EITHER side fails closed (never a
+      match). A real date still matches its datetime rendering
+      ("2026-09-01" vs "2026-09-01T00:00:00").
+    - money fields (writtenPremium/fullTermPremium) -> ``Decimal`` exact
+      equality after cleaning ("$", ",", whitespace). Deliberate choice: no
+      epsilon tolerance. Premiums are discrete cent values locked at two
+      decimals, so a one-cent difference is a real mismatch; float math is
+      avoided entirely.
+    - everything else -> the legacy order: both numeric-like ("100.00" vs
+      100 vs "$100") -> float compare with 0.005 epsilon; both date-like
+      (YYYY-MM-DD shape) -> date-part compare; otherwise stripped,
+      case-insensitive string compare.
     """
 
     if expected is None and actual is None:
         return True
     if expected is None or actual is None:
         return False
+    if field_name is not None:
+        kind = _field_kind(field_name)
+        if kind == "identifier":
+            return str(expected).strip().casefold() == str(actual).strip().casefold()
+        if kind == "date":
+            expected_date = _to_date(expected)
+            actual_date = _to_date(actual)
+            return (
+                expected_date is not None
+                and actual_date is not None
+                and expected_date == actual_date
+            )
+        if kind == "money":
+            expected_money = _to_decimal(expected)
+            actual_money = _to_decimal(actual)
+            return (
+                expected_money is not None
+                and actual_money is not None
+                and expected_money == actual_money
+            )
     expected_num = _to_float(expected)
     actual_num = _to_float(actual)
     if expected_num is not None and actual_num is not None:
@@ -191,6 +232,94 @@ def values_equal(expected: Any, actual: Any) -> bool:
     if _looks_like_date(expected_text) and _looks_like_date(actual_text):
         return expected_text[:10] == actual_text[:10]
     return expected_text.casefold() == actual_text.casefold()
+
+
+# ---------------------------------------------------------------------------
+# M3: type-driven comparison helpers
+# ---------------------------------------------------------------------------
+
+_MONEY_FIELDS = frozenset({"writtenPremium", "fullTermPremium"})
+
+_DATE_FIELDS = frozenset({"effectiveDate", "expirationDate"})
+
+_IDENTIFIER_FIELDS = frozenset(
+    {
+        "policyNumber",
+        "policy_number",
+        "policyNo",
+        "policy_no",
+        "policyId",
+        "policy_id",
+        "applicantId",
+        "applicant_id",
+        "loanNumber",
+        "loan_number",
+        "loanId",
+        "loan_id",
+        "discussionId",
+        "discussion_id",
+        "most_recent_note_id",
+        "document_id",
+    }
+)
+
+_IDENTIFIER_SUFFIXES = ("_id", "Id", "ID", "_number", "Number", "number")
+
+
+def _field_kind(field_name: str) -> str:
+    """Classify a plan field for typed comparison: identifier | date | money."""
+    if field_name in _MONEY_FIELDS:
+        return "money"
+    if field_name in _DATE_FIELDS or field_name.endswith("_date"):
+        return "date"
+    if field_name in _IDENTIFIER_FIELDS or field_name.endswith(_IDENTIFIER_SUFFIXES):
+        return "identifier"
+    return "other"
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    """Clean a money-like value into a Decimal, or None if not money-like.
+
+    Uses Decimal(str(...)) for ints/floats so binary float representation
+    error never enters the comparison.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, float)):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        try:
+            return Decimal(str(value))
+        except InvalidOperation:
+            return None
+    text = str(value).strip().replace(",", "").replace("$", "")
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def _to_date(value: Any) -> date | None:
+    """Parse an ISO date (or date/datetime object) or None if not a real date.
+
+    The first 10 characters are parsed so a destination datetime rendering
+    ("2026-09-01T00:00:00") still matches a planned date. Invalid calendar
+    dates ("2026-02-30") fail closed to None instead of comparing.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except ValueError:
+        return None
 
 
 def compare_plan_to_evidence(
@@ -209,6 +338,17 @@ def compare_plan_to_evidence(
     """
 
     captured_at = now or utc_now_iso()
+    # M1 hardening: an empty plan is not a checklist that confirms itself.
+    # Vacuous MATCHED would disposition CLOSE_CLEAN on zero evidence, so an
+    # empty fields map fails closed to NO_EVIDENCE (human, never clean).
+    if not plan.fields:
+        return EvidenceResult(
+            outcome=EvidenceOutcome.NO_EVIDENCE,
+            checks=(),
+            detail="locked plan has no fields; refusing to grade an empty checklist",
+            captured_at=captured_at,
+            plan_job_id=plan.job_id,
+        )
     locked_at = _parse_iso(plan.locked_at) if plan.locked_at else None
     captured_dt = _parse_iso(captured_at)
     if locked_at is not None and captured_dt is not None:
@@ -244,7 +384,7 @@ def compare_plan_to_evidence(
                         note="field not present in destination evidence after settle delay",
                     )
                 )
-        elif values_equal(expected, actual):
+        elif values_equal(expected, actual, field_name=name):
             checks.append(
                 FieldCheck(field=name, expected=expected, actual=actual, matched=True)
             )
