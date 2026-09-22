@@ -1,6 +1,8 @@
 """Unit tests for the policy-change verification worker. Fakes only."""
 
+import os
 import sys
+import tempfile
 import types
 import unittest
 from dataclasses import dataclass, field
@@ -86,8 +88,24 @@ def _install_fake_verification_mailer():
     install_fake(_INSTALLED, "robie_job_engine.verification_mailer", fake)
     return fake
 
+def _install_fake_report_email_source():
+    fake = types.ModuleType("robie_job_engine.report_email_source")
+    state = {"rows": [], "error": None, "calls": []}
+
+    def fetch_email_report_rows(*, report_id, fields=None, **kwargs):
+        state["calls"].append({"report_id": report_id, "fields": fields})
+        if state["error"] is not None:
+            raise state["error"]
+        return [dict(r) for r in state["rows"]]
+
+    fake.fetch_email_report_rows = fetch_email_report_rows
+    fake.state = state
+    install_fake(_INSTALLED, "robie_job_engine.report_email_source", fake)
+    return fake
+
 _common = _install_fake_verification_common()
 _mailer = _install_fake_verification_mailer()
+_email_source = _install_fake_report_email_source()
 
 from robie_job_engine import policy_change_worker as pcw  # noqa: E402
 from robie_job_engine.models import JobStatus  # noqa: E402
@@ -129,20 +147,113 @@ def _ezlynx(**fields):
     merged.update(fields)
     return merged
 
-class KillSwitchTests(unittest.TestCase):
-    def test_kill_switch_holds_at_needs_clarification(self):
-        self.assertFalse(pcw.POLICY_CHANGE_ENABLED)
+class GateFlipTests(unittest.TestCase):
+    """The 4359 pilot gate flip (Carlo's 2026-09-22 ratification).
+
+    Each test discriminates against the pre-pilot branch, where perform()
+    held at the kill switch BEFORE any row fetch: retryable=False, error
+    "report 4359 schema unverified", and no outcomes were ever recorded.
+    """
+
+    def setUp(self):
+        _email_source.state["rows"] = []
+        _email_source.state["error"] = None
+        _email_source.state["calls"] = []
+        self._tmpdir = tempfile.mkdtemp(prefix="pcw-gate-test-")
+
+    def _clear_row(self):
+        return {
+            "Policy Number": "P-100",
+            "Change Request Created Date": "2026-09-19",
+            "policy_number": "P-100",
+            "insured_name": "Sun Volt Energy LLC",
+            "department": "Commercial",
+            "carrier": "Pie Insurance",
+            "effective_date": "2026-10-01",
+            "change_action": "add",
+            "affected_item": "2022 Honda Civic",
+            "requested_values": {"vehicle": "2022 Honda Civic"},
+            "premium_expectation": "200.00",
+            "_identity_key": "P-100 | 2026-09-19",
+        }
+
+    def _ambiguous_row(self):
+        return {
+            "Policy Number": "P-200",
+            "Change Request Created Date": "2026-09-19",
+            "policy_number": "P-200",
+            "_identity_key": "P-200 | 2026-09-19",
+        }
+
+    def _perform(self):
+        db_path = os.path.join(self._tmpdir, "registry.db")
         worker = pcw.PolicyChangeWorker()
-        result = worker.perform(
-            {"action_type": "policy_change_verification", "payload": {}},
+        return worker.perform(
+            {
+                "id": "job-1",
+                "action_type": "policy_change_verification",
+                "payload": {"db_path": db_path},
+            },
             idempotency_key="k1",
         )
-        self.assertFalse(result.succeeded)
-        self.assertEqual(result.hold_status, JobStatus.NEEDS_CLARIFICATION)
-        self.assertIn("report 4359 schema unverified", result.error)
 
-    def test_kill_switch_never_flipped_by_accident(self):
-        self.assertIs(pcw.POLICY_CHANGE_ENABLED, False)
+    def test_missing_registry_db_path_holds(self):
+        worker = pcw.PolicyChangeWorker()
+        result = worker.perform(
+            {"id": "job-1", "action_type": "policy_change_verification", "payload": {}},
+            idempotency_key="k1",
+        )
+        # Fail closed: without a registry db the schema gate cannot run.
+        self.assertFalse(result.succeeded)
+        self.assertFalse(result.retryable)
+        self.assertIn("registry db path unavailable", result.error)
+        self.assertEqual(_email_source.state["calls"], [])
+
+    def test_enabled_flag_is_set(self):
+        self.assertIs(pcw.POLICY_CHANGE_ENABLED, True)
+
+    def test_perform_processes_open_requests(self):
+        _email_source.state["rows"] = [self._clear_row(), self._ambiguous_row()]
+        result = self._perform()
+        self.assertTrue(result.succeeded)
+        self.assertIsNone(result.error)
+        # The kill switch held BEFORE any fetch; a fetch call proves the flip.
+        self.assertEqual(
+            [c["report_id"] for c in _email_source.state["calls"]], ["4359"]
+        )
+        outcomes = result.detail["outcomes"]
+        self.assertEqual(len(outcomes), 2)
+        clear, ambiguous = outcomes
+        # No evidence retrieval is wired yet: a clear request waits on the
+        # carrier; an ambiguous one routes to the CSR. Nothing auto-passes.
+        self.assertEqual(clear["status"], "pending")
+        self.assertEqual(clear["waiting_on"], "carrier")
+        self.assertEqual(clear["policy_number"], "P-100")
+        # The composite per-request identity becomes the tracked request id.
+        self.assertEqual(clear["evidence"]["request_id"], "P-100 | 2026-09-19")
+        self.assertEqual(ambiguous["status"], "not_done")
+        self.assertEqual(ambiguous["waiting_on"], "csr")
+        # The worker never closes the underlying request.
+        self.assertFalse(result.detail["request_closed"])
+
+    def test_fetch_failure_holds_retryable(self):
+        _email_source.state["error"] = RuntimeError("no email today")
+        result = self._perform()
+        # Past the old kill switch: the fetch was attempted and its failure
+        # surfaces as a retryable hold, never a crash or guessed rows.
+        self.assertTrue(_email_source.state["calls"])
+        self.assertFalse(result.succeeded)
+        self.assertTrue(result.retryable)
+        self.assertEqual(result.hold_status, JobStatus.NEEDS_CLARIFICATION)
+        self.assertIn("row fetch failed", result.error)
+
+    def test_untrackable_row_refused(self):
+        row = self._clear_row()
+        del row["_identity_key"]
+        _email_source.state["rows"] = [row]
+        result = self._perform()
+        self.assertFalse(result.succeeded)
+        self.assertIn("untrackable", result.error)
 
 class ReconstructRequestTests(unittest.TestCase):
     def test_reconstructs_clear_request(self):

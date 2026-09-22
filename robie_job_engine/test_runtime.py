@@ -160,8 +160,8 @@ def build_runtime_engine(
     verifiers["ezlynx.overdue_submission_reports"] = OverdueSubmissionReportVerifier()
     verifiers["ezlynx.session_refresh"] = EzlynxSessionVerifier()
     # Daily verification workers (EZLynx reports 4247/4246/4372/4359 + digest).
-    # The policy-change worker stays kill-switched off (POLICY_CHANGE_ENABLED
-    # is False in its module) until report 4359's schema is verified.
+    # The policy-change worker is live for report 4359 (schema verified
+    # 2026-09-19, re-verified 2026-09-22; pilot ratified by Carlo 2026-09-22).
     from .audit_verification_worker import AuditVerificationWorker, AuditVerificationVerifier
     from .manual_renewal_worker import ManualRenewalWorker, ManualRenewalVerifier
     from .mortgagee_verification_worker import (

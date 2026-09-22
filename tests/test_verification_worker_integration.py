@@ -10,8 +10,10 @@ guessed sibling signatures:
 - Worker outcome dicts must fit the real ``PolicyOutcome`` schema; worker-only
   keys such as ``audit_id`` travel inside ``evidence`` so the shared identity
   key derivation keeps working.
-- The policy-change worker stays kill-switched until report 4359's schema is
-  verified, and the bounded schema gate holds it.
+- The policy-change worker runs live on report 4359 (schema verified against
+  the 2026-09-19 delivery, re-verified 2026-09-22, pilot ratified by Carlo),
+  and the bounded schema gate admits it; Production promotion stays
+  separately gated by job_type_gate.
 
 Isolation: every worker scenario runs in a FRESH SUBPROCESS
 (``_verification_integration_child.py``) that imports the real worker with
@@ -141,19 +143,52 @@ class AuditWorkerRealSharedModulesTest(unittest.TestCase):
         self.assertIn("no carrier/underwriter email", outcomes[0]["reason"])
 
 
-class PolicyChangeKillSwitchTest(unittest.TestCase):
-    def test_worker_refuses_while_schema_unverified(self):
-        result = _run_child({"scenario": "policy_change", "rows": []})
-        self.assertFalse(result["policy_change_enabled"])
-        self.assertFalse(result["succeeded"])
-        self.assertIn("disabled", (result["error"] or "").lower())
+class PolicyChangeGateTest(unittest.TestCase):
+    """Post-flip behavior (Carlo's 2026-09-22 ratification). On the pre-pilot
+    branch both tests fail: the child held with "disabled" and the bounded
+    gate held with "unregistered or unverified schema"."""
 
-    def test_bounded_schema_gate_holds_policy_change(self):
+    def test_worker_processes_open_requests_after_gate_flip(self):
+        rows = [
+            {
+                "Policy Number": "P-100",
+                "Change Request Created Date": "2026-09-19",
+                "policy_number": "P-100",
+                "insured_name": "Sun Volt Energy LLC",
+                "department": "Commercial",
+                "carrier": "Pie Insurance",
+                "effective_date": "2026-10-01",
+                "change_action": "add",
+                "affected_item": "2022 Honda Civic",
+                "requested_values": {"vehicle": "2022 Honda Civic"},
+                "premium_expectation": "200.00",
+            },
+            {
+                "Policy Number": "P-200",
+                "Change Request Created Date": "2026-09-19",
+                "policy_number": "P-200",
+            },
+        ]
+        result = _run_child({"scenario": "policy_change", "rows": rows})
+        self.assertTrue(result["policy_change_enabled"])
+        self.assertTrue(result["succeeded"])
+        self.assertIsNone(result["error"])
+        outcomes = result["outcomes"]
+        self.assertEqual(len(outcomes), 2)
+        # No carrier evidence is retrieved in the pilot: a clear request
+        # waits on the carrier, an ambiguous one routes to the CSR. The
+        # composite identity from real ingestion is the tracked request id.
+        self.assertEqual(outcomes[0]["status"], "pending")
+        self.assertEqual(outcomes[0]["waiting_on"], "carrier")
+        self.assertEqual(outcomes[0]["evidence"]["request_id"], "P-100 | 2026-09-19")
+        self.assertEqual(outcomes[1]["status"], "not_done")
+        self.assertEqual(outcomes[1]["waiting_on"], "csr")
+
+    def test_bounded_schema_gate_allows_policy_change(self):
         reason = bounded_schema_hold_reason(
             "policy_change_verification", {"report_id": "4359"}
         )
-        self.assertIsNotNone(reason)
-        self.assertIn("unverified", reason)
+        self.assertIsNone(reason)
 
     def test_bounded_schema_gate_allows_manual_renewal(self):
         reason = bounded_schema_hold_reason(

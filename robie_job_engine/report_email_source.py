@@ -39,7 +39,10 @@ from .gmail_report_ingestion import (
 logger = logging.getLogger("robie.report_email_source")
 
 # Live workers that prefer today's robie@ CSV over Looker favorites.
-EMAIL_FIRST_REPORT_IDS = frozenset({"4246", "4247", "4372"})
+# 4359 joined the email-first set 2026-09-22 with the policy-change pilot
+# (Carlo's ratification); it has no mapped Looker look, so email is its only
+# source.
+EMAIL_FIRST_REPORT_IDS = frozenset({"4246", "4247", "4359", "4372"})
 
 # 4246's daily email is scheduled report 4360 (Active policies only).
 AUDIT_4360_STATUS_COLUMN = "Current Policy Status"
@@ -108,6 +111,28 @@ COLUMN_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "Assigned Producer": ("assigned_agent",),
         "CSR": ("csr",),
         "Note": ("note",),
+    },
+    "4359": {
+        "Policy Number": ("policy_number",),
+        "Account Name": ("insured_name",),
+        "Applicant ID": ("applicant_id",),
+        "Master Company": ("carrier", "carrier_name"),
+        "Line Of Business": ("line_of_business",),
+        "Request Status": ("request_status",),
+        "Created By": ("created_by",),
+        "Branch": ("branch",),
+        "Department": ("department",),
+        "Assigned Producer": ("assigned_agent",),
+        "CSR": ("csr",),
+        "Change Request Created Date": (
+            "change_request_created_date",
+            "request_created_date",
+        ),
+        # Deliberately NOT aliased: this export's "Effective Date" is the
+        # policy's effective date, not the requested change's effective
+        # date. Feeding it into the request would silently match against
+        # the wrong date; reconstruct_request extracts the change date from
+        # the request text or flags the request ambiguous (CSR route).
     },
 }
 
@@ -260,6 +285,9 @@ def project_email_rows(
             for dest in dests:
                 row.setdefault(dest, value)
         row["_fetch_source"] = "gmail_email_csv"
+        # The work-item key the worker tracks day to day: the per-policy key
+        # for 4246/4247/4372, the composite per-request key for 4359.
+        row["_identity_key"] = key
         emitted.append(row)
     if not emitted:
         raise GmailReportIngestionError(
