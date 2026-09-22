@@ -287,6 +287,16 @@ def _claim_key(store: JobStore, key: str, loop_job_id: str) -> str:
                    VALUES (?, ?, 'CLAIMED', ?, ?)""",
                 (key, str(loop_job_id), moment, moment),
             )
+            # Append-only audit of the retry claim (H4): same transaction as
+            # the claim INSERT, so the audit row commits with the claim.
+            from . import plan_lock as _plan_lock
+
+            _plan_lock.append_transition(
+                conn,
+                str(loop_job_id),
+                "retry_claimed",
+                detail={"idempotency_key": key},
+            )
             return "FRESH"
     except sqlite3.IntegrityError:
         pass

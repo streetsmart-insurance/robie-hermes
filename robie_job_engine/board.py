@@ -188,6 +188,21 @@ def record_grade(
                 utc_now(),
             ),
         )
+        # Append-only audit of the grade (H4): same connection, so the
+        # audit row commits with the grade record.
+        from . import plan_lock as _plan_lock
+
+        _plan_lock.append_transition(
+            conn,
+            str(loop_job_id or ""),
+            "graded",
+            detail={
+                "job_id": job_id,
+                "job_type": result.job_type,
+                "grade": result.grade,
+                "passed": bool(result.passed),
+            },
+        )
         conn.commit()
     finally:
         conn.close()
