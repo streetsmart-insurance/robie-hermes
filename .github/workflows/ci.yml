@@ -25,7 +25,7 @@ jobs:
             exit 1
           fi
       - name: Install test and workbook dependencies
-        run: python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4"
+        run: python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" "PyYAML>=6.0,<7"
       - name: Install Google Chat bridge dependencies
         run: python -m pip install -r services/chat-http-bridge/requirements.txt
       - name: Test Google Chat bridge
@@ -67,6 +67,9 @@ jobs:
             tests/test_accountability_timer_install_workflow.py \
             tests/test_accountability_delivery_watchdog.py \
             tests/test_repair_dedicated_accountability_google_docs.py \
+            tests/test_repair_dedicated_accountability_magellan_sentiment_heading.py \
+            tests/test_magellan_sad_identity.py \
+            tests/test_repair_dedicated_accountability_magellan_sad_identity.py \
             tests/test_repair_dedicated_accountability_submission_gate.py \
             tests/test_repair_dedicated_accountability_submission_boundary.py \
             tests/test_preflight_dedicated_accountability_submission.py \
