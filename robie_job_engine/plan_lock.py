@@ -64,6 +64,42 @@ def _plan_from_row(row: dict[str, Any]) -> LockedPlan:
     )
 
 
+def _normalize_plan(plan: LockedPlan, locked_by: str) -> LockedPlan:
+    """Validate the plan and fill lock metadata defaults."""
+    if not str(plan.job_id or "").strip():
+        raise ValueError("cannot lock a plan without a job_id")
+    if not plan.fields:
+        raise ValueError("cannot lock a plan with no fields")
+    if not str(plan.locked_by or "").strip():
+        plan = dataclasses.replace(plan, locked_by=locked_by)
+    if not str(plan.locked_at or "").strip():
+        plan = dataclasses.replace(plan, locked_at=utc_now_iso())
+    return plan
+
+
+def _insert_locked_plan(conn: sqlite3.Connection, plan: LockedPlan) -> None:
+    """Insert the locked-plan row on an existing connection.
+
+    Does NOT commit: the caller owns the transaction, so the insert can
+    commit or roll back atomically with related writes (e.g. the approval
+    flip in confirmations.confirm_and_lock).
+
+    Raises PlanAlreadyLocked when a plan is already locked for the job.
+    """
+    payload = json.dumps(_plan_to_row(plan), sort_keys=True, default=str)
+    _ensure_schema(conn)
+    try:
+        conn.execute(
+            "INSERT INTO locked_plans(job_id, plan_json, locked_at, locked_by)"
+            " VALUES (?, ?, ?, ?)",
+            (plan.job_id, payload, plan.locked_at, plan.locked_by),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise PlanAlreadyLocked(
+            f"job {plan.job_id} already has a locked plan; refusing to overwrite"
+        ) from exc
+
+
 def lock_plan(
     store: Any,
     plan: LockedPlan,
@@ -77,29 +113,10 @@ def lock_plan(
         ValueError: the plan has no job_id or no fields.
     """
 
-    if not str(plan.job_id or "").strip():
-        raise ValueError("cannot lock a plan without a job_id")
-    if not plan.fields:
-        raise ValueError("cannot lock a plan with no fields")
-    if not str(plan.locked_by or "").strip():
-        plan = dataclasses.replace(plan, locked_by=locked_by)
-    if not str(plan.locked_at or "").strip():
-        plan = dataclasses.replace(plan, locked_at=utc_now_iso())
-
-    payload = json.dumps(_plan_to_row(plan), sort_keys=True, default=str)
+    plan = _normalize_plan(plan, locked_by)
     conn = store.connect()
     try:
-        _ensure_schema(conn)
-        try:
-            conn.execute(
-                "INSERT INTO locked_plans(job_id, plan_json, locked_at, locked_by)"
-                " VALUES (?, ?, ?, ?)",
-                (plan.job_id, payload, plan.locked_at, plan.locked_by),
-            )
-        except sqlite3.IntegrityError as exc:
-            raise PlanAlreadyLocked(
-                f"job {plan.job_id} already has a locked plan; refusing to overwrite"
-            ) from exc
+        _insert_locked_plan(conn, plan)
         conn.commit()
     finally:
         conn.close()
