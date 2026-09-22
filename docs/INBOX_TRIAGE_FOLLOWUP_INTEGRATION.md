@@ -45,9 +45,14 @@ real 2026-09-22 Sonant emails (gmail 1a0c920af059657c, 1a0c924c267e52c7).
 
 ## Open gaps before go-live (Carlo's explicit approval needed for each)
 
-1. **Zap update**: the agency's EZLynx follow-up-task Zap does not read
-   `task_notes` today. Its Create-Task step must map the new field before any
-   fire, or the summary body is dropped. (Editing the Zap = Carlo's call.)
+1. **Zap update: NOT NEEDED (revised 2026-09-22 ~12:20 EDT).** The payload
+   now sends the summary under both `task_notes` (descriptive) and
+   `note_text` (compat). The agency's EZLynx follow-up-task Zap already maps
+   the webhook's `note_text` field to the Note Description (fixed and
+   published as v4 on 2026-09-22; shared with the phone watchdog), so the
+   summary flows through with no Zap edit. Do NOT remap the Zap's Note
+   Description to `task_notes` -- the Zap reads a single field there and
+   that would blank phone-task descriptions.
 2. **Assignee map**: `PRODUCER_USERNAMES` currently only maps
    "Carlo Ferrara" -> "Carlo1". Other producers' EZLynx login usernames must be
    resolved from EZLynx before assigning to them; until then those proposals are

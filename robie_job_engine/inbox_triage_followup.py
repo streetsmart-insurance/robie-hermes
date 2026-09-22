@@ -270,12 +270,16 @@ def assemble_task_payload(applicant_id, task_title, task_body, assignee,
                           email_subject, due_date, source="inbox-triage"):
     """Assemble the Zapier catch-hook payload. Fail-closed validation.
 
-    Keys: applicant_id, task_title, task_notes, assignee, source,
+    Keys: applicant_id, task_title, task_notes, note_text, assignee, source,
     email_subject, due_date.
 
-    NOTE: `task_notes` is a NEW field the EZLynx follow-up-task Zap does not
-    read today. The Zap's Create-Task step must be updated to map it before
-    go-live (Carlo's approval to edit the Zap).
+    NOTE: `task_notes` is the descriptive summary key for this enrichment.
+    `note_text` carries the same summary for Zap compatibility: the live
+    follow-up-task Zap already maps the webhook's `note_text` field to the
+    EZLynx Note Description (shared with the phone watchdog), so no Zap edit
+    is needed. Do NOT remap the Zap's Note Description to `task_notes` --
+    the Zap reads a single field there and that would blank phone-task
+    descriptions.
     """
     if not task_title or not str(task_title).strip():
         return None, "missing task_title"
@@ -296,6 +300,11 @@ def assemble_task_payload(applicant_id, task_title, task_body, assignee,
         "applicant_id": raw,
         "task_title": str(task_title).strip(),
         "task_notes": task_body.strip(),
+        # Compat: the live follow-up-task Zap already maps the webhook's
+        # `note_text` field to the EZLynx Note Description (shared with the
+        # phone watchdog). Sending the same summary under both keys means no
+        # Zap edit is needed and neither producer's path regresses.
+        "note_text": task_body.strip(),
         "assignee": assignee,
         "source": source,
         "email_subject": email_subject,

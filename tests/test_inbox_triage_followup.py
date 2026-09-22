@@ -150,6 +150,16 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(payload["due_date"], "2026-09-23")
         self.assertIn("task_notes", payload)
 
+    def test_note_text_compat_key_matches_task_notes(self):
+        # Regression: the live Zap maps the webhook's note_text field to the
+        # EZLynx description (shared with the phone watchdog). The payload
+        # must carry the same summary under both keys so no Zap edit is needed.
+        payload, err = itfu.assemble_task_payload(**self._good())
+        self.assertEqual(err, "")
+        self.assertIn("note_text", payload)
+        self.assertEqual(payload["note_text"], payload["task_notes"])
+        self.assertTrue(payload["note_text"].strip())
+
     def test_due_date_required(self):
         kw = self._good()
         kw["due_date"] = ""
