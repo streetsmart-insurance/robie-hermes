@@ -36,7 +36,7 @@ Use the same order in the agency summary and every department tab:
 4. Sales — Sales Center assigned producer, lead source, stage, last touch, and no-touch age.
 5. Tasks & Activities — overdue tasks, applicant/account, owner, age, latest evidence, and department offenders.
 6. COIs & Submissions — pending COIs and Submission Center exceptions with original request date and blocker.
-7. Customer Sentiment — Magellan sad/at-risk calls and corroborated service concerns.
+7. Customer sentiment (SAD) — Magellan: sad/at-risk calls and corroborated service concerns.
 8. Validation — source window, evidence gaps, unresolved ownership, and release gates.
 
 ## Default recipient allowlist
