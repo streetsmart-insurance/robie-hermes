@@ -68,10 +68,16 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)
     ),
+    # 4359 verified 2026-09-19 ~10:15 EDT against the real delivery (Gmail
+    # 1a0b9a359d14407a, ROBIE_daily_CSV_2026-09-19T0827.csv): exact 19-column
+    # header match, 69 rows, zero blank Policy Number, zero blank Change
+    # Request Created Date, 69 unique per-request identity keys. Re-verified
+    # 2026-09-22 against the same attachment; Carlo ratified the 4359 pilot
+    # the same day. Mirrors gmail_report_ingestion.SCHEMA_VERIFIED (in sync).
     "4359": ReportSpec(
         "4359",
         "Policy Change",
-        False,
+        True,
         ("request_id",),
         filter_name="Open Requests - ROBIE",
     ),
