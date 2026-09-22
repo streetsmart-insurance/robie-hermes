@@ -4,10 +4,13 @@ New build from the policy-change SOP
 (``.agents/skills/ezlynx-policy-change-confirmation/SKILL.md`` + rebuild-brief
 sections 2.4/3.4). There is no old code to port; the SOP is the spec.
 
-Kill switch: :data:`POLICY_CHANGE_ENABLED` stays ``False`` until a human has
-verified the report 4359 (Policy Change Request OPEN) columns. Report 4359 has
-``schema_verified=False`` in ``report_registry``, so ``start_run()`` refuses it
-— that refusal is allowed to propagate; it is never bypassed.
+Pilot state: report 4359's schema was verified against the real 2026-09-19
+delivery (Gmail 1a0b9a359d14407a, ROBIE_daily_CSV_2026-09-19T0827.csv: exact
+19-column header match, 69 rows, zero blank identity columns) and re-verified
+2026-09-22; Carlo ratified the pilot the same day, so
+:data:`POLICY_CHANGE_ENABLED` is ``True`` and report_registry's 4359
+``schema_verified`` is ``True``. The ``start_run()`` gate stays armed and its
+refusal still propagates — it is never bypassed.
 
 Safety invariants encoded here:
 - Cardinal rule: ROBIE never deletes a policy. This worker has no delete path;
@@ -23,16 +26,30 @@ Safety invariants encoded here:
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 
+try:  # Sibling-built email row source; fail-closed stub when absent.
+    from .report_email_source import fetch_email_report_rows  # type: ignore
+    _REPORT_ROWS_AVAILABLE = True
+except ImportError:  # pragma: no cover - sibling module not yet landed
+    _REPORT_ROWS_AVAILABLE = False
 
-#: Kill switch. Stays False until report 4359's schema is verified by a human.
-#: Do NOT flip this without the verified 4359 column list.
-POLICY_CHANGE_ENABLED = False
+    def fetch_email_report_rows(**kwargs):  # type: ignore
+        raise NotImplementedError(
+            "report_email_source.fetch_email_report_rows is not yet installed; "
+            "policy_change_verification cannot fetch report 4359"
+        )
+
+
+#: Pilot switch. Enabled 2026-09-22 with Carlo's ratification after the
+#: 2026-09-19 4359 delivery was schema-verified (19 columns, 69 rows, 69
+#: unique per-request identity keys) and independently re-verified 2026-09-22.
+POLICY_CHANGE_ENABLED = True
 
 JOB_TYPE = "policy_change_verification"
 WORKER_NAME = "policy-change-verification"
@@ -416,6 +433,18 @@ class PolicyChangeWorker:
     def __init__(self, store: Any | None = None) -> None:
         self._store = store
 
+    def _db_path(self, job: Mapping[str, Any]) -> str | None:
+        """Report-run registry path (mirrors the mortgagee worker)."""
+        payload = job.get("payload") or {}
+        candidate = (
+            payload.get("db_path")
+            or payload.get("jobs_db_path")
+            or getattr(self._store, "path", None)
+            or os.environ.get("ROBIE_JOB_DB")
+            or None
+        )
+        return str(candidate) if candidate else None
+
     # -- carrier evidence -------------------------------------------------
     def _maybe_send_carrier_email(
         self,
@@ -505,12 +534,27 @@ class PolicyChangeWorker:
                 error="report 4359 schema unverified — policy-change worker disabled",
                 hold_status=JobStatus.NEEDS_CLARIFICATION,
             )
-        # Report 4359 is schema-unverified; start_run() must refuse. The
-        # refusal propagates as a hold — never bypassed.
+        # The registry gate stays armed: start_run() refuses if 4359's
+        # schema_verified flag regresses to False. The refusal propagates
+        # as a hold — never bypassed. The gate runs against the real registry
+        # db; with no resolvable path the worker refuses to run ungated.
+        db_path = self._db_path(job)
+        if not db_path:
+            return WorkerResult(
+                False,
+                action,
+                {"report_id": REPORT_ID},
+                retryable=False,
+                error=(
+                    "report 4359 registry db path unavailable; "
+                    "refusing to run without the schema gate"
+                ),
+                hold_status=JobStatus.NEEDS_CLARIFICATION,
+            )
         try:
             from .report_registry import ReportRunRegistry, ReportRegistryError
 
-            registry = ReportRunRegistry(":memory:")
+            registry = ReportRunRegistry(db_path)
             registry.start_run(
                 run_id=idempotency_key,
                 report_id=REPORT_ID,
@@ -525,18 +569,54 @@ class PolicyChangeWorker:
                 error=f"report 4359 run refused: {type(exc).__name__}: {exc}",
                 hold_status=JobStatus.NEEDS_CLARIFICATION,
             )
-        return self._process_open_requests(job, idempotency_key=idempotency_key)
+        try:
+            rows = list(self._iter_open_requests(job))
+        except Exception as exc:
+            # A missing, stale, or wrong-schema daily CSV holds the job
+            # retryably; the worker never proceeds on guessed rows.
+            return WorkerResult(
+                False,
+                action,
+                {"report_id": REPORT_ID},
+                {"error": f"{type(exc).__name__}: {exc}"},
+                retryable=True,
+                error=(
+                    f"report {REPORT_ID} row fetch failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                hold_status=JobStatus.NEEDS_CLARIFICATION,
+            )
+        return self._process_open_requests(job, rows, idempotency_key=idempotency_key)
 
     def _iter_open_requests(self, job: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
-        """Yield open report-4359 rows. Row fetching is wired once the report
-        schema is verified; until then the start_run() refusal above holds."""
-        raise NotImplementedError("report 4359 row fetcher is not wired (schema unverified)")
+        """Yield open report-4359 rows from today's robie@ daily CSV.
 
-    def _process_open_requests(self, job: Mapping[str, Any], *, idempotency_key: str) -> WorkerResult:
+        Email-first and fail-closed via ``report_email_source``: a missing,
+        stale, or wrong-schema CSV raises (perform() converts that into a
+        retryable hold) rather than returning guessed rows. The 4359 export
+        has no request-ID column, so the composite per-request identity key
+        (Policy Number | Change Request Created Date) computed at ingestion
+        becomes the request_id the worker tracks day to day; a row missing
+        both raises instead of processing an untrackable request.
+        """
+        for row in fetch_email_report_rows(report_id=REPORT_ID):
+            row = dict(row)
+            if not str(row.get("request_id") or "").strip():
+                identity = str(row.get("_identity_key") or "").strip()
+                if not identity:
+                    raise ValueError(
+                        "report 4359 row has no request_id and no ingestion "
+                        "identity key; refusing to process an untrackable "
+                        "request"
+                    )
+                row["request_id"] = identity
+            yield row
+
+    def _process_open_requests(self, job: Mapping[str, Any], rows: Iterable[Mapping[str, Any]], *, idempotency_key: str) -> WorkerResult:
         action = str(job.get("action_type") or JOB_TYPE)
         outcomes: list[dict[str, Any]] = []
         reports: list[dict[str, Any]] = []
-        for row in self._iter_open_requests(job):
+        for row in rows:
             request = reconstruct_request(row, str(row.get("discussion_text") or ""))
             intents = _evidence_retrieval_intents(request)
             # Carrier evidence + EZLynx keyed data are attached by the
@@ -575,6 +655,7 @@ class PolicyChangeWorker:
             }[match_result["state"]]
             if portal_stall:
                 next_action = "resolve portal login gap, then chase carrier for issued endorsement"
+            follow_up = row.get("follow_up_date")
             report = build_confirmation_report(
                 request=request,
                 match_result=match_result,
