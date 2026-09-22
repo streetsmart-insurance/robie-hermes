@@ -2,10 +2,19 @@
 
 This is the human-facing side of the HITL plan-confirmation gate: pending
 plan drafts appear as plain-English rows, and the human approves or rejects
-by typing APPROVE or REJECT in the "Your decision" column. The next sync
-ingests that decision into the ``plan_confirmations`` ledger via
+by pasting a signed decision token (minted and delivered by
+``confirmation_notify`` in the approver's Chat DM / email when a signing
+key is configured) into the "Your decision" column. The next sync verifies the token and ingests the
+decision into the ``plan_confirmations`` ledger via
 ``confirmations.approve`` / ``confirmations.reject`` (which fail closed on
 anything that is not PENDING) and writes the decided status back.
+
+The sheet is a display surface, not an authorization surface: any editor
+can type in it, so a bare APPROVE/REJECT word or a typed name in "Decided
+by" is NEVER trusted. The decider's identity comes from the verified token
+alone. Without a configured signing key
+(``confirmations.DECISION_TOKEN_ENV``) no sheet decision is ingested at
+all -- the tab is display-only.
 
 Ordering matters: decisions are ingested BEFORE the tab is rewritten, so a
 sync never wipes a decision the human just typed. When rewriting, any
@@ -30,6 +39,7 @@ Column layout (row 1 = headers, data from row 2):
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -37,6 +47,8 @@ from zoneinfo import ZoneInfo
 from . import confirmations
 from .store import JobStore
 
+
+logger = logging.getLogger(__name__)
 
 TAB_TITLE = "Confirmations"
 DATA_START_ROW = 2
@@ -49,7 +61,7 @@ HEADERS = [
     "Status",
     "Requested by",
     "Requested at",
-    "Your decision (type APPROVE or REJECT)",
+    "Your decision (paste signed token)",
     "Reason (optional)",
     "Decided by",
     "Decided at",
@@ -59,7 +71,6 @@ HEADERS = [
 (ID, SUMMARY, JOB_TYPE, DETAILS, STATUS, REQUESTED_BY, REQUESTED_AT,
  DECISION, REASON, DECIDED_BY, DECIDED_AT) = range(len(HEADERS))
 
-DEFAULT_DECIDER = "Carlo Ferrara"
 APPROVE_WORD = "APPROVE"
 REJECT_WORD = "REJECT"
 
@@ -167,12 +178,35 @@ def read_tab_rows(api: Any, spreadsheet_id: str) -> list[list[str]]:
     return [[_cell(row, i) for i in range(len(HEADERS))] for row in resp.get("values", [])]
 
 
+def _extract_token(text: str) -> str | None:
+    """Pull the signed decision token out of a decision cell, if present.
+
+    Accepts a bare token or "APPROVE <token>" / "REJECT <token>" (the word
+    is decoration for the human; the token carries the real decision).
+    """
+    for word in str(text or "").split():
+        if word.startswith(confirmations.DECISION_TOKEN_PREFIX + "."):
+            return word
+    return None
+
+
 def apply_decisions_from_sheet(
     db_path: str,
     spreadsheet_id: str,
     values_api: Any = None,
+    *,
+    decision_key: Any = None,
+    skipped: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Ingest APPROVE/REJECT decisions typed on the tab.
+    """Ingest signed decisions pasted on the tab.
+
+    A decision counts only as a verified token
+    (``confirmations.verify_decision_token``) whose confirmation id matches
+    the row. The decider's identity comes from the token; the "Decided by"
+    cell is never consulted. Bare words, forged tokens, expired tokens, and
+    tokens for a different confirmation are skipped (and reported through
+    ``skipped`` when a list is passed). With no signing key configured the
+    tab is display-only: nothing is ingested.
 
     Only rows whose ledger record is still PENDING are decided; everything
     else is skipped. Returns one dict per applied decision.
@@ -180,26 +214,56 @@ def apply_decisions_from_sheet(
     api = _values_api(values_api)
     rows = read_tab_rows(api, spreadsheet_id)
     store = JobStore(db_path)
+    try:
+        key = confirmations.decision_signing_key(decision_key)
+    except ValueError as exc:
+        # A misconfigured key must never crash the whole sheets_sync run:
+        # degrade the Confirmations tab to display-only and say so.
+        logger.warning(
+            "decision signing key unusable (%s); Confirmations tab is display-only",
+            exc,
+        )
+        key = None
     applied: list[dict[str, Any]] = []
+
+    def _skip(cid: str, why: str) -> None:
+        if skipped is not None:
+            skipped.append({"confirmation_id": cid, "reason": why})
+
     for row in rows[1:]:  # skip headers
         confirmation_id = _cell(row, ID)
-        decision = _cell(row, DECISION).upper()
-        if not confirmation_id or decision not in (APPROVE_WORD, REJECT_WORD):
+        decision_text = _cell(row, DECISION)
+        if not confirmation_id or not decision_text:
+            continue
+        if key is None:
+            _skip(confirmation_id, "no signing key configured (display-only)")
+            continue
+        token = _extract_token(decision_text)
+        if token is None:
+            _skip(confirmation_id, "unsigned decision text (bare word)")
+            continue
+        try:
+            verified = confirmations.verify_decision_token(token, key=key)
+        except ValueError as exc:
+            _skip(confirmation_id, f"invalid token: {exc}")
+            continue
+        if verified["confirmation_id"] != confirmation_id:
+            _skip(confirmation_id, "token was minted for a different confirmation")
             continue
         record = confirmations.get(confirmation_id, store=store)
         if record is None:
             continue  # unknown id on the sheet: never invent a record
         if str(record.get("status")) != "PENDING":
             continue  # already decided: the write-back owns this row now
-        decided_by = _cell(row, DECIDED_BY) or DEFAULT_DECIDER
+        decided_by = verified["principal"]
         reason = _cell(row, REASON)
-        if decision == APPROVE_WORD:
+        if verified["decision"] == APPROVE_WORD:
             updated = confirmations.approve(confirmation_id, decided_by, store=store)
         else:
             updated = confirmations.reject(confirmation_id, decided_by, reason, store=store)
         applied.append({
             "confirmation_id": confirmation_id,
-            "decision": decision,
+            "decision": verified["decision"],
             "decided_by": decided_by,
             "status": updated.get("status"),
         })
@@ -216,6 +280,7 @@ def sync_confirmations(
     gmail_sender: Any = None,
     chat_thread_poster: Any = None,
     zap_trigger: Any = None,
+    decision_key: Any = None,
 ) -> dict[str, Any]:
     """Full sync of the Confirmations tab. Ingest first, then rewrite.
 
@@ -234,7 +299,11 @@ def sync_confirmations(
     api = _values_api(values_api)
     ensure_tab(spreadsheet_id, sheets_api=sheets_api)
 
-    applied = apply_decisions_from_sheet(db_path, spreadsheet_id, values_api=api)
+    skipped: list[dict[str, Any]] = []
+    applied = apply_decisions_from_sheet(
+        db_path, spreadsheet_id, values_api=api,
+        decision_key=decision_key, skipped=skipped,
+    )
 
     # Carry over decision text the human typed on rows that are still PENDING
     # (e.g. typed between a previous rewrite and this sync's ingest).
@@ -295,12 +364,15 @@ def sync_confirmations(
         "expired": expired,
         "decisions_applied": len(applied),
         "applied": applied,
+        "skipped_unauthenticated": len(skipped),
+        "skipped": skipped,
         "rows": len(records),
         "read_back_rows": len(read_back) - 1,
         "notifications": _notify_pending(
             store, records, spreadsheet_id,
             notify=notify, chat_poster=chat_poster, gmail_sender=gmail_sender,
             chat_thread_poster=chat_thread_poster, zap_trigger=zap_trigger,
+            decision_key=decision_key,
         ),
     }
 
@@ -315,6 +387,7 @@ def _notify_pending(
     gmail_sender: Any,
     chat_thread_poster: Any = None,
     zap_trigger: Any = None,
+    decision_key: Any = None,
 ) -> list[dict[str, Any]]:
     """Fan out Chat + email for PENDING records not yet notified."""
     if not notify:
@@ -337,6 +410,7 @@ def _notify_pending(
                 chat_thread_poster=chat_thread_poster,
                 zap_trigger=zap_trigger,
                 given_sheet_id=spreadsheet_id,
+                decision_key=decision_key,
             )
         )
     return results

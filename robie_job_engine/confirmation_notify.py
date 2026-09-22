@@ -7,6 +7,14 @@ and by email. Every sent notification is recorded in the ledger, so a
 re-sync never double-notifies; a channel that fails is recorded as an
 error and retried on the next sync.
 
+The Chat DM and email are the authenticated surfaces: each carries
+single-purpose APPROVE and REJECT decision tokens (minted via
+``confirmations.mint_decision_token`` for the approver principal) that
+Carlo pastes into the sheet's decision column -- magic-link style. The
+sheet itself is unauthenticated display space; without a configured
+signing key no tokens are minted, the tab is display-only, and the
+notification says so instead of pretending approvals work.
+
 ``assign_requester_task`` creates an EZLynx follow-up task for the
 requesting user through the Zapier catch-hook (the agency's real task path;
 the legacy ``create_task`` fallback in ``ezlynx_note_poster`` fabricates
@@ -19,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -28,6 +37,8 @@ from typing import Any, Mapping
 from . import confirmations
 from .store import JobStore
 
+
+logger = logging.getLogger(__name__)
 
 NOTIFY_TABLE = "confirmation_notifications"
 
@@ -105,15 +116,75 @@ def _record(store: Any, confirmation_id: str, channel: str, receipt: Mapping[str
 
 
 # ---------------------------------------------------------------------------
+# Decision tokens for the approver, minted at notify time and delivered
+# inside the Chat DM / email (the authenticated surfaces). Carlo pastes one
+# into the sheet's decision column -- the token, not the typed word, is the
+# authorization.
+# ---------------------------------------------------------------------------
+
+def approver_principal() -> str:
+    """The identity the decision tokens bind: the verified approver inbox."""
+    return notify_email_to()
+
+
+def mint_approver_tokens(
+    confirmation_id: str, *, decision_key: Any = None
+) -> dict[str, str] | None:
+    """Mint APPROVE + REJECT tokens for the approver, or None when no
+    signing key is configured (the tab is display-only then). A malformed
+    key logs a warning and degrades to display-only rather than crashing
+    the notification fan-out.
+    """
+    try:
+        key = confirmations.decision_signing_key(decision_key)
+    except ValueError as exc:
+        logger.warning(
+            "decision signing key unusable (%s); notifying without tokens", exc
+        )
+        return None
+    if key is None:
+        return None
+    principal = approver_principal()
+    return {
+        "APPROVE": confirmations.mint_decision_token(
+            confirmation_id, "APPROVE", principal, key=key
+        ),
+        "REJECT": confirmations.mint_decision_token(
+            confirmation_id, "REJECT", principal, key=key
+        ),
+    }
+
+
+def _decision_instructions(tokens: dict[str, str] | None, tab_url: str) -> str:
+    if tokens:
+        return (
+            f"Decide on the Confirmations tab: {tab_url}\n"
+            "Paste ONE of these into the \"Your decision\" column "
+            f"(they expire in {confirmations.DEFAULT_TOKEN_TTL_SECONDS // 86400} days):\n"
+            f"  {tokens['APPROVE']}\n"
+            f"  {tokens['REJECT']}\n"
+            "The signed token is the approval -- a typed word is not."
+        )
+    return (
+        f"Review it on the Confirmations tab: {tab_url}\n"
+        "The tab is display-only right now (no decision signing key "
+        "configured), so approvals cannot be taken from the sheet until "
+        "the key is set and this notice is re-sent."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Message content: plain English, no jargon.
 # ---------------------------------------------------------------------------
 
-def _chat_text(record: Mapping[str, Any], tab_url: str) -> str:
+def _chat_text(
+    record: Mapping[str, Any], tab_url: str,
+    tokens: dict[str, str] | None = None,
+) -> str:
     summary = confirmations.confirmation_summary(record)
     return (
         f"ROBIE needs your approval.\n\n{summary}\n\n"
-        f"Approve or reject it on the Confirmations tab: {tab_url}\n"
-        "Type APPROVE or REJECT in the \"Your decision\" column."
+        + _decision_instructions(tokens, tab_url)
     )
 
 
@@ -121,14 +192,16 @@ def _email_subject(record: Mapping[str, Any]) -> str:
     return f"[ROBIE] Approval needed: {confirmations.confirmation_summary(record)[:90]}"
 
 
-def _email_body(record: Mapping[str, Any], tab_url: str) -> str:
+def _email_body(
+    record: Mapping[str, Any], tab_url: str,
+    tokens: dict[str, str] | None = None,
+) -> str:
     summary = confirmations.confirmation_summary(record)
     return (
         f"Hi Carlo,\n\nROBIE needs your approval before it can continue:\n\n"
         f"{summary}\n\n"
-        f"Review it on the Confirmations tab:\n{tab_url}\n\n"
-        "Type APPROVE or REJECT in the \"Your decision\" column. "
-        "If you reject, add a short reason in the Reason column.\n\n"
+        + _decision_instructions(tokens, tab_url)
+        + "\nIf you reject, add a short reason in the Reason column.\n\n"
         "Nothing moves until you decide.\n"
     )
 
@@ -312,16 +385,20 @@ def notify_requested(
     chat_thread_poster: Any = None,
     zap_trigger: Any = None,
     given_sheet_id: str | None = None,
+    decision_key: Any = None,
 ) -> dict[str, Any]:
     """Notify Carlo (Chat + email) and the requester on their origin platform.
 
-    Carlo's Chat + email are the approval ask. The requester additionally
-    hears back on the platform they started on (Chat thread, email, or an
-    EZLynx task) via ``notify_requester_on_origin``. Idempotent per
-    (confirmation, channel): already-notified channels are skipped. Channel
-    failures are returned as errors, never raised, so one broken channel
-    cannot block the others -- and the ledger only records successes, so
-    failures retry on the next sync.
+    Carlo's Chat + email are the approval ask: when a decision signing key
+    is configured, both legs carry APPROVE/REJECT tokens minted for his
+    inbox, which he pastes into the sheet's decision column (magic-link
+    style). The requester additionally hears back on the platform they
+    started on (Chat thread, email, or an EZLynx task) via
+    ``notify_requester_on_origin`` -- requesters never receive tokens.
+    Idempotent per (confirmation, channel): already-notified channels are
+    skipped. Channel failures are returned as errors, never raised, so one
+    broken channel cannot block the others -- and the ledger only records
+    successes, so failures retry on the next sync.
     """
     record = confirmations.get(confirmation_id, store=store)
     if record is None:
@@ -331,13 +408,14 @@ def notify_requested(
                 "skipped": "not PENDING"}
 
     tab_url = confirmations_tab_url(given_sheet_id)
+    tokens = mint_approver_tokens(confirmation_id, decision_key=decision_key)
     notified: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
     if not was_notified(store, confirmation_id, "google_chat"):
         try:
             poster = chat_poster if chat_poster is not None else _real_chat_poster()
-            receipt = poster(_chat_text(record, tab_url))
+            receipt = poster(_chat_text(record, tab_url, tokens))
             _record(store, confirmation_id, "google_chat", receipt)
             notified.append({"channel": "google_chat", **receipt})
         except Exception as exc:
@@ -346,7 +424,7 @@ def notify_requested(
     if not was_notified(store, confirmation_id, "email"):
         try:
             sender = gmail_sender if gmail_sender is not None else _real_gmail_sender()
-            receipt = sender(notify_email_to(), _email_subject(record), _email_body(record, tab_url))
+            receipt = sender(notify_email_to(), _email_subject(record), _email_body(record, tab_url, tokens))
             _record(store, confirmation_id, "email", receipt)
             notified.append({"channel": "email", **receipt})
         except Exception as exc:
@@ -536,9 +614,9 @@ def assign_requester_task(
         "task_title": f"ROBIE approval needed: {summary[:80]}",
         "task_description": (
             f"Your ROBIE job is waiting on a human decision.\n\n{summary}\n\n"
-            f"Approve or reject it on the Confirmations tab:\n"
+            f"Track it on the Confirmations tab:\n"
             f"{confirmations_tab_url()}\n\n"
-            "Type APPROVE or REJECT in the \"Your decision\" column."
+            "Carlo approves or rejects; the decision is signed, not typed."
         ),
         "assignee": login,
         "due_date": due_date or _default_due_date(),

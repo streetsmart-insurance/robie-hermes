@@ -66,6 +66,153 @@ def test_notify_sends_chat_and_email(db):
     assert "Nothing moves until you decide" in body
 
 
+TEST_KEY = "test-decision-signing-key-0123456789abcdef"
+
+
+def _tokens_in(text):
+    return [line.strip() for line in text.splitlines()
+            if line.strip().startswith(confirmations.DECISION_TOKEN_PREFIX)]
+
+
+def test_notify_delivers_signed_decision_tokens(db):
+    """With a signing key, the Chat DM and email carry APPROVE/REJECT tokens
+    minted for the approver inbox -- the magic-link delivery leg."""
+    store = JobStore(db)
+    cid = _request(store)
+    chat, gmail = FakeChat(), FakeGmail()
+    result = notify.notify_requested(
+        store, cid, chat_poster=chat, gmail_sender=gmail, decision_key=TEST_KEY
+    )
+    assert result["errors"] == []
+
+    chat_tokens = _tokens_in(chat.posts[0])
+    assert len(chat_tokens) == 2  # APPROVE + REJECT
+    decisions = set()
+    for token in chat_tokens:
+        verified = confirmations.verify_decision_token(token, key=TEST_KEY)
+        assert verified["confirmation_id"] == cid
+        assert verified["principal"] == notify.approver_principal()
+        decisions.add(verified["decision"])
+    assert decisions == {"APPROVE", "REJECT"}
+
+    _, _, body = gmail.sent[0]
+    assert len(_tokens_in(body)) == 2
+    assert "display-only" not in chat.posts[0]
+
+
+def test_delivered_token_applies_on_the_board(db):
+    """End to end: token delivered in the Chat DM, pasted on the sheet, is
+    the decision that lands. A bare typed word on the same run is not."""
+    from robie_job_engine import confirmation_board
+
+    store = JobStore(db)
+    cid = _request(store)
+    chat = FakeChat()
+    notify.notify_requested(store, cid, chat_poster=chat, decision_key=TEST_KEY)
+    approve_token = [t for t in _tokens_in(chat.posts[0])
+                     if confirmations.verify_decision_token(t, key=TEST_KEY)["decision"] == "APPROVE"][0]
+
+    values, sheets = _board_apis()
+    confirmation_board.sync_confirmations(db, _board_sheet_id(values), values_api=values, sheets_api=sheets)
+    rows = values.cells[(_board_sheet_id(values), "Confirmations")]
+    rows[1][confirmation_board.DECISION] = approve_token
+    result = confirmation_board.sync_confirmations(
+        db, _board_sheet_id(values), values_api=values, sheets_api=sheets,
+        decision_key=TEST_KEY,
+    )
+    assert result["decisions_applied"] == 1
+    assert confirmations.get(cid, store=store)["status"] == "APPROVED"
+    assert result["applied"][0]["decided_by"] == notify.approver_principal()
+
+
+class _FakeExecutable:
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self):
+        return self._result
+
+
+class _FakeValuesApi:
+    """Minimal in-memory stand-in for the Sheets values API."""
+
+    def __init__(self):
+        self.cells: dict[tuple[str, str], list[list[str]]] = {}
+        self.titles: set[str] = set()
+
+    def get(self, spreadsheetId, range):  # noqa: N803
+        tab = range.split("!", 1)[0]
+        return _FakeExecutable({"values": [list(r) for r in self.cells.get((spreadsheetId, tab), [])]})
+
+    def update(self, spreadsheetId, range, valueInputOption, body):  # noqa: N803
+        tab = range.split("!", 1)[0]
+        self.titles.add(tab)
+        self.cells[(spreadsheetId, tab)] = [list(r) for r in body["values"]]
+        return _FakeExecutable({"updatedRange": range})
+
+    def clear(self, spreadsheetId, range):  # noqa: N803
+        tab = range.split("!", 1)[0]
+        self.cells[(spreadsheetId, tab)] = []
+        return _FakeExecutable({})
+
+
+class _FakeSheetsApi:
+    def __init__(self, values):
+        self.values = values
+
+    def get(self, spreadsheetId, fields):  # noqa: N803
+        return _FakeExecutable({
+            "sheets": [{"properties": {"title": t}} for t in sorted(self.values.titles)]
+        })
+
+    def batchUpdate(self, spreadsheetId, body):  # noqa: N803
+        for req in body.get("requests", []):
+            title = req.get("addSheet", {}).get("properties", {}).get("title")
+            if title:
+                self.values.titles.add(title)
+        return _FakeExecutable({})
+
+
+def _board_apis():
+    values = _FakeValuesApi()
+    return values, _FakeSheetsApi(values)
+
+
+def _board_sheet_id(values):
+    return "notify-board-sheet"
+
+
+def test_notify_without_key_stays_display_only(db, monkeypatch):
+    """No key: the message must say the tab is display-only, not imply that
+    typing APPROVE on the sheet works."""
+    monkeypatch.delenv(confirmations.DECISION_TOKEN_ENV, raising=False)
+    store = JobStore(db)
+    cid = _request(store)
+    chat, gmail = FakeChat(), FakeGmail()
+    result = notify.notify_requested(store, cid, chat_poster=chat, gmail_sender=gmail)
+    assert result["errors"] == []
+    assert len(result["notified"]) == 2
+    assert "display-only" in chat.posts[0]
+    assert "display-only" in gmail.sent[0][2]
+    assert _tokens_in(chat.posts[0]) == []
+    assert _tokens_in(gmail.sent[0][2]) == []
+
+
+def test_notify_misconfigured_key_degrades_without_crashing(db):
+    """A <16-byte key must not kill the notification fan-out: warn, send
+    without tokens, keep both channels alive."""
+    store = JobStore(db)
+    cid = _request(store)
+    chat, gmail = FakeChat(), FakeGmail()
+    result = notify.notify_requested(
+        store, cid, chat_poster=chat, gmail_sender=gmail, decision_key="short"
+    )
+    assert result["errors"] == []
+    assert len(result["notified"]) == 2
+    assert _tokens_in(chat.posts[0]) == []
+    assert "display-only" in chat.posts[0]
+
+
 def test_notify_is_idempotent(db):
     store = JobStore(db)
     cid = _request(store)
