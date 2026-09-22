@@ -314,9 +314,10 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "identity": ("report_id",),
     },
     "policy_change_verification": {
-        # Report 4359's schema is not yet verified: the worker must stay
-        # disabled (POLICY_CHANGE_ENABLED is False) and bounded jobs hold.
-        "schema_verified": False,
+        # Report 4359 verified against the real 2026-09-19 delivery and
+        # re-verified 2026-09-22; Carlo ratified the pilot the same day.
+        # Production promotion stays separately gated by job_type_gate.
+        "schema_verified": True,
         "required": ("report_id",),
         "identity": ("report_id",),
     },
