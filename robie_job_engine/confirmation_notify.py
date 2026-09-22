@@ -371,21 +371,87 @@ def notify_requested(
 # EZLynx requester task: "assign a task back in EZLynx to the user who
 # requested". The Zap's Task Assignee field is free text and EZLynx rejects
 # anything it cannot resolve as a login username -- display names like
-# "Carlo Ferrara" fail. Unknown requesters fail closed; add them via
-# ROBIE_EZLYNX_LOGIN_<NAME> (e.g. ROBIE_EZLYNX_LOGIN_JAKE=JakeSS).
+# "Carlo Ferrara" fail ("Can't create note as assignee not found").
+# Unknown requesters fail closed; add them via
+# ROBIE_EZLYNX_LOGIN_<NAME> (e.g. ROBIE_EZLYNX_LOGIN_JAKE=jferrara3).
 # ---------------------------------------------------------------------------
 
-#: Requester name (normalized) -> EZLynx login username. Seeded from
-#: usernames Carlo supplied directly. Extend with ROBIE_EZLYNX_LOGIN_*.
+#: Requester name (normalized) -> EZLynx login username. Full agency
+#: directory seeded from EZLynx Agency Admin > Manage Users, exported by
+#: Carlo 2026-09-22 (35 users). Bare first names are included only where
+#: unambiguous -- "andrea" is intentionally absent (Andrea Illanes and
+#: Andrea Martinez share it). Extend/override with ROBIE_EZLYNX_LOGIN_*
+#: (env wins over this table).
 REQUESTER_LOGINS: dict[str, str] = {
+    "accounting team": "Markley1",
+    "alejandro": "Alejandro11",
+    "alejandro zelaya": "Alejandro11",
+    "amber": "Amber14",
+    "amber voigt": "Amber14",
+    "ana": "anaflores",
+    "ana flores": "anaflores",
+    "andrea illanes": "a_illanes",
+    "andrea martinez": "Amartinez21",
+    "angie": "AngieV",
+    "angie valladarez": "AngieV",
+    "ashley": "ahuntley",
+    "ashley huntley": "ahuntley",
     "carlo": "Carlo1",
     "carlo ferrara": "Carlo1",
+    "daniela": "Daniela_Aguilar",
+    "daniela aguilar": "Daniela_Aguilar",
+    "diana": "Diana12",
+    "diana cabrera": "Diana12",
+    "eimy": "Eramos1",
+    "eimy ramos": "Eramos1",
+    "erika": "Erika11",
+    "erika palacios": "Erika11",
+    "eunice": "Eunice",
+    "eunice iraheta": "Eunice",
+    "gabriela": "Gabrielac1",
+    "gabriela chutin": "Gabrielac1",
+    "jackie": "Jackie_Arriola",
+    "jackie arriola": "Jackie_Arriola",
+    "jake": "jferrara3",
+    "jake ferrara": "jferrara3",
+    "jazmin": "Jazmin11",
+    "jazmin molina": "Jazmin11",
+    "jimmy": "Jimmy1",
+    "jimmy ferrara": "Jimmy1",
+    "jose": "Josecabrera",
+    "jose cabrera": "Josecabrera",
     "karla": "KarlaSS",
     "karla brown": "KarlaSS",
+    "lenin": "Lperdomo1",
+    "lenin perdomo": "Lperdomo1",
+    "maria": "MariaB12",
+    "maria bara": "MariaB12",
+    "markley": "Markley1",
     "matthew": "Mancina1",
     "matthew mancina": "Mancina1",
     "mancina": "Mancina1",
-    "markley": "Accounting Team",
+    "mike": "MikeS1",
+    "mike sosa": "MikeS1",
+    "mitchell": "Mitch1",
+    "mitchell slagle": "Mitch1",
+    "nelson": "Nmaldonado2",
+    "nelson maldonado": "Nmaldonado2",
+    "nicole": "SSNicole",
+    "nicole segovia": "SSNicole",
+    "ricardo": "Ricardo2",
+    "ricardo aguilar": "Ricardo2",
+    "robie": "SSRobie",
+    "robie ai": "SSRobie",
+    "sandeep": "Sandeep11",
+    "sandeep yadav": "Sandeep11",
+    "sandy": "Sandy11",
+    "sandy santana": "Sandy11",
+    "steffany": "SCanales",
+    "steffany canales": "SCanales",
+    "taylor": "TCimei",
+    "taylor cimei": "TCimei",
+    "zeus": "Zeus12",
+    "zeus quezada": "Zeus12",
 }
 
 ZAP_TRIGGER = os.path.expanduser("~/workspace/skills/zapier/bin/zap-trigger")

@@ -318,3 +318,90 @@ def test_old_rows_without_origin_columns_still_read(db):
     )
     channels = [n["channel"] for n in result["notified"]]
     assert channels == ["google_chat", "email"]
+
+
+class TestRequesterLoginDirectory:
+    """The EZLynx login directory (Agency Admin > Manage Users, 2026-09-22).
+
+    The Zap's Task Assignee field needs the login username; a display
+    name like "Accounting Team" is rejected by EZLynx, so every entry
+    must be a real User Name from the directory.
+    """
+
+    def test_full_directory_resolves(self):
+        expected = {
+            "zeus quezada": "Zeus12",
+            "taylor cimei": "TCimei",
+            "steffany canales": "SCanales",
+            "sandy santana": "Sandy11",
+            "sandeep yadav": "Sandeep11",
+            "robie ai": "SSRobie",
+            "ricardo aguilar": "Ricardo2",
+            "nicole segovia": "SSNicole",
+            "nelson maldonado": "Nmaldonado2",
+            "mitchell slagle": "Mitch1",
+            "mike sosa": "MikeS1",
+            "matthew mancina": "Mancina1",
+            "maria bara": "MariaB12",
+            "lenin perdomo": "Lperdomo1",
+            "karla brown": "KarlaSS",
+            "jose cabrera": "Josecabrera",
+            "jimmy ferrara": "Jimmy1",
+            "jazmin molina": "Jazmin11",
+            "jake ferrara": "jferrara3",
+            "jackie arriola": "Jackie_Arriola",
+            "gabriela chutin": "Gabrielac1",
+            "eunice iraheta": "Eunice",
+            "erika palacios": "Erika11",
+            "eimy ramos": "Eramos1",
+            "diana cabrera": "Diana12",
+            "daniela aguilar": "Daniela_Aguilar",
+            "carlo ferrara": "Carlo1",
+            "ashley huntley": "ahuntley",
+            "angie valladarez": "AngieV",
+            "andrea illanes": "a_illanes",
+            "andrea martinez": "Amartinez21",
+            "ana flores": "anaflores",
+            "amber voigt": "Amber14",
+            "alejandro zelaya": "Alejandro11",
+            "accounting team": "Markley1",
+        }
+        for name, login in expected.items():
+            assert notify.requester_login(name) == login, name
+        # Bare first names resolve where unambiguous.
+        for first, login in [
+            ("zeus", "Zeus12"), ("taylor", "TCimei"), ("steffany", "SCanales"),
+            ("sandy", "Sandy11"), ("sandeep", "Sandeep11"), ("robie", "SSRobie"),
+            ("ricardo", "Ricardo2"), ("nicole", "SSNicole"),
+            ("nelson", "Nmaldonado2"), ("mitchell", "Mitch1"),
+            ("mike", "MikeS1"), ("matthew", "Mancina1"),
+            ("maria", "MariaB12"), ("markley", "Markley1"),
+            ("karla", "KarlaSS"), ("lenin", "Lperdomo1"),
+            ("jose", "Josecabrera"), ("jimmy", "Jimmy1"),
+            ("jazmin", "Jazmin11"), ("jake", "jferrara3"),
+            ("jackie", "Jackie_Arriola"), ("gabriela", "Gabrielac1"),
+            ("eunice", "Eunice"), ("erika", "Erika11"), ("eimy", "Eramos1"),
+            ("diana", "Diana12"), ("daniela", "Daniela_Aguilar"),
+            ("carlo", "Carlo1"), ("ashley", "ahuntley"), ("angie", "AngieV"),
+            ("ana", "anaflores"), ("amber", "Amber14"),
+            ("alejandro", "Alejandro11"),
+        ]:
+            assert notify.requester_login(first) == login, first
+
+    def test_markley_is_login_not_display_name(self):
+        # Regression: "Accounting Team" is the display name and EZLynx
+        # rejects it as a task assignee; the login is Markley1.
+        assert notify.requester_login("markley") == "Markley1"
+        assert notify.requester_login("accounting team") == "Markley1"
+
+    def test_ambiguous_first_name_fails_closed(self):
+        assert notify.requester_login("andrea") is None
+
+    def test_unknown_requester_fails_closed(self):
+        assert notify.requester_login("somebody nobody") is None
+
+    def test_env_override_wins(self, monkeypatch):
+        # The env key is built from the full normalized name.
+        monkeypatch.setenv("ROBIE_EZLYNX_LOGIN_JAKE_FERRARA", "JakeCustom")
+        assert notify.requester_login("jake ferrara") == "JakeCustom"
+        assert notify.requester_login("jake") == "jferrara3"
