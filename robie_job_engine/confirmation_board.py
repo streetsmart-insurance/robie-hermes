@@ -358,7 +358,7 @@ def sync_confirmations(
     api.update(
         spreadsheetId=spreadsheet_id,
         range=f"{TAB_TITLE}!A1",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         body={"values": values},
     ).execute()
 
