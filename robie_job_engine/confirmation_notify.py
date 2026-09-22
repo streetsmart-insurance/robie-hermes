@@ -156,6 +156,9 @@ def mint_approver_tokens(
 
 
 def _decision_instructions(tokens: dict[str, str] | None, tab_url: str) -> str:
+    # LEGACY sheet-paste path (deprecated as the human decision path
+    # 2026-09-22; Chat-native buttons are primary). Kept working as the
+    # fallback/audit mirror for one release.
     if tokens:
         return (
             f"Decide on the Confirmations tab: {tab_url}\n"
@@ -388,6 +391,11 @@ def notify_requested(
     decision_key: Any = None,
 ) -> dict[str, Any]:
     """Notify Carlo (Chat + email) and the requester on their origin platform.
+
+    LEGACY fan-out (kept working): prefer ``notify_approval_on_origin``,
+    which routes the ask on its origin medium instead of blasting Chat +
+    email every time. This function remains the fallback for confirmations
+    filed without an origin platform, and its behavior is unchanged.
 
     Carlo's Chat + email are the approval ask: when a decision signing key
     is configured, both legs carry APPROVE/REJECT tokens minted for his
@@ -627,3 +635,332 @@ def assign_requester_task(
     receipt = fire(payload)
     _record(store, confirmation_id, "ezlynx_task", {"assignee": login, **receipt})
     return {"confirmation_id": confirmation_id, "assignee": login, "receipt": receipt}
+
+
+# ---------------------------------------------------------------------------
+# Origin-medium notify policy (Carlo 2026-09-22): origin wins.
+#
+# Reply on the medium where the ask started; never blast Chat + EZLynx +
+# email for one ask.
+#
+# - chat origin   -> the approval CARD (Approve/Reject buttons, signed
+#                    tokens) goes in the originating Chat thread. That one
+#                    card is the decision surface. Email is a tokenless
+#                    backup heads-up only, never a second live decision
+#                    thread. EZLynx is NEVER touched from a Chat-origin ask --
+#                    not even when an applicant id happens to be on the job.
+# - email origin  -> the approval ask goes by email with signed tokens
+#                    (the live surface, as before). No parallel Chat ask.
+# - ezlynx origin -> EZLynx task only, and only when the applicant id is
+#                    already proven on the job (fail closed otherwise -- an
+#                    EZLynx note/task is never invented). No Chat thread up
+#                    front. After the quiet window with no decision,
+#                    ``maybe_quiet_nudge`` posts ONE Chat nudge with links
+#                    back to the item.
+# - missing/unknown origin (old rows) -> legacy ``notify_requested``
+#                    fan-out (Chat DM + email to the approver), so an ask
+#                    never goes silent for lack of routing data.
+#
+# Every leg is idempotent per (confirmation, channel) in the ledger; a
+# channel that fails is returned as an error, never raised.
+# ---------------------------------------------------------------------------
+
+#: Ledger channel names used by the origin router.
+CHANNEL_ORIGIN_CHAT_CARD = "origin_chat_card"
+CHANNEL_BACKUP_EMAIL = "backup_email"
+CHANNEL_ORIGIN_EMAIL = "origin_email"
+CHANNEL_CHAT_NUDGE = "chat_nudge"
+
+
+def quiet_window_hours() -> float:
+    """Hours of EZLynx silence before the one Chat nudge. Env-overridable."""
+    raw = _env("ROBIE_CONFIRMATION_QUIET_HOURS", "24")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 24.0
+    return value if value > 0 else 24.0
+
+
+def _channel_notified_at(store: Any, confirmation_id: str, channel: str) -> str | None:
+    conn = store.connect()
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            f"SELECT notified_at FROM {NOTIFY_TABLE} WHERE confirmation_id = ? AND channel = ?",
+            (confirmation_id, channel),
+        ).fetchone()
+        return str(row["notified_at"]) if row and row["notified_at"] else None
+    finally:
+        conn.close()
+
+
+def _parse_notified_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _real_approval_card_poster() -> Any:
+    """Post the approval card to a Chat space/thread as the Chat app."""
+    from . import confirmation_cards
+    from .chat_app_post import post_card_as_chat_app
+
+    def post(space: str, card_v2: dict[str, Any], thread: str | None = None) -> dict[str, Any]:
+        if not str(space or "").startswith("spaces/"):
+            raise ValueError("origin chat post needs a spaces/ space name")
+        result = post_card_as_chat_app(space, [card_v2], thread_name=thread)
+        return {"space": space, "thread": thread, "message_name": result.get("name")}
+    return post
+
+
+def _backup_email_subject(record: Mapping[str, Any]) -> str:
+    return f"[ROBIE] Approval waiting in Chat: {confirmations.confirmation_summary(record)[:90]}"
+
+
+def _backup_email_body(record: Mapping[str, Any], tab_url: str) -> str:
+    summary = confirmations.confirmation_summary(record)
+    return (
+        "Hi Carlo,\n\n"
+        "Heads-up only: ROBIE needs your approval and the decision is "
+        "waiting in the originating Chat thread -- tap Approve or Reject "
+        "there.\n\n"
+        f"{summary}\n\n"
+        "This email is not a decision channel (no tokens inside). "
+        "Reference copy on the Confirmations tab:\n"
+        f"{tab_url}\n\n"
+        "Nothing moves until you decide.\n"
+    )
+
+
+def post_origin_approval_card(
+    store: Any,
+    confirmation_id: str,
+    *,
+    card_poster: Any = None,
+    decision_key: Any = None,
+) -> dict[str, Any]:
+    """Post the Chat-native approval card to the originating Chat thread.
+
+    Chat-origin asks only. The card's buttons carry the signed decision
+    tokens; without a signing key the card posts display-only. Idempotent
+    per confirmation (``origin_chat_card`` ledger channel).
+    """
+    record = confirmations.get(confirmation_id, store=store)
+    if record is None:
+        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+    if str(record.get("status")) != "PENDING":
+        return {"confirmation_id": confirmation_id, "skipped": "not PENDING"}
+    if was_notified(store, confirmation_id, CHANNEL_ORIGIN_CHAT_CARD):
+        return {"confirmation_id": confirmation_id, "skipped": "already notified"}
+    ref = _origin_ref_dict(record)
+    space = str(ref.get("space") or "").strip()
+    thread = str(ref.get("thread") or "").strip() or None
+    if not space:
+        raise ValueError("chat origin needs origin_ref.space")
+    from . import confirmation_cards
+
+    tokens = mint_approver_tokens(confirmation_id, decision_key=decision_key)
+    card_v2 = confirmation_cards.approval_card_v2(record, tokens)
+    poster = card_poster if card_poster is not None else _real_approval_card_poster()
+    receipt = poster(space, card_v2, thread)
+    _record(store, confirmation_id, CHANNEL_ORIGIN_CHAT_CARD, receipt)
+    return {"confirmation_id": confirmation_id, "notified": [{"channel": CHANNEL_ORIGIN_CHAT_CARD, **receipt}]}
+
+
+def notify_approval_on_origin(
+    store: Any,
+    confirmation_id: str,
+    *,
+    approval_card_poster: Any = None,
+    gmail_sender: Any = None,
+    zap_trigger: Any = None,
+    chat_poster: Any = None,
+    decision_key: Any = None,
+    given_sheet_id: str | None = None,
+) -> dict[str, Any]:
+    """Route one approval ask on its origin medium (origin wins).
+
+    See the module section above for the full policy. ``chat_poster`` is
+    the legacy text poster to the approver's Chat DM; it is used only for
+    the missing-origin fallback (via ``notify_requested``). Failures are
+    returned as errors, never raised.
+    """
+    record = confirmations.get(confirmation_id, store=store)
+    if record is None:
+        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+    if str(record.get("status")) != "PENDING":
+        return {"confirmation_id": confirmation_id, "notified": [], "errors": [],
+                "skipped": "not PENDING"}
+
+    origin = str(record.get("origin_platform") or "").strip().casefold()
+    if not origin:
+        # Old rows predate origin tracking: keep the proven fan-out so the
+        # ask never goes silent for lack of routing data.
+        logger.info(
+            "confirmation %s has no origin_platform; using legacy fan-out",
+            confirmation_id,
+        )
+        return notify_requested(
+            store,
+            confirmation_id,
+            chat_poster=chat_poster,
+            gmail_sender=gmail_sender,
+            zap_trigger=zap_trigger,
+            given_sheet_id=given_sheet_id,
+            decision_key=decision_key,
+        )
+
+    notified: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    tab_url = confirmations_tab_url(given_sheet_id)
+    ref = _origin_ref_dict(record)
+
+    if origin == "chat":
+        # The card in the originating thread is the decision surface.
+        try:
+            card_result = post_origin_approval_card(
+                store,
+                confirmation_id,
+                card_poster=approval_card_poster,
+                decision_key=decision_key,
+            )
+            notified.extend(card_result.get("notified", []))
+        except Exception as exc:
+            errors.append({"channel": CHANNEL_ORIGIN_CHAT_CARD,
+                           "error": f"{type(exc).__name__}: {exc}"})
+        # Backup heads-up email: tokenless, points at the Chat thread.
+        # Never a second live decision thread, and never an EZLynx write:
+        # a Chat-origin ask without (or with) an applicant never touches
+        # EZLynx.
+        if not was_notified(store, confirmation_id, CHANNEL_BACKUP_EMAIL):
+            try:
+                sender = gmail_sender if gmail_sender is not None else _real_gmail_sender()
+                receipt = sender(
+                    notify_email_to(),
+                    _backup_email_subject(record),
+                    _backup_email_body(record, tab_url),
+                )
+                _record(store, confirmation_id, CHANNEL_BACKUP_EMAIL, receipt)
+                notified.append({"channel": CHANNEL_BACKUP_EMAIL, **receipt})
+            except Exception as exc:
+                errors.append({"channel": CHANNEL_BACKUP_EMAIL,
+                               "error": f"{type(exc).__name__}: {exc}"})
+
+    elif origin == "email":
+        # Email is the live surface for email-origin asks (tokens as before).
+        if not was_notified(store, confirmation_id, CHANNEL_ORIGIN_EMAIL):
+            try:
+                to = str(ref.get("to") or "").strip()
+                if "@" not in to:
+                    raise ValueError("email origin needs origin_ref.to")
+                tokens = mint_approver_tokens(confirmation_id, decision_key=decision_key)
+                sender = gmail_sender if gmail_sender is not None else _real_gmail_sender()
+                receipt = sender(to, _email_subject(record),
+                                 _email_body(record, tab_url, tokens))
+                _record(store, confirmation_id, CHANNEL_ORIGIN_EMAIL, receipt)
+                notified.append({"channel": CHANNEL_ORIGIN_EMAIL, **receipt})
+            except Exception as exc:
+                errors.append({"channel": CHANNEL_ORIGIN_EMAIL,
+                               "error": f"{type(exc).__name__}: {exc}"})
+
+    elif origin == "ezlynx":
+        # EZLynx only: a task on the proven applicant. No Chat thread up
+        # front, no parallel email ask. Missing applicant id fails closed --
+        # an EZLynx note/task is never invented.
+        try:
+            applicant_id = str(ref.get("applicant_id") or "").strip()
+            if not applicant_id:
+                raise ValueError(
+                    "ezlynx origin needs origin_ref.applicant_id (proven in "
+                    "EZLynx); refusing to invent an EZLynx task"
+                )
+            receipt = assign_requester_task(
+                store, confirmation_id, applicant_id=applicant_id,
+                zap_trigger=zap_trigger,
+            )
+            notified.append({"channel": "ezlynx_task", **receipt})
+        except Exception as exc:
+            errors.append({"channel": "ezlynx_task",
+                           "error": f"{type(exc).__name__}: {exc}"})
+
+    else:
+        errors.append({"channel": "origin",
+                       "error": f"unknown origin platform {origin!r}; ask not routed"})
+
+    return {"confirmation_id": confirmation_id, "notified": notified, "errors": errors}
+
+
+def _nudge_text(record: Mapping[str, Any], tab_url: str, waited: str) -> str:
+    summary = confirmations.confirmation_summary(record)
+    return (
+        "ROBIE approval still waiting (EZLynx).\n\n"
+        f"{summary}\n\n"
+        f"The EZLynx task went out {waited} with no decision yet. "
+        "This is the one nudge -- the EZLynx task stays the record:\n"
+        f"{tab_url}\n"
+        "Reply here and the conversation continues in Chat."
+    )
+
+
+def maybe_quiet_nudge(
+    store: Any,
+    confirmation_id: str,
+    *,
+    chat_poster: Any = None,
+    quiet_hours: float | None = None,
+    now: datetime | None = None,
+    given_sheet_id: str | None = None,
+) -> dict[str, Any]:
+    """Quiet escalate: one Chat nudge after the quiet window.
+
+    Only for EZLynx-origin asks that are still PENDING: when the EZLynx leg
+    went out at least ``quiet_hours`` ago (default 24, env
+    ``ROBIE_CONFIRMATION_QUIET_HOURS``) with no decision, post ONE Chat
+    nudge to the approver's DM with links back to the item. Idempotent via
+    the ``chat_nudge`` ledger channel -- a second call never re-nudges.
+    This is a nudge with links, not a second full conversation.
+    """
+    def _skip(reason: str) -> dict:
+        return {"confirmation_id": confirmation_id, "notified": [],
+                "errors": [], "skipped": reason}
+
+    record = confirmations.get(confirmation_id, store=store)
+    if record is None:
+        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+    if str(record.get("status")) != "PENDING":
+        return _skip("not PENDING")
+    origin = str(record.get("origin_platform") or "").strip().casefold()
+    if origin != "ezlynx":
+        return _skip("not ezlynx origin")
+    if was_notified(store, confirmation_id, CHANNEL_CHAT_NUDGE):
+        return _skip("already nudged")
+    sent_at = _parse_notified_at(_channel_notified_at(store, confirmation_id, "ezlynx_task"))
+    if sent_at is None:
+        return _skip("ezlynx leg not sent yet")
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    window = quiet_hours if quiet_hours and quiet_hours > 0 else quiet_window_hours()
+    elapsed = (moment - sent_at).total_seconds() / 3600.0
+    if elapsed < window:
+        return _skip(f"quiet window not elapsed ({elapsed:.1f}h < {window:g}h)")
+    waited = f"{elapsed:.0f}h ago" if elapsed < 48 else f"{elapsed/24:.0f}d ago"
+    tab_url = confirmations_tab_url(given_sheet_id)
+    try:
+        poster = chat_poster if chat_poster is not None else _real_chat_poster()
+        receipt = poster(_nudge_text(record, tab_url, waited))
+        _record(store, confirmation_id, CHANNEL_CHAT_NUDGE, receipt)
+        return {"confirmation_id": confirmation_id,
+                "notified": [{"channel": CHANNEL_CHAT_NUDGE, **receipt}],
+                "errors": []}
+    except Exception as exc:
+        return {"confirmation_id": confirmation_id,
+                "errors": [{"channel": CHANNEL_CHAT_NUDGE,
+                            "error": f"{type(exc).__name__}: {exc}"}]}

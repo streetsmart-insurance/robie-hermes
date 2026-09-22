@@ -2235,6 +2235,22 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 response = result.message
                 if result.status == "RESOLVED" and result.choice:
                     response = f"Choice recorded: {result.choice}. ROBIE will continue from its checkpoint."
+            elif action == "robie_confirmation_decision":
+                # Chat-native plan-confirmation Approve/Reject. The button
+                # carries the HMAC-signed decision token; the click is
+                # verified (signature, expiry, principal) and applied
+                # idempotently. dispatch_http_event wraps the reply in
+                # UPDATE_MESSAGE so the answered card is replaced.
+                from robie_job_engine.confirmation_cards import (
+                    resolve_confirmation_click,
+                )
+                from robie_job_engine.store import JobStore
+                db_path = os.getenv(
+                    "ROBIE_JOB_DB",
+                    "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db",
+                )
+                click = resolve_confirmation_click(JobStore(db_path), payload)
+                response = click.message
             else:
                 response = "That action is not supported."
         except Exception:

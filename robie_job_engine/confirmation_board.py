@@ -1,5 +1,10 @@
 """The Confirmations tab on the Operations Control Center board.
 
+DEPRECATED as the human decision path (2026-09-22): Chat-native
+Approve/Reject buttons (``confirmation_cards``) are the primary path.
+The sheet stays as a fallback/audit mirror for one release -- ingestion
+below still works exactly as before -- then the human path is removed.
+
 This is the human-facing side of the HITL plan-confirmation gate: pending
 plan drafts appear as plain-English rows, and the human approves or rejects
 by pasting a signed decision token (minted and delivered by
@@ -213,6 +218,10 @@ def apply_decisions_from_sheet(
 ) -> list[dict[str, Any]]:
     """Ingest signed decisions pasted on the tab.
 
+    DEPRECATED as the human decision path (2026-09-22): Chat-native
+    Approve/Reject buttons are the primary path. Kept working as the
+    fallback/audit mirror for one release; do not extend.
+
     A decision counts only as a verified token
     (``confirmations.verify_decision_token``) whose confirmation id matches
     the row. The decider's identity comes from the token; the "Decided by"
@@ -294,17 +303,23 @@ def sync_confirmations(
     chat_thread_poster: Any = None,
     zap_trigger: Any = None,
     decision_key: Any = None,
+    approval_card_poster: Any = None,
+    quiet_hours: float | None = None,
 ) -> dict[str, Any]:
     """Full sync of the Confirmations tab. Ingest first, then rewrite.
 
     1. Expire stale PENDING confirmations (72h).
-    2. Ingest APPROVE/REJECT decisions typed on the tab.
+    2. Ingest APPROVE/REJECT decisions typed on the tab. DEPRECATED as the
+       human decision path (2026-09-22): Chat-native buttons are primary;
+       the sheet stays as fallback/audit mirror for one release.
     3. Rewrite the tab (headers + one row per record, pending first),
        carrying over any decision text still sitting on a still-PENDING row.
     4. Read the tab back and verify the write landed.
-    5. When ``notify`` is true, fan out Chat + email for PENDING records
-       Carlo has not been told about yet (idempotent; failures are
-       returned, never raised).
+    5. When ``notify`` is true, route approval asks on their origin medium
+       (``notify_approval_on_origin``: origin wins, no blast) plus the one
+       quiet-window Chat nudge for stale EZLynx-origin asks
+       (``maybe_quiet_nudge``). Idempotent; failures are returned, never
+       raised.
     """
     store = JobStore(db_path)
     expired = confirmations.expire_old(store)
@@ -385,7 +400,8 @@ def sync_confirmations(
             store, records, spreadsheet_id,
             notify=notify, chat_poster=chat_poster, gmail_sender=gmail_sender,
             chat_thread_poster=chat_thread_poster, zap_trigger=zap_trigger,
-            decision_key=decision_key,
+            decision_key=decision_key, approval_card_poster=approval_card_poster,
+            quiet_hours=quiet_hours,
         ),
     }
 
@@ -401,8 +417,18 @@ def _notify_pending(
     chat_thread_poster: Any = None,
     zap_trigger: Any = None,
     decision_key: Any = None,
+    approval_card_poster: Any = None,
+    quiet_hours: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Fan out Chat + email for PENDING records not yet notified."""
+    """Route approval asks on their origin medium for PENDING records.
+
+    Origin wins (Carlo 2026-09-22): ``notify_approval_on_origin`` puts the
+    ask on the medium where it started instead of blasting Chat + email
+    every time. ``maybe_quiet_nudge`` then posts the one Chat nudge for
+    EZLynx-origin asks whose quiet window has elapsed. ``chat_thread_poster``
+    is kept for signature stability (legacy requester pings); the origin
+    router uses ``approval_card_poster`` for Chat-origin cards instead.
+    """
     if not notify:
         return []
     from . import confirmation_notify
@@ -415,15 +441,24 @@ def _notify_pending(
         if not confirmation_id:
             continue
         results.append(
-            confirmation_notify.notify_requested(
+            confirmation_notify.notify_approval_on_origin(
                 store,
                 confirmation_id,
-                chat_poster=chat_poster,
+                approval_card_poster=approval_card_poster,
                 gmail_sender=gmail_sender,
-                chat_thread_poster=chat_thread_poster,
                 zap_trigger=zap_trigger,
+                chat_poster=chat_poster,
                 given_sheet_id=spreadsheet_id,
                 decision_key=decision_key,
             )
         )
+        nudge = confirmation_notify.maybe_quiet_nudge(
+            store,
+            confirmation_id,
+            chat_poster=chat_poster,
+            quiet_hours=quiet_hours,
+            given_sheet_id=spreadsheet_id,
+        )
+        if nudge.get("notified") or nudge.get("errors"):
+            results.append(nudge)
     return results

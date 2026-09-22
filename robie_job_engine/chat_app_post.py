@@ -308,6 +308,34 @@ def post_as_chat_app(
     return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
 
 
+def post_card_as_chat_app(
+    space_name: str,
+    cards_v2: list[dict[str, Any]],
+    *,
+    thread_name: str | None = None,
+    chat: Any | None = None,
+) -> dict[str, Any]:
+    """POST spaces.messages.create with cardsV2 as the Chat APP.
+
+    Same fail-closed identity as ``post_as_chat_app``: the dedicated Chat
+    app service account only (``ROBIE_CHAT_SA_KEY_FILE`` /
+    ``ROBIE_CHAT_APP_CLIENT_EMAIL``), no user-token or ADC fallback.
+    Used for interactive approval cards (Approve/Reject buttons).
+    """
+    if not space_name.startswith("spaces/"):
+        raise ValueError("Chat APP posts stay in an existing space")
+    if not isinstance(cards_v2, list) or not cards_v2:
+        raise ValueError("cardsV2 must be a non-empty list")
+    client = chat if chat is not None else _chat_app_client()
+    body: dict[str, Any] = {"cardsV2": list(cards_v2)}
+    kwargs: dict[str, Any] = {"parent": space_name, "body": body}
+    if thread_name:
+        body["thread"] = {"name": thread_name}
+        kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    result = client.spaces().messages().create(**kwargs).execute()
+    return {"name": result.get("name"), "thread": (result.get("thread") or {}).get("name")}
+
+
 def maybe_post_audit_as_chat_app(job: dict[str, Any], message: str) -> dict[str, Any] | None:
     target = conversation_target(job)
     if target is None:
