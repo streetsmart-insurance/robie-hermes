@@ -2,9 +2,9 @@
 
 This is the human-facing side of the HITL plan-confirmation gate: pending
 plan drafts appear as plain-English rows, and the human approves or rejects
-by pasting a signed decision token (minted by an authenticated surface such
-as the Chat HITL ping via ``confirmations.mint_decision_token``) into the
-"Your decision" column. The next sync verifies the token and ingests the
+by pasting a signed decision token (minted and delivered by
+``confirmation_notify`` in the approver's Chat DM / email when a signing
+key is configured) into the "Your decision" column. The next sync verifies the token and ingests the
 decision into the ``plan_confirmations`` ledger via
 ``confirmations.approve`` / ``confirmations.reject`` (which fail closed on
 anything that is not PENDING) and writes the decided status back.
@@ -39,6 +39,7 @@ Column layout (row 1 = headers, data from row 2):
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -46,6 +47,8 @@ from zoneinfo import ZoneInfo
 from . import confirmations
 from .store import JobStore
 
+
+logger = logging.getLogger(__name__)
 
 TAB_TITLE = "Confirmations"
 DATA_START_ROW = 2
@@ -211,7 +214,16 @@ def apply_decisions_from_sheet(
     api = _values_api(values_api)
     rows = read_tab_rows(api, spreadsheet_id)
     store = JobStore(db_path)
-    key = confirmations.decision_signing_key(decision_key)
+    try:
+        key = confirmations.decision_signing_key(decision_key)
+    except ValueError as exc:
+        # A misconfigured key must never crash the whole sheets_sync run:
+        # degrade the Confirmations tab to display-only and say so.
+        logger.warning(
+            "decision signing key unusable (%s); Confirmations tab is display-only",
+            exc,
+        )
+        key = None
     applied: list[dict[str, Any]] = []
 
     def _skip(cid: str, why: str) -> None:
@@ -360,6 +372,7 @@ def sync_confirmations(
             store, records, spreadsheet_id,
             notify=notify, chat_poster=chat_poster, gmail_sender=gmail_sender,
             chat_thread_poster=chat_thread_poster, zap_trigger=zap_trigger,
+            decision_key=decision_key,
         ),
     }
 
@@ -374,6 +387,7 @@ def _notify_pending(
     gmail_sender: Any,
     chat_thread_poster: Any = None,
     zap_trigger: Any = None,
+    decision_key: Any = None,
 ) -> list[dict[str, Any]]:
     """Fan out Chat + email for PENDING records not yet notified."""
     if not notify:
@@ -396,6 +410,7 @@ def _notify_pending(
                 chat_thread_poster=chat_thread_poster,
                 zap_trigger=zap_trigger,
                 given_sheet_id=spreadsheet_id,
+                decision_key=decision_key,
             )
         )
     return results
