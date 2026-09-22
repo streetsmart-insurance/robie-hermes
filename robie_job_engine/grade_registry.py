@@ -33,6 +33,9 @@ refuses to grade them rather than grading clean.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +66,48 @@ _REQUIRED_FIELD_MODES = (
     "document_and_plan",
     "call_record",
 )
+
+
+# ---------------------------------------------------------------------------
+# Grade-spec pinning: bind a locked plan to the spec in force at lock time.
+#
+# The registry can be repointed after lock (ROBIE_GRADES_YAML env override)
+# or mutated in-process (register_job_type). Either would silently change
+# what PASS means for an already-locked plan. The defense: plan_lock pins
+# the SHA-256 of the job type's *validated* grade spec into the locked
+# plan's plan_json at lock time, and grade() refuses to grade when the
+# currently-resolved spec no longer matches the pin (fail closed).
+# ---------------------------------------------------------------------------
+
+#: Reserved top-level key inside a locked plan's ``plan_json`` carrying the
+#: spec pin. A sibling of ``fields``/``job_type`` -- never inside ``fields``
+#: -- so it cannot collide with plan data and needs no schema migration.
+GRADE_SPEC_HASH_KEY = "grade_spec_hash"
+
+#: Reserved top-level key carrying the *effective* extraction model at lock
+#: time (``ROBIE_GEMINI_MODEL`` env override if set, else the registry pin,
+#: else the light default). The grader never calls a model, so this is
+#: audit evidence rather than a grading input -- but pinning it closes the
+#: adjacent env-override surface: the exact model that produced the draft
+#: is on the immutable record.
+GRADE_EXTRACTION_MODEL_KEY = "grade_extraction_model"
+
+#: Reason fragment emitted when grading is refused because the spec moved
+#: after the plan was locked. Tests and operators can match on this string.
+SPEC_CHANGED_REASON = "grade spec changed since plan lock"
+
+
+def grade_spec_hash(spec: Mapping[str, Any]) -> str:
+    """SHA-256 over the canonical JSON serialization of a grade spec.
+
+    Canonical form is ``json.dumps(spec, sort_keys=True,
+    separators=(",", ":"))`` -- the same spec built with a different key
+    order hashes identically.
+    """
+    canonical = json.dumps(
+        dict(spec), sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +255,34 @@ class _Registry:
             return None
         return str(spec.get("required_fields") or "plan")
 
+    def validated_spec_hash(self, job_type: str) -> str | None:
+        """Hash of the job type's currently-resolved, *validated* grade spec.
+
+        Returns None when the job type is unknown to the registry. Callers
+        pinning a plan at lock time treat None as "no spec to bind to" and
+        fail closed.
+        """
+        name = self._validate_name(job_type)
+        spec = self._specs.get(name)
+        if spec is None:
+            return None
+        return grade_spec_hash(_validate_spec(name, spec))
     def grade(
-        self, job_type: str, evidence: list[Mapping[str, Any]] | None
+        self,
+        job_type: str,
+        evidence: list[Mapping[str, Any]] | None,
+        expected_spec_hash: str | None = None,
     ) -> GradeResult:
+        """Grade evidence against the job type's passing rule.
+
+        ``expected_spec_hash`` is the spec pin taken at plan-lock time (see
+        ``plan_lock.locked_plan_grade_spec_hash``). When provided, the
+        currently-resolved spec is re-hashed and compared: on mismatch the
+        grade is REFUSED -- NEEDS_REVIEW with a "spec changed" reason --
+        because the spec in force now is not the spec the plan was locked
+        against. ``None`` (the default) preserves the legacy behavior for
+        existing callers and tests.
+        """
         name = self._validate_name(job_type)
         spec = self._specs.get(name)
         items = [dict(e) for e in (evidence or [])]
@@ -229,6 +299,20 @@ class _Registry:
                 ],
                 evidence_summary=summary,
             )
+        if expected_spec_hash is not None:
+            current = grade_spec_hash(_validate_spec(name, spec))
+            if not hmac.compare_digest(current, str(expected_spec_hash)):
+                return GradeResult(
+                    job_type=name,
+                    label=str(spec["label"]),
+                    grade="NEEDS_REVIEW",
+                    passed=False,
+                    reasons=[
+                        f"{SPEC_CHANGED_REASON}; refusing to grade "
+                        "(fail closed)"
+                    ],
+                    evidence_summary=summary,
+                )
         rule = _PASSING_RULES[spec["passing_rule"]]
         passed, reasons = rule(items)
         return GradeResult(
@@ -294,9 +378,18 @@ registry = _Registry()
 
 # Convenience passthroughs.
 def grade(
-    job_type: str, evidence: list[Mapping[str, Any]] | None
+    job_type: str,
+    evidence: list[Mapping[str, Any]] | None,
+    expected_spec_hash: str | None = None,
 ) -> GradeResult:
-    return registry.grade(job_type, evidence)
+    return registry.grade(
+        job_type, evidence, expected_spec_hash=expected_spec_hash
+    )
+
+
+def validated_spec_hash(job_type: str) -> str | None:
+    """Hash of the job type's currently-resolved, validated grade spec."""
+    return registry.validated_spec_hash(job_type)
 
 
 def job_types() -> list[str]:
@@ -327,6 +420,15 @@ def default_extraction_model(job_type: str) -> str:
     ``llm_json_fn`` for ``extract_plan_draft`` should use this -- extraction
     is a structured task and stays on a small cheap model, never a
     high-reasoning one.
+
+    Security note (adjacent env-override surface): the spec pin
+    (``GRADE_SPEC_HASH_KEY``) covers ``extraction_model`` only as stored in
+    the YAML -- it does NOT cover this env override. That is handled by
+    pinning the *effective* model (this function's return value) into the
+    locked plan's ``plan_json`` under ``GRADE_EXTRACTION_MODEL_KEY`` at lock
+    time. The override cannot change what PASS means -- the grader is
+    deterministic code and never calls a model -- but the exact model that
+    produced the draft is on the immutable record for audit.
     """
     override = os.environ.get("ROBIE_GEMINI_MODEL", "").strip()
     if override:
