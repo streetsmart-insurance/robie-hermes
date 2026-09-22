@@ -2189,12 +2189,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         common = payload.get("common") or {}
         action_obj = payload.get("action") or {}
-        action = str(
+        raw_action = str(
             common.get("invokedFunction")
             or action_obj.get("actionMethodName")
             or payload.get("actionMethodName")
             or ""
         ).strip()
+        # Confirmation cards posted before the short-name fix stored a
+        # bridge URL in action.function. Chat echoes that URL as
+        # invokedFunction; fold it back to the bare action so the click
+        # is not rejected as unsupported.
+        from robie_job_engine.confirmation_cards import canonical_card_action
+        action = canonical_card_action(raw_action)
         parameters = _card_parameters(payload)
         response = "That action is no longer available."
 

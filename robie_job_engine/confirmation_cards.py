@@ -21,9 +21,15 @@ can approve or reject with one tap and no sheet paste:
 - ``confirmation_click_response`` -- the UPDATE_MESSAGE payload that
   replaces the card in Chat so it cannot be clicked again.
 
-The click reaches this code through the Chat HTTP bridge
-(``services/chat-http-bridge`` -> PubSub -> the Google Chat adapter's
-``_handle_card_event``, action ``robie_confirmation_decision``).
+The click reaches this code as a Chat-app ``CARD_CLICKED`` event. Google
+delivers it to the Chat app's configured HTTP endpoint (the Test
+chat-http-bridge, which forwards to PubSub, or the gateway HTTP-events
+handler). The button's ``action.function`` is the short name
+``robie_confirmation_decision`` -- a Cloud Run URL is not a Chat-app
+function, and Chat answers "That action is not supported." The adapter's
+``_handle_card_event`` still accepts a previously posted bridge URL, via
+``canonical_card_action``, so an already-sent card can be clicked after
+the fix is deployed.
 
 Fail-closed everywhere: no signing key, malformed/forged/expired token,
 clicking user != token principal, or unknown confirmation all refuse and
@@ -33,31 +39,43 @@ an invalid click).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 from . import confirmations
 
 
-#: Google Chat card-click action name. The HTTP bridge exposes it at
-#: ``{GOOGLE_CHAT_CARD_ACTION_BASE_URL}/actions/robie_confirmation_decision``.
+#: Short action name Google Chat apps put in ``action.function`` and echo
+#: back as ``common.invokedFunction`` on ``CARD_CLICKED``.
 CARD_ACTION = "robie_confirmation_decision"
-
-_DEFAULT_ACTION_BASE_URL = (
-    "https://robie-chat-http-bridge-751771086524.us-east1.run.app"
-)
-
-
-def _action_base_url() -> str:
-    return (
-        os.environ.get("GOOGLE_CHAT_CARD_ACTION_BASE_URL", "").strip().rstrip("/")
-        or _DEFAULT_ACTION_BASE_URL
-    )
 
 
 def _click_function() -> str:
-    return f"{_action_base_url()}/actions/{CARD_ACTION}"
+    """Function name a Chat-app cardsV2 button must use.
+
+    Chat apps do not call ``action.function`` as an HTTP URL. They deliver
+    ``CARD_CLICKED`` to the app's configured endpoint with this string as
+    ``common.invokedFunction``. A full URL is rejected by Chat (or arrives
+    unmatched) as "That action is not supported."
+    """
+    return CARD_ACTION
+
+
+def canonical_card_action(raw: str) -> str:
+    """Return the bare action name for a confirmation click, or ``raw``.
+
+    Accepts the short name Chat sends for a current card, and the bridge
+    URL (``.../actions/robie_confirmation_decision``) that cards posted
+    before this fix stored in ``action.function``. Any other string is
+    returned unchanged so unrelated card actions keep their own names.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    bare = text.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if bare == CARD_ACTION or bare.endswith("/actions/" + CARD_ACTION):
+        return CARD_ACTION
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +224,14 @@ def _click_action(payload: Mapping[str, Any]) -> str:
     action = payload.get("action") or {}
     if not isinstance(action, dict):
         action = {}
-    return str(
-        common.get("invokedFunction")
-        or action.get("actionMethodName")
-        or payload.get("actionMethodName")
-        or ""
-    ).strip()
+    return canonical_card_action(
+        str(
+            common.get("invokedFunction")
+            or action.get("actionMethodName")
+            or payload.get("actionMethodName")
+            or ""
+        )
+    )
 
 
 def _click_actor(payload: Mapping[str, Any]) -> str:

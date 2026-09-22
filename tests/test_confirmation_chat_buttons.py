@@ -78,9 +78,11 @@ def test_card_buttons_carry_signed_tokens(db):
     seen = set()
     for button, decision in zip(buttons, ("APPROVE", "REJECT")):
         params = button["onClick"]["action"]["parameters"]
-        assert button["onClick"]["action"]["function"].endswith(
-            "/actions/robie_confirmation_decision"
-        )
+        # Chat apps require the short function name. A full URL is what
+        # made Approve/Reject answer "That action is not supported."
+        assert button["onClick"]["action"]["function"] == cards.CARD_ACTION
+        assert "://" not in button["onClick"]["action"]["function"]
+        assert "/" not in button["onClick"]["action"]["function"]
         token = next(p["value"] for p in params if p["key"] == "decision_token")
         verified = confirmations.verify_decision_token(token, key=TEST_KEY)
         assert verified["confirmation_id"] == cid
@@ -261,6 +263,107 @@ def test_raw_chat_api_parameter_shape_parses(db):
     result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
     assert result.status == "APPROVED"
     assert confirmations.get(cid, store=store)["status"] == "APPROVED"
+
+
+_LIVE_BRIDGE_URL = (
+    "https://robie-chat-http-bridge-751771086524.us-east1.run.app"
+    "/actions/robie_confirmation_decision"
+)
+
+
+def test_canonical_action_accepts_short_name_and_bridge_url():
+    assert cards.canonical_card_action(cards.CARD_ACTION) == cards.CARD_ACTION
+    assert cards.canonical_card_action(_LIVE_BRIDGE_URL) == cards.CARD_ACTION
+    assert cards.canonical_card_action(_LIVE_BRIDGE_URL + "?x=1") == cards.CARD_ACTION
+    assert cards.canonical_card_action("/actions/robie_confirmation_decision") == cards.CARD_ACTION
+    # Unrelated actions, including a lookalike suffix, stay untouched.
+    assert cards.canonical_card_action("robie_decision") == "robie_decision"
+    assert cards.canonical_card_action(
+        "https://example.test/actions/robie_decision"
+    ) == "https://example.test/actions/robie_decision"
+    assert cards.canonical_card_action("not_robie_confirmation_decision") == (
+        "not_robie_confirmation_decision"
+    )
+
+
+def test_google_card_clicked_short_function_approves(db):
+    """Shape Google sends when action.function is the short Chat-app name."""
+    store = JobStore(db)
+    cid = _request(store)
+    token = _tokens(cid)["APPROVE"]
+    payload = {
+        "type": "CARD_CLICKED",
+        "space": {"name": "spaces/AAQAZbLJO78"},
+        "message": {"name": "spaces/AAQAZbLJO78/messages/1"},
+        "user": {"email": _principal(), "type": "HUMAN"},
+        "action": {
+            "actionMethodName": cards.CARD_ACTION,
+            "parameters": [{"key": "decision_token", "value": token}],
+        },
+        "common": {
+            "hostApp": "CHAT",
+            "invokedFunction": cards.CARD_ACTION,
+            "parameters": {"decision_token": token},
+        },
+    }
+    result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
+    assert result.status == "APPROVED"
+    assert confirmations.get(cid, store=store)["status"] == "APPROVED"
+
+
+def test_google_card_clicked_bridge_url_function_approves(db):
+    """The live card stored a full URL in action.function. Chat echoes it."""
+    store = JobStore(db)
+    cid = _request(store)
+    token = _tokens(cid)["REJECT"]
+    payload = {
+        "type": "CARD_CLICKED",
+        "user": {"email": _principal(), "type": "HUMAN"},
+        "action": {
+            "actionMethodName": _LIVE_BRIDGE_URL,
+            "parameters": [{"key": "decision_token", "value": token}],
+        },
+        "common": {
+            "invokedFunction": _LIVE_BRIDGE_URL,
+            "parameters": {"decision_token": token},
+        },
+    }
+    result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
+    assert result.status == "REJECTED"
+    assert confirmations.get(cid, store=store)["status"] == "REJECTED"
+
+
+def test_unrelated_url_function_is_not_a_confirmation_click(db):
+    store = JobStore(db)
+    cid = _request(store)
+    payload = _click(
+        _tokens(cid)["APPROVE"],
+        action="https://example.test/actions/robie_decision",
+    )
+    result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
+    assert result.status == "INVALID"
+    assert confirmations.get(cid, store=store)["status"] == "PENDING"
+
+
+def test_adapter_folds_bridge_url_before_unsupported_branch():
+    """Live failure: the adapter compared the raw URL and returned
+    "That action is not supported." before the parser could accept it.
+    The hermes ``gateway`` package is not in this tree, so lock the
+    dispatch order from the adapter source.
+    """
+    adapter_path = Path(__file__).resolve().parent.parent / "integrations/google_chat/adapter.py"
+    handle = adapter_path.read_text(encoding="utf-8").split(
+        "async def _handle_card_event", 1
+    )[1].split("async def dispatch_http_event", 1)[0]
+    canon_at = handle.index("canonical_card_action")
+    branch_at = handle.index('action == "robie_confirmation_decision"')
+    unsupported_at = handle.index("That action is not supported.")
+    assert canon_at < branch_at < unsupported_at
+    update = adapter_path.read_text(encoding="utf-8").split(
+        "async def dispatch_http_event", 1
+    )[1].split("async def ", 1)[0]
+    assert '"type": "UPDATE_MESSAGE"' in update
+    assert '"cardsV2": []' in update
 
 
 def test_click_response_replaces_card():
