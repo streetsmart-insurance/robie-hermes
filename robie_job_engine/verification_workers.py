@@ -613,7 +613,8 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                     day=day.isoformat(), mode=mode,
                     ingested_rows=0, work_items=0)
 
-    # 4359 stays gated until its schema is verified (Carlo's rule).
+    # The schema gate applies uniformly to every report; allow_unverified
+    # stays caller-controlled (fail-closed default False).
     ing.check_report_gate(report_id, allow_unverified=allow_unverified)
 
     # 1. INGEST
@@ -628,7 +629,6 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             row_count=len(rows), skipped_rows=skipped, rows=rows,
         )
     elif gmail_service is not None:
-        allow_unverified = report_id == "4359"
         got = ing.ingest_daily_reports(gmail_service, day=day,
                                        report_ids=[report_id],
                                        allow_unverified=allow_unverified)
