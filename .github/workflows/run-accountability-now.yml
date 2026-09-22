@@ -169,6 +169,7 @@ jobs:
             recipient_args+=(--recipient jake@streetsmart.insurance)
             recipient_args+=(--recipient ashley@streetsmart.insurance)
             recipient_args+=(--recipient gabrielac@streetsmart.insurance)
+            recipient_args+=(--recipient sandy@streetsmart.insurance)
           fi
           python scripts/verify_dedicated_accountability_delivery.py \
             --mode preflight \
