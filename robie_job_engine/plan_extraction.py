@@ -237,6 +237,11 @@ def _validate_extracted(
         raw_changes = []
 
     lowered_text = text.casefold()
+    # Whitespace-normalized copies: the anti-hallucination check below must
+    # compare words, not line breaks. A model quoting "effective 10/01/2026"
+    # for a request containing "effective\n10/01/2026" is quoting the actual
+    # request -- rejecting it would punish the model for formatting.
+    normalized_text = re.sub(r"\s+", " ", lowered_text).strip()
     for entry in raw_changes:
         if not isinstance(entry, Mapping):
             reasons.append(f"ignoring malformed change entry: {entry!r}")
@@ -257,8 +262,10 @@ def _validate_extracted(
         if not quote:
             reasons.append(f"field {canonical!r} has no supporting quote")
             continue
-        if quote.casefold() not in lowered_text:
-            # Anti-hallucination: the model must quote the actual request.
+        quote_norm = re.sub(r"\s+", " ", quote.casefold()).strip()
+        if not quote_norm or quote_norm not in normalized_text:
+            # Anti-hallucination: the model must quote the actual request
+            # (same words in the same order; whitespace may differ).
             reasons.append(
                 f"field {canonical!r} quotes text not found in the request"
             )

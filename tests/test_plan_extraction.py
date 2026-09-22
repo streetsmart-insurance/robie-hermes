@@ -249,3 +249,55 @@ def test_draft_summary_is_human_readable():
     assert "TEST-HO-20260911-E01" in text
     assert "writtenPremium -> 1250.0" in text
     assert "ready to lock" in text
+
+
+def test_quote_check_tolerates_whitespace_differences():
+    # The request has "effective\n10/01/2026" (line break); a model quoting
+    # "effective 10/01/2026" (space) is quoting the actual request.
+    request = (
+        "Please increase the written premium to 2450.00 on our policy effective\n"
+        "10/01/2026 to reflect the added exposure. Applicant 220250093, "
+        "policy TEST-HO-20260911-E01."
+    )
+    payload = {
+        "applicant_id": "220250093",
+        "policy_number": "TEST-HO-20260911-E01",
+        "changes": [
+            {
+                "field": "effectiveDate",
+                "value": "2026-10-01",
+                "quote": "policy effective 10/01/2026",
+            },
+        ],
+        "uncertainties": [],
+    }
+    draft = extract_plan_draft(
+        request,
+        llm_json_fn=_fake_llm(payload),
+        policy_exists_fn=lambda number: True,
+    )
+    assert draft.changes.get("effectiveDate") == "2026-10-01"
+    assert not draft.needs_human_review
+
+
+def test_quote_check_still_rejects_invented_words():
+    request = "Please update the written premium to 100. Applicant 220250093."
+    payload = {
+        "applicant_id": "220250093",
+        "policy_number": "TEST-HO-20260911-E01",
+        "changes": [
+            {
+                "field": "writtenPremium",
+                "value": 100,
+                "quote": "update the written premium to 999 (totally different)",
+            },
+        ],
+        "uncertainties": [],
+    }
+    draft = extract_plan_draft(
+        request,
+        llm_json_fn=_fake_llm(payload),
+        policy_exists_fn=lambda number: True,
+    )
+    assert draft.needs_human_review
+    assert any("not found in the request" in r for r in draft.review_reasons)

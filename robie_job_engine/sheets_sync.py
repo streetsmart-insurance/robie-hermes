@@ -266,8 +266,10 @@ def _runtime_job_fields(item: dict[str, Any]) -> dict[str, Any]:
     checks = int(item.get("verification_count") or 0)
     verified = int(item.get("verified_evidence_count") or 0)
     authoritative = int(item.get("authoritative_evidence_count") or 0)
+    grade_label = item.get("grade_label")
     verification_status = (
-        "Verified" if status == "COMPLETE" and verified > 0 and authoritative > 0
+        grade_label if grade_label
+        else "Verified" if status == "COMPLETE" and verified > 0 and authoritative > 0
         else "Needs review" if status in {"UNVERIFIED", "FAILED"}
         else "Pending"
     )
