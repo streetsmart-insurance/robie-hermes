@@ -114,8 +114,77 @@ def test_unknown_confirmation_raises(db):
         notify.notify_requested(store, "nope", chat_poster=FakeChat(), gmail_sender=FakeGmail())
 
 
-def test_assign_requester_task_is_an_explicit_stub(db):
+class FakeZap:
+    def __init__(self):
+        self.payloads: list[dict] = []
+
+    def __call__(self, payload):
+        self.payloads.append(dict(payload))
+        return {"zap_output": "ok"}
+
+
+def test_assign_requester_task_fires_zap_with_login_username(db):
     store = JobStore(db)
-    cid = _request(store)
-    with pytest.raises(NotImplementedError):
-        notify.assign_requester_task(store, cid)
+    cid = _request(store, requested_by="Carlo Ferrara")
+    zap = FakeZap()
+    result = notify.assign_requester_task(
+        store, cid, applicant_id="220250093", zap_trigger=zap
+    )
+    assert result["assignee"] == "Carlo1"
+    assert len(zap.payloads) == 1
+    payload = zap.payloads[0]
+    assert payload["applicant_id"] == "220250093"
+    assert payload["assignee"] == "Carlo1"
+    assert payload["due_date"]  # Carlo's rule: always a due date
+    assert "Confirmations tab" in payload["task_description"]
+
+
+def test_assign_requester_task_is_idempotent(db):
+    store = JobStore(db)
+    cid = _request(store, requested_by="Karla Brown")
+    zap = FakeZap()
+    notify.assign_requester_task(store, cid, applicant_id="220250093", zap_trigger=zap)
+    result = notify.assign_requester_task(
+        store, cid, applicant_id="220250093", zap_trigger=zap
+    )
+    assert result["skipped"] == "already assigned"
+    assert len(zap.payloads) == 1
+
+
+def test_assign_requester_task_fails_closed_on_unknown_requester(db):
+    store = JobStore(db)
+    cid = _request(store, requested_by="Some Stranger")
+    with pytest.raises(ValueError, match="no known EZLynx login username"):
+        notify.assign_requester_task(
+            store, cid, applicant_id="220250093", zap_trigger=FakeZap()
+        )
+
+
+def test_assign_requester_task_env_override_adds_a_login(db, monkeypatch):
+    store = JobStore(db)
+    cid = _request(store, requested_by="Jake Ferrara")
+    monkeypatch.setenv("ROBIE_EZLYNX_LOGIN_JAKE_FERRARA", "JakeSS")
+    zap = FakeZap()
+    result = notify.assign_requester_task(
+        store, cid, applicant_id="220250093", zap_trigger=zap
+    )
+    assert result["assignee"] == "JakeSS"
+
+
+def test_assign_requester_task_requires_applicant_id(db):
+    store = JobStore(db)
+    cid = _request(store, requested_by="Carlo Ferrara")
+    with pytest.raises(ValueError, match="applicant_id is required"):
+        notify.assign_requester_task(store, cid, applicant_id="", zap_trigger=FakeZap())
+
+
+def test_assign_requester_task_skips_decided(db):
+    store = JobStore(db)
+    cid = _request(store, requested_by="Carlo Ferrara")
+    confirmations.approve(cid, "Carlo Ferrara", store=store)
+    zap = FakeZap()
+    result = notify.assign_requester_task(
+        store, cid, applicant_id="220250093", zap_trigger=zap
+    )
+    assert result["skipped"] == "not PENDING"
+    assert zap.payloads == []

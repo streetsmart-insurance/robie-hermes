@@ -7,12 +7,12 @@ and by email. Every sent notification is recorded in the ledger, so a
 re-sync never double-notifies; a channel that fails is recorded as an
 error and retried on the next sync.
 
-Future: ``assign_requester_task`` will create an EZLynx follow-up task
-for the user who requested the work. It is an explicit stub today: it
-needs the requester's EZLynx user identity on the confirmation record and
-a real task-create API. The legacy ``create_task`` fallback in
-``ezlynx_note_poster`` fabricates a success dict when no API exists --
-never build on it.
+``assign_requester_task`` creates an EZLynx follow-up task for the
+requesting user through the Zapier catch-hook (the agency's real task path;
+the legacy ``create_task`` fallback in ``ezlynx_note_poster`` fabricates
+success and is never used). The requester is mapped to an EZLynx login
+username through ``REQUESTER_LOGINS`` (env-extensible); unknown requesters
+fail closed. The caller's ``applicant_id`` must already be proven in EZLynx.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from __future__ import annotations
 import base64
 import json
 import os
-from datetime import datetime, timezone
+import subprocess
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Any, Mapping
 
@@ -238,17 +239,119 @@ def notify_requested(
     return {"confirmation_id": confirmation_id, "notified": notified, "errors": errors}
 
 
-def assign_requester_task(store: Any, confirmation_id: str, **kwargs: Any) -> dict[str, Any]:
-    """FUTURE: create an EZLynx follow-up task for the requesting user.
+# ---------------------------------------------------------------------------
+# EZLynx requester task: "assign a task back in EZLynx to the user who
+# requested". The Zap's Task Assignee field is free text and EZLynx rejects
+# anything it cannot resolve as a login username -- display names like
+# "Carlo Ferrara" fail. Unknown requesters fail closed; add them via
+# ROBIE_EZLYNX_LOGIN_<NAME> (e.g. ROBIE_EZLYNX_LOGIN_JAKE=JakeSS).
+# ---------------------------------------------------------------------------
 
-    Not implemented. Needs, before it can be built:
-      1. the requester's EZLynx user identity on the confirmation record
-         (``requested_by`` today is a free-text name, not a user id);
-      2. a real EZLynx task-create API. The legacy ``create_task`` in
-         ``ezlynx_note_poster`` returns a fabricated success dict when no
-         API exists -- building on it would silently pretend tasks exist.
-    """
-    raise NotImplementedError(
-        "assign_requester_task is not implemented: needs the requester's EZLynx "
-        "user identity and a real task-create API (see docstring)"
+#: Requester name (normalized) -> EZLynx login username. Seeded from
+#: usernames Carlo supplied directly. Extend with ROBIE_EZLYNX_LOGIN_*.
+REQUESTER_LOGINS: dict[str, str] = {
+    "carlo": "Carlo1",
+    "carlo ferrara": "Carlo1",
+    "karla": "KarlaSS",
+    "karla brown": "KarlaSS",
+    "matthew": "Mancina1",
+    "matthew mancina": "Mancina1",
+    "mancina": "Mancina1",
+    "markley": "Accounting Team",
+}
+
+ZAP_TRIGGER = os.path.expanduser("~/workspace/skills/zapier/bin/zap-trigger")
+
+
+def _normalize_requester(requested_by: str) -> str:
+    return " ".join(str(requested_by or "").strip().casefold().split())
+
+
+def requester_login(requested_by: str) -> str | None:
+    """EZLynx login username for a requester, or None when unknown."""
+    key = _normalize_requester(requested_by)
+    env_key = "ROBIE_EZLYNX_LOGIN_" + "_".join(key.split()).upper()
+    override = _env(env_key)
+    if override:
+        return override
+    return REQUESTER_LOGINS.get(key)
+
+
+def _default_due_date() -> str:
+    return (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d")
+
+
+def _fire_zap_task(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Fire the EZLynx follow-up-task Zap. Fail-closed on any error."""
+    completed = subprocess.run(
+        [ZAP_TRIGGER, "--payload", json.dumps(dict(payload)), "--applicant-verified"],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
+    out = (completed.stdout or "") + (completed.stderr or "")
+    if completed.returncode != 0:
+        raise RuntimeError(f"zap-trigger exited {completed.returncode}: {out.strip()[:500]}")
+    return {"zap_output": out.strip()[:500]}
+
+
+def assign_requester_task(
+    store: Any,
+    confirmation_id: str,
+    *,
+    applicant_id: str,
+    due_date: str | None = None,
+    zap_trigger: Any = None,
+    source: str = "confirmation-board",
+) -> dict[str, Any]:
+    """Create an EZLynx follow-up task for the user who requested the work.
+
+    The task tells the requester their ROBIE job is waiting on a human
+    decision and points at the Confirmations tab. Fires through the
+    agency's Zapier catch-hook (the real task path).
+
+    Fail-closed: unknown confirmation, non-PENDING confirmation, requester
+    with no known EZLynx login username, or missing applicant_id all raise
+    ``ValueError`` -- nothing fires. ``applicant_id`` must already be
+    proven in EZLynx by the caller (the Zap refuses unverified ids).
+    Idempotent per confirmation: a second call returns the recorded
+    receipt instead of firing again.
+    """
+    record = confirmations.get(confirmation_id, store=store)
+    if record is None:
+        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+    if str(record.get("status")) != "PENDING":
+        return {"confirmation_id": confirmation_id, "skipped": "not PENDING"}
+    if was_notified(store, confirmation_id, "ezlynx_task"):
+        return {"confirmation_id": confirmation_id, "skipped": "already assigned"}
+
+    requested_by = str(record.get("requested_by") or "")
+    login = requester_login(requested_by)
+    if not login:
+        raise ValueError(
+            f"no known EZLynx login username for requester {requested_by!r}; "
+            "set ROBIE_EZLYNX_LOGIN_<NAME> to add one"
+        )
+    applicant_id = str(applicant_id or "").strip()
+    if not applicant_id:
+        raise ValueError("applicant_id is required and must already be proven in EZLynx")
+
+    summary = confirmations.confirmation_summary(record)
+    payload = {
+        "applicant_id": applicant_id,
+        "task_title": f"ROBIE approval needed: {summary[:80]}",
+        "task_description": (
+            f"Your ROBIE job is waiting on a human decision.\n\n{summary}\n\n"
+            f"Approve or reject it on the Confirmations tab:\n"
+            f"{confirmations_tab_url()}\n\n"
+            "Type APPROVE or REJECT in the \"Your decision\" column."
+        ),
+        "assignee": login,
+        "due_date": due_date or _default_due_date(),
+        "source": source,
+        "confirmation_id": confirmation_id,
+    }
+    fire = zap_trigger if zap_trigger is not None else _fire_zap_task
+    receipt = fire(payload)
+    _record(store, confirmation_id, "ezlynx_task", {"assignee": login, **receipt})
+    return {"confirmation_id": confirmation_id, "assignee": login, "receipt": receipt}
