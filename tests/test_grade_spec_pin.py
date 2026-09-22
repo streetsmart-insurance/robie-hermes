@@ -14,7 +14,7 @@ import os
 import pytest
 
 from robie_job_engine import grade_registry, plan_lock
-from robie_job_engine.evidence import LockedPlan
+from robie_job_engine.evidence import EvidenceSpan, LockedPlan, span_source_hash
 from robie_job_engine.store import JobStore
 
 
@@ -209,11 +209,22 @@ def test_confirm_and_lock_path_also_pins_spec_hash(tmp_path):
     from robie_job_engine.plan_extraction import PlanDraft
 
     store = _store(tmp_path)
+    quote = "written premium to 2450.00"
+    request = f"please increase the {quote} on the policy"
+    start = request.index(quote)
     draft = PlanDraft(
         applicant_id="220250093",
         policy_number="TEST-HO-1",
         changes={"writtenPremium": "2450.0"},
-        evidence_spans={"writtenPremium": "written premium to 2450.00"},
+        evidence_spans={
+            "writtenPremium": EvidenceSpan(
+                source_id="change_request_text",
+                source_hash=span_source_hash(request),
+                offset_start=start,
+                offset_end=start + len(quote),
+                quote=quote,
+            )
+        },
         uncertainties=[],
         needs_human_review=True,
         review_reasons=["test"],
