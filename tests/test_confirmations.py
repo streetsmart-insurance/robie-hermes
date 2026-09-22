@@ -9,6 +9,7 @@ import pytest
 
 from robie_job_engine import confirmations
 from robie_job_engine.confirmations import (
+    ConfirmationMismatch,
     approve,
     confirm_and_lock,
     confirmation_summary,
@@ -19,7 +20,11 @@ from robie_job_engine.confirmations import (
     request_confirmation,
     rows_for_sheet,
 )
-from robie_job_engine.plan_extraction import PlanDraft, PlanNeedsHumanReview
+from robie_job_engine.plan_extraction import (
+    PlanDraft,
+    PlanNeedsHumanReview,
+    draft_fingerprint,
+)
 from robie_job_engine.store import JobStore
 
 
@@ -45,6 +50,11 @@ def _request(store, loop_job_id="loop-1", **kwargs):
     )
     params.update(kwargs)
     return request_confirmation(store, **params)
+
+
+def _request_with_draft(store, draft, loop_job_id="loop-1", **kwargs):
+    """File a confirmation bound to the exact draft under review."""
+    return _request(store, loop_job_id=loop_job_id, draft=draft, **kwargs)
 
 
 def _review_draft():
@@ -187,24 +197,142 @@ def test_list_pending_oldest_first(store):
 # ---------------------------------------------------------------------------
 
 def test_confirm_and_lock_approves_and_locks_review_draft(store):
-    cid = _request(store)
-    locked = confirm_and_lock(store, cid, _review_draft(), "job-1", "Carlo Ferrara")
+    draft = _review_draft()
+    cid = _request_with_draft(store, draft)
+    locked = confirm_and_lock(store, cid, draft, "loop-1", "Carlo Ferrara")
     assert locked is not None
     record = get(cid, store=store)
     assert record["status"] == "APPROVED"
     assert record["decided_by"] == "Carlo Ferrara"
+    # The locked plan landed for the confirmed job, attributed to the human.
+    from robie_job_engine import plan_lock
+
+    plan = plan_lock.get_locked_plan(store, "loop-1")
+    assert plan is not None
+    assert plan.locked_by == "human:Carlo Ferrara"
 
 
 def test_confirm_and_lock_raises_on_already_decided(store):
-    cid = _request(store)
+    draft = _review_draft()
+    cid = _request_with_draft(store, draft)
     approve(cid, "Carlo Ferrara", store=store)
     with pytest.raises(ValueError):
-        confirm_and_lock(store, cid, _review_draft(), "job-1", "Carlo Ferrara")
+        confirm_and_lock(store, cid, draft, "loop-1", "Carlo Ferrara")
 
 
 def test_confirm_and_lock_unknown_id_raises(store):
     with pytest.raises(ValueError):
-        confirm_and_lock(store, "nope", _review_draft(), "job-1", "Carlo Ferrara")
+        confirm_and_lock(store, "nope", _review_draft(), "loop-1", "Carlo Ferrara")
+
+
+# ---------------------------------------------------------------------------
+# Critical 1 regressions: approval binds to the reviewed draft, atomically
+# ---------------------------------------------------------------------------
+
+def test_confirm_and_lock_refuses_a_different_draft(store):
+    """Approve draft A, attempt to lock draft B: refused, stays PENDING."""
+    reviewed = _review_draft()
+    cid = _request_with_draft(store, reviewed)
+    swapped = PlanDraft(
+        applicant_id=reviewed.applicant_id,
+        policy_number=reviewed.policy_number,
+        changes={"writtenPremium": "999999.0"},  # not what was reviewed
+        evidence_spans=reviewed.evidence_spans,
+        uncertainties=reviewed.uncertainties,
+        needs_human_review=reviewed.needs_human_review,
+        review_reasons=reviewed.review_reasons,
+        request_excerpt=reviewed.request_excerpt,
+        extracted_at=reviewed.extracted_at,
+    )
+    with pytest.raises(ConfirmationMismatch):
+        confirm_and_lock(store, cid, swapped, "loop-1", "Carlo Ferrara")
+    assert get(cid, store=store)["status"] == "PENDING"
+
+
+def test_confirm_and_lock_refuses_a_different_job(store):
+    """An approval filed for one loop job never locks a plan for another."""
+    draft = _review_draft()
+    cid = _request_with_draft(store, draft)
+    with pytest.raises(ConfirmationMismatch):
+        confirm_and_lock(store, cid, draft, "other-job", "Carlo Ferrara")
+    assert get(cid, store=store)["status"] == "PENDING"
+
+
+def test_confirm_and_lock_refuses_unfingerprinted_confirmation(store):
+    """A confirmation filed without the draft cannot gate a lock."""
+    cid = _request(store)  # legacy shape: no draft fingerprint
+    with pytest.raises(ConfirmationMismatch):
+        confirm_and_lock(store, cid, _review_draft(), "loop-1", "Carlo Ferrara")
+    assert get(cid, store=store)["status"] == "PENDING"
+
+
+def test_failed_lock_rolls_back_the_approval(store):
+    """If the lock step fails, no false APPROVED record survives."""
+    from robie_job_engine import plan_lock
+    from robie_job_engine.evidence import LockedPlan
+
+    draft = _review_draft()
+    cid = _request_with_draft(store, draft)
+    # Pre-lock the job so the insert inside confirm_and_lock must fail.
+    plan_lock.lock_plan(
+        store,
+        LockedPlan(
+            job_id="loop-1",
+            job_type="policy_change",
+            fields={"writtenPremium": "1"},
+            locked_by="test",
+        ),
+    )
+    from robie_job_engine.plan_lock import PlanAlreadyLocked
+
+    with pytest.raises(PlanAlreadyLocked):
+        confirm_and_lock(store, cid, draft, "loop-1", "Carlo Ferrara")
+    record = get(cid, store=store)
+    assert record["status"] == "PENDING"
+    assert record["decided_by"] is None
+
+
+def test_unreviewed_draft_rolls_back_the_approval(store):
+    """PlanNeedsHumanReview from the lock step also rolls the approval back."""
+    draft = _review_draft()
+    cid = _request_with_draft(store, draft)
+    # A named human's confirmation bypasses needs_human_review, so use a
+    # draft the lock gate itself refuses: no changes.
+    broken = PlanDraft(
+        applicant_id=draft.applicant_id,
+        policy_number=draft.policy_number,
+        changes={},
+    )
+    # Rebind the confirmation to the broken draft so the fingerprint check
+    # passes and the lock gate itself is what fires.
+    conn = store.connect()
+    conn.execute(
+        "UPDATE plan_confirmations SET draft_hash = ? WHERE id = ?",
+        (draft_fingerprint(broken), cid),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(PlanNeedsHumanReview):
+        confirm_and_lock(store, cid, broken, "loop-1", "Carlo Ferrara")
+    assert get(cid, store=store)["status"] == "PENDING"
+
+
+def test_request_with_conflicting_draft_and_hash_raises(store):
+    with pytest.raises(ValueError):
+        _request(store, draft=_review_draft(), draft_hash="0" * 64)
+
+
+def test_request_rejects_malformed_draft_hash(store):
+    with pytest.raises(ValueError):
+        _request(store, draft_hash="not-a-hash")
+
+
+def test_draft_fingerprint_is_stable_and_content_bound():
+    a = _review_draft()
+    b = _review_draft()
+    assert draft_fingerprint(a) == draft_fingerprint(b)
+    b.changes = dict(b.changes, writtenPremium="2450.01")
+    assert draft_fingerprint(a) != draft_fingerprint(b)
 
 
 def test_lock_still_refuses_without_approval():
