@@ -10,8 +10,12 @@ decision layer behind that gate:
 - ``get`` / ``list_pending`` -- read back records;
 - ``confirmation_summary`` -- one plain-English line per record;
 - ``rows_for_sheet`` -- header + rows shaped for the board sheet;
-- ``confirm_and_lock`` -- approve, then lock the draft via
-  ``draft_to_locked_plan`` (fail closed: raises unless PENDING).
+- ``confirm_and_lock`` -- approve AND lock, atomically: verifies the
+  supplied draft is byte-for-byte the draft that was filed for review
+  (draft fingerprint), flips PENDING -> APPROVED with a compare-and-set,
+  and inserts the locked plan -- all in one transaction, so a failed lock
+  never leaves a false APPROVED record and an approval for one draft can
+  never lock another.
 
 Storage is a ``plan_confirmations`` table in the job engine's sqlite db,
 reached through the passed-in store. Every function takes ``store``
@@ -27,7 +31,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Mapping
 
-from .plan_extraction import draft_to_locked_plan
+from .plan_extraction import draft_fingerprint, draft_to_locked_plan
 
 try:
     # Typing-only import; never instantiated here.
@@ -37,6 +41,12 @@ except Exception:  # pragma: no cover - typing convenience only
 
 
 STATUSES = ("PENDING", "APPROVED", "REJECTED", "EXPIRED")
+
+
+class ConfirmationMismatch(ValueError):
+    """The confirmation record does not match the draft/job being locked:
+    wrong job, missing fingerprint, or a draft that differs from the one
+    filed for review. Fail closed -- never lock on a mismatch."""
 
 _SHEET_HEADERS = [
     "Confirmation ID",
@@ -115,6 +125,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE plan_confirmations ADD COLUMN origin_platform TEXT")
     if "origin_ref" not in columns:
         conn.execute("ALTER TABLE plan_confirmations ADD COLUMN origin_ref TEXT")
+    # Fingerprint of the exact draft under review
+    # (plan_extraction.draft_fingerprint). Added after the table first
+    # shipped; older rows have NULL and therefore cannot pass
+    # confirm_and_lock -- fail closed, re-file the confirmation.
+    if "draft_hash" not in columns:
+        conn.execute("ALTER TABLE plan_confirmations ADD COLUMN draft_hash TEXT")
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_confirmations_loop
            ON plan_confirmations(loop_job_id, status)"""
@@ -158,6 +174,8 @@ def request_confirmation(
     requested_by: str,
     origin_platform: str | None = None,
     origin_ref: Any = None,
+    draft: Any = None,
+    draft_hash: str | None = None,
 ) -> str:
     """File a draft for human decision. Idempotent per loop job.
 
@@ -169,10 +187,31 @@ def request_confirmation(
     ``origin_ref`` carries what that platform needs (dict or JSON string):
     chat -> {"space": ..., "thread": ...}; email -> {"to": ...};
     ezlynx -> {"applicant_id": ...}.
+
+    ``draft`` (a PlanDraft) or its ``draft_hash`` binds this confirmation to
+    the exact draft under review: ``confirm_and_lock`` later refuses to lock
+    any other draft against this approval. Callers that intend to use
+    ``confirm_and_lock`` must file the fingerprint here.
     """
     loop_job_id = _require_nonempty(loop_job_id, "loop_job_id")
     job_type = _require_nonempty(job_type, "job_type")
     requested_by = _require_nonempty(requested_by, "requested_by")
+    if draft is not None:
+        fingerprint = draft_fingerprint(draft)
+        if draft_hash is not None and str(draft_hash) != fingerprint:
+            raise ValueError(
+                "draft and draft_hash disagree; pass one canonical draft"
+            )
+        draft_hash = fingerprint
+    if draft_hash is not None:
+        draft_hash = str(draft_hash).strip().lower()
+        if len(draft_hash) != 64 or any(
+            c not in "0123456789abcdef" for c in draft_hash
+        ):
+            raise ValueError(
+                "draft_hash must be a 64-char hex SHA-256 fingerprint "
+                "(see plan_extraction.draft_fingerprint)"
+            )
     if origin_platform is not None:
         origin_platform = _require_nonempty(origin_platform, "origin_platform").casefold()
         if origin_platform not in ("chat", "email", "ezlynx"):
@@ -195,8 +234,9 @@ def request_confirmation(
             """INSERT INTO plan_confirmations
                (id, loop_job_id, job_type, draft_summary, changes_json,
                 status, requested_by, decided_by, decided_at,
-                decision_reason, created_at, origin_platform, origin_ref)
-               VALUES (?, ?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?, ?, ?)""",
+                decision_reason, created_at, origin_platform, origin_ref,
+                draft_hash)
+               VALUES (?, ?, ?, ?, ?, 'PENDING', ?, NULL, NULL, NULL, ?, ?, ?, ?)""",
             (
                 confirmation_id,
                 loop_job_id,
@@ -207,6 +247,7 @@ def request_confirmation(
                 _utc_now(),
                 origin_platform,
                 origin_ref_text,
+                draft_hash,
             ),
         )
     return confirmation_id
@@ -454,22 +495,82 @@ def confirm_and_lock(
     job_id: str,
     decided_by: str,
 ) -> Any:
-    """Approve the confirmation, then lock the draft. Fail closed.
+    """Approve the confirmation AND lock the draft, atomically. Fail closed.
 
-    Raises ValueError unless the confirmation is PENDING. Any
-    ``PlanNeedsHumanReview`` from the lock step propagates -- the approval
-    stands as the true record of the human's decision.
+    Everything happens inside one transaction:
+
+    1. the confirmation must exist and be PENDING;
+    2. its ``loop_job_id`` must equal ``job_id`` -- an approval filed for
+       one job never executes another;
+    3. its stored ``draft_hash`` must equal ``draft_fingerprint(draft)`` --
+       the draft being locked is byte-for-byte the draft the human reviewed
+       (``ConfirmationMismatch`` otherwise);
+    4. the locked plan's job_type must match the confirmation's job_type;
+    5. the status flips PENDING -> APPROVED by compare-and-set (a concurrent
+       decision loses the race) and the locked plan is inserted in the same
+       transaction -- a failed lock rolls the APPROVED back, so the ledger
+       never shows an approval for a plan that was not locked.
+
+    ``decided_by`` must be the authenticated principal id supplied by the
+    caller's adapter (Chat user id, verified decision-token principal, ...);
+    this module records it, it cannot verify it. ``PlanNeedsHumanReview``
+    from the lock step propagates with the approval rolled back.
     """
+    from . import plan_lock
+
     confirmation_id = _require_nonempty(confirmation_id, "confirmation_id")
     decided_by = _require_nonempty(decided_by, "decided_by")
     job_id = _require_nonempty(job_id, "job_id")
-    record = get(confirmation_id, store=store)
-    if record is None:
-        raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
-    if str(record.get("status")) != "PENDING":
-        raise ValueError(
-            f"confirmation {confirmation_id!r} is {record.get('status')}, "
-            "not PENDING; refusing to lock"
+    with _session(store) as conn:
+        row = conn.execute(
+            "SELECT * FROM plan_confirmations WHERE id = ?", (confirmation_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown confirmation id: {confirmation_id!r}")
+        if str(row["status"]) != "PENDING":
+            raise ValueError(
+                f"confirmation {confirmation_id!r} is {row['status']}, "
+                "not PENDING; refusing to lock"
+            )
+        if str(row["loop_job_id"]) != job_id:
+            raise ConfirmationMismatch(
+                f"confirmation {confirmation_id!r} was filed for job "
+                f"{row['loop_job_id']!r}, not {job_id!r}; refusing to lock"
+            )
+        stored_hash = (
+            str(row["draft_hash"]) if "draft_hash" in row.keys() else ""
         )
-    approve(confirmation_id, decided_by, store=store)
-    return draft_to_locked_plan(draft, job_id, human_confirmed_by=decided_by)
+        if not stored_hash:
+            raise ConfirmationMismatch(
+                f"confirmation {confirmation_id!r} has no draft fingerprint "
+                "on file; re-file the confirmation with the draft so the "
+                "approval binds to it"
+            )
+        if draft_fingerprint(draft) != stored_hash:
+            raise ConfirmationMismatch(
+                f"the draft being locked does not match the draft filed for "
+                f"review on confirmation {confirmation_id!r}; refusing to "
+                "lock"
+            )
+        locked = draft_to_locked_plan(
+            draft, job_id, human_confirmed_by=decided_by
+        )
+        if str(locked.job_type) != str(row["job_type"]):
+            raise ConfirmationMismatch(
+                f"confirmation {confirmation_id!r} is a "
+                f"{row['job_type']!r} approval but the draft locks as "
+                f"{locked.job_type!r}; refusing to lock"
+            )
+        cur = conn.execute(
+            """UPDATE plan_confirmations
+               SET status = 'APPROVED', decided_by = ?, decided_at = ?
+               WHERE id = ? AND status = 'PENDING'""",
+            (decided_by, _utc_now(), confirmation_id),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(
+                f"confirmation {confirmation_id!r} was decided concurrently; "
+                "refusing to lock"
+            )
+        plan_lock._insert_locked_plan(conn, locked)
+    return locked
