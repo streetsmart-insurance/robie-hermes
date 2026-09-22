@@ -12,7 +12,7 @@ from robie_job_engine.evidence import (
     EvidenceOutcome,
     LockedPlan,
 )
-from robie_job_engine.retry import IdempotencyViolation
+from robie_job_engine.retry import IdempotencyClaimed, IdempotencyViolation
 from robie_job_engine.store import JobStore
 
 
@@ -216,7 +216,9 @@ def test_execute_idempotent_requires_key(store):
         )
 
 
-def test_execute_idempotent_fn_failure_does_not_record_key(store):
+def test_execute_idempotent_fn_failure_records_unknown(store):
+    """A raised fn is not proof the destination did not commit: the key is
+    recorded UNKNOWN and a blind retry is refused."""
     def boom():
         raise RuntimeError("write failed")
 
@@ -224,9 +226,197 @@ def test_execute_idempotent_fn_failure_does_not_record_key(store):
         retry.execute_idempotent(
             store, idempotency_key="key-2", loop_job_id="loop-1", fn=boom
         )
-    # Key not recorded: a later retry is still allowed to attempt.
+    # Blind re-run refused: the first attempt may have landed.
+    with pytest.raises(IdempotencyClaimed):
+        retry.execute_idempotent(
+            store, idempotency_key="key-2", loop_job_id="loop-1",
+            fn=lambda: "blind retry must not run",
+        )
+
+
+def test_execute_idempotent_unknown_reruns_only_after_reconcile(store):
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("connection dropped after the write")
+        return "ok"
+
+    with pytest.raises(RuntimeError):
+        retry.execute_idempotent(
+            store, idempotency_key="key-3", loop_job_id="loop-1", fn=flaky
+        )
+    # Reconcile says the effect never landed -> re-run is allowed, once.
     out = retry.execute_idempotent(
-        store, idempotency_key="key-2", loop_job_id="loop-1",
-        fn=lambda: "second try ok",
+        store, idempotency_key="key-3", loop_job_id="loop-1",
+        fn=flaky, reconcile=lambda: False,
     )
-    assert out == "second try ok"
+    assert out == "ok"
+    assert calls == [1, 1]
+    with pytest.raises(IdempotencyViolation):
+        retry.execute_idempotent(
+            store, idempotency_key="key-3", loop_job_id="loop-1",
+            fn=flaky, reconcile=lambda: False,
+        )
+    assert calls == [1, 1]
+
+
+def test_execute_idempotent_reconcile_match_never_reruns(store):
+    """UNKNOWN + destination already shows the effect -> seal, don't replay."""
+    def boom():
+        raise RuntimeError("response lost after commit")
+
+    with pytest.raises(RuntimeError):
+        retry.execute_idempotent(
+            store, idempotency_key="key-4", loop_job_id="loop-1", fn=boom
+        )
+    with pytest.raises(IdempotencyViolation):
+        retry.execute_idempotent(
+            store, idempotency_key="key-4", loop_job_id="loop-1",
+            fn=lambda: "must not run", reconcile=lambda: True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Critical 3 regressions: atomic claim, crash window, reconciliation
+# ---------------------------------------------------------------------------
+
+def test_concurrent_workers_cannot_both_execute(store):
+    """Two workers racing the same key: exactly one fn ever runs."""
+    import threading
+
+    ran = []
+    errors = []
+
+    def work():
+        ran.append(1)
+
+    def worker():
+        try:
+            retry.execute_idempotent(
+                store, idempotency_key="race-key", loop_job_id="loop-1",
+                fn=work,
+            )
+        except IdempotencyViolation as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert ran == [1]  # the side effect ran exactly once
+    assert len(errors) == 1  # the loser was refused
+
+
+def test_crash_after_effect_blocks_blind_replay(store):
+    """Simulate a crash: key left CLAIMED (fn ran, completion never
+    recorded). A later execute must refuse, not replay."""
+    import sqlite3
+
+    retry.pending_retries(store, "setup")  # create the schema
+    conn = store.connect()
+    conn.execute(
+        "INSERT INTO executed_idempotency_keys "
+        "(idempotency_key, loop_job_id, status, executed_at, claimed_at) "
+        "VALUES ('crash-key', 'loop-1', 'CLAIMED', ?, ?)",
+        (
+            datetime.now(timezone.utc).isoformat(),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(IdempotencyClaimed):
+        retry.execute_idempotent(
+            store, idempotency_key="crash-key", loop_job_id="loop-1",
+            fn=lambda: "replay must not run",
+        )
+
+
+def test_reconcile_seals_stale_claimed_when_effect_landed(store):
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    retry.pending_retries(store, "setup")  # create the schema
+    conn = store.connect()
+    conn.execute(
+        "INSERT INTO executed_idempotency_keys "
+        "(idempotency_key, loop_job_id, status, executed_at, claimed_at) "
+        "VALUES ('stale-key', 'loop-1', 'CLAIMED', ?, ?)",
+        (old, old),
+    )
+    conn.commit()
+    conn.close()
+    result = retry.reconcile_idempotency_key(
+        store, idempotency_key="stale-key", reconcile=lambda: True
+    )
+    assert result == "COMPLETED"
+    with pytest.raises(IdempotencyViolation):
+        retry.execute_idempotent(
+            store, idempotency_key="stale-key", loop_job_id="loop-1",
+            fn=lambda: "must not run",
+        )
+
+
+def test_reconcile_clears_stale_claimed_when_effect_absent(store):
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    retry.pending_retries(store, "setup")  # create the schema
+    conn = store.connect()
+    conn.execute(
+        "INSERT INTO executed_idempotency_keys "
+        "(idempotency_key, loop_job_id, status, executed_at, claimed_at) "
+        "VALUES ('stale-key2', 'loop-1', 'CLAIMED', ?, ?)",
+        (old, old),
+    )
+    conn.commit()
+    conn.close()
+    result = retry.reconcile_idempotency_key(
+        store, idempotency_key="stale-key2", reconcile=lambda: False
+    )
+    assert result == "CLEARED"
+    out = retry.execute_idempotent(
+        store, idempotency_key="stale-key2", loop_job_id="loop-1",
+        fn=lambda: "fresh run ok",
+    )
+    assert out == "fresh run ok"
+
+
+def test_reconcile_leaves_live_claim_alone(store):
+    fresh = datetime.now(timezone.utc).isoformat()
+    retry.pending_retries(store, "setup")  # create the schema
+    conn = store.connect()
+    conn.execute(
+        "INSERT INTO executed_idempotency_keys "
+        "(idempotency_key, loop_job_id, status, executed_at, claimed_at) "
+        "VALUES ('live-key', 'loop-1', 'CLAIMED', ?, ?)",
+        (fresh, fresh),
+    )
+    conn.commit()
+    conn.close()
+    result = retry.reconcile_idempotency_key(
+        store, idempotency_key="live-key", reconcile=lambda: False
+    )
+    assert result == "CLAIMED"
+    with pytest.raises(IdempotencyClaimed):
+        retry.execute_idempotent(
+            store, idempotency_key="live-key", loop_job_id="loop-1",
+            fn=lambda: "must not run",
+        )
+
+
+def test_reconcile_absent_key(store):
+    assert retry.reconcile_idempotency_key(
+        store, idempotency_key="never-seen", reconcile=lambda: False
+    ) == "ABSENT"
+
+
+def test_legacy_completed_rows_stay_completed(store):
+    """Pre-claim-protocol rows (no status/claimed_at) migrate to COMPLETED
+    and keep refusing re-execution."""
+    retry.execute_idempotent(
+        store, idempotency_key="legacy-key", loop_job_id="loop-1",
+        fn=lambda: "done",
+    )
+    assert retry.reconcile_idempotency_key(
+        store, idempotency_key="legacy-key", reconcile=lambda: False
+    ) == "COMPLETED"
