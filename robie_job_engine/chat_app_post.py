@@ -4,6 +4,12 @@ This is the Job Engine / scheduler fallback. Production Chat jobs already
 post as the APP because ``guard_chat_response`` is included in adapter.send().
 Never impersonate the person Robie AI. Never create a new space.
 
+Credential precedence for the Chat API client (all must carry chat.bot):
+1. ``ROBIE_CHAT_SA_KEY_FILE`` — service-account key JSON (the Chat app's own
+   service account, e.g. the box's google-chat-sa.json).
+2. ``ROBIE_GOOGLE_TOKEN_FILE`` — authorized-user token JSON.
+3. Application Default Credentials.
+
 There is no outbound email API on hermes-poc-01. Operator fail-notify uses
 this same Chat APP poster. ``find_direct_message_space`` only resolves an
 already-existing DM (``spaces.findDirectMessage``). It never creates a
@@ -71,13 +77,21 @@ def _chat_app_client() -> Any:
     import google.auth
     from googleapiclient.discovery import build
 
-    token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
-    if token_file:
-        from google.oauth2.credentials import Credentials
+    sa_key_file = os.environ.get("ROBIE_CHAT_SA_KEY_FILE", "").strip()
+    if sa_key_file:
+        from google.oauth2 import service_account
 
-        credentials = Credentials.from_authorized_user_file(token_file)
+        credentials = service_account.Credentials.from_service_account_file(
+            sa_key_file, scopes=[CHAT_BOT_SCOPE]
+        )
     else:
-        credentials, _ = google.auth.default(scopes=[CHAT_BOT_SCOPE])
+        token_file = os.environ.get("ROBIE_GOOGLE_TOKEN_FILE", "").strip()
+        if token_file:
+            from google.oauth2.credentials import Credentials
+
+            credentials = Credentials.from_authorized_user_file(token_file)
+        else:
+            credentials, _ = google.auth.default(scopes=[CHAT_BOT_SCOPE])
     return build("chat", "v1", credentials=credentials, cache_discovery=False)
 
 
