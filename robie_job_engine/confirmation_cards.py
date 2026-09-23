@@ -263,18 +263,25 @@ def _click_action(payload: Mapping[str, Any]) -> str:
 def _click_actor(payload: Mapping[str, Any]) -> str:
     """The authenticated Chat user who clicked, lowercased email.
 
-    The bridge normalizes Workspace Add-ons card-click envelopes so the
-    clicking user (from the add-on ``commonEventObject``) is at
-    ``common.user``; the top-level ``user`` can instead be the message sender
-    -- the bot that posted the card -- so it must not shadow the true
-    clicker. Prefer ``common.user`` first, then fall back to the native Chat
-    API top-level ``user``.
+    Live 2026-09-23: for this Chat app, Workspace Add-ons card clicks carry
+    the clicking user at ``chat.user``. ``commonEventObject`` has no ``user``
+    key, and the bridge's top-level ``user`` is the message sender -- the
+    bot that posted the card -- so it must not shadow the true clicker.
+    Prefer the add-on clicker locations first, then fall back to the native
+    Chat API top-level ``user``.
     """
     payload = dict(payload or {})
     common = payload.get("common") or {}
     if not isinstance(common, dict):
         common = {}
-    for candidate in (common.get("user"), payload.get("user")):
+    chat = payload.get("chat") or {}
+    if not isinstance(chat, dict):
+        chat = {}
+    for candidate in (
+        common.get("user"),
+        chat.get("user"),
+        payload.get("user"),
+    ):
         if isinstance(candidate, dict):
             actor = str(candidate.get("email") or candidate.get("name") or "").strip().lower()
             if actor:

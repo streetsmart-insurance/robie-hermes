@@ -393,24 +393,32 @@ def test_click_response_replaces_card():
 
 
 def test_addon_clicker_not_shadowed_by_message_sender(db):
-    """Regression (live 2026-09-23): a Workspace Add-ons card click arrived
-    with the clicking user at ``common.user`` (from ``commonEventObject``)
-    while the bridge's top-level ``user`` was the message sender -- the bot
-    that posted the card. The old actor extraction preferred the top-level
-    ``user`` and refused the approver's Approve as UNAUTHORIZED ("bound to a
-    different approver"). The click must resolve against the clicker.
+    """Regression (live 2026-09-23): a Workspace Add-ons card click arrives
+    with the clicking user at ``chat.user``. ``commonEventObject`` carries
+    no ``user`` key for this app, and the bridge's top-level ``user`` is the
+    message sender -- the bot that posted the card. The old actor extraction
+    read the top-level sender and refused the approver's Approve as
+    UNAUTHORIZED ("bound to a different approver"). The click must resolve
+    against the true clicker.
     """
     store = JobStore(db)
     cid = _request(store)
     token = _tokens(cid)["APPROVE"]
     payload = {
+        # Raw bridge shape: clicker at chat.user, no commonEventObject.user.
+        "chat": {
+            "user": {
+                "email": _principal(),
+                "displayName": "Carlo Ferrara",
+                "type": "HUMAN",
+            },
+        },
         "common": {
             "invokedFunction": "robie_confirmation_decision",
             "parameters": {"decision_token": token},
-            "user": {"email": _principal()},
         },
         # Bridge message-sender fallback: the bot that posted the card.
-        "user": {"name": "users/100000000000000000001", "type": "BOT"},
+        "user": {"name": "users/112266247562475398062", "type": "BOT"},
     }
     result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
     assert result.status == "APPROVED"
@@ -418,3 +426,25 @@ def test_addon_clicker_not_shadowed_by_message_sender(db):
     record = confirmations.get(cid, store=store)
     assert record["status"] == "APPROVED"
     assert record["decided_by"] == _principal()
+
+
+def test_adapter_surfaced_clicker_resolves(db):
+    """The adapter-normalized shape: the human clicker surfaced at the
+    top-level ``user`` (from ``chat.user``), with an empty ``common.user``.
+    Must still approve.
+    """
+    store = JobStore(db)
+    cid = _request(store)
+    token = _tokens(cid)["REJECT"]
+    payload = {
+        "common": {
+            "invokedFunction": "robie_confirmation_decision",
+            "parameters": {"decision_token": token},
+            "user": {},
+        },
+        "user": {"email": _principal(), "type": "HUMAN"},
+    }
+    result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
+    assert result.status == "REJECTED"
+    assert result.decided is True
+    assert confirmations.get(cid, store=store)["status"] == "REJECTED"

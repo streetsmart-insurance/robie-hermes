@@ -567,6 +567,14 @@ def _card_event_payload(envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 result[key] = envelope[key]
         if not result.get("common") and common:
             result["common"] = common
+        # Workspace Add-ons card clicks carry the true clicking user at
+        # chat.user. commonEventObject has no user for this app, and the
+        # envelope's top-level user is the message sender (the bot that
+        # posted the card). Surface the human clicker as the payload's
+        # user so actor extraction authorizes the right person.
+        chat_user = chat.get("user") if isinstance(chat, dict) else None
+        if isinstance(chat_user, dict) and chat_user.get("type") == "HUMAN":
+            result["user"] = chat_user
         return result
     return None
 
