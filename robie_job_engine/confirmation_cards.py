@@ -29,11 +29,14 @@ Production lets Production answer instead. Enabling Test Chat, on a
 Test-only ``GOOGLE_CHAT_SUBSCRIPTION_NAME``, is configuration for Dusty
 and Ralph — not something this module turns on.
 
-``action.function`` on new cards is the short name
-``robie_confirmation_decision``. ``canonical_card_action`` also accepts a
-full URL ending in ``/actions/robie_confirmation_decision`` (the value
-already-posted cards stored). The adapter folds that URL to the bare name
-before the "That action is not supported." branch.
+``action.function`` on new cards is the full bridge action URL
+(``{bridge base}/actions/robie_confirmation_decision``). A bare function
+name is NOT valid here: Google treats it as an add-on deployment function
+and the click never reaches the bridge (this broke every real
+Approve/Reject click on 2026-09-23). ``canonical_card_action`` also
+accepts the bare name for envelopes that already carry it. The adapter
+folds that URL to the bare name before the "That action is not
+supported." branch.
 
 Fail-closed everywhere: no signing key, malformed/forged/expired token,
 clicking user != token principal, or unknown confirmation all refuse and
@@ -43,35 +46,53 @@ an invalid click).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 from . import confirmations
 
 
-#: Short action name Google Chat apps put in ``action.function`` and echo
-#: back as ``common.invokedFunction`` on ``CARD_CLICKED``.
+#: Action name for confirmation clicks (also the bridge's
+#: ``/actions/<name>`` path). The bridge echoes this as
+#: ``common.invokedFunction`` on ``CARD_CLICKED``.
 CARD_ACTION = "robie_confirmation_decision"
 
 
-def _click_function() -> str:
-    """Function name a Chat-app cardsV2 button must use.
+#: Base URL of the Chat HTTP bridge that receives card-button clicks.
+#: Chat apps on an HTTP endpoint MUST put the full HTTPS action URL in
+#: ``action.function``. A bare function name is treated by Google as an
+#: add-on deployment function: the click never reaches the bridge. Every
+#: real Approve/Reject click on 2026-09-23 failed exactly this way
+#: (Google: "The Chat app didn't respond or its response was invalid").
+#: Same env knob as ``integrations/google_chat/adapter.py``.
+CARD_ACTION_BASE_URL = (
+    os.environ.get(
+        "GOOGLE_CHAT_CARD_ACTION_BASE_URL",
+        "https://robie-chat-http-bridge-751771086524.us-east1.run.app",
+    )
+    .strip()
+    .rstrip("/")
+)
 
-    Chat apps deliver ``CARD_CLICKED`` with this string as
-    ``common.invokedFunction``. A full URL ending in
-    ``/actions/robie_confirmation_decision`` is still accepted by
-    ``canonical_card_action`` so an already-posted card matches the same
-    branch as the bare name.
+
+def _click_function() -> str:
+    """Full action URL a Chat-app cardsV2 button must use.
+
+    ``{bridge base}/actions/robie_confirmation_decision`` -- the URL the
+    bridge receives real clicks on. A bare ``CARD_ACTION`` is wrong: Google
+    treats it as an add-on deployment function and the click never
+    reaches the HTTP endpoint.
     """
-    return CARD_ACTION
+    return f"{CARD_ACTION_BASE_URL}/actions/{CARD_ACTION}"
 
 
 def canonical_card_action(raw: str) -> str:
     """Return the bare action name for a confirmation click, or ``raw``.
 
-    Accepts the short name Chat sends for a current card, and the bridge
-    URL (``.../actions/robie_confirmation_decision``) that cards posted
-    before this fix stored in ``action.function``. Any other string is
+    Accepts the full bridge URL (``.../actions/robie_confirmation_decision``)
+    that current cards store in ``action.function``, and the bare name the
+    bridge echoes as ``common.invokedFunction``. Any other string is
     returned unchanged so unrelated card actions keep their own names.
     """
     text = str(raw or "").strip()

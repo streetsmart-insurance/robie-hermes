@@ -78,11 +78,15 @@ def test_card_buttons_carry_signed_tokens(db):
     seen = set()
     for button, decision in zip(buttons, ("APPROVE", "REJECT")):
         params = button["onClick"]["action"]["parameters"]
-        # Chat apps require the short function name. A full URL is what
-        # made Approve/Reject answer "That action is not supported."
-        assert button["onClick"]["action"]["function"] == cards.CARD_ACTION
-        assert "://" not in button["onClick"]["action"]["function"]
-        assert "/" not in button["onClick"]["action"]["function"]
+        # Chat apps on an HTTP endpoint require the FULL action URL in
+        # action.function. A bare function name is treated by Google as an
+        # add-on deployment function and the click never reaches the bridge
+        # (every real Approve/Reject click on 2026-09-23 failed this way).
+        function = button["onClick"]["action"]["function"]
+        assert function == cards._click_function()
+        assert function.startswith("https://")
+        assert function.endswith("/actions/" + cards.CARD_ACTION)
+        assert "://" in function and function.count("/") > 2
         token = next(p["value"] for p in params if p["key"] == "decision_token")
         verified = confirmations.verify_decision_token(token, key=TEST_KEY)
         assert verified["confirmation_id"] == cid
@@ -269,6 +273,18 @@ _LIVE_BRIDGE_URL = (
     "https://robie-chat-http-bridge-751771086524.us-east1.run.app"
     "/actions/robie_confirmation_decision"
 )
+
+
+def test_click_function_is_full_bridge_action_url():
+    # Regression: the bare action name is treated by Google as an add-on
+    # deployment function and the click never reaches the bridge. The
+    # rendered card must carry the full HTTPS action URL.
+    function = cards._click_function()
+    assert function.startswith("https://")
+    assert function.endswith("/actions/" + cards.CARD_ACTION)
+    # The click still resolves: the bridge echoes the bare name as
+    # common.invokedFunction and the envelope carries the full URL.
+    assert cards.canonical_card_action(function) == cards.CARD_ACTION
 
 
 def test_canonical_action_accepts_short_name_and_bridge_url():
