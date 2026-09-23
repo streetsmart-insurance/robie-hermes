@@ -529,3 +529,68 @@ def test_card_event_payload_ignores_non_human_chat_user():
     payload = _card_event_payload(envelope)
     assert payload is not None
     assert payload["user"]["email"] == "carlo@streetsmart.insurance"
+
+
+def test_card_event_payload_surfaces_chat_message_for_inplace_patch():
+    """Direct adapter regression (live 2026-09-23): a Workspace Add-ons
+    CARD_CLICKED envelope has NO top-level "message" key -- the clicked
+    message lives at ``chat.message`` (keys are authorizationEventObject,
+    chat, commonEventObject). ``_card_event_payload()`` must surface it as
+    the normalized payload's ``message`` so the async gateway path can
+    patch the answered card in place via messages.patch. Without this,
+    message_name is empty, _patch_message is skipped, and the user gets a
+    separate acknowledgement while the card keeps live Approve/Reject buttons.
+    """
+    _card_event_payload = _load_card_event_payload()
+    envelope = {
+        "chat": {
+            "user": {
+                "displayName": "Carlo Ferrara",
+                "email": "carlo@streetsmart.insurance",
+                "type": "HUMAN",
+            },
+            "message": {
+                "name": "spaces/AAQAZbLJO78/messages/gHMvZiUpF5A.gHMvZiUpF5A",
+                "space": {"name": "spaces/AAQAZbLJO78"},
+            },
+            "space": {"name": "spaces/AAQAZbLJO78"},
+            "buttonClickedPayload": {
+                "action": {"actionMethodName": "robie_confirmation_decision"},
+            },
+        },
+        "commonEventObject": {
+            "invokedFunction": "robie_confirmation_decision",
+            "parameters": {},
+        },
+        "authorizationEventObject": {},
+        # No top-level "message", "space", or "user" keys (live shape).
+    }
+    payload = _card_event_payload(envelope)
+    assert payload is not None
+    # Message identity must be surfaced for the in-place patch.
+    assert payload["message"]["name"] == (
+        "spaces/AAQAZbLJO78/messages/gHMvZiUpF5A.gHMvZiUpF5A"
+    )
+    # Space must be surfaced for the fallback separate-message path.
+    assert payload["space"]["name"] == "spaces/AAQAZbLJO78"
+    # The human clicker must still be surfaced (PR #555 behavior preserved).
+    assert payload["user"]["email"] == "carlo@streetsmart.insurance"
+    assert payload["user"]["type"] == "HUMAN"
+
+
+def test_card_event_payload_prefers_top_level_message():
+    """A top-level "message" (legacy Chat-app shape) wins over chat.message."""
+    _card_event_payload = _load_card_event_payload()
+    envelope = {
+        "chat": {
+            "message": {"name": "spaces/AAA/messages/chat-nested"},
+            "buttonClickedPayload": {
+                "action": {"actionMethodName": "robie_confirmation_decision"},
+            },
+        },
+        "message": {"name": "spaces/AAA/messages/top-level"},
+        "commonEventObject": {"invokedFunction": "robie_confirmation_decision"},
+    }
+    payload = _card_event_payload(envelope)
+    assert payload is not None
+    assert payload["message"]["name"] == "spaces/AAA/messages/top-level"

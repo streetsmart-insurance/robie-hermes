@@ -575,6 +575,26 @@ def _card_event_payload(envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         chat_user = chat.get("user") if isinstance(chat, dict) else None
         if isinstance(chat_user, dict) and chat_user.get("type") == "HUMAN":
             result["user"] = chat_user
+        # Workspace Add-ons nest the clicked message (and its space) under
+        # chat.message / chat.space -- the envelope has no top-level
+        # "message" or "space" keys. Surface them so the async gateway path
+        # can patch the answered card in place via messages.patch instead of
+        # posting a separate acknowledgement message.
+        if isinstance(chat, dict):
+            if not result.get("message"):
+                chat_message = chat.get("message")
+                if isinstance(chat_message, dict) and chat_message.get("name"):
+                    result["message"] = chat_message
+            if not result.get("space"):
+                chat_space = chat.get("space")
+                if isinstance(chat_space, dict) and chat_space.get("name"):
+                    result["space"] = chat_space
+                else:
+                    msg = result.get("message")
+                    if isinstance(msg, dict):
+                        msg_space = msg.get("space")
+                        if isinstance(msg_space, dict) and msg_space.get("name"):
+                            result["space"] = msg_space
         return result
     return None
 
@@ -2272,8 +2292,14 @@ class GoogleChatAdapter(BasePlatformAdapter):
             response = "ROBIE could not record that choice safely. The Job remains paused."
 
         if notify:
-            space = payload.get("space") or {}
-            event_message = payload.get("message") or {}
+            # Normalize the envelope first: Workspace Add-on card clicks carry
+            # the message/space under chat.message / chat.space (no top-level
+            # keys). Without this, message_name is empty, _patch_message is
+            # skipped, and the user gets a separate acknowledgement message
+            # while the answered card keeps its live Approve/Reject buttons.
+            normalized = _card_event_payload(payload) or {}
+            space = normalized.get("space") or payload.get("space") or {}
+            event_message = normalized.get("message") or payload.get("message") or {}
             if not space and isinstance(event_message, dict):
                 space = event_message.get("space") or {}
             chat_id = str(space.get("name") or "") if isinstance(space, dict) else ""
