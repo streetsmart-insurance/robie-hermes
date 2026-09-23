@@ -68,7 +68,14 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(event["space"]["name"], "legacy-space")
         self.assertEqual(event["user"]["name"], "legacy-user")
 
-    def test_addon_card_payload_is_normalized_and_acknowledged(self):
+    def test_addon_card_payload_is_normalized_and_returns_update_message(self):
+        """Workspace Add-on CARD_CLICKED must return UPDATE_MESSAGE, not {}.
+
+        Google rejects the empty {} synchronous response for Add-on card
+        clicks, displaying "<App> is unable to process your request."  The
+        bridge returns UPDATE_MESSAGE with a processing card; Hermes replaces
+        it asynchronously with the durable decision card via the Chat API.
+        """
         payload = {
             "commonEventObject": {"parameters": {"decision_id": "d1"}},
             "chat": {
@@ -83,11 +90,29 @@ class BridgeTests(unittest.TestCase):
                 "/actions/robie_decision", json=payload
             )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {})
+        body = response.get_json()
+        # Must be a valid Add-on ActionResponse, not empty {}.
+        self.assertEqual(body["actionResponse"]["type"], "UPDATE_MESSAGE")
+        self.assertTrue(body["cardsV2"])
+        self.assertEqual(body["cardsV2"][0]["cardId"], "robie-processing")
+        # Event still forwarded to Pub/Sub for async processing.
         event = publish.call_args.args[0]
         self.assertEqual(event["common"]["invokedFunction"], "robie_decision")
         self.assertEqual(event["common"]["parameters"]["decision_id"], "d1")
         self.assertEqual(event["space"]["name"], "spaces/1")
+
+    def test_chat_api_card_click_keeps_empty_async_ack(self):
+        """Non-Add-on (Chat API) card clicks keep the empty {} async ack."""
+        payload = {
+            "type": "CARD_CLICKED",
+            "common": {"invokedFunction": "robie_decision"},
+        }
+        with patch.object(main, "_publish") as publish:
+            response = main.app.test_client().post(
+                "/actions/robie_decision", json=payload
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {})
 
     def test_message_is_forwarded_without_payload_logging_or_rewrite(self):
         payload = {"type": "MESSAGE", "message": {"name": "m1"}}

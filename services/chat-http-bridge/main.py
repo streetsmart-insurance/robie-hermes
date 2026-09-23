@@ -78,6 +78,38 @@ def _chat_message(text: str) -> dict[str, Any]:
     return {"text": text}
 
 
+def _addon_processing_response() -> dict[str, Any]:
+    """Return a Workspace Add-on UPDATE_MESSAGE response showing a processing state.
+
+    Google Workspace Add-ons reject the empty ``{}`` synchronous response that
+    works for standard Chat apps: the framework displays
+    "<App> is unable to process your request."  Returning UPDATE_MESSAGE with
+    a minimal processing card satisfies the Add-on contract; Hermes then
+    replaces it asynchronously with the durable decision card via the Chat API.
+    """
+    return {
+        "actionResponse": {"type": "UPDATE_MESSAGE"},
+        "cardsV2": [
+            {
+                "cardId": "robie-processing",
+                "card": {
+                    "sections": [
+                        {
+                            "widgets": [
+                                {
+                                    "textParagraph": {
+                                        "text": "⏳ Processing your decision…"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+
+
 def _event_style(payload: dict[str, Any]) -> str:
     """Classify the envelope without logging customer message contents."""
     if isinstance(payload.get("chat"), dict):
@@ -116,6 +148,14 @@ def receive(action_name: str | None = None):
         payload.get("type") or payload.get("eventType") or "none",
         ",".join(sorted(payload.keys())),
     )
+
+    # Workspace Add-on CARD_CLICKED events require a synchronous ActionResponse;
+    # the empty {} that works for standard Chat apps makes Chat display
+    # "<App> is unable to process your request."  Return UPDATE_MESSAGE with a
+    # processing card; Hermes replaces it asynchronously with the durable card.
+    # Standard Chat API MESSAGE events keep the empty async-ack response.
+    if action_name and _event_style(payload) == "workspace_addon":
+        return jsonify(_addon_processing_response())
 
     # Hermes posts the durable status/card asynchronously. Google recommends an
     # empty synchronous response for this pattern; returning a Message or an
