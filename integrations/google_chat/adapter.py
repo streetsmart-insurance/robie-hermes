@@ -557,7 +557,9 @@ def _card_event_payload(envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             common.get("invokedFunction")
             or (common.get("parameters") or {}).get("__action_method_name__")
             or action.get("actionMethodName")
+            or action.get("function")
             or candidate.get("actionMethodName")
+            or candidate.get("function")
         )
         if not invoked:
             continue
@@ -2135,9 +2137,22 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # --- Message events ---
             extracted = self._extract_message_payload(envelope, ce_type)
             if extracted is None:
-                logger.debug(
+                looks_interactive = (
+                    str(envelope.get("type") or "").upper() == "CARD_CLICKED"
+                    or isinstance(envelope.get("action"), dict)
+                    or "card" in ce_type.lower()
+                    or "widget" in ce_type.lower()
+                )
+                log = logger.warning if looks_interactive else logger.debug
+                log(
                     "[GoogleChat] Envelope did not match a known message format; "
-                    "ce-type=%s, keys=%s", ce_type, list(envelope.keys())
+                    "ce-type=%s, keys=%s, type=%s, action_keys=%s",
+                    ce_type,
+                    list(envelope.keys()),
+                    envelope.get("type"),
+                    list((envelope.get("action") or {}).keys())
+                    if isinstance(envelope.get("action"), dict)
+                    else None,
                 )
                 message.ack()
                 return
@@ -2192,7 +2207,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         raw_action = str(
             common.get("invokedFunction")
             or action_obj.get("actionMethodName")
+            or action_obj.get("function")
             or payload.get("actionMethodName")
+            or payload.get("function")
             or ""
         ).strip()
         # Confirmation cards posted before the short-name fix stored a

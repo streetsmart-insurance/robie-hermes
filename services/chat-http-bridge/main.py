@@ -41,8 +41,15 @@ def _normalize(payload: dict[str, Any], action_name: str | None) -> dict[str, An
     if not isinstance(common, dict):
         common = event.get("commonEventObject")
     common = dict(common) if isinstance(common, dict) else {}
-    if action_name:
-        common["invokedFunction"] = action_name
+    # Chat apps often POST CARD_CLICKED to `/` with action.function set
+    # (cardsV2) and no path segment. Promote that into invokedFunction so
+    # Hermes card routing does not depend on `/actions/<name>` alone.
+    body_action = event.get("action") if isinstance(event.get("action"), dict) else {}
+    inferred = action_name or body_action.get("function") or body_action.get("actionMethodName")
+    if inferred and not common.get("invokedFunction"):
+        common["invokedFunction"] = inferred
+    if inferred:
+        action_name = inferred
     if common:
         event["common"] = common
 
@@ -102,7 +109,20 @@ def receive(action_name: str | None = None):
         return jsonify(_chat_message("Invalid request.")), 400
 
     event = _normalize(payload, action_name)
-    event_type = "google.workspace.chat.card.v1.clicked" if action_name else "google.workspace.chat.event.v1.received"
+    # Prefer path action_name; else promote body fields filled by _normalize.
+    effective_action = action_name
+    if not effective_action:
+        common = event.get("common") if isinstance(event.get("common"), dict) else {}
+        effective_action = common.get("invokedFunction") or None
+    body_type = str(payload.get("type") or payload.get("eventType") or "").upper()
+    is_card = bool(effective_action) or body_type == "CARD_CLICKED"
+    if is_card and not event.get("type"):
+        event["type"] = "CARD_CLICKED"
+    event_type = (
+        "google.workspace.chat.card.v1.clicked"
+        if is_card
+        else "google.workspace.chat.event.v1.received"
+    )
     try:
         _publish(event, event_type)
     except Exception:
@@ -111,14 +131,14 @@ def receive(action_name: str | None = None):
 
     logger.info(
         "Forwarded Google Chat event action=%s style=%s event_type=%s keys=%s",
-        action_name or "message",
+        effective_action or "message",
         _event_style(payload),
         payload.get("type") or payload.get("eventType") or "none",
         ",".join(sorted(payload.keys())),
     )
 
-    # Hermes posts the durable status/card asynchronously. Google recommends an
-    # empty synchronous response for this pattern; returning a Message or an
-    # add-on action here can make Chat display "app not responding" when the
-    # configured interaction format differs from the response envelope.
-    return jsonify({})
+    # Hermes posts the durable status/card asynchronously. Google Chat expects
+    # a truly empty HTTP body (not JSON `{}`) when acknowledging without a
+    # synchronous Message; `{}` is a common cause of the red
+    # "Robie is unable to process your request" toast.
+    return ("", 200)
