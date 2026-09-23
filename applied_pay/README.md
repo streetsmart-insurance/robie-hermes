@@ -13,7 +13,7 @@ Nothing here posts, edits or logs in anywhere. It turns snapshots into a report 
 - qbo_snapshot.py  live read-only QBO side (receipt/-R JEs with cash-side account; 3021 deposits + which JEs they group).
   Fee/payable "applications" off Unapplied Cash are excluded. v87 token (reconnected 9/23).
 - run_live_test.py  live pull + live QBO -> matcher, and checks every proposed deposit against the posted deposit.
-  9/23 result: 9 of 9 proposed deposits identical to what accounting posted; 3 stops (9/01 Segura no source JE, 9/10+9/14 pair).
+  9/23 result: 9 of 9 proposed deposits identical to what accounting posted; 3 stops (9/01 chargeback with no source JE, 9/10+9/14 pair).
 
 ## Email source (preferred, from 9/23)
 Applied emails "Batch Settlement Details for Primary Account Reconciled on <date>" (noreply_pay@mail.myappliedproducts.com) to Accounting@ each business morning ~7:50 ET. email_parse.parse(body_text, date_header, xlsx_path) -> same payout dict as portal_live_parse. Transfer ID + Total Deposit from body; lines from Transactions + Returns sheets; payout_date = email arrival date (ET). Verified 14/14 identical to the live portal pull for Sept (run_email_test.py: 9/9 proposed deposits identical to posted).
@@ -30,5 +30,5 @@ qbo_production_client_id / qbo_production_client_secret / qbo_production_refresh
 No cron or service is installed on the box; nothing here runs unless invoked.
 
 ## Data in this directory
-fixtures/snapshot_sept.json holds real September 2026 payout + ledger data (customer names, amounts)
-needed by tests/test_known_good.py. Raw portal dumps, live QBO snapshots and reports are NOT committed.
+fixtures/snapshot_sept.json is SCRUBBED September 2026 data: customer/payer names and PSP refs are consistent fakes;
+amounts, dates, receipt numbers and structure are real so tests/test_known_good.py exercises the same matches. Raw portal dumps, live QBO snapshots and reports are NOT committed.
