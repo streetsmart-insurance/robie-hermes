@@ -448,3 +448,84 @@ def test_adapter_surfaced_clicker_resolves(db):
     assert result.status == "REJECTED"
     assert result.decided is True
     assert confirmations.get(cid, store=store)["status"] == "REJECTED"
+
+
+def _load_card_event_payload():
+    """Load the adapter's real ``_card_event_payload`` in isolation.
+
+    The adapter module has heavy gateway imports; this function is pure
+    (typing only), so exec its actual source from the repo tree. This
+    tests the shipped code, not a copy.
+    """
+    import ast
+    from pathlib import Path
+
+    adapter_path = Path(__file__).resolve().parent.parent / "integrations/google_chat/adapter.py"
+    tree = ast.parse(adapter_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_card_event_payload":
+            ns = {"Dict": dict, "Any": object, "Optional": __import__("typing").Optional}
+            exec(compile(ast.Module(body=[node], type_ignores=[]), str(adapter_path), "exec"), ns)
+            return ns["_card_event_payload"]
+    raise AssertionError("_card_event_payload not found in adapter")
+
+
+def test_card_event_payload_surfaces_chat_user_as_clicker():
+    """Direct adapter regression (live 2026-09-23): a Workspace Add-ons
+    CARD_CLICKED envelope carries the true clicking human at ``chat.user``.
+    ``commonEventObject`` has no user for this app, and the envelope's
+    top-level ``user`` is the message sender (the bot that posted the card).
+    ``_card_event_payload()`` must surface the human clicker as the
+    normalized payload's ``user`` so actor extraction authorizes the right
+    person instead of the bot.
+    """
+    _card_event_payload = _load_card_event_payload()
+    envelope = {
+        # Workspace Add-ons style: clicker lives under chat.user
+        "chat": {
+            "user": {
+                "displayName": "Carlo Ferrara",
+                "email": "carlo@streetsmart.insurance",
+                "type": "HUMAN",
+            },
+            "buttonClickedPayload": {
+                "action": {"actionMethodName": "robie_confirmation_decision"},
+            },
+        },
+        # No user here for this app (live shape)
+        "commonEventObject": {
+            "invokedFunction": "robie_confirmation_decision",
+            "parameters": {"decision_token": "rbd1.test"},
+        },
+        "common": {},
+        # Message sender: the bot, NOT the clicker
+        "user": {"name": "users/112266247562475398062", "type": "BOT"},
+    }
+    payload = _card_event_payload(envelope)
+    assert payload is not None
+    assert payload["user"]["email"] == "carlo@streetsmart.insurance"
+    assert payload["user"]["type"] == "HUMAN"
+    # The bot sender must not shadow the human clicker.
+    assert payload["user"]["type"] != "BOT"
+
+
+def test_card_event_payload_ignores_non_human_chat_user():
+    """A non-HUMAN chat.user (e.g. BOT) must not replace the payload user."""
+    _card_event_payload = _load_card_event_payload()
+    envelope = {
+        "chat": {
+            "user": {"type": "BOT", "name": "users/112266247562475398062"},
+            "buttonClickedPayload": {
+                "action": {"actionMethodName": "robie_confirmation_decision"},
+            },
+        },
+        "commonEventObject": {
+            "invokedFunction": "robie_confirmation_decision",
+            "parameters": {},
+        },
+        "common": {},
+        "user": {"email": "carlo@streetsmart.insurance", "type": "HUMAN"},
+    }
+    payload = _card_event_payload(envelope)
+    assert payload is not None
+    assert payload["user"]["email"] == "carlo@streetsmart.insurance"
