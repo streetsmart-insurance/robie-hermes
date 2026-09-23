@@ -1,0 +1,1147 @@
+{
+ "cutoff": "2026-09-18",
+ "payouts": [
+  {
+   "payout_date": "2026-09-01",
+   "ref": "38EF106C762KR7K9",
+   "net": "565.50",
+   "portal_conv_total": "121.80",
+   "portal_line_count": 8,
+   "portal_net_of_lines": "565.50",
+   "lines": [
+    {
+     "txn_date": "2026-08-31",
+     "type": "ach_chargeback",
+     "amount": "-2800.0",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "CC8X2F2BM8RRCGF3",
+     "payer": "Luis Segura",
+     "business": "Segura and Son Transportation LLP",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-29",
+     "type": "sale",
+     "amount": "500.0",
+     "conv_fee": "17.5",
+     "method": "card",
+     "psp_ref": "BCMTRN74TFSGGTQ9",
+     "payer": "Kristian Gomez",
+     "business": "Kristian Tree Service and Landscaping LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-29",
+     "type": "sale",
+     "amount": "300.0",
+     "conv_fee": "10.5",
+     "method": "card",
+     "psp_ref": "SJGKNZ5XXGFTFZF3",
+     "payer": "Said Mirvositov",
+     "business": "EGLOO TRUCKING INC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-29",
+     "type": "sale",
+     "amount": "200.0",
+     "conv_fee": "7.0",
+     "method": "card",
+     "psp_ref": "TSWGQN9MLPZQRXF3",
+     "payer": "Carlos Wilson Marinho De Moraes Santiago",
+     "business": "CWM Standard Services LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-29",
+     "type": "sale",
+     "amount": "320.0",
+     "conv_fee": "11.2",
+     "method": "applepay",
+     "psp_ref": "T2KGGMNR9C7M87G3",
+     "payer": "Paul Juska",
+     "business": null,
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-29",
+     "type": "sale",
+     "amount": "1638.0",
+     "conv_fee": "57.33",
+     "method": "card",
+     "psp_ref": "WVRJRH9QCPQXV7F3",
+     "payer": "Joseph Hadley",
+     "business": "CARRY YOUR BURDEN LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-29",
+     "type": "sale",
+     "amount": "400.0",
+     "conv_fee": "14.0",
+     "method": "card",
+     "psp_ref": "QLST48NFXHLL8LD3",
+     "payer": "Boubacar Ide",
+     "business": "ANSAR VOYAGE LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-28",
+     "type": "sale",
+     "amount": "7.5",
+     "conv_fee": "0.27",
+     "method": "card",
+     "psp_ref": "PL2BQKNXT66LHWF3",
+     "payer": "Basit Naeem",
+     "business": "MYNZA LOGISTICS LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-02",
+   "ref": "38EABS6C7KD0BO5W",
+   "net": "1635.02",
+   "portal_conv_total": "64.23",
+   "portal_line_count": 2,
+   "portal_net_of_lines": "1635.02",
+   "lines": [
+    {
+     "txn_date": "2026-09-01",
+     "type": "sale",
+     "amount": "1735.02",
+     "conv_fee": "60.73",
+     "method": "applepay",
+     "psp_ref": "DSVRS28V9C7M87G3",
+     "payer": "Dwayne Farrell",
+     "business": "ODELL LOGISTICS LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-08-31",
+     "type": "refund",
+     "amount": "-100.0",
+     "conv_fee": "3.5",
+     "method": "card",
+     "psp_ref": "BF65QXRMCPQXV7F3",
+     "payer": "Pasquale Dispigna",
+     "business": "Pasquale Dispigna",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-03",
+   "ref": "38EBWI6C7YNDVRA6",
+   "net": "6.00",
+   "portal_conv_total": "0.21",
+   "portal_line_count": 1,
+   "portal_net_of_lines": "6.00",
+   "lines": [
+    {
+     "txn_date": "2026-09-02",
+     "type": "sale",
+     "amount": "6.0",
+     "conv_fee": "0.21",
+     "method": "googlepay",
+     "psp_ref": "CSSVLCCW9C7M87G3",
+     "payer": "Brandon Sinclair",
+     "business": "READY 2 ROLL MOVING LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-04",
+   "ref": "38EBWI6C8CXSI5GR",
+   "net": "1518.00",
+   "portal_conv_total": "4.42",
+   "portal_line_count": 2,
+   "portal_net_of_lines": "1518.00",
+   "lines": [
+    {
+     "txn_date": "2026-09-03",
+     "type": "sale",
+     "amount": "1506.0",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "RF8G5HRMG4ZJHWF3",
+     "payer": "Nicole Hornacek",
+     "business": "Accurate Leak LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-03",
+     "type": "sale",
+     "amount": "12.0",
+     "conv_fee": "0.42",
+     "method": "applepay",
+     "psp_ref": "F7CRQGZ5V66LHWF3",
+     "payer": "Luis Segura",
+     "business": "Segura and Son Transportation LLP",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-07",
+   "ref": "38E9MW6C9JT158XD",
+   "net": "931.75",
+   "portal_conv_total": "10.18",
+   "portal_line_count": 6,
+   "portal_net_of_lines": "931.75",
+   "lines": [
+    {
+     "txn_date": "2026-09-04",
+     "type": "sale",
+     "amount": "500.0",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "TW8STPCWF82VXLG6",
+     "payer": "Francisco Aguilar",
+     "business": "Jaguar Tree Service LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-04",
+     "type": "sale",
+     "amount": "11.0",
+     "conv_fee": "0.39",
+     "method": "googlepay",
+     "psp_ref": "TKBMK8XFSVGMXZF6",
+     "payer": "Luis Marquez Avila",
+     "business": "M&A Trucking & Logistics LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-04",
+     "type": "sale",
+     "amount": "5.0",
+     "conv_fee": "0.18",
+     "method": "googlepay",
+     "psp_ref": "NJBXRL46DRJW44G6",
+     "payer": "Brandon Sinclair",
+     "business": "READY 2 ROLL MOVING LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-04",
+     "type": "sale",
+     "amount": "16.0",
+     "conv_fee": "0.56",
+     "method": "card",
+     "psp_ref": "FVWC3RWFSVGMXZF6",
+     "payer": "Wayne Bell",
+     "business": "CAB TRUCKING LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-04",
+     "type": "sale",
+     "amount": "369.75",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "RGS2XNT5Z57H23H6",
+     "payer": "Sebastian Tabares",
+     "business": "Unwind Moving LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-04",
+     "type": "sale",
+     "amount": "30.0",
+     "conv_fee": "1.05",
+     "method": "card",
+     "psp_ref": "DZQK3TW2MRRPZSG6",
+     "payer": "FRIEDERICH Lopez",
+     "business": "Lopez Lopez Transportation LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-08",
+   "ref": "38E9MW6C9Y3ENBLO",
+   "net": "789.49",
+   "portal_conv_total": "23.75",
+   "portal_line_count": 3,
+   "portal_net_of_lines": "789.49",
+   "lines": [
+    {
+     "txn_date": "2026-09-05",
+     "type": "sale",
+     "amount": "450.0",
+     "conv_fee": "15.75",
+     "method": "card",
+     "psp_ref": "CCT6B2ZVHFQHTVF3",
+     "payer": "Peterson Altidort",
+     "business": "ALTI TRANSPORT LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-05",
+     "type": "sale",
+     "amount": "149.49",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "GMWV8ZW8D9KVGSG3",
+     "payer": "Marianne Frank",
+     "business": "DJ Movers LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-05",
+     "type": "sale",
+     "amount": "190.0",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "NZ56WGPLM8RRCGF3",
+     "payer": "Marianne Frank",
+     "business": "DJ Movers LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-10",
+   "ref": "38EBVI6CAQO7BBDU",
+   "net": "566.18",
+   "portal_conv_total": "55.25",
+   "portal_line_count": 5,
+   "portal_net_of_lines": "1010.51",
+   "lines": [
+    {
+     "txn_date": "2026-09-09",
+     "type": "sale",
+     "amount": "400.0",
+     "conv_fee": "14.0",
+     "method": "card",
+     "psp_ref": "MHGQC4MRG2HNKFZ3",
+     "payer": "Josef Dumuir",
+     "business": "J Swat Contracting LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-09",
+     "type": "sale",
+     "amount": "500.0",
+     "conv_fee": "17.5",
+     "method": "card",
+     "psp_ref": "CNVWGB6978CVZ7R9",
+     "payer": "Edgar Gonzalez",
+     "business": "EG Smart Home LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-09",
+     "type": "sale",
+     "amount": "450.0",
+     "conv_fee": "15.75",
+     "method": "card",
+     "psp_ref": "JNSJPF7ZL7ZD3FG3",
+     "payer": "Hussein Aden",
+     "business": "HSA SERVICE LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-08",
+     "type": "ach_chargeback",
+     "amount": "-190.0",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "NZ56WGPLM8RRCGF3",
+     "payer": "Marianne Frank",
+     "business": "DJ Movers LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-08",
+     "type": "ach_chargeback",
+     "amount": "-149.49",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "GMWV8ZW8D9KVGSG3",
+     "payer": "Marianne Frank",
+     "business": "DJ Movers LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-14",
+   "ref": "38E9LL6CCBTT9MIA",
+   "net": "12.00",
+   "portal_conv_total": "16.37",
+   "portal_line_count": 3,
+   "portal_net_of_lines": "-432.33",
+   "lines": [
+    {
+     "txn_date": "2026-09-11",
+     "type": "sale",
+     "amount": "12.0",
+     "conv_fee": "0.42",
+     "method": "applepay",
+     "psp_ref": "XW6SNDHNRGQCXDF6",
+     "payer": "Cecil Barrett",
+     "business": "JUSTICE 5 LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-10",
+     "type": "sale",
+     "amount": "5.67",
+     "conv_fee": "0.2",
+     "method": "applepay",
+     "psp_ref": "PB9Z74NB2F5RP2H3",
+     "payer": "Dwayne Farrell",
+     "business": "ODELL LOGISTICS LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-09",
+     "type": "refund",
+     "amount": "-450.0",
+     "conv_fee": "15.75",
+     "method": "card",
+     "psp_ref": "JNSJPF7ZL7ZD3FG3",
+     "payer": "Hussein Aden",
+     "business": "HSA SERVICE LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-15",
+   "ref": "38EEZC6CCQ48X6VI",
+   "net": "500.00",
+   "portal_conv_total": "17.50",
+   "portal_line_count": 1,
+   "portal_net_of_lines": "500.00",
+   "lines": [
+    {
+     "txn_date": "2026-09-12",
+     "type": "sale",
+     "amount": "500.0",
+     "conv_fee": "17.5",
+     "method": "card",
+     "psp_ref": "C4KCZJPT3BR3KTG3",
+     "payer": "Airis Bontempo",
+     "business": "Crystal Wood Floors LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-16",
+   "ref": "38EEZC6CD4EQCUCN",
+   "net": "904.00",
+   "portal_conv_total": "54.04",
+   "portal_line_count": 5,
+   "portal_net_of_lines": "904.00",
+   "lines": [
+    {
+     "txn_date": "2026-09-15",
+     "type": "sale",
+     "amount": "200.0",
+     "conv_fee": "7.0",
+     "method": "card",
+     "psp_ref": "W4K6JVQ6M7ZD3FG3",
+     "payer": "Mununga Kipata",
+     "business": "Ohana 6 Limited Company LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-15",
+     "type": "sale",
+     "amount": "50.0",
+     "conv_fee": "1.75",
+     "method": "card",
+     "psp_ref": "FSHSQVM7ZHWZL8Z3",
+     "payer": "Michael Caruso",
+     "business": null,
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-15",
+     "type": "sale",
+     "amount": "724.0",
+     "conv_fee": "25.34",
+     "method": "card",
+     "psp_ref": "SDFP76VXZFBJJMF3",
+     "payer": "Ashley Davidson",
+     "business": "My Little School Inc.",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-15",
+     "type": "sale",
+     "amount": "250.0",
+     "conv_fee": "8.75",
+     "method": "card",
+     "psp_ref": "ZX8PLRPJT8GN7VD3",
+     "payer": "Peter Lagatta",
+     "business": "AIMEE DELIVERY INC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-14",
+     "type": "refund",
+     "amount": "-320.0",
+     "conv_fee": "11.2",
+     "method": "applepay",
+     "psp_ref": "T2KGGMNR9C7M87G3",
+     "payer": "Paul Juska",
+     "business": null,
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-17",
+   "ref": "38EC0I6CDIP1AYE2",
+   "net": "250.00",
+   "portal_conv_total": "8.75",
+   "portal_line_count": 1,
+   "portal_net_of_lines": "250.00",
+   "lines": [
+    {
+     "txn_date": "2026-09-16",
+     "type": "sale",
+     "amount": "250.0",
+     "conv_fee": "8.75",
+     "method": "card",
+     "psp_ref": "H3D28FSH3CVDG7H3",
+     "payer": "Ana Buruca",
+     "business": "JOSE EFRAIN FLORES QUINONES DBA F & Q TRANSPORT",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-18",
+   "ref": "38E9MG6CDWZFCWFJ",
+   "net": "822.39",
+   "portal_conv_total": "17.81",
+   "portal_line_count": 3,
+   "portal_net_of_lines": "822.39",
+   "lines": [
+    {
+     "txn_date": "2026-09-17",
+     "type": "sale",
+     "amount": "6.0",
+     "conv_fee": "0.21",
+     "method": "card",
+     "psp_ref": "RSQT2RH8M7ZD3FG3",
+     "payer": "Brandon Sinclair",
+     "business": "READY 2 ROLL MOVING LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-17",
+     "type": "sale",
+     "amount": "428.0",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "DKPP4B42N8PCG7H3",
+     "payer": "Robbin Cappadona",
+     "business": null,
+     "invoice": null,
+     "description": null,
+     "policy": null
+    },
+    {
+     "txn_date": "2026-09-17",
+     "type": "sale",
+     "amount": "388.39",
+     "conv_fee": "13.6",
+     "method": "card",
+     "psp_ref": "XNNQM6FVBS3XL9G3",
+     "payer": "Jyothi Narayanasetty",
+     "business": "AmwinTek LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-21",
+   "ref": "38EAB86CF3UO7EVW",
+   "net": "908.33",
+   "portal_conv_total": "4.00",
+   "portal_line_count": 1,
+   "portal_net_of_lines": "908.33",
+   "lines": [
+    {
+     "txn_date": "2026-09-18",
+     "type": "sale",
+     "amount": "908.33",
+     "conv_fee": "4.0",
+     "method": "ach",
+     "psp_ref": "Z6QQ86VG86HZCWG6",
+     "payer": "Salvatore Mendola",
+     "business": "Michele Construction LLC DBA Basement Waterproofing Solutions",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  },
+  {
+   "payout_date": "2026-09-22",
+   "ref": "38E9L66CFI521IBD",
+   "net": "16.00",
+   "portal_conv_total": "0.56",
+   "portal_line_count": 1,
+   "portal_net_of_lines": "16.00",
+   "lines": [
+    {
+     "txn_date": "2026-09-19",
+     "type": "sale",
+     "amount": "16.0",
+     "conv_fee": "0.56",
+     "method": "card",
+     "psp_ref": "Z8H8KXJ6ZNZ4XNP9",
+     "payer": "Michael James",
+     "business": "Iron Will Freight LLC",
+     "invoice": null,
+     "description": null,
+     "policy": null
+    }
+   ]
+  }
+ ],
+ "ledger": [
+  {
+   "receipt_no": "015082",
+   "je_id": "JE-015082",
+   "customer": "Segura and Son Transportation LLP",
+   "amount": "2800.00",
+   "date": "2026-08-25",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015081",
+   "je_id": "JE-015081",
+   "customer": "Pasquale Dispigna",
+   "amount": "100.00",
+   "date": "2026-08-25",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015081-R",
+   "je_id": "JE-015081-R",
+   "customer": "Pasquale Dispigna",
+   "amount": "100.00",
+   "date": "2026-08-31",
+   "bank_account": "Undeposited Funds",
+   "kind": "reversal",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015086",
+   "je_id": "JE-015086",
+   "customer": "Kristian Tree Service and Landscaping LLC",
+   "amount": "500.00",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015087",
+   "je_id": "JE-015087",
+   "customer": "EGLOO TRUCKING INC",
+   "amount": "300.00",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015088",
+   "je_id": "JE-015088",
+   "customer": "CWM Standard Services LLC",
+   "amount": "200.00",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015089",
+   "je_id": "JE-015089",
+   "customer": "Paul Juska",
+   "amount": "320.00",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015090",
+   "je_id": "JE-015090",
+   "customer": "CARRY YOUR BURDEN LLC",
+   "amount": "1638.00",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015091",
+   "je_id": "JE-015091",
+   "customer": "ANSAR VOYAGE LLC",
+   "amount": "400.00",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015092",
+   "je_id": "JE-015092",
+   "customer": "MYNZA LOGISTICS LLC",
+   "amount": "7.50",
+   "date": "2026-08-29",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015093",
+   "je_id": "JE-015093",
+   "customer": "ODELL LOGISTICS LLC",
+   "amount": "1735.02",
+   "date": "2026-09-01",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015094",
+   "je_id": "JE-015094",
+   "customer": "READY 2 ROLL MOVING LLC",
+   "amount": "6.00",
+   "date": "2026-09-02",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015095",
+   "je_id": "JE-015095",
+   "customer": "Segura and Son Transportation LLP",
+   "amount": "12.00",
+   "date": "2026-09-03",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015096",
+   "je_id": "JE-015096",
+   "customer": "Accurate Leak LLC",
+   "amount": "1506.00",
+   "date": "2026-09-03",
+   "bank_account": "Trust",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015098",
+   "je_id": "JE-015098",
+   "customer": "Lopez Lopez Transportation LLC",
+   "amount": "30.00",
+   "date": "2026-09-04",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015099",
+   "je_id": "JE-015099",
+   "customer": "Unwind Moving LLC",
+   "amount": "369.75",
+   "date": "2026-09-04",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015100",
+   "je_id": "JE-015100",
+   "customer": "CAB TRUCKING LLC",
+   "amount": "16.00",
+   "date": "2026-09-04",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015101",
+   "je_id": "JE-015101",
+   "customer": "READY 2 ROLL MOVING LLC",
+   "amount": "5.00",
+   "date": "2026-09-04",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015102",
+   "je_id": "JE-015102",
+   "customer": "M&A Trucking & Logistics LLC",
+   "amount": "11.00",
+   "date": "2026-09-04",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015103",
+   "je_id": "JE-015103",
+   "customer": "Jaguar Tree Service LLC",
+   "amount": "500.00",
+   "date": "2026-09-04",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015104",
+   "je_id": "JE-015104",
+   "customer": "DJ Movers LLC",
+   "amount": "190.00",
+   "date": "2026-09-05",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015105",
+   "je_id": "JE-015105",
+   "customer": "DJ Movers LLC",
+   "amount": "149.49",
+   "date": "2026-09-05",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015106",
+   "je_id": "JE-015106",
+   "customer": "Peterson Altidort",
+   "amount": "450.00",
+   "date": "2026-09-05",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015107",
+   "je_id": "JE-015107",
+   "customer": "HSA SERVICE LLC",
+   "amount": "450.00",
+   "date": "2026-09-09",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015107-R",
+   "je_id": "JE-015107-R",
+   "customer": "HSA SERVICE LLC",
+   "amount": "450.00",
+   "date": "2026-09-09",
+   "bank_account": "Undeposited Funds",
+   "kind": "reversal",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015108",
+   "je_id": "JE-015108",
+   "customer": "EG Smart Home LLC",
+   "amount": "500.00",
+   "date": "2026-09-09",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015110",
+   "je_id": "JE-015110",
+   "customer": "J Swat Contracting LLC",
+   "amount": "400.00",
+   "date": "2026-09-09",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015111",
+   "je_id": "JE-015111",
+   "customer": "ODELL LOGISTICS LLC",
+   "amount": "5.67",
+   "date": "2026-09-10",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015112",
+   "je_id": "JE-015112",
+   "customer": "JUSTICE 5 LLC",
+   "amount": "12.00",
+   "date": "2026-09-11",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015116",
+   "je_id": "JE-015116",
+   "customer": "Crystal Wood Floors LLC",
+   "amount": "500.00",
+   "date": "2026-09-11",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015119",
+   "je_id": "JE-015119",
+   "customer": "AIMEE DELIVERY INC",
+   "amount": "250.00",
+   "date": "2026-09-15",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015120",
+   "je_id": "JE-015120",
+   "customer": "My Little School Inc.",
+   "amount": "724.00",
+   "date": "2026-09-15",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015121",
+   "je_id": "JE-015121",
+   "customer": "Michael Caruso",
+   "amount": "50.00",
+   "date": "2026-09-15",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015122",
+   "je_id": "JE-015122",
+   "customer": "Mununga Kipata",
+   "amount": "200.00",
+   "date": "2026-09-15",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": true
+  },
+  {
+   "receipt_no": "015089-R",
+   "je_id": "JE-015089-R",
+   "customer": "Paul Juska",
+   "amount": "320.00",
+   "date": "2026-09-14",
+   "bank_account": "Undeposited Funds",
+   "kind": "reversal",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015125",
+   "je_id": "JE-015125",
+   "customer": "Ana Buruca",
+   "amount": "250.00",
+   "date": "2026-09-16",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015126",
+   "je_id": "JE-015126",
+   "customer": "AmwinTek LLC",
+   "amount": "388.39",
+   "date": "2026-09-17",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015127",
+   "je_id": "JE-015127",
+   "customer": "Robbin Cappadona",
+   "amount": "428.00",
+   "date": "2026-09-17",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  },
+  {
+   "receipt_no": "015136",
+   "je_id": "JE-015136",
+   "customer": "READY 2 ROLL MOVING LLC",
+   "amount": "6.00",
+   "date": "2026-09-17",
+   "bank_account": "Undeposited Funds",
+   "kind": "receipt",
+   "assumed": false
+  }
+ ],
+ "bank_deposits": [
+  {
+   "id": "W00",
+   "date": "2026-09-01",
+   "amount": "565.50"
+  },
+  {
+   "id": "W01",
+   "date": "2026-09-02",
+   "amount": "1635.02"
+  },
+  {
+   "id": "W02",
+   "date": "2026-09-03",
+   "amount": "6.00"
+  },
+  {
+   "id": "W03",
+   "date": "2026-09-04",
+   "amount": "1518.00"
+  },
+  {
+   "id": "W04",
+   "date": "2026-09-08",
+   "amount": "931.75"
+  },
+  {
+   "id": "W05",
+   "date": "2026-09-08",
+   "amount": "789.49"
+  },
+  {
+   "id": "W06",
+   "date": "2026-09-10",
+   "amount": "566.18"
+  },
+  {
+   "id": "W07",
+   "date": "2026-09-14",
+   "amount": "12.00"
+  },
+  {
+   "id": "W08",
+   "date": "2026-09-15",
+   "amount": "500.00"
+  },
+  {
+   "id": "W09",
+   "date": "2026-09-16",
+   "amount": "904.00"
+  },
+  {
+   "id": "W10",
+   "date": "2026-09-17",
+   "amount": "250.00",
+   "feed_suggested_match": "QBO JE dated 07/13 (wrong)"
+  },
+  {
+   "id": "W11",
+   "date": "2026-09-18",
+   "amount": "822.39"
+  }
+ ],
+ "aliases": {}
+}
