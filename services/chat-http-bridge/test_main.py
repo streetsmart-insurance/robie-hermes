@@ -10,6 +10,15 @@ with patch("google.cloud.pubsub_v1.PublisherClient"):
 
 
 class BridgeTests(unittest.TestCase):
+    def assert_empty_json_ack(self, response):
+        """Interactive ack: empty body, application/json, not HTML and not `{}`."""
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_data(), b"")
+        self.assertEqual(response.mimetype, "application/json")
+        self.assertNotIn("text/html", response.content_type or "")
+        self.assertNotEqual((response.get_data(as_text=True) or "").strip(), "{}")
+        self.assertIsNone(response.get_json(silent=True))
+
     def test_addon_message_payload_is_normalized_for_legacy_hermes(self):
         payload = {
             "authorizationEventObject": {"userOAuthToken": "redacted-test-token"},
@@ -37,8 +46,7 @@ class BridgeTests(unittest.TestCase):
         with patch.object(main, "_publish") as publish:
             response = main.app.test_client().post("/", json=payload)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {})
+        self.assert_empty_json_ack(response)
         event, event_type = publish.call_args.args
         self.assertEqual(event_type, "google.workspace.chat.event.v1.received")
         self.assertEqual(event["type"], "MESSAGE")
@@ -82,8 +90,7 @@ class BridgeTests(unittest.TestCase):
             response = main.app.test_client().post(
                 "/actions/robie_decision", json=payload
             )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {})
+        self.assert_empty_json_ack(response)
         event = publish.call_args.args[0]
         self.assertEqual(event["common"]["invokedFunction"], "robie_decision")
         self.assertEqual(event["common"]["parameters"]["decision_id"], "d1")
@@ -93,8 +100,7 @@ class BridgeTests(unittest.TestCase):
         payload = {"type": "MESSAGE", "message": {"name": "m1"}}
         with patch.object(main, "_publish") as publish:
             response = main.app.test_client().post("/", json=payload)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {})
+        self.assert_empty_json_ack(response)
         self.assertEqual(publish.call_args.args[0], payload)
 
     def test_event_style_does_not_inspect_message_contents(self):

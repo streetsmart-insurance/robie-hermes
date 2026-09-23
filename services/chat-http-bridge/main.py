@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from google.cloud import pubsub_v1
 
 
@@ -138,7 +138,8 @@ def receive(action_name: str | None = None):
     )
 
     # Hermes posts the durable status/card asynchronously. Google Chat expects
-    # a truly empty HTTP body (not JSON `{}`) when acknowledging without a
-    # synchronous Message; `{}` is a common cause of the red
+    # an empty HTTP body with Content-Type application/json when acknowledging
+    # without a synchronous Message. Flask's `("", 200)` defaults to
+    # text/html, and `jsonify({})` sends `{}`; both surface as the red
     # "Robie is unable to process your request" toast.
-    return ("", 200)
+    return Response(b"", status=200, content_type="application/json")
