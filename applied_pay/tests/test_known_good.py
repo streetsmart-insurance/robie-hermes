@@ -13,8 +13,8 @@ EXPECT_READY = {   # payout ref -> receipts grouped in the posted deposit
  "38EC0I6CDIP1AYE2": {"015125"},       # waiting: bank-feed 07/13 suggestion must not be accepted
 }
 EXPECT_STOP = {  # payouts the hand-match needed a person for
- "38EF106C762KR7K9": "no source JE",   # Segura -2800 chargeback -> Carlo approved Unapplied Cash line
- "38EBWI6C8CXSI5GR": "legacy Trust",   # Accurate Leak 015096 JE 74687 still on legacy Trust (open item)
+ "38EF106C762KR7K9": "no source JE",   # -2800 chargeback with no source JE -> approved Unapplied Cash line
+ "38EBWI6C8CXSI5GR": "legacy Trust",   # receipt 015096 still on legacy Trust (open item)
  "38EBVI6CAQO7BBDU": "group",          # 9/10 + 9/14 tie only as a pair
  "38E9LL6CCBTT9MIA": "group",
 }
@@ -33,7 +33,7 @@ def test():
     for ref in ("38EAB86CF3UO7EVW", "38E9L66CFI521IBD"):
         if fs[ref].bucket != "past_cutoff": bad.append(f"{ref}: expected past_cutoff")
     split = [r for r in fs["38EBVI6CAQO7BBDU"].reasons if r.startswith("suggested split")]
-    want_split = {"J Swat Contracting LLC 400.00", "EG Smart Home LLC 500.00", "DJ Movers LLC -190.00", "DJ Movers LLC -149.49", "ODELL LOGISTICS LLC 5.67"}
+    want_split = {"J Sabrita Mirator LLC 400.00", "Bripeldun Hatorquo Pelpeltor LLC 500.00", "Dunmarra Zelfenquo LLC -190.00", "Dunmarra Zelfenquo LLC -149.49", "Pelquodun LOGISTICS LLC 5.67"}
     if not split or {x.strip() for x in split[0].split(":",1)[1].split(";")[0].split(",")} != want_split: bad.append(f"9/10 split hint wrong: {split}")
     in_period = sum(float(f.proposed_deposit["amount"]) if f.proposed_deposit else 0 for f in fs.values())
     print("FAIL\n" + "\n".join(bad) if bad else "PASS: reproduces hand-match")
