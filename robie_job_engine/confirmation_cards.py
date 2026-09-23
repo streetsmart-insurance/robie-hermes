@@ -261,15 +261,25 @@ def _click_action(payload: Mapping[str, Any]) -> str:
 
 
 def _click_actor(payload: Mapping[str, Any]) -> str:
-    """The authenticated Chat user who clicked, lowercased email."""
+    """The authenticated Chat user who clicked, lowercased email.
+
+    The bridge normalizes Workspace Add-ons card-click envelopes so the
+    clicking user (from the add-on ``commonEventObject``) is at
+    ``common.user``; the top-level ``user`` can instead be the message sender
+    -- the bot that posted the card -- so it must not shadow the true
+    clicker. Prefer ``common.user`` first, then fall back to the native Chat
+    API top-level ``user``.
+    """
     payload = dict(payload or {})
     common = payload.get("common") or {}
     if not isinstance(common, dict):
         common = {}
-    user = payload.get("user") or common.get("user") or {}
-    if not isinstance(user, dict):
-        user = {}
-    return str(user.get("email") or user.get("name") or "").strip().lower()
+    for candidate in (common.get("user"), payload.get("user")):
+        if isinstance(candidate, dict):
+            actor = str(candidate.get("email") or candidate.get("name") or "").strip().lower()
+            if actor:
+                return actor
+    return ""
 
 
 def parse_confirmation_click(payload: Mapping[str, Any]) -> tuple[str, str]:

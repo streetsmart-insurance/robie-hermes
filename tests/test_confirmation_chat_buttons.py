@@ -390,3 +390,31 @@ def test_click_response_replaces_card():
     assert response["actionResponse"] == {"type": "UPDATE_MESSAGE"}
     assert response["text"] == "Approved."
     assert response["cardsV2"] == []
+
+
+def test_addon_clicker_not_shadowed_by_message_sender(db):
+    """Regression (live 2026-09-23): a Workspace Add-ons card click arrived
+    with the clicking user at ``common.user`` (from ``commonEventObject``)
+    while the bridge's top-level ``user`` was the message sender -- the bot
+    that posted the card. The old actor extraction preferred the top-level
+    ``user`` and refused the approver's Approve as UNAUTHORIZED ("bound to a
+    different approver"). The click must resolve against the clicker.
+    """
+    store = JobStore(db)
+    cid = _request(store)
+    token = _tokens(cid)["APPROVE"]
+    payload = {
+        "common": {
+            "invokedFunction": "robie_confirmation_decision",
+            "parameters": {"decision_token": token},
+            "user": {"email": _principal()},
+        },
+        # Bridge message-sender fallback: the bot that posted the card.
+        "user": {"name": "users/100000000000000000001", "type": "BOT"},
+    }
+    result = cards.resolve_confirmation_click(store, payload, decision_key=TEST_KEY)
+    assert result.status == "APPROVED"
+    assert result.decided is True
+    record = confirmations.get(cid, store=store)
+    assert record["status"] == "APPROVED"
+    assert record["decided_by"] == _principal()
