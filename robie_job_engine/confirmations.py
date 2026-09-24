@@ -33,6 +33,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Iterator, Mapping
 
 from .evidence import EvidenceSpan
@@ -577,16 +578,20 @@ def _parse_changes(record: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+_CARD_DISPLAY_TZ = ZoneInfo("America/New_York")
+
+
 def _friendly_datetime(value: Any) -> str:
+    """Card clock in Eastern Time. The label is ET in both EST and EDT."""
     text = str(value or "").strip()
     if not text:
         return "unknown time"
     try:
-        dt = datetime.fromisoformat(text)
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        local = dt.astimezone()
-        return local.strftime("%b %-d, %Y %-I:%M %p")
+        local = dt.astimezone(_CARD_DISPLAY_TZ)
+        return local.strftime("%b %-d, %Y %-I:%M %p") + " ET"
     except (ValueError, TypeError):
         return text
 

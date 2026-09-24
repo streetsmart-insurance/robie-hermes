@@ -46,9 +46,12 @@ an invalid click).
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
 
 from . import confirmations
 
@@ -310,6 +313,40 @@ def parse_confirmation_click(payload: Mapping[str, Any]) -> tuple[str, str]:
     return token, actor
 
 
+def _short_confirmation_ref(confirmation_id: str) -> str:
+    text = str(confirmation_id or "").strip()
+    if not text:
+        return "-"
+    return text[:8]
+
+
+def _actor_domain(actor: str) -> str:
+    """Mail domain only. The local part is not written to the log."""
+    text = str(actor or "").strip().lower()
+    if "@" not in text:
+        return "-"
+    domain = text.rsplit("@", 1)[1].strip().rstrip(".")
+    if not domain or any(ch.isspace() for ch in domain):
+        return "-"
+    return domain
+
+
+def _log_confirmation_click(
+    payload: Mapping[str, Any],
+    result: ConfirmationClickResult,
+    *,
+    decision: str,
+) -> None:
+    action = decision if decision in {"APPROVE", "REJECT"} else (_click_action(payload) or "-")
+    logger.info(
+        "confirmation_cards.click ref=%s action=%s click.status=%s actor_domain=%s",
+        _short_confirmation_ref(result.confirmation_id),
+        action,
+        result.status,
+        _actor_domain(_click_actor(payload)),
+    )
+
+
 def resolve_confirmation_click(
     store: Any,
     payload: Mapping[str, Any],
@@ -328,19 +365,25 @@ def resolve_confirmation_click(
        so a second click on an already-decided confirmation resolves to
        ALREADY_DECIDED instead of re-deciding (double-submit safe).
     """
+    decision = ""
+
+    def finish(result: ConfirmationClickResult) -> ConfirmationClickResult:
+        _log_confirmation_click(payload, result, decision=decision)
+        return result
+
     try:
         token, actor = parse_confirmation_click(payload)
     except ValueError as exc:
-        return ConfirmationClickResult(
+        return finish(ConfirmationClickResult(
             status="INVALID",
             decided=False,
             confirmation_id="",
             message=f"That approval button could not be read ({exc}). Nothing was decided.",
-        )
+        ))
     try:
         verified = confirmations.verify_decision_token(token, key=decision_key)
     except RuntimeError:
-        return ConfirmationClickResult(
+        return finish(ConfirmationClickResult(
             status="NO_KEY",
             decided=False,
             confirmation_id="",
@@ -348,27 +391,27 @@ def resolve_confirmation_click(
                 "Approvals are not configured right now (no decision signing "
                 "key). Nothing was decided."
             ),
-        )
+        ))
     except ValueError as exc:
         text = str(exc).lower()
         if "expired" in text:
-            return ConfirmationClickResult(
+            return finish(ConfirmationClickResult(
                 status="EXPIRED_TOKEN",
                 decided=False,
                 confirmation_id="",
                 message="That approval button has expired. Nothing was decided.",
-            )
-        return ConfirmationClickResult(
+            ))
+        return finish(ConfirmationClickResult(
             status="INVALID_TOKEN",
             decided=False,
             confirmation_id="",
             message="That approval button is not valid. Nothing was decided.",
-        )
+        ))
     principal = str(verified["principal"] or "").strip().lower()
     confirmation_id = str(verified["confirmation_id"] or "").strip()
     decision = str(verified["decision"] or "").strip().upper()
     if not actor or actor != principal:
-        return ConfirmationClickResult(
+        return finish(ConfirmationClickResult(
             status="UNAUTHORIZED",
             decided=False,
             confirmation_id=confirmation_id,
@@ -376,7 +419,7 @@ def resolve_confirmation_click(
                 "That approval button is bound to a different approver. "
                 "Nothing was decided."
             ),
-        )
+        ))
     try:
         if decision == "APPROVE":
             confirmations.approve(confirmation_id, decided_by=principal, store=store)
@@ -392,7 +435,7 @@ def resolve_confirmation_click(
     except ValueError as exc:
         record = confirmations.get(confirmation_id, store=store)
         if record is not None and str(record.get("status")) != "PENDING":
-            return ConfirmationClickResult(
+            return finish(ConfirmationClickResult(
                 status="ALREADY_DECIDED",
                 decided=False,
                 confirmation_id=confirmation_id,
@@ -400,26 +443,26 @@ def resolve_confirmation_click(
                     f"This request was already {str(record['status']).lower()}; "
                     "the second click changed nothing."
                 ),
-            )
-        return ConfirmationClickResult(
+            ))
+        return finish(ConfirmationClickResult(
             status="INVALID",
             decided=False,
             confirmation_id=confirmation_id,
             message=f"That approval could not be applied ({exc}). Nothing was decided.",
-        )
+        ))
     if decision == "APPROVE":
-        return ConfirmationClickResult(
+        return finish(ConfirmationClickResult(
             status="APPROVED",
             decided=True,
             confirmation_id=confirmation_id,
             message="Approved. ROBIE recorded your decision and the request is no longer pending.",
-        )
-    return ConfirmationClickResult(
+        ))
+    return finish(ConfirmationClickResult(
         status="REJECTED",
         decided=True,
         confirmation_id=confirmation_id,
         message="Rejected. ROBIE recorded your decision and stopped that request.",
-    )
+    ))
 
 
 def confirmation_click_response(result: ConfirmationClickResult) -> dict[str, Any]:

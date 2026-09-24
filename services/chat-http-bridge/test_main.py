@@ -1,6 +1,8 @@
 import copy
 import os
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-project")
@@ -216,7 +218,8 @@ class BridgeTests(unittest.TestCase):
         publish.assert_called_once()
         self.assertEqual(self.mocked_verify.call_args.args[0], "signed-token")
         self.assertEqual(
-            self.mocked_verify.call_args.args[1], main._expand_audiences([AUDIENCE])
+            self.mocked_verify.call_args.args[1],
+            main._expand_audiences(main._audiences_for_request("/actions/robie_decision")),
         )
 
     def test_unset_auth_config_fails_closed_without_verify(self):
@@ -359,6 +362,195 @@ class BridgeTests(unittest.TestCase):
             response = self._post("/", {"type": "MESSAGE"})
         self.assertEqual(response.status_code, 200)
         publish.assert_called_once()
+
+    def test_action_audience_adds_only_the_request_path(self):
+        os.environ["ROBIE_CHAT_BRIDGE_AUDIENCE"] = (
+            "https://bridge.example,1234567890,https://bridge.example/actions/already"
+        )
+        action = "/actions/robie_confirmation_decision"
+        self.assertEqual(
+            main._audiences_for_request(action),
+            [
+                "https://bridge.example",
+                "1234567890",
+                "https://bridge.example/actions/already",
+                "https://bridge.example" + action,
+            ],
+        )
+        self.assertEqual(
+            main._audiences_for_request("/"),
+            [
+                "https://bridge.example",
+                "1234567890",
+                "https://bridge.example/actions/already",
+            ],
+        )
+        self.assertNotIn(
+            "https://bridge.example/actions/robie_decision",
+            main._audiences_for_request(action),
+        )
+
+
+def _signing_material():
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "bridge-test")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1))
+        .sign(key, hashes.SHA256())
+    )
+    private_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    return private_pem, cert_pem
+
+
+class SignedClaimTests(unittest.TestCase):
+    """Auth policy against real RS256 verification, not a stubbed verifier.
+
+    Google's cert fetch is replaced with a test certificate. Signature,
+    expiry, audience, and issuer checks still run through google-auth.
+    """
+
+    ACTION = "/actions/robie_confirmation_decision"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.private_pem, cls.cert_pem = _signing_material()
+
+    def setUp(self):
+        self._env = patch.dict(
+            os.environ,
+            {
+                "ROBIE_CHAT_BRIDGE_AUDIENCE": AUDIENCE,
+                "ROBIE_CHAT_BRIDGE_SERVICE_ACCOUNT_EMAILS": f"{ADDON_SA},{CHAT_SA}",
+            },
+        )
+        self._env.start()
+        self._certs = patch(
+            "google.oauth2.id_token._fetch_certs",
+            return_value={"test-key": self.cert_pem},
+        )
+        self._certs.start()
+
+    def tearDown(self):
+        self._certs.stop()
+        self._env.stop()
+
+    def _token(self, **overrides) -> str:
+        from google.auth import jwt as google_jwt
+        from google.auth.crypt import RSASigner
+
+        moment = int(time.time())
+        payload = {
+            "iss": "https://accounts.google.com",
+            "aud": AUDIENCE + self.ACTION,
+            "azp": ADDON_SA,
+            "email": ADDON_SA,
+            "email_verified": True,
+            "sub": "112233445566778899",
+            "iat": moment,
+            "exp": moment + 3600,
+        }
+        payload.update(overrides)
+        signer = RSASigner.from_string(self.private_pem, key_id="test-key")
+        return google_jwt.encode(signer, payload).decode("ascii")
+
+    def _post(self, token, path=None):
+        return main.app.test_client().post(
+            path or self.ACTION,
+            json={
+                "chat": {
+                    "buttonClickedPayload": {
+                        "space": {"name": "spaces/1"},
+                        "message": {"name": "spaces/1/messages/1"},
+                    }
+                }
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def test_addon_click_with_full_action_url_aud_is_accepted(self):
+        token = self._token()
+        with patch.object(main, "_publish") as publish:
+            response = self._post(token)
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        message = body["hostAppDataAction"]["chatDataAction"]["updateMessageAction"]["message"]
+        self.assertEqual(message["cardsV2"][0]["cardId"], "robie-processing")
+        publish.assert_called_once()
+        self.assertNotIn(token, response.get_data(as_text=True))
+
+    def test_explicit_full_action_url_in_env_is_accepted(self):
+        full = AUDIENCE + self.ACTION
+        os.environ["ROBIE_CHAT_BRIDGE_AUDIENCE"] = full
+        token = self._token(aud=full)
+        with patch.object(main, "_publish") as publish:
+            response = self._post(token)
+        self.assertEqual(response.status_code, 200)
+        publish.assert_called_once()
+
+    def test_wrong_aud_is_rejected_and_logged_without_the_token(self):
+        token = self._token(aud="https://evil.example/actions/robie_confirmation_decision")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post(token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        logged = "\n".join(logs.output)
+        self.assertIn("reason=audience_mismatch", logged)
+        self.assertIn("aud=https://evil.example/actions/robie_confirmation_decision", logged)
+        self.assertIn("iss=https://accounts.google.com", logged)
+        self.assertIn(f"email={ADDON_SA}", logged)
+        self.assertNotIn(token, logged)
+        self.assertNotIn(token, response.get_data(as_text=True))
+
+    def test_different_action_path_is_rejected(self):
+        token = self._token(aud=AUDIENCE + "/actions/robie_decision")
+        with patch.object(main, "_publish") as publish:
+            response = self._post(token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+
+    def test_wrong_issuer_is_rejected(self):
+        token = self._token(iss="https://evil.example")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post(token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        logged = "\n".join(logs.output)
+        self.assertIn("reason=issuer_unexpected", logged)
+        self.assertIn("iss=https://evil.example", logged)
+        self.assertNotIn(token, logged)
+
+    def test_email_not_on_allowlist_is_rejected(self):
+        intruder = "intruder@example.gserviceaccount.com"
+        token = self._token(email=intruder, azp=intruder)
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post(token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        logged = "\n".join(logs.output)
+        self.assertIn("reason=unexpected_bearer_identity", logged)
+        self.assertIn(f"email={intruder}", logged)
+        self.assertIn("aud=" + AUDIENCE + self.ACTION, logged)
+        self.assertNotIn(token, logged)
 
 
 if __name__ == "__main__":

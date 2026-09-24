@@ -369,6 +369,16 @@ def test_confirmation_summary_pending(store):
     assert "HITL" not in line and "draft_to_locked" not in line
 
 
+def test_card_timestamp_is_eastern_with_et_label():
+    # 2026-09-24 23:04 UTC is 7:04 PM in America/New_York (EDT, labeled ET).
+    assert confirmations._friendly_datetime("2026-09-24T23:04:00+00:00") == (
+        "Sep 24, 2026 7:04 PM ET"
+    )
+    assert confirmations._friendly_datetime("2026-01-15T16:04:00Z") == (
+        "Jan 15, 2026 11:04 AM ET"
+    )
+
+
 def test_confirmation_summary_approved_and_rejected(store):
     cid = _request(store)
     approve(cid, "Carlo Ferrara", store=store)

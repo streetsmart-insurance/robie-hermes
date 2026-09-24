@@ -6,14 +6,18 @@ configured HTTP endpoint URL; ``email`` is the add-on service account)
 and the Chat HTTP check (``chat@system.gserviceaccount.com``, either an
 ID token for the endpoint URL or a project-number JWT signed with that
 issuer's certs). Tokens are never logged. Rejections log a stable reason
-code plus non-secret diagnostics (aud/iss); the raw token is never logged.
+code plus the unverified aud, iss, and email. The raw token is never logged.
 
 Required environment variables (fail closed when either is unset):
 
 - ``ROBIE_CHAT_BRIDGE_AUDIENCE`` — comma-separated accepted ``aud`` values.
-  Use the exact HTTPS URL Google calls for Add-ons and for Chat apps whose
-  authentication audience is "HTTP endpoint URL". Add the Cloud project
-  number as well when Chat is configured for a project-number audience.
+  Use each HTTPS origin of this service (no path) for Add-ons and for Chat
+  apps whose authentication audience is "HTTP endpoint URL". On
+  ``/actions/<name>`` the bridge also accepts that origin plus the request
+  path: Workspace Add-on button clicks set ``aud`` to the full action URL
+  Google called (live Test, 2026-09-24). Entries already in this list are
+  accepted as written, including a Cloud project number for Chat
+  project-number tokens. No other audience is accepted.
 - ``ROBIE_CHAT_BRIDGE_SERVICE_ACCOUNT_EMAILS`` — comma-separated allowed
   token identities. Include the add-on service account shown on the Chat
   API configuration page and, when standard Chat events can also hit this
@@ -33,6 +37,7 @@ import os
 import re
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from flask import Flask, jsonify, request
 from google.cloud import pubsub_v1
@@ -61,14 +66,40 @@ _CHAT_CERTS_URL = (
 class _BearerAuthError(Exception):
     """Fail-closed auth result. ``reason`` is a stable code, never a token.
 
-    ``detail`` carries non-secret diagnostic values (aud/iss). It is logged
-    for operators but never returned to the caller.
+    ``detail`` is an optional non-secret diagnostic (for example ``exp=``).
+    ``aud``, ``iss``, and ``email`` are the unverified claims for the log
+    line. None of these fields is returned to the caller, and the raw token
+    is never stored here.
     """
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    def __init__(
+        self,
+        reason: str,
+        detail: str = "",
+        *,
+        aud: str = "",
+        iss: str = "",
+        email: str = "",
+    ) -> None:
         self.reason = reason
         self.detail = detail
+        self.aud = aud
+        self.iss = iss
+        self.email = email
         super().__init__(reason)
+
+
+_ACTION_PATH_RE = re.compile(r"^/actions/[A-Za-z0-9_-]{1,80}$")
+
+
+def _log_claim(value: Any) -> str:
+    """One log field. Newlines stripped so a claim cannot forge extra lines."""
+    if isinstance(value, list):
+        text = ",".join(str(item) for item in value)
+    else:
+        text = str(value or "")
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    return text[:300] or "-"
 
 
 def _csv_env(name: str) -> list[str]:
@@ -81,6 +112,73 @@ def _expected_audiences() -> list[str]:
 
 def _expected_service_accounts() -> set[str]:
     return {item.lower() for item in _csv_env("ROBIE_CHAT_BRIDGE_SERVICE_ACCOUNT_EMAILS")}
+
+
+def _configured_origin(value: str) -> str | None:
+    """Return ``scheme://host[:port]`` when ``value`` is an origin only.
+
+    A value that already carries a path, query, userinfo, or fragment stays
+    an explicit audience and is not used as a base to append ``/actions``.
+    """
+    parts = urlsplit(value.strip())
+    if parts.scheme not in {"https", "http"} or not parts.hostname:
+        return None
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return None
+    if parts.path not in {"", "/"}:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
+def _audiences_for_request(request_path: str) -> list[str]:
+    """Configured audiences, plus origin + path for ``/actions/<name>``.
+
+    The explicit env list is always accepted. For an action route, each
+    configured origin also accepts that origin joined with the request path
+    and nothing else — not a different path, not a longer host, not a query.
+    """
+    configured = _expected_audiences()
+    allowed: list[str] = []
+    seen: set[str] = set()
+    for item in configured:
+        if item not in seen:
+            allowed.append(item)
+            seen.add(item)
+    if not _ACTION_PATH_RE.fullmatch(request_path or ""):
+        return allowed
+    for item in configured:
+        origin = _configured_origin(item)
+        if origin is None:
+            continue
+        candidate = origin + request_path
+        if candidate not in seen:
+            allowed.append(candidate)
+            seen.add(candidate)
+    return allowed
+
+
+def _unverified_identity(token: str) -> tuple[str, str, str]:
+    """Read aud, iss, and email without checking the signature.
+
+    Used only for rejection logs. The token itself is never returned.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3 or not parts[1]:
+            return ("", "", "")
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        claims = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return ("", "", "")
+    if not isinstance(claims, dict):
+        return ("", "", "")
+    aud = claims.get("aud")
+    if isinstance(aud, list):
+        aud_text = ",".join(str(item) for item in aud)
+    else:
+        aud_text = str(aud or "")
+    return (aud_text, str(claims.get("iss") or ""), str(claims.get("email") or ""))
 
 
 def _verify_google_id_token(
@@ -250,21 +348,36 @@ def _claims_from_google(
     raise _diagnose_rejection(token, audiences)
 
 
-def _authenticate_bearer(header: str | None) -> None:
-    """Reject the POST unless the Bearer JWT is signed for this bridge.
-
-    Unset audience or service-account allowlist fails closed. Any
-    ``run.invoker`` principal that is not an expected Chat or Add-on
-    identity is rejected the same way.
-    """
-    token = _extract_bearer(header)
-    audiences = _expected_audiences()
+def _check_bearer(token: str, request_path: str) -> None:
+    audiences = _audiences_for_request(request_path)
     expected_emails = _expected_service_accounts()
     if not audiences or not expected_emails:
         raise _BearerAuthError("auth_not_configured")
     claims = _claims_from_google(token, audiences, expected_emails)
     if not _audience_matches(claims, _expand_audiences(audiences)) or not _identity_matches(claims, expected_emails):
         raise _BearerAuthError("unexpected_bearer_identity")
+
+
+def _authenticate_bearer(header: str | None, *, request_path: str) -> None:
+    """Reject the POST unless the Bearer JWT is signed for this bridge.
+
+    Unset audience or service-account allowlist fails closed. Any
+    ``run.invoker`` principal that is not an expected Chat or Add-on
+    identity is rejected the same way. Rejection carries the unverified
+    aud, iss, and email for the log line; the token is not retained.
+    """
+    token = _extract_bearer(header)
+    aud, iss, email = _unverified_identity(token)
+    try:
+        _check_bearer(token, request_path)
+    except _BearerAuthError as exc:
+        raise _BearerAuthError(
+            exc.reason,
+            exc.detail,
+            aud=aud,
+            iss=iss,
+            email=email,
+        ) from None
 
 
 def _normalize(payload: dict[str, Any], action_name: str | None) -> dict[str, Any]:
@@ -382,12 +495,21 @@ def health():
 @app.post("/actions/<action_name>")
 def receive(action_name: str | None = None):
     try:
-        _authenticate_bearer(request.headers.get("Authorization"))
+        _authenticate_bearer(
+            request.headers.get("Authorization"),
+            request_path=request.path,
+        )
     except _BearerAuthError as exc:
+        # ``detail`` repeats aud/iss for some reasons. Keep it only when it
+        # adds something those three fields do not, such as exp=.
+        extra = f" {exc.detail}" if exc.detail.startswith("exp=") else ""
         logger.info(
-            "Rejected Google Chat POST reason=%s%s",
+            "Rejected Google Chat POST reason=%s aud=%s iss=%s email=%s%s",
             exc.reason,
-            f" {exc.detail}" if exc.detail else "",
+            _log_claim(exc.aud),
+            _log_claim(exc.iss),
+            _log_claim(exc.email),
+            extra,
         )
         return jsonify(_chat_message("Unauthorized.")), 401
 

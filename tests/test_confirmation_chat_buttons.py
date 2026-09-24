@@ -119,6 +119,26 @@ def test_approve_click_decides_without_sheet(db):
     assert record["decided_by"] == _principal()
 
 
+def test_click_logs_short_ref_action_outcome_and_actor_domain(db, caplog):
+    store = JobStore(db)
+    cid = _request(store)
+    principal = _principal()
+    domain = principal.split("@", 1)[1]
+    with caplog.at_level("INFO", logger="robie_job_engine.confirmation_cards"):
+        result = cards.resolve_confirmation_click(
+            store, _click(_tokens(cid)["APPROVE"]), decision_key=TEST_KEY
+        )
+    assert result.status == "APPROVED"
+    line = next(r.getMessage() for r in caplog.records if "confirmation_cards.click" in r.getMessage())
+    assert f"ref={cid[:8]}" in line
+    assert cid not in line
+    assert "action=APPROVE" in line
+    assert "click.status=APPROVED" in line
+    assert f"actor_domain={domain}" in line
+    assert principal not in line
+    assert "decision_token" not in line
+
+
 def test_reject_click_decides_without_sheet(db):
     store = JobStore(db)
     cid = _request(store)
@@ -130,13 +150,15 @@ def test_reject_click_decides_without_sheet(db):
     assert confirmations.get(cid, store=store)["status"] == "REJECTED"
 
 
-def test_bare_click_with_no_token_fails_closed(db):
+def test_bare_click_with_no_token_fails_closed(db, caplog):
     store = JobStore(db)
     cid = _request(store)
-    result = cards.resolve_confirmation_click(store, _click(None), decision_key=TEST_KEY)
+    with caplog.at_level("INFO", logger="robie_job_engine.confirmation_cards"):
+        result = cards.resolve_confirmation_click(store, _click(None), decision_key=TEST_KEY)
     assert result.status == "INVALID"
     assert result.decided is False
     assert confirmations.get(cid, store=store)["status"] == "PENDING"
+    assert any("click.status=INVALID" in r.getMessage() for r in caplog.records)
 
 
 def test_forged_token_fails_closed(db):
