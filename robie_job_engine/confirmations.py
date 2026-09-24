@@ -185,6 +185,30 @@ def verify_decision_token(
         "principal": principal,
     }
 
+
+def peek_confirmation_id(token: str) -> str:
+    """Read the confirmation id from an rbd1 token without checking the HMAC.
+
+    This is not authorization. A gateway uses it only to see whether that
+    id exists in its own database before it verifies or replies. Returns
+    "" when the token is not a readable rbd1 payload.
+    """
+    text = str(token or "").strip()
+    parts = text.split(".")
+    if len(parts) != 3 or parts[0] != DECISION_TOKEN_PREFIX:
+        return ""
+    try:
+        payload = _b64d(parts[1]).decode("utf-8")
+    except Exception:
+        return ""
+    confirmation_id = payload.split("|", 1)[0].strip()
+    if not confirmation_id or len(confirmation_id) > 200:
+        return ""
+    if any(char in confirmation_id for char in "\r\n\x00"):
+        return ""
+    return confirmation_id
+
+
 _SHEET_HEADERS = [
     "Confirmation ID",
     "Job type",

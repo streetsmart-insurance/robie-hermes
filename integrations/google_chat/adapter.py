@@ -521,6 +521,12 @@ def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
         {"key": str(key), "value": str(value)}
         for key, value in sorted(raw_params.items())
     ]
+    if not any(item["key"] == "robie_env" for item in parameters):
+        from robie_job_engine.runtime_env import chat_routing_env
+
+        env = chat_routing_env()
+        if env:
+            parameters.append({"key": "robie_env", "value": env})
     action_base = os.getenv(
         "GOOGLE_CHAT_CARD_ACTION_BASE_URL",
         "https://robie-chat-http-bridge-751771086524.us-east1.run.app",
@@ -610,6 +616,46 @@ def _card_parameters(payload: Dict[str, Any]) -> Dict[str, str]:
         if isinstance(item, dict) and item.get("key") is not None:
             result[str(item["key"])] = str(item.get("value") or "")
     return result
+
+
+def _gateway_job_db_path(adapter: Any) -> str:
+    """This gateway's job database. An instance path overrides the env."""
+    override = getattr(adapter, "_job_db_path", None)
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+    return os.getenv(
+        "ROBIE_JOB_DB",
+        "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db",
+    )
+
+
+def _confirmation_owned_by_gateway(
+    adapter: Any, parameters: Dict[str, str]
+) -> Tuple[str, bool]:
+    """Whether this gateway's own DB contains the clicked confirmation.
+
+    The id is read from the token without verifying the HMAC. A different
+    environment's signing key must not turn a foreign click into a reply.
+    A lookup failure is treated as not owned: ack, do not patch.
+    """
+    from robie_job_engine.confirmations import get as get_confirmation
+    from robie_job_engine.confirmations import peek_confirmation_id
+    from robie_job_engine.store import JobStore
+
+    confirmation_id = peek_confirmation_id(parameters.get("decision_token", ""))
+    if not confirmation_id:
+        return "", False
+    try:
+        record = get_confirmation(
+            confirmation_id, store=JobStore(_gateway_job_db_path(adapter))
+        )
+    except Exception:
+        logger.info(
+            "[GoogleChat] confirmation ownership check failed ref=%s",
+            confirmation_id[:8],
+        )
+        return confirmation_id, False
+    return confirmation_id, record is not None
 
 
 def _card_form_text(payload: Dict[str, Any], name: str) -> Optional[str]:
@@ -2209,8 +2255,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _handle_card_event(
         self, envelope: Dict[str, Any], *, notify: bool
-    ) -> str:
-        """Resolve a trusted Google Chat card action without starting an agent turn."""
+    ) -> Optional[str]:
+        """Resolve a trusted Google Chat card action without starting an agent turn.
+
+        Returns None when this gateway must not patch or reply. That covers
+        an unknown card action, and a ``robie_confirmation_decision`` whose
+        confirmation id is not in this gateway's own database. The caller
+        still acks: a normal return settles the Pub/Sub delivery. Known
+        actions (``hermes_clarify``, ``robie_decision``, and a confirmation
+        this gateway owns) still update the card. Safe to deploy before
+        subscription filters exist.
+        """
         payload = _card_event_payload(envelope)
         if payload is None:
             return "That action could not be read. Please ask ROBIE to show it again."
@@ -2226,10 +2281,30 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # Confirmation cards posted before the short-name fix stored a
         # bridge URL in action.function. Chat echoes that URL as
         # invokedFunction; fold it back to the bare action so the click
-        # is not rejected as unsupported.
+        # reaches the confirmation branch.
         from robie_job_engine.confirmation_cards import canonical_card_action
         action = canonical_card_action(raw_action)
         parameters = _card_parameters(payload)
+
+        # Unknown actions and foreign confirmation clicks must not reach
+        # the patch below. Prod's old else-branch replied "That action is
+        # not supported." and stripped the other environment's buttons.
+        if action == "robie_confirmation_decision":
+            confirmation_id, owned = _confirmation_owned_by_gateway(self, parameters)
+            if not owned:
+                logger.info(
+                    "[GoogleChat] confirmation click not owned here action=%s ref=%s",
+                    action,
+                    (confirmation_id or "-")[:8],
+                )
+                return None
+        elif action not in {"hermes_clarify", "robie_decision"}:
+            logger.info(
+                "[GoogleChat] unknown card action ignored action=%s",
+                (action or "-")[:80],
+            )
+            return None
+
         response = "That action is no longer available."
 
         try:
@@ -2261,32 +2336,27 @@ class GoogleChatAdapter(BasePlatformAdapter):
                             response = "That question was already answered or has expired."
             elif action == "robie_decision":
                 from robie_job_engine.decisions import resolve_google_chat_interaction
-                db_path = os.getenv(
-                    "ROBIE_JOB_DB",
-                    "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db",
+                result = resolve_google_chat_interaction(
+                    _gateway_job_db_path(self), payload
                 )
-                result = resolve_google_chat_interaction(db_path, payload)
                 response = result.message
                 if result.status == "RESOLVED" and result.choice:
                     response = f"Choice recorded: {result.choice}. ROBIE will continue from its checkpoint."
             elif action == "robie_confirmation_decision":
-                # Chat-native plan-confirmation Approve/Reject. The button
+                # Chat-native plan-confirmation Approve/Reject. Ownership
+                # was already checked against this gateway's DB. The button
                 # carries the HMAC-signed decision token; the click is
                 # verified (signature, expiry, principal) and applied
-                # idempotently. dispatch_http_event wraps the reply in
+                # idempotently. dispatch_http_event wraps a real reply in
                 # UPDATE_MESSAGE so the answered card is replaced.
                 from robie_job_engine.confirmation_cards import (
                     resolve_confirmation_click,
                 )
                 from robie_job_engine.store import JobStore
-                db_path = os.getenv(
-                    "ROBIE_JOB_DB",
-                    "/opt/streetsmart-hermes/robie-job-engine/data/jobs.db",
+                click = resolve_confirmation_click(
+                    JobStore(_gateway_job_db_path(self)), payload
                 )
-                click = resolve_confirmation_click(JobStore(db_path), payload)
                 response = click.message
-            else:
-                response = "That action is not supported."
         except Exception:
             logger.exception("[GoogleChat] Card action failed (%s)", action or "unknown")
             response = "ROBIE could not record that choice safely. The Job remains paused."
@@ -2330,6 +2400,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
     async def dispatch_http_event(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         if _card_event_payload(envelope) is not None:
             response = await self._handle_card_event(envelope, notify=False)
+            if response is None:
+                return {}
             return {
                 "actionResponse": {
                     "type": "UPDATE_MESSAGE",

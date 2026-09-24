@@ -383,11 +383,10 @@ def test_unrelated_url_function_is_not_a_confirmation_click(db):
     assert confirmations.get(cid, store=store)["status"] == "PENDING"
 
 
-def test_adapter_folds_bridge_url_before_unsupported_branch():
-    """Live failure: the adapter compared the raw URL and returned
-    "That action is not supported." before the parser could accept it.
-    The hermes ``gateway`` package is not in this tree, so lock the
-    dispatch order from the adapter source.
+def test_adapter_folds_bridge_url_before_confirmation_branch():
+    """Live failure: the adapter compared the raw URL and treated the click
+    as unsupported before the parser could accept it. The fold must happen
+    before the confirmation branch. Unknown actions are not patched.
     """
     adapter_path = Path(__file__).resolve().parent.parent / "integrations/google_chat/adapter.py"
     handle = adapter_path.read_text(encoding="utf-8").split(
@@ -395,13 +394,44 @@ def test_adapter_folds_bridge_url_before_unsupported_branch():
     )[1].split("async def dispatch_http_event", 1)[0]
     canon_at = handle.index("canonical_card_action")
     branch_at = handle.index('action == "robie_confirmation_decision"')
-    unsupported_at = handle.index("That action is not supported.")
-    assert canon_at < branch_at < unsupported_at
+    silent_at = handle.index("unknown card action ignored")
+    assert canon_at < branch_at < silent_at
+    assert "That action is not supported." not in handle
     update = adapter_path.read_text(encoding="utf-8").split(
         "async def dispatch_http_event", 1
     )[1].split("async def ", 1)[0]
+    assert "if response is None:" in update
+    assert "return {}" in update
     assert '"type": "UPDATE_MESSAGE"' in update
     assert '"cardsV2": []' in update
+
+
+def test_card_buttons_carry_routing_env_when_configured(db, monkeypatch):
+    store = JobStore(db)
+    cid = _request(store)
+    record = confirmations.get(cid, store=store)
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    card = cards.approval_card_v2(record, _tokens(cid))
+    buttons = card["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    for button in buttons:
+        params = button["onClick"]["action"]["parameters"]
+        env = next(p["value"] for p in params if p["key"] == "robie_env")
+        assert env == "test"
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+    prod = cards.approval_card_v2(record, _tokens(cid))
+    prod_buttons = prod["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    assert all(
+        next(p["value"] for p in b["onClick"]["action"]["parameters"] if p["key"] == "robie_env")
+        == "prod"
+        for b in prod_buttons
+    )
+    monkeypatch.delenv("ROBIE_ENV", raising=False)
+    untagged = cards.approval_card_v2(record, _tokens(cid))
+    untagged_buttons = untagged["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    assert all(
+        "robie_env" not in {p["key"] for p in b["onClick"]["action"]["parameters"]}
+        for b in untagged_buttons
+    )
 
 
 def test_click_response_replaces_card():

@@ -22,12 +22,13 @@ can approve or reject with one tap and no sheet paste:
   replaces the card in Chat so it cannot be clicked again.
 
 The designed click path is: button → Cloud Run ``robie-chat-http-bridge``
-→ Pub/Sub topic ``hermes-chat-topic`` → the Hermes gateway that is
-actually subscribed. ``hermes-test-01`` does not see the click while its
-gateway has no messaging platform enabled. A shared subscription with
-Production lets Production answer instead. Enabling Test Chat, on a
-Test-only ``GOOGLE_CHAT_SUBSCRIPTION_NAME``, is configuration for Dusty
-and Ralph — not something this module turns on.
+→ Pub/Sub topic ``hermes-chat-topic``. Buttons minted while ``ROBIE_ENV``
+is TEST or Production also carry ``robie_env`` (``test`` or ``prod``).
+The bridge copies that value onto the Pub/Sub attribute ``robie_env`` for
+card clicks only, so each environment's subscription can filter to its
+own clicks. Ordinary Chat messages are not tagged. A gateway that does
+not have the confirmation id in its own database acks the click and does
+not patch the card.
 
 ``action.function`` on new cards is the full bridge action URL
 (``{bridge base}/actions/robie_confirmation_decision``). A bare function
@@ -35,8 +36,7 @@ name is NOT valid here: Google treats it as an add-on deployment function
 and the click never reaches the bridge (this broke every real
 Approve/Reject click on 2026-09-23). ``canonical_card_action`` also
 accepts the bare name for envelopes that already carry it. The adapter
-folds that URL to the bare name before the "That action is not
-supported." branch.
+folds that URL to the bare name before it matches this action.
 
 Fail-closed everywhere: no signing key, malformed/forged/expired token,
 clicking user != token principal, or unknown confirmation all refuse and
@@ -111,6 +111,21 @@ def canonical_card_action(raw: str) -> str:
 # Card rendering (cardsV2, posted via chat_app_post.post_card_as_chat_app)
 # ---------------------------------------------------------------------------
 
+def _decision_button_parameters(token: str) -> list[dict[str, str]]:
+    """Token plus the owning environment, when this process knows it.
+
+    ``robie_env`` is how the shared bridge routes the click to one gateway.
+    Unset ``ROBIE_ENV`` omits it; those clicks stay untagged.
+    """
+    from robie_job_engine.runtime_env import chat_routing_env
+
+    parameters = [{"key": "decision_token", "value": str(token)}]
+    env = chat_routing_env()
+    if env:
+        parameters.append({"key": "robie_env", "value": env})
+    return parameters
+
+
 def approval_card_v2(
     record: Mapping[str, Any],
     tokens: Mapping[str, str] | None,
@@ -143,12 +158,9 @@ def approval_card_v2(
                             "onClick": {
                                 "action": {
                                     "function": function,
-                                    "parameters": [
-                                        {
-                                            "key": "decision_token",
-                                            "value": str(tokens["APPROVE"]),
-                                        }
-                                    ],
+                                    "parameters": _decision_button_parameters(
+                                        tokens["APPROVE"]
+                                    ),
                                 }
                             },
                         },
@@ -157,12 +169,9 @@ def approval_card_v2(
                             "onClick": {
                                 "action": {
                                     "function": function,
-                                    "parameters": [
-                                        {
-                                            "key": "decision_token",
-                                            "value": str(tokens["REJECT"]),
-                                        }
-                                    ],
+                                    "parameters": _decision_button_parameters(
+                                        tokens["REJECT"]
+                                    ),
                                 }
                             },
                         },

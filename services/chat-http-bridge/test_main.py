@@ -390,6 +390,106 @@ class BridgeTests(unittest.TestCase):
             main._audiences_for_request(action),
         )
 
+    def _publish_attrs(self, event, event_type):
+        with patch.object(main.publisher, "publish") as publish:
+            publish.return_value.result.return_value = "mid"
+            main._publish(event, event_type)
+        self.assertEqual(publish.call_args.args[0], main.TOPIC_PATH)
+        return publish.call_args.kwargs
+
+    def test_click_routing_attribute_is_test_or_prod_only(self):
+        clicked = "google.workspace.chat.card.v1.clicked"
+        test_attrs = self._publish_attrs(
+            {
+                "type": "CARD_CLICKED",
+                "common": {"parameters": {"robie_env": "test", "decision_token": "secret"}},
+            },
+            clicked,
+        )
+        self.assertEqual(test_attrs["ce-type"], clicked)
+        self.assertEqual(test_attrs["robie_env"], "test")
+        self.assertNotIn("decision_token", test_attrs)
+
+        prod_attrs = self._publish_attrs(
+            {
+                "type": "CARD_CLICKED",
+                "common": {
+                    "parameters": [
+                        {"key": "robie_env", "value": "prod"},
+                        {"key": "decision_token", "value": "secret"},
+                    ]
+                },
+            },
+            clicked,
+        )
+        self.assertEqual(prod_attrs["robie_env"], "prod")
+
+        for value in ("", "staging", "TEST", "production"):
+            attrs = self._publish_attrs(
+                {"type": "CARD_CLICKED", "common": {"parameters": {"robie_env": value}}},
+                clicked,
+            )
+            self.assertNotIn("robie_env", attrs, msg=value)
+            self.assertEqual(attrs["ce-type"], clicked)
+
+        missing = self._publish_attrs(
+            {"type": "CARD_CLICKED", "common": {"parameters": {"decision_token": "secret"}}},
+            clicked,
+        )
+        self.assertNotIn("robie_env", missing)
+
+    def test_non_click_messages_are_not_routed_by_robie_env(self):
+        received = "google.workspace.chat.event.v1.received"
+        attrs = self._publish_attrs(
+            {
+                "type": "MESSAGE",
+                "message": {"name": "spaces/1/messages/1"},
+                "common": {"parameters": {"robie_env": "test"}},
+            },
+            received,
+        )
+        self.assertEqual(attrs, {"ce-type": received})
+        self.assertNotIn("robie_env", attrs)
+
+    def test_forwarded_click_publishes_button_robie_env(self):
+        payload = {
+            "chat": {
+                "buttonClickedPayload": {
+                    "message": {"name": "spaces/1/messages/1"},
+                    "action": {
+                        "parameters": [
+                            {"key": "robie_env", "value": "test"},
+                            {"key": "decision_token", "value": "secret-token"},
+                        ]
+                    },
+                }
+            }
+        }
+        with patch.object(main.publisher, "publish") as publish:
+            publish.return_value.result.return_value = "mid"
+            response = self._post("/actions/robie_confirmation_decision", payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(publish.call_args.kwargs["robie_env"], "test")
+        self.assertEqual(
+            publish.call_args.kwargs["ce-type"],
+            "google.workspace.chat.card.v1.clicked",
+        )
+        body = publish.call_args.args[1].decode("utf-8")
+        self.assertIn("secret-token", body)
+        self.assertNotIn("secret-token", str(publish.call_args.kwargs))
+
+    def test_forwarded_message_omits_robie_env_attribute(self):
+        payload = {
+            "type": "MESSAGE",
+            "message": {"name": "spaces/1/messages/1", "text": "hello"},
+            "common": {"parameters": {"robie_env": "test"}},
+        }
+        with patch.object(main.publisher, "publish") as publish:
+            publish.return_value.result.return_value = "mid"
+            response = self._post("/", payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("robie_env", publish.call_args.kwargs)
+
 
 def _signing_material():
     from cryptography import x509

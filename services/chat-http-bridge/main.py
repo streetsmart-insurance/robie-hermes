@@ -23,6 +23,13 @@ Required environment variables (fail closed when either is unset):
   API configuration page and, when standard Chat events can also hit this
   service, ``chat@system.gserviceaccount.com``.
 
+Card clicks may carry a button parameter ``robie_env`` of ``test`` or
+``prod``. This bridge copies that exact value to the Pub/Sub attribute
+``robie_env`` and only on card clicks. Any other value is omitted.
+Ordinary Chat messages are published with ``ce-type`` only, so a
+subscription filter can keep them on Prod. This module does not create
+topics, subscriptions, or IAM bindings.
+
 Redeploy of this service is a separate human GO. This module does not
 deploy Cloud Run, Test, or Production.
 """
@@ -426,9 +433,70 @@ def _normalize(payload: dict[str, Any], action_name: str | None) -> dict[str, An
     return event
 
 
+_ROUTING_ENVS = frozenset({"test", "prod"})
+
+
+def _parameter_map(event: dict[str, Any]) -> dict[str, str]:
+    """Button parameters from a normalized Chat event, first value wins."""
+    sources: list[Any] = []
+    common = event.get("common") if isinstance(event.get("common"), dict) else {}
+    sources.append(common.get("parameters"))
+    action = event.get("action") if isinstance(event.get("action"), dict) else {}
+    sources.append(action.get("parameters"))
+    chat = event.get("chat") if isinstance(event.get("chat"), dict) else {}
+    for key in ("buttonClickedPayload", "cardClickedPayload", "widgetUpdatedPayload"):
+        clicked = chat.get(key)
+        if not isinstance(clicked, dict):
+            continue
+        clicked_common = clicked.get("common") if isinstance(clicked.get("common"), dict) else {}
+        sources.append(clicked_common.get("parameters"))
+        clicked_action = clicked.get("action") if isinstance(clicked.get("action"), dict) else {}
+        sources.append(clicked_action.get("parameters"))
+
+    result: dict[str, str] = {}
+    for source in sources:
+        if isinstance(source, dict):
+            items = ({"key": key, "value": value} for key, value in source.items())
+        elif isinstance(source, list):
+            items = (item for item in source if isinstance(item, dict))
+        else:
+            continue
+        for item in items:
+            key = item.get("key")
+            if key is None:
+                continue
+            name = str(key)
+            if name not in result:
+                result[name] = str(item.get("value") or "")
+    return result
+
+
+def _is_card_click(event: dict[str, Any], event_type: str) -> bool:
+    if event_type == "google.workspace.chat.card.v1.clicked":
+        return True
+    return str(event.get("type") or "").strip() == "CARD_CLICKED"
+
+
+def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str]:
+    """Pub/Sub attributes for one forwarded event.
+
+    ``robie_env`` is set only for a card click whose button parameter is
+    exactly ``test`` or ``prod``. Messages, and clicks without that
+    parameter, stay untagged so they match a Prod filter of
+    ``attributes.robie_env = "prod" OR NOT attributes:robie_env``.
+    """
+    attrs = {"ce-type": event_type}
+    if not _is_card_click(event, event_type):
+        return attrs
+    env = _parameter_map(event).get("robie_env", "").strip()
+    if env in _ROUTING_ENVS:
+        attrs["robie_env"] = env
+    return attrs
+
+
 def _publish(event: dict[str, Any], event_type: str) -> None:
     body = app.json.dumps(event, separators=(",", ":")).encode("utf-8")
-    future = publisher.publish(TOPIC_PATH, body, **{"ce-type": event_type})
+    future = publisher.publish(TOPIC_PATH, body, **_routing_attributes(event, event_type))
     future.result(timeout=8)
 
 
