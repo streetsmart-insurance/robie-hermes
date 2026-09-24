@@ -6,6 +6,20 @@ Standing rule for the living [Robie Capability Map](https://docs.google.com/docu
 
 Any new capability or integration gets a row in this map before it ships. The human confirms the row; LLMs do not invent capabilities.
 
+## Reliability
+
+Every capability or integration row MUST include a **Reliability** field with exactly one of:
+
+- **Reliable** — agency can bet on it in Production with normal babysitting
+- **Proving** — real, but Test / not boring yet / still breaking
+- **Blocked** — waiting on vendor, IAM, or a hard gate
+
+A row without that field, or with any other value, is not a complete row and does not satisfy the rule above.
+
+## Operating focus
+
+As of 2026-09-23, Carlo's operating focus is: stop opening new fronts; clear the existing list until items move to Reliable. Do not invent new capabilities; humans confirm rows.
+
 ## Living map
 
 - Title: Robie Capability Map
