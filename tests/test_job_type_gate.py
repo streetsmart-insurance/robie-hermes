@@ -13,6 +13,7 @@ from robie_job_engine.job_type_gate import (
     JobTypeGateError,
     assert_job_type_production_ready,
     check_repo_gate,
+    grandfathered_skills,
     is_job_type_production_ready,
     parse_skill_frontmatter,
     production_hold_reason,
@@ -34,6 +35,34 @@ class JobTypeGateTests(unittest.TestCase):
         self.assertTrue(is_job_type_production_ready("hermes.google_chat_task"))
         self.assertTrue(is_job_type_production_ready("ezlynx.submission_audit"))
         self.assertIsNone(production_hold_reason("ezlynx.commercial_auto", env="PRODUCTION"))
+
+    def test_overdue_submission_reports_is_grandfathered_but_unproven_types_hold(self):
+        # Live on Production hermes-poc-01 since before the gate; the Production
+        # tree carried this as a manual grandfathered.json exception.
+        self.assertTrue(is_job_type_production_ready("ezlynx.overdue_submission_reports"))
+        self.assertIsNone(
+            production_hold_reason("ezlynx.overdue_submission_reports", env="PRODUCTION")
+        )
+        assert_job_type_production_ready(
+            "ezlynx.overdue_submission_reports", env="PRODUCTION"
+        )
+        self.assertIn("ezlynx-overdue-submission-reports", grandfathered_skills())
+        reason = production_hold_reason("ezlynx.unproven_example", env="PRODUCTION")
+        self.assertIsNotNone(reason)
+        self.assertIn("not Production-ready", reason)
+        with self.assertRaises(JobTypeGateError):
+            assert_job_type_production_ready("ezlynx.unproven_example", env="PRODUCTION")
+
+    def test_overdue_submission_reports_grandfather_comes_from_json(self):
+        with durable_temporary_directory() as tmp:
+            empty = Path(tmp) / "grandfathered.json"
+            empty.write_text('{"job_types": [], "skills": []}\n', encoding="utf-8")
+            with patch("robie_job_engine.job_type_gate.GRANDFATHERED_PATH", empty):
+                self.assertIsNotNone(
+                    production_hold_reason(
+                        "ezlynx.overdue_submission_reports", env="PRODUCTION"
+                    )
+                )
 
     def test_new_type_is_not_production_ready_without_test_audits(self):
         self.assertFalse(is_job_type_production_ready("ezlynx.personal_auto"))
