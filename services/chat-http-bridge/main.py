@@ -1,3 +1,27 @@
+"""Cloud Run ingress for Google Chat and Workspace Add-on events.
+
+Every POST must present a Google-signed ``Authorization: Bearer`` JWT.
+Verification follows the Workspace Add-on HTTP check (audience is the
+configured HTTP endpoint URL; ``email`` is the add-on service account)
+and the Chat HTTP check (``chat@system.gserviceaccount.com``, either an
+ID token for the endpoint URL or a project-number JWT signed with that
+issuer's certs). Tokens are never logged.
+
+Required environment variables (fail closed when either is unset):
+
+- ``ROBIE_CHAT_BRIDGE_AUDIENCE`` — comma-separated accepted ``aud`` values.
+  Use the exact HTTPS URL Google calls for Add-ons and for Chat apps whose
+  authentication audience is "HTTP endpoint URL". Add the Cloud project
+  number as well when Chat is configured for a project-number audience.
+- ``ROBIE_CHAT_BRIDGE_SERVICE_ACCOUNT_EMAILS`` — comma-separated allowed
+  token identities. Include the add-on service account shown on the Chat
+  API configuration page and, when standard Chat events can also hit this
+  service, ``chat@system.gserviceaccount.com``.
+
+Redeploy of this service is a separate human GO. This module does not
+deploy Cloud Run, Test, or Production.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -19,6 +43,146 @@ TOPIC_ID = os.environ.get("ROBIE_CHAT_TOPIC", "hermes-chat-topic")
 TOPIC_PATH = f"projects/{PROJECT_ID}/topics/{TOPIC_ID}"
 ACTION_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 publisher = pubsub_v1.PublisherClient()
+
+# Google OIDC ID tokens (Add-on system tokens and Chat "HTTP endpoint URL"
+# tokens) use these issuers. Chat "Project Number" tokens use the Chat
+# system service account as both issuer and cert source.
+_GOOGLE_ISSUERS = frozenset({"accounts.google.com", "https://accounts.google.com"})
+_CHAT_ISSUER = "chat@system.gserviceaccount.com"
+_CHAT_CERTS_URL = (
+    "https://www.googleapis.com/service_accounts/v1/metadata/x509/" + _CHAT_ISSUER
+)
+
+
+class _BearerAuthError(Exception):
+    """Fail-closed auth result. ``reason`` is a stable code, never a token."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _csv_env(name: str) -> list[str]:
+    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+
+def _expected_audiences() -> list[str]:
+    return _csv_env("ROBIE_CHAT_BRIDGE_AUDIENCE")
+
+
+def _expected_service_accounts() -> set[str]:
+    return {item.lower() for item in _csv_env("ROBIE_CHAT_BRIDGE_SERVICE_ACCOUNT_EMAILS")}
+
+
+def _verify_google_id_token(
+    token: str,
+    audiences: list[str],
+    *,
+    certs_url: str | None = None,
+) -> dict[str, Any]:
+    """Validate a Google-signed JWT against Google certs and ``audiences``.
+
+    Mirrors ``integrations/google_chat/adapter.py`` ``_verify_google_id_token``
+    without importing the gateway adapter. ``certs_url`` selects the Chat
+    project-number certs; the default path is ``verify_oauth2_token``.
+    The raw token is never logged.
+    """
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+    except ImportError as exc:
+        raise _BearerAuthError("auth_dependency_unavailable") from exc
+
+    google_request = google_requests.Request()
+    if certs_url:
+        claims = id_token.verify_token(
+            token,
+            google_request,
+            audience=audiences,
+            certs_url=certs_url,
+        )
+    else:
+        claims = id_token.verify_oauth2_token(token, google_request, audiences)
+    if not isinstance(claims, dict):
+        raise ValueError("Google token verification returned no claims")
+    return claims
+
+
+def _try_verify(
+    token: str,
+    audiences: list[str],
+    *,
+    certs_url: str | None = None,
+) -> dict[str, Any] | None:
+    try:
+        return _verify_google_id_token(token, audiences, certs_url=certs_url)
+    except _BearerAuthError:
+        raise
+    except Exception:
+        return None
+
+
+def _audience_matches(claims: dict[str, Any], audiences: list[str]) -> bool:
+    aud = claims.get("aud")
+    values = aud if isinstance(aud, list) else [aud]
+    allowed = set(audiences)
+    return any(isinstance(item, str) and item in allowed for item in values)
+
+
+def _identity_matches(claims: dict[str, Any], expected_emails: set[str]) -> bool:
+    issuer = str(claims.get("iss") or "").strip()
+    email = str(claims.get("email") or "").strip().lower()
+    if issuer in _GOOGLE_ISSUERS:
+        if claims.get("email_verified") not in (True, "true"):
+            return False
+        return bool(email) and email in expected_emails
+    if issuer == _CHAT_ISSUER and _CHAT_ISSUER in expected_emails:
+        # Project-number Chat JWTs identify the issuer. An email claim, when
+        # present, still has to be on the allowlist.
+        return not email or email in expected_emails
+    return False
+
+
+def _extract_bearer(header: str | None) -> str:
+    if not isinstance(header, str):
+        raise _BearerAuthError("missing_bearer")
+    scheme, separator, token = header.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not token.strip():
+        raise _BearerAuthError("missing_bearer")
+    return token.strip()
+
+
+def _claims_from_google(
+    token: str,
+    audiences: list[str],
+    expected_emails: set[str],
+) -> dict[str, Any]:
+    oidc_claims = _try_verify(token, audiences)
+    if oidc_claims is not None and str(oidc_claims.get("iss") or "").strip() in _GOOGLE_ISSUERS:
+        return oidc_claims
+    if _CHAT_ISSUER in expected_emails:
+        chat_claims = _try_verify(token, audiences, certs_url=_CHAT_CERTS_URL)
+        issuer = str((chat_claims or {}).get("iss") or "").strip()
+        if chat_claims is not None and issuer == _CHAT_ISSUER:
+            return chat_claims
+    raise _BearerAuthError("invalid_bearer")
+
+
+def _authenticate_bearer(header: str | None) -> None:
+    """Reject the POST unless the Bearer JWT is signed for this bridge.
+
+    Unset audience or service-account allowlist fails closed. Any
+    ``run.invoker`` principal that is not an expected Chat or Add-on
+    identity is rejected the same way.
+    """
+    token = _extract_bearer(header)
+    audiences = _expected_audiences()
+    expected_emails = _expected_service_accounts()
+    if not audiences or not expected_emails:
+        raise _BearerAuthError("auth_not_configured")
+    claims = _claims_from_google(token, audiences, expected_emails)
+    if not _audience_matches(claims, audiences) or not _identity_matches(claims, expected_emails):
+        raise _BearerAuthError("unexpected_bearer_identity")
 
 
 def _normalize(payload: dict[str, Any], action_name: str | None) -> dict[str, Any]:
@@ -79,34 +243,42 @@ def _chat_message(text: str) -> dict[str, Any]:
 
 
 def _addon_processing_response() -> dict[str, Any]:
-    """Return a Workspace Add-on UPDATE_MESSAGE response showing a processing state.
+    """Return a Workspace Add-on update-message action with a processing card.
 
     Google Workspace Add-ons reject the empty ``{}`` synchronous response that
-    works for standard Chat apps: the framework displays
-    "<App> is unable to process your request."  Returning UPDATE_MESSAGE with
-    a minimal processing card satisfies the Add-on contract; Hermes then
-    replaces it asynchronously with the durable decision card via the Chat API.
+    works for standard Chat apps. They also reject the legacy Chat-app
+    ``{"actionResponse": {"type": "UPDATE_MESSAGE"}, "cardsV2": [...]}``
+    envelope. The Add-on response is
+    ``hostAppDataAction.chatDataAction.updateMessageAction.message``.
+    Hermes then replaces that message asynchronously via the Chat API.
     """
     return {
-        "actionResponse": {"type": "UPDATE_MESSAGE"},
-        "cardsV2": [
-            {
-                "cardId": "robie-processing",
-                "card": {
-                    "sections": [
-                        {
-                            "widgets": [
-                                {
-                                    "textParagraph": {
-                                        "text": "⏳ Processing your decision…"
-                                    }
-                                }
-                            ]
-                        }
-                    ]
-                },
+        "hostAppDataAction": {
+            "chatDataAction": {
+                "updateMessageAction": {
+                    "message": {
+                        "cardsV2": [
+                            {
+                                "cardId": "robie-processing",
+                                "card": {
+                                    "sections": [
+                                        {
+                                            "widgets": [
+                                                {
+                                                    "textParagraph": {
+                                                        "text": "⏳ Processing your decision…"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    }
+                }
             }
-        ],
+        }
     }
 
 
@@ -127,6 +299,12 @@ def health():
 @app.post("/")
 @app.post("/actions/<action_name>")
 def receive(action_name: str | None = None):
+    try:
+        _authenticate_bearer(request.headers.get("Authorization"))
+    except _BearerAuthError as exc:
+        logger.info("Rejected Google Chat POST reason=%s", exc.reason)
+        return jsonify(_chat_message("Unauthorized.")), 401
+
     if action_name and not ACTION_RE.fullmatch(action_name):
         return jsonify(_chat_message("Unsupported action.")), 404
     payload = request.get_json(silent=True)
@@ -149,11 +327,11 @@ def receive(action_name: str | None = None):
         ",".join(sorted(payload.keys())),
     )
 
-    # Workspace Add-on CARD_CLICKED events require a synchronous ActionResponse;
-    # the empty {} that works for standard Chat apps makes Chat display
-    # "<App> is unable to process your request."  Return UPDATE_MESSAGE with a
-    # processing card; Hermes replaces it asynchronously with the durable card.
-    # Standard Chat API MESSAGE events keep the empty async-ack response.
+    # Workspace Add-on CARD_CLICKED / action routes need a synchronous
+    # updateMessageAction. The empty {} that works for standard Chat apps
+    # makes Chat display "<App> is unable to process your request."
+    # Hermes replaces the processing card asynchronously via the Chat API.
+    # Standard Chat API events keep the empty async-ack response.
     if action_name and _event_style(payload) == "workspace_addon":
         return jsonify(_addon_processing_response())
 
