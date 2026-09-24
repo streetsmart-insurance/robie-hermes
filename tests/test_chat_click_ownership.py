@@ -37,6 +37,7 @@ def _load_adapter_card_handlers():
     wanted = {
         "_gateway_job_db_path",
         "_confirmation_owned_by_gateway",
+        "_decision_owned_by_gateway",
         "_card_parameters",
         "_card_event_payload",
         "_card_form_text",
@@ -148,7 +149,7 @@ def test_only_owning_gateway_patches_the_shared_click(tmp_path, monkeypatch, cap
     owner_db = str(tmp_path / "owner.db")
     foreign_db = str(tmp_path / "foreign.db")
     owner_store = JobStore(owner_db)
-    foreign_store = JobStore(foreign_db)
+    JobStore(foreign_db)
     cid = _request(owner_store)
     token = confirmations.mint_decision_token(cid, "REJECT", _principal(), key=TEST_KEY)
     envelope = _click(token)
@@ -163,8 +164,14 @@ def test_only_owning_gateway_patches_the_shared_click(tmp_path, monkeypatch, cap
     assert foreign_result is None
     assert foreign.patches == []
     assert foreign.creates == []
+    foreign_conn = __import__("sqlite3").connect(foreign_db)
+    try:
+        assert foreign_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_confirmations'"
+        ).fetchone() is None
+    finally:
+        foreign_conn.close()
     assert confirmations.get(cid, store=owner_store)["status"] == "PENDING"
-    assert confirmations.get(cid, store=foreign_store) is None
     assert any(
         "confirmation click not owned here" in record.getMessage()
         and f"ref={cid[:8]}" in record.getMessage()
@@ -201,9 +208,13 @@ def test_unknown_card_action_does_not_patch_or_reply(tmp_path, caplog):
 
 def test_known_clarify_action_still_patches(tmp_path):
     gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
+    gateway._clarify_state["clarify-local-1"] = "session-1"
     envelope = {
         "type": "CARD_CLICKED",
-        "common": {"invokedFunction": "hermes_clarify", "parameters": {}},
+        "common": {
+            "invokedFunction": "hermes_clarify",
+            "parameters": {"clarify_id": "clarify-local-1"},
+        },
         "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
         "space": {"name": "spaces/AAQA"},
     }
@@ -214,6 +225,102 @@ def test_known_clarify_action_still_patches(tmp_path):
     http = asyncio.run(gateway.dispatch_http_event(envelope))
     assert http["actionResponse"] == {"type": "UPDATE_MESSAGE"}
     assert http["cardsV2"] == []
+
+
+def test_foreign_clarify_and_decision_clicks_do_not_patch(tmp_path, caplog):
+    import sqlite3
+
+    bare = tmp_path / "bare.db"
+    sqlite3.connect(bare).close()
+    before = bare.read_bytes()
+    gateway = _bind(_Gateway(str(bare)))
+    clarify = {
+        "type": "CARD_CLICKED",
+        "common": {
+            "invokedFunction": "hermes_clarify",
+            "parameters": {"clarify_id": "foreign-clarify", "choice": "yes"},
+        },
+        "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
+        "space": {"name": "spaces/AAQA"},
+    }
+    decision = {
+        "type": "CARD_CLICKED",
+        "common": {
+            "invokedFunction": "robie_decision",
+            "parameters": {"decision_id": "foreign-decision", "choice": "approve"},
+        },
+        "user": {"email": "carlo@streetsmart.insurance", "type": "HUMAN"},
+        "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
+        "space": {"name": "spaces/AAQA"},
+    }
+    with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
+        clarify_result = asyncio.run(gateway._handle_card_event(clarify, notify=True))
+        decision_result = asyncio.run(gateway._handle_card_event(decision, notify=True))
+        clarify_http = asyncio.run(gateway.dispatch_http_event(clarify))
+        decision_http = asyncio.run(gateway.dispatch_http_event(decision))
+    assert clarify_result is None
+    assert decision_result is None
+    assert clarify_http == {}
+    assert decision_http == {}
+    assert gateway.patches == []
+    assert gateway.creates == []
+    assert bare.read_bytes() == before
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "clarify click not owned here" in messages
+    assert "ref=foreign-" in messages
+    assert "decision click not owned here" in messages
+
+
+def test_owned_decision_click_still_replies(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "owner.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE decisions (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO decisions (id) VALUES ('owned-decision')")
+    conn.commit()
+    conn.close()
+    gateway = _bind(_Gateway(str(db)))
+    envelope = {
+        "type": "CARD_CLICKED",
+        "common": {
+            "invokedFunction": "robie_decision",
+            "parameters": {"decision_id": "owned-decision", "choice": "approve"},
+        },
+        "user": {"email": "carlo@streetsmart.insurance", "type": "HUMAN"},
+        "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
+        "space": {"name": "spaces/AAQA"},
+    }
+    result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    assert result
+    assert gateway.patches
+
+
+def test_confirmation_lookup_does_not_create_a_missing_table(tmp_path):
+    import sqlite3
+
+    missing = tmp_path / "missing" / "jobs.db"
+    assert confirmations.has_confirmation(str(missing), "cid-1") is False
+    assert not missing.exists()
+
+    bare = tmp_path / "bare.db"
+    sqlite3.connect(bare).close()
+    before = bare.read_bytes()
+    assert confirmations.has_confirmation(str(bare), "cid-1") is False
+    assert bare.read_bytes() == before
+    conn = sqlite3.connect(bare)
+    try:
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'plan_confirmations'"
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+    owned = tmp_path / "owned.db"
+    store = JobStore(str(owned))
+    cid = _request(store)
+    assert confirmations.has_confirmation(str(owned), cid) is True
+    assert confirmations.has_confirmation(str(owned), "someone-elses-id") is False
 
 
 def test_adapter_buttons_stamp_routing_env(monkeypatch):

@@ -638,24 +638,41 @@ def _confirmation_owned_by_gateway(
     environment's signing key must not turn a foreign click into a reply.
     A lookup failure is treated as not owned: ack, do not patch.
     """
-    from robie_job_engine.confirmations import get as get_confirmation
-    from robie_job_engine.confirmations import peek_confirmation_id
-    from robie_job_engine.store import JobStore
+    from robie_job_engine.confirmations import has_confirmation, peek_confirmation_id
 
     confirmation_id = peek_confirmation_id(parameters.get("decision_token", ""))
     if not confirmation_id:
         return "", False
     try:
-        record = get_confirmation(
-            confirmation_id, store=JobStore(_gateway_job_db_path(adapter))
-        )
+        owned = has_confirmation(_gateway_job_db_path(adapter), confirmation_id)
     except Exception:
         logger.info(
             "[GoogleChat] confirmation ownership check failed ref=%s",
             confirmation_id[:8],
         )
         return confirmation_id, False
-    return confirmation_id, record is not None
+    return confirmation_id, owned
+
+
+def _decision_owned_by_gateway(adapter: Any, decision_id: str) -> bool:
+    """Whether this gateway's own DB already has the decision id.
+
+    Read-only. Missing file or missing ``decisions`` table is not owned,
+    so a foreign click cannot create schema or patch the card.
+    """
+    from robie_job_engine.decisions import has_decision
+
+    decision_id = str(decision_id or "").strip()
+    if not decision_id:
+        return False
+    try:
+        return has_decision(_gateway_job_db_path(adapter), decision_id)
+    except Exception:
+        logger.info(
+            "[GoogleChat] decision ownership check failed ref=%s",
+            decision_id[:8],
+        )
+        return False
 
 
 def _card_form_text(payload: Dict[str, Any], name: str) -> Optional[str]:
@@ -2259,12 +2276,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """Resolve a trusted Google Chat card action without starting an agent turn.
 
         Returns None when this gateway must not patch or reply. That covers
-        an unknown card action, and a ``robie_confirmation_decision`` whose
-        confirmation id is not in this gateway's own database. The caller
-        still acks: a normal return settles the Pub/Sub delivery. Known
-        actions (``hermes_clarify``, ``robie_decision``, and a confirmation
-        this gateway owns) still update the card. Safe to deploy before
-        subscription filters exist.
+        an unknown card action, and a ``hermes_clarify``, ``robie_decision``,
+        or ``robie_confirmation_decision`` whose id is not known on this
+        gateway. The caller still acks: a normal return settles the Pub/Sub
+        delivery. An id this gateway already has still updates the card.
+        Safe to deploy before subscription filters exist.
         """
         payload = _card_event_payload(envelope)
         if payload is None:
@@ -2286,10 +2302,28 @@ class GoogleChatAdapter(BasePlatformAdapter):
         action = canonical_card_action(raw_action)
         parameters = _card_parameters(payload)
 
-        # Unknown actions and foreign confirmation clicks must not reach
-        # the patch below. Prod's old else-branch replied "That action is
-        # not supported." and stripped the other environment's buttons.
-        if action == "robie_confirmation_decision":
+        # Foreign and unknown clicks must not reach the patch below.
+        # Prod's old else-branch told the user the action was unsupported
+        # and stripped the other environment's buttons.
+        if action == "hermes_clarify":
+            clarify_id = parameters.get("clarify_id", "").strip()
+            if clarify_id not in getattr(self, "_clarify_state", {}):
+                logger.info(
+                    "[GoogleChat] clarify click not owned here action=%s ref=%s",
+                    action,
+                    (clarify_id or "-")[:8],
+                )
+                return None
+        elif action == "robie_decision":
+            decision_id = parameters.get("decision_id", "").strip()
+            if not _decision_owned_by_gateway(self, decision_id):
+                logger.info(
+                    "[GoogleChat] decision click not owned here action=%s ref=%s",
+                    action,
+                    (decision_id or "-")[:8],
+                )
+                return None
+        elif action == "robie_confirmation_decision":
             confirmation_id, owned = _confirmation_owned_by_gateway(self, parameters)
             if not owned:
                 logger.info(
@@ -2298,7 +2332,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     (confirmation_id or "-")[:8],
                 )
                 return None
-        elif action not in {"hermes_clarify", "robie_decision"}:
+        else:
             logger.info(
                 "[GoogleChat] unknown card action ignored action=%s",
                 (action or "-")[:80],

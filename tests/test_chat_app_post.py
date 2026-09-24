@@ -19,8 +19,19 @@ from unittest import mock
 
 import pytest
 
-googleapiclient = pytest.importorskip("googleapiclient")
-pytest.importorskip("google.auth")
+# unittest discover imports this module. pytest.importorskip raises
+# pytest.skip at import time, which discover records as an error when
+# googleapiclient is not installed. A skip mark leaves the import clean.
+try:
+    import googleapiclient  # noqa: F401
+    import google.auth  # noqa: F401
+except ImportError:
+    googleapiclient = None
+
+pytestmark = pytest.mark.skipif(
+    googleapiclient is None,
+    reason="googleapiclient is not installed",
+)
 
 from robie_job_engine import chat_app_post
 

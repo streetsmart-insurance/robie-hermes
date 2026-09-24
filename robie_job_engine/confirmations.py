@@ -186,6 +186,43 @@ def verify_decision_token(
     }
 
 
+def has_confirmation(db_path: str, confirmation_id: str) -> bool:
+    """Whether ``db_path`` already contains this confirmation id.
+
+    Read-only. A missing file, a missing ``plan_confirmations`` table, or
+    any sqlite error means this gateway does not own the click. This never
+    calls ``_ensure_schema`` and never creates a table.
+    """
+    confirmation_id = str(confirmation_id or "").strip()
+    if not confirmation_id:
+        return False
+    from pathlib import Path
+
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("plan_confirmations",),
+        ).fetchone()
+        if present is None:
+            return False
+        row = conn.execute(
+            "SELECT 1 FROM plan_confirmations WHERE id = ?",
+            (confirmation_id,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def peek_confirmation_id(token: str) -> str:
     """Read the confirmation id from an rbd1 token without checking the HMAC.
 
