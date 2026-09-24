@@ -37,6 +37,7 @@ def _load_adapter_card_handlers():
     wanted = {
         "_gateway_job_db_path",
         "_confirmation_owned_by_gateway",
+        "_click_routed_to_this_gateway",
         "_decision_owned_by_gateway",
         "_card_parameters",
         "_card_event_payload",
@@ -206,18 +207,21 @@ def test_unknown_card_action_does_not_patch_or_reply(tmp_path, caplog):
     )
 
 
-def test_known_clarify_action_still_patches(tmp_path):
-    gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
-    gateway._clarify_state["clarify-local-1"] = "session-1"
-    envelope = {
+def _card(action, **parameters):
+    return {
         "type": "CARD_CLICKED",
-        "common": {
-            "invokedFunction": "hermes_clarify",
-            "parameters": {"clarify_id": "clarify-local-1"},
-        },
+        "common": {"invokedFunction": action, "parameters": parameters},
+        "user": {"email": "carlo@streetsmart.insurance", "type": "HUMAN"},
         "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
         "space": {"name": "spaces/AAQA"},
     }
+
+
+def test_known_clarify_action_still_patches(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
+    gateway._clarify_state["clarify-local-1"] = "session-1"
+    envelope = _card("hermes_clarify", clarify_id="clarify-local-1", robie_env="test")
     result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
     assert result == "That question has expired. Please ask ROBIE again."
     assert len(gateway.patches) == 1
@@ -227,32 +231,42 @@ def test_known_clarify_action_still_patches(tmp_path):
     assert http["cardsV2"] == []
 
 
-def test_foreign_clarify_and_decision_clicks_do_not_patch(tmp_path, caplog):
+def test_own_expired_clarify_replies_expired(tmp_path, monkeypatch):
+    """Clarify state expires after 120s. Our own late click still replies."""
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
+    envelope = _card(
+        "hermes_clarify",
+        clarify_id="expired-clarify",
+        choice="yes",
+        robie_env="test",
+    )
+    result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    assert result == "That question has expired. Please ask ROBIE again."
+    assert len(gateway.patches) == 1
+    assert "expired" in gateway.patches[0][1]["text"].lower()
+
+
+def test_foreign_env_clarify_and_decision_are_silent(tmp_path, monkeypatch, caplog):
     import sqlite3
 
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
     bare = tmp_path / "bare.db"
     sqlite3.connect(bare).close()
     before = bare.read_bytes()
     gateway = _bind(_Gateway(str(bare)))
-    clarify = {
-        "type": "CARD_CLICKED",
-        "common": {
-            "invokedFunction": "hermes_clarify",
-            "parameters": {"clarify_id": "foreign-clarify", "choice": "yes"},
-        },
-        "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
-        "space": {"name": "spaces/AAQA"},
-    }
-    decision = {
-        "type": "CARD_CLICKED",
-        "common": {
-            "invokedFunction": "robie_decision",
-            "parameters": {"decision_id": "foreign-decision", "choice": "approve"},
-        },
-        "user": {"email": "carlo@streetsmart.insurance", "type": "HUMAN"},
-        "message": {"name": MESSAGE, "space": {"name": "spaces/AAQA"}},
-        "space": {"name": "spaces/AAQA"},
-    }
+    clarify = _card(
+        "hermes_clarify",
+        clarify_id="foreign-clarify",
+        choice="yes",
+        robie_env="prod",
+    )
+    decision = _card(
+        "robie_decision",
+        decision_id="foreign-decision",
+        choice="approve",
+        robie_env="prod",
+    )
     with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
         clarify_result = asyncio.run(gateway._handle_card_event(clarify, notify=True))
         decision_result = asyncio.run(gateway._handle_card_event(decision, notify=True))
@@ -269,6 +283,42 @@ def test_foreign_clarify_and_decision_clicks_do_not_patch(tmp_path, caplog):
     assert "clarify click not owned here" in messages
     assert "ref=foreign-" in messages
     assert "decision click not owned here" in messages
+
+
+def test_missing_robie_env_on_prod_is_treated_as_own(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+    gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
+    envelope = _card("hermes_clarify", clarify_id="untagged-clarify", choice="yes")
+    result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    assert result == "That question has expired. Please ask ROBIE again."
+    assert gateway.patches
+
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    test_gateway = _bind(_Gateway(str(tmp_path / "test.db")))
+    silent = asyncio.run(test_gateway._handle_card_event(envelope, notify=True))
+    assert silent is None
+    assert test_gateway.patches == []
+
+
+def test_matching_env_decision_without_a_row_still_replies(tmp_path, monkeypatch):
+    """Id missing locally, but robie_env is ours: do not ack silently."""
+    import sqlite3
+
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    db = tmp_path / "empty.db"
+    sqlite3.connect(db).close()
+    gateway = _bind(_Gateway(str(db)))
+    envelope = _card(
+        "robie_decision",
+        decision_id="missing-decision",
+        choice="approve",
+        robie_env="test",
+    )
+    result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    assert result
+    assert result != "That action is not supported."
+    assert gateway.patches
+    assert "not supported" not in gateway.patches[0][1]["text"].lower()
 
 
 def test_owned_decision_click_still_replies(tmp_path):

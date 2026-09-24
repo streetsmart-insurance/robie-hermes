@@ -654,6 +654,25 @@ def _confirmation_owned_by_gateway(
     return confirmation_id, owned
 
 
+def _click_routed_to_this_gateway(parameters: Dict[str, str]) -> bool:
+    """Whether this click belongs on this gateway, by ``robie_env``.
+
+    Same rule as the subscription filters: ``test`` is Test, ``prod`` is
+    Prod, and a click with no ``robie_env`` is Prod's. A value that names
+    the other environment is not ours.
+    """
+    from robie_job_engine.runtime_env import (
+        PRODUCTION_ENV_NAMES,
+        chat_routing_env,
+        current_robie_env,
+    )
+
+    stamped = str(parameters.get("robie_env") or "").strip()
+    if not stamped:
+        return current_robie_env() in PRODUCTION_ENV_NAMES
+    return stamped == (chat_routing_env() or "")
+
+
 def _decision_owned_by_gateway(adapter: Any, decision_id: str) -> bool:
     """Whether this gateway's own DB already has the decision id.
 
@@ -2306,8 +2325,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # Prod's old else-branch told the user the action was unsupported
         # and stripped the other environment's buttons.
         if action == "hermes_clarify":
-            clarify_id = parameters.get("clarify_id", "").strip()
-            if clarify_id not in getattr(self, "_clarify_state", {}):
+            # In-memory clarify state expires, so a late click on our own
+            # card must still reach the "expired" reply. Ownership is the
+            # button's robie_env, not whether the id is still remembered.
+            if not _click_routed_to_this_gateway(parameters):
+                clarify_id = parameters.get("clarify_id", "").strip()
                 logger.info(
                     "[GoogleChat] clarify click not owned here action=%s ref=%s",
                     action,
@@ -2316,7 +2338,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 return None
         elif action == "robie_decision":
             decision_id = parameters.get("decision_id", "").strip()
-            if not _decision_owned_by_gateway(self, decision_id):
+            # A row in this database is ours. If the row is gone, robie_env
+            # still decides: our environment falls through to the resolver,
+            # the other environment is acked with no patch.
+            if (
+                not _decision_owned_by_gateway(self, decision_id)
+                and not _click_routed_to_this_gateway(parameters)
+            ):
                 logger.info(
                     "[GoogleChat] decision click not owned here action=%s ref=%s",
                     action,
