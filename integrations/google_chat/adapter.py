@@ -2181,8 +2181,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _handle_card_event(
         self, envelope: Dict[str, Any], *, notify: bool
-    ) -> str:
-        """Resolve a trusted Google Chat card action without starting an agent turn."""
+    ) -> Optional[str]:
+        """Resolve a trusted Google Chat card action without starting an agent turn.
+
+        Returns None for an unknown card action. Callers ack that normal
+        return and do not patch or reply. ``hermes_clarify`` and
+        ``robie_decision`` still update the card.
+        """
         payload = _card_event_payload(envelope)
         if payload is None:
             return "That action could not be read. Please ask ROBIE to show it again."
@@ -2196,6 +2201,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
             or ""
         ).strip()
         parameters = _card_parameters(payload)
+        if action not in {"hermes_clarify", "robie_decision"}:
+            logger.info(
+                "[GoogleChat] unknown card action ignored action=%s",
+                (action or "-")[:80],
+            )
+            return None
+
         response = "That action is no longer available."
 
         try:
@@ -2235,8 +2247,6 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 response = result.message
                 if result.status == "RESOLVED" and result.choice:
                     response = f"Choice recorded: {result.choice}. ROBIE will continue from its checkpoint."
-            else:
-                response = "That action is not supported."
         except Exception:
             logger.exception("[GoogleChat] Card action failed (%s)", action or "unknown")
             response = "ROBIE could not record that choice safely. The Job remains paused."
@@ -2274,6 +2284,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
     async def dispatch_http_event(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         if _card_event_payload(envelope) is not None:
             response = await self._handle_card_event(envelope, notify=False)
+            if response is None:
+                return {}
             return {
                 "actionResponse": {
                     "type": "UPDATE_MESSAGE",
