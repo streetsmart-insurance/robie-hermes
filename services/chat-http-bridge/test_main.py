@@ -25,6 +25,21 @@ def _claims(**overrides):
     return claims
 
 
+def _unsigned_jwt(payload):
+    """Build an unsigned JWT for rejection-diagnostic tests.
+
+    The signature is never verified in these tests (verification is mocked
+    to fail); only the payload decode in the diagnostics path is exercised.
+    """
+    import base64
+    import json
+
+    def _seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    return f"{_seg({'alg': 'RS256', 'typ': 'JWT'})}.{_seg(payload)}.invalid-signature"
+
+
 class BridgeTests(unittest.TestCase):
     def setUp(self):
         self._env = patch.dict(
@@ -200,7 +215,9 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("actionResponse", body)
         publish.assert_called_once()
         self.assertEqual(self.mocked_verify.call_args.args[0], "signed-token")
-        self.assertEqual(self.mocked_verify.call_args.args[1], [AUDIENCE])
+        self.assertEqual(
+            self.mocked_verify.call_args.args[1], main._expand_audiences([AUDIENCE])
+        )
 
     def test_unset_auth_config_fails_closed_without_verify(self):
         os.environ["ROBIE_CHAT_BRIDGE_AUDIENCE"] = ""
@@ -265,6 +282,83 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(main._event_style({"chat": {"messagePayload": {}}}), "workspace_addon")
         self.assertEqual(main._event_style({"type": "MESSAGE"}), "chat_api")
         self.assertEqual(main._event_style({"message": {"text": "secret"}}), "unknown")
+
+    def test_audience_mismatch_logs_actual_aud_without_token(self):
+        token = _unsigned_jwt(
+            {"iss": main._CHAT_ISSUER, "aud": "https://wrong.example/", "exp": 9999999999}
+        )
+        self.mocked_verify.side_effect = ValueError("bad signature")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post("/", {"type": "MESSAGE"}, token=token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        output = "\n".join(logs.output)
+        self.assertIn("reason=audience_mismatch", output)
+        self.assertIn("aud=https://wrong.example/", output)
+        self.assertNotIn(token, output)
+        self.assertNotIn(token, response.get_data(as_text=True))
+
+    def test_expired_token_is_diagnosed(self):
+        token = _unsigned_jwt(
+            {"iss": "https://accounts.google.com", "aud": AUDIENCE, "exp": 1000}
+        )
+        self.mocked_verify.side_effect = ValueError("expired")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post("/", {"type": "MESSAGE"}, token=token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        self.assertIn("reason=token_expired", "\n".join(logs.output))
+
+    def test_malformed_token_is_diagnosed(self):
+        self.mocked_verify.side_effect = ValueError("bad")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post("/", {"type": "MESSAGE"}, token="not-a-jwt")
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        self.assertIn("reason=token_malformed", "\n".join(logs.output))
+
+    def test_signature_failure_with_plausible_claims_is_diagnosed(self):
+        token = _unsigned_jwt(
+            {"iss": main._CHAT_ISSUER, "aud": AUDIENCE, "exp": 9999999999}
+        )
+        self.mocked_verify.side_effect = ValueError("bad signature")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post("/", {"type": "MESSAGE"}, token=token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        output = "\n".join(logs.output)
+        self.assertIn("reason=signature_verification_failed", output)
+        self.assertNotIn(token, output)
+
+    def test_issuer_unexpected_is_diagnosed(self):
+        token = _unsigned_jwt(
+            {"iss": "https://evil.example", "aud": AUDIENCE, "exp": 9999999999}
+        )
+        self.mocked_verify.side_effect = ValueError("bad signature")
+        with patch.object(main, "_publish") as publish:
+            with self.assertLogs("robie-chat-http-bridge", level="INFO") as logs:
+                response = self._post("/", {"type": "MESSAGE"}, token=token)
+        self.assertEqual(response.status_code, 401)
+        publish.assert_not_called()
+        output = "\n".join(logs.output)
+        self.assertIn("reason=issuer_unexpected", output)
+        self.assertIn("iss=https://evil.example", output)
+
+    def test_trailing_slash_audience_variant_is_accepted(self):
+        self.assertEqual(
+            main._expand_audiences([AUDIENCE]), [AUDIENCE, AUDIENCE + "/"]
+        )
+        self.assertEqual(main._expand_audiences(["1234567890"]), ["1234567890"])
+        # A verified token carrying the trailing-slash form still passes.
+        self.mocked_verify.return_value = _claims(aud=AUDIENCE + "/")
+        with patch.object(main, "_publish") as publish:
+            response = self._post("/", {"type": "MESSAGE"})
+        self.assertEqual(response.status_code, 200)
+        publish.assert_called_once()
 
 
 if __name__ == "__main__":

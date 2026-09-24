@@ -5,7 +5,8 @@ Verification follows the Workspace Add-on HTTP check (audience is the
 configured HTTP endpoint URL; ``email`` is the add-on service account)
 and the Chat HTTP check (``chat@system.gserviceaccount.com``, either an
 ID token for the endpoint URL or a project-number JWT signed with that
-issuer's certs). Tokens are never logged.
+issuer's certs). Tokens are never logged. Rejections log a stable reason
+code plus non-secret diagnostics (aud/iss); the raw token is never logged.
 
 Required environment variables (fail closed when either is unset):
 
@@ -24,10 +25,13 @@ deploy Cloud Run, Test, or Production.
 
 from __future__ import annotations
 
+import base64
 import copy
+import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from flask import Flask, jsonify, request
@@ -55,10 +59,15 @@ _CHAT_CERTS_URL = (
 
 
 class _BearerAuthError(Exception):
-    """Fail-closed auth result. ``reason`` is a stable code, never a token."""
+    """Fail-closed auth result. ``reason`` is a stable code, never a token.
 
-    def __init__(self, reason: str) -> None:
+    ``detail`` carries non-secret diagnostic values (aud/iss). It is logged
+    for operators but never returned to the caller.
+    """
+
+    def __init__(self, reason: str, detail: str = "") -> None:
         self.reason = reason
+        self.detail = detail
         super().__init__(reason)
 
 
@@ -122,6 +131,50 @@ def _try_verify(
         return None
 
 
+# Leeway for the expiry diagnostic only. Verification itself uses
+# google-auth's clock handling; this keeps borderline clock-skew cases out
+# of the "expired" bucket so the reason stays trustworthy.
+_EXPIRY_LEEWAY_SECONDS = 300
+
+
+def _unverified_claims(token: str) -> dict[str, Any] | None:
+    """Decode the JWT payload without verifying the signature.
+
+    Used ONLY to build non-secret rejection diagnostics (aud/iss/exp).
+    The result is never trusted for authentication. Returns None when the
+    token is not a decodable JWT.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def _expand_audiences(audiences: list[str]) -> list[str]:
+    """Accept trailing-slash variants of configured URL audiences.
+
+    Google sometimes sends the audience with a trailing slash even when the
+    configured value has none (or vice versa). Both forms identify the same
+    endpoint, so both are accepted. Non-URL audiences (project numbers) are
+    left exactly as configured. Order-preserving, de-duplicated.
+    """
+    expanded: list[str] = []
+    for aud in audiences:
+        if aud not in expanded:
+            expanded.append(aud)
+        if aud.startswith(("http://", "https://")):
+            noslash = aud.rstrip("/")
+            for variant in (noslash, noslash + "/"):
+                if variant != aud and variant not in expanded:
+                    expanded.append(variant)
+    return expanded
+
+
 def _audience_matches(claims: dict[str, Any], audiences: list[str]) -> bool:
     aud = claims.get("aud")
     values = aud if isinstance(aud, list) else [aud]
@@ -143,6 +196,34 @@ def _identity_matches(claims: dict[str, Any], expected_emails: set[str]) -> bool
     return False
 
 
+def _diagnose_rejection(token: str, audiences: list[str]) -> _BearerAuthError:
+    """Build a specific, token-safe rejection for a failed verification.
+
+    Inspects the UNVERIFIED claims (aud/iss/exp are not secrets) to tell
+    operators exactly why Google's token was rejected. The raw token is
+    never included.
+    """
+    claims = _unverified_claims(token)
+    if claims is None:
+        return _BearerAuthError("token_malformed")
+    exp = claims.get("exp")
+    if isinstance(exp, (int, float)) and exp < time.time() - _EXPIRY_LEEWAY_SECONDS:
+        return _BearerAuthError("token_expired", f"exp={int(exp)}")
+    aud = claims.get("aud")
+    aud_values = aud if isinstance(aud, list) else [aud]
+    aud_str = ",".join(str(item) for item in aud_values if isinstance(item, str))
+    allowed = set(_expand_audiences(audiences))
+    if not any(isinstance(item, str) and item in allowed for item in aud_values):
+        return _BearerAuthError("audience_mismatch", f"aud={aud_str or 'missing'}")
+    issuer = str(claims.get("iss") or "").strip()
+    if issuer not in _GOOGLE_ISSUERS and issuer != _CHAT_ISSUER:
+        return _BearerAuthError("issuer_unexpected", f"iss={issuer or 'missing'}")
+    return _BearerAuthError(
+        "signature_verification_failed",
+        f"aud={aud_str or 'missing'} iss={issuer or 'missing'}",
+    )
+
+
 def _extract_bearer(header: str | None) -> str:
     if not isinstance(header, str):
         raise _BearerAuthError("missing_bearer")
@@ -157,15 +238,16 @@ def _claims_from_google(
     audiences: list[str],
     expected_emails: set[str],
 ) -> dict[str, Any]:
-    oidc_claims = _try_verify(token, audiences)
+    expanded = _expand_audiences(audiences)
+    oidc_claims = _try_verify(token, expanded)
     if oidc_claims is not None and str(oidc_claims.get("iss") or "").strip() in _GOOGLE_ISSUERS:
         return oidc_claims
     if _CHAT_ISSUER in expected_emails:
-        chat_claims = _try_verify(token, audiences, certs_url=_CHAT_CERTS_URL)
+        chat_claims = _try_verify(token, expanded, certs_url=_CHAT_CERTS_URL)
         issuer = str((chat_claims or {}).get("iss") or "").strip()
         if chat_claims is not None and issuer == _CHAT_ISSUER:
             return chat_claims
-    raise _BearerAuthError("invalid_bearer")
+    raise _diagnose_rejection(token, audiences)
 
 
 def _authenticate_bearer(header: str | None) -> None:
@@ -181,7 +263,7 @@ def _authenticate_bearer(header: str | None) -> None:
     if not audiences or not expected_emails:
         raise _BearerAuthError("auth_not_configured")
     claims = _claims_from_google(token, audiences, expected_emails)
-    if not _audience_matches(claims, audiences) or not _identity_matches(claims, expected_emails):
+    if not _audience_matches(claims, _expand_audiences(audiences)) or not _identity_matches(claims, expected_emails):
         raise _BearerAuthError("unexpected_bearer_identity")
 
 
@@ -302,7 +384,11 @@ def receive(action_name: str | None = None):
     try:
         _authenticate_bearer(request.headers.get("Authorization"))
     except _BearerAuthError as exc:
-        logger.info("Rejected Google Chat POST reason=%s", exc.reason)
+        logger.info(
+            "Rejected Google Chat POST reason=%s%s",
+            exc.reason,
+            f" {exc.detail}" if exc.detail else "",
+        )
         return jsonify(_chat_message("Unauthorized.")), 401
 
     if action_name and not ACTION_RE.fullmatch(action_name):
