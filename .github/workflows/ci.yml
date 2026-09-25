@@ -72,6 +72,9 @@ jobs:
             tests/test_repair_dedicated_accountability_magellan_sentiment_heading.py \
             tests/test_magellan_sad_identity.py \
             tests/test_repair_dedicated_accountability_magellan_sad_identity.py \
+            tests/test_magellan_session_acl.py \
+            tests/test_magellan_empty_gate.py \
+            tests/test_repair_dedicated_accountability_magellan_empty.py \
             tests/test_repair_dedicated_accountability_submission_gate.py \
             tests/test_repair_dedicated_accountability_submission_boundary.py \
             tests/test_preflight_dedicated_accountability_submission.py \
