@@ -142,11 +142,14 @@ class AuditWorkerRealSharedModulesTest(unittest.TestCase):
 
 
 class PolicyChangeKillSwitchTest(unittest.TestCase):
-    def test_worker_refuses_while_schema_unverified(self):
+    def test_worker_enabled_after_schema_verification(self):
+        # 4359 schema verified 2026-09-25 (Carlo approved). Kill switch
+        # intentionally lifted; worker no longer refuses on schema grounds.
         result = _run_child({"scenario": "policy_change", "rows": []})
-        self.assertFalse(result["policy_change_enabled"])
-        self.assertFalse(result["succeeded"])
-        self.assertIn("disabled", (result["error"] or "").lower())
+        self.assertTrue(result["policy_change_enabled"])
+        if not result["succeeded"]:
+            self.assertNotIn("disabled", (result["error"] or "").lower())
+            self.assertNotIn("unverified", (result["error"] or "").lower())
 
     def test_bounded_schema_gate_allows_policy_change_after_verification(self):
         # 4359 schema verified 2026-09-25 (Carlo approved). The gate no
