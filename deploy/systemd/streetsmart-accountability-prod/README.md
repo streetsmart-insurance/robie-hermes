@@ -36,3 +36,27 @@ Then `systemctl daemon-reload` and `systemctl enable --now streetsmart-accountab
 The webhook secret is `accountability-team-lead-chat-webhook`. Optional env
 `TEAM_LEAD_CHAT_WEBHOOK_SECRET` may name a different secret id. This unit
 does not send leadership email.
+
+## Evening source collection
+
+`streetsmart-accountability-collect-evening.timer` stays Mon–Fri 17:00
+America/New_York and must keep executing `run_source_collection_vm.sh` only.
+Do not retarget it at the 17:05 Chat unit and do not add `--publish` or
+`--deliver`.
+
+`production_main` still defaults to the previous business day when `--date`
+is omitted. The evening script passes today's America/New_York date so
+`--skip-if-prepared` looks at that day's snapshot. The 09:00 unit keeps
+`run_daily_accountability_vm.sh` with no `--date`.
+
+Copy onto the VM before the next weekday 17:00, without replacing
+`production_main.py`, `src/engine/date_utils.py`, or `src/engine/__init__.py`:
+
+- `src/engine/collection_target.py`
+- `scripts/run_source_collection_vm.sh` (mode `0755`)
+
+Diff the live script before copy. Keep any local steps that are not date
+selection. The date change is the added `--date` from
+`src.engine.collection_target --evening`. Leave the installed evening timer
+unit in place when its `ExecStart` is already that script. Magellan
+session-file ownership is a separate fix.
