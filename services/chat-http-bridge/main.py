@@ -505,6 +505,15 @@ def _chat_message(text: str) -> dict[str, Any]:
     return {"text": text}
 
 
+PROCESSING_TEXT = "⏳ Processing your decision…"
+# This card replaces the buttons before any gateway has claimed the click.
+# If no gateway patches it (gateway down, subscription misrouted), the user
+# still needs to know what to do.
+PROCESSING_FALLBACK_TEXT = (
+    "If this card does not update within a minute, message ROBIE in this chat."
+)
+
+
 def _addon_processing_response() -> dict[str, Any]:
     """Return a Workspace Add-on update-message action with a processing card.
 
@@ -514,6 +523,8 @@ def _addon_processing_response() -> dict[str, Any]:
     envelope. The Add-on response is
     ``hostAppDataAction.chatDataAction.updateMessageAction.message``.
     Hermes then replaces that message asynchronously via the Chat API.
+    The card always carries ``PROCESSING_FALLBACK_TEXT`` so a click no
+    gateway patches never leaves a card with no buttons and no guidance.
     """
     return {
         "hostAppDataAction": {
@@ -529,9 +540,14 @@ def _addon_processing_response() -> dict[str, Any]:
                                             "widgets": [
                                                 {
                                                     "textParagraph": {
-                                                        "text": "⏳ Processing your decision…"
+                                                        "text": PROCESSING_TEXT
                                                     }
-                                                }
+                                                },
+                                                {
+                                                    "textParagraph": {
+                                                        "text": PROCESSING_FALLBACK_TEXT
+                                                    }
+                                                },
                                             ]
                                         }
                                     ]

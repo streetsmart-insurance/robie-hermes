@@ -222,6 +222,25 @@ class BridgeTests(unittest.TestCase):
             main._expand_audiences(main._audiences_for_request("/actions/robie_decision")),
         )
 
+    def test_processing_card_always_carries_fallback_guidance(self):
+        # The processing card replaces the buttons before any gateway owns
+        # the click. If nobody patches it, the user must still see what to do.
+        def texts(body):
+            message = body["hostAppDataAction"]["chatDataAction"]["updateMessageAction"]["message"]
+            widgets = message["cardsV2"][0]["card"]["sections"][0]["widgets"]
+            return [widget["textParagraph"]["text"] for widget in widgets]
+
+        self.assertEqual(
+            texts(main._addon_processing_response()),
+            [main.PROCESSING_TEXT, main.PROCESSING_FALLBACK_TEXT],
+        )
+        self.assertIn("message ROBIE", main.PROCESSING_FALLBACK_TEXT)
+        payload = {"chat": {"buttonClickedPayload": {"message": {"name": "spaces/9/messages/9"}}}}
+        with patch.object(main, "_publish"):
+            response = self._post("/actions/robie_confirmation_decision", payload, token="signed-token")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(main.PROCESSING_FALLBACK_TEXT, texts(response.get_json()))
+
     def test_unset_auth_config_fails_closed_without_verify(self):
         os.environ["ROBIE_CHAT_BRIDGE_AUDIENCE"] = ""
         with patch.object(main, "_publish") as publish:

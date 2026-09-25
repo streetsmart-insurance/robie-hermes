@@ -2294,13 +2294,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         """Resolve a trusted Google Chat card action without starting an agent turn.
 
-        Returns None when this gateway must not patch or reply. That covers
-        an unknown card action, a click whose ``robie_env`` names the other
-        environment, and a confirmation id that is not in this gateway's
-        database. The caller still acks: a normal return settles the Pub/Sub
-        delivery. An unknown action is never patched. A clarify or decision
-        click routed to this gateway still updates the card, including the
-        expired-question reply after in-memory clarify state is gone.
+        Returns None when this gateway must not patch or reply: the click's
+        ``robie_env`` routes it to the other environment, whose own
+        subscription receives it and patches the card. The caller still
+        acks: a normal return settles the Pub/Sub delivery.
+
+        A click routed to this gateway always gets a terminal patch. The
+        bridge has already replaced the buttons with a processing card, so
+        an unknown action, an unreadable token, or a confirmation id missing
+        from this gateway's database is patched to "This card is no longer active."
+        rather than left on "Processing". A clarify or decision click routed
+        here still updates the card, including the expired-question reply
+        after in-memory clarify state is gone.
         """
         payload = _card_event_payload(envelope)
         if payload is None:
@@ -2322,10 +2327,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         action = canonical_card_action(raw_action)
         parameters = _card_parameters(payload)
 
-        # Foreign and unknown clicks must not reach the patch below.
-        # Prod's old else-branch told the user the action was unsupported
-        # and stripped the other environment's buttons. Unknown actions
-        # still ack with no patch, including after main's smaller change.
+        # Foreign clicks must not reach the patch below: Prod's old
+        # else-branch told the user the action was unsupported and stripped
+        # the other environment's buttons. A click routed here that this
+        # gateway cannot act on is marked inactive instead of acked silently,
+        # because the bridge already replaced its buttons with "Processing".
+        inactive = False
         if action == "hermes_clarify":
             # In-memory clarify state expires, so a late click on our own
             # card must still reach the "expired" reply. Ownership is the
@@ -2356,23 +2363,40 @@ class GoogleChatAdapter(BasePlatformAdapter):
         elif action == "robie_confirmation_decision":
             confirmation_id, owned = _confirmation_owned_by_gateway(self, parameters)
             if not owned:
+                if not _click_routed_to_this_gateway(parameters):
+                    logger.info(
+                        "[GoogleChat] confirmation click not owned here action=%s ref=%s",
+                        action,
+                        (confirmation_id or "-")[:8],
+                    )
+                    return None
                 logger.info(
-                    "[GoogleChat] confirmation click not owned here action=%s ref=%s",
+                    "[GoogleChat] confirmation click routed here but not found; marking card inactive action=%s ref=%s",
                     action,
                     (confirmation_id or "-")[:8],
                 )
-                return None
+                inactive = True
         else:
+            if not _click_routed_to_this_gateway(parameters):
+                logger.info(
+                    "[GoogleChat] unknown card action ignored action=%s",
+                    (action or "-")[:80],
+                )
+                return None
             logger.info(
-                "[GoogleChat] unknown card action ignored action=%s",
+                "[GoogleChat] unknown card action routed here; marking card inactive action=%s",
                 (action or "-")[:80],
             )
-            return None
+            inactive = True
 
         response = "That action is no longer available."
 
         try:
-            if action == "hermes_clarify":
+            if inactive:
+                # Never call a resolver for a click this gateway does not
+                # own: a missing id must not create schema or rows here.
+                response = "This card is no longer active."
+            elif action == "hermes_clarify":
                 clarify_id = parameters.get("clarify_id", "").strip()
                 choice = parameters.get("choice", "").strip()
                 if not clarify_id or not choice or clarify_id not in self._clarify_state:
