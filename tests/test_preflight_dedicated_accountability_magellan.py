@@ -81,3 +81,14 @@ def test_workflows_require_two_contexts_and_preserve_redacted_evidence():
     assert "--reliability-attempts 2" in diagnose_workflow
     assert "systemctl start" not in diagnose_workflow
     assert "--publish" not in diagnose_workflow
+    assert "helper_path=scripts/magellan_session_acl.py" in diagnose_workflow
+    assert 'MAGELLAN_SESSION_ACL_PATH="${remote_helper}"' in diagnose_workflow
+
+
+def test_preflight_saves_through_dual_writer_helper():
+    source = Path("scripts/preflight_dedicated_accountability_magellan.py").read_text(
+        encoding="utf-8"
+    )
+    assert "os.chmod(STORAGE_STATE_PATH, 0o600)" not in source
+    assert "publish_private_storage_state" in source
+    assert "storage_state_is_dual_writer_private" in source
