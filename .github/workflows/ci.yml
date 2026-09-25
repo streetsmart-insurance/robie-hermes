@@ -31,7 +31,7 @@ jobs:
       - name: Test Google Chat bridge
         run: PYTHONPATH=services/chat-http-bridge python -m unittest discover -s services/chat-http-bridge -p 'test_*.py' -v
       - name: Compile source
-        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine tests
+        run: PYTHONPYCACHEPREFIX=/tmp/robie-pyc python -m compileall -q deploy/hermes integrations robie_job_engine src tests
       - name: Test Chat approval cards
         run: PYTHONPATH=. python -m pytest -q tests/test_confirmation_chat_buttons.py tests/test_confirmation_origin_notify.py
       - name: Run regression battery
@@ -77,6 +77,7 @@ jobs:
             tests/test_repair_dedicated_accountability_magellan_empty.py \
             tests/test_repair_dedicated_accountability_submission_gate.py \
             tests/test_repair_dedicated_accountability_submission_boundary.py \
+            tests/test_team_lead_chat_eod.py \
             tests/test_preflight_dedicated_accountability_submission.py \
             tests/test_ezlynx_api.py \
             tests/test_browser_proxy_units.py \
