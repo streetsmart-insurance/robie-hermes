@@ -148,12 +148,13 @@ class PolicyChangeKillSwitchTest(unittest.TestCase):
         self.assertFalse(result["succeeded"])
         self.assertIn("disabled", (result["error"] or "").lower())
 
-    def test_bounded_schema_gate_holds_policy_change(self):
+    def test_bounded_schema_gate_allows_policy_change_after_verification(self):
+        # 4359 schema verified 2026-09-25 (Carlo approved). The gate no
+        # longer holds policy change jobs for unverified schema.
         reason = bounded_schema_hold_reason(
             "policy_change_verification", {"report_id": "4359"}
         )
-        self.assertIsNotNone(reason)
-        self.assertIn("unverified", reason)
+        self.assertIsNone(reason)
 
     def test_bounded_schema_gate_allows_manual_renewal(self):
         reason = bounded_schema_hold_reason(
