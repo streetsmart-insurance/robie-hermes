@@ -130,19 +130,24 @@ def _ezlynx(**fields):
     return merged
 
 class KillSwitchTests(unittest.TestCase):
-    def test_kill_switch_holds_at_needs_clarification(self):
-        self.assertFalse(pcw.POLICY_CHANGE_ENABLED)
+    def test_worker_enabled_after_schema_verification(self):
+        # 4359 schema verified 2026-09-25 (Carlo approved): 19 columns confirmed,
+        # no request_id field exists, using (policy_number, change_request_created_date)
+        # composite key verified unique across 71 rows. Kill switch intentionally lifted.
+        self.assertTrue(pcw.POLICY_CHANGE_ENABLED)
         worker = pcw.PolicyChangeWorker()
         result = worker.perform(
             {"action_type": "policy_change_verification", "payload": {}},
             idempotency_key="k1",
         )
-        self.assertFalse(result.succeeded)
-        self.assertEqual(result.hold_status, JobStatus.NEEDS_CLARIFICATION)
-        self.assertIn("report 4359 schema unverified", result.error)
+        # Should NOT block on schema verification anymore
+        if not result.succeeded:
+            self.assertNotIn("report 4359 schema unverified", result.error or "")
 
-    def test_kill_switch_never_flipped_by_accident(self):
-        self.assertIs(pcw.POLICY_CHANGE_ENABLED, False)
+    def test_kill_switch_intentionally_lifted(self):
+        # Carlo approved enabling 4359 on 2026-09-25 after schema verification.
+        # This test documents the intentional state change.
+        self.assertIs(pcw.POLICY_CHANGE_ENABLED, True)
 
 class ReconstructRequestTests(unittest.TestCase):
     def test_reconstructs_clear_request(self):
