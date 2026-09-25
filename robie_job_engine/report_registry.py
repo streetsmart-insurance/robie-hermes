@@ -75,10 +75,10 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4359": ReportSpec(
         "4359",
         "Policy Change",
-        # Stay False until 3 clean hermes-test-01 post-job audits after
-        # Test install. Do not flip this in the same change as
-        # POLICY_CHANGE_ENABLED.
-        False,
+        # Verified 2026-09-25: 3/3 clean hermes-test-01 dry_run audits
+        # (71 items, 71 actions, 71 evidence, 0 errors each).
+        # POLICY_CHANGE_ENABLED flip is a separate change per policy.
+        True,
         ("policy_number", "change_request_created_date"),
         filter_name=POLICY_CHANGE_4359_SCOPE_MARKER,
         look_id=LOOK_ID_BY_REPORT["4359"],
