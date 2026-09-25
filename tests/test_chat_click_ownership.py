@@ -2,7 +2,11 @@
 
 Prod and Test share hermes-chat-topic. A confirmation click must update
 the card only on the gateway whose own database contains that id. An
-unknown action must not patch or reply.
+click routed to a gateway that cannot act on it (unknown action,
+unreadable token, confirmation id not in its database) is patched to
+"This card is no longer active." because the bridge already replaced the
+buttons with a processing card. A click stamped for the other environment
+stays silent: that environment's subscription receives and patches it.
 """
 
 from __future__ import annotations
@@ -158,6 +162,8 @@ def test_only_owning_gateway_patches_the_shared_click(tmp_path, monkeypatch, cap
     owner = _bind(_Gateway(owner_db))
     foreign = _bind(_Gateway(foreign_db))
 
+    # The click is stamped robie_env=test; the foreign gateway is Prod.
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
     with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
         foreign_result = asyncio.run(
             foreign._handle_card_event(envelope, notify=True)
@@ -180,6 +186,7 @@ def test_only_owning_gateway_patches_the_shared_click(tmp_path, monkeypatch, cap
     )
     assert token not in "\n".join(record.getMessage() for record in caplog.records)
 
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
     owner_result = asyncio.run(owner._handle_card_event(envelope, notify=True))
     assert owner_result
     assert confirmations.get(cid, store=owner_store)["status"] == "REJECTED"
@@ -190,7 +197,8 @@ def test_only_owning_gateway_patches_the_shared_click(tmp_path, monkeypatch, cap
     assert "not supported" not in owner.patches[0][1]["text"].lower()
 
 
-def test_unknown_card_action_does_not_patch_or_reply(tmp_path, caplog):
+def test_foreign_env_unknown_card_action_does_not_patch_or_reply(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
     gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
     envelope = _click("rbd1.unused", action="not_a_real_action")
     with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
@@ -413,10 +421,118 @@ def test_adapter_buttons_stamp_routing_env(monkeypatch):
     }
 
 
-def test_unreadable_confirmation_token_is_silent(tmp_path):
+def test_foreign_env_unreadable_confirmation_token_is_silent(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
     gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
     envelope = _click("not-a-decision-token")
     result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
     assert result is None
     assert gateway.patches == []
     assert gateway.creates == []
+
+
+INACTIVE = "This card is no longer active."
+
+
+def _assert_patched_inactive(gateway, result, http):
+    assert result == INACTIVE
+    assert len(gateway.patches) == 1
+    assert gateway.patches[0][0] == MESSAGE
+    assert gateway.patches[0][1] == {"text": f"✓ {INACTIVE}", "cardsV2": []}
+    assert gateway.creates == []
+    assert http["actionResponse"] == {"type": "UPDATE_MESSAGE"}
+    assert http["text"] == f"✓ {INACTIVE}"
+
+
+def _no_confirmations_table(db_path):
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_confirmations'"
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_routed_unknown_card_action_patches_card_inactive(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
+    envelope = _click("rbd1.unused", action="not_a_real_action")
+    with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
+        result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    http = asyncio.run(gateway.dispatch_http_event(envelope))
+    _assert_patched_inactive(gateway, result, http)
+    assert any(
+        "unknown card action routed here" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_unstamped_unknown_card_action_on_prod_patches_card_inactive(tmp_path, monkeypatch):
+    # No robie_env on the button is Prod's click, matching the Prod filter.
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+    gateway = _bind(_Gateway(str(tmp_path / "jobs.db")))
+    envelope = _card("not_a_real_action")
+    result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    http = asyncio.run(gateway.dispatch_http_event(envelope))
+    _assert_patched_inactive(gateway, result, http)
+
+
+def test_routed_confirmation_not_in_db_patches_inactive_without_schema(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ROBIE_DECISION_SIGNING_KEY", TEST_KEY)
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    db = str(tmp_path / "jobs.db")
+    __import__("sqlite3").connect(db).close()
+    token = confirmations.mint_decision_token(
+        "cid-gone-12345678", "REJECT", _principal(), key=TEST_KEY
+    )
+    gateway = _bind(_Gateway(db))
+    envelope = _click(token)
+    with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
+        result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    http = asyncio.run(gateway.dispatch_http_event(envelope))
+    _assert_patched_inactive(gateway, result, http)
+    # The resolver never ran: no schema was created for a foreign id.
+    assert _no_confirmations_table(db)
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "routed here but not found" in log_text
+    assert "ref=cid-gone" in log_text
+    assert token not in log_text
+
+
+def test_routed_unreadable_confirmation_token_patches_inactive(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    db = str(tmp_path / "jobs.db")
+    gateway = _bind(_Gateway(db))
+    envelope = _click("not-a-decision-token")
+    result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
+    http = asyncio.run(gateway.dispatch_http_event(envelope))
+    _assert_patched_inactive(gateway, result, http)
+
+
+def test_shared_click_gets_exactly_one_terminal_patch(tmp_path, monkeypatch):
+    """Both gateways see a Test click; the owner patches, Prod stays silent."""
+    monkeypatch.setenv("ROBIE_DECISION_SIGNING_KEY", TEST_KEY)
+    test_db = str(tmp_path / "test.db")
+    prod_db = str(tmp_path / "prod.db")
+    test_store = JobStore(test_db)
+    JobStore(prod_db)
+    cid = _request(test_store)
+    token = confirmations.mint_decision_token(cid, "REJECT", _principal(), key=TEST_KEY)
+    unknown = _click(token, action="not_a_real_action")
+    known = _click(token)
+
+    prod = _bind(_Gateway(prod_db))
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
+    assert asyncio.run(prod._handle_card_event(known, notify=True)) is None
+    assert asyncio.run(prod._handle_card_event(unknown, notify=True)) is None
+    assert prod.patches == [] and prod.creates == []
+
+    test = _bind(_Gateway(test_db))
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
+    assert asyncio.run(test._handle_card_event(known, notify=True)) != INACTIVE
+    assert confirmations.get(cid, store=test_store)["status"] == "REJECTED"
+    assert asyncio.run(test._handle_card_event(unknown, notify=True)) == INACTIVE
+    assert len(test.patches) == 2

@@ -1,4 +1,8 @@
-"""Unknown Google Chat card actions ack without a patch or a reply.
+"""Unknown Google Chat card actions on the other environment ack silently.
+
+A click with no ``robie_env`` is Prod's, so Test acks it with no patch or
+reply. The routed-here case (patched "This card is no longer active.") is
+covered in test_chat_click_ownership.py.
 
 The adapter module imports gateway, which is not installed in this tree,
 so the handlers are executed from the shipped source.
@@ -83,7 +87,9 @@ def _envelope(action, **parameters):
     }
 
 
-def test_unknown_card_action_does_not_patch_or_reply(caplog):
+def test_unknown_card_action_does_not_patch_or_reply(caplog, monkeypatch):
+    # Unstamped click, Test gateway: the click is Prod's, so Test is silent.
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
     gateway = _bind()
     envelope = _envelope("not_a_real_action")
     with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
