@@ -364,12 +364,12 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "identity": ("report_id",),
     },
     "policy_change_verification": {
-        # Look 4602's 19 columns are mapped. schema_verified stays False
-        # until 3 clean hermes-test-01 post-job audits after Test install.
-        # Do not flip this in the same change as POLICY_CHANGE_ENABLED.
+        # Look 4602's 19 columns are mapped. Verified 2026-09-25 via 3/3
+        # clean hermes-test-01 dry_run audits (71/71/71/0 each).
+        # POLICY_CHANGE_ENABLED flip is a separate change per policy.
         # Job payload still requires report_id. Work-item identity matches
         # report_registry (no request_id column exists on the export).
-        "schema_verified": False,
+        "schema_verified": True,
         "required": ("report_id",),
         "identity": ("policy_number", "change_request_created_date"),
     },
