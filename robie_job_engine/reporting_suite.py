@@ -167,9 +167,20 @@ class ReportingSuite:
             ])
             for item in sad_calls[:50]:
                 tags = ", ".join(item.get("tags") or []) or "no tags supplied"
+                display_name = (
+                    item.get("client_name")
+                    or item.get("account_name")
+                    or item.get("caller_name")
+                    or "Unknown"
+                )
+                display_phone = (
+                    item.get("client_phone")
+                    or item.get("caller_phone_masked")
+                    or "masked"
+                )
                 lines.append(
-                    f"• {item.get('account_name') or 'UNVERIFIED ACCOUNT'} | "
-                    f"{item.get('caller_phone_masked') or 'masked'} | {item.get('occurred_at') or 'time UNVERIFIED'} | "
+                    f"• {display_name} | "
+                    f"{display_phone} | {item.get('occurred_at') or 'time UNVERIFIED'} | "
                     f"{tags} | answered by: {item.get('answered_by') or 'UNVERIFIED'} | "
                     f"producer: {item.get('assigned_producer') or 'UNVERIFIED'} | "
                     f"CSR: {item.get('assigned_csr') or 'UNVERIFIED'} | "

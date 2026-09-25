@@ -104,13 +104,21 @@ def test_watchdog_fails_closed_for_each_missing_proof(field, bad_value, failed_c
 
 
 def test_report_content_gate_accepts_populated_submission_center():
-    evidence = _report_module().validate_submission_content(
+    from scripts.repair_dedicated_accountability_magellan_sentiment_heading import (
+        NEW_HEADING,
+    )
+
+    heading = NEW_HEADING
+    document = (
         "Sales / service — Submission Center\n"
         "Open over 30 days: 4\n"
         "Evidence source: live EZLynx Submission Center\n"
-        "Customer sentiment — Magellan\n"
+        f"{heading}\n"
         "Verified zero — full target-date pagination completed"
     )
+    assert heading == "Customer sentiment (SAD) — Magellan"
+    assert heading in document
+    evidence = _report_module().validate_submission_content(document)
     assert evidence["verified"] is True
     assert evidence["submission_center_section_present"] is True
     assert evidence["submission_center_unverified_marker_present"] is False

@@ -2295,11 +2295,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """Resolve a trusted Google Chat card action without starting an agent turn.
 
         Returns None when this gateway must not patch or reply. That covers
-        an unknown card action, and a ``hermes_clarify``, ``robie_decision``,
-        or ``robie_confirmation_decision`` whose id is not known on this
-        gateway. The caller still acks: a normal return settles the Pub/Sub
-        delivery. An id this gateway already has still updates the card.
-        Safe to deploy before subscription filters exist.
+        an unknown card action, a click whose ``robie_env`` names the other
+        environment, and a confirmation id that is not in this gateway's
+        database. The caller still acks: a normal return settles the Pub/Sub
+        delivery. An unknown action is never patched. A clarify or decision
+        click routed to this gateway still updates the card, including the
+        expired-question reply after in-memory clarify state is gone.
         """
         payload = _card_event_payload(envelope)
         if payload is None:
@@ -2323,7 +2324,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         # Foreign and unknown clicks must not reach the patch below.
         # Prod's old else-branch told the user the action was unsupported
-        # and stripped the other environment's buttons.
+        # and stripped the other environment's buttons. Unknown actions
+        # still ack with no patch, including after main's smaller change.
         if action == "hermes_clarify":
             # In-memory clarify state expires, so a late click on our own
             # card must still reach the "expired" reply. Ownership is the

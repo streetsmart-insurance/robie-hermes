@@ -34,6 +34,17 @@ def test_repair_install_uses_one_verified_ssh_session():
     assert "repair_dedicated_accountability_submission_gate.py" in step
     assert "repair_dedicated_accountability_submission_boundary.py" in step
     assert '--path "${APP_ROOT}/src/reporters/stable_google_doc.py"' in step
+    assert "repair_dedicated_accountability_magellan_sentiment_heading.py" in step
+    assert (
+        'repair_dedicated_accountability_magellan_sentiment_heading.py" '
+        '--path "${APP_ROOT}/src/reporters/stable_google_doc.py"'
+    ) in step
+    assert "repair_dedicated_accountability_magellan_sad_identity.py" in step
+    assert (
+        'repair_dedicated_accountability_magellan_sad_identity.py" '
+        '--production-main "${APP_ROOT}/src/production_main.py" '
+        '--magellan-extractor "${APP_ROOT}/src/extractors/magellan_playwright.py"'
+    ) in step
     assert 'repair_dedicated_accountability_google_docs.py" --path "${APP_ROOT}/src/production_main.py"' not in step
     assert "ezlynx_submission_browser.py" in step
     assert "ezlynx_submission_center.py" in step
