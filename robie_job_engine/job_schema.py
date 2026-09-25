@@ -363,9 +363,10 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "identity": ("report_id",),
     },
     "policy_change_verification": {
-        # Report 4359's schema is not yet verified: the worker must stay
-        # disabled (POLICY_CHANGE_ENABLED is False) and bounded jobs hold.
-        "schema_verified": False,
+        # Report 4359's schema verified 2026-09-25 (Carlo approved):
+        # 19 columns confirmed, composite key
+        # (policy_number, change_request_created_date) verified unique.
+        "schema_verified": True,
         "required": ("report_id",),
         "identity": ("report_id",),
     },
