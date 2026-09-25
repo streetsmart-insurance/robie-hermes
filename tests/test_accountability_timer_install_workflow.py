@@ -45,6 +45,18 @@ def test_repair_install_uses_one_verified_ssh_session():
         '--production-main "${APP_ROOT}/src/production_main.py" '
         '--magellan-extractor "${APP_ROOT}/src/extractors/magellan_playwright.py"'
     ) in step
+    assert "repair_dedicated_accountability_magellan_session_acl.py" in step
+    assert 'cp scripts/magellan_session_acl.py "${bundle_dir}/"' in step
+    assert (
+        'repair_dedicated_accountability_magellan_session_acl.py" '
+        '--path "${APP_ROOT}/src/extractors/magellan_playwright.py"'
+    ) in step
+    repair_invoke = (
+        'repair_dedicated_accountability_magellan_session_acl.py" '
+        '--path "${APP_ROOT}/src/extractors/magellan_playwright.py"'
+    )
+    preflight_invoke = 'preflight_dedicated_accountability_magellan.py" --app-root'
+    assert step.index(repair_invoke) < step.index(preflight_invoke)
     assert 'repair_dedicated_accountability_google_docs.py" --path "${APP_ROOT}/src/production_main.py"' not in step
     assert "ezlynx_submission_browser.py" in step
     assert "ezlynx_submission_center.py" in step
