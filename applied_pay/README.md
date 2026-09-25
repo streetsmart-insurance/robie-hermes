@@ -16,4 +16,4 @@ Run synthetic safety checks with `python3 -m unittest applied_pay.tests.test_saf
 
 There is no box service or cron installed for this code. Email/xlsx retrieval, an independent bank-clearing feed, a fail-closed runner, idempotent state, alerting and a deployment unit/timer are still needed before unattended production operation. The existing weekday task can run it manually read-only in the meantime. Never schedule both that task and a box timer for the same report without a deduplication design.
 
-The old `tests/test_known_good.py` hand-match expectations are not valid under the new bank-clearing rule and retained real transfer/receipt identifiers; replace them with synthetic safety tests before running CI.
+The old real-data hand-match expectations have been replaced with a synthetic smoke check. The safety tests include duplicate transfers, false READY, missing bank proof and fee review.
