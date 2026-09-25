@@ -1,4 +1,8 @@
-"""Unknown Google Chat card actions ack without a patch or a reply.
+"""Unknown Google Chat card actions on the other environment ack silently.
+
+A click with no ``robie_env`` is Prod's, so Test acks it with no patch or
+reply. The routed-here case (patched "This card is no longer active.") is
+covered in test_chat_click_ownership.py.
 
 The adapter module imports gateway, which is not installed in this tree,
 so the handlers are executed from the shipped source.
@@ -25,6 +29,7 @@ def _handlers():
         "_card_event_payload",
         "_card_parameters",
         "_card_form_text",
+        "_click_routed_to_this_gateway",
         "_handle_card_event",
         "dispatch_http_event",
     }
@@ -82,7 +87,9 @@ def _envelope(action, **parameters):
     }
 
 
-def test_unknown_card_action_does_not_patch_or_reply(caplog):
+def test_unknown_card_action_does_not_patch_or_reply(caplog, monkeypatch):
+    # Unstamped click, Test gateway: the click is Prod's, so Test is silent.
+    monkeypatch.setenv("ROBIE_ENV", "TEST")
     gateway = _bind()
     envelope = _envelope("not_a_real_action")
     with caplog.at_level("INFO", logger="gateway.platforms.google_chat"):
@@ -99,7 +106,9 @@ def test_unknown_card_action_does_not_patch_or_reply(caplog):
     )
 
 
-def test_known_clarify_action_still_patches():
+def test_known_clarify_action_still_patches(monkeypatch):
+    # No robie_env on the button is Prod's click, matching the filter.
+    monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
     gateway = _bind()
     envelope = _envelope("hermes_clarify")
     result = asyncio.run(gateway._handle_card_event(envelope, notify=True))
