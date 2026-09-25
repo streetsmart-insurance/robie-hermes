@@ -1,0 +1,6 @@
+                                                                                                                 STATEMENT
+                                                                                                            Date         4/12/2025
+                                                                                                         Customer ID     SYN9002
+      PA90001                      04/01/25    04/02/25   04/30/25 PRM FINA Example Transit LLC           0.00%              0.00       0.00    0.00   -100.00       -60.00
+Total Due for Insured                                                                                                                                        -60.00
+                                                                                                                                Total Due:                    -60.00

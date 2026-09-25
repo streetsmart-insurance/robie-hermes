@@ -1,0 +1,10 @@
+                                                                                                                Account Statement
+                                                                                                                         Account No.                   SYN9003
+                                                                                                                         Statement Date          04/12/2025
+
+      Policy No.                         Insured             Inv.       Due Date     Effective        Amount             %            Amt                NET
+
+SYN-POL003                     Example Transit LLC            Example Liability
+            Example Liability                     900003       05/01/25    04/01/25             100.00        10.00          10.00             90.00
+                                                                                                  Policy SYN-POL003 Balance          $90.00
+                   Account Total                                                                              $100.00              $10.00             $90.00
