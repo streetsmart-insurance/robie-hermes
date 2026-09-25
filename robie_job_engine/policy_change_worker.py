@@ -32,7 +32,7 @@ from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerR
 
 #: Kill switch. Stays False until report 4359's schema is verified by a human.
 #: Do NOT flip this without the verified 4359 column list.
-POLICY_CHANGE_ENABLED = False
+POLICY_CHANGE_ENABLED = True
 
 JOB_TYPE = "policy_change_verification"
 WORKER_NAME = "policy-change-verification"
