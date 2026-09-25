@@ -53,5 +53,5 @@ def parse(body_text, email_date, xlsx_path):
                     business=(r.get("Business Name") or "").strip(), invoice=r.get("Invoice") or None,
                     description=r.get("Description") or None, policy=r.get("Policy #") or None))
     total = sum(Decimal(l["amount"]) for l in lines)
-    return dict(ref=tid, payout_date=dt.strftime("%Y-%m-%d"), net=str(net), portal_conv_total=str(conv),
+    return dict(ref=tid, payout_date=dt.strftime("%Y-%m-%d"), net=str(net), status="scheduled", portal_conv_total=str(conv),
                 lines=lines, source="email", lines_sum=str(total), lines_tie=(total == net))

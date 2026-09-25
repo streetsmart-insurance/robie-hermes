@@ -6,7 +6,7 @@ from match import Matcher
 def test():
     snap = json.loads((pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "snapshot_sept.json").read_text())
     findings = {f.payout_ref: f for f in Matcher(snap).run()}
-    assert findings["SYN-PAYOUT-A"].bucket == "scheduled_unlanded"
+    assert findings["SYN-PAYOUT-A"].bucket == "unmatched"  # no EZLynx note check yet
     assert findings["SYN-PAYOUT-B"].bucket == "unmatched"
     assert all(f.proposed_deposit is None for f in findings.values())
     return True

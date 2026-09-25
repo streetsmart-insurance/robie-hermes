@@ -2,8 +2,10 @@
 
 Inputs are plain JSON snapshots (pulled elsewhere); this module never talks to
 EZLynx, QBO or the bank and never posts anything. It proposes Bank Deposits and
-reports every line into one of four buckets:
-  ready            - every line + bank deposit matched, deposit proposal built
+reports every line into one of six buckets:
+  ready            - cleared bank record and all lines matched; unposted proposal built
+  already_posted   - existing QBO deposit groups precisely the matched JEs
+  scheduled_unlanded - matched settlement email, no verified cleared bank record yet
   waiting_approval - matched, but needs a person (alias, wash, reduction w/o rule...)
   unmatched        - stop: reason given, never guessed
   past_cutoff      - payout after the period cutoff
@@ -46,15 +48,36 @@ class Matcher:
         self.cutoff = d(snap["cutoff"]) if snap.get("cutoff") else None
         self.payouts = sorted(snap["payouts"], key=lambda p: (p["payout_date"], p["ref"]))
         self.ledger = snap["ledger"]            # receipt / reversal JEs from QBO
-        self.bank = snap["bank_deposits"]        # Wells 3021 deposits
+        self.bank = snap["bank_deposits"]        # existing QBO 3021 deposits (NOT bank-clearing proof)
+        self.cleared_bank = snap.get("cleared_bank_deposits", [])  # independently verified bank-cleared records
         self.aliases = {k.lower(): v for k, v in snap.get("aliases", {}).items()}  # approved payer->customer
+        self.fee_rules = snap.get("fee_rules", {})  # explicit review clues, never posting rules
         self.used_je: set[str] = set()
         self.used_bank: set[str] = set()
 
     # ---- bank ---------------------------------------------------------------
-    def _bank_candidates(self, amount: Decimal, pdate: date):
-        return [b for b in self.bank if b["id"] not in self.used_bank and D(b["amount"]) == amount
+    def _bank_candidates(self, records, amount: Decimal, pdate: date):
+        return [b for b in records if b["id"] not in self.used_bank and D(b["amount"]) == amount
                 and pdate <= d(b["date"]) <= pdate + timedelta(days=1)]
+
+    def _cleared_candidates(self, amount: Decimal, pdate: date, payout_ref: str):
+        # Amount/date alone cannot bind a bank item to this transfer. A verifier
+        # must provide an independent bank source and the exact payout reference.
+        return [b for b in self._bank_candidates(self.cleared_bank, amount, pdate)
+                if b.get("status") == "cleared" and b.get("account") == TRUST_3021
+                and b.get("verified_payout_ref") == payout_ref
+                and b.get("verification_source") == "bank_record"
+                and b.get("bank_transaction_id")]
+
+    def _scheduled_candidates(self, amount: Decimal, pdate: date):
+        return [b for b in self._bank_candidates(self.cleared_bank, amount, pdate)
+                if b.get("status") == "scheduled" and b.get("account") == TRUST_3021]
+
+
+    @staticmethod
+    def _group_ids(bank):
+        return {str(g) for g in bank.get("groups", [])}
+
 
     def _group_ties(self, idx: int):
         """Neighbouring payouts whose nets only tie to one bank deposit as a group."""
@@ -89,6 +112,43 @@ class Matcher:
         amt = abs(D(line["amount"]))
         return [j for j in self.ledger if j["kind"] == "reversal" and j["je_id"] not in self.used_je and D(j["amount"]) == amt]
 
+    def _fee_review(self, line):
+        """Use source-bound EZLynx notes only as review clues, not posting rules."""
+        amount = D(line["amount"])
+        evidence = line.get("ezlynx_note_check") or {}
+        checked = (evidence.get("status") == "checked" and
+                   evidence.get("source") == "ezlynx" and
+                   evidence.get("payment_ref") and
+                   evidence.get("payment_ref") == line.get("psp_ref") and
+                   evidence.get("note_ids") and
+                   isinstance(evidence.get("notes"), list))
+        if not checked:
+            return "needs_approval", "EZLynx notes not checked and bound to this payment; fee/payable type unknown", None
+        context = " ".join(str(n.get("text") or "") for n in evidence["notes"] if isinstance(n, dict))
+        fee_terms = self.fee_rules.get("note_terms", ["MBR", "agency fee"])
+        payable_terms = self.fee_rules.get("payable_terms", ["payable"])
+        has_fee = any(re.search(r"\b" + re.escape(str(t)) + r"\b", context, re.I) for t in fee_terms if t)
+        has_payable = any(re.search(r"\b" + re.escape(str(t)) + r"\b", context, re.I) for t in payable_terms if t)
+        if has_fee and has_payable:
+            return "stop", "EZLynx notes mention fee and payable; conflicting classification", None
+        if has_payable:
+            return "needs_approval", "EZLynx notes suggest payable, not a fee; review allocation", None
+        components = line.get("fee_components") or []
+        if components:
+            if not has_fee:
+                return "stop", "fee components supplied without an EZLynx fee note tied to this payment", None
+            fees = sum(D(x["amount"]) for x in components)
+            premium = D(line.get("premium_amount", amount - fees))
+            if fees <= 0 or premium < 0 or premium + fees != amount:
+                return "stop", "fee components do not tie to settled payment; check source", None
+            labels = ", ".join(str(x.get("type", "unclassified")) for x in components)
+            return "needs_approval", f"proposed premium {premium} + fee {fees} ({labels}); verify fee account and notes", premium
+        if has_fee:
+            return "needs_approval", "EZLynx note mentions fee; inspect premium/fee split and account", None
+        if amount < SMALL_LINE:
+            return "needs_approval", "small payment with no fee/payable note; review before classification", None
+        return None
+
     def match_line(self, line, pdate):
         amt = D(line["amount"])
         out = {"line": line, "status": None, "je": None, "notes": []}
@@ -112,6 +172,28 @@ class Matcher:
                 out.update(status="stop", notes=["no source JE for reduction (no -R reversal)"
                            + (f"; original receipt {orig[0]['receipt_no']} still unapplied?" if orig else "")])
             return out
+        # A structured fee split can identify a premium receipt but the fee's QBO
+        # account is not inferred. A note term alone cannot set the split.
+        fee = self._fee_review(line)
+        if fee:
+            status, note, premium = fee
+            out.update(status=status, notes=[note])
+            if status == "stop" or premium is None or premium == 0:
+                return out
+            premium_line = dict(line, amount=str(premium))
+            cands = [(j, self._name_ok(premium_line, j)) for j in self._receipt_candidates(premium_line, pdate)]
+            named = [c for c in cands if c[1][0]]
+            if len(named) != 1:
+                out.update(status="stop", notes=[note, "premium receipt missing or ambiguous"])
+                return out
+            j = named[0][0]
+            self.used_je.add(j["je_id"])
+            out["je"] = j
+            out["notes"].append(f"premium receipt {j['receipt_no']} found; fee still requires accounting review")
+            if j.get("bank_account") != UNDEPOSITED or j.get("deposited_in"):
+                out["status"] = "stop"
+                out["notes"].append("premium receipt unavailable in Undeposited Funds")
+            return out
         # sale
         cands = [(j, self._name_ok(line, j)) for j in self._receipt_candidates(line, pdate)]
         named = [c for c in cands if c[1][0]]
@@ -129,8 +211,6 @@ class Matcher:
             out.update(status="stop", notes=[f"ambiguous: {len(cands)} receipts at {amt}: {[c[0]['receipt_no'] for c in cands]}"])
         else:
             out.update(status="stop", notes=["no EZLynx receipt JE for this payer+amount"])
-        if amt < SMALL_LINE and out["status"] != "matched":
-            out["notes"].append("small line - confirm it is a real payment, not a fee")
         return out
 
     def _split_hint(self, p, q):
@@ -169,16 +249,25 @@ class Matcher:
         return notes
 
     def _already_grouped(self, f):
-        """A receipt already grouped in a different deposit than the matched bank deposit = double count risk."""
+        """A JE in another QBO deposit is never available for a new proposal."""
         for l in f.lines:
             je = l.get("je")
-            if je and je.get("deposited_in") and f.bank and ("QBO-DEP-" + str(je["deposited_in"])) != f.bank["id"]:
-                f.reasons.append(f"{je['receipt_no']} already grouped in QBO deposit {je['deposited_in']} - would double count")
+            if not je or not je.get("deposited_in"):
+                continue
+            deposited = str(je["deposited_in"])
+            linked = deposited if deposited.startswith("QBO-DEP-") else "QBO-DEP-" + deposited
+            if not f.bank or linked != str(f.bank["id"]) or f.bank not in self.bank:
+                f.reasons.append(f"{je['receipt_no']} already grouped in QBO deposit {deposited} - would double count")
                 l["status"] = "stop"
 
     # ---- payouts ------------------------------------------------------------
     def run(self):
         findings = []
+        refs = [p["ref"] for p in self.payouts]
+        if len(refs) != len(set(refs)):
+            return [Finding(payout_ref=p["ref"], bucket="unmatched",
+                            reasons=["duplicate payout transfer ID in input; stop all matching"])
+                    for p in self.payouts]
         for i, p in enumerate(self.payouts):
             pdate, net = d(p["payout_date"]), D(p["net"])
             f = Finding(payout_ref=p["ref"], bucket="")
@@ -199,28 +288,45 @@ class Matcher:
                             f.reasons.append(f"ties only as a group with {q['ref']} ({q['payout_date']}): lines {line_sum + qsum} = nets {net} + {D(q['net'])}")
                             f.reasons += self._split_hint(p, q)
             f.reasons += self._cross_payout_notes(p, counted)
-            bank = self._bank_candidates(net, pdate)
-            if len(bank) == 1:
-                f.bank = bank[0]; self.used_bank.add(bank[0]["id"])
-                if bank[0].get("feed_suggested_match"):
-                    f.reasons.append(f"bank feed suggests {bank[0]['feed_suggested_match']} - never auto-accept")
-            else:
-                ties = self._group_ties(i)
-                if ties: f.reasons.append(f"ties only as a group: {ties[0]['payouts']} = {ties[0]['total']} -> bank {ties[0]['bank']['date']}")
-                elif len(bank) > 1: f.reasons.append(f"ambiguous: {len(bank)} Wells deposits of {net}")
-                else: f.reasons.append(f"no Wells 3021 deposit of {net} on {pdate} or {pdate + timedelta(days=1)}")
+            # QBO deposit is not evidence of bank clearing. An existing deposit must
+            # contain precisely these JE IDs, never just the same date and dollars.
+            posted = self._bank_candidates(self.bank, net, pdate)
+            selected_ids = {str(l["je"]["je_id"]) for l in counted if l.get("je")}
+            existing_exact = len(posted) == 1 and len(selected_ids) == len(counted) and self._group_ids(posted[0]) == selected_ids
+            if existing_exact:
+                f.bank = posted[0]
+                self.used_bank.add(f.bank["id"])
+                f.reasons.append("existing QBO deposit groups exactly these receipt/reversal JEs; already posted, not a new proposal")
+            elif posted:
+                f.reasons.append("existing QBO 3021 deposit has same date/amount but grouped JE IDs do not match exactly (or ambiguous deposit); stop")
+            cleared = self._cleared_candidates(net, pdate, p["ref"])
+            if not existing_exact and not posted and len(cleared) == 1:
+                f.bank = cleared[0]
+                self.used_bank.add(f.bank["id"])
+            elif len(cleared) > 1:
+                f.reasons.append(f"ambiguous: {len(cleared)} independently cleared 3021 bank deposits of {net}")
+            if f.bank is None and not posted and not cleared:
+                f.reasons.append("no independently verified cleared 3021 bank record tied to this payout reference; never infer landing from email")
+                if self._scheduled_candidates(net, pdate):
+                    f.reasons.append("matching bank item is only scheduled, not cleared")
             self._already_grouped(f)
             stops = [l for l in counted if l["status"] == "stop"]
             approvals = [l for l in counted if l["status"] == "needs_approval"]
-            if stops or f.bank is None or line_sum != net:
+            if stops or line_sum != net or (posted and not existing_exact) or len(cleared) > 1:
                 f.bucket = "unmatched"
                 f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in stops]
-            elif approvals or any(r.startswith(("wash", "bank feed")) for r in f.reasons):
+            elif existing_exact:
+                f.bucket = "already_posted" if not approvals and not any(r.startswith("wash") for r in f.reasons) else "waiting_approval"
+                f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in approvals]
+            elif f.bank is None:
+                f.bucket = "scheduled_unlanded" if not approvals and not any(r.startswith("wash") for r in f.reasons) and (p.get("status") == "scheduled" or self._scheduled_candidates(net, pdate)) else "unmatched"
+                f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in approvals]
+            elif approvals or any(r.startswith("wash") for r in f.reasons):
                 f.bucket = "waiting_approval"
                 f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in approvals]
             else:
                 f.bucket = "ready"
-            if f.bucket in ("ready", "waiting_approval"):
+            if f.bucket == "ready" and not existing_exact and f.bank is not None:
                 sel = [{"je_id": l["je"]["je_id"], "receipt_no": l["je"]["receipt_no"], "amount": str(D(l["line"]["amount"]))} for l in counted]
                 tot = sum(D(s["amount"]) for s in sel)
                 f.proposed_deposit = {"account": TRUST_3021, "date": f.bank["date"], "amount": str(net),
@@ -231,6 +337,8 @@ class Matcher:
 
 def report(findings) -> str:
     order = [("ready", "Matched + ready (proposed deposits, not posted)"), ("waiting_approval", "Matched - waiting approval"),
+             ("already_posted", "Already posted in QBO (no new proposal)"),
+             ("scheduled_unlanded", "Scheduled / bank not verified cleared"),
              ("unmatched", "Unmatched (stop - reason)"), ("past_cutoff", "Past cutoff")]
     out = []
     for key, title in order:
