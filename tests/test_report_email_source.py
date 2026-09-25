@@ -248,12 +248,79 @@ def _mailbox_item(
 
 
 class EmailSourceGateTests(unittest.TestCase):
-    def test_email_first_ids_are_4246_4247_4372(self):
+    def test_email_first_ids_include_verification_queues(self):
         self.assertTrue(src.uses_email_source("4247"))
         self.assertTrue(src.uses_email_source("4246"))
         self.assertTrue(src.uses_email_source("4372"))
-        self.assertFalse(src.uses_email_source("4359"))
+        self.assertTrue(src.uses_email_source("4359"))
         self.assertFalse(src.uses_email_source("9999"))
+
+
+class Project4359Tests(unittest.TestCase):
+    def _row(self, policy="POL-4359-001", created="09/01/2026"):
+        row = {header: "" for header in ing.expected_headers("4359")}
+        row.update(
+            {
+                "Account Name": "Example Trucking LLC",
+                "Applicant ID": "A-100",
+                "Policy Number": policy,
+                "Line Of Business": "Commercial Auto",
+                "Effective Date": "09/15/2026",
+                "Master Company": "Example Carrier",
+                "Request Status": "Open",
+                "Created By": "CSR Example",
+                "Written Premium": "1500.00",
+                "Premium - Annualized": "2400.00",
+                "Branch": "Commercial Lines",
+                "Department": "Commercial Lines",
+                "Service Team": "Service A",
+                "Assigned Producer": "Producer Example",
+                "CSR": "CSR Example",
+                "Preferred Language": "English",
+                "Applicant Labels": "VIP",
+                "Policy Labels": "Audit",
+                "Change Request Created Date": created,
+            }
+        )
+        return row
+
+    def test_aliases_cover_the_19_csv_headers(self):
+        self.assertEqual(
+            list(src.COLUMN_ALIASES["4359"]), ing.expected_headers("4359")
+        )
+        self.assertNotIn("request_id", src.COLUMN_ALIASES["4359"])
+
+    def test_projects_real_columns(self):
+        rows = src.rows_from_csv_bytes("4359", _csv_bytes("4359", [self._row()]))
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["policy_number"], "POL-4359-001")
+        self.assertEqual(row["Policy Number"], "POL-4359-001")
+        self.assertEqual(row["change_request_created_date"], "09/01/2026")
+        self.assertEqual(row["annualized_premium"], "2400.00")
+        self.assertEqual(row["written_premium"], "1500.00")
+        self.assertEqual(row["account_name"], "Example Trucking LLC")
+        self.assertEqual(row["insured_name"], "Example Trucking LLC")
+        self.assertEqual(row["master_company"], "Example Carrier")
+        self.assertEqual(row["carrier"], "Example Carrier")
+        self.assertEqual(row["_fetch_source"], "gmail_email_csv")
+        self.assertNotIn("request_id", row)
+
+    def test_two_requests_on_one_policy_both_kept(self):
+        rows = src.rows_from_csv_bytes(
+            "4359",
+            _csv_bytes(
+                "4359",
+                [
+                    self._row(created="09/01/2026"),
+                    self._row(created="09/15/2026"),
+                ],
+            ),
+        )
+        self.assertEqual(
+            [row["change_request_created_date"] for row in rows],
+            ["09/01/2026", "09/15/2026"],
+        )
 
 
 class Project4247Tests(unittest.TestCase):

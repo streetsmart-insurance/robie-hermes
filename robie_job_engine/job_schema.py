@@ -211,8 +211,9 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
     ),
     "policy_change_verification": _contract(
         "per-request policy-change outcomes are recorded with carrier evidence "
-        "or a pending reason, and every request in report 4359 is accounted for; "
-        "no request is ever closed by the worker",
+        "or a pending reason, keyed by policy number and change-request created "
+        "date (report 4359 / look 4602), and every request in report 4359 is "
+        "accounted for; no request is ever closed by the worker",
         "PolicyChangeVerifier",
     ),
     "daily_verification_digest": ExecutableSkillContract(
@@ -363,11 +364,14 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "identity": ("report_id",),
     },
     "policy_change_verification": {
-        # Report 4359's schema is not yet verified: the worker must stay
-        # disabled (POLICY_CHANGE_ENABLED is False) and bounded jobs hold.
+        # Look 4602's 19 columns are mapped. schema_verified stays False
+        # until 3 clean hermes-test-01 post-job audits after Test install.
+        # Do not flip this in the same change as POLICY_CHANGE_ENABLED.
+        # Job payload still requires report_id. Work-item identity matches
+        # report_registry (no request_id column exists on the export).
         "schema_verified": False,
         "required": ("report_id",),
-        "identity": ("report_id",),
+        "identity": ("policy_number", "change_request_created_date"),
     },
     "daily_verification_digest": {
         "schema_verified": True,
