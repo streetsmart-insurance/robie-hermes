@@ -71,8 +71,8 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4359": ReportSpec(
         "4359",
         "Policy Change",
-        False,
-        ("request_id",),
+        True,
+        ("policy_number", "change_request_created_date"),
         filter_name="Open Requests - ROBIE",
     ),
 }
