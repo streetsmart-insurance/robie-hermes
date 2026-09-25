@@ -14,8 +14,8 @@ Protocol: ``argv[1]`` is a JSON input file, stdout is a single JSON object:
 
 - ``audit``: run ``AuditVerificationWorker.perform`` on the supplied job,
   optionally capturing carrier-email kwargs instead of sending.
-- ``policy_change``: run ``PolicyChangeWorker.perform`` (expected to refuse
-  while the kill switch is off) and report the flag value.
+- ``policy_change``: run ``PolicyChangeWorker.perform`` and report the flag
+  value. (4359 schema verified 2026-09-25; kill switch intentionally lifted.)
 """
 
 from __future__ import annotations
