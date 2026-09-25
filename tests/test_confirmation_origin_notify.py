@@ -160,8 +160,10 @@ def test_chat_origin_card_buttons_carry_valid_tokens(db):
     card_poster = FakeCardPoster()
     _route(store, cid, approval_card_poster=card_poster,
            gmail_sender=FakeGmail(), zap_trigger=FakeZap())
-    buttons = card_poster.posts[0]["card"]["card"]["sections"][0]["widgets"][2][
-        "buttonList"]["buttons"]
+    widgets = card_poster.posts[0]["card"]["card"]["sections"][0]["widgets"]
+    button_lists = [w["buttonList"]["buttons"] for w in widgets if "buttonList" in w]
+    assert len(button_lists) == 1
+    buttons = button_lists[0]
     for button, decision in zip(buttons, ("APPROVE", "REJECT")):
         token = next(
             p["value"] for p in button["onClick"]["action"]["parameters"]

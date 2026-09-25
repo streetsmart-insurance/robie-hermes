@@ -7,6 +7,7 @@ double-submit is safe; the answered card is replaced.
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +55,33 @@ def _tokens(cid):
     }
 
 
+def _buttons(card):
+    widgets = card["card"]["sections"][0]["widgets"]
+    found = [
+        widget["buttonList"]["buttons"]
+        for widget in widgets
+        if isinstance(widget, dict) and "buttonList" in widget
+    ]
+    assert len(found) == 1
+    return found[0]
+
+
+def _visible_lines(card):
+    header = card["card"].get("header") or {}
+    lines = [str(header.get("title") or ""), str(header.get("subtitle") or "")]
+    for widget in card["card"]["sections"][0]["widgets"]:
+        if not isinstance(widget, dict):
+            continue
+        paragraph = widget.get("textParagraph")
+        if isinstance(paragraph, dict):
+            lines.append(str(paragraph.get("text") or ""))
+        buttons = widget.get("buttonList")
+        if isinstance(buttons, dict):
+            for button in buttons.get("buttons") or []:
+                lines.append(str(button.get("text") or ""))
+    return [line for line in lines if line]
+
+
 def _click(token, actor=None, action="robie_confirmation_decision"):
     # Bridge-normalized envelope shape (common.invokedFunction from the
     # /actions/<name> URL, common.parameters as a dict).
@@ -73,7 +101,7 @@ def test_card_buttons_carry_signed_tokens(db):
     tokens = _tokens(cid)
     card = cards.approval_card_v2(record, tokens)
     assert card["cardId"] == f"robie-confirmation-{cid}"
-    buttons = card["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    buttons = _buttons(card)
     assert [b["text"] for b in buttons] == ["Approve", "Reject"]
     seen = set()
     for button, decision in zip(buttons, ("APPROVE", "REJECT")):
@@ -104,6 +132,14 @@ def test_card_without_key_is_display_only(db):
     widgets = card["card"]["sections"][0]["widgets"]
     assert not any("buttonList" in w for w in widgets)
     assert any("display-only" in str(w.get("textParagraph", {}).get("text", "")) for w in widgets)
+    lines = _visible_lines(card)
+    policy_at = lines.index("Policy: HO-1")
+    assert lines[policy_at + 1] == f"Confirmation ref: {cid[:8]}…"
+    assert "Category: Policy change" in lines
+    assert "What this will do: Raise written premium." in lines
+    visible = "\n".join(lines)
+    assert "loop-1" not in visible
+    assert cid not in visible
 
 
 def test_approve_click_decides_without_sheet(db):
@@ -412,14 +448,14 @@ def test_card_buttons_carry_routing_env_when_configured(db, monkeypatch):
     record = confirmations.get(cid, store=store)
     monkeypatch.setenv("ROBIE_ENV", "TEST")
     card = cards.approval_card_v2(record, _tokens(cid))
-    buttons = card["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    buttons = _buttons(card)
     for button in buttons:
         params = button["onClick"]["action"]["parameters"]
         env = next(p["value"] for p in params if p["key"] == "robie_env")
         assert env == "test"
     monkeypatch.setenv("ROBIE_ENV", "PRODUCTION")
     prod = cards.approval_card_v2(record, _tokens(cid))
-    prod_buttons = prod["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    prod_buttons = _buttons(prod)
     assert all(
         next(p["value"] for p in b["onClick"]["action"]["parameters"] if p["key"] == "robie_env")
         == "prod"
@@ -427,7 +463,7 @@ def test_card_buttons_carry_routing_env_when_configured(db, monkeypatch):
     )
     monkeypatch.delenv("ROBIE_ENV", raising=False)
     untagged = cards.approval_card_v2(record, _tokens(cid))
-    untagged_buttons = untagged["card"]["sections"][0]["widgets"][2]["buttonList"]["buttons"]
+    untagged_buttons = _buttons(untagged)
     assert all(
         "robie_env" not in {p["key"] for p in b["onClick"]["action"]["parameters"]}
         for b in untagged_buttons
@@ -646,3 +682,146 @@ def test_card_event_payload_prefers_top_level_message():
     payload = _card_event_payload(envelope)
     assert payload is not None
     assert payload["message"]["name"] == "spaces/AAA/messages/top-level"
+
+
+def _card_fixture():
+    path = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "confirmation_cards"
+        / "approval_card_visible.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_fixture_card_shows_short_ref_category_description_and_hides_job_id():
+    """Golden card face: short ref under the policy line, category, description.
+
+    The full evidence-loop job id is absent from the card JSON. The full
+    confirmation id stays on cardId (Chat's card identity) and off the face.
+    """
+    fixture = _card_fixture()
+    record = fixture["record"]
+    job_id = fixture["forbidden_job_id"]
+    card = cards.approval_card_v2(record, None)
+    lines = _visible_lines(card)
+    assert card["card"]["header"]["subtitle"] == fixture["header_subtitle"]
+    for expected in fixture["visible_lines"]:
+        assert expected in lines
+    policy_at = lines.index("Policy: HO-4421")
+    assert lines[policy_at + 1] == "Confirmation ref: a82e194e…"
+    assert "..." not in lines[policy_at + 1]
+    visible = "\n".join(lines)
+    assert record["id"] not in visible
+    assert job_id not in visible
+    assert "policy_change" not in visible
+    assert job_id not in json.dumps(card)
+    assert card["cardId"] == f"robie-confirmation-{record['id']}"
+    assert any("waiting for approval" in line for line in lines)
+    assert any("Sep 24, 2026 7:04 PM ET" in line for line in lines)
+    assert not any("buttonList" in widget for widget in card["card"]["sections"][0]["widgets"])
+
+    with_buttons = cards.approval_card_v2(
+        record, {"APPROVE": "approve-token", "REJECT": "reject-token"}
+    )
+    buttons = _buttons(with_buttons)
+    assert [button["text"] for button in buttons] == ["Approve", "Reject"]
+    for button, token in zip(buttons, ("approve-token", "reject-token")):
+        params = button["onClick"]["action"]["parameters"]
+        assert {item["key"] for item in params} <= {"decision_token", "robie_env"}
+        assert next(item["value"] for item in params if item["key"] == "decision_token") == token
+        assert button["onClick"]["action"]["function"] == cards._click_function()
+    assert job_id not in json.dumps(with_buttons)
+    assert "Confirmation ref: a82e194e…" in _visible_lines(with_buttons)
+
+
+def test_card_description_falls_back_when_draft_would_leak_the_job_id():
+    fixture = _card_fixture()
+    record = dict(fixture["record"])
+    job_id = fixture["forbidden_job_id"]
+    record["draft_summary"] = (
+        "Policy change draft:\n"
+        f"  loop job {job_id}\n"
+        "  changes:"
+    )
+    card = cards.approval_card_v2(record, None)
+    lines = _visible_lines(card)
+    assert "What this will do: Set written premium to 2450." in lines
+    assert job_id not in json.dumps(card)
+    assert "loop job" not in "\n".join(lines)
+
+
+def test_card_hides_job_id_used_as_policy_number():
+    fixture = _card_fixture()
+    record = dict(fixture["record"])
+    job_id = fixture["forbidden_job_id"]
+    record["changes_json"] = {
+        "policy_number": job_id,
+        "changes": {"writtenPremium": "2450"},
+    }
+    record["draft_summary"] = "Raise the written premium"
+    card = cards.approval_card_v2(record, None)
+    lines = _visible_lines(card)
+    policy_at = lines.index("Policy: not listed on this request")
+    assert lines[policy_at + 1] == "Confirmation ref: a82e194e…"
+    assert job_id not in json.dumps(card)
+
+
+def test_unknown_job_type_category_is_plain_english():
+    fixture = _card_fixture()
+    record = dict(fixture["record"])
+    record["job_type"] = "ezlynx.document_upload"
+    record["draft_summary"] = "Upload the signed application"
+    card = cards.approval_card_v2(record, None)
+    lines = _visible_lines(card)
+    assert card["card"]["header"]["subtitle"] == "Document upload"
+    assert "Category: Document upload" in lines
+    assert "What this will do: Upload the signed application." in lines
+    assert any(line.startswith("Document upload for policy HO-4421") for line in lines)
+    assert "ezlynx.document_upload" not in "\n".join(lines)
+
+
+def test_short_confirmation_id_is_not_given_a_fake_ellipsis():
+    fixture = _card_fixture()
+    exact = dict(fixture["record"])
+    exact["id"] = "abc12345"
+    exact_lines = _visible_lines(cards.approval_card_v2(exact, None))
+    assert "Confirmation ref: abc12345" in exact_lines
+    assert "Confirmation ref: abc12345…" not in exact_lines
+    longer = dict(fixture["record"])
+    longer["id"] = "abc123456"
+    longer_lines = _visible_lines(cards.approval_card_v2(longer, None))
+    assert "Confirmation ref: abc12345…" in longer_lines
+
+
+def test_render_log_keeps_full_ids_off_the_card_face(db, caplog):
+    store = JobStore(db)
+    loop_job_id = "evidence-loop-9f3c1a77-b0c14d2e-FULL"
+    cid = _request(
+        store,
+        loop_job_id=loop_job_id,
+        job_type="policy_change",
+        draft_summary="Raise the written premium on this homeowners policy",
+        changes_json={"policy_number": "HO-4421", "changes": {"writtenPremium": "2450"}},
+    )
+    record = confirmations.get(cid, store=store)
+    with caplog.at_level("INFO", logger="robie_job_engine.confirmation_cards"):
+        card = cards.approval_card_v2(record, _tokens(cid))
+    lines = _visible_lines(card)
+    assert lines[lines.index("Policy: HO-4421") + 1] == f"Confirmation ref: {cid[:8]}…"
+    assert "Category: Policy change" in lines
+    assert "What this will do: Raise the written premium on this homeowners policy." in lines
+    visible = "\n".join(lines)
+    assert cid not in visible
+    assert loop_job_id not in visible
+    assert loop_job_id not in json.dumps(card)
+    message = next(
+        rec.getMessage()
+        for rec in caplog.records
+        if "confirmation_cards.render" in rec.getMessage()
+    )
+    assert f"ref={cid[:8]}" in message
+    assert f"confirmation_id={cid}" in message
+    assert f"loop_job_id={loop_job_id}" in message
+    assert "…" not in message
+    assert [button["text"] for button in _buttons(card)] == ["Approve", "Reject"]
