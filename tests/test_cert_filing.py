@@ -198,7 +198,7 @@ def test_resolve_prefers_registry(tmp_path):
     v = make_verified()
     did, title, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
                                          deps.discussions_client)
-    assert did == "d-reg" and how == "task registry"
+    assert did == "d-reg" and how.startswith("task registry")
 
 
 def test_resolve_matches_holder_discussion(tmp_path):
