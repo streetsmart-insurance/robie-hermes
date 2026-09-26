@@ -377,10 +377,27 @@ def test_schedule_preserves_existing_monday_9am_eastern_cadence(tmp_path: Path):
     assert scheduled["parameters"]["authorized_actions"] == [ACTION]
 
 
-def test_schedule_cannot_be_installed_in_production_before_test_promotion(tmp_path: Path):
+def test_grandfathered_schedule_installs_in_production(tmp_path: Path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"google_sheets": {"enabled": True}}), encoding="utf-8")
     with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+        scheduled = install_submission_report_schedule(
+            str(tmp_path / "jobs.db"),
+            str(manifest),
+            now=datetime.fromisoformat("2026-09-18T12:00:00-04:00"),
+        )
+    assert scheduled["action_type"] == JOB_TYPE
+    assert scheduled["cron_spec"] == CRON_SPEC
+
+
+def test_schedule_cannot_be_installed_in_production_without_grandfather_or_promotion(tmp_path: Path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"google_sheets": {"enabled": True}}), encoding="utf-8")
+    empty = tmp_path / "grandfathered.json"
+    empty.write_text('{"job_types": [], "skills": []}\n', encoding="utf-8")
+    with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False), patch(
+        "robie_job_engine.job_type_gate.GRANDFATHERED_PATH", empty
+    ), patch("robie_job_engine.job_type_gate.PROMOTIONS_DIR", tmp_path / "promotions"):
         try:
             install_submission_report_schedule(str(tmp_path / "jobs.db"), str(manifest))
         except Exception as exc:

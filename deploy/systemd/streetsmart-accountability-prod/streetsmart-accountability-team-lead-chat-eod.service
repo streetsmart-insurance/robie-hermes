@@ -1,0 +1,19 @@
+[Unit]
+Description=StreetSmart Team Lead Chat end-of-day wrap-up
+Wants=network-online.target
+After=network-online.target
+OnFailure=streetsmart-accountability-alert@%n.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/streetsmart-daily-accountability
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/streetsmart-daily-accountability
+ExecStart=/opt/streetsmart-daily-accountability/scripts/run_team_lead_chat_eod.sh
+TimeoutStartSec=10min
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

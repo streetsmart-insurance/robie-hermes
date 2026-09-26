@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekday Applied Pay read-only pull and match (do not enable alongside existing weekday task)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:20:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=applied-pay-propose-only.service
+
+[Install]
+WantedBy=timers.target

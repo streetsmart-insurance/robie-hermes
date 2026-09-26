@@ -364,6 +364,38 @@ class RecordOutcomesTests(_StoreMixin, unittest.TestCase):
             ("policy_number",),
         )
 
+    def test_policy_change_identity_keeps_two_requests_on_one_policy(self):
+        self.assertEqual(
+            vc._JOB_TYPE_IDENTITY_HINTS["policy_change_verification"],
+            ("policy_number", "change_request_created_date"),
+        )
+        with durable_temporary_directory() as tmp:
+            store, job_id = self._new_store(tmp)
+            vc.record_outcomes(
+                store,
+                job_id,
+                "policy_change_verification",
+                [
+                    {
+                        "policy_number": "P-1",
+                        "status": "pending",
+                        "reason": "waiting_for_carrier: first",
+                        "evidence": {"change_request_created_date": "09/01/2026"},
+                    },
+                    {
+                        "policy_number": "P-1",
+                        "status": "pending",
+                        "reason": "waiting_for_carrier: second",
+                        "evidence": {"change_request_created_date": "09/15/2026"},
+                    },
+                ],
+            )
+            back = vc.read_outcomes(store, "policy_change_verification")
+            created = sorted(
+                item["evidence"]["change_request_created_date"] for item in back
+            )
+            self.assertEqual(created, ["09/01/2026", "09/15/2026"])
+
     def test_identity_key_uses_report_identity_from_evidence(self):
         with durable_temporary_directory() as tmp:
             store, job_id = self._new_store(tmp)

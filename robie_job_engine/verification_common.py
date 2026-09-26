@@ -215,21 +215,47 @@ _JOB_TYPE_IDENTITY_HINTS: dict[str, tuple[str, ...]] = {
     "manual_renewal_verification": ("policy_number",),
     "audit_verification": ("audit_id",),
     "mortgagee_verification": ("policy_number",),
-    "policy_change_verification": ("request_id",),
+    "policy_change_verification": ("policy_number", "change_request_created_date"),
     "daily_verification_digest": ("policy_number",),
 }
+
+
+def _identity_value(evidence: dict[str, Any], outcome: dict[str, Any], name: str) -> str:
+    for source in (evidence, outcome):
+        raw = source.get(name)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return ""
 
 
 def _policy_identity_key(job_type: str, outcome: dict[str, Any]) -> str:
     evidence = outcome.get("evidence") or {}
     if not isinstance(evidence, dict):
         evidence = {}
-    candidates = list(_JOB_TYPE_IDENTITY_HINTS.get(job_type, ()))
+    hints = tuple(_JOB_TYPE_IDENTITY_HINTS.get(job_type, ()))
+    # Composite report identity (4359: policy number + created date). Every
+    # hint must be present so two requests on one policy do not collapse.
+    if len(hints) > 1:
+        parts: list[str] = []
+        missing: list[str] = []
+        for name in hints:
+            value = _identity_value(evidence, outcome, name)
+            if not value:
+                missing.append(name)
+            else:
+                parts.append(f"{name}:{value}")
+        if missing:
+            raise ValueError(
+                f"cannot derive a policy identity key for job type {job_type!r}: "
+                f"missing {', '.join(missing)}"
+            )
+        return "policy:" + "|".join(parts)
+    candidates = list(hints)
     candidates.extend(["policy_number", "applicant_id"])
     for name in candidates:
-        value = evidence.get(name) or outcome.get(name)
-        if value is not None and str(value).strip():
-            return f"policy:{name}:{str(value).strip()}"
+        value = _identity_value(evidence, outcome, name)
+        if value:
+            return f"policy:{name}:{value}"
     raise ValueError(f"cannot derive a policy identity key for job type {job_type!r}")
 
 
