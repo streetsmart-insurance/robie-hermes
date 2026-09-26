@@ -266,8 +266,10 @@ def _runtime_job_fields(item: dict[str, Any]) -> dict[str, Any]:
     checks = int(item.get("verification_count") or 0)
     verified = int(item.get("verified_evidence_count") or 0)
     authoritative = int(item.get("authoritative_evidence_count") or 0)
+    grade_label = item.get("grade_label")
     verification_status = (
-        "Verified" if status == "COMPLETE" and verified > 0 and authoritative > 0
+        grade_label if grade_label
+        else "Verified" if status == "COMPLETE" and verified > 0 and authoritative > 0
         else "Needs review" if status in {"UNVERIFIED", "FAILED"}
         else "Pending"
     )
@@ -341,7 +343,7 @@ def upsert_job_rows(
     if writes:
         api.batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"valueInputOption": "USER_ENTERED", "data": writes},
+            body={"valueInputOption": "RAW", "data": writes},
         ).execute()
     return {"jobs": len(selected), "updated": updated, "appended": appended}
 
@@ -420,7 +422,7 @@ def publish_job_to_control_center(
     if evidence_writes:
         api.batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"valueInputOption": "USER_ENTERED", "data": evidence_writes},
+            body={"valueInputOption": "RAW", "data": evidence_writes},
         ).execute()
 
     job_rows = api.get(
@@ -542,8 +544,19 @@ def sync(db_path: str, spreadsheet_id: str) -> dict[str, int]:
         write for write in writes
         if str(write["range"]).split("!", 1)[0] in available_sheets
     ]
-    api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
-    return {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
+    api.batchUpdate(spreadsheetId=spreadsheet_id, body={"valueInputOption": "RAW", "data": writes}).execute()
+    result = {"assignments": imported, "jobs": len(data["jobs"]), "evidence": len(data["evidence"]), "artifacts": len(data["artifacts"]), "recordings": len(data["recordings"]), "releases": len(data["releases"]), "reports": len(data["reports"])}
+    # The Confirmations tab is the human-facing side of the HITL gate.
+    # Sync it last: decisions are ingested before the tab is rewritten, so a
+    # sync never wipes a decision the human just typed.
+    if "Confirmations" in available_sheets:
+        from . import confirmation_board
+        board_result = confirmation_board.sync_confirmations(
+            db_path, spreadsheet_id, notify=True
+        )
+        result["confirmations"] = board_result["rows"]
+        result["confirmations_decisions_applied"] = board_result["decisions_applied"]
+    return result
 
 
 def sync_from_env(db_path: str) -> dict[str, int] | None:

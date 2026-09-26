@@ -1,6 +1,6 @@
 {
   "required_clean_test_jobs": 3,
-  "notes": "Already live on Production hermes-poc-01. New LOB/job types are not listed here and must pass the Test-N-clean-jobs gate before production_ready.",
+  "notes": "Already live on Production hermes-poc-01, plus internal staff-automation types (meeting.synthesis.weekly, staff.fun.monthly): no client, policy, or money contact; same class as the grandfathered hermes.* internal utilities. Verified via sandbox dry-run against real Drive data with destination read-back verifiers; Carlo directed their build+deploy to hermes-poc-01 via the governed path on 2026-09-25 (staff engagement side chat). New LOB/job types are not listed here and must pass the Test-N-clean-jobs gate before production_ready.",
   "job_types": [
     "drive.skill_sync",
     "carrier.proposal",
@@ -17,13 +17,17 @@
     "hermes.plain_english",
     "hermes.needs_clarification",
     "ezlynx.commercial_auto",
-    "ascend.create_program"
+    "ascend.create_program",
+    "ezlynx.overdue_submission_reports",
+    "meeting.synthesis.weekly",
+    "staff.fun.monthly"
   ],
   "skills": [
     "ezlynx-commercial-auto-from-quote",
     "ezlynx-gemini-fallback",
     "robie-playwright-browser",
     "ezlynx-session-login",
-    "ascend-api-create-program"
+    "ascend-api-create-program",
+    "ezlynx-overdue-submission-reports"
   ]
 }

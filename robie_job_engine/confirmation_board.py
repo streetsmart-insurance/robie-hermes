@@ -1,0 +1,476 @@
+"""The Confirmations tab on the Operations Control Center board.
+
+DEPRECATED as the human decision path (2026-09-22): Chat-native
+Approve/Reject buttons (``confirmation_cards``) are the primary path.
+The sheet stays as a fallback/audit mirror for one release -- ingestion
+below still works exactly as before -- then the human path is removed.
+
+This is the human-facing side of the HITL plan-confirmation gate: pending
+plan drafts appear as plain-English rows, and the human approves or rejects
+by pasting a signed decision token (minted and delivered by
+``confirmation_notify`` in the approver's Chat DM / email when a signing
+key is configured) into the "Your decision" column. The next sync verifies the token and ingests the
+decision into the ``plan_confirmations`` ledger via
+``confirmations.approve`` / ``confirmations.reject`` (which fail closed on
+anything that is not PENDING) and writes the decided status back.
+
+The sheet is a display surface, not an authorization surface: any editor
+can type in it, so a bare APPROVE/REJECT word or a typed name in "Decided
+by" is NEVER trusted. The decider's identity comes from the verified token
+alone. Without a configured signing key
+(``confirmations.DECISION_TOKEN_ENV``) no sheet decision is ingested at
+all -- the tab is display-only.
+
+Ordering matters: decisions are ingested BEFORE the tab is rewritten, so a
+sync never wipes a decision the human just typed. When rewriting, any
+decision text still sitting on a row whose record is still PENDING is
+carried over, so a decision typed between ingest and rewrite survives to
+the next sync.
+
+Column layout (row 1 = headers, data from row 2):
+  A Confirmation ID
+  B What needs approval      (one plain-English line)
+  C Job type
+  D Details                  (proposed changes, plain English)
+  E Status
+  F Requested by
+  G Requested at
+  H Your decision            (human types APPROVE or REJECT here)
+  I Reason                   (optional; used for REJECT)
+  J Decided by
+  K Decided at
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Mapping
+from zoneinfo import ZoneInfo
+
+from . import confirmations
+from .store import JobStore
+
+
+logger = logging.getLogger(__name__)
+
+TAB_TITLE = "Confirmations"
+DATA_START_ROW = 2
+
+HEADERS = [
+    "Confirmation ID",
+    "What needs approval",
+    "Job type",
+    "Details",
+    "Status",
+    "Requested by",
+    "Requested at",
+    "Your decision (paste signed token)",
+    "Reason (optional)",
+    "Decided by",
+    "Decided at",
+]
+
+# Column indexes (0-based) into a sheet row.
+(ID, SUMMARY, JOB_TYPE, DETAILS, STATUS, REQUESTED_BY, REQUESTED_AT,
+ DECISION, REASON, DECIDED_BY, DECIDED_AT) = range(len(HEADERS))
+
+APPROVE_WORD = "APPROVE"
+REJECT_WORD = "REJECT"
+
+_JOB_TYPE_LABELS = {
+    "policy_change": "Policy change",
+    "carrier_quote": "Carrier quote",
+    "carrier_call": "Carrier call",
+}
+
+
+def _cell(row: list[Any], index: int) -> str:
+    return str(row[index]).strip() if index < len(row) and row[index] is not None else ""
+
+
+def _friendly_datetime(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        tz = ZoneInfo("America/New_York")
+        return stamp.astimezone(tz).strftime("%b %-d, %Y, %-I:%M %p")
+    except (ValueError, TypeError):
+        return text
+
+
+def _details_text(record: Mapping[str, Any]) -> str:
+    """Proposed changes as plain English, capped for a sheet cell."""
+    changes = confirmations._parse_changes(record)
+    policy = str(changes.get("policy_number") or "").strip()
+    change_map = changes.get("changes")
+    spans = changes.get("field_spans")
+    if not isinstance(spans, Mapping):
+        spans = {}
+    parts: list[str] = []
+    if isinstance(change_map, Mapping):
+        for field, value in change_map.items():
+            if isinstance(value, Mapping):
+                old = value.get("old", value.get("from"))
+                new = value.get("new", value.get("to", value.get("value")))
+                if old is not None and new is not None:
+                    parts.append(f"{field}: {old} -> {new}")
+                elif new is not None:
+                    parts.append(f"{field}: {new}")
+                else:
+                    parts.append(f"{field}: {json.dumps(value, default=str)}")
+            else:
+                parts.append(f"{field}: {value}")
+            # Provenance, not just the value: the quote + source for the field.
+            raw_span = spans.get(field)
+            if isinstance(raw_span, Mapping):
+                source = str(raw_span.get("source_id") or "").strip()
+                quote = str(raw_span.get("quote") or "").strip()
+                if source or quote:
+                    snippet = (quote[:70] + "...") if len(quote) > 70 else quote
+                    parts[-1] += f' [source: {source or "unknown"}, "{snippet}"]'
+            elif raw_span:
+                parts[-1] += f' [source: "{str(raw_span)[:70]}"]'
+    elif isinstance(change_map, list):
+        for entry in change_map:
+            parts.append(str(entry)[:120])
+    detail = "; ".join(parts)[:900]
+    if policy:
+        detail = f"Policy {policy}. {detail}" if detail else f"Policy {policy}."
+    return detail or str(record.get("draft_summary") or "")
+
+
+def _record_row(record: Mapping[str, Any]) -> list[str]:
+    return [
+        str(record.get("id") or ""),
+        confirmations.confirmation_summary(record),
+        _JOB_TYPE_LABELS.get(str(record.get("job_type") or ""), str(record.get("job_type") or "")),
+        _details_text(record),
+        str(record.get("status") or ""),
+        str(record.get("requested_by") or ""),
+        _friendly_datetime(record.get("created_at")),
+        "",  # Your decision: filled by the human
+        str(record.get("decision_reason") or ""),
+        str(record.get("decided_by") or ""),
+        _friendly_datetime(record.get("decided_at")),
+    ]
+
+
+def _values_api(provided: Any = None) -> Any:
+    if provided is not None:
+        return provided
+    from . import sheets_sync
+    return sheets_sync._service().spreadsheets().values()
+
+
+def ensure_tab(spreadsheet_id: str, sheets_api: Any = None) -> bool:
+    """Create the Confirmations tab if it is missing. Returns True if created."""
+    if sheets_api is None:
+        from . import sheets_sync
+        sheets_api = sheets_sync._service().spreadsheets()
+    meta = sheets_api.get(
+        spreadsheetId=spreadsheet_id, fields="sheets.properties.title"
+    ).execute()
+    titles = {
+        str(s.get("properties", {}).get("title") or "")
+        for s in meta.get("sheets", [])
+    }
+    if TAB_TITLE in titles:
+        return False
+    sheets_api.batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": TAB_TITLE}}}]},
+    ).execute()
+    return True
+
+
+def read_tab_rows(api: Any, spreadsheet_id: str) -> list[list[str]]:
+    """Raw rows currently on the tab (headers + data), as strings."""
+    resp = api.get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{TAB_TITLE}!A1:K",
+    ).execute()
+    return [[_cell(row, i) for i in range(len(HEADERS))] for row in resp.get("values", [])]
+
+
+def _extract_token(text: str) -> str | None:
+    """Pull the signed decision token out of a decision cell, if present.
+
+    Accepts a bare token or "APPROVE <token>" / "REJECT <token>" (the word
+    is decoration for the human; the token carries the real decision).
+    """
+    for word in str(text or "").split():
+        if word.startswith(confirmations.DECISION_TOKEN_PREFIX + "."):
+            return word
+    return None
+
+
+def apply_decisions_from_sheet(
+    db_path: str,
+    spreadsheet_id: str,
+    values_api: Any = None,
+    *,
+    decision_key: Any = None,
+    skipped: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Ingest signed decisions pasted on the tab.
+
+    DEPRECATED as the human decision path (2026-09-22): Chat-native
+    Approve/Reject buttons are the primary path. Kept working as the
+    fallback/audit mirror for one release; do not extend.
+
+    A decision counts only as a verified token
+    (``confirmations.verify_decision_token``) whose confirmation id matches
+    the row. The decider's identity comes from the token; the "Decided by"
+    cell is never consulted. Bare words, forged tokens, expired tokens, and
+    tokens for a different confirmation are skipped (and reported through
+    ``skipped`` when a list is passed). With no signing key configured the
+    tab is display-only: nothing is ingested.
+
+    Only rows whose ledger record is still PENDING are decided; everything
+    else is skipped. Returns one dict per applied decision.
+    """
+    api = _values_api(values_api)
+    rows = read_tab_rows(api, spreadsheet_id)
+    store = JobStore(db_path)
+    try:
+        key = confirmations.decision_signing_key(decision_key)
+    except ValueError as exc:
+        # A misconfigured key must never crash the whole sheets_sync run:
+        # degrade the Confirmations tab to display-only and say so.
+        logger.warning(
+            "decision signing key unusable (%s); Confirmations tab is display-only",
+            exc,
+        )
+        key = None
+    applied: list[dict[str, Any]] = []
+
+    def _skip(cid: str, why: str) -> None:
+        if skipped is not None:
+            skipped.append({"confirmation_id": cid, "reason": why})
+
+    for row in rows[1:]:  # skip headers
+        confirmation_id = _cell(row, ID)
+        decision_text = _cell(row, DECISION)
+        if not confirmation_id or not decision_text:
+            continue
+        if key is None:
+            _skip(confirmation_id, "no signing key configured (display-only)")
+            continue
+        token = _extract_token(decision_text)
+        if token is None:
+            _skip(confirmation_id, "unsigned decision text (bare word)")
+            continue
+        try:
+            verified = confirmations.verify_decision_token(token, key=key)
+        except ValueError as exc:
+            _skip(confirmation_id, f"invalid token: {exc}")
+            continue
+        if verified["confirmation_id"] != confirmation_id:
+            _skip(confirmation_id, "token was minted for a different confirmation")
+            continue
+        record = confirmations.get(confirmation_id, store=store)
+        if record is None:
+            continue  # unknown id on the sheet: never invent a record
+        if str(record.get("status")) != "PENDING":
+            continue  # already decided: the write-back owns this row now
+        decided_by = verified["principal"]
+        reason = _cell(row, REASON)
+        if verified["decision"] == APPROVE_WORD:
+            updated = confirmations.approve(confirmation_id, decided_by, store=store)
+        else:
+            updated = confirmations.reject(confirmation_id, decided_by, reason, store=store)
+        applied.append({
+            "confirmation_id": confirmation_id,
+            "decision": verified["decision"],
+            "decided_by": decided_by,
+            "status": updated.get("status"),
+        })
+    return applied
+
+
+def sync_confirmations(
+    db_path: str,
+    spreadsheet_id: str,
+    values_api: Any = None,
+    sheets_api: Any = None,
+    notify: bool = False,
+    chat_poster: Any = None,
+    gmail_sender: Any = None,
+    chat_thread_poster: Any = None,
+    zap_trigger: Any = None,
+    decision_key: Any = None,
+    approval_card_poster: Any = None,
+    quiet_hours: float | None = None,
+) -> dict[str, Any]:
+    """Full sync of the Confirmations tab. Ingest first, then rewrite.
+
+    1. Expire stale PENDING confirmations (72h).
+    2. Ingest APPROVE/REJECT decisions typed on the tab. DEPRECATED as the
+       human decision path (2026-09-22): Chat-native buttons are primary;
+       the sheet stays as fallback/audit mirror for one release.
+    3. Rewrite the tab (headers + one row per record, pending first),
+       carrying over any decision text still sitting on a still-PENDING row.
+    4. Read the tab back and verify the write landed.
+    5. When ``notify`` is true, route approval asks on their origin medium
+       (``notify_approval_on_origin``: origin wins, no blast) plus the one
+       quiet-window Chat nudge for stale EZLynx-origin asks
+       (``maybe_quiet_nudge``) and the quiet-window backup email for
+       unanswered Chat-origin asks (``maybe_quiet_backup_email``).
+       Idempotent; failures are returned, never raised.
+    """
+    store = JobStore(db_path)
+    expired = confirmations.expire_old(store)
+
+    api = _values_api(values_api)
+    ensure_tab(spreadsheet_id, sheets_api=sheets_api)
+
+    skipped: list[dict[str, Any]] = []
+    applied = apply_decisions_from_sheet(
+        db_path, spreadsheet_id, values_api=api,
+        decision_key=decision_key, skipped=skipped,
+    )
+
+    # Carry over decision text the human typed on rows that are still PENDING
+    # (e.g. typed between a previous rewrite and this sync's ingest).
+    pending_decisions: dict[str, tuple[str, str]] = {}
+    for row in read_tab_rows(api, spreadsheet_id)[1:]:
+        cid = _cell(row, ID)
+        if not cid:
+            continue
+        record = confirmations.get(cid, store=store)
+        if record is not None and str(record.get("status")) == "PENDING":
+            decision = _cell(row, DECISION)
+            reason = _cell(row, REASON)
+            if decision:
+                pending_decisions[cid] = (decision, reason)
+
+    conn = store.connect()
+    try:
+        db_rows = conn.execute(
+            """SELECT * FROM plan_confirmations
+               ORDER BY CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END,
+                        CASE WHEN status = 'PENDING' THEN created_at END ASC,
+                        decided_at DESC"""
+        ).fetchall()
+        records = [dict(r) for r in db_rows]
+    finally:
+        conn.close()
+
+    values: list[list[str]] = [list(HEADERS)]
+    for record in records:
+        sheet_row = _record_row(record)
+        carried = pending_decisions.get(str(record.get("id") or ""))
+        if carried:
+            sheet_row[DECISION], sheet_row[REASON] = carried
+        values.append(sheet_row)
+    if len(values) == 1:
+        values.append(["" for _ in HEADERS])
+
+    api.clear(spreadsheetId=spreadsheet_id, range=f"{TAB_TITLE}!A1:K").execute()
+    api.update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{TAB_TITLE}!A1",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
+
+    read_back = read_tab_rows(api, spreadsheet_id)
+    if not read_back or read_back[0] != HEADERS:
+        raise RuntimeError("Confirmations tab read-back did not match the written headers")
+    read_ids = {_cell(r, ID) for r in read_back[1:] if _cell(r, ID)}
+    expected_ids = {str(r.get("id") or "") for r in records if r.get("id")}
+    if read_ids != expected_ids:
+        raise RuntimeError(
+            f"Confirmations tab read-back IDs {sorted(read_ids)} "
+            f"did not match ledger {sorted(expected_ids)}"
+        )
+    return {
+        "tab": TAB_TITLE,
+        "expired": expired,
+        "decisions_applied": len(applied),
+        "applied": applied,
+        "skipped_unauthenticated": len(skipped),
+        "skipped": skipped,
+        "rows": len(records),
+        "read_back_rows": len(read_back) - 1,
+        "notifications": _notify_pending(
+            store, records, spreadsheet_id,
+            notify=notify, chat_poster=chat_poster, gmail_sender=gmail_sender,
+            chat_thread_poster=chat_thread_poster, zap_trigger=zap_trigger,
+            decision_key=decision_key, approval_card_poster=approval_card_poster,
+            quiet_hours=quiet_hours,
+        ),
+    }
+
+
+def _notify_pending(
+    store: Any,
+    records: list[dict[str, Any]],
+    spreadsheet_id: str,
+    *,
+    notify: bool,
+    chat_poster: Any,
+    gmail_sender: Any,
+    chat_thread_poster: Any = None,
+    zap_trigger: Any = None,
+    decision_key: Any = None,
+    approval_card_poster: Any = None,
+    quiet_hours: float | None = None,
+) -> list[dict[str, Any]]:
+    """Route approval asks on their origin medium for PENDING records.
+
+    Origin wins (Carlo 2026-09-22): ``notify_approval_on_origin`` puts the
+    ask on the medium where it started instead of blasting Chat + email
+    every time. A successful Chat card does not email; backup email waits
+    for a failed Chat post or for ``maybe_quiet_backup_email`` after the
+    quiet window. ``maybe_quiet_nudge`` then posts the one Chat nudge for
+    EZLynx-origin asks whose quiet window has elapsed. ``chat_thread_poster``
+    is kept for signature stability (legacy requester pings); the origin
+    router uses ``approval_card_poster`` for Chat-origin cards instead.
+    """
+    if not notify:
+        return []
+    from . import confirmation_notify
+
+    results: list[dict[str, Any]] = []
+    for record in records:
+        if str(record.get("status")) != "PENDING":
+            continue
+        confirmation_id = str(record.get("id") or "")
+        if not confirmation_id:
+            continue
+        results.append(
+            confirmation_notify.notify_approval_on_origin(
+                store,
+                confirmation_id,
+                approval_card_poster=approval_card_poster,
+                gmail_sender=gmail_sender,
+                zap_trigger=zap_trigger,
+                chat_poster=chat_poster,
+                given_sheet_id=spreadsheet_id,
+                decision_key=decision_key,
+            )
+        )
+        nudge = confirmation_notify.maybe_quiet_nudge(
+            store,
+            confirmation_id,
+            chat_poster=chat_poster,
+            quiet_hours=quiet_hours,
+            given_sheet_id=spreadsheet_id,
+        )
+        if nudge.get("notified") or nudge.get("errors"):
+            results.append(nudge)
+        backup = confirmation_notify.maybe_quiet_backup_email(
+            store,
+            confirmation_id,
+            gmail_sender=gmail_sender,
+            quiet_hours=quiet_hours,
+            given_sheet_id=spreadsheet_id,
+        )
+        if backup.get("notified") or backup.get("errors"):
+            results.append(backup)
+    return results

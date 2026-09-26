@@ -9,6 +9,7 @@ session survives a second, independent browser context.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -19,6 +20,26 @@ from urllib.parse import urlsplit
 
 APP_HOST = "app.magellan.insure"
 LOGIN_PATHS = {"/", "/login", "/sign-in", "/signin"}
+
+
+def _load_session_acl():
+    configured = os.environ.get("MAGELLAN_SESSION_ACL_PATH", "").strip()
+    helper = (
+        Path(configured)
+        if configured
+        else Path(__file__).resolve().parent / "magellan_session_acl.py"
+    )
+    if not helper.is_file():
+        raise RuntimeError(f"Magellan session ACL helper is missing: {helper}")
+    spec = importlib.util.spec_from_file_location("magellan_session_acl", helper)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Magellan session ACL helper cannot be loaded: {helper}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SESSION_ACL = _load_session_acl()
 
 
 def _safe_page_state(page, storage_path: Path) -> dict[str, object]:
@@ -103,9 +124,10 @@ def main() -> int:
                     if not _is_authenticated(page):
                         evidence["failure_stage"] = f"attempt_{attempt}_authentication"
                         raise RuntimeError("Magellan authentication did not reach an authenticated application route")
-                    STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    context.storage_state(path=str(STORAGE_STATE_PATH))
-                    os.chmod(STORAGE_STATE_PATH, 0o600)
+                    _SESSION_ACL.publish_private_storage_state(
+                        STORAGE_STATE_PATH,
+                        lambda temporary: context.storage_state(path=str(temporary)),
+                    )
                     evidence["reliability_attempts_passed"] = attempt
                 except Exception as exc:
                     evidence.setdefault(f"attempt_{attempt}", _safe_page_state(page, STORAGE_STATE_PATH))
@@ -122,7 +144,9 @@ def main() -> int:
             "authenticated": True,
             "dashboard_verified": True,
             "storage_state_refreshed": True,
-            "storage_state_mode_verified": oct(STORAGE_STATE_PATH.stat().st_mode & 0o777) == "0o600",
+            "storage_state_mode_verified": _SESSION_ACL.storage_state_is_dual_writer_private(
+                STORAGE_STATE_PATH
+            ),
         }
     )
     print(json.dumps(evidence, sort_keys=True))
