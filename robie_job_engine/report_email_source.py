@@ -13,7 +13,10 @@ into worker-facing row dicts.
 
 Used by :func:`robie_job_engine.report_fetcher.fetch_report_rows` for
 report ids 4247 (manual renewals), 4246 (audits; daily feed is the
-4360 Active-filtered transaction CSV), and 4372 (mortgagee).
+4360 Active-filtered transaction CSV), 4372 (mortgagee), and 4359
+(policy change; Look 4602 fallback only when the email is missing).
+Report 4359's registry ``schema_verified`` flag still blocks
+``fetch_report_rows`` until it is flipped after Test audits.
 
 Fail closed: missing email, stale delivery, or a header/schema mismatch
 raises. Rows are never guessed. A wrong-subject robie@ CSV is ignored
@@ -39,7 +42,7 @@ from .gmail_report_ingestion import (
 logger = logging.getLogger("robie.report_email_source")
 
 # Live workers that prefer today's robie@ CSV over Looker favorites.
-EMAIL_FIRST_REPORT_IDS = frozenset({"4246", "4247", "4372"})
+EMAIL_FIRST_REPORT_IDS = frozenset({"4246", "4247", "4372", "4359"})
 
 # 4246's daily email is scheduled report 4360 (Active policies only).
 AUDIT_4360_STATUS_COLUMN = "Current Policy Status"
@@ -108,6 +111,29 @@ COLUMN_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "Assigned Producer": ("assigned_agent",),
         "CSR": ("csr",),
         "Note": ("note",),
+    },
+    # 4359 Policy Change / Look 4602. CSV short headers only (the 19 columns
+    # gmail_report_ingestion already fingerprints). No request_id.
+    "4359": {
+        "Account Name": ("account_name", "insured_name"),
+        "Applicant ID": ("applicant_id",),
+        "Policy Number": ("policy_number",),
+        "Line Of Business": ("line_of_business",),
+        "Effective Date": ("effective_date",),
+        "Master Company": ("master_company", "carrier"),
+        "Request Status": ("request_status",),
+        "Created By": ("created_by",),
+        "Written Premium": ("written_premium",),
+        "Premium - Annualized": ("annualized_premium",),
+        "Branch": ("branch",),
+        "Department": ("department",),
+        "Service Team": ("service_team",),
+        "Assigned Producer": ("assigned_producer",),
+        "CSR": ("csr",),
+        "Preferred Language": ("preferred_language",),
+        "Applicant Labels": ("applicant_labels",),
+        "Policy Labels": ("policy_labels",),
+        "Change Request Created Date": ("change_request_created_date",),
     },
 }
 

@@ -20,6 +20,8 @@ The local Codex tasks currently use 5:00 PM for the weekly report. The cloud
 job defaults to 5:15 PM so the final weekday source exports have time to land.
 Change either only after the intended cutover is confirmed.
 
+On the dedicated VM `streetsmart-accountability-prod`, weekdays are three separate units: 09:00 America/New_York publishes the department Doc, emails leadership, and posts Team Lead Chat for the previous business day (`run_daily_accountability_vm.sh` omits `--date`, so `production_main` keeps `get_previous_business_day()`); 17:00 collect runs only `run_source_collection_vm.sh` (`production_main --skip-if-prepared --date` set to that same Eastern calendar day, no publish and no Chat); 17:05 Team Lead Chat EOD posts a short Chat wrap-up for that Eastern calendar day to the same Team Lead webhook (`accountability-team-lead-chat-webhook`, space `spaces/AAQAHYP7Ezg`) and does not send leadership email or rewrite the Doc. `--skip-if-prepared` reuses a snapshot only for the date it was given. Omitting `--date` on the 17:00 unit prepared the prior business day and left EOD with no same-day snapshot.
+
 ## Cloud connection inputs
 
 No credentials belong in Git, Chat, report artifacts, or the connection

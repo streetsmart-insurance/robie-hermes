@@ -1,9 +1,9 @@
 """Unit tests for the policy-change verification worker. Fakes only."""
 
-import sys
 import types
 import unittest
 from dataclasses import dataclass, field
+from unittest import mock
 
 # Fake data only — never real credentials, customer artifacts, or secrets.
 CLIENT_EMAIL = "insured-client@example.test"
@@ -144,27 +144,198 @@ class KillSwitchTests(unittest.TestCase):
     def test_kill_switch_never_flipped_by_accident(self):
         self.assertIs(pcw.POLICY_CHANGE_ENABLED, False)
 
+    def test_schema_gate_holds_even_if_kill_switch_is_patched(self):
+        worker = pcw.PolicyChangeWorker()
+        with mock.patch.object(pcw, "POLICY_CHANGE_ENABLED", True), mock.patch.object(
+            pcw, "_load_fetch_report_rows", side_effect=AssertionError("fetch touched")
+        ):
+            result = worker.perform(
+                {"action_type": "policy_change_verification", "payload": {}},
+                idempotency_key="k-enabled",
+            )
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.hold_status, JobStatus.NEEDS_CLARIFICATION)
+        self.assertIn("disabled", result.error)
+
+
+class OpenRequestFetchTests(unittest.TestCase):
+    def test_iter_open_requests_returns_fetched_rows(self):
+        fetched = [_sample_looker_row()]
+
+        def fake_fetch(**kwargs):
+            self.assertEqual(kwargs["report_id"], "4359")
+            self.assertIsNone(kwargs["fields"])
+            self.assertIsNone(kwargs["filters"])
+            self.assertEqual(kwargs["db_path"], "/tmp/policy-change-test.db")
+            return list(fetched)
+
+        worker = pcw.PolicyChangeWorker()
+        job = {
+            "action_type": "policy_change_verification",
+            "payload": {"db_path": "/tmp/policy-change-test.db"},
+        }
+        with mock.patch.object(pcw, "_load_fetch_report_rows", return_value=fake_fetch):
+            rows = list(worker._iter_open_requests(job))
+        self.assertEqual(rows, fetched)
+        parsed = pcw.parse_policy_change_row(rows[0])
+        self.assertEqual(parsed["policy_number"], "POL-4359-001")
+        self.assertEqual(parsed["change_request_created_date"], "09/01/2026")
+
+    def test_process_open_request_keys_real_identity(self):
+        worker = pcw.PolicyChangeWorker(store=object())
+        job = {
+            "id": "job-1",
+            "action_type": "policy_change_verification",
+            "payload": {},
+        }
+        with mock.patch.object(
+            worker, "_iter_open_requests", return_value=[_sample_csv_row()]
+        ):
+            result = worker._process_open_requests(job, idempotency_key="k-row")
+        self.assertTrue(result.succeeded)
+        self.assertFalse(result.detail["request_closed"])
+        outcome = result.detail["outcomes"][0]
+        self.assertEqual(outcome["policy_number"], "POL-4359-001")
+        self.assertEqual(outcome["evidence"]["change_request_created_date"], "09/01/2026")
+        self.assertEqual(outcome["evidence"]["look_id"], "4602")
+        self.assertNotIn("request_id", outcome["evidence"])
+        self.assertIn("waiting_for_carrier", outcome["reason"])
+        self.assertIn("POL-4359-001", result.destination["confirmation_reports"][0]["report"])
+
+def _sample_csv_row(**overrides):
+    """One synthetic 19-column Gmail CSV row. No customer data."""
+    row = {
+        "Account Name": "Example Trucking LLC",
+        "Applicant ID": "A-100",
+        "Policy Number": "POL-4359-001",
+        "Line Of Business": "Commercial Auto",
+        "Effective Date": "09/15/2026",
+        "Master Company": "Example Carrier",
+        "Request Status": "Open",
+        "Created By": "CSR Example",
+        "Written Premium": "1500.00",
+        "Premium - Annualized": "2400.00",
+        "Branch": "Commercial Lines",
+        "Department": "Commercial Lines",
+        "Service Team": "Service A",
+        "Assigned Producer": "Producer Example",
+        "CSR": "CSR Example",
+        "Preferred Language": "English",
+        "Applicant Labels": "VIP",
+        "Policy Labels": "Audit",
+        "Change Request Created Date": "09/01/2026",
+    }
+    row.update(overrides)
+    return row
+
+
+def _sample_looker_row():
+    """The same request keyed by the verified Look 4602 headers."""
+    csv_row = _sample_csv_row()
+    return {
+        looker: csv_row[csv_name]
+        for looker, csv_name in (
+            ("Applicant Data Account Name", "Account Name"),
+            ("Policy Transaction Data Applicant ID", "Applicant ID"),
+            ("Policy Change Request Detail Policy Number", "Policy Number"),
+            ("Policy Transaction Data Line Of Business", "Line Of Business"),
+            ("Policy Change Request Detail Policy Effective Date", "Effective Date"),
+            ("Policy Transaction Data Master Company", "Master Company"),
+            ("Policy Change Request Detail Request Status", "Request Status"),
+            ("Policy Change Request Detail Created By", "Created By"),
+            ("Policy Transaction Data Written Premium", "Written Premium"),
+            ("Policy Transaction Data Annualized Premium", "Premium - Annualized"),
+            ("Applicant Data Branch", "Branch"),
+            ("Policy Transaction Data Department", "Department"),
+            ("Serviceteampolicychangerequest Service Team", "Service Team"),
+            ("Applicant Data Assigned Producer", "Assigned Producer"),
+            ("Applicant Data CSR", "CSR"),
+            ("Applicant Data Preferred Language", "Preferred Language"),
+            ("Applicant Labels Applicant Labels", "Applicant Labels"),
+            ("Policy Labels Policy Labels", "Policy Labels"),
+            (
+                "Policy Change Request Detail Change Request Created Date",
+                "Change Request Created Date",
+            ),
+        )
+    }
+
+
+class RegistryIdentityTests(unittest.TestCase):
+    def test_4359_identity_look_and_schema_gate(self):
+        from robie_job_engine.job_schema import get_bounded_job_schema
+        from robie_job_engine.report_registry import LOOK_ID_BY_REPORT, get_report_spec
+
+        spec = get_report_spec("4359")
+        self.assertEqual(
+            spec.identity_fields, ("policy_number", "change_request_created_date")
+        )
+        self.assertEqual(spec.look_id, "4602")
+        self.assertFalse(spec.schema_verified)
+        self.assertEqual(LOOK_ID_BY_REPORT["4359"], "4602")
+        self.assertEqual(spec.filter_name, "Policy Change Request Confirmation Queue - ROBIE")
+        schema = get_bounded_job_schema("policy_change_verification")
+        self.assertFalse(schema["schema_verified"])
+        self.assertEqual(
+            schema["identity"], ("policy_number", "change_request_created_date")
+        )
+        self.assertIs(pcw.POLICY_CHANGE_ENABLED, False)
+
+
+class ParsePolicyChangeRowTests(unittest.TestCase):
+    def test_csv_and_looker_headers_parse_to_the_same_19_fields(self):
+        csv_parsed = pcw.parse_policy_change_row(_sample_csv_row())
+        looker_parsed = pcw.parse_policy_change_row(_sample_looker_row())
+        self.assertEqual(csv_parsed, looker_parsed)
+        self.assertEqual(tuple(csv_parsed), pcw.POLICY_CHANGE_FIELDS)
+        self.assertEqual(len(csv_parsed), 19)
+        self.assertEqual(csv_parsed["policy_number"], "POL-4359-001")
+        self.assertEqual(csv_parsed["change_request_created_date"], "09/01/2026")
+        self.assertEqual(csv_parsed["account_name"], "Example Trucking LLC")
+        self.assertEqual(csv_parsed["annualized_premium"], "2400.00")
+        self.assertEqual(csv_parsed["written_premium"], "1500.00")
+        self.assertEqual(csv_parsed["master_company"], "Example Carrier")
+        self.assertNotIn("request_id", csv_parsed)
+
+    def test_phantom_columns_are_dropped(self):
+        row = _sample_csv_row(
+            request_id="REQ-SHOULD-DROP",
+            change_action="add",
+            change_description="add a vehicle",
+            affected_item="2022 Honda Civic",
+        )
+        parsed = pcw.parse_policy_change_row(row)
+        self.assertNotIn("request_id", parsed)
+        self.assertEqual(parsed["policy_number"], "POL-4359-001")
+        request = pcw.reconstruct_request(row, "please add a vehicle")
+        self.assertFalse(request["ambiguous"])
+        self.assertIsNone(request["change_action"])
+        self.assertEqual(request["requested_values"], {})
+        self.assertEqual(request["affected_item"], None)
+
+
 class ReconstructRequestTests(unittest.TestCase):
     def test_reconstructs_clear_request(self):
-        row = {
-            "request_id": "REQ-9",
-            "policy_number": "P-1",
-            "effective_date": "2026-10-01",
-            "change_action": "add",
-            "affected_item": "2022 Honda Civic",
-            "requested_values": {"vehicle": "2022 Honda Civic"},
-            "premium_expectation": "200.00",
-        }
-        request = pcw.reconstruct_request(row, "adding a vehicle per client email")
+        request = pcw.reconstruct_request(
+            _sample_csv_row(), "adding a vehicle per client email"
+        )
         self.assertFalse(request["ambiguous"])
-        self.assertEqual(request["effective_date"], "2026-10-01")
-        self.assertEqual(request["change_action"], "add")
-        self.assertEqual(request["affected_item"], "2022 Honda Civic")
+        self.assertEqual(request["policy_number"], "POL-4359-001")
+        self.assertEqual(request["change_request_created_date"], "09/01/2026")
+        self.assertEqual(request["effective_date"], "09/15/2026")
+        self.assertEqual(request["insured_name"], "Example Trucking LLC")
+        self.assertEqual(request["premium_expectation"], "1500.00")
+        self.assertIsNone(request["change_action"])
 
     def test_ambiguous_request_flagged(self):
-        request = pcw.reconstruct_request({"request_id": "REQ-X"}, "some discussion text")
+        request = pcw.reconstruct_request(
+            {"request_id": "REQ-X", "change_description": "add a vehicle"},
+            "some discussion text",
+        )
         self.assertTrue(request["ambiguous"])
-        self.assertTrue(request["ambiguity_reasons"])
+        self.assertIn("missing policy number", request["ambiguity_reasons"])
+        self.assertIn("missing change request created date", request["ambiguity_reasons"])
+        self.assertEqual(request["policy_number"], "")
 
 class ThreeWayMatchTests(unittest.TestCase):
     def test_pass_when_all_three_match(self):
