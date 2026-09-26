@@ -1,406 +1,402 @@
-"""Certificates filing: verify the client, then write via EZLynx APIs.
+"""Certificates chunk 3: filing verified requests into EZLynx.
 
-Every write path runs the fail-closed ``verify_filing_target`` gate
-first — the three checks Carlo set after the 2026-09-25 Rivera misfile:
+Pipeline per VERIFIED record (read-only until the write steps):
+  1. Claim a per-message lease (concurrent workers never double-file).
+  2. Resolve the discussion: task registry -> existing holder-matching
+     certificates discussion -> HOLD (never create, never guess).
+  3. Triple filing guard (verify_filing_target) before every write.
+  4. Append the summary note (real content via summarize_for_note).
+     On an uncertain POST outcome, read the destination back BEFORE any
+     retry — never blind-retry a non-idempotent POST.
+  5. Upload PDF attachments via the OAuth DocumentApi, with read-back.
+  6. Task decision via the registry + Zapier (create/reuse/reopen/hold).
 
-1. The worker's matched record (insured name + policy number) agrees
-   with what the email itself says.
-2. The email's policy number is anchored to the applicant in EZLynx.
-3. The discussion being filed into belongs to that applicant.
-
-Any failure raises ``FilingTargetMismatch`` and NOTHING is written.
-Post-write, every note and document is read back and asserted before
-the result is reported.
-
-Pluggable boundaries (duck-typed, fakeable in tests):
-
-- ``applicant_lookup``: ``find_applicant(policy_number) ->
-  applicant | None``. Applicant is a dict with ``applicant_id``,
-  ``insured_name``, ``policy_numbers`` (list).
-- ``discussion_client``: ``get_discussions(applicant_id)``,
-  ``get_discussion(discussion_id)``, ``append_note(discussion_id, body)``
-  — matches ``DiscussionApiClient``; may also be the certificate-filing
-  helper's client.
-- ``document_client``: ``upload(applicant_id, document_name, file_bytes,
-  filename=...) -> document_id`` and ``search(applicant_id) ->
-  list[dict]`` where each row carries the uploaded document's id/name.
-
-The module never creates an applicant, never creates a discussion, and
-never fires the review-task Zap itself — it builds the verified payload
-and returns it for the runtime to fire.
+Writes go through the injected ports so offline tests use fakes; production
+wiring passes add_note_to_discussion / upload_document_via_api from
+ezlynx_api_only_writes. The writers enforce the EZLynx write allowlist.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
-import subprocess
+import sqlite3
+import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
-from .cert_intake import CertEmail, RequestFacts, render_email_source
-from .certificate_filing import file_certificate_notes
-from .ezlynx_discussions import reject_phone_numbers
+from .cert_intake import summarize_for_note
+from .cert_task_registry import (
+    CREATE, HOLD, NONE, REOPEN, REUSE, TASK_OPEN,
+    TaskEntry, decide_task_action, holder_key_for, policy_key_for,
+)
+from .cert_verification import (
+    ACTION_ACK, ACTION_NEW_REQUEST, VERIFIED,
+    FilingTargetMismatch, verify_filing_target,
+)
+
+FILED = "FILED"
+DRY_RUN = "DRY_RUN"
+HELD = "HELD"
+PARTIAL = "PARTIAL"
+ERROR = "ERROR"
 
 
-class FilingTargetMismatch(RuntimeError):
-    """A pre-write identity check failed. Nothing was written."""
-
-
-class HoldForHuman(RuntimeError):
-    """The request is real but cannot be filed safely. Human reviews."""
-
-
-def _norm_name(value: str | None) -> str:
-    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
-
-
-def _norm_policy(value: str | None) -> str:
-    return re.sub(r"[^a-z0-9]", "", (value or "").upper())
-
-
-def verify_filing_target(
-    facts: RequestFacts,
-    applicant: dict[str, Any],
-    discussion: dict[str, Any],
-) -> dict[str, Any]:
-    """Run the triple check. Returns the verified target or raises.
-
-    1. ``facts`` (what the email says) agrees with ``applicant``
-       (what EZLynx says) on insured name and policy number.
-    2. The policy number is anchored to the applicant's own policy list.
-    3. The discussion belongs to the applicant.
-    """
-    applicant_id = str(applicant.get("applicant_id") or "").strip()
-    if not applicant_id:
-        raise FilingTargetMismatch("applicant has no applicant_id")
-
-    # Check 1: email vs matched record.
-    email_insured = _norm_name(facts.insured_name)
-    record_insured = _norm_name(applicant.get("insured_name"))
-    if facts.insured_name and record_insured:
-        if email_insured != record_insured and email_insured not in record_insured and record_insured not in email_insured:
-            raise FilingTargetMismatch(
-                f"insured mismatch: email says {facts.insured_name!r}, "
-                f"record says {applicant.get('insured_name')!r}"
-            )
-    elif not record_insured:
-        raise FilingTargetMismatch("matched record has no insured name to agree with")
-
-    email_policies = [_norm_policy(p) for p in facts.policy_numbers if _norm_policy(p)]
-    record_policies = [
-        _norm_policy(p)
-        for p in (applicant.get("policy_numbers") or [])
-        if _norm_policy(p)
-    ]
-    if not email_policies:
-        raise FilingTargetMismatch("email carries no policy number to anchor")
-    if not any(p in record_policies for p in email_policies):
-        raise FilingTargetMismatch(
-            f"policy {facts.policy_numbers[0]!r} is not on applicant {applicant_id}"
-        )
-
-    # Check 2 is the anchoring above: the policy number matched a policy
-    # on THIS applicant's record, not merely a policy-shaped string.
-
-    # Check 3: the discussion belongs to the applicant.
-    disc_applicant = str(
-        discussion.get("applicant_id") or discussion.get("applicantId") or ""
-    ).strip()
-    if disc_applicant and disc_applicant != applicant_id:
-        raise FilingTargetMismatch(
-            f"discussion {discussion.get('discussion_id')} belongs to "
-            f"applicant {disc_applicant}, not {applicant_id}"
-        )
-    return {
-        "applicant_id": applicant_id,
-        "policy_number": facts.policy_numbers[0],
-        "discussion_id": str(discussion.get("discussion_id") or "").strip(),
-    }
-
-
-def resolve_discussion(
-    discussion_client: Any, applicant_id: str, discussion_id: str | None = None
-) -> dict[str, Any]:
-    """Resolve the existing discussion to file into.
-
-    Never creates one. With an explicit discussion id, asserts it exists
-    and belongs to the applicant. Without one, prefers an existing
-    certificate-named discussion; refuses zero or ambiguous matches.
-    """
-    discussions = discussion_client.get_discussions(applicant_id) or []
-    if discussion_id:
-        for d in discussions:
-            if str(d.get("discussion_id")) == str(discussion_id):
-                return dict(d, applicant_id=applicant_id)
-        raise FilingTargetMismatch(
-            f"discussion {discussion_id} not found on applicant {applicant_id}"
-        )
-    cert_named = [
-        d
-        for d in discussions
-        if re.search(r"(?i)cert", str(d.get("title") or ""))
-    ]
-    if len(cert_named) == 1:
-        return dict(cert_named[0], applicant_id=applicant_id)
-    if not cert_named:
-        raise HoldForHuman(
-            f"applicant {applicant_id} has no certificate discussion; "
-            "human to pick the filing discussion"
-        )
-    raise HoldForHuman(
-        f"applicant {applicant_id} has {len(cert_named)} certificate "
-        "discussions; human to pick the filing discussion"
-    )
-
-
-def extract_pdf_text(pdf_bytes: bytes) -> str | None:
-    """Best-effort PDF text via pdftotext. None when unreadable."""
-    if not pdf_bytes:
-        return None
-    try:
-        proc = subprocess.run(
-            ["pdftotext", "-layout", "-", "-"],
-            input=pdf_bytes,
-            capture_output=True,
-            timeout=60,
-        )
-    except Exception:
-        return None
-    if proc.returncode != 0:
-        return None
-    text = proc.stdout.decode("utf-8", "replace").strip()
-    return text or None
-
-
-def _document_name(email: CertEmail, filename: str) -> str:
-    # The gmail id in the name makes re-runs idempotent: the exact same
-    # delivery is never uploaded twice.
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", filename or "attachment")
-    if "." not in safe:
-        safe += ".pdf"
-    stamp = (email.date or "nodate")[:10]
-    return f"Certificates-{stamp}-{email.gmail_id}-{safe}"[:150]
-
-
-def _upload_once(
-    document_client: Any,
-    applicant_id: str,
-    name: str,
-    content: bytes,
-    *,
-    filename: str,
-    content_hash: str,
-) -> dict[str, Any]:
-    """Upload unless a document with this exact name already exists.
-
-    The name carries the Gmail id, so "already exists" means the exact
-    same delivery was already filed — never a coincidence. The search
-    is best-effort: if it errors, the durable dedupe store upstream
-    remains the authoritative guard and we proceed.
-    """
-    try:
-        rows = document_client.search(applicant_id) or []
-    except Exception:
-        rows = []
-    for row in rows:
-        for key in ("name", "documentName", "document_name", "fileName"):
-            if str(row.get(key) or "") == name:
-                return {
-                    "document_id": str(
-                        row.get("document_id")
-                        or row.get("documentId")
-                        or row.get("id")
-                    ),
-                    "name": name,
-                    "sha256": content_hash,
-                    "size": len(content),
-                    "duplicate_skipped": True,
-                }
-    document_id = document_client.upload(
-        applicant_id, name, content, filename=filename
-    )
-    try:
-        rows = document_client.search(applicant_id) or []
-    except Exception:
-        rows = []
-    hit = any(
-        str(r.get("document_id") or r.get("documentId") or r.get("id"))
-        == str(document_id)
-        for r in rows
-    )
-    if not hit:
-        raise RuntimeError(
-            f"document {document_id} uploaded but not found on read-back"
-        )
-    return {
-        "document_id": str(document_id),
-        "name": name,
-        "sha256": content_hash,
-        "size": len(content),
-        "duplicate_skipped": False,
-    }
+@dataclass
+class FilingDeps:
+    discussions_client: Any = None   # get_discussions(applicant_id)
+    verifier: Any = None             # search_policies/policy anchor reads
+    note_writer: Any = None          # (applicant_id, note_text, *, title_hint, dry_run) -> dict
+    doc_writer: Any = None           # (applicant_id, document_name, file_bytes, *, filename) -> dict
+    zapier: Any = None               # CertZapierClient (or fake)
+    registry: Any = None             # TaskRegistry
+    store: Any = None                # FilingStore
 
 
 @dataclass
 class FilingResult:
-    applicant_id: str
-    discussion_id: str
-    documents: list[dict[str, Any]] = field(default_factory=list)
-    note: dict[str, Any] = field(default_factory=dict)
-    task_payload: dict[str, Any] = field(default_factory=dict)
-    held: str | None = None
+    status: str = HELD
+    discussion_id: str | None = None
+    note_id: str | None = None
+    document_ids: list[str] = field(default_factory=list)
+    task_action: str = "not_reached"
+    task_id: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    hold_reasons: list[str] = field(default_factory=list)
 
 
-def file_certificate_request(
-    *,
-    email: CertEmail,
-    facts: RequestFacts,
-    applicant_lookup: Any,
-    discussion_client: Any,
-    document_client: Any,
-    note_text: str,
-    discussion_id: str | None = None,
-    assignee: str = "",
-    due_date: str = "",
-    task_source: str = "certificates-intake",
-    note_guard_cutoff: datetime | None = None,
-) -> FilingResult:
-    """Verify, upload documents, file the note, build the task payload.
+class FilingStore:
+    """Per-message crash-safe filing state + worker leases."""
 
-    Raises ``FilingTargetMismatch`` (nothing written) or ``HoldForHuman``
-    (nothing written). On success every write is read back and asserted.
+    def __init__(self, db_path: str) -> None:
+        self._db = sqlite3.connect(db_path, timeout=30)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS cert_filing (
+                message_id TEXT PRIMARY KEY,
+                note_status TEXT NOT NULL DEFAULT 'pending',
+                note_id TEXT,
+                discussion_id TEXT,
+                docs_json TEXT NOT NULL DEFAULT '{}',
+                task_status TEXT NOT NULL DEFAULT 'pending',
+                task_id TEXT,
+                lease_owner TEXT,
+                lease_expires REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            )"""
+        )
+        self._db.commit()
 
-    ``note_guard_cutoff``: pass the timestamp this email was first filed
-    at (from the durable intake store). The filing tool then refuses to
-    append a second note when the discussion was modified at/after that
-    instant — retries never duplicate the note. Documents are deduped by
-    their gmail-id-bearing names on every run.
+    def claim(self, message_id: str, owner: str, ttl_s: int = 600) -> bool:
+        """Take the lease for a message. False = another worker holds it."""
+        now = time.time()
+        row = self._db.execute(
+            "SELECT lease_owner, lease_expires FROM cert_filing WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+        if row and row[0] != owner and row[1] > now:
+            return False
+        self._db.execute(
+            """INSERT INTO cert_filing (message_id, lease_owner, lease_expires, updated_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(message_id) DO UPDATE SET
+                lease_owner=excluded.lease_owner,
+                lease_expires=excluded.lease_expires,
+                updated_at=excluded.updated_at""",
+            (message_id, owner, now + ttl_s, now),
+        )
+        self._db.commit()
+        return True
+
+    def release(self, message_id: str, owner: str) -> None:
+        self._db.execute(
+            "UPDATE cert_filing SET lease_owner=NULL, lease_expires=0,"
+            " updated_at=? WHERE message_id=? AND lease_owner=?",
+            (time.time(), message_id, owner),
+        )
+        self._db.commit()
+
+    def get(self, message_id: str) -> dict[str, Any]:
+        row = self._db.execute(
+            "SELECT note_status, note_id, discussion_id, docs_json, task_status,"
+            " task_id FROM cert_filing WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+        if not row:
+            return {"note_status": "pending", "note_id": None,
+                    "discussion_id": None, "docs_json": "{}",
+                    "task_status": "pending", "task_id": None}
+        return {"note_status": row[0], "note_id": row[1],
+                "discussion_id": row[2], "docs_json": row[3],
+                "task_status": row[4], "task_id": row[5]}
+
+    def set(self, message_id: str, **fields: Any) -> None:
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self._db.execute(
+            f"UPDATE cert_filing SET {cols}, updated_at=? WHERE message_id=?",
+            (*fields.values(), time.time(), message_id),
+        )
+        self._db.commit()
+
+
+def _discussion_title(d: dict[str, Any]) -> str:
+    for key in ("title", "Title", "discussionTitle", "DiscussionTitle",
+                "name", "Name"):
+        val = d.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _discussion_id(d: dict[str, Any]) -> str | None:
+    for key in ("id", "Id", "ID", "discussionId", "DiscussionId"):
+        val = d.get(key)
+        if val:
+            return str(val)
+    return None
+
+
+def resolve_discussion(verified: Any, holder_names: list[str],
+                       registry: Any, discussions_client: Any
+                       ) -> tuple[str | None, str | None, str]:
+    """Find the discussion to file into. Never creates, never guesses.
+
+    Returns (discussion_id, discussion_title, reason). The title is passed
+    to the note writer as its title hint so the writer's own fail-closed
+    selection confirms the same discussion.
+
+    Order: task registry -> existing holder-matching certificates
+    discussion -> (None, None, reason).
     """
-    if facts.pdf_unreadable:
-        raise HoldForHuman("a PDF attachment could not be read as text")
-    if not facts.policy_numbers:
-        raise HoldForHuman("no policy number in the email or its PDFs")
+    policy_key = policy_key_for(verified.policy_numbers)
+    holder_key = holder_key_for(holder_names)
+    entry = registry.get(verified.applicant_id, policy_key, holder_key)
+    discussions = discussions_client.get_discussions(verified.applicant_id) or []
+    titles = {}
+    for d in discussions:
+        if isinstance(d, dict):
+            did = _discussion_id(d)
+            if did:
+                titles[did] = _discussion_title(d)
+    if entry and entry.discussion_id:
+        return (entry.discussion_id,
+                titles.get(entry.discussion_id),
+                "task registry")
 
-    applicant = applicant_lookup.find_applicant(facts.policy_numbers[0])
-    if not applicant:
-        raise HoldForHuman(
-            f"policy {facts.policy_numbers[0]} matched no EZLynx applicant"
-        )
-    applicant_id = str(applicant.get("applicant_id") or "").strip()
+    holder_frags = [re.sub(r"[^a-z0-9]", "", h.lower())
+                    for h in holder_names if h]
+    candidates = []
+    for d in discussions:
+        if not isinstance(d, dict):
+            continue
+        title = _discussion_title(d).lower()
+        if "cert" not in title and "coi" not in title:
+            continue
+        did = _discussion_id(d)
+        if not did:
+            continue
+        if holder_frags and not any(f and f in re.sub(r"[^a-z0-9]", "", title)
+                                    for f in holder_frags):
+            continue
+        candidates.append((did, _discussion_title(d)))
+    if len(candidates) == 1:
+        did, title = candidates[0]
+        return did, title, f"existing discussion {title!r}"
+    if len(candidates) > 1:
+        shown = "; ".join(t for _, t in candidates[:5])
+        return None, None, (
+            f"{len(candidates)} certificates discussions match "
+            f"({shown}); refusing to guess")
+    return None, None, ("no certificates discussion on file for this request — "
+                        "create a named one in EZLynx or approve auto-creation")
 
-    discussion = resolve_discussion(discussion_client, applicant_id, discussion_id)
-    target = verify_filing_target(facts, applicant, discussion)
 
-    # Documents first: the email itself, then its attachments. Each is
-    # read back and asserted before the next step runs.
-    email_source = render_email_source(email).encode("utf-8")
-    filed: list[dict[str, Any]] = [
-        _upload_once(
-            document_client,
-            applicant_id,
-            _document_name(email, "email.txt"),
-            email_source,
-            filename="email.txt",
-            content_hash=hashlib.sha256(email_source).hexdigest(),
-        )
-    ]
-    for att in email.attachments:
-        name = _document_name(email, att.filename)
-        filed.append(
-            _upload_once(
-                document_client,
-                applicant_id,
-                name,
-                att.content,
-                filename=att.filename,
-                content_hash=att.sha256,
-            )
-        )
+def _note_count(discussions_client: Any, applicant_id: int,
+                discussion_id: str) -> int | None:
+    try:
+        for d in discussions_client.get_discussions(applicant_id) or []:
+            if isinstance(d, dict) and _discussion_id(d) == str(discussion_id):
+                for key in ("noteCount", "NoteCount", "note_count"):
+                    if d.get(key) is not None:
+                        return int(d[key])
+    except Exception:
+        return None
+    return None
 
-    # The note, through the gated filing tool (it re-verifies read-back).
-    # skip_if_modified_after makes retries note-idempotent.
-    safe_note = reject_phone_numbers(note_text)
-    filing = file_certificate_notes(
-        discussion_client,
-        [
-            {
-                "applicant_id": applicant_id,
-                "discussion_id": target["discussion_id"],
-                "note": safe_note,
-                "source": f"certificates-intake:{email.gmail_id}",
-            }
-        ],
-        skip_if_modified_after=note_guard_cutoff,
-    )
-    item = filing[0]
-    if item["status"] == "skipped":
-        note_result: dict[str, Any] = {
-            "status": "skipped_guard",
-            "detail": item.get("reason"),
-        }
+
+def file_record(record: Any, verified: Any, deps: FilingDeps,
+                owner: str = "cert-worker", dry_run: bool = False) -> FilingResult:
+    """File one VERIFIED record. Fail-closed at every step."""
+    res = FilingResult()
+    if verified.status != VERIFIED or not verified.applicant_id:
+        res.hold_reasons.append("record is not VERIFIED — refusing to file")
+        return res
+    applicant_id = verified.applicant_id
+    message_id = getattr(record, "gmail_id", None) or getattr(
+        record, "message_id", "unknown")
+
+    if deps.store and not deps.store.claim(message_id, owner):
+        res.hold_reasons.append("another worker holds the lease — skipping")
+        return res
+    try:
+        return _file_claimed(record, verified, deps, res, message_id,
+                             applicant_id, owner, dry_run)
+    finally:
+        if deps.store:
+            deps.store.release(message_id, owner)
+
+
+def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
+                  res: FilingResult, message_id: str, applicant_id: int,
+                  owner: str, dry_run: bool) -> FilingResult:
+    # --- discussion -------------------------------------------------------
+    discussion_id, discussion_title, how = resolve_discussion(
+        verified, list(getattr(record.facts, "holder_names", []) or []),
+        deps.registry, deps.discussions_client)
+    if not discussion_id:
+        res.hold_reasons.append(how)
+        return res
+    res.discussion_id = discussion_id
+    res.evidence.append(f"discussion resolved: {how}")
+
+    # --- triple guard before ANY write ------------------------------------
+    try:
+        verify_filing_target(verified, discussion_id, deps.verifier)
+    except FilingTargetMismatch as e:
+        res.hold_reasons.append(f"triple guard refused: {e}")
+        return res
+    res.evidence.append("triple filing guard passed")
+
+    # --- note --------------------------------------------------------------
+    state = deps.store.get(message_id) if deps.store else {}
+    note_text = summarize_for_note(
+        getattr(record, "email", record), record.facts,
+        filed_documents=[])
+    pre_count = _note_count(deps.discussions_client, applicant_id,
+                            discussion_id)
+    if state.get("note_status") == "written" and state.get("note_id"):
+        res.note_id = state["note_id"]
+        res.evidence.append(
+            f"note already filed as {res.note_id} — not duplicating")
     else:
-        if item["status"] not in ("filed", "filed_unverified"):
-            raise RuntimeError(
-                f"note filing failed: {item['status']}: {item.get('detail')}"
-            )
-        if item["status"] == "filed_unverified":
-            raise RuntimeError("note filed but read-back verification failed")
-        note_result = {"status": item["status"], "detail": item.get("detail")}
+        try:
+            filed = deps.note_writer(
+                str(applicant_id), note_text,
+                title_hint=discussion_title, dry_run=dry_run)
+        except Exception as exc:
+            # Uncertain outcome: read the destination back before any retry.
+            post_count = _note_count(deps.discussions_client, applicant_id,
+                                     discussion_id)
+            if (pre_count is not None and post_count is not None
+                    and post_count > pre_count):
+                res.note_id = state.get("note_id") or "recovered-via-readback"
+                res.evidence.append(
+                    "note POST outcome uncertain but destination shows the "
+                    "note landed — not retrying")
+                if deps.store:
+                    deps.store.set(message_id, note_status="written",
+                                   note_id=res.note_id,
+                                   discussion_id=discussion_id)
+            else:
+                res.hold_reasons.append(f"note write failed: {exc}")
+                if deps.store:
+                    deps.store.set(message_id, note_status="failed")
+                res.status = ERROR
+                return res
+        else:
+            status = (filed or {}).get("status")
+            if status == "dry_run":
+                res.status = DRY_RUN
+                res.evidence.append("dry run: note validated, nothing written")
+                return _task_step(record, verified, deps, res, message_id,
+                                  applicant_id, note_text, dry_run=True)
+            if status != "filed":
+                res.hold_reasons.append(
+                    f"note writer declined: {(filed or {}).get('reason')}")
+                res.status = HELD
+                return res
+            res.note_id = str((filed or {}).get("note_id") or "")
+            res.evidence.append(f"note filed: {res.note_id}")
+            if deps.store:
+                deps.store.set(message_id, note_status="written",
+                               note_id=res.note_id,
+                               discussion_id=discussion_id)
 
-    task_payload = build_task_payload(
-        applicant_id=applicant_id,
-        email=email,
-        facts=facts,
-        note=safe_note,
-        assignee=assignee,
-        due_date=due_date,
-        source=task_source,
-    )
-    return FilingResult(
-        applicant_id=applicant_id,
-        discussion_id=target["discussion_id"],
-        documents=filed,
-        note=note_result,
-        task_payload=task_payload,
-    )
+    # --- documents ----------------------------------------------------------
+    attachments = [a for a in (getattr(record, "attachments", []) or [])
+                   if (getattr(a, "filename", "") or "").lower().endswith(".pdf")]
+    for att in attachments:
+        doc_name = att.filename if att.filename.lower().endswith(".pdf") \
+            else att.filename + ".pdf"
+        try:
+            up = deps.doc_writer(str(applicant_id), doc_name, att.content,
+                                 filename=att.filename)
+        except Exception as exc:
+            res.hold_reasons.append(
+                f"document upload failed for {att.filename}: {exc}")
+            res.status = PARTIAL
+            return _task_step(record, verified, deps, res, message_id,
+                              applicant_id, note_text, dry_run=dry_run)
+        res.document_ids.append(str((up or {}).get("document_id") or ""))
+    if attachments:
+        res.evidence.append(f"{len(attachments)} document(s) uploaded "
+                            "with read-back")
+
+    res.status = FILED if res.status == HELD else res.status
+    return _task_step(record, verified, deps, res, message_id, applicant_id,
+                      note_text, dry_run=dry_run)
 
 
-def build_task_payload(
-    *,
-    applicant_id: str,
-    email: CertEmail,
-    facts: RequestFacts,
-    note: str,
-    assignee: str,
-    due_date: str,
-    source: str = "certificates-intake",
-) -> dict[str, Any]:
-    """Build (not fire) the Zapier review-task payload.
+def _task_step(record: Any, verified: Any, deps: FilingDeps,
+               res: FilingResult, message_id: str, applicant_id: int,
+               note_text: str, dry_run: bool) -> FilingResult:
+    """Task decision: create / reuse / reopen / none / hold."""
+    from .cert_zapier import CertZapierClient
 
-    ``assignee`` must be the reviewer's EZLynx login username and
-    ``due_date`` an ISO date — both required, never defaulted, because
-    the Zap rejects bad assignees and Carlo requires a due date.
-    """
-    applicant_id = str(applicant_id or "").strip()
-    assignee = str(assignee or "").strip()
-    due_date = str(due_date or "").strip()
-    if not applicant_id:
-        raise HoldForHuman("task payload needs a verified applicant_id")
-    if not assignee:
-        raise HoldForHuman("task payload needs the reviewer's EZLynx login username")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_date or ""):
-        raise HoldForHuman("task payload needs an ISO due_date (YYYY-MM-DD)")
-    if not note or not note.strip():
-        raise HoldForHuman("task payload needs real note content, never a placeholder")
-    insured = facts.insured_name or "insured not identified"
-    return {
-        "applicant_id": applicant_id,
-        "task_title": f"Certificate review: {insured}",
-        "assignee": assignee,
-        "source": source,
-        "email_subject": email.subject,
-        "due_date": due_date,
-        "note_text": note,
-    }
+    policy_key = policy_key_for(verified.policy_numbers)
+    holder_key = holder_key_for(
+        list(getattr(record.facts, "holder_names", []) or []))
+    entry = deps.registry.get(applicant_id, policy_key, holder_key)
+    live_state = deps.zapier.get_task_state(entry.task_id) \
+        if (deps.zapier and entry and entry.task_id) else "unknown"
+    action = decide_task_action(verified.requested_action, entry, live_state)
+    res.task_action = action
+
+    if action == NONE:
+        res.evidence.append("acknowledgement — task state left alone")
+    elif action == REUSE:
+        res.task_id = entry.task_id if entry else None
+        res.evidence.append(f"reusing open task {res.task_id}")
+    elif action == CREATE:
+        holder = (getattr(record.facts, "holder_names", []) or [""])[0]
+        title = (f"Certificate request — {holder or verified.insured_name}"
+                 )[:120]
+        try:
+            zap = deps.zapier.create_task(
+                applicant_id=applicant_id, title=title,
+                email_subject=getattr(record, "subject", ""),
+                note_text=note_text)
+        except Exception as exc:
+            res.hold_reasons.append(f"task creation failed: {exc}")
+            res.status = PARTIAL if res.status == FILED else res.status
+            return res
+        res.evidence.append(f"task Zap fired: {zap.reason}; task ID arrives "
+                            "via the Zap callback")
+        new_entry = entry or TaskEntry(
+            applicant_id=applicant_id, policy_key=policy_key,
+            holder_key=holder_key, task_status=TASK_OPEN)
+        new_entry.discussion_id = res.discussion_id
+        deps.registry.put(new_entry)
+    elif action == REOPEN:
+        try:
+            deps.zapier.reopen_task(
+                task_id=entry.task_id, applicant_id=applicant_id,
+                title="Certificate request (reopened)", note_text=note_text)
+        except Exception as exc:
+            res.hold_reasons.append(f"task reopen unavailable: {exc}")
+    else:  # HOLD
+        res.hold_reasons.append(
+            "could not classify the task action safely — holding")
+
+    if res.status == HELD and not res.hold_reasons:
+        res.status = FILED if res.note_id else DRY_RUN
+    return res
