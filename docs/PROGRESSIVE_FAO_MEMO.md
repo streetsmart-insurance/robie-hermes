@@ -120,9 +120,17 @@ Those selectors are one element. Policy Activity accepts `Policy Activity`
 or `View policy activity reports`. If the chosen control is not visible,
 Main Navigation is clicked once and the control is resolved again. Zero
 matches, two visible matches, or two Manage Policies elements hold. There
-is no positional click. Dates, Search, Communications, and Memo stay exact
-names. A Memo open accepts one
-PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
+is no positional click. Policy Activity then selects View Activity By
+`Processed Date` (`select#PDDateType[name="DateType"]`, option value
+`PROCESSEDDATE`), fills the HTML date inputs in `#PDDateRange` (`Start Date`
+/ `End Date`, `YYYY-MM-DD`), and clicks `Get Policy Activity`
+(`[data-at="ProcessedDateButton"]`). Those controls were observed on
+hermes-test-01 release `3b651fadabb6`; the labels `Processed date from` and
+`Processed date to` were not in that DOM. Search, Communications, and Memo
+stay the same exact names. A missing or second match holds. A unique
+`data-at` or id match is used when that element has no accessible name; a
+different accessible name, or the expected name on another element, holds.
+A Memo open accepts one PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
 URL, or embed), or a same-tab PDF that can be returned to the list. HTML is
 not printed into a fake PDF. Two different PDFs hold.
 
@@ -187,8 +195,29 @@ not upload or write a note.
   which may also be hidden until that expand. A pull on the installed Test
   release still holds at `Progressive control 'Manage Policies' is missing
   or ambiguous` until this commit is released there.
-- Still exact, and still UNVERIFIED on a completed pull: `Processed date from`,
-  `Processed date to`, `Search`, Communications tab `aria-selected`, and a
+- Policy Activity date filter, read off the authenticated session that
+  `--pull-only` held on release `3b651fadabb6` (CDP stayed on
+  `https://www.foragentsonly.com/managepolicies/policyactivity/`). That run
+  returned `Progressive control 'Processed date from' is missing or ambiguous`
+  because `get_by_label` for `Processed date from` / `Processed date to`
+  matched nothing. The live controls are View Activity By
+  (`#PDDateType` / `name=DateType`, option `PROCESSEDDATE` “Processed Date”),
+  then `#PDDateRange`: start
+  `input[type=date]#js-datepicker__date-start` with
+  `data-at="datatable-daterangepicker-startdate"` labeled Start Date, end
+  `data-at="datatable-daterangepicker-enddate"` labeled End Date, and submit
+  `data-at="ProcessedDateButton"` value Get Policy Activity. This commit
+  targets that shape. It has not been installed, and a completed pull is
+  still UNVERIFIED.
+- Ambiguous date UI stays fail-closed in this commit. The StreetSmart HITL
+  ladder for a later change is Gemini for an open-ended read (“what am I
+  looking at / which control”), then **Jev** (TypeSafe System One) as the
+  typed judgment gate (boolean, choice, or score, plus confidence) — for
+  example “does this look like the processed-date filter we expect?” or
+  “quote-only vs complete.” No Jev client, network call, or secret is added
+  here. Keys are not configured.
+- Still exact, and still UNVERIFIED on a completed pull: `Search`,
+  Communications tab `aria-selected`, and a
   Memo link or button on each row. A mismatch holds.
 - Whether the communications grid uses a Type column, and whether a disabled
   `Next` control is present. An enabled `Next` holds so a partial page is

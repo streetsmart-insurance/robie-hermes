@@ -1,7 +1,7 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.0",
+  "version": "1.1",
   "fields": {
     "manage_policies": {
       "name": "manage_policies",
@@ -24,20 +24,57 @@
       "description": "Header link Policy Activity, or the Manage Policies landing link View policy activity reports. Either may be hidden until Main Navigation is expanded once. Two visible matches hold.",
       "last_updated": "2026-09-26"
     },
+    "view_activity_by": {
+      "name": "view_activity_by",
+      "primary_strategy": "css",
+      "primary_selector": "select#PDDateType[name=\"DateType\"]",
+      "exact": true,
+      "accessible_name": "View Activity By",
+      "description": "Policy Activity View Activity By. Live select on hermes-test-01 release 3b651fadabb6. The accessible name and this selector must be the same single element. Choose option PROCESSEDDATE. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_date_option": {
+      "name": "processed_date_option",
+      "primary_strategy": "css",
+      "primary_selector": "option[value=\"PROCESSEDDATE\"]",
+      "exact": true,
+      "accessible_name": "Processed Date",
+      "description": "Option inside View Activity By, not a page-wide search. Visible text must be Processed Date and the value must be PROCESSEDDATE. A second option with that value or that text holds.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_date_range": {
+      "name": "processed_date_range",
+      "primary_strategy": "css",
+      "primary_selector": "#PDDateRange",
+      "exact": true,
+      "description": "Date range shown after Processed Date is selected. Start, end, and Get Policy Activity are resolved inside this one element and must also be unique on the page.",
+      "last_updated": "2026-09-26"
+    },
     "processed_date_from": {
       "name": "processed_date_from",
-      "primary_strategy": "label",
-      "primary_selector": "Processed date from",
+      "primary_strategy": "css",
+      "primary_selector": "input[type=\"date\"]#js-datepicker__date-start[data-at=\"datatable-daterangepicker-startdate\"]",
       "exact": true,
-      "description": "Inclusive processed-date start. Filled MM/DD/YYYY and read back.",
+      "accessible_name": "Start Date",
+      "description": "Inclusive processed-date start inside #PDDateRange. HTML date input, filled YYYY-MM-DD and read back. The accessible name Start Date must be this same element. The old label Processed date from is not on this page.",
       "last_updated": "2026-09-26"
     },
     "processed_date_to": {
       "name": "processed_date_to",
-      "primary_strategy": "label",
-      "primary_selector": "Processed date to",
+      "primary_strategy": "css",
+      "primary_selector": "input[type=\"date\"][data-at=\"datatable-daterangepicker-enddate\"]",
       "exact": true,
-      "description": "Inclusive processed-date end. Filled MM/DD/YYYY and read back.",
+      "accessible_name": "End Date",
+      "description": "Inclusive processed-date end inside #PDDateRange. HTML date input, filled YYYY-MM-DD and read back. The accessible name End Date must be this same element.",
+      "last_updated": "2026-09-26"
+    },
+    "get_policy_activity": {
+      "name": "get_policy_activity",
+      "primary_strategy": "css",
+      "primary_selector": "[data-at=\"ProcessedDateButton\"]",
+      "exact": true,
+      "accessible_name": "Get Policy Activity",
+      "description": "Submits the processed-date window. Live control value is Get Policy Activity. Resolved inside #PDDateRange and unique on the page. Search is the next step and is unchanged.",
       "last_updated": "2026-09-26"
     },
     "search": {
@@ -45,7 +82,8 @@
       "primary_strategy": "role",
       "primary_selector": "button:Search",
       "exact": true,
-      "description": "Apply the processed-date window. Live button name is UNVERIFIED until a hermes-test-01 run.",
+      "accessible_name": "Search",
+      "description": "Clicked after Get Policy Activity. Live button name is still UNVERIFIED on a completed pull.",
       "last_updated": "2026-09-26"
     },
     "communications_tab": {
