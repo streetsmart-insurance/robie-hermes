@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from datetime import date
@@ -25,10 +26,23 @@ from robie_job_engine.progressive_fao_memo import (
     MemoGrid,
     MemoOpenObservation,
     PagePdfView,
+    END_DATE_CSS,
+    END_DATE_LABEL,
+    GET_POLICY_ACTIVITY_CSS,
+    GET_POLICY_ACTIVITY_LABEL,
     MAIN_NAVIGATION_NAME,
     MANAGE_POLICIES_CSS,
     MANAGE_POLICIES_NAME,
     POLICY_ACTIVITY_NAMES,
+    PROCESSED_DATE_OPTION_CSS,
+    PROCESSED_DATE_OPTION_LABEL,
+    PROCESSED_DATE_OPTION_VALUE,
+    PROCESSED_DATE_RANGE_CSS,
+    PROCESSED_DATE_RANGE_LABEL,
+    START_DATE_CSS,
+    START_DATE_LABEL,
+    VIEW_ACTIVITY_BY_CSS,
+    VIEW_ACTIVITY_BY_LABEL,
     PlaywrightFaoMemoBrowser,
     assert_agent_context,
     build_parser,
@@ -715,7 +729,25 @@ class LocatorContractTests(unittest.TestCase):
         self.assertEqual(activity.fallback_selector, "link:" + POLICY_ACTIVITY_NAMES[1])
         self.assertTrue(activity.exact)
         self.assertIn("tab:Communications", selectors)
-        self.assertIn("Processed date from", selectors)
+        self.assertNotIn("Processed date from", selectors)
+        self.assertNotIn("Processed date to", selectors)
+        expected = {
+            "view_activity_by": (VIEW_ACTIVITY_BY_CSS, VIEW_ACTIVITY_BY_LABEL),
+            "processed_date_option": (PROCESSED_DATE_OPTION_CSS, PROCESSED_DATE_OPTION_LABEL),
+            "processed_date_range": (PROCESSED_DATE_RANGE_CSS, ""),
+            "processed_date_from": (START_DATE_CSS, START_DATE_LABEL),
+            "processed_date_to": (END_DATE_CSS, END_DATE_LABEL),
+            "get_policy_activity": (GET_POLICY_ACTIVITY_CSS, GET_POLICY_ACTIVITY_LABEL),
+        }
+        for name, (selector, accessible) in expected.items():
+            field = page.get_field(name)
+            self.assertIsNotNone(field, name)
+            self.assertEqual(field.primary_strategy, "css")
+            self.assertEqual(field.primary_selector, selector)
+            self.assertEqual(field.accessible_name, accessible)
+            self.assertFalse(field.fallback_selector)
+        self.assertIn(PROCESSED_DATE_OPTION_VALUE, page.get_field("processed_date_option").primary_selector)
+        self.assertEqual(page.get_field("search").primary_selector, "button:Search")
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
         self.assertIsNone(MANAGE_POLICIES_NAME.search("Menu Manage Policies"))
@@ -750,10 +782,58 @@ class LocatorContractTests(unittest.TestCase):
             "GoogleDriveUploader",
         ):
             self.assertNotIn(banned, text)
+        self.assertIn("does not call Gemini or Jev", text)
+        self.assertIn("TypeSafe System One", text)
+        self.assertNotIn("JEV_", text)
+        self.assertNotIn("typesafe", text.casefold().replace("typesafe system one", ""))
+
+
+_CSS_ATTR = re.compile(r'\[([A-Za-z_][\w-]*)="([^"]*)"\]')
+_CSS_ID = re.compile(r"#([A-Za-z_][\w-]*)")
+_CSS_TAG = re.compile(r"[A-Za-z][\w-]*")
+
+
+def _css_match(node, selector):
+    body = selector
+    tag = None
+    if body[:1].isalpha():
+        tag_match = _CSS_TAG.match(body)
+        if tag_match is None:
+            raise KeyError(selector)
+        tag = tag_match.group(0)
+        body = body[tag_match.end():]
+    element_id = None
+    attrs = {}
+    while body:
+        if body.startswith("#") and element_id is None:
+            id_match = _CSS_ID.match(body)
+            if id_match is None:
+                raise KeyError(selector)
+            element_id = id_match.group(1)
+            body = body[id_match.end():]
+            continue
+        if body.startswith("["):
+            attr_match = _CSS_ATTR.match(body)
+            if attr_match is None:
+                raise KeyError(selector)
+            key = attr_match.group(1)
+            if key in attrs:
+                raise KeyError(selector)
+            attrs[key] = attr_match.group(2)
+            body = body[attr_match.end():]
+            continue
+        raise KeyError(selector)
+    if tag is None and element_id is None and not attrs:
+        raise KeyError(selector)
+    if tag is not None and node.role != tag:
+        return False
+    if element_id is not None and node.attrs.get("id") != element_id:
+        return False
+    return all(node.attrs.get(key) == value for key, value in attrs.items())
 
 
 class FakeNode:
-    def __init__(self, role, name="", text=None, children=None, attrs=None, disabled=False, visible=True):
+    def __init__(self, role, name="", text=None, children=None, attrs=None, disabled=False, visible=True, label=""):
         self.role = role
         self.name = name
         self.text = name if text is None else text
@@ -761,6 +841,7 @@ class FakeNode:
         self.attrs = attrs or {}
         self.disabled = disabled
         self.visible = visible
+        self.label = label
         self.value = ""
         self.input_override = None
 
@@ -778,6 +859,15 @@ class FakeNode:
             found.extend(child.find_role(role, name, exact))
         return found
 
+    def find_label(self, label, exact):
+        own = self.attrs.get("aria-label") or self.label
+        found = []
+        if own and ((own == label) if exact else label in own):
+            found.append(self)
+        for child in self.children:
+            found.extend(child.find_label(label, exact))
+        return found
+
     def _name_matches(self, name, exact):
         if name is None:
             return True
@@ -790,7 +880,7 @@ class FakeNode:
     def matches(self, selector):
         if selector == MANAGE_POLICIES_CSS:
             return self.role == "link" and self.attrs.get("data-at") == "header-nav__parent-link--manage-policies"
-        return {
+        known = {
             "table": self.role == "table",
             "thead": self.role == "thead",
             "tbody": self.role == "tbody",
@@ -802,7 +892,10 @@ class FakeNode:
             "a": self.role == "link",
             "embed[type='application/pdf']": self.role == "embed" and self.attrs.get("type") == "application/pdf",
             "input[type='password']": self.attrs.get("type") == "password",
-        }[selector]
+        }
+        if selector in known:
+            return known[selector]
+        return _css_match(self, selector)
 
 
 class NodeLocator:
@@ -867,6 +960,33 @@ class NodeLocator:
             found.extend(node.find_role(role, name, exact))
         return NodeLocator(found, self.page)
 
+    def evaluate(self, expression):
+        if "aria-label" not in expression or "labels" not in expression:
+            raise AssertionError(expression)
+        node = self.nodes[0]
+        aria = node.attrs.get("aria-label")
+        if aria:
+            return aria
+        return node.label or ""
+
+    def select_option(self, value=None, label=None):
+        if len(self.nodes) != 1:
+            raise TimeoutError("select_option expected one element")
+        node = self.nodes[0]
+        chosen = []
+        for child in node.children:
+            if child.role != "option":
+                continue
+            if value is not None and child.attrs.get("value") == value:
+                chosen.append(child)
+            elif label is not None and child.text == label:
+                chosen.append(child)
+        if len(chosen) != 1:
+            raise TimeoutError("select_option missed")
+        node.value = chosen[0].attrs.get("value", "")
+        self.page.on_select(node, chosen[0])
+        return [node.value]
+
 
 class NavPage:
     def __init__(self, *, body="StreetSmart Risk Mgr CA33617", url=LIST_URL, password=False,
@@ -875,7 +995,10 @@ class NavPage:
                  manage_role="link", manage_visible=True, manage_attrs=None,
                  extra_manage=None, policy_name="Policy Activity", policy_role="link",
                  policy_visible=True, policy_items=None, include_main_nav=True,
-                 duplicate_main_nav=False, main_nav_visible=True):
+                 duplicate_main_nav=False, main_nav_visible=True,
+                 view_mode="ok", option_mode="ok", range_mode="reveal",
+                 start_mode="ok", end_mode="ok", button_mode="ok",
+                 legacy_dates=False):
         self.url = url
         self.list_url = url
         self.body_text = body
@@ -897,6 +1020,13 @@ class NavPage:
         self.include_main_nav = include_main_nav
         self.duplicate_main_nav = duplicate_main_nav
         self.main_nav_visible = main_nav_visible
+        self.view_mode = view_mode
+        self.option_mode = option_mode
+        self.range_mode = range_mode
+        self.start_mode = start_mode
+        self.end_mode = end_mode
+        self.button_mode = button_mode
+        self.legacy_dates = legacy_dates
         self.clicks = []
         self.memo_opens = []
         self.screenshot_calls = 0
@@ -943,11 +1073,50 @@ class NavPage:
                 self.main_nav_nodes.append(
                     FakeNode("button", MAIN_NAVIGATION_NAME, visible=self.main_nav_visible)
                 )
-        self.from_box = FakeNode("textbox", "Processed date from")
-        self.to_box = FakeNode("textbox", "Processed date to")
+        self.view_nodes = self._view_nodes()
+        start_label = {"unlabeled": "", "mistitled": "From Date"}.get(self.start_mode, START_DATE_LABEL)
+        self.start_date = self._date_input(
+            start_label,
+            "js-datepicker__date-start",
+            "datatable-daterangepicker-startdate",
+        )
         if self.date_override is not None:
-            self.from_box.input_override = self.date_override
-        self.activity = [self.from_box, self.to_box, FakeNode("button", "Search")]
+            self.start_date.input_override = self.date_override
+        self.end_date = self._date_input(
+            END_DATE_LABEL if self.end_mode != "unlabeled" else "",
+            "",
+            "datatable-daterangepicker-enddate",
+        )
+        self.get_activity = self._activity_button("Get Policy Activity" if self.button_mode != "misnamed" else "Apply")
+        range_children = []
+        if self.start_mode != "missing":
+            range_children.append(self.start_date)
+            if self.start_mode == "duplicate":
+                range_children.append(self._date_input(
+                    START_DATE_LABEL, "js-datepicker__date-start", "datatable-daterangepicker-startdate",
+                ))
+        if self.end_mode != "missing":
+            range_children.append(self.end_date)
+            if self.end_mode == "duplicate":
+                range_children.append(self._date_input(END_DATE_LABEL, "", "datatable-daterangepicker-enddate"))
+        if self.button_mode != "missing":
+            range_children.append(self.get_activity)
+            if self.button_mode == "duplicate":
+                range_children.append(self._activity_button("Get Policy Activity"))
+        self.date_range = FakeNode("div", attrs={"id": "PDDateRange"}, children=range_children)
+        self.date_range_visible = False
+        self.search_button = FakeNode("button", "Search")
+        self.activity_extras = []
+        if self.start_mode == "outside":
+            self.activity_extras.append(self._date_input(
+                START_DATE_LABEL, "js-datepicker__date-start", "datatable-daterangepicker-startdate",
+            ))
+        if self.legacy_dates:
+            self.legacy_from = FakeNode("textbox", "Processed date from", label="Processed date from")
+            self.legacy_to = FakeNode("textbox", "Processed date to", label="Processed date to")
+            self.activity_extras.extend([self.legacy_from, self.legacy_to])
+        if self.view_mode == "split-label":
+            self.activity_extras.append(FakeNode("div", VIEW_ACTIVITY_BY_LABEL, label=VIEW_ACTIVITY_BY_LABEL))
         self.tab = FakeNode("tab", "Communications", attrs={"aria-selected": "false"})
         self.rows = []
         body_rows = []
@@ -984,7 +1153,12 @@ class NavPage:
         nodes = [self.body, *self.main_nav_nodes]
         if self.password:
             nodes.append(self.password_node)
-        nodes.extend({"home": self.home, "policies": self.policies, "activity": self.activity, "comms": [self.tab]}[self.state])
+        nodes.extend({
+            "home": self.home,
+            "policies": self.policies,
+            "activity": self._activity_roots(),
+            "comms": [self.tab],
+        }[self.state])
         if self.state == "comms" and self.table_visible:
             nodes.append(self.table)
             nodes.extend(self.next_nodes)
@@ -1005,8 +1179,69 @@ class NavPage:
     def get_by_label(self, label, exact=True):
         found = []
         for node in self.roots():
-            found.extend(node.find_role("textbox", label, exact))
+            found.extend(node.find_label(label, exact))
         return NodeLocator(found, self)
+
+    def _activity_roots(self):
+        nodes = [*self.view_nodes, self.search_button, *self.activity_extras]
+        if self.date_range_visible:
+            nodes.append(self.date_range)
+        return nodes
+
+    def _view_nodes(self):
+        if self.view_mode == "missing":
+            return []
+        label = "" if self.view_mode in {"unlabeled", "split-label"} else VIEW_ACTIVITY_BY_LABEL
+        if self.view_mode == "mistitled":
+            label = "Activity By"
+        attrs = {"id": "PDDateType", "name": "DateKind" if self.view_mode == "renamed" else "DateType"}
+        nodes = [self._view_select(label, attrs)]
+        if self.view_mode == "duplicate":
+            nodes.append(self._view_select(label, dict(attrs)))
+        return nodes
+
+    def _view_select(self, label, attrs):
+        return FakeNode(
+            "select",
+            VIEW_ACTIVITY_BY_LABEL,
+            label=label,
+            attrs=attrs,
+            children=self._processed_options(),
+        )
+
+    def _processed_options(self):
+        options = [
+            FakeNode("option", "Select", text="Select", attrs={"value": "SELECT"}),
+            FakeNode("option", "Effective Date", text="Effective Date", attrs={"value": "EFFECTIVEDATE"}),
+        ]
+        if self.option_mode != "missing":
+            text = "Posted Date" if self.option_mode == "mistyped" else PROCESSED_DATE_OPTION_LABEL
+            options.append(FakeNode("option", text, text=text, attrs={"value": PROCESSED_DATE_OPTION_VALUE}))
+        if self.option_mode == "duplicate":
+            options.append(FakeNode(
+                "option", PROCESSED_DATE_OPTION_LABEL, text=PROCESSED_DATE_OPTION_LABEL,
+                attrs={"value": PROCESSED_DATE_OPTION_VALUE},
+            ))
+        if self.option_mode == "duplicate-text":
+            options.append(FakeNode(
+                "option", PROCESSED_DATE_OPTION_LABEL, text=PROCESSED_DATE_OPTION_LABEL,
+                attrs={"value": "OTHERDATE"},
+            ))
+        return options
+
+    def _date_input(self, label, element_id, data_at):
+        attrs = {"type": "date", "data-at": data_at}
+        if element_id:
+            attrs["id"] = element_id
+        return FakeNode("input", label or "date", label=label, attrs=attrs)
+
+    def _activity_button(self, value):
+        return FakeNode(
+            "input",
+            value,
+            text=value,
+            attrs={"type": "submit", "data-at": "ProcessedDateButton", "value": value},
+        )
 
     def screenshot(self, full_page=True, type="png"):
         self.screenshot_calls += 1
@@ -1052,6 +1287,11 @@ class NavPage:
                 self.pending_download = None
                 self.context.request_body = token
                 self.go_back_restores = False
+
+    def on_select(self, node, option):
+        self.clicks.append(option.text)
+        if option.attrs.get("value") == PROCESSED_DATE_OPTION_VALUE and self.range_mode != "stuck":
+            self.date_range_visible = True
 
 
 class NavContext:
@@ -1179,15 +1419,23 @@ class NavigationTests(unittest.TestCase):
     def test_navigation_order_date_readback_and_selected_memo(self):
         page = NavPage()
         browser = PlaywrightFaoMemoBrowser(page)
-        grid = browser.load_communications(start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE)
+        grid = browser.load_communications(start=PROVE_DAY, end=date(2026, 9, 26), agent_code=DEFAULT_AGENT_CODE)
         memos = parse_memo_grid(grid, agent_code=DEFAULT_AGENT_CODE)
         self.assertEqual([memo.policy_number for memo in memos], ["860521214", "879512352"])
-        self.assertEqual(page.from_box.value, "09/25/2026")
-        self.assertEqual(page.to_box.value, "09/25/2026")
+        self.assertEqual(page.start_date.value, "2026-09-25")
+        self.assertEqual(page.end_date.value, "2026-09-26")
         observation = browser.capture_memo(memos[1].document_id)
         self.assertEqual(pdf_bytes_from_observation(observation), pdf_bytes(b"879512352"))
         self.assertEqual(page.memo_opens, ["879512352"])
-        self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity", "Search", "Communications", "Memo"])
+        self.assertEqual(page.clicks, [
+            "Manage Policies",
+            "Policy Activity",
+            "Processed Date",
+            "Get Policy Activity",
+            "Search",
+            "Communications",
+            "Memo",
+        ])
         self.assertNotIn(MAIN_NAVIGATION_NAME, page.clicks)
         self.assertFalse(page.closed)
 
@@ -1349,7 +1597,154 @@ class NavigationTests(unittest.TestCase):
             PlaywrightFaoMemoBrowser(page).load_communications(
                 start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE,
             )
+        self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity", "Processed Date"])
+        self.assertEqual(page.end_date.value, "")
+        self.assertNotIn("Get Policy Activity", page.clicks)
         self.assertNotIn("Search", page.clicks)
+
+    def test_policy_activity_uses_live_date_controls_not_old_labels(self):
+        page = NavPage()
+        page.state = "activity"
+        self.assertEqual(page.get_by_label("Processed date from", exact=True).count(), 0)
+        self.assertEqual(page.get_by_label("Processed date to", exact=True).count(), 0)
+        self.assertEqual(page.locator(VIEW_ACTIVITY_BY_CSS).count(), 1)
+        self.assertEqual(page.get_by_label(VIEW_ACTIVITY_BY_LABEL, exact=True).count(), 1)
+        self.assertEqual(page.locator(PROCESSED_DATE_RANGE_CSS).count(), 0)
+        page.date_range_visible = True
+        self.assertEqual(page.locator(PROCESSED_DATE_RANGE_CSS).count(), 1)
+        self.assertEqual(
+            page.get_by_label(START_DATE_LABEL, exact=True).and_(page.locator(START_DATE_CSS)).count(),
+            1,
+        )
+        self.assertEqual(
+            page.get_by_label(END_DATE_LABEL, exact=True).and_(page.locator(END_DATE_CSS)).count(),
+            1,
+        )
+        self.assertEqual(page.locator(GET_POLICY_ACTIVITY_CSS).get_attribute("value"), GET_POLICY_ACTIVITY_LABEL)
+        self.assertEqual(page.locator(PROCESSED_DATE_OPTION_CSS).count(), 1)
+
+    def test_legacy_processed_date_labels_do_not_satisfy_the_filter(self):
+        page = NavPage(legacy_dates=True)
+        self._load(page)
+        self.assertEqual(page.start_date.value, PROVE_DAY.isoformat())
+        self.assertEqual(page.end_date.value, PROVE_DAY.isoformat())
+        self.assertEqual(page.legacy_from.value, "")
+        self.assertEqual(page.legacy_to.value, "")
+        self.assertIn("Get Policy Activity", page.clicks)
+
+        missing = NavPage(view_mode="missing", legacy_dates=True)
+        with self.assertRaisesRegex(IntakeHold, "View Activity By") as caught:
+            self._load(missing)
+        self.assertNotIn("Processed date from", str(caught.exception))
+        self.assertNotIn("Processed date to", str(caught.exception))
+        self.assertEqual(missing.legacy_from.value, "")
+        self.assertEqual(missing.legacy_to.value, "")
+        self.assertNotIn("Search", missing.clicks)
+        self.assertNotIn("Get Policy Activity", missing.clicks)
+
+    def test_unique_selector_without_an_accessible_name_still_filters(self):
+        for kwargs in ({"view_mode": "unlabeled"}, {"start_mode": "unlabeled"}):
+            with self.subTest(kwargs):
+                page = NavPage(**kwargs)
+                self._load(page)
+                self.assertEqual(page.start_date.value, PROVE_DAY.isoformat())
+                self.assertEqual(page.end_date.value, PROVE_DAY.isoformat())
+                self.assertIn("Get Policy Activity", page.clicks)
+                self.assertIn("Search", page.clicks)
+
+    def test_date_filter_fails_closed_when_controls_are_missing_or_ambiguous(self):
+        cases = (
+            ("missing view", dict(view_mode="missing"), "View Activity By", ["Manage Policies", "Policy Activity"]),
+            ("duplicate view", dict(view_mode="duplicate"), "View Activity By", ["Manage Policies", "Policy Activity"]),
+            ("mistitled view", dict(view_mode="mistitled"), "View Activity By", ["Manage Policies", "Policy Activity"]),
+            ("split label", dict(view_mode="split-label"), "View Activity By", ["Manage Policies", "Policy Activity"]),
+            ("renamed select", dict(view_mode="renamed"), "View Activity By", ["Manage Policies", "Policy Activity"]),
+            ("missing option", dict(option_mode="missing"), "Processed Date", ["Manage Policies", "Policy Activity"]),
+            ("duplicate option", dict(option_mode="duplicate"), "Processed Date", ["Manage Policies", "Policy Activity"]),
+            ("mistyped option", dict(option_mode="mistyped"), "Processed Date", ["Manage Policies", "Policy Activity"]),
+            (
+                "duplicate option text",
+                dict(option_mode="duplicate-text"),
+                "Processed Date",
+                ["Manage Policies", "Policy Activity"],
+            ),
+            (
+                "range does not appear",
+                dict(range_mode="stuck"),
+                "Processed date range",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "missing start",
+                dict(start_mode="missing"),
+                "Start Date",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "duplicate start",
+                dict(start_mode="duplicate"),
+                "Start Date",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "mistitled start",
+                dict(start_mode="mistitled"),
+                "Start Date",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "start outside the range",
+                dict(start_mode="outside"),
+                "Start Date",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "missing end",
+                dict(end_mode="missing"),
+                "End Date",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "duplicate end",
+                dict(end_mode="duplicate"),
+                "End Date",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "missing submit",
+                dict(button_mode="missing"),
+                "Get Policy Activity",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "duplicate submit",
+                dict(button_mode="duplicate"),
+                "Get Policy Activity",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "misnamed submit",
+                dict(button_mode="misnamed"),
+                "Get Policy Activity",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+        )
+        for label, kwargs, hold, clicks in cases:
+            with self.subTest(label):
+                page = NavPage(**kwargs)
+                with self.assertRaisesRegex(IntakeHold, hold):
+                    self._load(page)
+                self.assertEqual(page.clicks, clicks)
+                self.assertNotIn("Get Policy Activity", page.clicks)
+                self.assertNotIn("Search", page.clicks)
+                if kwargs.get("start_mode") in {"duplicate", "missing", "mistitled", "outside"}:
+                    self.assertEqual(page.start_date.value, "")
+                if kwargs.get("end_mode") == "duplicate":
+                    self.assertEqual(page.start_date.value, PROVE_DAY.isoformat())
+                    self.assertEqual(page.end_date.value, "")
+                if kwargs.get("button_mode") in {"missing", "duplicate", "misnamed"}:
+                    self.assertEqual(page.start_date.value, PROVE_DAY.isoformat())
+                    self.assertEqual(page.end_date.value, PROVE_DAY.isoformat())
 
     def test_new_tab_pdf_is_captured_and_enabled_next_holds(self):
         page = NavPage(open_mode="tab", next_mode="none")

@@ -10,7 +10,10 @@ name is ``Manage Policies Home`` (``aria-label`` wins over the visible text)
 and it is hidden until Main Navigation is expanded once. The same link is
 ``a[data-at="header-nav__parent-link--manage-policies"]``. Policy Activity is
 either that header name or the landing link ``View policy activity reports``.
-A missing or non-unique control raises IntakeHold. This module does not log
+Policy Activity then requires View Activity By ``Processed Date``
+(``select#PDDateType``, option ``PROCESSEDDATE``), the ``#PDDateRange``
+start and end dates, and ``Get Policy Activity``. A missing or non-unique
+control raises IntakeHold. This module does not log
 in and does not submit OTP. Portal code does not upload, note, task, or
 label in EZLynx.
 
@@ -81,6 +84,25 @@ MANAGE_POLICIES_NAME = re.compile(r"^Manage Policies")
 POLICY_ACTIVITY_LABEL = "Policy Activity"
 POLICY_ACTIVITY_NAMES = ("Policy Activity", "View policy activity reports")
 MAIN_NAVIGATION_NAME = "Main Navigation"
+# Policy Activity date filter observed on hermes-test-01 release 3b651fadabb6.
+# get_by_label("Processed date from" / "Processed date to") matched nothing.
+# The same strings are the locator contract in locators/progressive_fao.json.
+VIEW_ACTIVITY_BY_LABEL = "View Activity By"
+VIEW_ACTIVITY_BY_CSS = 'select#PDDateType[name="DateType"]'
+PROCESSED_DATE_OPTION_LABEL = "Processed Date"
+PROCESSED_DATE_OPTION_VALUE = "PROCESSEDDATE"
+PROCESSED_DATE_OPTION_CSS = 'option[value="PROCESSEDDATE"]'
+PROCESSED_DATE_RANGE_LABEL = "Processed date range"
+PROCESSED_DATE_RANGE_CSS = "#PDDateRange"
+START_DATE_LABEL = "Start Date"
+START_DATE_CSS = (
+    'input[type="date"]#js-datepicker__date-start'
+    '[data-at="datatable-daterangepicker-startdate"]'
+)
+END_DATE_LABEL = "End Date"
+END_DATE_CSS = 'input[type="date"][data-at="datatable-daterangepicker-enddate"]'
+GET_POLICY_ACTIVITY_LABEL = "Get Policy Activity"
+GET_POLICY_ACTIVITY_CSS = '[data-at="ProcessedDateButton"]'
 _SHELL_NAV_ROLES = ("link", "button")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
 _EASTERN = ZoneInfo("America/New_York")
@@ -537,17 +559,134 @@ def _policy_activity_locator(page: Any) -> Any:
     ])
 
 
-def fill_labeled_date(page: Any, label: str, day: date) -> None:
-    locator = page.get_by_label(label, exact=True)
-    if locator.count() != 1:
-        raise IntakeHold(f"Progressive control {label!r} is missing or ambiguous")
-    locator.fill(day.strftime("%m/%d/%Y"))
+_ACCESSIBLE_NAME_JS = """(el) => {
+  const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  const aria = norm(el.getAttribute("aria-label"));
+  if (aria) return aria;
+  const labels = el.labels ? Array.from(el.labels) : [];
+  if (labels.length !== 1) return "";
+  return norm(labels[0].innerText || labels[0].textContent || "");
+}"""
+
+
+def _accessible_name(locator: Any, label: str) -> str:
+    evaluate = getattr(locator, "evaluate", None)
+    if not callable(evaluate):
+        raise _control_hold(label)
     try:
-        observed = parse_processed_date(str(locator.input_value()).strip())
+        return _norm(str(evaluate(_ACCESSIBLE_NAME_JS) or ""))
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(label) from exc
+
+
+def _require_expected_label(page: Any, located: Any, label: str) -> None:
+    """Hold unless this one element is unlabeled or carries exactly ``label``.
+
+    A unique ``data-at`` / id match is the control when no accessible name is
+    readable. A readable name other than ``label`` holds. ``label`` on a
+    different element, or more than one such label, holds.
+    """
+    if int(located.count()) != 1:
+        raise _control_hold(label)
+    named = page.get_by_label(label, exact=True)
+    named_count = int(named.count())
+    if named_count > 1 or (named_count == 1 and int(located.and_(named).count()) != 1):
+        raise _control_hold(label)
+    own = _accessible_name(located, label)
+    if own and own != label:
+        raise _control_hold(label)
+
+
+def _unique_labeled(page: Any, css: str, label: str) -> Any:
+    located = page.locator(css)
+    if int(located.count()) != 1:
+        raise _control_hold(label)
+    _require_expected_label(page, located, label)
+    return located
+
+
+def _unique_in_date_range(page: Any, css: str, label: str) -> Any:
+    ranged = page.locator(PROCESSED_DATE_RANGE_CSS)
+    if int(ranged.count()) != 1:
+        raise _control_hold(PROCESSED_DATE_RANGE_LABEL)
+    scoped = ranged.locator(css)
+    page_level = page.locator(css)
+    if int(scoped.count()) != 1 or int(page_level.count()) != 1:
+        raise _control_hold(label)
+    return scoped
+
+
+def _select_processed_date_view(page: Any) -> None:
+    view = _unique_labeled(page, VIEW_ACTIVITY_BY_CSS, VIEW_ACTIVITY_BY_LABEL)
+    option = view.locator(PROCESSED_DATE_OPTION_CSS)
+    if int(option.count()) != 1 or _norm(str(option.inner_text())) != PROCESSED_DATE_OPTION_LABEL:
+        raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
+    labeled = [
+        item for item in view.locator("option").all()
+        if _norm(str(item.inner_text())) == PROCESSED_DATE_OPTION_LABEL
+    ]
+    if (
+        len(labeled) != 1
+        or _norm(str(labeled[0].get_attribute("value") or "")) != PROCESSED_DATE_OPTION_VALUE
+    ):
+        raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
+    try:
+        view.select_option(value=PROCESSED_DATE_OPTION_VALUE)
+        selected = _norm(str(view.input_value()))
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(PROCESSED_DATE_OPTION_LABEL) from exc
+    if selected != PROCESSED_DATE_OPTION_VALUE:
+        raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
+
+
+def _fill_html_date(page: Any, css: str, label: str, day: date) -> None:
+    locator = _unique_in_date_range(page, css, label)
+    _require_expected_label(page, locator, label)
+    try:
+        locator.fill(day.isoformat())
+        observed = parse_processed_date(_norm(str(locator.input_value())))
     except IntakeHold:
         observed = None
+    except Exception as exc:
+        raise _control_hold(label) from exc
     if observed != day:
         raise IntakeHold("Processed date filter did not stick")
+
+
+def _click_get_policy_activity(page: Any) -> None:
+    button = _unique_in_date_range(page, GET_POLICY_ACTIVITY_CSS, GET_POLICY_ACTIVITY_LABEL)
+    value = _norm(str(button.get_attribute("value") or ""))
+    text = _norm(str(button.inner_text() or ""))
+    names = {part for part in (value, text) if part}
+    if names != {GET_POLICY_ACTIVITY_LABEL}:
+        raise _control_hold(GET_POLICY_ACTIVITY_LABEL)
+    try:
+        button.click()
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(GET_POLICY_ACTIVITY_LABEL) from exc
+
+
+def apply_processed_date_window(page: Any, start: date, end: date) -> None:
+    """Select Processed Date, fill the HTML date range, and click Get Policy Activity.
+
+    Ambiguous Policy Activity date UI fails closed. A future HITL ladder may
+    ask Gemini what the open page is showing, then Jev (TypeSafe System One)
+    for a typed judgment (boolean, choice, or score, plus confidence) — for
+    example whether this is the processed-date filter we expect, or quote-only
+    versus complete. This function does not call Gemini or Jev.
+    """
+    _select_processed_date_view(page)
+    if int(page.locator(PROCESSED_DATE_RANGE_CSS).count()) != 1:
+        raise _control_hold(PROCESSED_DATE_RANGE_LABEL)
+    _fill_html_date(page, START_DATE_CSS, START_DATE_LABEL, start)
+    _fill_html_date(page, END_DATE_CSS, END_DATE_LABEL, end)
+    _click_get_policy_activity(page)
 
 
 def open_communications_tab(page: Any) -> None:
@@ -644,8 +783,7 @@ class PlaywrightFaoMemoBrowser:
             label=POLICY_ACTIVITY_LABEL,
             unique_element=False,
         )
-        fill_labeled_date(self.page, "Processed date from", start)
-        fill_labeled_date(self.page, "Processed date to", end)
+        apply_processed_date_window(self.page, start, end)
         click_named(self.page, "Search", roles=("button",))
         open_communications_tab(self.page)
         assert_authenticated(self.page)
