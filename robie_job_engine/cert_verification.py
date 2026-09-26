@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ HOLD = "HOLD"
 ACTION_NEW_REQUEST = "new_request"
 ACTION_ACK = "acknowledgement"
 ACTION_UNKNOWN = "unknown"
+ACTION_AUTOREPLY = "auto_reply"
 
 POLICY_API_BASE = "https://app.ezlynx.com/PolicyApi"
 DISCUSSION_API_BASE = "https://app.ezlynx.com/DiscussionApi"
@@ -41,53 +43,29 @@ class FilingTargetMismatch(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Subject-line insured extraction
+# Subject-line insured extraction lives in cert_intake (shared with the
+# intake extractor so both agree). Re-exported here for compatibility.
 # ---------------------------------------------------------------------------
-
-_SUBJECT_PREFIXES = re.compile(r"^(?:\s*(?:re|fwd?)\s*:\s*)+", re.IGNORECASE)
-_MC_SUFFIX = re.compile(r"\s+(?:MC|DOT|USDOT)\s*\d+\s*$", re.IGNORECASE)
-_POLICY_TAIL = re.compile(r"\s+[A-Z0-9][A-Z0-9/\-]{3,}\s*$")
-
-_SUBJECT_PATTERNS = [
-    # "Certificate of Insurance for Homegrown Moving Company"
-    re.compile(r"certificate of insurance for\s+(.+?)(?:\s+to\s+|\s*$)", re.IGNORECASE),
-    # "Request for COI for Ameritesting LLC Covering SilverLini"
-    re.compile(r"request for coi for\s+(.+?)(?:\s+covering\s+|\s*$)", re.IGNORECASE),
-    # "Certificate of Insurance LA Burger LLC to Anderson Marke"
-    re.compile(r"certificate of insurance\s+(.+?)\s+to\s+", re.IGNORECASE),
-    # "Renewal Certificate Request- Abg Transportation MC112184"
-    re.compile(r"certificate request\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
-    # "COI - Fonseca General Contractor LLC"
-    re.compile(r"\bcoi\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
-]
-
-_NAME_LIKE = re.compile(r"[A-Za-z]{2,}")
-
-
-def _strip_subject_prefixes(subject: str) -> str:
-    return _SUBJECT_PREFIXES.sub("", subject or "").strip()
-
-
-def extract_subject_insured(subject: str) -> str | None:
-    """Best-effort insured name from the email subject line.
-
-    Returns None when nothing name-like is found — the verifier holds
-    instead of guessing.
-    """
-    clean = _strip_subject_prefixes(subject)
-    for pat in _SUBJECT_PATTERNS:
-        m = pat.search(clean)
-        if m:
-            name = _MC_SUFFIX.sub("", m.group(1)).strip(" -:,")
-            if _NAME_LIKE.search(name):
-                return name
-    # "Haris Uddin 008265/15/00": leading name before a policy-like tail.
-    m = _POLICY_TAIL.search(clean)
-    if m:
-        name = _MC_SUFFIX.sub("", clean[: m.start()]).strip(" -:,")
-        if _NAME_LIKE.search(name) and len(name.split()) <= 6:
-            return name
-    return None
+try:
+    from .cert_intake import (
+        _MC_SUFFIX,
+        _NAME_LIKE,
+        _POLICY_TAIL,
+        _SUBJECT_PATTERNS,
+        _SUBJECT_PREFIXES,
+        _strip_subject_prefixes,
+        extract_subject_insured,
+    )
+except ImportError:  # loaded outside the package
+    from robie_job_engine.cert_intake import (
+        _MC_SUFFIX,
+        _NAME_LIKE,
+        _POLICY_TAIL,
+        _SUBJECT_PATTERNS,
+        _SUBJECT_PREFIXES,
+        _strip_subject_prefixes,
+        extract_subject_insured,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -109,15 +87,61 @@ _NEW_REQUEST_PATTERNS = [
     re.compile(r"\brenewal\s+certificate\b", re.IGNORECASE),
 ]
 
+# Auto-replies quote the original request's subject ("Re: Renewal
+# Certificate Request- ..."), so subject/body request language must NOT
+# classify them as new requests — that is what mints duplicate tasks.
+# Body language is the signal; sender-based detection would wrongly flag
+# genuine RMIS requests (donotreply@ senders are real requesters).
+_AUTOREPLY_PATTERNS = [
+    re.compile(r"\bautomated response\b", re.IGNORECASE),
+    re.compile(r"\bauto[\-\s]?reply\b", re.IGNORECASE),
+    re.compile(r"\bout of office\b", re.IGNORECASE),
+    re.compile(r"\bdo not reply\b", re.IGNORECASE),
+    re.compile(r"\bthis (mailbox|inbox|email) is not monitored\b", re.IGNORECASE),
+    re.compile(r"\bdelivery (failure|status notification)\b", re.IGNORECASE),
+    re.compile(r"\bmessage not delivered\b", re.IGNORECASE),
+    re.compile(r"\bvacation responder\b", re.IGNORECASE),
+]
 
-def classify_requested_action(subject: str, body: str) -> str:
-    """new_request vs acknowledgement vs unknown.
+# Sender local-parts that are always automated responders. Kept narrow:
+# "donotreply" is deliberately absent — RMIS requests come from
+# donotreply@ senders and are genuine.
+_AUTOREPLY_SENDERS = (
+    "canned.response",
+    "mailer-daemon",
+    "postmaster",
+    "autoresponder",
+)
+
+
+def _sender_is_autoresponder(sender: str | None) -> bool:
+    local = (sender or "").split("@", 1)[0].lower()
+    return any(token in local for token in _AUTOREPLY_SENDERS)
+
+
+def classify_requested_action(subject: str, body: str,
+                              sender: str | None = None) -> str:
+    """new_request vs acknowledgement vs auto_reply vs unknown.
 
     Acknowledgements ("received the certificate", "thanks") must never be
     treated as new certificate requests — that is what creates duplicate
-    tasks.
+    tasks. Auto-replies are checked before new-request phrases because they
+    often quote an original request subject. But genuine request language in
+    the BODY always beats auto-reply boilerplate: vendor systems (RMIS et
+    al.) routinely footer real requests with "please do not reply", and that
+    footer must not turn a real request into an auto-reply.
     """
-    text = f"{subject or ''}\n{body or ''}"
+    # A known autoresponder address is definitive: it never issues a
+    # genuine request, even when it quotes the original subject.
+    if _sender_is_autoresponder(sender):
+        return ACTION_AUTOREPLY
+    body_text = body or ""
+    body_has_request = any(
+        p.search(body_text) for p in _NEW_REQUEST_PATTERNS)
+    if not body_has_request and any(
+            p.search(body_text) for p in _AUTOREPLY_PATTERNS):
+        return ACTION_AUTOREPLY
+    text = f"{subject or ''}\n{body_text}"
     if any(p.search(text) for p in _ACK_PATTERNS):
         return ACTION_ACK
     if any(p.search(text) for p in _NEW_REQUEST_PATTERNS):
@@ -137,7 +161,9 @@ def normalize_insured_name(name: str | None) -> str:
     """Normalize for comparison only — never for display or matching keys."""
     if not name:
         return ""
-    n = re.sub(r"[^a-z0-9 ]", " ", name.lower())
+    folded = unicodedata.normalize("NFKD", name).encode(
+        "ascii", "ignore").decode("ascii")
+    n = re.sub(r"[^a-z0-9 ]", " ", folded.lower())
     n = re.sub(r"\s+", " ", n).strip()
     words = n.split()
     while words and words[-1] in _ENTITY_SUFFIXES:
@@ -431,14 +457,22 @@ def verify_record(record: Any, index: Any,
             f"third-party requester: {res.requester_name} "
             f"<{res.requester_email}> is not the insured")
 
-    # Requested action: new request vs acknowledgement.
+    # Requested action: new request vs acknowledgement vs auto-reply.
     body_text = " ".join(record.facts.pdf_texts)
-    res.requested_action = classify_requested_action(record.subject,
-                                                     body_text)
+    res.requested_action = classify_requested_action(
+        record.subject, body_text,
+        sender=getattr(record.facts, "requester_email", None))
     if res.requested_action == ACTION_ACK:
         res.evidence.append(
             "message classified as acknowledgement/thank-you — not a new "
             "certificate request")
+    elif res.requested_action == ACTION_AUTOREPLY:
+        res.evidence.append(
+            "message classified as automated response — never a new "
+            "certificate request")
+        return res.hold(
+            "automated response (auto-reply/bounce), not a certificate "
+            "request — holding, never filing or tasking")
 
     match = record.match
     status = getattr(match, "status", "")

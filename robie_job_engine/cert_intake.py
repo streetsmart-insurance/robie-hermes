@@ -247,12 +247,121 @@ _POLICY_RE = re.compile(
 )
 
 _HOLDER_RE = re.compile(r"(?i)certificate holder\s*[:\-]\s*(.+?)(?:\n|$)")
+# Subject pattern "Certificate of Insurance {INSURED} to {HOLDER}" — the
+# holder is named in the subject but never labeled "certificate holder:".
+# Narrow on purpose: the subject must open with the certificate phrase and
+# the text before " to " must resemble the extracted insured name.
+_SUBJECT_HOLDER_RE = re.compile(
+    r"^(?:certificate of insurance|coi)\b\s+(.+?)\s+to\s+(.+)$",
+    re.IGNORECASE,
+)
 _DBA_RE = re.compile(r"(?i)\bdba\b\s+(.+?)(?:,|\n|$)")
 _REQUESTER_RE = re.compile(r"(?i)(?:requested by|requester)\s*[:\-]\s*(.+?)(?:\n|$)")
+
+# ---------------------------------------------------------------------------
+# Subject-line insured extraction (moved here from cert_verification so the
+# intake extractor and the verifier share one implementation — the intake
+# used to miss names the verifier later found, e.g. "Renewal Certificate
+# Request- Abg Transportation MC1121844").
+# ---------------------------------------------------------------------------
+
+_SUBJECT_PREFIXES = re.compile(r"^(?:\s*(?:re|fwd?)\s*:\s*)+", re.IGNORECASE)
+_MC_SUFFIX = re.compile(r"\s+(?:MC|DOT|USDOT)\s*\d+\s*$", re.IGNORECASE)
+_POLICY_TAIL = re.compile(r"\s+[A-Z0-9][A-Z0-9/\-]{3,}\s*$")
+
+_SUBJECT_PATTERNS = [
+    # "Certificate of Insurance for Homegrown Moving Company"
+    re.compile(r"certificate of insurance for\s+(.+?)(?:\s+to\s+|\s*$)", re.IGNORECASE),
+    # "Request for COI for Ameritesting LLC Covering SilverLini"
+    re.compile(r"request for coi for\s+(.+?)(?:\s+covering\s+|\s*$)", re.IGNORECASE),
+    # "Certificate of Insurance LA Burger LLC to Anderson Marke"
+    re.compile(r"certificate of insurance\s+(.+?)\s+to\s+", re.IGNORECASE),
+    # "Renewal Certificate Request- Abg Transportation MC112184"
+    re.compile(r"certificate request\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
+    # "COI - Fonseca General Contractor LLC"
+    re.compile(r"\bcoi\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
+]
+
+_NAME_LIKE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _strip_subject_prefixes(subject: str) -> str:
+    return _SUBJECT_PREFIXES.sub("", subject or "").strip()
+
+
+def extract_subject_insured(subject: str) -> str | None:
+    """Best-effort insured name from the email subject line.
+
+    Returns None when nothing name-like is found — the caller holds
+    instead of guessing.
+    """
+    clean = _strip_subject_prefixes(subject)
+    for pat in _SUBJECT_PATTERNS:
+        m = pat.search(clean)
+        if m:
+            name = _MC_SUFFIX.sub("", m.group(1)).strip(" -:,")
+            if _NAME_LIKE.search(name):
+                return name
+    # "Haris Uddin 008265/15/00": leading name before a policy-like tail.
+    m = _POLICY_TAIL.search(clean)
+    if m:
+        name = _MC_SUFFIX.sub("", clean[: m.start()]).strip(" -:,")
+        if _NAME_LIKE.search(name) and len(name.split()) <= 6:
+            return name
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Sentence-runoff truncation: body-text captures sometimes glue a trailing
+# sentence onto the name ("LA Burger LLC. This certificate confirms that
+# the listed insurance"). Truncate at the first period+space that ends a
+# complete-looking name, while keeping legitimate internal periods
+# ("St. Mary Hospital", "J. P. Morgan", "MAR Engineering, P.C.").
+# ---------------------------------------------------------------------------
+
+_ENTITY_SUFFIXES = (
+    "llc", "inc", "corp", "ltd", "co", "company", "pllc",
+    "pa", "pc", "lp", "llp", "jr", "sr", "ii", "iii", "iv",
+)
+
+# Words that end with a period but do not end a name: street abbreviations,
+# titles, etc. ("Main St. Pizza Shop" must not truncate to "Main St").
+_ABBREVIATIONS = {
+    "st", "ave", "avenue", "blvd", "rd", "road", "dr", "drive", "ln",
+    "lane", "ct", "court", "cir", "circle", "pl", "place", "pkwy",
+    "parkway", "mt", "ft", "ste", "suite", "apt", "bldg", "dept",
+    "mr", "mrs", "ms", "prof", "rev", "hon", "esq", "vs",
+}
+
+
+def _truncate_sentence_runoff(name: str) -> str:
+    text = name or ""
+    start = 0
+    while True:
+        idx = text.find(". ", start)
+        if idx == -1:
+            return text
+        pre, post = text[:idx], text[idx + 2:]
+        pre_words = pre.split()
+        post_words = post.split()
+        if len(pre_words) >= 2 and len(pre_words[-1]) > 1:
+            last = pre_words[-1].rstrip(".").lower()
+            if last in _ENTITY_SUFFIXES:
+                return pre
+            if last not in _ABBREVIATIONS and len(post_words) >= 3:
+                return pre
+        start = idx + 1
 
 
 def _clean_name(value: str) -> str:
     value = re.sub(r"\s+", " ", (value or "").strip())
+    value = _truncate_sentence_runoff(value)
+    # A trailing period is sentence punctuation, not part of the name —
+    # unless the name ends in an abbreviation/entity suffix ("P.C.").
+    if value.endswith("."):
+        last = value[:-1].split()[-1].rstrip(".").lower() if value[:-1].split() else ""
+        if last not in _ABBREVIATIONS and last not in _ENTITY_SUFFIXES:
+            value = value[:-1]
     return value[:120]
 
 
@@ -336,6 +445,13 @@ def extract_request_facts(
         if m and _clean_name(m.group(1)):
             facts.insured_name = _clean_name(m.group(1))
             break
+    if not facts.insured_name:
+        # Subject lines often carry the cleanest name
+        # ("Renewal Certificate Request- Abg Transportation MC1121844").
+        # Shares the verifier's subject parser so intake and verify agree.
+        subj_name = extract_subject_insured(email.subject)
+        if subj_name and _clean_name(subj_name):
+            facts.insured_name = _clean_name(subj_name)
     dba_m = _DBA_RE.search(text)
     if dba_m:
         facts.dba = _clean_name(dba_m.group(1))
@@ -350,6 +466,22 @@ def extract_request_facts(
         for m in _HOLDER_RE.finditer(text)
         if _clean_name(m.group(1))
     ]
+    # Holder named in the subject: "Certificate of Insurance {INSURED} to
+    # {HOLDER}". Only accepted when the text before " to " resembles the
+    # extracted insured name — otherwise "to" is just a preposition.
+    subj = _SUBJECT_PREFIXES.sub("", facts.raw_subject or "").strip()
+    shm = _SUBJECT_HOLDER_RE.match(subj)
+    if shm:
+        insured_part = re.sub(r"[^a-z0-9]", "",
+                              (shm.group(1) or "").lower())
+        insured_norm = re.sub(r"[^a-z0-9]", "",
+                              (facts.insured_name or "").lower())
+        holder_part = _clean_name(shm.group(2))
+        if (holder_part and len(insured_norm) >= 4 and
+                (insured_norm in insured_part or
+                 insured_part in insured_norm) and
+                holder_part not in facts.holder_names):
+            facts.holder_names.append(holder_part)
     req_m = _REQUESTER_RE.search(text)
     if req_m:
         facts.requester_name = _clean_name(req_m.group(1))
