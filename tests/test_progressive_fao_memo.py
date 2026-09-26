@@ -37,6 +37,7 @@ from robie_job_engine.progressive_fao_memo import (
     read_playwright_pdf_view,
     require_loopback_cdp,
     require_memo_pdf_parity,
+    resolve_processed_window,
     select_fao_page,
 )
 from robie_job_engine.progressive_retrieval import ProgressiveRetrieval
@@ -459,7 +460,7 @@ class PullTests(unittest.TestCase):
         stdout = io.StringIO()
         with patch("sys.stdout", stdout):
             code = main(
-                ["--start", "2026-09-25", "--end", "2026-09-25", "--output", str(self.output)],
+                ["--pull-only", "--as-of", "2026-09-26", "--start", "2026-09-25", "--end", "2026-09-25", "--output", str(self.output)],
                 browser_factory=lambda args: self.browser,
             )
         self.assertEqual(code, 0)
@@ -486,6 +487,48 @@ class PullTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(called, [])
         self.assertEqual(json.loads(stdout.getvalue())["status"], "HELD")
+
+    def test_default_cli_asks_the_filing_stage_and_pull_only_does_not(self):
+        calls = []
+
+        def fake_file(items, **kwargs):
+            calls.append({"items": items, "sheet_day": kwargs.get("sheet_day")})
+            return {
+                "status": "disabled",
+                "reason": "switch off",
+                "attempted_writes": False,
+                "results": [],
+            }
+
+        stdout = io.StringIO()
+        with patch("robie_job_engine.document_retrieval_filing.file_progressive_memos", fake_file), patch("sys.stdout", stdout):
+            code = main(
+                ["--as-of", "2026-09-26", "--start", "2026-09-25", "--end", "2026-09-25", "--output", str(self.output)],
+                browser_factory=lambda args: self.browser,
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "PULLED")
+        self.assertEqual(payload["ezlynx"], "disabled")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["sheet_day"], date(2026, 9, 26))
+        self.assertEqual(len(calls[0]["items"]), 4)
+        manifest = json.loads((self.output / "2026-09-25" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["ezlynx"], "disabled")
+        self.assertFalse(manifest["filing"]["attempted_writes"])
+
+        calls.clear()
+        other = Path(self.tmp.name) / "pull-only"
+        stdout.seek(0)
+        stdout.truncate()
+        with patch("robie_job_engine.document_retrieval_filing.file_progressive_memos", fake_file), patch("sys.stdout", stdout):
+            code = main(
+                ["--pull-only", "--as-of", "2026-09-26", "--start", "2026-09-25", "--end", "2026-09-25", "--output", str(other)],
+                browser_factory=lambda args: self.browser,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertEqual(json.loads(stdout.getvalue())["ezlynx"], "not_run")
 
     def test_bad_screenshot_holds_before_any_memo_download(self):
         self.browser.screenshot_bytes = b"GIF89a-not-a-png"
@@ -565,19 +608,28 @@ class PullTests(unittest.TestCase):
         stdout = io.StringIO()
         with patch("sys.stdout", stdout):
             code = main(
-                ["--start", "2026-01-01", "--end", "2026-09-01", "--output", str(self.output)],
+                ["--as-of", "2026-09-26", "--start", "2026-01-01", "--end", "2026-09-01", "--output", str(self.output)],
                 browser_factory=lambda args: called.append("attached"),
             )
         self.assertEqual(code, 2)
         self.assertEqual(called, [])
-        self.assertIn("32 inclusive", json.loads(stdout.getvalue())["reason"])
+        self.assertIn("standing retrieval window", json.loads(stdout.getvalue())["reason"])
         self.assertFalse(self.output.exists())
+
+    def test_omitted_dates_follow_the_monday_standing_window(self):
+        start, end, today = resolve_processed_window(None, None, "2026-09-28")
+        self.assertEqual(today, date(2026, 9, 28))
+        self.assertEqual((start, end), (date(2026, 9, 25), date(2026, 9, 28)))
+        with self.assertRaisesRegex(IntakeHold, "standing retrieval window"):
+            resolve_processed_window("2026-09-25", "2026-09-25", "2026-09-29")
 
     def test_default_output_is_the_hermes_qa_root_and_does_not_create_it(self):
         existed = DEFAULT_QA_ROOT.exists()
         args = build_parser().parse_args(["--start", "2026-09-25", "--end", "2026-09-25"])
         self.assertEqual(Path(args.output), DEFAULT_QA_ROOT)
         self.assertFalse(args.upload_drive)
+        self.assertFalse(args.pull_only)
+        self.assertFalse(args.file_ezlynx)
         self.assertEqual(DEFAULT_QA_ROOT.exists(), existed)
 
     def test_each_processed_date_gets_its_own_qa_pack(self):
@@ -608,7 +660,18 @@ class PullTests(unittest.TestCase):
         stdout = io.StringIO()
         with patch("sys.stdout", stdout):
             code = main(
-                ["--start", "2026-09-25", "--end", "2026-09-25", "--output", str(self.output), "--upload-drive"],
+                [
+                    "--pull-only",
+                    "--as-of",
+                    "2026-09-26",
+                    "--start",
+                    "2026-09-25",
+                    "--end",
+                    "2026-09-25",
+                    "--output",
+                    str(self.output),
+                    "--upload-drive",
+                ],
                 browser_factory=lambda args: self.browser,
             )
         self.assertEqual(code, 2)

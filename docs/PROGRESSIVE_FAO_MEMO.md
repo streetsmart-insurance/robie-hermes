@@ -32,7 +32,16 @@ local ledger are skipped. Anything ambiguous holds the pull before download.
 `python -m robie_job_engine.progressive_fao_memo` attaches to an
 already-open FAO tab and writes one QA pack per processed date. A receipt
 with `"status": "PULLED"` means the local pack passed the verification gate
-below. That is not Job Engine `COMPLETE`. `"ezlynx": "not_run"` is always set.
+below. That is not Job Engine `COMPLETE`.
+
+`--pull-only` leaves `"ezlynx": "not_run"`. Omitting that flag, or passing
+`--file-ezlynx`, asks the shared filing stage to run after the pull. The
+stage still does not write unless `ROBIE_ENV=TEST`, the host is
+`hermes-test-01`, and `ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1`. With the
+switch off the receipt stays `PULLED` and `"ezlynx": "disabled"`. Dates must
+sit in the standing window: yesterday and today in `America/New_York`.
+Monday also includes Friday through Sunday. See
+[DOCUMENT_RETRIEVAL_FILING.md](DOCUMENT_RETRIEVAL_FILING.md).
 
 ## Hermes QA pack
 
@@ -132,19 +141,24 @@ of this commit is installed on `hermes-test-01` (not done here):
 ```bash
 cd /opt/streetsmart-hermes-test/releases/current
 ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.progressive_fao_memo \
+  --pull-only \
+  --as-of 2026-09-26 \
   --start 2026-09-25 \
   --end 2026-09-25
 ```
 
 That writes
 `/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/progressive/2026-09-25/`.
-Use an explicit window that covers the business days you mean, including
-weekends when those days should be included. The window cannot exceed 32
-inclusive days. For one processed date, `--start` and `--end` are that
-date. After `PULLED`, that date folder must contain the PNG, README,
-manifest, and the same number of memo PDFs as Memo rows on that page. A
-count mismatch writes a `HELD` pack and is a failed pull, not a partial
-success. This code has not been run on `hermes-test-01`.
+`--start` and `--end` must fall inside yesterday and today (Monday includes
+Friday through Monday). Omit both flags to use that window. After `PULLED`,
+that date folder must contain the PNG, README, manifest, and the same number
+of memo PDFs as Memo rows on that page. A count mismatch writes a `HELD`
+pack and is a failed pull, not a partial success. This code has not been
+run on `hermes-test-01`.
+
+Do not export `ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1` until Carlo says the
+Test filing path may call EZLynx. `--file-ezlynx` without that switch does
+not upload or write a note.
 
 ## UNVERIFIED until that Test run
 
