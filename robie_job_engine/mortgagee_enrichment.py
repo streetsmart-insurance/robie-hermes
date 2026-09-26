@@ -1277,7 +1277,12 @@ def enrich_work_item(
 
 @dataclass
 class MortgageLenderCheck:
-    """One ``verify_lender`` (+ of-record placeholder) result per mortgage."""
+    """One ``verify_lender`` (+ of-record placeholder) result per mortgage.
+
+    ``of_record_attempted`` distinguishes a real portal lookup from the
+    not-yet-performed placeholder: only an attempted lookup that FAILED is
+    a lender-of-record mismatch, and a mismatch must stop delivery.
+    """
 
     lender_name: str
     loan_number: str
@@ -1286,6 +1291,7 @@ class MortgageLenderCheck:
     verify_reason: str
     of_record_ok: bool
     of_record_reason: str
+    of_record_attempted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -1425,6 +1431,7 @@ def check_ready_mortgages(
                 verify_reason=reason,
                 of_record_ok=bool(rec_ok),
                 of_record_reason=rec_reason,
+                of_record_attempted=portal_lookup is not None,
             )
         )
     return checks
@@ -1540,6 +1547,25 @@ def plan_from_enrichment(
                 + "; ".join(lines)
                 + f" ({due_txt})",
                 result.mortgages[0].lender_name,
+                "blocked",
+                reason,
+            )
+        # Carlo's rule: lender-of-record mismatch = flag pending, NEVER
+        # upload to the wrong lender. Only an attempted portal lookup that
+        # failed counts; a lookup not yet performed (portal step unwired)
+        # is recorded above but does not block.
+        mismatched = [
+            c for c in checks if c.of_record_attempted and not c.of_record_ok
+        ]
+        if mismatched:
+            reason = mismatched[0].of_record_reason
+            return (
+                "verify",
+                "LENDER-OF-RECORD MISMATCH — flag pending and do NOT "
+                "deliver; the portal disagrees with the lender on file: "
+                + "; ".join(lines)
+                + f" ({due_txt})",
+                "HITL",
                 "blocked",
                 reason,
             )

@@ -211,8 +211,9 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
     ),
     "policy_change_verification": _contract(
         "per-request policy-change outcomes are recorded with carrier evidence "
-        "or a pending reason, and every request in report 4359 is accounted for; "
-        "no request is ever closed by the worker",
+        "or a pending reason, keyed by policy number and change-request created "
+        "date (report 4359 / look 4602), and every request in report 4359 is "
+        "accounted for; no request is ever closed by the worker",
         "PolicyChangeVerifier",
     ),
     "daily_verification_digest": ExecutableSkillContract(
@@ -234,6 +235,45 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
             "output_dir or email_sender is missing from the job payload",
             "fresh artifact read-back or checksum verification fails",
             "delivery receipt verification fails",
+        ),
+    ),
+    "meeting.synthesis.weekly": ExecutableSkillContract(
+        expected_destination_result=(
+            "the weekly synthesis email is sent from robie@streetsmart.insurance "
+            "to Carlo and the social-post drafts are appended to the "
+            "'StreetSmart social drafts' Google Doc"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="MeetingSynthesisVerifier",
+        maximum_attempts=2,
+        success_conditions=(
+            "the synthesis email exists in Gmail with From robie@streetsmart.insurance",
+            "the social drafts doc exists and is readable in Drive",
+            "no social post is published automatically",
+        ),
+        failure_conditions=(
+            "the Drive notes listing or Gemini synthesis fails",
+            "the Gmail send to Carlo fails",
+            "the social drafts doc cannot be created or appended",
+        ),
+    ),
+    "staff.fun.monthly": ExecutableSkillContract(
+        expected_destination_result=(
+            "the monthly staff-fun announcement is posted to the general "
+            "Google Chat space and Carlo receives the gift-card reminder email"
+        ),
+        recording_policy="EXEMPT",
+        independent_verifier="StaffFunVerifier",
+        maximum_attempts=2,
+        success_conditions=(
+            "the chat webhook post returns 2xx",
+            "the gift-card reminder email exists in Gmail with From robie@streetsmart.insurance",
+            "gift cards stay manual: nothing is purchased automatically",
+        ),
+        failure_conditions=(
+            "the chat webhook post fails",
+            "the Gmail send to Carlo fails",
+            "the Gemini content generation fails",
         ),
     ),
 }
@@ -298,6 +338,16 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ("target_path", "expected_content", "expected_sha256"),
         "identity": ("target_path",),
     },
+    "meeting.synthesis.weekly": {
+        "schema_verified": True,
+        "required": ("worker",),
+        "identity": ("worker",),
+    },
+    "staff.fun.monthly": {
+        "schema_verified": True,
+        "required": ("worker",),
+        "identity": ("worker",),
+    },
     "manual_renewal_verification": {
         "schema_verified": True,
         "required": ("report_id",),
@@ -314,11 +364,14 @@ BOUNDED_JOB_SCHEMAS: dict[str, dict[str, Any]] = {
         "identity": ("report_id",),
     },
     "policy_change_verification": {
-        # Report 4359's schema is not yet verified: the worker must stay
-        # disabled (POLICY_CHANGE_ENABLED is False) and bounded jobs hold.
+        # Look 4602's 19 columns are mapped. schema_verified stays False
+        # until 3 clean hermes-test-01 post-job audits after Test install.
+        # Do not flip this in the same change as POLICY_CHANGE_ENABLED.
+        # Job payload still requires report_id. Work-item identity matches
+        # report_registry (no request_id column exists on the export).
         "schema_verified": False,
         "required": ("report_id",),
-        "identity": ("report_id",),
+        "identity": ("policy_number", "change_request_created_date"),
     },
     "daily_verification_digest": {
         "schema_verified": True,
