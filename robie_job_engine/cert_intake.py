@@ -247,6 +247,14 @@ _POLICY_RE = re.compile(
 )
 
 _HOLDER_RE = re.compile(r"(?i)certificate holder\s*[:\-]\s*(.+?)(?:\n|$)")
+# Subject pattern "Certificate of Insurance {INSURED} to {HOLDER}" — the
+# holder is named in the subject but never labeled "certificate holder:".
+# Narrow on purpose: the subject must open with the certificate phrase and
+# the text before " to " must resemble the extracted insured name.
+_SUBJECT_HOLDER_RE = re.compile(
+    r"^(?:certificate of insurance|coi)\b\s+(.+?)\s+to\s+(.+)$",
+    re.IGNORECASE,
+)
 _DBA_RE = re.compile(r"(?i)\bdba\b\s+(.+?)(?:,|\n|$)")
 _REQUESTER_RE = re.compile(r"(?i)(?:requested by|requester)\s*[:\-]\s*(.+?)(?:\n|$)")
 
@@ -458,6 +466,22 @@ def extract_request_facts(
         for m in _HOLDER_RE.finditer(text)
         if _clean_name(m.group(1))
     ]
+    # Holder named in the subject: "Certificate of Insurance {INSURED} to
+    # {HOLDER}". Only accepted when the text before " to " resembles the
+    # extracted insured name — otherwise "to" is just a preposition.
+    subj = _SUBJECT_PREFIXES.sub("", facts.raw_subject or "").strip()
+    shm = _SUBJECT_HOLDER_RE.match(subj)
+    if shm:
+        insured_part = re.sub(r"[^a-z0-9]", "",
+                              (shm.group(1) or "").lower())
+        insured_norm = re.sub(r"[^a-z0-9]", "",
+                              (facts.insured_name or "").lower())
+        holder_part = _clean_name(shm.group(2))
+        if (holder_part and len(insured_norm) >= 4 and
+                (insured_norm in insured_part or
+                 insured_part in insured_norm) and
+                holder_part not in facts.holder_names):
+            facts.holder_names.append(holder_part)
     req_m = _REQUESTER_RE.search(text)
     if req_m:
         facts.requester_name = _clean_name(req_m.group(1))

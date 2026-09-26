@@ -155,8 +155,123 @@ def _discussion_id(d: dict[str, Any]) -> str | None:
     return None
 
 
+def _fold_alnum(value: str) -> str:
+    """Lowercase alphanumeric fold for title/name comparison."""
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+_WORD_STOP = {"llc", "inc", "corp", "ltd", "co", "company", "pllc", "pa",
+              "pc", "lp", "llp", "the", "of", "and", "for", "a", "an"}
+
+
+def _sig_words(value: str) -> set[str]:
+    """Significant words: lowercased, de-punctuated, no entity suffixes or
+    stopwords, length >= 3."""
+    words = re.sub(r"[^a-z0-9 ]", " ", (value or "").lower()).split()
+    return {w for w in words if len(w) >= 3 and w not in _WORD_STOP}
+
+
+def _holder_named_in_title(holder: str, title: str) -> bool:
+    """True when the title names the holder: a long verbatim folded phrase,
+    or all of the holder's significant words appear in the title. A single
+    short word (e.g. "RMIS", "ABC") only earns the weaker fragment anchor —
+    it is too easy to mismatch distinct entities on it."""
+    if not holder or not title:
+        return False
+    fh, ft = _fold_alnum(holder), _fold_alnum(title)
+    if fh and ft and len(fh) >= 6 and fh in ft:
+        return True
+    hw, tw = _sig_words(holder), _sig_words(title)
+    if not hw or not hw <= tw:
+        return False
+    if len(hw) >= 2:
+        return True
+    word = next(iter(hw))
+    return len(word) >= 6
+
+
+def _parse_email_date(value: Any) -> Any:
+    """Parse an email Date header (RFC 2822) or ISO string to datetime."""
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(text)
+    except Exception:
+        pass
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _parse_disc_date(value: Any) -> Any:
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).strip())
+    except Exception:
+        return None
+
+
+def _discussion_created(d: dict[str, Any]) -> Any:
+    for key in ("created", "Created", "createdAt", "CreatedAt",
+                "creationDate", "CreationDate"):
+        val = d.get(key)
+        if val:
+            return _parse_disc_date(val)
+    return None
+
+
+# A discussion created this many days (or fewer) before the email arrived is
+# treated as "created for this request" — but only combined with an exact
+# holder anchor, never on recency alone.
+_CREATED_FOR_REQUEST_DAYS = 5
+
+
+def _grade_candidates(candidates: list[dict[str, Any]],
+                      holder_names: list[str],
+                      policy_numbers: list[str],
+                      ) -> list[dict[str, Any]]:
+    """Annotate cert-titled candidates with anchor evidence.
+
+    Each annotated dict carries ``_anchors``: evidence strings for an exact
+    holder phrase in the title, policy digits in the title, or a holder
+    fragment in the title.
+    """
+    holder_phrases = [h for h in holder_names if _fold_alnum(h)]
+    policy_digits = [re.sub(r"\D", "", p) for p in (policy_numbers or [])]
+    policy_digits = [d for d in policy_digits if len(d) >= 4]
+    annotated = []
+    for did, title in candidates:
+        norm_title = _fold_alnum(title)
+        anchors: list[str] = []
+        for h in holder_phrases:
+            if _holder_named_in_title(h, title):
+                anchors.append(f"holder {h!r} named in title")
+                break
+        for pd in policy_digits:
+            if pd in norm_title:
+                anchors.append(f"policy digits {pd} appear in title")
+                break
+        if not anchors:
+            for h in holder_names:
+                frag = _fold_alnum(h)
+                if frag and frag in norm_title:
+                    anchors.append(f"holder fragment {frag!r} in title")
+                    break
+        annotated.append({"id": did, "title": title,
+                          "_anchors": anchors})
+    return annotated
+
+
 def resolve_discussion(verified: Any, holder_names: list[str],
-                       registry: Any, discussions_client: Any
+                       registry: Any, discussions_client: Any,
+                       email_date: Any = None,
+                       is_followup: bool = False,
                        ) -> tuple[str | None, str | None, str]:
     """Find the discussion to file into. Never creates, never guesses.
 
@@ -164,48 +279,144 @@ def resolve_discussion(verified: Any, holder_names: list[str],
     to the note writer as its title hint so the writer's own fail-closed
     selection confirms the same discussion.
 
-    Order: task registry -> existing holder-matching certificates
-    discussion -> (None, None, reason).
+    Confidence ladder (recorded in the reason):
+      1. task registry hit — deterministic: this applicant+policy+holder
+         filed to this discussion before;
+      2. exactly one cert-titled discussion anchored by the email's exact
+         holder phrase or policy digits;
+      3. exactly one cert-titled discussion matching a holder fragment;
+      4. HOLD — multiple candidates, or none for this request.
+
+    Recency never resolves on its own: it only strengthens the evidence for
+    a single anchored candidate ("created N days before the request — looks
+    created for it") or sharpens the hold reason ("N prior threads for this
+    holder; newest is M days old — none looks like this request").
     """
-    policy_key = policy_key_for(verified.policy_numbers)
+    policy_numbers = list(getattr(verified, "policy_numbers", []) or [])
+    policy_key = policy_key_for(policy_numbers)
     holder_key = holder_key_for(holder_names)
     entry = registry.get(verified.applicant_id, policy_key, holder_key)
     discussions = discussions_client.get_discussions(verified.applicant_id) or []
-    titles = {}
+    titles: dict[str, str] = {}
+    created: dict[str, Any] = {}
     for d in discussions:
         if isinstance(d, dict):
             did = _discussion_id(d)
             if did:
                 titles[did] = _discussion_title(d)
+                created[did] = _discussion_created(d)
     if entry and entry.discussion_id:
-        return (entry.discussion_id,
-                titles.get(entry.discussion_id),
-                "task registry")
+        did = str(entry.discussion_id)
+        return (did, titles.get(did),
+                f"task registry: applicant+policy+holder filed to "
+                f"discussion {did} before (title {titles.get(did)!r})")
 
-    holder_frags = [re.sub(r"[^a-z0-9]", "", h.lower())
-                    for h in holder_names if h]
-    candidates = []
+    cert_discs = []
     for d in discussions:
         if not isinstance(d, dict):
             continue
-        title = _discussion_title(d).lower()
-        if "cert" not in title and "coi" not in title:
+        title = _discussion_title(d)
+        low = title.lower()
+        if "cert" not in low and "coi" not in low:
             continue
         did = _discussion_id(d)
-        if not did:
+        if did:
+            cert_discs.append((did, title))
+
+    holder_frags = [_fold_alnum(h) for h in holder_names if h]
+    filtered = []
+    for did, title in cert_discs:
+        norm_title = _fold_alnum(title)
+        if holder_names and not (
+                any(f and f in norm_title for f in holder_frags)
+                or any(_holder_named_in_title(h, title)
+                       for h in holder_names)):
             continue
-        if holder_frags and not any(f and f in re.sub(r"[^a-z0-9]", "", title)
-                                    for f in holder_frags):
-            continue
-        candidates.append((did, _discussion_title(d)))
-    if len(candidates) == 1:
-        did, title = candidates[0]
-        return did, title, f"existing discussion {title!r}"
-    if len(candidates) > 1:
-        shown = "; ".join(t for _, t in candidates[:5])
+        filtered.append((did, title))
+
+    edt = _parse_email_date(email_date)
+
+    def age_days(did: str) -> int | None:
+        c = created.get(did)
+        if not c or not edt:
+            return None
+        try:
+            delta = edt - c
+            return delta.days
+        except Exception:
+            return None
+
+    if len(filtered) == 1:
+        did, title = filtered[0]
+        ann = _grade_candidates([(did, title)], holder_names,
+                                 policy_numbers)
+        anchors = ann[0]["_anchors"]
+        age = age_days(did)
+        ev = "; ".join(anchors) if anchors else "holder fragment match"
+        if age is not None and 0 <= age <= _CREATED_FOR_REQUEST_DAYS:
+            ev += (f"; created {age} day(s) before the request — "
+                   "looks created for it")
+        strength = "STRONG" if anchors and any(
+            "named in title" in a or "policy digits" in a for a in anchors) \
+            else "MEDIUM"
+        return did, title, (
+            f"{strength}: single certificates discussion {title!r} "
+            f"({ev})")
+
+    if len(filtered) > 1:
+        ann = _grade_candidates(filtered, holder_names,
+                                 policy_numbers)
+        # Tiebreaker 1: policy digits or exact holder phrase narrowing to one.
+        strong = [a for a in ann if any(
+            "named in title" in x or "policy digits" in x for x in a["_anchors"])]
+        if len(strong) == 1:
+            a = strong[0]
+            age = age_days(a["id"])
+            ev = "; ".join(a["_anchors"])
+            if age is not None and 0 <= age <= _CREATED_FOR_REQUEST_DAYS:
+                ev += (f"; created {age} day(s) before the request — "
+                       "looks created for it")
+            return a["id"], a["title"], (
+                f"STRONG: {len(filtered)} candidates narrowed to one by "
+                f"{ev} — discussion {a['title']!r}")
+        # Tiebreaker 2: exactly one holder-anchored candidate created for
+        # this request — fresh (non-reply) email + brand-new discussion.
+        # Never on recency alone: the holder anchor is required.
+        if not is_followup and edt is not None:
+            fresh = [a for a in ann if a["_anchors"]]
+            fresh = [a for a in fresh
+                     if (age_days(a["id"]) is not None
+                         and 0 <= age_days(a["id"])
+                         <= _CREATED_FOR_REQUEST_DAYS)]
+            if len(fresh) == 1:
+                a = fresh[0]
+                return a["id"], a["title"], (
+                    f"MEDIUM: {len(filtered)} candidates; "
+                    f"{a['title']!r} is the only holder-anchored one "
+                    f"created {age_days(a['id'])} day(s) before this new "
+                    f"request ({'; '.join(a['_anchors'])})")
+        # Still ambiguous: say exactly why, with dates.
+        parts = []
+        for a in ann[:6]:
+            age = age_days(a["id"])
+            age_s = f", created {age}d before request" \
+                if age is not None and age >= 0 else ""
+            anch = ("; ".join(a["_anchors"]) if a["_anchors"]
+                    else "fragment/no anchor")
+            parts.append(f"{a['title']!r} [{anch}{age_s}]")
+        shown = "; ".join(parts)
+        holder_s = (f" for holder {holder_names[0]!r}"
+                    if holder_names else " (no holder extracted)")
+        stale_note = ""
+        ages = [age_days(a["id"]) for a in ann
+                if age_days(a["id"]) is not None]
+        if ages and min(ages) > _CREATED_FOR_REQUEST_DAYS:
+            stale_note = (f" Newest thread is {min(ages)} days old — none "
+                          "looks created for this request.")
         return None, None, (
-            f"{len(candidates)} certificates discussions match "
-            f"({shown}); refusing to guess")
+            f"{len(filtered)} certificates discussions match{holder_s} "
+            f"({shown}){stale_note}; refusing to guess — create a new "
+            "named discussion in EZLynx or pick one by hand")
     return None, None, ("no certificates discussion on file for this request — "
                         "create a named one in EZLynx or approve auto-creation")
 
@@ -245,13 +456,21 @@ def file_record(record: Any, verified: Any, deps: FilingDeps,
             deps.store.release(message_id, owner)
 
 
+def _looks_like_followup(subject: Any) -> bool:
+    """True when the subject opens with Re:/Fwd: — a reply in a thread."""
+    return bool(re.match(r"^\s*(?:re|fwd?)\s*:",
+                         str(subject or ""), re.IGNORECASE))
+
+
 def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                   res: FilingResult, message_id: str, applicant_id: int,
                   owner: str, dry_run: bool) -> FilingResult:
     # --- discussion -------------------------------------------------------
     discussion_id, discussion_title, how = resolve_discussion(
         verified, list(getattr(record.facts, "holder_names", []) or []),
-        deps.registry, deps.discussions_client)
+        deps.registry, deps.discussions_client,
+        email_date=getattr(record, "date", None),
+        is_followup=_looks_like_followup(getattr(record, "subject", "")))
     if not discussion_id:
         res.hold_reasons.append(how)
         return res
@@ -316,6 +535,27 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                 return res
             res.note_id = str((filed or {}).get("note_id") or "")
             res.evidence.append(f"note filed: {res.note_id}")
+            # Destination agreement: the writer reports which discussion it
+            # filed to and whether it read the note back. If it names a
+            # different discussion than the resolver chose, that is a
+            # misfile signal — never silently mark FILED.
+            writer_disc = str((filed or {}).get("discussion_id") or "")
+            if writer_disc and writer_disc != str(discussion_id):
+                res.hold_reasons.append(
+                    f"note writer filed to discussion {writer_disc} but the "
+                    f"resolver chose {discussion_id} ({discussion_title!r}) — "
+                    "destination mismatch, needs human review")
+                res.status = ERROR
+                if deps.store:
+                    deps.store.set(message_id, note_status="failed")
+                return res
+            if (filed or {}).get("read_back") is True:
+                res.evidence.append(
+                    f"writer read-back confirmed note {res.note_id} in "
+                    f"discussion {discussion_id}")
+            else:
+                res.evidence.append(
+                    "writer did not report a read-back confirmation")
             if deps.store:
                 deps.store.set(message_id, note_status="written",
                                note_id=res.note_id,
