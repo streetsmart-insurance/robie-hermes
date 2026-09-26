@@ -23,34 +23,50 @@ def _load_email_guard():
 
     The module under test only needs `re` for the sanitizer; stubbing the
     relative imports keeps this test independent of the rest of the engine.
+
+    The load is fully isolated: it runs under a throwaway module name and
+    restores sys.modules afterwards, so it never replaces or shadows the real
+    robie_job_engine modules for other tests in the same process.
     """
-    pkg_name = "robie_job_engine"
-    if pkg_name not in sys.modules:
-        pkg = types.ModuleType(pkg_name)
-        pkg.__path__ = []
-        sys.modules[pkg_name] = pkg
-    stubs = {
-        "engine": ["JobEngine"],
-        "models": ["ACTION_OUTCOME_UNKNOWN", "JobStatus", "WorkerResult"],
-        "store": ["JobStore"],
-        "chat_policy": ["SECURITY_GUARD_STOP_RULE"],
-        "skill_sync": ["add_synced_context", "submission_center_sop_url"],
-    }
-    for mod, attrs in stubs.items():
-        full = f"{pkg_name}.{mod}"
-        if full not in sys.modules:
-            stub = types.ModuleType(full)
-            for attr in attrs:
-                setattr(stub, attr, object())
-            sys.modules[full] = stub
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "robie_job_engine", "email_guard.py"
-    )
-    spec = importlib.util.spec_from_file_location(f"{pkg_name}.email_guard", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    saved_modules = dict(sys.modules)
+    try:
+        pkg_name = "robie_job_engine"
+        if pkg_name not in sys.modules:
+            pkg = types.ModuleType(pkg_name)
+            pkg.__path__ = []
+            sys.modules[pkg_name] = pkg
+        stubs = {
+            "engine": ["JobEngine"],
+            "models": ["ACTION_OUTCOME_UNKNOWN", "JobStatus", "WorkerResult"],
+            "store": ["JobStore"],
+            "chat_policy": ["SECURITY_GUARD_STOP_RULE"],
+            "skill_sync": ["add_synced_context", "submission_center_sop_url"],
+        }
+        for mod, attrs in stubs.items():
+            full = f"{pkg_name}.{mod}"
+            if full not in sys.modules:
+                stub = types.ModuleType(full)
+                for attr in attrs:
+                    setattr(stub, attr, object())
+                sys.modules[full] = stub
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "robie_job_engine", "email_guard.py"
+        )
+        # Throwaway name under the package: relative imports still resolve,
+        # but the real robie_job_engine.email_guard entry is never replaced.
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_name}._reasoning_strip_test_isolated", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        # Restore sys.modules exactly: drop everything added, revive removed.
+        for key in list(sys.modules):
+            if key not in saved_modules:
+                del sys.modules[key]
+        sys.modules.update(saved_modules)
 
 
 _guard = _load_email_guard()
