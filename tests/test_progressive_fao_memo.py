@@ -32,12 +32,18 @@ from robie_job_engine.progressive_fao_memo import (
     pdf_bytes_from_observation,
     read_playwright_pdf_view,
     require_loopback_cdp,
+    require_memo_pdf_parity,
     select_fao_page,
 )
 from robie_job_engine.progressive_retrieval import ProgressiveRetrieval
 
 
 LIST_URL = "https://www.foragentsonly.com/managepolicies/policyactivity"
+LIST_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
+    "0000000c4944415408d763f8cfc00000000300010005fe02fedccc59e700000000"
+    "49454e44ae426082"
+)
 PROVE_DAY = date(2026, 9, 25)
 PROVE_ROWS = (
     ("860521214", "3JR Contracting LLC", "General", "Memo", "09/25/2026"),
@@ -69,12 +75,18 @@ class ScriptedBrowser:
         self.grid = grid
         self.pdfs = pdfs
         self.loads = 0
+        self.shots = 0
+        self.screenshot_bytes = LIST_PNG
         self.captures: list[str] = []
 
     def load_communications(self, *, start, end, agent_code):
         self.loads += 1
         self.window = (start, end, agent_code)
         return self.grid
+
+    def screenshot_communications(self):
+        self.shots += 1
+        return self.screenshot_bytes
 
     def capture_memo(self, document_id):
         self.captures.append(document_id)
@@ -347,7 +359,14 @@ class PullTests(unittest.TestCase):
         items = self.worker.pull_fao_communications(self.portal, start=PROVE_DAY, end=PROVE_DAY)
         self.assertEqual(tuple(item.filename for item in items), EXPECTED_NAMES)
         self.assertEqual(self.browser.loads, 1)
+        self.assertEqual(self.browser.shots, 1)
         self.assertEqual(len(self.browser.captures), 4)
+        shot = self.output / "fao-communications-memo-2026-09-25.png"
+        self.assertEqual(shot.read_bytes(), LIST_PNG)
+        self.assertEqual(shot.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.portal.verification["by_date"], [{
+            "processed_date": "2026-09-25", "memo_rows": 4, "pdfs": 4,
+        }])
         self.assertEqual(self.api.writes, 0)
         for item in items:
             named = self.output / item.filename
@@ -361,6 +380,8 @@ class PullTests(unittest.TestCase):
         )
         self.assertEqual(second, ())
         self.assertEqual(replay_browser.captures, [])
+        self.assertEqual(replay.verification["by_date"][0]["pdfs"], 4)
+        self.assertEqual(list(self.output.glob("fao-communications-memo-*.png")), [shot])
         self.assertEqual(replay.skipped_document_ids, tuple(memo.document_id for memo in self.memos))
 
     def test_other_scopes_and_bad_windows_do_not_download(self):
@@ -425,6 +446,9 @@ class PullTests(unittest.TestCase):
         self.assertEqual(payload["count"], 4)
         self.assertEqual(payload["process"], "progressive")
         self.assertEqual(payload["downloaded"][1]["filename"], EXPECTED_NAMES[1])
+        self.assertEqual(payload["verification"]["gate"], "memo_rows_equal_pdfs")
+        self.assertEqual(payload["verification"]["by_date"][0]["memo_rows"], 4)
+        self.assertTrue(payload["verification"]["screenshot"].endswith("fao-communications-memo-2026-09-25.png"))
 
         called = []
         stdout.seek(0)
@@ -437,6 +461,67 @@ class PullTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(called, [])
         self.assertEqual(json.loads(stdout.getvalue())["status"], "HELD")
+
+    def test_bad_screenshot_holds_before_any_memo_download(self):
+        self.browser.screenshot_bytes = b"GIF89a-not-a-png"
+        with self.assertRaisesRegex(IntakeHold, "not a PNG"):
+            self.worker.pull_fao_communications(self.portal, start=PROVE_DAY, end=PROVE_DAY)
+        self.assertEqual(self.browser.captures, [])
+        self.assertEqual(list(self.output.glob("*.png")), [])
+
+    def test_count_mismatch_does_not_save_the_screenshot_or_claim_success(self):
+        class ShortLedger(LocalDeliveryLedger):
+            def pdf_ids_for_date(self, day):
+                found = super().pdf_ids_for_date(day)
+                return set(list(found)[:-1]) if found else found
+
+        ledger = ShortLedger(self.output)
+        portal = FaoCommunicationsMemoPortal(self.browser, ledger)
+        with self.assertRaisesRegex(IntakeHold, "4 memo rows and 3 PDFs"):
+            self.worker.pull_fao_communications(portal, start=PROVE_DAY, end=PROVE_DAY)
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertEqual(len(self.browser.captures), 4)
+        self.assertTrue((self.output / EXPECTED_NAMES[0]).is_file())
+
+    def test_empty_communications_list_still_saves_a_zero_count_screenshot(self):
+        browser = ScriptedBrowser(MemoGrid(LIST_URL, HEADERS, (), (), False), {})
+        portal = FaoCommunicationsMemoPortal(browser, self.ledger)
+        items = self.worker.pull_fao_communications(portal, start=PROVE_DAY, end=PROVE_DAY)
+        self.assertEqual(items, ())
+        self.assertEqual(portal.verification["by_date"], [{
+            "processed_date": "2026-09-25", "memo_rows": 0, "pdfs": 0,
+        }])
+        self.assertEqual((self.output / "fao-communications-memo-2026-09-25.png").read_bytes(), LIST_PNG)
+
+    def test_parity_rejects_a_short_or_extra_pdf_count(self):
+        rows = [
+            {"document_id": "a", "processed_or_effective_date": "2026-09-25"},
+            {"document_id": "b", "processed_or_effective_date": "2026-09-25"},
+        ]
+
+        class Ids:
+            def __init__(self, ids):
+                self._ids = set(ids)
+
+            def pdf_ids_for_date(self, day):
+                return set(self._ids)
+
+        with self.assertRaisesRegex(IntakeHold, "2 memo rows and 1 PDFs"):
+            require_memo_pdf_parity(rows=rows, ledger=Ids({"a"}), start=PROVE_DAY, end=PROVE_DAY)
+        with self.assertRaisesRegex(IntakeHold, "2 memo rows and 3 PDFs"):
+            require_memo_pdf_parity(rows=rows, ledger=Ids({"a", "b", "c"}), start=PROVE_DAY, end=PROVE_DAY)
+
+        class ByDay:
+            def pdf_ids_for_date(self, day):
+                return {"a", "b"} if day == PROVE_DAY else set()
+
+        evidence = require_memo_pdf_parity(
+            rows=rows, ledger=ByDay(), start=PROVE_DAY, end=date(2026, 9, 26),
+        )
+        self.assertEqual(
+            [(row["processed_date"], row["memo_rows"], row["pdfs"]) for row in evidence],
+            [("2026-09-25", 2, 2), ("2026-09-26", 0, 0)],
+        )
 
     def test_cli_holds_a_wide_window_before_attaching(self):
         called = []
@@ -595,6 +680,7 @@ class NavPage:
         self.go_back_restores = go_back_restores
         self.clicks = []
         self.memo_opens = []
+        self.screenshot_calls = 0
         self.closed = False
         self.pending_download = None
         self.state = "home"
@@ -674,6 +760,12 @@ class NavPage:
         for node in self.roots():
             found.extend(node.find_role("textbox", label, exact))
         return NodeLocator(found, self)
+
+    def screenshot(self, full_page=True, type="png"):
+        self.screenshot_calls += 1
+        if full_page and type == "png" and self.table_visible and self.state == "comms":
+            return LIST_PNG
+        return b""
 
     def expect_download(self, timeout):
         return _NavExpect(self)
@@ -769,6 +861,13 @@ class NavigationTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {"ROBIE_ENV": "TEST"})
         self.env.start()
         self.addCleanup(self.env.stop)
+
+    def test_communications_list_screenshot_is_a_full_page_png(self):
+        page = NavPage(next_mode="none")
+        browser = PlaywrightFaoMemoBrowser(page)
+        browser.load_communications(start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE)
+        self.assertEqual(browser.screenshot_communications(), LIST_PNG)
+        self.assertEqual(page.screenshot_calls, 1)
 
     def test_navigation_order_date_readback_and_selected_memo(self):
         page = NavPage()

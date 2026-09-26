@@ -21,7 +21,7 @@ import sys
 import tempfile
 import urllib.parse
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -35,6 +35,7 @@ DEFAULT_AGENT_CODE = "CA33617"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "fao-memo-ledger.json"
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _AGENT_CODE = re.compile(r"^CA\d{5}$")
 _AGENT_CODE_IN_TEXT = re.compile(r"\bCA\d{5}\b")
 _POLICY_NUMBER = re.compile(r"^\d{6,12}$")
@@ -502,6 +503,18 @@ class PlaywrightFaoMemoBrowser:
                 raise IntakeHold("Memo PDF capture left the Communications list")
         return observation
 
+    def screenshot_communications(self) -> bytes:
+        """Full-page PNG of the Communications list while that tab is selected."""
+        if self._grid is None or str(getattr(self.page, "url", "") or "") != self._list_url:
+            raise IntakeHold("Communications list screenshot is missing or not a PNG")
+        if self.page.locator("table").count() != 1:
+            raise IntakeHold("Communications list screenshot is missing or not a PNG")
+        tab = self.page.get_by_role("tab", name="Communications", exact=True)
+        if tab.count() != 1 or tab.get_attribute("aria-selected") != "true":
+            raise IntakeHold("Communications list screenshot is missing or not a PNG")
+        data = self.page.screenshot(full_page=True, type="png")
+        return require_png(data)
+
 
 class LocalDeliveryLedger:
     """Private named-PDF ledger. A conflicting file is kept and the pull holds."""
@@ -532,7 +545,7 @@ class LocalDeliveryLedger:
             raise IntakeHold("Existing memo file conflicts with the pull ledger")
         return True
 
-    def record(self, source: SourceItem) -> Path:
+    def record(self, source: SourceItem, *, processed_on: date) -> Path:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Memo filename is missing or ambiguous")
@@ -559,8 +572,56 @@ class LocalDeliveryLedger:
             "filename": source.filename,
             "sha256": digest,
             "bytes": len(source.content),
+            "processed_date": processed_on.isoformat(),
         }
         self._write(data)
+        return path
+
+    def pdf_ids_for_date(self, day: date) -> set[str]:
+        """Verified memo PDFs whose ledger row is this processed date."""
+        found: set[str] = set()
+        for document_id, entry in self._load()["items"].items():
+            if not isinstance(entry, dict) or entry.get("processed_date") != day.isoformat():
+                continue
+            filename = str(entry.get("filename") or "")
+            if self.delivery_status(document_id=str(document_id), filename=filename):
+                found.add(str(document_id))
+        return found
+
+    def save_screenshot(self, start: date, end: date, png: bytes) -> Path:
+        """Write the list PNG. A different existing shot is kept and a sibling is added."""
+        self.ensure_private()
+        blob = require_png(png)
+        primary = self._named_path(communications_screenshot_name(start, end))
+        if primary.exists():
+            if primary.is_symlink() or not primary.is_file():
+                raise IntakeHold("Communications list screenshot is missing or not a PNG")
+            if primary.read_bytes() == blob:
+                return primary
+            return self._write_png(self._sibling_screenshot(start, end), blob)
+        return self._write_png(primary, blob)
+
+    def _sibling_screenshot(self, start: date, end: date) -> Path:
+        stem = communications_screenshot_name(start, end)[:-4]
+        for index in range(2, 100):
+            candidate = self.root / f"{stem}-{index}.png"
+            if not candidate.exists() and not candidate.is_symlink():
+                return candidate
+        raise IntakeHold("Communications list screenshot is missing or not a PNG")
+
+    def _write_png(self, path: Path, blob: bytes) -> Path:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(blob)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
         return path
 
     def _named_path(self, filename: str) -> Path:
@@ -617,7 +678,9 @@ class FaoCommunicationsMemoPortal:
         self._cache_key: tuple[Any, ...] | None = None
         self._cache_result: Any = None
         self._memos: dict[str, MemoRow] = {}
+        self._list_png: bytes | None = None
         self.skipped_document_ids: tuple[str, ...] = ()
+        self.verification: dict[str, Any] | None = None
 
     def list_documents(self, *, scope: str, start: date, end: date):
         from .intake_core import ReadResult
@@ -631,6 +694,7 @@ class FaoCommunicationsMemoPortal:
         memos = parse_memo_grid(grid, agent_code=self.agent_code)
         if grid.more_pages is not False:
             raise IntakeHold("Communications memo list is incomplete or ambiguous")
+        self._list_png = require_png(self.browser.screenshot_communications())
         rows = []
         found: dict[str, MemoRow] = {}
         skipped: list[str] = []
@@ -673,9 +737,25 @@ class FaoCommunicationsMemoPortal:
         )
 
     def publish_source(self, source: SourceItem) -> str:
-        path = self.ledger.record(source)
+        memo = self.memo(source.source_id)
+        path = self.ledger.record(source, processed_on=memo.processed_on)
         self._mark_delivered(source.source_id)
         return str(path)
+
+    def finish_fao_pull(self, start: date, end: date) -> dict[str, Any]:
+        """Count gate, then save the Communications list PNG. Mismatch does not save it."""
+        if self._list_png is None or self._cache_result is None:
+            raise IntakeHold("Communications list screenshot is missing or not a PNG")
+        by_date = require_memo_pdf_parity(
+            rows=self._cache_result.rows, ledger=self.ledger, start=start, end=end,
+        )
+        path = self.ledger.save_screenshot(start, end, self._list_png)
+        self.verification = {
+            "gate": "memo_rows_equal_pdfs",
+            "by_date": [dict(row) for row in by_date],
+            "screenshot": str(path),
+        }
+        return self.verification
 
     def memo(self, document_id: str) -> MemoRow:
         try:
@@ -796,6 +876,7 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
             "count": len(downloaded),
             "downloaded": downloaded,
             "skipped_already_delivered": list(portal.skipped_document_ids),
+            "verification": portal.verification,
             "ezlynx": "not_run",
         })
         return 0
@@ -812,6 +893,58 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
     finally:
         if closer is not None:
             closer()
+
+
+def communications_screenshot_name(start: date, end: date) -> str:
+    if end < start:
+        raise IntakeHold("Processed date window is missing or ambiguous")
+    if start == end:
+        name = f"fao-communications-memo-{start.isoformat()}.png"
+    else:
+        name = f"fao-communications-memo-{start.isoformat()}-to-{end.isoformat()}.png"
+    if name != Path(name).name:
+        raise IntakeHold("Communications list screenshot is missing or not a PNG")
+    return name
+
+
+def require_png(blob: bytes | bytearray | None) -> bytes:
+    if not isinstance(blob, (bytes, bytearray)) or not bytes(blob).startswith(_PNG_MAGIC):
+        raise IntakeHold("Communications list screenshot is missing or not a PNG")
+    return bytes(blob)
+
+
+def require_memo_pdf_parity(*, rows, ledger: LocalDeliveryLedger, start: date, end: date) -> tuple[dict[str, Any], ...]:
+    """Each processed date in the window must have one verified PDF per Memo row.
+
+    A short download, an extra PDF for that date, or a day inside the window
+    whose page count and file count disagree holds the pull. Nothing is
+    reported as successful when the counts differ.
+    """
+    grouped: dict[str, set[str]] = {}
+    day = start
+    while day <= end:
+        grouped[day.isoformat()] = set()
+        day += timedelta(days=1)
+    for row in rows:
+        processed = str(row.get("processed_or_effective_date") or "")
+        document_id = str(row.get("document_id") or "")
+        if processed not in grouped or not document_id or document_id in grouped[processed]:
+            raise IntakeHold("Communications memo count does not match downloaded PDFs")
+        grouped[processed].add(document_id)
+    evidence: list[dict[str, Any]] = []
+    for processed, ids in grouped.items():
+        pdf_ids = set(ledger.pdf_ids_for_date(date.fromisoformat(processed)))
+        if pdf_ids != ids:
+            raise IntakeHold(
+                "Communications memo count does not match downloaded PDFs "
+                f"for {processed}: {len(ids)} memo rows and {len(pdf_ids)} PDFs"
+            )
+        evidence.append({
+            "processed_date": processed,
+            "memo_rows": len(ids),
+            "pdfs": len(pdf_ids),
+        })
+    return tuple(evidence)
 
 
 def _emit(payload: dict[str, Any]) -> None:

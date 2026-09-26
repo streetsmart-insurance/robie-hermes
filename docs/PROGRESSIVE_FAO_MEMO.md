@@ -31,8 +31,37 @@ local ledger are skipped. Anything ambiguous holds the pull before download.
 
 `python -m robie_job_engine.progressive_fao_memo` attaches to an
 already-open FAO tab and writes named PDFs plus `fao-memo-ledger.json`.
-A receipt with `"status": "PULLED"` means files were saved locally. That is
-not Job Engine `COMPLETE`. `"ezlynx": "not_run"` is always set.
+A receipt with `"status": "PULLED"` means files were saved locally and the
+verification gate below passed. That is not Job Engine `COMPLETE`.
+`"ezlynx": "not_run"` is always set.
+
+## Verification gate
+
+Robie's gate for a pull, checked separately for **each processed date** in
+the requested window:
+
+**Memo rows on the Communications list for that date = PDFs saved for that date.**
+
+The list screenshot is taken while the Communications tab is selected,
+before any Memo is opened, and it is written only after the counts match.
+A mismatch holds the pull (`HELD`). The receipt is not `PULLED`. Already
+written PDFs are left in place for recovery; they are not deleted and they
+are not treated as a successful partial. An extra PDF for that same
+processed date fails the same way. A day in the window with no Memo rows
+must have no PDFs for that date (`0 == 0`).
+
+Daily QA for Nicole should use the same start and end date. The screenshot
+is then one full-page PNG of that day's Communications Memo list:
+
+`fao-communications-memo-YYYY-MM-DD.png`
+
+in the pull output directory (mode `0600`), next to the PDFs. A multi-day
+window still counts each date on its own and saves one PNG of the list that
+was actually on screen, named with the window. A later pull that captures
+different bytes does not replace the first PNG; it adds a sibling file.
+
+There is no systemd timer. Do not enable one from this slice. Production
+is not a target.
 
 The browser steps use exact accessible names from the manual path. Zero or
 multiple matches hold. There is no positional click. A Memo open accepts one
@@ -72,7 +101,10 @@ ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.progressive_fao_memo \
 
 Use an explicit window that covers the business days you mean, including
 weekends when those days should be included. The window cannot exceed 32
-inclusive days.
+inclusive days. For one processed date, `--start` and `--end` are that
+date. After `PULLED`, the output folder must contain the PNG and the same
+number of memo PDFs as Memo rows on that page. A count mismatch is a
+failed pull, not a partial success.
 
 ## UNVERIFIED until that Test run
 
