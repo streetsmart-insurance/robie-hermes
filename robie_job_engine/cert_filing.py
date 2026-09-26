@@ -156,19 +156,32 @@ def _discussion_id(d: dict[str, Any]) -> str | None:
 
 
 def resolve_discussion(verified: Any, holder_names: list[str],
-                       registry: Any, discussions_client: Any) -> tuple[str | None, str]:
+                       registry: Any, discussions_client: Any
+                       ) -> tuple[str | None, str | None, str]:
     """Find the discussion to file into. Never creates, never guesses.
 
+    Returns (discussion_id, discussion_title, reason). The title is passed
+    to the note writer as its title hint so the writer's own fail-closed
+    selection confirms the same discussion.
+
     Order: task registry -> existing holder-matching certificates
-    discussion -> (None, reason).
+    discussion -> (None, None, reason).
     """
     policy_key = policy_key_for(verified.policy_numbers)
     holder_key = holder_key_for(holder_names)
     entry = registry.get(verified.applicant_id, policy_key, holder_key)
-    if entry and entry.discussion_id:
-        return entry.discussion_id, "task registry"
-
     discussions = discussions_client.get_discussions(verified.applicant_id) or []
+    titles = {}
+    for d in discussions:
+        if isinstance(d, dict):
+            did = _discussion_id(d)
+            if did:
+                titles[did] = _discussion_title(d)
+    if entry and entry.discussion_id:
+        return (entry.discussion_id,
+                titles.get(entry.discussion_id),
+                "task registry")
+
     holder_frags = [re.sub(r"[^a-z0-9]", "", h.lower())
                     for h in holder_names if h]
     candidates = []
@@ -186,12 +199,13 @@ def resolve_discussion(verified: Any, holder_names: list[str],
             continue
         candidates.append((did, _discussion_title(d)))
     if len(candidates) == 1:
-        return candidates[0][0], f"existing discussion {candidates[0][1]!r}"
+        did, title = candidates[0]
+        return did, title, f"existing discussion {title!r}"
     if len(candidates) > 1:
-        return None, (f"{len(candidates)} certificates discussions match; "
-                      "refusing to guess")
-    return None, ("no certificates discussion on file for this request — "
-                  "create a named one in EZLynx or approve auto-creation")
+        return None, None, (f"{len(candidates)} certificates discussions "
+                            "match; refusing to guess")
+    return None, None, ("no certificates discussion on file for this request — "
+                        "create a named one in EZLynx or approve auto-creation")
 
 
 def _note_count(discussions_client: Any, applicant_id: int,
@@ -233,7 +247,7 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                   res: FilingResult, message_id: str, applicant_id: int,
                   owner: str, dry_run: bool) -> FilingResult:
     # --- discussion -------------------------------------------------------
-    discussion_id, how = resolve_discussion(
+    discussion_id, discussion_title, how = resolve_discussion(
         verified, list(getattr(record.facts, "holder_names", []) or []),
         deps.registry, deps.discussions_client)
     if not discussion_id:
@@ -265,7 +279,7 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
         try:
             filed = deps.note_writer(
                 str(applicant_id), note_text,
-                title_hint=None, dry_run=dry_run)
+                title_hint=discussion_title, dry_run=dry_run)
         except Exception as exc:
             # Uncertain outcome: read the destination back before any retry.
             post_count = _note_count(deps.discussions_client, applicant_id,

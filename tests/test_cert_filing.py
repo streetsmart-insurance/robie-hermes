@@ -196,17 +196,17 @@ def test_resolve_prefers_registry(tmp_path):
     deps.registry.put(TaskEntry(220250093, "POL123", "bigclientinc",
                                 discussion_id="d-reg"))
     v = make_verified()
-    did, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
-                                  deps.discussions_client)
+    did, title, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+                                         deps.discussions_client)
     assert did == "d-reg" and how == "task registry"
 
 
 def test_resolve_matches_holder_discussion(tmp_path):
     deps = make_deps(str(tmp_path))
     v = make_verified()
-    did, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
-                                  deps.discussions_client)
-    assert did == "d1"
+    did, title, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+                                         deps.discussions_client)
+    assert did == "d1" and "Big Client" in (title or "")
 
 
 def test_resolve_holds_when_nothing_matches(tmp_path):
@@ -214,8 +214,8 @@ def test_resolve_holds_when_nothing_matches(tmp_path):
     deps.discussions_client = FakeDiscussions(
         [{"id": "d9", "title": "Renewal follow-up", "noteCount": 1}])
     v = make_verified()
-    did, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
-                                     deps.discussions_client)
+    did, title, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+                                            deps.discussions_client)
     assert did is None and "no certificates discussion" in reason
 
 
@@ -226,8 +226,8 @@ def test_resolve_holds_on_ambiguous_matches(tmp_path):
         {"id": "d2", "title": "COI for Big Client Inc renewal"},
     ])
     v = make_verified()
-    did, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
-                                     deps.discussions_client)
+    did, title, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+                                            deps.discussions_client)
     assert did is None and "refusing to guess" in reason
 
 
@@ -382,3 +382,11 @@ def test_record_task_callback_updates_registry(tmp_path):
     CertZapierClient.record_task_callback(r, 7, "P1", "h1", "zap-123")
     got = r.get(7, "P1", "h1")
     assert got.task_id == "zap-123" and got.task_status == TASK_OPEN
+
+
+def test_file_record_passes_resolved_title_as_hint(tmp_path):
+    deps = make_deps(str(tmp_path))
+    file_record(make_record(), make_verified(), deps)
+    assert deps.note_writer.calls, "note writer was not called"
+    _applicant, _text, kw = deps.note_writer.calls[0]
+    assert kw.get("title_hint") == "Certificate request - Big Client Inc"
