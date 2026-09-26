@@ -50,10 +50,17 @@ When that titled discussion is missing, ambiguous, or the filing rule has no
 confirmed title, the stage still uploads the PDF (after the document dedupe),
 skips Notes, and calls `robie_job_engine.zapier_tasks.fire_task`. The webhook
 stays in the vault as `custom.zapier-webhook` and is loaded by `bin/zap-trigger`.
-The payload is:
+`fire_task` resolves that script through `resolve_zap_trigger`: when
+`ROBIE_ZAP_TRIGGER` is set it is the only path tried; otherwise the release
+copy `<release_root>/skills/zapier/bin/zap-trigger` comes first, then the
+legacy locations (`~/workspace/skills/zapier/bin/zap-trigger`, then
+`.hermes/skills` and `workspace/skills` under `/opt/streetsmart-hermes-test`
+and `/opt/streetsmart-hermes`). A miss names every path that was tried. The
+search does not read the vault.
+The payload is built by `document_retrieval_task_payload`:
 
 - `applicant_id`
-- `assignee`: `Nicole Segovia`
+- `assignee`: display name `Nicole Segovia`, normalized to the EZLynx login `SSNicole`
 - `source`: `document-retrieval`
 - `due_date`: the Eastern filing day, ISO `YYYY-MM-DD`
 - `task_title`: `Document Retrieval review — {Carrier} {DocType} — {Insured} — {PolicyNumber}`

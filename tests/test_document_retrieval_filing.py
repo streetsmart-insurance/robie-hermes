@@ -313,7 +313,7 @@ class FilingGateTests(unittest.TestCase):
         self.assertTrue(deps.tasks[0]["dry_run"])
         payload = deps.tasks[0]["payload"]
         self.assertEqual(payload["applicant_id"], "220250093")
-        self.assertEqual(payload["assignee"], "Nicole Segovia")
+        self.assertEqual(payload["assignee"], "SSNicole")
         self.assertEqual(payload["source"], "document-retrieval")
         self.assertEqual(payload["due_date"], "2026-09-26")
         self.assertEqual(
@@ -361,12 +361,15 @@ class FilingGateTests(unittest.TestCase):
             return zapier_tasks.fire_task(payload, dry_run=dry_run)
 
         deps.fire_task = fire
-        original = zapier_tasks.ZAP_TRIGGER_SCRIPT
-        zapier_tasks.ZAP_TRIGGER_SCRIPT = script.name
+        original = os.environ.get("ROBIE_ZAP_TRIGGER")
+        os.environ["ROBIE_ZAP_TRIGGER"] = script.name
         try:
             result = file_with(deps, [memo_item()], zapier_dry_run=True)
         finally:
-            zapier_tasks.ZAP_TRIGGER_SCRIPT = original
+            if original is None:
+                os.environ.pop("ROBIE_ZAP_TRIGGER", None)
+            else:
+                os.environ["ROBIE_ZAP_TRIGGER"] = original
             os.unlink(script.name)
         self.assertEqual(result["status"], "filed_no_workflow")
         self.assertEqual(deps.notes, [])

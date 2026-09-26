@@ -12,8 +12,11 @@ Notes go through :func:`robie_job_engine.ezlynx_api_only_writes.add_note_to_disc
 when the titled workflow already exists. Browser automation is not used for
 either write. DiscussionApi has no create call. A missing workflow still
 uploads the PDF, skips the note, and asks :func:`robie_job_engine.zapier_tasks.fire_task`
-to open a Nicole review task. The webhook URL stays in the vault
-(``custom.zapier-webhook``) and is loaded by ``bin/zap-trigger``.
+to open a Nicole review task. The payload comes from
+:func:`robie_job_engine.zapier_tasks.document_retrieval_task_payload`, which
+maps the display name Nicole Segovia to the EZLynx login ``SSNicole``.
+The webhook URL stays in the vault (``custom.zapier-webhook``) and is loaded
+by ``bin/zap-trigger``. This module does not resolve the script path.
 
 The status-sheet writer uses the Sheets API when Application Default
 Credentials are present. A missing library, credential, daily tab, or carrier
@@ -66,7 +69,6 @@ class FilingDecision:
 
 
 NICOLE_ASSIGNEE = "Nicole Segovia"
-ZAPIER_SOURCE = "document-retrieval"
 NO_WORKFLOW_SHEET_COMMENT = "Doc filed (no WF); Nicole EZLynx task created for review"
 
 
@@ -244,14 +246,6 @@ def nicole_status_comment(rule: FilingRule) -> str:
     return f"Added to the {rule.folder} folder and WF: {rule.workflow_title}"
 
 
-def review_task_title(rule: FilingRule, *, insured_name: str, policy_number: str) -> str:
-    carrier = rule.carrier_label or rule.carrier_section
-    return (
-        f"Document Retrieval review — {carrier} {rule.document_type} — "
-        f"{insured_name} — {policy_number}"
-    )
-
-
 def review_task_payload(
     rule: FilingRule,
     *,
@@ -260,21 +254,24 @@ def review_task_payload(
     policy_number: str,
     due_on: date,
 ) -> dict[str, Any]:
-    """Zapier catch-hook payload. ``due_on`` is the Eastern filing day, ISO YYYY-MM-DD."""
+    """Zapier catch-hook payload. ``due_on`` is the Eastern filing day, ISO YYYY-MM-DD.
 
-    from .zapier_tasks import validate_task_payload
+    The display name ``Nicole Segovia`` is normalized to ``SSNicole`` inside
+    :func:`robie_job_engine.zapier_tasks.document_retrieval_task_payload`.
+    """
 
-    payload = {
-        "applicant_id": str(applicant_id).strip(),
-        "assignee": NICOLE_ASSIGNEE,
-        "source": ZAPIER_SOURCE,
-        "due_date": due_on.isoformat(),
-        "task_title": review_task_title(
-            rule, insured_name=insured_name, policy_number=policy_number
-        ),
-    }
-    validate_task_payload(payload)
-    return payload
+    from .zapier_tasks import document_retrieval_task_payload
+
+    carrier = rule.carrier_label or rule.carrier_section
+    return document_retrieval_task_payload(
+        applicant_id=str(applicant_id).strip(),
+        carrier=carrier,
+        doc_type=rule.document_type,
+        insured=insured_name,
+        policy_number=policy_number,
+        due_date=due_on.isoformat(),
+        assignee=NICOLE_ASSIGNEE,
+    )
 
 
 def filing_note(rule: FilingRule, processed_on: date) -> str:
@@ -1104,7 +1101,6 @@ __all__ = [
     "nicole_status_comment",
     "plan_status_sheet_edit",
     "review_task_payload",
-    "review_task_title",
     "sketch_carrier_rule",
     "require_retrieval_window",
     "retrieval_date_window",
