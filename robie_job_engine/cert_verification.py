@@ -82,6 +82,11 @@ _ACK_PATTERNS = [
     re.compile(r"\breceived the certificate\b", re.IGNORECASE),
     re.compile(r"\bgot the certificate\b", re.IGNORECASE),
     re.compile(r"\bconfirming receipt\b", re.IGNORECASE),
+    # A terse "COI received" subject is a statement, not a request — it must
+    # never be treated as new request language (false-positive guard for the
+    # coi-as-request-signal rule below).
+    re.compile(r"\b(coi|certificate)\s+received\b", re.IGNORECASE),
+    re.compile(r"\breceived\s+(the\s+)?(coi|certificate)\b", re.IGNORECASE),
 ]
 
 _NEW_REQUEST_PATTERNS = [
@@ -98,6 +103,7 @@ _NEW_REQUEST_PATTERNS = [
 # genuine RMIS requests (donotreply@ senders are real requesters).
 _AUTOREPLY_PATTERNS = [
     re.compile(r"\bautomated response\b", re.IGNORECASE),
+    re.compile(r"\bautomatic reply\b", re.IGNORECASE),
     re.compile(r"\bauto[\-\s]?reply\b", re.IGNORECASE),
     re.compile(r"\bout of office\b", re.IGNORECASE),
     re.compile(r"\bdo not reply\b", re.IGNORECASE),
@@ -139,11 +145,23 @@ _BOUNCE_SUBJECT_RE = re.compile(
 # ("Haris Uddin 008265/15/00") is not enough on its own.
 _CERT_SUBJECT_RE = re.compile(r"(?i)\b(certificate|coi)\b")
 
-# A terse subject that is nothing but "Coi" (optionally after Re:/Fwd:)
-# is a genuine client certificate request — the word "certificate"
-# spelled out is not required. Deliberately narrow: "COI received" or
-# "Coi attached" (a statement, not a request) does NOT match.
+# A terse subject that is just "coi" (optionally after Re:/Fwd:) is a
+# genuine client certificate request — the word "certificate" spelled out
+# is not required. Deliberately narrow: "COI received" or "Coi attached"
+# (a statement, not a request) does NOT match — the ACK patterns above
+# catch those first.
 _BARE_COI_SUBJECT_RE = re.compile(r"^\s*coi\s*$", re.IGNORECASE)
+
+# Word-boundary "coi" anywhere in the subject is a certificate-request
+# signal (Carlo 2026-09-26: genuine terse client subjects like "COI
+# request", "New COI", "Coi needed" were held as unknown). Vendor
+# compliance platforms (myCOI, Certificial, ProfileGorilla/prequal) send
+# automated document-update mail that must stay held — never requests.
+_COI_WORD_RE = re.compile(r"\bcoi\b", re.IGNORECASE)
+_VENDOR_COI_UPDATE_RE = re.compile(
+    r"(?i)\b(my\s?coi|certificial|profile\s?gorilla|prequal|"
+    r"vendor\s+portal|upload\s+your\b.{0,40}\b(coi|certificate)\b)\b"
+)
 
 
 def _subject_is_request_shape(subject: str) -> bool:
@@ -162,6 +180,27 @@ def _subject_is_bare_coi(subject: str) -> bool:
     """
     return bool(_BARE_COI_SUBJECT_RE.match(
         _strip_subject_prefixes(subject or "")))
+
+
+def _subject_is_coi_request(subject: str, sender: str | None = None) -> bool:
+    """True when a word-boundary "coi" in the subject signals a request.
+
+    Broader than _subject_is_bare_coi: terse client subjects like "COI
+    request", "New COI", "Coi needed", "COI Request for MHS LLC DOT: ..."
+    are genuine certificate requests even with trailing detail. The bounce,
+    autoresponder, and acknowledgement filters in classify_requested_action
+    run BEFORE this, so postmaster bounces, auto-replies ("Automatic reply
+    Re: COI"), and statements ("COI received") stay held. Automated vendor
+    compliance mail (myCOI/Certificial/ProfileGorilla, vendor-portal
+    update language) is excluded here and stays held.
+    """
+    if not _COI_WORD_RE.search(subject or ""):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(subject or ""):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(sender or ""):
+        return False
+    return True
 
 
 def _sender_is_autoresponder(sender: str | None) -> bool:
@@ -186,6 +225,9 @@ def classify_requested_action(subject: str, body: str,
     language even when the body is a bare certificate PDF — the subject is
     the request. Bounce/undeliverable subjects are checked first so a
     failure notice quoting a request subject never classifies as a request.
+    A word-boundary "coi" in the subject is itself a request signal
+    ("COI request", "New COI", "Coi needed") unless it is a statement
+    ("COI received"), an auto-reply, or vendor compliance mail.
     """
     # A bounce quoting the original subject is definitive: it never issues
     # a genuine request, even when the quoted tail names a certificate.
@@ -206,7 +248,8 @@ def classify_requested_action(subject: str, body: str,
         return ACTION_ACK
     if (any(p.search(text) for p in _NEW_REQUEST_PATTERNS)
             or _subject_is_request_shape(subject)
-            or _subject_is_bare_coi(subject)):
+            or _subject_is_bare_coi(subject)
+            or _subject_is_coi_request(subject, sender)):
         return ACTION_NEW_REQUEST
     return ACTION_UNKNOWN
 

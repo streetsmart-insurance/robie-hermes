@@ -127,7 +127,7 @@ def _book():
          "email_primary": "malasbrotherspainting@gmail.com", "phones": []},
         {"account_name": "Carry Your Burden LLC",
          "applicant_id": 216803074,
-         "email_primary": "carrymeyerburdenllc@gmail.com", "phones": []},
+         "email_primary": "carryyourburdenllc@gmail.com", "phones": []},
     ])
 
 
@@ -292,6 +292,20 @@ def test_terse_coi_subject_is_new_request():
     assert classify_requested_action(
         "Re: Coi", "Please send over the certificate holder details."
     ) == ACTION_NEW_REQUEST
+    # Broadened FIX 2: word-boundary "coi" in the subject is a request
+    # signal — "COI request", "New COI", "Coi needed", detailed subjects.
+    assert classify_requested_action(
+        "COI request", "holder details here",
+        sender="carryyourburdenllc@gmail.com") == ACTION_NEW_REQUEST
+    assert classify_requested_action(
+        "New COI", "need one for the job",
+        sender="szwarcp@hotmail.com") == ACTION_NEW_REQUEST
+    assert classify_requested_action(
+        "Coi needed", "please send asap",
+        sender="nonstopdieselservices@gmail.com") == ACTION_NEW_REQUEST
+    assert classify_requested_action(
+        "COI Request for MHS LLC DOT: 4263931", "details",
+        sender="jass.s@immensitylogistics.com") == ACTION_NEW_REQUEST
 
 
 def test_terse_coi_sets_intake_requested_action():
@@ -315,7 +329,26 @@ def test_coi_statement_subject_is_not_a_request():
     # "COI received" is a statement about a COI, not a request for one.
     assert classify_requested_action(
         "COI received", "Attached is the signed COI for your file."
-    ) != ACTION_NEW_REQUEST
+    ) == "acknowledgement"
+    assert classify_requested_action(
+        "Received the COI, thanks", "got it") == "acknowledgement"
+
+
+def test_coi_automatic_reply_stays_autoreply():
+    # "Automatic reply Re: COI" is an auto-reply, not a request.
+    assert classify_requested_action(
+        "Automatic reply Re: COI", "I am out of office this week.",
+        sender="jake@streetsmart.insurance") == ACTION_AUTOREPLY
+
+
+def test_coi_vendor_compliance_mail_stays_held():
+    # Automated vendor compliance platforms are not requests.
+    assert classify_requested_action(
+        "Maple Hollow Properties - COI Renewal Request", "renewal notice",
+        sender="prequal@profilegorilla.com") == ACTION_UNKNOWN
+    assert classify_requested_action(
+        "Action Required: Upload Your Updated COI to the Vendor Portal",
+        "upload your new COI", sender="compliance@mycoi.com") == ACTION_UNKNOWN
 
 
 def test_coi_bounce_stays_autoreply():
