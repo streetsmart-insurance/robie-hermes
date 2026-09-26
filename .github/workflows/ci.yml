@@ -78,6 +78,7 @@ jobs:
             tests/test_repair_dedicated_accountability_submission_gate.py \
             tests/test_repair_dedicated_accountability_submission_boundary.py \
             tests/test_team_lead_chat_eod.py \
+            tests/test_evening_collection_target.py \
             tests/test_preflight_dedicated_accountability_submission.py \
             tests/test_ezlynx_api.py \
             tests/test_browser_proxy_units.py \
