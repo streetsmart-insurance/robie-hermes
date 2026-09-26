@@ -125,13 +125,23 @@ def classify_requested_action(subject: str, body: str,
 
     Acknowledgements ("received the certificate", "thanks") must never be
     treated as new certificate requests — that is what creates duplicate
-    tasks. Auto-replies are checked first for the same reason: they quote
-    the original request and would otherwise match new-request language.
+    tasks. Auto-replies are checked before new-request phrases because they
+    often quote an original request subject. But genuine request language in
+    the BODY always beats auto-reply boilerplate: vendor systems (RMIS et
+    al.) routinely footer real requests with "please do not reply", and that
+    footer must not turn a real request into an auto-reply.
     """
-    text = f"{subject or ''}\n{body or ''}"
-    if _sender_is_autoresponder(sender) or any(
-            p.search(text) for p in _AUTOREPLY_PATTERNS):
+    # A known autoresponder address is definitive: it never issues a
+    # genuine request, even when it quotes the original subject.
+    if _sender_is_autoresponder(sender):
         return ACTION_AUTOREPLY
+    body_text = body or ""
+    body_has_request = any(
+        p.search(body_text) for p in _NEW_REQUEST_PATTERNS)
+    if not body_has_request and any(
+            p.search(body_text) for p in _AUTOREPLY_PATTERNS):
+        return ACTION_AUTOREPLY
+    text = f"{subject or ''}\n{body_text}"
     if any(p.search(text) for p in _ACK_PATTERNS):
         return ACTION_ACK
     if any(p.search(text) for p in _NEW_REQUEST_PATTERNS):

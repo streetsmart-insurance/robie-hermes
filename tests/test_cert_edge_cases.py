@@ -411,6 +411,25 @@ def test_e2e_haris_uddin_holds_for_human():
     assert result.applicant_id is None
 
 
+def test_genuine_request_with_donotreply_footer_is_new_request():
+    # RMIS-style: real request language in the body plus a "do not reply"
+    # footer. The footer must not turn a genuine request into an auto-reply.
+    body = ("Please provide a renewal certificate of insurance for "
+            "Abg Transportation MC1121844.\n\n"
+            "This is an automated notification. Please do not reply to "
+            "this email.")
+    assert classify_requested_action(
+        "Renewal Certificate Request- Abg Transportation MC1121844",
+        body,
+        sender="donotreply@rmis.example.com") == ACTION_NEW_REQUEST
+    # But a pure auto-reply body with no request language still holds,
+    # even from an unknown sender.
+    assert classify_requested_action(
+        "Re: Renewal Certificate Request- Abg Transportation",
+        "This is an automated response. Your message was received.",
+        sender="someone@example.com") == ACTION_AUTOREPLY
+
+
 def test_e2e_canned_autoreply_holds_never_tasks():
     # The mailbox's own canned responder quoting a real request subject:
     # matched applicant or not, it must hold and never verify.
