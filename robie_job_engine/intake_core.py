@@ -194,12 +194,14 @@ class IntakeWorker:
                 if len(existing) != 1 or not task_matches(expected, existing[0]):
                     raise IntakeHold("Existing intake task conflicts with this source or assignment")
                 task_id = str(existing[0].get("task_id") or "")
+                detail["intake_disposition"] = "existing_task_reused"
             else:
                 if self.api.find_related_work(applicant, policy, source).checked():
                     raise IntakeHold("Related work already exists; human must attach/update it to avoid duplication")
                 # A failed write must not become permission to repeat a POST.
                 # Adapter guarantees one task per stable source key.
                 task_id = self.api.create_task_once(expected)
+                detail["intake_disposition"] = "task_create_requested"
             if not task_id:
                 raise IntakeHold("Task write has no stable identifier; reconcile before continuing")
             return WorkerResult(True, action, {**expected, "task_id": task_id},

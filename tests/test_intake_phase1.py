@@ -96,6 +96,8 @@ class IntakePhase1Tests(unittest.TestCase):
         self.assertTrue(second.succeeded)
         self.assertEqual(first.destination['task_id'], second.destination['task_id'])
         self.assertEqual(self.api.writes, 1)
+        self.assertEqual(first.detail["intake_disposition"], "task_create_requested")
+        self.assertEqual(second.detail["intake_disposition"], "existing_task_reused")
 
     def test_cross_flow_replay_does_not_create_second_task(self):
         self.run_worker()
