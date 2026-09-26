@@ -30,10 +30,36 @@ memo whose processed date is inside the window. Rows already recorded in the
 local ledger are skipped. Anything ambiguous holds the pull before download.
 
 `python -m robie_job_engine.progressive_fao_memo` attaches to an
-already-open FAO tab and writes named PDFs plus `fao-memo-ledger.json`.
-A receipt with `"status": "PULLED"` means files were saved locally and the
-verification gate below passed. That is not Job Engine `COMPLETE`.
-`"ezlynx": "not_run"` is always set.
+already-open FAO tab and writes one QA pack per processed date. A receipt
+with `"status": "PULLED"` means the local pack passed the verification gate
+below. That is not Job Engine `COMPLETE`. `"ezlynx": "not_run"` is always set.
+
+## Hermes QA pack
+
+Every accepted window writes under the Progressive QA root. `--output`
+defaults to that root. CI and laptops pass an explicit private directory
+so they do not create the Hermes path.
+
+```text
+/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/progressive/{YYYY-MM-DD}/
+```
+
+A window that spans days gets one subfolder per processed date, including a
+day with zero Memo rows. Each date folder contains:
+
+1. `fao-communications-memo-YYYY-MM-DD.png` — full-page Communications list
+2. That date's memo PDFs (`[PolicyNumber] Progressive Memo [Reason].pdf`)
+3. `README.md` — what Robie saw, pulled this run, already had, and held
+4. `manifest.json` — carrier `progressive`, window, `memos[]`, and `PULLED` or `HELD`
+
+`fao-memo-ledger.json` stays on the QA root (machine state for replay).
+Hash-named source copies stay in `{root}/sources`. Neither file is the
+Nicole pack. README and manifest are replaced on each run. A different
+existing PDF or PNG is kept.
+
+When the window spans days, the same on-screen list PNG is copied into
+each date folder. `screenshot_covers_window` in the manifest says that image
+is the window list, not a second query filtered to that day.
 
 ## Verification gate
 
@@ -43,25 +69,35 @@ the requested window:
 **Memo rows on the Communications list for that date = PDFs saved for that date.**
 
 The list screenshot is taken while the Communications tab is selected,
-before any Memo is opened, and it is written only after the counts match.
-A mismatch holds the pull (`HELD`). The receipt is not `PULLED`. Already
-written PDFs are left in place for recovery; they are not deleted and they
-are not treated as a successful partial. An extra PDF for that same
-processed date fails the same way. A day in the window with no Memo rows
-must have no PDFs for that date (`0 == 0`).
+before any Memo is opened. The QA pack, including that PNG, is written for
+every date in an accepted window. A count mismatch still writes the pack
+with `"status": "HELD"` and the hold reason, then the command exits `HELD`.
+The receipt is not `PULLED`. Already written PDFs are left in place; they
+are not deleted and they are not a successful partial. An extra PDF for
+that same processed date fails the same way. A day in the window with no
+Memo rows must have no PDFs for that date (`0 == 0`).
 
-Daily QA for Nicole should use the same start and end date. The screenshot
-is then one full-page PNG of that day's Communications Memo list:
-
-`fao-communications-memo-YYYY-MM-DD.png`
-
-in the pull output directory (mode `0600`), next to the PDFs. A multi-day
-window still counts each date on its own and saves one PNG of the list that
-was actually on screen, named with the window. A later pull that captures
-different bytes does not replace the first PNG; it adds a sibling file.
+A later pull that captures different screenshot bytes does not replace the
+first PNG; it adds a sibling file.
 
 There is no systemd timer. Do not enable one from this slice. Production
 is not a target.
+
+## Drive
+
+The documented destination for a day's folder is shared Drive
+`Robie Carrier Pull QA (Nicole)/Progressive/{YYYY-MM-DD}/`.
+
+| | |
+| --- | --- |
+| Parent `Robie Carrier Pull QA (Nicole)` | `1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2` |
+| Progressive child | `1MMojqm99ft4DgxplMuBvz-eTnKdgpY9U` |
+
+Folder upload is **TODO**. The existing Drive helper uploads one `video/webm`
+recording; it is not used here. `--upload-drive` is off by default. When it
+is set, the local pack is still written, then the command fails closed and
+does not call Google or report the pack as uploaded. The manifest `drive`
+status becomes `HELD`.
 
 The browser steps use exact accessible names from the manual path. Zero or
 multiple matches hold. There is no positional click. A Memo open accepts one
@@ -87,24 +123,28 @@ of this commit is installed on `hermes-test-01` (not done here):
 5. The shell must show agent code `CA33617` and no second `CA#####` code.
    Override only with `--agent-code` / `PROGRESSIVE_FAO_AGENT_CODE` when the
    Test session is actually that code.
-6. Use a private output directory (mode `0700`). The command creates it and
-   holds if it is group- or world-accessible. Existing named PDFs that do
-   not match the ledger are left in place and the pull holds.
+6. The default output root is private (mode `0700`), and each date folder
+   is too. The command creates them and holds if either is group- or
+   world-accessible. Existing named PDFs that do not match the ledger are
+   left in place and the pull holds. Do not pass `--upload-drive` until
+   folder upload exists; it fails closed.
 
 ```bash
 cd /opt/streetsmart-hermes-test/releases/current
 ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.progressive_fao_memo \
   --start 2026-09-25 \
-  --end 2026-09-25 \
-  --output /opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/fao-memo-pull
+  --end 2026-09-25
 ```
 
+That writes
+`/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/progressive/2026-09-25/`.
 Use an explicit window that covers the business days you mean, including
 weekends when those days should be included. The window cannot exceed 32
 inclusive days. For one processed date, `--start` and `--end` are that
-date. After `PULLED`, the output folder must contain the PNG and the same
-number of memo PDFs as Memo rows on that page. A count mismatch is a
-failed pull, not a partial success.
+date. After `PULLED`, that date folder must contain the PNG, README,
+manifest, and the same number of memo PDFs as Memo rows on that page. A
+count mismatch writes a `HELD` pack and is a failed pull, not a partial
+success. This code has not been run on `hermes-test-01`.
 
 ## UNVERIFIED until that Test run
 
@@ -121,3 +161,7 @@ failed pull, not a partial success.
 - Test release digest, pointer flip, and rollback target. No release was
   built or installed for this change.
 - N=3 clean Test jobs. Not started.
+- Drive folder upload. Destination ids are documented only. `--upload-drive`
+  fails closed and does not call Google.
+- A run on `hermes-test-01`. The default path above is the contract; it has
+  not been created by this change.

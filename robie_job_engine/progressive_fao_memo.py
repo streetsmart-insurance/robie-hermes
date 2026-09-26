@@ -36,6 +36,19 @@ DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "fao-memo-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+DEFAULT_QA_ROOT = Path(
+    "/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/progressive"
+)
+# Shared Drive "Robie Carrier Pull QA (Nicole)" and its Progressive child.
+# Folder upload is TODO. The recording uploader writes one video/webm file and
+# is not a QA-folder helper, so --upload-drive fails closed and does not call Google.
+DRIVE_QA_PARENT_ID = "1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2"
+DRIVE_PROGRESSIVE_FOLDER_ID = "1MMojqm99ft4DgxplMuBvz-eTnKdgpY9U"
+DRIVE_QA_FOLDER_NAME = "Robie Carrier Pull QA (Nicole)/Progressive"
+DRIVE_UPLOAD_UNAVAILABLE = (
+    "Drive upload of the Progressive QA pack is not available; "
+    "refusing to report the pack as uploaded"
+)
 _AGENT_CODE = re.compile(r"^CA\d{5}$")
 _AGENT_CODE_IN_TEXT = re.compile(r"\bCA\d{5}\b")
 _POLICY_NUMBER = re.compile(r"^\d{6,12}$")
@@ -527,9 +540,9 @@ class LocalDeliveryLedger:
         if self.root.is_symlink() or not self.root.is_dir() or self.root.stat().st_mode & 0o077:
             raise IntakeHold("Memo output directory must be private (0700)")
 
-    def delivery_status(self, *, document_id: str, filename: str) -> bool:
+    def delivery_status(self, *, document_id: str, filename: str, processed_on: date) -> bool:
         self.ensure_private()
-        path = self._named_path(filename)
+        path = self.pdf_path(processed_on, filename)
         entry = self._load()["items"].get(document_id)
         exists = path.exists()
         if entry is None and not exists:
@@ -540,6 +553,7 @@ class LocalDeliveryLedger:
             or path.is_symlink()
             or not path.is_file()
             or entry.get("filename") != filename
+            or entry.get("processed_date") != processed_on.isoformat()
             or entry.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest()
         ):
             raise IntakeHold("Existing memo file conflicts with the pull ledger")
@@ -549,7 +563,7 @@ class LocalDeliveryLedger:
         self.ensure_private()
         if source.filename == LEDGER_NAME:
             raise IntakeHold("Memo filename is missing or ambiguous")
-        path = self._named_path(source.filename)
+        path = self.pdf_path(processed_on, source.filename)
         if path.exists():
             raise IntakeHold("Existing memo file conflicts with the pull ledger")
         digest = hashlib.sha256(source.content).hexdigest()
@@ -584,27 +598,55 @@ class LocalDeliveryLedger:
             if not isinstance(entry, dict) or entry.get("processed_date") != day.isoformat():
                 continue
             filename = str(entry.get("filename") or "")
-            if self.delivery_status(document_id=str(document_id), filename=filename):
+            processed = str(entry.get("processed_date") or "")
+            if processed != day.isoformat():
+                continue
+            if self.delivery_status(
+                document_id=str(document_id),
+                filename=filename,
+                processed_on=date.fromisoformat(processed),
+            ):
                 found.add(str(document_id))
         return found
 
-    def save_screenshot(self, start: date, end: date, png: bytes) -> Path:
-        """Write the list PNG. A different existing shot is kept and a sibling is added."""
+    def pdf_path(self, day: date, filename: str) -> Path:
+        return self.date_dir(day) / self._basename(filename)
+
+    def date_dir(self, day: date) -> Path:
         self.ensure_private()
+        folder = self.root / day.isoformat()
+        if folder.is_symlink():
+            raise IntakeHold("Memo output directory must be private (0700)")
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not folder.is_dir() or folder.stat().st_mode & 0o077:
+            raise IntakeHold("Memo output directory must be private (0700)")
+        return folder
+
+    def save_screenshot(self, start: date, end: date, png: bytes) -> dict[str, str]:
+        """Write the list PNG into each processed-date folder. Never replace a different shot."""
         blob = require_png(png)
-        primary = self._named_path(communications_screenshot_name(start, end))
+        saved: dict[str, str] = {}
+        day = start
+        while day <= end:
+            name = communications_screenshot_name(day, day)
+            saved[day.isoformat()] = str(self._save_png_named(self.date_dir(day), name, blob))
+            day += timedelta(days=1)
+        return saved
+
+    def _save_png_named(self, folder: Path, name: str, blob: bytes) -> Path:
+        primary = folder / self._basename(name)
         if primary.exists():
             if primary.is_symlink() or not primary.is_file():
                 raise IntakeHold("Communications list screenshot is missing or not a PNG")
             if primary.read_bytes() == blob:
                 return primary
-            return self._write_png(self._sibling_screenshot(start, end), blob)
+            return self._write_png(self._sibling_screenshot(folder, name), blob)
         return self._write_png(primary, blob)
 
-    def _sibling_screenshot(self, start: date, end: date) -> Path:
-        stem = communications_screenshot_name(start, end)[:-4]
+    def _sibling_screenshot(self, folder: Path, name: str) -> Path:
+        stem = self._basename(name)[:-4]
         for index in range(2, 100):
-            candidate = self.root / f"{stem}-{index}.png"
+            candidate = folder / f"{stem}-{index}.png"
             if not candidate.exists() and not candidate.is_symlink():
                 return candidate
         raise IntakeHold("Communications list screenshot is missing or not a PNG")
@@ -624,10 +666,10 @@ class LocalDeliveryLedger:
             raise
         return path
 
-    def _named_path(self, filename: str) -> Path:
+    def _basename(self, filename: str) -> str:
         if not filename or filename != Path(filename).name or filename in {".", ".."}:
             raise IntakeHold("Memo filename is missing or ambiguous")
-        return self.root / filename
+        return filename
 
     def _ledger_path(self) -> Path:
         return self.root / LEDGER_NAME
@@ -699,7 +741,11 @@ class FaoCommunicationsMemoPortal:
         found: dict[str, MemoRow] = {}
         skipped: list[str] = []
         for memo in memos:
-            delivered = self.ledger.delivery_status(document_id=memo.document_id, filename=memo.filename)
+            delivered = self.ledger.delivery_status(
+                document_id=memo.document_id,
+                filename=memo.filename,
+                processed_on=memo.processed_on,
+            )
             if delivered:
                 skipped.append(memo.document_id)
             rows.append({
@@ -743,18 +789,47 @@ class FaoCommunicationsMemoPortal:
         return str(path)
 
     def finish_fao_pull(self, start: date, end: date) -> dict[str, Any]:
-        """Count gate, then save the Communications list PNG. Mismatch does not save it."""
+        """Write one QA pack per processed date. A count mismatch stays HELD."""
         if self._list_png is None or self._cache_result is None:
             raise IntakeHold("Communications list screenshot is missing or not a PNG")
-        by_date = require_memo_pdf_parity(
-            rows=self._cache_result.rows, ledger=self.ledger, start=start, end=end,
+        held: str | None = None
+        try:
+            by_date = require_memo_pdf_parity(
+                rows=self._cache_result.rows, ledger=self.ledger, start=start, end=end,
+            )
+            status = "PULLED"
+        except IntakeHold as exc:
+            held = str(exc)
+            try:
+                by_date = observed_memo_pdf_counts(
+                    rows=self._cache_result.rows, ledger=self.ledger, start=start, end=end,
+                )
+            except IntakeHold:
+                raise exc from None
+            status = "HELD"
+        screenshots = self.ledger.save_screenshot(start, end, self._list_png)
+        packs = write_progressive_qa_packs(
+            ledger=self.ledger,
+            start=start,
+            end=end,
+            agent_code=self.agent_code,
+            status=status,
+            held=held,
+            by_date=by_date,
+            screenshots=screenshots,
+            rows=self._cache_result.rows,
+            skipped_document_ids=self.skipped_document_ids,
+            screenshot_covers_window=start != end,
         )
-        path = self.ledger.save_screenshot(start, end, self._list_png)
         self.verification = {
             "gate": "memo_rows_equal_pdfs",
             "by_date": [dict(row) for row in by_date],
-            "screenshot": str(path),
+            "screenshot": screenshots.get(start.isoformat()),
+            "screenshots": screenshots,
+            "packs": packs,
         }
+        if held:
+            raise IntakeHold(held)
         return self.verification
 
     def memo(self, document_id: str) -> MemoRow:
@@ -824,7 +899,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pull Progressive FAO Communications memos (Test only)")
     parser.add_argument("--start", required=True, help="Processed date window start, YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="Processed date window end, YYYY-MM-DD")
-    parser.add_argument("--output", required=True, help="Private directory for named PDFs and the ledger")
+    parser.add_argument(
+        "--output",
+        default=str(DEFAULT_QA_ROOT),
+        help="Progressive QA root. One private subfolder per processed date "
+        "(default: hermes-test carrier-pull-qa/progressive)",
+    )
+    parser.add_argument(
+        "--upload-drive",
+        action="store_true",
+        help="Upload that day's QA folder to the Nicole shared Drive. Not implemented; fails closed.",
+    )
     parser.add_argument("--agent-code", default=os.environ.get("PROGRESSIVE_FAO_AGENT_CODE", DEFAULT_AGENT_CODE))
     parser.add_argument("--cdp-url", default=None, help="Loopback CDP URL. Defaults to 127.0.0.1:9222")
     return parser
@@ -833,6 +918,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.Namespace], Any] | None = None) -> int:
     args = build_parser().parse_args(argv)
     closer: Callable[[], None] | None = None
+    portal: FaoCommunicationsMemoPortal | None = None
     try:
         require_test()
         try:
@@ -864,8 +950,12 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
                 "insured_name": memo.insured_name,
                 "reason": memo.reason,
                 "processed_date": memo.processed_on.isoformat(),
-                "path": str(ledger.root / item.filename),
+                "path": str(ledger.pdf_path(memo.processed_on, item.filename)),
             })
+        if args.upload_drive:
+            refuse_progressive_drive_upload(
+                ledger, start=start, end=end, verification=portal.verification,
+            )
         _emit({
             "status": "PULLED",
             "scope": FAO_SCOPE,
@@ -881,7 +971,10 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
         })
         return 0
     except IntakeHold as exc:
-        _emit({"status": "HELD", "reason": str(exc), "ezlynx": "not_run"})
+        payload: dict[str, Any] = {"status": "HELD", "reason": str(exc), "ezlynx": "not_run"}
+        if portal is not None and portal.verification is not None:
+            payload["verification"] = portal.verification
+        _emit(payload)
         return 2
     except Exception as exc:
         _emit({
@@ -913,13 +1006,7 @@ def require_png(blob: bytes | bytearray | None) -> bytes:
     return bytes(blob)
 
 
-def require_memo_pdf_parity(*, rows, ledger: LocalDeliveryLedger, start: date, end: date) -> tuple[dict[str, Any], ...]:
-    """Each processed date in the window must have one verified PDF per Memo row.
-
-    A short download, an extra PDF for that date, or a day inside the window
-    whose page count and file count disagree holds the pull. Nothing is
-    reported as successful when the counts differ.
-    """
+def _memo_ids_by_date(rows, start: date, end: date) -> dict[str, set[str]]:
     grouped: dict[str, set[str]] = {}
     day = start
     while day <= end:
@@ -931,20 +1018,232 @@ def require_memo_pdf_parity(*, rows, ledger: LocalDeliveryLedger, start: date, e
         if processed not in grouped or not document_id or document_id in grouped[processed]:
             raise IntakeHold("Communications memo count does not match downloaded PDFs")
         grouped[processed].add(document_id)
+    return grouped
+
+
+def observed_memo_pdf_counts(*, rows, ledger: LocalDeliveryLedger, start: date, end: date) -> tuple[dict[str, Any], ...]:
+    """Count Memo rows and verified PDFs per date without treating a mismatch as success."""
     evidence: list[dict[str, Any]] = []
-    for processed, ids in grouped.items():
+    for processed, ids in _memo_ids_by_date(rows, start, end).items():
         pdf_ids = set(ledger.pdf_ids_for_date(date.fromisoformat(processed)))
-        if pdf_ids != ids:
-            raise IntakeHold(
-                "Communications memo count does not match downloaded PDFs "
-                f"for {processed}: {len(ids)} memo rows and {len(pdf_ids)} PDFs"
-            )
         evidence.append({
             "processed_date": processed,
             "memo_rows": len(ids),
             "pdfs": len(pdf_ids),
         })
     return tuple(evidence)
+
+
+def require_memo_pdf_parity(*, rows, ledger: LocalDeliveryLedger, start: date, end: date) -> tuple[dict[str, Any], ...]:
+    """Each processed date in the window must have one verified PDF per Memo row.
+
+    A short download, an extra PDF for that date, or a day inside the window
+    whose page count and file count disagree holds the pull. Nothing is
+    reported as successful when the counts differ.
+    """
+    evidence: list[dict[str, Any]] = []
+    for row in observed_memo_pdf_counts(rows=rows, ledger=ledger, start=start, end=end):
+        if row["memo_rows"] != row["pdfs"]:
+            raise IntakeHold(
+                "Communications memo count does not match downloaded PDFs "
+                f"for {row['processed_date']}: {row['memo_rows']} memo rows and {row['pdfs']} PDFs"
+            )
+        evidence.append(row)
+    return tuple(evidence)
+
+
+def write_progressive_qa_packs(
+    *,
+    ledger: LocalDeliveryLedger,
+    start: date,
+    end: date,
+    agent_code: str,
+    status: str,
+    held: str | None,
+    by_date,
+    screenshots: dict[str, str],
+    rows,
+    skipped_document_ids,
+    screenshot_covers_window: bool,
+) -> dict[str, str]:
+    """Write README.md and manifest.json into each processed-date folder."""
+    counts = {str(row["processed_date"]): row for row in by_date}
+    skipped = set(skipped_document_ids)
+    stored = ledger._load()["items"]
+    packs: dict[str, str] = {}
+    day = start
+    while day <= end:
+        key = day.isoformat()
+        folder = ledger.date_dir(day)
+        shot = screenshots.get(key)
+        if not shot:
+            raise IntakeHold("Communications list screenshot is missing or not a PNG")
+        count = counts.get(key) or {"memo_rows": 0, "pdfs": 0}
+        memos = _manifest_memos(rows, stored, skipped, processed=key)
+        covers = f"{start.isoformat()} to {end.isoformat()}" if screenshot_covers_window else key
+        manifest = {
+            "carrier": "progressive",
+            "scope": FAO_SCOPE,
+            "agent_code": agent_code,
+            "processed_date": key,
+            "window": {"start": start.isoformat(), "end": end.isoformat()},
+            "status": status,
+            "gate": "memo_rows_equal_pdfs",
+            "memo_rows": count["memo_rows"],
+            "pdfs": count["pdfs"],
+            "screenshot": Path(shot).name,
+            "screenshot_covers": covers,
+            "screenshot_covers_window": screenshot_covers_window,
+            "memos": memos,
+            "held": held,
+            "ezlynx": "not_run",
+            "drive": _drive_destination(key),
+        }
+        _write_private_file(folder / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n")
+        _write_private_file(folder / "README.md", _qa_readme(manifest, memos).encode("utf-8"))
+        packs[key] = str(folder)
+        day += timedelta(days=1)
+    return packs
+
+
+def refuse_progressive_drive_upload(
+    ledger: LocalDeliveryLedger,
+    *,
+    start: date,
+    end: date,
+    verification: dict[str, Any] | None = None,
+) -> None:
+    """TODO: upload the date folder into the Nicole Progressive Drive. Fail closed."""
+    day = start
+    while day <= end:
+        folder = ledger.date_dir(day)
+        manifest_path = folder / "manifest.json"
+        readme_path = folder / "README.md"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            readme = readme_path.read_text(encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE) from exc
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("drive"), dict):
+            raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+        if "Drive: not_run\n" not in readme:
+            raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+        manifest["drive"]["status"] = "HELD"
+        manifest["drive"]["reason"] = DRIVE_UPLOAD_UNAVAILABLE
+        _write_private_file(
+            manifest_path,
+            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+        )
+        _write_private_file(
+            readme_path,
+            readme.replace("Drive: not_run\n", f"Drive: HELD — {DRIVE_UPLOAD_UNAVAILABLE}\n", 1).encode("utf-8"),
+        )
+        day += timedelta(days=1)
+    if verification is not None:
+        verification["drive_upload"] = "HELD"
+    raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+
+
+def _drive_destination(processed: str) -> dict[str, str]:
+    return {
+        "status": "not_run",
+        "parent_id": DRIVE_QA_PARENT_ID,
+        "folder_id": DRIVE_PROGRESSIVE_FOLDER_ID,
+        "path": f"{DRIVE_QA_FOLDER_NAME}/{processed}/",
+    }
+
+
+def _manifest_memos(rows, stored: dict[str, Any], skipped: set[str], *, processed: str) -> list[dict[str, Any]]:
+    memos: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("processed_or_effective_date") or "") != processed:
+            continue
+        document_id = str(row.get("document_id") or "")
+        entry = stored.get(document_id)
+        present = isinstance(entry, dict) and entry.get("processed_date") == processed
+        if document_id in skipped and present:
+            disposition = "already_present"
+        elif present:
+            disposition = "pulled"
+        else:
+            disposition = "missing"
+        memos.append({
+            "document_id": document_id,
+            "policy_number": row.get("policy_number"),
+            "insured_name": row.get("insured_name"),
+            "reason": row.get("reason"),
+            "filename": row.get("filename"),
+            "sha256": entry.get("sha256") if present else None,
+            "bytes": entry.get("bytes") if present else None,
+            "disposition": disposition,
+        })
+    return memos
+
+
+def _qa_readme(manifest: dict[str, Any], memos: list[dict[str, Any]]) -> str:
+    lines = [
+        f"# Progressive FAO Communications QA — {manifest['processed_date']}",
+        "",
+        "Carrier: progressive",
+        f"Agent: {manifest['agent_code']}",
+        f"Window: {manifest['window']['start']} through {manifest['window']['end']}",
+        f"Status: {manifest['status']}",
+        (
+            "Gate: memo rows on the Communications list equal saved PDFs "
+            f"({manifest['memo_rows']} memo rows, {manifest['pdfs']} PDFs)"
+        ),
+        "",
+        "## Seen",
+    ]
+    if memos:
+        for memo in memos:
+            lines.append(
+                f"- {memo['policy_number']} {memo['insured_name']} — {memo['reason']} "
+                f"({memo['filename']}; {memo['disposition']})"
+            )
+    else:
+        lines.append("- No Memo rows for this processed date.")
+    lines.extend(["", "## Pulled this run"])
+    pulled = [memo for memo in memos if memo["disposition"] == "pulled"]
+    lines.extend([f"- {memo['filename']}" for memo in pulled] or ["- None"])
+    lines.extend(["", "## Already present"])
+    present = [memo for memo in memos if memo["disposition"] == "already_present"]
+    lines.extend([f"- {memo['filename']}" for memo in present] or ["- None"])
+    lines.extend(["", "## Held", manifest["held"] or "None", ""])
+    lines.append(f"Screenshot: {manifest['screenshot']}")
+    if manifest["screenshot_covers_window"]:
+        lines.append(
+            "This PNG is the Communications list for the whole window, copied into this date folder. "
+            "It is not a separate single-day capture."
+        )
+    lines.extend([
+        "",
+        "EZLynx: not_run",
+        "Drive: not_run",
+        f"Drive destination: {manifest['drive']['path']}",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _write_private_file(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.exists() or temporary.is_symlink():
+        raise IntakeHold("Existing memo file conflicts with the pull ledger")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    os.chmod(path, 0o600)
 
 
 def _emit(payload: dict[str, Any]) -> None:

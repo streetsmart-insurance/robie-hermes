@@ -17,12 +17,16 @@ from robie_job_engine.locator_registry import LocatorRegistry
 from robie_job_engine.playwright_write_guard import locator_is_positional_guess
 from robie_job_engine.progressive_fao_memo import (
     DEFAULT_AGENT_CODE,
+    DEFAULT_QA_ROOT,
+    DRIVE_PROGRESSIVE_FOLDER_ID,
+    DRIVE_QA_PARENT_ID,
     FaoCommunicationsMemoPortal,
     LocalDeliveryLedger,
     MemoGrid,
     MemoOpenObservation,
     PagePdfView,
     PlaywrightFaoMemoBrowser,
+    build_parser,
     classify_memo_row,
     collect_memo_observation,
     main,
@@ -361,15 +365,32 @@ class PullTests(unittest.TestCase):
         self.assertEqual(self.browser.loads, 1)
         self.assertEqual(self.browser.shots, 1)
         self.assertEqual(len(self.browser.captures), 4)
-        shot = self.output / "fao-communications-memo-2026-09-25.png"
+        day = self.output / "2026-09-25"
+        shot = day / "fao-communications-memo-2026-09-25.png"
         self.assertEqual(shot.read_bytes(), LIST_PNG)
         self.assertEqual(shot.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.portal.verification["by_date"], [{
             "processed_date": "2026-09-25", "memo_rows": 4, "pdfs": 4,
         }])
+        manifest = json.loads((day / "manifest.json").read_text(encoding="utf-8"))
+        readme = (day / "README.md").read_text(encoding="utf-8")
+        self.assertEqual(manifest["carrier"], "progressive")
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["memo_rows"], 4)
+        self.assertEqual(len(manifest["memos"]), 4)
+        self.assertEqual(manifest["drive"]["status"], "not_run")
+        self.assertEqual(manifest["drive"]["parent_id"], DRIVE_QA_PARENT_ID)
+        self.assertEqual(manifest["drive"]["folder_id"], DRIVE_PROGRESSIVE_FOLDER_ID)
+        self.assertIn("860521214", readme)
+        self.assertIn("Status: PULLED", readme)
+        self.assertIn("## Pulled this run", readme)
+        self.assertEqual((day / "manifest.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((day / "README.md").stat().st_mode & 0o777, 0o600)
+        self.assertTrue((self.output / "fao-memo-ledger.json").is_file())
+        self.assertFalse((day / "fao-memo-ledger.json").exists())
         self.assertEqual(self.api.writes, 0)
         for item in items:
-            named = self.output / item.filename
+            named = day / item.filename
             self.assertEqual(named.read_bytes(), item.content)
             self.assertEqual(named.stat().st_mode & 0o777, 0o600)
             self.assertTrue((self.output / "sources").is_dir())
@@ -381,7 +402,10 @@ class PullTests(unittest.TestCase):
         self.assertEqual(second, ())
         self.assertEqual(replay_browser.captures, [])
         self.assertEqual(replay.verification["by_date"][0]["pdfs"], 4)
-        self.assertEqual(list(self.output.glob("fao-communications-memo-*.png")), [shot])
+        self.assertEqual(list(day.glob("fao-communications-memo-*.png")), [shot])
+        replay_readme = (day / "README.md").read_text(encoding="utf-8")
+        self.assertIn("## Already present", replay_readme)
+        self.assertIn("860521214 Progressive Memo General.pdf", replay_readme)
         self.assertEqual(replay.skipped_document_ids, tuple(memo.document_id for memo in self.memos))
 
     def test_other_scopes_and_bad_windows_do_not_download(self):
@@ -413,8 +437,7 @@ class PullTests(unittest.TestCase):
 
     def test_conflicting_local_file_is_kept_and_not_replaced(self):
         filename = EXPECTED_NAMES[0]
-        self.ledger.ensure_private()
-        path = self.output / filename
+        path = self.ledger.date_dir(PROVE_DAY) / filename
         path.write_bytes(pdf_bytes(b"different"))
         with self.assertRaisesRegex(IntakeHold, "conflicts"):
             self.worker.pull_fao_communications(self.portal, start=PROVE_DAY, end=PROVE_DAY)
@@ -449,6 +472,8 @@ class PullTests(unittest.TestCase):
         self.assertEqual(payload["verification"]["gate"], "memo_rows_equal_pdfs")
         self.assertEqual(payload["verification"]["by_date"][0]["memo_rows"], 4)
         self.assertTrue(payload["verification"]["screenshot"].endswith("fao-communications-memo-2026-09-25.png"))
+        self.assertTrue(payload["downloaded"][0]["path"].endswith("2026-09-25/" + EXPECTED_NAMES[0]))
+        self.assertIn("2026-09-25", payload["verification"]["packs"])
 
         called = []
         stdout.seek(0)
@@ -469,7 +494,7 @@ class PullTests(unittest.TestCase):
         self.assertEqual(self.browser.captures, [])
         self.assertEqual(list(self.output.glob("*.png")), [])
 
-    def test_count_mismatch_does_not_save_the_screenshot_or_claim_success(self):
+    def test_count_mismatch_writes_a_held_pack_and_does_not_claim_success(self):
         class ShortLedger(LocalDeliveryLedger):
             def pdf_ids_for_date(self, day):
                 found = super().pdf_ids_for_date(day)
@@ -479,9 +504,17 @@ class PullTests(unittest.TestCase):
         portal = FaoCommunicationsMemoPortal(self.browser, ledger)
         with self.assertRaisesRegex(IntakeHold, "4 memo rows and 3 PDFs"):
             self.worker.pull_fao_communications(portal, start=PROVE_DAY, end=PROVE_DAY)
-        self.assertEqual(list(self.output.glob("*.png")), [])
+        day = self.output / "2026-09-25"
+        self.assertEqual((day / "fao-communications-memo-2026-09-25.png").read_bytes(), LIST_PNG)
+        manifest = json.loads((day / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "HELD")
+        self.assertEqual(manifest["memo_rows"], 4)
+        self.assertEqual(manifest["pdfs"], 3)
+        self.assertIn("4 memo rows and 3 PDFs", manifest["held"])
+        self.assertIn("Status: HELD", (day / "README.md").read_text(encoding="utf-8"))
         self.assertEqual(len(self.browser.captures), 4)
-        self.assertTrue((self.output / EXPECTED_NAMES[0]).is_file())
+        self.assertTrue((day / EXPECTED_NAMES[0]).is_file())
+        self.assertIsNotNone(portal.verification)
 
     def test_empty_communications_list_still_saves_a_zero_count_screenshot(self):
         browser = ScriptedBrowser(MemoGrid(LIST_URL, HEADERS, (), (), False), {})
@@ -491,7 +524,11 @@ class PullTests(unittest.TestCase):
         self.assertEqual(portal.verification["by_date"], [{
             "processed_date": "2026-09-25", "memo_rows": 0, "pdfs": 0,
         }])
-        self.assertEqual((self.output / "fao-communications-memo-2026-09-25.png").read_bytes(), LIST_PNG)
+        day = self.output / "2026-09-25"
+        self.assertEqual((day / "fao-communications-memo-2026-09-25.png").read_bytes(), LIST_PNG)
+        manifest = json.loads((day / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["memos"], [])
 
     def test_parity_rejects_a_short_or_extra_pdf_count(self):
         rows = [
@@ -534,6 +571,59 @@ class PullTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(called, [])
         self.assertIn("32 inclusive", json.loads(stdout.getvalue())["reason"])
+        self.assertFalse(self.output.exists())
+
+    def test_default_output_is_the_hermes_qa_root_and_does_not_create_it(self):
+        existed = DEFAULT_QA_ROOT.exists()
+        args = build_parser().parse_args(["--start", "2026-09-25", "--end", "2026-09-25"])
+        self.assertEqual(Path(args.output), DEFAULT_QA_ROOT)
+        self.assertFalse(args.upload_drive)
+        self.assertEqual(DEFAULT_QA_ROOT.exists(), existed)
+
+    def test_each_processed_date_gets_its_own_qa_pack(self):
+        rows = (
+            ("860521214", "3JR Contracting LLC", "General", "Memo", "09/25/2026", "Memo"),
+            ("879512352", "ALTI TRANSPORT LLC", "Policy Verific.", "Memo", "09/26/2026", "Memo"),
+        )
+        grid = MemoGrid(LIST_URL, HEADERS, rows, (1, 1), False)
+        memos = parse_memo_grid(grid, agent_code=DEFAULT_AGENT_CODE)
+        pdfs = {memo.document_id: pdf_bytes(memo.policy_number.encode()) for memo in memos}
+        browser = ScriptedBrowser(grid, pdfs)
+        portal = FaoCommunicationsMemoPortal(browser, self.ledger)
+        items = self.worker.pull_fao_communications(portal, start=PROVE_DAY, end=date(2026, 9, 26))
+        self.assertEqual(len(items), 2)
+        for day, policy in (("2026-09-25", "860521214"), ("2026-09-26", "879512352")):
+            folder = self.output / day
+            self.assertEqual((folder / f"fao-communications-memo-{day}.png").read_bytes(), LIST_PNG)
+            manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "PULLED")
+            self.assertTrue(manifest["screenshot_covers_window"])
+            self.assertEqual(manifest["window"], {"end": "2026-09-26", "start": "2026-09-25"})
+            self.assertEqual([memo["policy_number"] for memo in manifest["memos"]], [policy])
+            self.assertIn("whole window", (folder / "README.md").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["drive"]["path"], f"Robie Carrier Pull QA (Nicole)/Progressive/{day}/")
+        self.assertTrue((self.output / "fao-memo-ledger.json").is_file())
+
+    def test_upload_drive_writes_the_local_pack_then_fails_closed(self):
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            code = main(
+                ["--start", "2026-09-25", "--end", "2026-09-25", "--output", str(self.output), "--upload-drive"],
+                browser_factory=lambda args: self.browser,
+            )
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "HELD")
+        self.assertIn("not available", payload["reason"])
+        self.assertEqual(payload["verification"]["drive_upload"], "HELD")
+        self.assertEqual(payload["verification"]["by_date"][0]["pdfs"], 4)
+        day = self.output / "2026-09-25"
+        manifest = json.loads((day / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["drive"]["status"], "HELD")
+        self.assertEqual(manifest["drive"]["folder_id"], DRIVE_PROGRESSIVE_FOLDER_ID)
+        self.assertIn("refusing to report the pack as uploaded", (day / "README.md").read_text(encoding="utf-8"))
+        self.assertTrue((day / EXPECTED_NAMES[0]).is_file())
 
 
 class LocatorContractTests(unittest.TestCase):
@@ -575,6 +665,8 @@ class LocatorContractTests(unittest.TestCase):
             "create_task_once",
             "DocumentApi",
             "DiscussionApi",
+            "googleapiclient",
+            "GoogleDriveUploader",
         ):
             self.assertNotIn(banned, text)
 

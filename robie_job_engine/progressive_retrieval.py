@@ -72,7 +72,7 @@ class ProgressiveRetrieval(IntakeWorker):
             downloaded.append(source)
         finish = getattr(portal, "finish_fao_pull", None)
         if callable(finish):
-            # FAO portal holds unless Memo rows equal saved PDFs, then stores the list PNG.
+            # FAO portal writes one QA pack per date, then holds if the counts disagree.
             finish(start, end)
         return tuple(downloaded)
 
