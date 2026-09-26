@@ -20,6 +20,38 @@ class Safety(unittest.TestCase):
     def test_existing_posted_exact_groups_not_new_proposal(self):
         s=scenario();s['bank_deposits']=[{'id':'QBO-DEP-SYN-A','date':'2026-09-24','amount':'100.00','groups':['SYN-JE-A']}];s['ledger'][0]['deposited_in']='SYN-A'
         f=run(s);self.assertEqual('already_posted',f.bucket);self.assertIsNone(f.proposed_deposit)
+    def test_existing_posted_without_note_check_needs_source_review(self):
+        s=scenario();s['payouts'][0]['lines'][0].pop('ezlynx_note_check')
+        s['bank_deposits']=[{'id':'QBO-DEP-SYN-A','date':'2026-09-24','amount':'100.00','groups':['SYN-JE-A']}]
+        s['ledger'][0]['deposited_in']='SYN-A'
+        f=run(s)
+        self.assertEqual('already_posted_needs_review',f.bucket)
+        self.assertEqual('QBO-DEP-SYN-A',f.bank['id'])
+        self.assertEqual('SYN-JE-A',f.lines[0]['je']['je_id'])
+        self.assertIsNone(f.proposed_deposit)
+        self.assertIn('source-bound', ' '.join(f.reasons))
+    def test_missing_note_without_matching_deposit_remains_unmatched(self):
+        s=scenario();s['payouts'][0]['lines'][0].pop('ezlynx_note_check')
+        s['bank_deposits']=[{'id':'QBO-DEP-SYN-X','date':'2026-09-24','amount':'100.00','groups':['SYN-UNRELATED']}]
+        f=run(s);self.assertEqual('unmatched',f.bucket);self.assertIsNone(f.proposed_deposit)
+    def test_missing_note_no_deposit_never_proposes_even_with_bank_proof(self):
+        s=scenario();s['payouts'][0]['lines'][0].pop('ezlynx_note_check')
+        s['cleared_bank_deposits']=[{'id':'SYN-BANK-A','date':'2026-09-24','amount':'100.00','account':'10002 Trust Checking WF (3021)','status':'cleared','verified_payout_ref':'SYN-PAYOUT-A','verification_source':'bank_record','bank_transaction_id':'SYN-BANK-TXN-A'}]
+        f=run(s);self.assertEqual('waiting_approval',f.bucket);self.assertIsNone(f.proposed_deposit)
+    def test_missing_note_does_not_hide_ambiguous_grouped_jes(self):
+        s=scenario();s['payouts'][0]['lines'][0].pop('ezlynx_note_check')
+        s['payouts'][0]['net']='200.00'
+        s['payouts'][0]['lines'].append(copy.deepcopy(s['payouts'][0]['lines'][0]))
+        s['ledger'].append(dict(s['ledger'][0],je_id='SYN-JE-B',receipt_no='SYN-RECEIPT-B',deposited_in='SYN-A'))
+        s['ledger'][0]['deposited_in']='SYN-A'
+        s['bank_deposits']=[{'id':'QBO-DEP-SYN-A','date':'2026-09-24','amount':'200.00','groups':['SYN-JE-A','SYN-JE-B']}]
+        f=run(s);self.assertEqual('unmatched',f.bucket);self.assertIsNone(f.proposed_deposit)
+    def test_missing_note_never_bypasses_fee_components(self):
+        s=scenario();s['payouts'][0]['lines'][0].pop('ezlynx_note_check')
+        s['payouts'][0]['lines'][0]['fee_components']=[{'type':'agency_fee','amount':'10.00'}]
+        s['bank_deposits']=[{'id':'QBO-DEP-SYN-A','date':'2026-09-24','amount':'100.00','groups':['SYN-JE-A']}]
+        s['ledger'][0]['deposited_in']='SYN-A'
+        f=run(s);self.assertEqual('unmatched',f.bucket);self.assertIsNone(f.proposed_deposit)
     def test_cleared_external_bank_without_qbo_deposit_can_propose(self):
         s=scenario();s['payouts'][0]['status']='reconciled';checked_note(s,'Premium payment');s['cleared_bank_deposits']=[{'id':'SYN-BANK-A','date':'2026-09-24','amount':'100.00','account':'10002 Trust Checking WF (3021)','status':'cleared','verified_payout_ref':'SYN-PAYOUT-A','verification_source':'bank_record','bank_transaction_id':'SYN-BANK-TXN-A'}]
         f=run(s);self.assertEqual('ready',f.bucket);self.assertTrue(f.proposed_deposit['ties'])

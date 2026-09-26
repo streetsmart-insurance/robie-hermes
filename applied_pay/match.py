@@ -5,6 +5,8 @@ EZLynx, QBO or the bank and never posts anything. It proposes Bank Deposits and
 reports every line into one of six buckets:
   ready            - cleared bank record and all lines matched; unposted proposal built
   already_posted   - existing QBO deposit groups precisely the matched JEs
+  already_posted_needs_review - exact QBO group mapped by amount/customer,
+                       but PSP-bound EZLynx notes are missing
   scheduled_unlanded - matched settlement email, no verified cleared bank record yet
   waiting_approval - matched, but needs a person (alias, wash, reduction w/o rule...)
   unmatched        - stop: reason given, never guessed
@@ -260,6 +262,48 @@ class Matcher:
                 f.reasons.append(f"{je['receipt_no']} already grouped in QBO deposit {deposited} - would double count")
                 l["status"] = "stop"
 
+    def _posted_without_note_check(self, posted, counted, pdate):
+        """Find an existing QBO deposit's exact JE group, never approve a new posting.
+
+        No fee/payable claim can be made without PSP-bound EZLynx notes. This
+        path is only a provisional *already posted* classification, and refuses
+        any ambiguous mapping, fee split, reduction, or previously used JE.
+        """
+        if len(posted) != 1 or not counted or any(
+            l["line"]["type"] != "sale" or l["status"] != "needs_approval" or
+            l.get("je") or l["line"].get("fee_components") or
+            not any("EZLynx notes not checked and bound" in n for n in l["notes"])
+            for l in counted
+        ):
+            return None
+        bank = posted[0]
+        groups = [str(g) for g in bank.get("groups", [])]
+        if len(groups) != len(counted) or len(set(groups)) != len(groups):
+            return None
+        by_id = {str(j["je_id"]): j for j in self.ledger if str(j["je_id"]) in groups}
+        if len(by_id) != len(groups):
+            return None
+        matches = []
+        for l in counted:
+            candidates = [j for j in by_id.values()
+                if str(j["je_id"]) not in self.used_je
+                and j["kind"] == "receipt"
+                and j.get("bank_account") == UNDEPOSITED
+                and str(j.get("deposited_in")) in (str(bank["id"]), str(bank["id"]).removeprefix("QBO-DEP-"))
+                and D(j["amount"]) == D(l["line"]["amount"])
+                and pdate - timedelta(days=RECEIPT_LOOKBACK_DAYS) <= d(j["date"]) <= pdate
+                and self._name_ok(l["line"], j)[0]]
+            if not candidates:
+                return None
+            matches.append(candidates)
+        assignments = []
+        for choice in itertools.product(*matches):
+            if len({str(j["je_id"]) for j in choice}) == len(groups):
+                assignments.append(choice)
+                if len(assignments) > 1:
+                    return None  # same-amount duplicates must never be guessed
+        return (bank, assignments[0]) if len(assignments) == 1 else None
+
     # ---- payouts ------------------------------------------------------------
     def run(self):
         findings = []
@@ -293,11 +337,23 @@ class Matcher:
             posted = self._bank_candidates(self.bank, net, pdate)
             selected_ids = {str(l["je"]["je_id"]) for l in counted if l.get("je")}
             existing_exact = len(posted) == 1 and len(selected_ids) == len(counted) and self._group_ids(posted[0]) == selected_ids
+            provisional_posted = None
+            if not existing_exact and line_sum == net:
+                provisional_posted = self._posted_without_note_check(posted, counted, pdate)
+            if provisional_posted:
+                bank, assigned = provisional_posted
+                for line, je in zip(counted, assigned):
+                    line["je"] = je
+                    line["notes"].append(f"existing deposit groups receipt {je['receipt_no']} by amount and customer; PSP/EZLynx note binding unverified")
+                    self.used_je.add(str(je["je_id"]))
+                f.bank = bank
+                self.used_bank.add(bank["id"])
+                f.reasons.append("existing QBO deposit groups exactly the amount/customer-matched JEs; needs source-bound PSP and EZLynx note review, not bank-clearing proof")
             if existing_exact:
                 f.bank = posted[0]
                 self.used_bank.add(f.bank["id"])
                 f.reasons.append("existing QBO deposit groups exactly these receipt/reversal JEs; already posted, not a new proposal")
-            elif posted:
+            elif posted and not provisional_posted:
                 f.reasons.append("existing QBO 3021 deposit has same date/amount but grouped JE IDs do not match exactly (or ambiguous deposit); stop")
             cleared = self._cleared_candidates(net, pdate, p["ref"])
             if not existing_exact and not posted and len(cleared) == 1:
@@ -312,9 +368,12 @@ class Matcher:
             self._already_grouped(f)
             stops = [l for l in counted if l["status"] == "stop"]
             approvals = [l for l in counted if l["status"] == "needs_approval"]
-            if stops or line_sum != net or (posted and not existing_exact) or len(cleared) > 1:
+            if stops or line_sum != net or (posted and not existing_exact and not provisional_posted) or len(cleared) > 1:
                 f.bucket = "unmatched"
                 f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in stops]
+            elif provisional_posted:
+                f.bucket = "already_posted_needs_review"
+                f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in approvals]
             elif existing_exact:
                 f.bucket = "already_posted" if not approvals and not any(r.startswith("wash") for r in f.reasons) else "waiting_approval"
                 f.reasons += [f"{l['line'].get('business') or l['line'].get('payer')} {l['line']['amount']}: {'; '.join(l['notes'])}" for l in approvals]
@@ -338,6 +397,7 @@ class Matcher:
 def report(findings) -> str:
     order = [("ready", "Matched + ready (proposed deposits, not posted)"), ("waiting_approval", "Matched - waiting approval"),
              ("already_posted", "Already posted in QBO (no new proposal)"),
+             ("already_posted_needs_review", "Existing QBO deposit - needs source-bound review (no new proposal)"),
              ("scheduled_unlanded", "Scheduled / bank not verified cleared"),
              ("unmatched", "Unmatched (stop - reason)"), ("past_cutoff", "Past cutoff")]
     out = []
