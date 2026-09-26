@@ -26,6 +26,7 @@ from robie_job_engine.progressive_fao_memo import (
     MemoOpenObservation,
     PagePdfView,
     PlaywrightFaoMemoBrowser,
+    assert_agent_context,
     build_parser,
     classify_memo_row,
     collect_memo_observation,
@@ -1011,6 +1012,62 @@ def _pdf_tab(token: bytes):
     )
 
 
+class _BodyPage:
+    def __init__(self, body: str):
+        self._body = body
+
+    def locator(self, selector):
+        if selector != "body":
+            raise AssertionError(selector)
+        return SimpleNamespace(inner_text=lambda: self._body)
+
+
+class AgentContextTests(unittest.TestCase):
+    def test_ca33617_alone_is_accepted(self):
+        assert_agent_context(_BodyPage("StreetSmart Risk Mgr CA33617"), DEFAULT_AGENT_CODE)
+
+    def test_parenthesized_agency_and_login_id_are_the_same_agent(self):
+        bodies = (
+            "Streetsmart Risk Mgr (33617)",
+            "Welcome, Carlo Ferrara\n33617c",
+            "Streetsmart Risk Mgr (33617)\nWelcome, Carlo Ferrara\n33617c",
+            "33617",
+            "CA33617 (33617) 33617c",
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                assert_agent_context(_BodyPage(body), DEFAULT_AGENT_CODE)
+
+    def test_empty_or_unrecognized_body_holds(self):
+        for body in ("", "Welcome, Carlo Ferrara", "   "):
+            with self.subTest(body=body):
+                with self.assertRaisesRegex(IntakeHold, "agent context is missing or ambiguous"):
+                    assert_agent_context(_BodyPage(body), DEFAULT_AGENT_CODE)
+
+    def test_multiple_distinct_agencies_hold(self):
+        bodies = (
+            "CA33617 CA11111",
+            "Streetsmart Risk Mgr (33617) CA11111",
+            "(33617) (11111)",
+            "33617c 99999c",
+            "CA33617 (11111)",
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                with self.assertRaisesRegex(IntakeHold, "agent context is missing or ambiguous"):
+                    assert_agent_context(_BodyPage(body), DEFAULT_AGENT_CODE)
+
+    def test_street_smart_display_does_not_satisfy_a_different_agent(self):
+        with self.assertRaisesRegex(IntakeHold, "agent context is missing or ambiguous"):
+            assert_agent_context(_BodyPage("Streetsmart Risk Mgr (33617) 33617c"), "CA11111")
+
+    def test_unrelated_bare_five_digit_token_is_not_a_second_agency(self):
+        assert_agent_context(
+            _BodyPage("Streetsmart Risk Mgr (33617)\nTampa FL 90210"),
+            DEFAULT_AGENT_CODE,
+        )
+
+
 class NavigationTests(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {"ROBIE_ENV": "TEST"})
@@ -1037,6 +1094,13 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(page.memo_opens, ["879512352"])
         self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity", "Search", "Communications", "Memo"])
         self.assertFalse(page.closed)
+
+    def test_live_home_agency_display_without_ca_prefix_reaches_communications(self):
+        page = NavPage(body="Streetsmart Risk Mgr (33617)\nWelcome, Carlo Ferrara\n33617c")
+        browser = PlaywrightFaoMemoBrowser(page)
+        grid = browser.load_communications(start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE)
+        self.assertEqual(len(grid.rows), 2)
+        self.assertIn("Search", page.clicks)
 
     def test_login_password_wrong_agent_and_ambiguous_controls_do_not_search(self):
         cases = (
