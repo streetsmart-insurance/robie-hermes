@@ -394,3 +394,46 @@ def test_e2e_vendor_doc_update_with_coi_still_holds():
     assert result.requested_action == ACTION_UNKNOWN
     assert result.status == HOLD
     assert result.applicant_id is None
+
+
+def test_body_coi_word_is_new_request():
+    # FIX 2 (body side, Carlo 2026-09-26): a word-boundary "coi" in the BODY
+    # is itself a request signal when the subject carries no signal.
+    assert classify_requested_action(
+        "Quarterly update", "COI",
+        sender="client@example.com") == ACTION_NEW_REQUEST
+    assert classify_requested_action(
+        "Request", "Can you issue a coi naming ABC Corp as holder?",
+        sender="client@example.com") == ACTION_NEW_REQUEST
+    assert classify_requested_action(
+        "Hi", "We need the coi renewed before Friday.",
+        sender="client@example.com") == ACTION_NEW_REQUEST
+    # intake agrees: coi in the body sets requested_action.
+    e = _email(frm="client@example.com", subject="Quarterly update",
+               body="Can you issue a coi naming ABC Corp as holder?")
+    assert extract_request_facts(e).requested_action == "certificate_request"
+
+
+def test_body_coi_provided_language_stays_not_request():
+    # "Attached COI" states the certificate is SENT, not requested.
+    assert classify_requested_action(
+        "FYI", "Please see attached COI for your file.",
+        sender="client@example.com") == ACTION_UNKNOWN
+    assert classify_requested_action(
+        "Docs", "Enclosed is the coi you asked about.",
+        sender="client@example.com") == ACTION_UNKNOWN
+
+
+def test_body_coi_vendor_and_autoreply_stay_held():
+    # Vendor compliance mail with coi in the body stays held.
+    assert classify_requested_action(
+        "Compliance", "Please upload your coi to the vendor portal.",
+        sender="prequal@profilegorilla.com") == ACTION_UNKNOWN
+    # Auto-reply/bounce body language with coi stays an auto-reply.
+    assert classify_requested_action(
+        "Re: COI", "This is an automated response. Do not reply. Your coi request was received.",
+        sender="mailer@example.com") == ACTION_AUTOREPLY
+    # Bounce subject quoting a coi body never becomes a request.
+    assert classify_requested_action(
+        "Undeliverable email: COI", "Delivery has failed. The coi could not be sent.",
+        sender="postmaster@example.com") == ACTION_AUTOREPLY

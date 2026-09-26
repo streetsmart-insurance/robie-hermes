@@ -163,6 +163,13 @@ _VENDOR_COI_UPDATE_RE = re.compile(
     r"vendor\s+portal|upload\s+your\b.{0,40}\b(coi|certificate)\b)\b"
 )
 
+# "Attached/enclosed COI" language states the certificate is PROVIDED, not
+# requested — it must never flip into a request via the coi-in-body rule.
+_COI_PROVIDED_RE = re.compile(
+    r"(?i)\b(attached|enclosed|here\s+is\s+the|please\s+find)\b"
+    r".{0,30}\b(coi|certificate)\b"
+)
+
 
 def _subject_is_request_shape(subject: str) -> bool:
     if not _CERT_SUBJECT_RE.search(subject or ""):
@@ -207,6 +214,34 @@ def _subject_is_coi_request(subject: str, sender: str | None = None) -> bool:
     return True
 
 
+def _body_is_coi_request(body: str, sender: str | None = None) -> bool:
+    """True when a word-boundary "coi" in the BODY signals a request.
+
+    Mirrors the subject-side rule (Carlo 2026-09-26): a terse body that just
+    says "COI", or "issue a coi naming X as holder", is a genuine certificate
+    request even when no other request language appears. Exclusions, in
+    order of danger:
+
+    - provided language ("attached/enclosed COI") states the certificate is
+      being SENT, not requested;
+    - vendor compliance platforms (myCOI/Certificial/ProfileGorilla,
+      vendor-portal update language) send automated document updates;
+    - auto-reply/bounce body language is never a request.
+    """
+    b = body or ""
+    if not _COI_WORD_RE.search(b):
+        return False
+    if _COI_PROVIDED_RE.search(b):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(b):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(sender or ""):
+        return False
+    if any(p.search(b) for p in _AUTOREPLY_PATTERNS):
+        return False
+    return True
+
+
 def _sender_is_autoresponder(sender: str | None) -> bool:
     local = (sender or "").split("@", 1)[0].lower()
     return any(token in local for token in _AUTOREPLY_SENDERS)
@@ -231,7 +266,11 @@ def classify_requested_action(subject: str, body: str,
     failure notice quoting a request subject never classifies as a request.
     A word-boundary "coi" in the subject is itself a request signal
     ("COI request", "New COI", "Coi needed") unless it is a statement
-    ("COI received"), an auto-reply, or vendor compliance mail.
+    ("COI received"), an auto-reply, or vendor compliance mail. The same
+    word-boundary rule applies to the body: a terse body that just says
+    "COI", or "issue a coi naming X as holder", is a request — unless the
+    body states the COI is provided ("attached"), reports a bounce, or is
+    vendor compliance mail.
     """
     # A bounce quoting the original subject is definitive: it never issues
     # a genuine request, even when the quoted tail names a certificate.
@@ -253,7 +292,8 @@ def classify_requested_action(subject: str, body: str,
     if (any(p.search(text) for p in _NEW_REQUEST_PATTERNS)
             or _subject_is_request_shape(subject)
             or _subject_is_bare_coi(subject)
-            or _subject_is_coi_request(subject, sender)):
+            or _subject_is_coi_request(subject, sender)
+            or _body_is_coi_request(body_text, sender)):
         return ACTION_NEW_REQUEST
     return ACTION_UNKNOWN
 
