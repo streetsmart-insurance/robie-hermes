@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from robie_job_engine import ascend_sync
 from robie_job_engine.ascend_sync import (
     AscendApiClient,
     AscendCancellationEvent,
@@ -642,3 +645,32 @@ class TestAscendEZLynxSyncManager(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSendGoogleChatAlertWebhook(unittest.TestCase):
+    """M4: the ascend_sync webhook is a documented exception to the Chat
+    single-identity rule — explicit target only, no identity fallback."""
+
+    def test_no_webhook_url_configured_posts_nothing(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", None)
+            with patch(
+                "robie_job_engine.ascend_sync.request.urlopen"
+            ) as mock_urlopen:
+                self.assertFalse(ascend_sync.send_google_chat_alert("hello"))
+        mock_urlopen.assert_not_called()
+
+    def test_configured_webhook_posts_to_that_url_only(self) -> None:
+        url = "https://chat.googleapis.com/v1/spaces/AAA/webhooks/secret"
+        with patch.dict(os.environ, {"ROBIE_GOOGLE_CHAT_WEBHOOK_URL": url}):
+            with patch(
+                "robie_job_engine.ascend_sync.request.urlopen"
+            ) as mock_urlopen:
+                resp = MagicMock()
+                resp.status = 200
+                mock_urlopen.return_value.__enter__.return_value = resp
+                self.assertTrue(ascend_sync.send_google_chat_alert("hello"))
+        (req,), _kwargs = mock_urlopen.call_args
+        self.assertEqual(req.full_url, url)
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(payload, {"text": "hello"})

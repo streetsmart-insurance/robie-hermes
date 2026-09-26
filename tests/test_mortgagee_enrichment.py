@@ -655,6 +655,96 @@ class TestReadyLenderChecks:
         assert "verify_lender=pass" in detail
         assert target == "Alpha"
 
+    def test_of_record_mismatch_blocks_delivery(self):
+        """Carlo's rule: lender-of-record mismatch = flag pending, never
+        upload to the wrong lender. A performed portal lookup that
+        disagrees must BLOCK, not ride through as 'waiting' with lender
+        inputs verified. Discriminates: old code returned 'waiting' here."""
+        result = _ready_result()
+        mismatch_lookup = {
+            "loan_number": "A-1",
+            "servicer": "Completely Different Bank",
+        }
+        kind, detail, target, status, reason = menc.plan_from_enrichment(
+            result,
+            due_txt="task due 2026-10-15",
+            property_zip="08527",
+            portal_lookup=mismatch_lookup,
+            producer_state={"producer_review_complete": True},
+        )
+        assert status == "blocked"
+        assert target == "HITL"
+        assert "mismatch" in reason.casefold()
+        assert "do NOT" in detail or "do not" in detail.casefold()
+        # every check must record that the of-record check really ran
+        checks = menc.check_ready_mortgages(
+            result.mortgages, property_zip="08527", portal_lookup=mismatch_lookup,
+        )
+        assert all(c.of_record_attempted for c in checks)
+
+    def test_of_record_mismatch_on_loan_number_blocks_delivery(self):
+        """Same rule via the loan# leg: row and portal disagree on the
+        loan number itself."""
+        result = _ready_result()
+        mismatch_lookup = {
+            "loan_number": "ZZ-999",
+            "servicer": "Alpha",
+        }
+        _kind, _detail, target, status, reason = menc.plan_from_enrichment(
+            result,
+            due_txt="task due 2026-10-15",
+            property_zip="08527",
+            portal_lookup=mismatch_lookup,
+            producer_state={"producer_review_complete": True},
+        )
+        assert status == "blocked"
+        assert target == "HITL"
+        assert "mismatch" in reason.casefold()
+
+    def test_of_record_confirmed_does_not_block(self):
+        """Control: a performed lookup that CONFIRMS the lender must not
+        block - proves the gate above fires on mismatch, not on any
+        attempted lookup. Single-mortgage policy: the lookup covers the
+        only loan on file. (A lookup for one loan on a multi-loan policy
+        flags the other loans pending - fail-closed by design.)"""
+        result = menc.EnrichmentResult(
+            policy_number="HO-1",
+            applicant_id="220250093",
+            status=menc.STATUS_READY,
+            reason="enriched 1 mortgage(s)",
+            dry_run=True,
+            mortgages=[menc.MortgageRecord("Alpha", "A-1", "agreed")],
+            property_zip="08527",
+        )
+        confirm_lookup = {
+            "loan_number": "A-1",
+            "servicer": "Alpha",
+        }
+        _kind, _detail, _target, status, reason = menc.plan_from_enrichment(
+            result,
+            due_txt="task due 2026-10-15",
+            property_zip="08527",
+            portal_lookup=confirm_lookup,
+            producer_state={"producer_review_complete": True},
+        )
+        assert status == "waiting"
+        assert "lender inputs verified" in reason
+
+    def test_of_record_not_performed_stays_recorded_only(self):
+        """Control: no portal lookup yet (portal step unwired) keeps the
+        old recorded-only behavior - 'not performed' is not a mismatch."""
+        result = _ready_result()
+        _kind, detail, _target, status, reason = menc.plan_from_enrichment(
+            result,
+            due_txt="task due 2026-10-15",
+            property_zip="08527",
+            portal_lookup=None,
+            producer_state={"producer_review_complete": True},
+        )
+        assert status == "waiting"
+        assert "lender inputs verified" in reason
+        assert "not yet verified" in detail or "not performed" in detail
+
     def test_conflict_hitl_does_not_call_verify_lender(self):
         def boom(*_args, **_kwargs):
             raise AssertionError("verify_lender must not run on HITL")

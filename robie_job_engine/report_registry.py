@@ -28,6 +28,10 @@ FactKind = Literal["observed", "configured", "inferred", "user_supplied"]
 # there is no "ROBIE Intake" Custom Filter Set on that look.
 MORTGAGEE_4372_SCOPE_MARKER = "Mortgagee Verification Queue - ROBIE"
 
+# Look 4602 title / Gmail display name. Scope marker for report 4359.
+# There is no separate "Open Requests - ROBIE" Custom Filter Set.
+POLICY_CHANGE_4359_SCOPE_MARKER = "Policy Change Request Confirmation Queue - ROBIE"
+
 # Shared Looker look ids (agency SharedReports-Streetsmart Insurance-36748).
 # These are Looker look ids, not EZLynx saved-report numbers. SSRobie Saved
 # Reports has zero ``a[href*=report_id]`` links for these queues.
@@ -37,7 +41,7 @@ LOOK_ID_BY_REPORT: dict[str, str] = {
     # (report_email_source). Do not wire Looker favorites 4603/4604 — SSRobie
     # has zero saved-report links and emails are the system of record.
     # 4246's daily email is the 4360 Active-filtered transaction feed.
-    # "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
+    "4359": "4602",  # Policy Change Request Confirmation Queue - ROBIE
 }
 
 
@@ -71,9 +75,13 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4359": ReportSpec(
         "4359",
         "Policy Change",
+        # Stay False until 3 clean hermes-test-01 post-job audits after
+        # Test install. Do not flip this in the same change as
+        # POLICY_CHANGE_ENABLED.
         False,
-        ("request_id",),
-        filter_name="Open Requests - ROBIE",
+        ("policy_number", "change_request_created_date"),
+        filter_name=POLICY_CHANGE_4359_SCOPE_MARKER,
+        look_id=LOOK_ID_BY_REPORT["4359"],
     ),
 }
 METADATA_ONLY_ALIASES: dict[str, ReportSpec] = {

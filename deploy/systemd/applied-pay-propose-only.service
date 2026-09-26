@@ -1,0 +1,20 @@
+[Unit]
+Description=Applied Pay read-only settlement matcher (review report only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+WorkingDirectory=/opt/streetsmart-hermes/releases/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/releases/current
+EnvironmentFile=/etc/streetsmart-hermes/robie-applied-pay.env
+ExecStart=/opt/streetsmart-hermes/.hermes/hermes-agent/venv/bin/python -m applied_pay.worker --output-dir /opt/streetsmart-hermes/applied-pay/reports
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/applied-pay/reports
+TimeoutStartSec=20min

@@ -8,9 +8,9 @@ robie@streetsmart.insurance daily at 5:00 AM Eastern.
 
 Fail-closed throughout: missing email, duplicate emails for one
 report/day, missing/multiple CSV attachments, header mismatch, ragged
-rows, zero data rows, or a blank identity on a row that carries real
-data all RAISE GmailReportIngestionError. Never returns partial or empty
-data silently.
+rows, or zero data rows all RAISE GmailReportIngestionError. Rows with
+a blank identity are skipped and logged (they no longer fail the whole
+report). Never returns partial or empty data silently.
 
 PROVENANCE of expected headers: the REAL CSV attachments received
 2026-09-19 (test sends triggered ~07:13-07:17 ET from the four
@@ -71,10 +71,14 @@ import base64
 import csv
 import hashlib
 import io
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
+
+
+logger = logging.getLogger(__name__)
 
 
 ROBIE_MAILBOX = "robie@streetsmart.insurance"
@@ -89,13 +93,18 @@ GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 # report_registry.MORTGAGEE_4372_SCOPE_MARKER / REPORT_DISPLAY_NAMES["4372"].
 DEFAULT_SUBJECT_CONTAINS = "ROBIE daily CSV"
 MORTGAGEE_4372_SUBJECT = "Mortgagee Verification Queue - ROBIE"
+AUDIT_4246_SUBJECT = "Workers Comp Renewal Audit Queue - ROBIE"
 DEFAULT_ALLOWED_SENDERS = ("donotreply@appliedsystems.com",)
 
 # Reports whose scheduled mail is uniquely identified by subject. Header
 # fingerprint alone must not assign these — a foreign daily CSV in the
 # same mailbox is not a 4372 miss-route, it is simply not 4372.
+# 4246's daily email is the 4360 transaction feed ("Workers Comp Renewal
+# Audit Queue - ROBIE", separate 6:06 AM delivery), NOT the generic
+# "ROBIE daily CSV" envelope — the old generic query could never find it.
 REPORT_SUBJECT_QUERIES: dict[str, str] = {
     "4372": MORTGAGEE_4372_SUBJECT,
+    "4246": AUDIT_4246_SUBJECT,
 }
 SUBJECT_EXCLUSIVE_REPORT_IDS = frozenset(REPORT_SUBJECT_QUERIES)
 
@@ -477,8 +486,9 @@ def subject_matches_report(subject: str, report_id: str) -> bool:
     ``ROBIE daily CSV`` subject is not 4372, even if the attachment
     happens to be a 32-col mortgagee CSV.
 
-    4246/4247/4359 keep the generic daily-CSV envelope. Their display
-    names are not required.
+    Other reports in REPORT_SUBJECT_QUERIES (4246) match against their
+    dedicated subject. 4247/4359 keep the generic daily-CSV envelope.
+    Their display names are not required.
     """
     report_id = str(report_id).strip()
     normalized = normalize_subject_fingerprint(subject)
@@ -487,6 +497,9 @@ def subject_matches_report(subject: str, report_id: str) -> bool:
     if report_id == "4372":
         tokens = set(normalized.split())
         return MORTGAGEE_4372_SUBJECT_PHRASE in normalized and "robie" in tokens
+    exclusive_query = REPORT_SUBJECT_QUERIES.get(report_id)
+    if exclusive_query is not None:
+        return _subject_contains_match(subject, exclusive_query)
     return normalize_subject_fingerprint(DEFAULT_SUBJECT_CONTAINS) in normalized
 
 
@@ -537,8 +550,10 @@ def parse_and_validate_csv(
       rows after skipping.
     - Rejects ragged rows (wrong width).
     - Skips totals rows (blank identity, only Total* columns populated)
-      and counts them; RAISES on a blank identity where any non-total
-      column carries data (that would be a real row losing its identity).
+      and counts them; skips (and logs) rows with a blank identity
+      carrying data in non-total columns instead of failing the whole
+      report — one bad row (e.g. a closed test task) must not block the
+      other rows. Still raises on zero usable data rows after skipping.
     Returns (rows, skipped_totals_rows). Rows are dicts keyed by the exact
     header names.
     """
@@ -577,10 +592,18 @@ def parse_and_validate_csv(
             if _is_totals_row(row, id_col):
                 skipped += 1
                 continue
-            raise GmailReportIngestionError(
-                f"report {report_id} {source_label} line {lineno}: "
-                f"identity column {id_col!r} is empty on a row carrying data"
+            # Empty identity on a row carrying data: skip and record
+            # instead of failing the whole report. A single bad row
+            # (e.g. a closed test task with no policy number) must not
+            # block the other rows. Still fail-closed at the report
+            # level: zero usable rows after skipping raises below.
+            logger.warning(
+                "report %s %s line %d: skipping row with empty identity "
+                "column %r carrying data",
+                report_id, source_label, lineno, id_col,
             )
+            skipped += 1
+            continue
         # Validates the work-item key (4359: raises on blank created date).
         identity_value(report_id, row)
         rows.append(row)
@@ -800,7 +823,20 @@ def ingest_daily_reports(
                     ) from exc
                 bucketed.setdefault(report_id, []).append((message, filename, content))
             continue
-        routed = fingerprint_report_id(csv_headers)
+        try:
+            routed = fingerprint_report_id(csv_headers)
+        except GmailReportIngestionError:
+            # Unknown CSV fingerprint: not a ROBIE report we recognize.
+            # Skip and record instead of failing the whole ingestion —
+            # one foreign attachment must never kill the other reports.
+            # Still fail-closed per-report: a report whose CSV is absent
+            # raises GmailReportMissingError below.
+            logger.warning(
+                "skipping unrecognized CSV attachment %r (%d cols) from "
+                "message %s: no known ROBIE fingerprint",
+                filename, len(csv_headers), str(message.get("id") or ""),
+            )
+            continue
         if routed in SUBJECT_EXCLUSIVE_REPORT_IDS:
             continue
         if routed in header_routed:
@@ -958,8 +994,11 @@ def _self_test() -> None:
         cells = next(csv.reader([lines[2]]))
         cells[idx] = "   "  # blank identity but the row still carries data
         lines[2] = ",".join(f'"{c}"' for c in cells)
-        parse_and_validate_csv("4247", "\n".join(lines).encode("utf-8"))
-    expect_raises("blank identity on a data row is rejected (4247)", blank_identity_with_data)
+        rows, skipped = parse_and_validate_csv("4247", "\n".join(lines).encode("utf-8"))
+        # The bad row is skipped (and logged); the good row is kept.
+        assert len(rows) == 1, f"expected 1 good row, got {len(rows)}"
+        assert skipped == 1, f"expected 1 skipped row, got {skipped}"
+    check("blank identity on a data row is skipped, not fatal (4247)", blank_identity_with_data)
 
     def no_data_rows():
         buffer = io.StringIO()
@@ -1032,12 +1071,15 @@ def _self_test() -> None:
         assert not subject_matches_report("Mortgagee Verification Queue", "4372")
         assert REPORT_DISPLAY_NAMES["4372"] == MORTGAGEE_4372_SUBJECT
         assert gmail_subject_queries(["4372"]) == [MORTGAGEE_4372_SUBJECT]
-        assert gmail_subject_queries(["4247", "4246"]) == [DEFAULT_SUBJECT_CONTAINS]
+        # 4246 is subject-exclusive on its 4360 transaction-feed email.
+        assert gmail_subject_queries(["4246"]) == [AUDIT_4246_SUBJECT]
+        assert gmail_subject_queries(["4247", "4246"]) == [DEFAULT_SUBJECT_CONTAINS, AUDIT_4246_SUBJECT]
         assert subject_matches_report(DEFAULT_SUBJECT_CONTAINS, "4247")
-        assert subject_matches_report(DEFAULT_SUBJECT_CONTAINS, "4246")
+        assert subject_matches_report(AUDIT_4246_SUBJECT, "4246")
+        assert not subject_matches_report(DEFAULT_SUBJECT_CONTAINS, "4246")
         assert not subject_matches_report(MORTGAGEE_4372_SUBJECT, "4247")
         assert not subject_matches_report(MORTGAGEE_4372_SUBJECT, "4246")
-    check("4372 subject fingerprint is exclusive; 4246/4247 stay on daily CSV", subject_4372_requires_mortgagee_phrase)
+    check("4372 subject fingerprint is exclusive; 4246 on audit queue; 4247 on daily CSV", subject_4372_requires_mortgagee_phrase)
 
     print(f"SELF-TEST passes={len(passes)} failures={len(failures)}")
     for name in passes:
