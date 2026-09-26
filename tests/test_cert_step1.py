@@ -114,6 +114,27 @@ def test_runner_matches_and_dedupes():
     assert out2["stats"]["processed"] == 0
 
 
+def test_identical_bodies_are_not_duplicates():
+    """Regression: two distinct messages with byte-identical bodies (e.g.
+    thread replies quoting prior content) must both be processed. The live
+    mailbox sweep of 2026-09-26 showed 94 real messages skipped on
+    body_hash alone."""
+    same_body = "Please issue a certificate. Thanks."
+    session = FakeSession({
+        "m1": gmail_payload("m1", "office@fonsecagc.com",
+                           "Certificate request",
+                           same_body),
+        "m2": gmail_payload("m2", "office@fonsecagc.com",
+                           "Re: Certificate request",
+                           same_body),
+    })
+    adapter = CertGmailAdapter(session)
+    store = MemoryDedupeStore()
+    out = run_intake_once(adapter, store, make_index(), query="newer_than:1d")
+    assert out["stats"]["processed"] == 2
+    assert out["stats"]["duplicates"] == 0
+
+
 def test_runner_checkpoint_meta_records_steps():
     session = FakeSession({
         "m1": gmail_payload("m1", "office@fonsecagc.com",
