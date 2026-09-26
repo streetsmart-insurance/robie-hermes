@@ -159,11 +159,17 @@ def _extract_carrier_records(payload: Any) -> list[dict[str, Any]]:
 def _pick_best_record(name: str, records: list[dict[str, Any]]) -> str | None:
     """Choose the canonical carrier name from directory records.
 
-    Prefers an exact (case-insensitive) name hit, then a record whose name
-    contains the query or vice versa. Returns None when nothing matches —
-    callers fall back to the packaged JSON fuzzy match.
+    The EZLynx directory is the authority on carrier identity: if it
+    returned records for the query, trust its matching. Prefer an exact
+    (case-insensitive) hit, else take the first record the directory
+    returned. Returns None only when the directory returned no usable
+    names — callers then fall back to the packaged JSON fuzzy match.
+
+    (2026-09-26: substring re-validation rejected the directory's correct
+    "FMI" -> "Franklin Mutual Insurance Company of New Jersey" answer —
+    the exact incident this module exists to prevent. Never second-guess
+    the directory with client-side substring matching.)
     """
-    lowered = name.casefold()
     candidates: list[str] = []
     for rec in records:
         for key in ("name", "carrierName", "carrier_name", "displayName"):
@@ -171,14 +177,14 @@ def _pick_best_record(name: str, records: list[dict[str, Any]]) -> str | None:
             if isinstance(val, str) and val.strip():
                 candidates.append(val.strip())
                 break
+    if not candidates:
+        return None
+    lowered = name.casefold()
     for cand in candidates:
         if cand.casefold() == lowered:
             return cand
-    for cand in candidates:
-        c = cand.casefold()
-        if c in lowered or lowered in c:
-            return cand
-    return None
+    # Trust the directory's own matching — it resolved the query.
+    return candidates[0]
 
 
 @lru_cache(maxsize=1)
