@@ -33,6 +33,10 @@ ACTION_NEW_REQUEST = "new_request"
 ACTION_ACK = "acknowledgement"
 ACTION_UNKNOWN = "unknown"
 ACTION_AUTOREPLY = "auto_reply"
+# EZLynx Client Center portal request: the customer submitted the form
+# themselves and EZLynx auto-created the task. Genuine request, but the
+# worker must never create a duplicate task (task_action already_exists).
+ACTION_CLIENT_CENTER = "client_center"
 
 POLICY_API_BASE = "https://app.ezlynx.com/PolicyApi"
 DISCUSSION_API_BASE = "https://app.ezlynx.com/DiscussionApi"
@@ -135,11 +139,29 @@ _BOUNCE_SUBJECT_RE = re.compile(
 # ("Haris Uddin 008265/15/00") is not enough on its own.
 _CERT_SUBJECT_RE = re.compile(r"(?i)\b(certificate|coi)\b")
 
+# A terse subject that is nothing but "Coi" (optionally after Re:/Fwd:)
+# is a genuine client certificate request — the word "certificate"
+# spelled out is not required. Deliberately narrow: "COI received" or
+# "Coi attached" (a statement, not a request) does NOT match.
+_BARE_COI_SUBJECT_RE = re.compile(r"^\s*coi\s*$", re.IGNORECASE)
+
 
 def _subject_is_request_shape(subject: str) -> bool:
     if not _CERT_SUBJECT_RE.search(subject or ""):
         return False
     return extract_subject_insured(subject) is not None
+
+
+def _subject_is_bare_coi(subject: str) -> bool:
+    """True when the subject is exactly "Coi" (after Re:/Fwd: stripping).
+
+    Terse client subjects ("Coi") are genuine requests. The automated and
+    bounce filters in classify_requested_action run BEFORE this, so
+    postmaster bounces ("Undeliverable: Coi") and canned auto-replies
+    ("Re: Coi" from the agency responder) stay held.
+    """
+    return bool(_BARE_COI_SUBJECT_RE.match(
+        _strip_subject_prefixes(subject or "")))
 
 
 def _sender_is_autoresponder(sender: str | None) -> bool:
@@ -183,7 +205,8 @@ def classify_requested_action(subject: str, body: str,
     if any(p.search(text) for p in _ACK_PATTERNS):
         return ACTION_ACK
     if (any(p.search(text) for p in _NEW_REQUEST_PATTERNS)
-            or _subject_is_request_shape(subject)):
+            or _subject_is_request_shape(subject)
+            or _subject_is_bare_coi(subject)):
         return ACTION_NEW_REQUEST
     return ACTION_UNKNOWN
 
@@ -407,6 +430,9 @@ class VerificationResult:
     evidence: list[str] = field(default_factory=list)
     hold_reasons: list[str] = field(default_factory=list)
     source: str = ""  # "report" | "ezlynx" | ""
+    # "client_center" when the request came through the EZLynx Client
+    # Center portal — the task already exists, never duplicate it.
+    origin: str = ""
 
     def hold(self, reason: str) -> "VerificationResult":
         self.status = HOLD
@@ -501,13 +527,25 @@ def verify_record(record: Any, index: Any,
     # usually lives in the body ("Please issue a certificate"), while
     # attached request forms live in the PDFs. Subject is included by the
     # classifier itself.
-    body_text = "\n".join(
-        t for t in [getattr(record.facts, "body_text", "") or ""]
-        + list(record.facts.pdf_texts) if t
-    )
-    res.requested_action = classify_requested_action(
-        record.subject, body_text,
-        sender=getattr(record.facts, "requester_email", None))
+    #
+    # EZLynx Client Center notifications bypass generic classification:
+    # intake already proved the portal origin and the certificate request
+    # type. They are genuine requests whose task EZLynx auto-created.
+    if getattr(record.facts, "origin", None) == "client_center":
+        res.requested_action = ACTION_CLIENT_CENTER
+        res.origin = "client_center"
+        res.evidence.append(
+            "EZLynx Client Center notification: the customer submitted the "
+            "request in the portal and EZLynx auto-created the task — "
+            "the worker never creates a duplicate task")
+    else:
+        body_text = "\n".join(
+            t for t in [getattr(record.facts, "body_text", "") or ""]
+            + list(record.facts.pdf_texts) if t
+        )
+        res.requested_action = classify_requested_action(
+            record.subject, body_text,
+            sender=getattr(record.facts, "requester_email", None))
     if res.requested_action == ACTION_ACK:
         res.evidence.append(
             "message classified as acknowledgement/thank-you — not a new "

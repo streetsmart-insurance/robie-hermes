@@ -95,12 +95,36 @@ def _b64decode(data: str) -> bytes:
     return base64.b64decode(data + "=" * (-len(data) % 4))
 
 
-def _walk_parts(
-    part: dict[str, Any], gmail_id: str, attachment_fetcher: Any
-) -> tuple[str, list[CertAttachment]]:
-    """Return (plain-text body, attachments) from a message payload part."""
-    texts: list[str] = []
-    atts: list[CertAttachment] = []
+def _html_to_text(html: str) -> str:
+    """Best-effort HTML -> text for HTML-only notification emails.
+
+    Strips script/style, turns block elements into newlines, drops the
+    remaining tags, and unescapes entities. Fail-soft: never raises.
+    """
+    import html as _html_module
+
+    try:
+        text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html or "")
+        text = re.sub(
+            r"(?i)<\s*(br|p|div|tr|table|li|h[1-6]|td|th)\b[^>]*>", "\n", text
+        )
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = _html_module.unescape(text)
+        text = re.sub(r"[ \t\xa0\u200b]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        return text.strip()
+    except Exception:
+        return ""
+
+
+def _collect_parts(
+    part: dict[str, Any],
+    gmail_id: str,
+    attachment_fetcher: Any,
+    texts: list[str],
+    html_texts: list[str],
+    atts: list[CertAttachment],
+) -> None:
     mime = str(part.get("mimeType") or "")
     filename = str(part.get("filename") or "")
     body = part.get("body", {}) or {}
@@ -114,11 +138,40 @@ def _walk_parts(
             texts.append(_b64decode(body["data"]).decode("utf-8", "replace"))
         except Exception:
             pass
+    elif mime == "text/html" and body.get("data"):
+        # HTML-only notifications (e.g. EZLynx Client Center) carry no
+        # text/plain part. Converted text is used only when NO plain text
+        # was found anywhere — never double-counted with it.
+        try:
+            html_texts.append(
+                _html_to_text(
+                    _b64decode(body["data"]).decode("utf-8", "replace")
+                )
+            )
+        except Exception:
+            pass
     for sub in part.get("parts", []) or []:
-        t, a = _walk_parts(sub, gmail_id, attachment_fetcher)
-        texts.append(t)
-        atts.extend(a)
-    return "\n".join(t for t in texts if t).strip(), atts
+        _collect_parts(sub, gmail_id, attachment_fetcher, texts, html_texts,
+                       atts)
+
+
+def _walk_parts(
+    part: dict[str, Any], gmail_id: str, attachment_fetcher: Any
+) -> tuple[str, list[CertAttachment]]:
+    """Return (plain-text body, attachments) from a message payload part.
+
+    Falls back to converted HTML text when the message has no text/plain
+    part at all (EZLynx Client Center notifications are HTML-only).
+    """
+    texts: list[str] = []
+    html_texts: list[str] = []
+    atts: list[CertAttachment] = []
+    _collect_parts(part, gmail_id, attachment_fetcher, texts, html_texts,
+                   atts)
+    body = "\n".join(t for t in texts if t).strip()
+    if not body:
+        body = "\n".join(t for t in html_texts if t).strip()
+    return body, atts
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +276,87 @@ def mark_processed(
     store.mark(keys["body_hash"], meta)
     for h in keys["attachment_hashes"]:
         store.mark(h, meta)
+
+
+# ---------------------------------------------------------------------------
+# EZLynx Client Center notifications (Carlo's standing rule, 2026-09-26)
+#
+# When a customer fills out the certificate request form in the EZLynx
+# Client Center portal, EZLynx emails certificates@ from cplive@ezlynx.com
+# with subject "EZLynx Client Center Notification" — and EZLynx
+# AUTO-CREATES the task. The worker must recognize these and NEVER create
+# a duplicate task.
+#
+# CRITICAL DISTINCTION: the agency's own canned auto-reply has subject
+# "Re: EZLynx Client Center Notification" but comes from
+# certificates+canned.response@streetsmart.insurance — that is an
+# auto-reply, never a Client Center request. The sender check below is
+# exact on the cplive local part so the canned reply can never match.
+# ---------------------------------------------------------------------------
+
+_CC_SENDER_LOCAL = "cplive"
+_CC_SENDER_DOMAIN = "ezlynx.com"
+_CC_SUBJECT_RE = re.compile(r"(?i)ezlynx client center notification")
+
+_CC_FIELD_RES = {
+    "requester_name": re.compile(r"(?i)\bname:\s*(.+?)(?=\s*\bemail:)"),
+    "requester_email": re.compile(
+        r"(?i)\bemail:\s*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"
+    ),
+    "request_type": re.compile(
+        r"(?i)\brequest type:\s*(.+?)(?=\s*\bmessage to agent:)"
+    ),
+    "message": re.compile(
+        r"(?is)\bmessage to agent:\s*(.+?)(?=\s*\bdate and time:|\s*$)"
+    ),
+}
+
+# The request type must name a certificate for the notification to count
+# as a certificate request — a "requested for policy change" portal form
+# is not one.
+_CC_CERTIFICATE_TYPE_RE = re.compile(r"(?i)\b(certificates?|coi)\b")
+
+
+def _cc_sender_address(from_header: str) -> str:
+    m = re.search(r"<([^>]+)>", from_header or "")
+    addr = (m.group(1) if m else from_header or "").strip().lower()
+    return addr
+
+
+def is_client_center_sender(from_header: str) -> bool:
+    """True only for the genuine EZLynx portal sender.
+
+    Exact on local part AND domain: the agency's canned responder
+    (certificates+canned.response@streetsmart.insurance) quotes the same
+    subject but must never match.
+    """
+    addr = _cc_sender_address(from_header)
+    if "@" not in addr:
+        return False
+    local, _, domain = addr.partition("@")
+    return local == _CC_SENDER_LOCAL and domain == _CC_SENDER_DOMAIN
+
+
+def parse_client_center_notification(
+    from_header: str, subject: str, body_text: str
+) -> dict[str, str] | None:
+    """Parse a Client Center notification into its portal fields.
+
+    Returns None unless the sender AND subject identify a genuine
+    Client Center notification. The body is the converted HTML text —
+    these emails are HTML-only.
+    """
+    if not is_client_center_sender(from_header):
+        return None
+    if not _CC_SUBJECT_RE.search(subject or ""):
+        return None
+    text = re.sub(r"\s+", " ", body_text or "").strip()
+    fields: dict[str, str] = {}
+    for key, pat in _CC_FIELD_RES.items():
+        m = pat.search(text)
+        if m:
+            fields[key] = re.sub(r"\s+", " ", m.group(1)).strip()
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +519,10 @@ class RequestFacts:
     # subject + body + PDF texts; without the body, "Please issue a
     # certificate" in the body is invisible and genuine requests hold.
     body_text: str = ""
+    # Where the request came from. "client_center" means the customer
+    # submitted it in the EZLynx Client Center portal — EZLynx auto-created
+    # the task, so the worker must never create a duplicate.
+    origin: str | None = None
 
     @property
     def requester_is_third_party(self) -> bool:
@@ -494,7 +632,29 @@ def extract_request_facts(
     facts.requester_email = from_email
     if not facts.requester_name:
         facts.requester_name = from_name
+    # EZLynx Client Center: the portal customer is the requester (the Name
+    # and Email fields in the notification), not cplive@ezlynx.com. The
+    # sender email alone would never match an applicant.
+    cc = parse_client_center_notification(
+        email.from_header, email.subject, facts.body_text)
+    if cc:
+        if cc.get("requester_name"):
+            facts.requester_name = _clean_name(cc["requester_name"]) or \
+                facts.requester_name
+        if cc.get("requester_email"):
+            facts.requester_email = cc["requester_email"].strip().lower()
+        if _CC_CERTIFICATE_TYPE_RE.search(cc.get("request_type") or ""):
+            facts.origin = "client_center"
+            facts.requested_action = "certificate_request"
     if re.search(r"(?i)\bcertificate\b", text):
+        facts.requested_action = "certificate_request"
+    elif not facts.requested_action and re.search(r"(?i)\bcoi\b", text):
+        # Terse client emails ("Coi" subject + holder details in the body)
+        # are genuine certificate requests — "certificate" spelled out is
+        # not required. Word-boundary only: "coin", "recoil" etc. never
+        # match. Bounce/auto-reply filtering happens later in
+        # classify_requested_action and always runs first, so postmaster
+        # bounces and canned replies stay held.
         facts.requested_action = "certificate_request"
     elif re.search(r"(?i)\bloss runs?\b", text):
         facts.requested_action = "loss_runs_request"

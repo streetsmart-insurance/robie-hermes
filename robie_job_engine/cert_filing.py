@@ -26,7 +26,7 @@ from typing import Any
 
 from .cert_intake import summarize_for_note
 from .cert_task_registry import (
-    CREATE, HOLD, NONE, REOPEN, REUSE, TASK_OPEN,
+    ALREADY_EXISTS, CREATE, HOLD, NONE, REOPEN, REUSE, TASK_OPEN,
     TaskEntry, decide_task_action, holder_key_for, policy_key_for,
 )
 from .cert_verification import (
@@ -452,6 +452,16 @@ def file_record(record: Any, verified: Any, deps: FilingDeps,
     if verified.status != VERIFIED or not verified.applicant_id:
         res.hold_reasons.append("record is not VERIFIED — refusing to file")
         return res
+    # Client Center portal requests: the task already exists (EZLynx
+    # auto-created it). Record that decision up front so it is visible
+    # even when discussion resolution holds the filing — the worker must
+    # never create or duplicate the task either way.
+    if getattr(verified, "origin", "") == "client_center":
+        res.task_action = ALREADY_EXISTS
+        res.evidence.append(
+            "Client Center origin: EZLynx auto-created the task when the "
+            "customer submitted the portal form — the worker never fires "
+            "the task Zap for this record")
     applicant_id = verified.applicant_id
     message_id = getattr(record, "gmail_id", None) or getattr(
         record, "message_id", "unknown")
@@ -614,6 +624,12 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
 
     if action == NONE:
         res.evidence.append("acknowledgement — task state left alone")
+    elif action == ALREADY_EXISTS:
+        # Client Center portal request: EZLynx auto-created the task.
+        # Never fire the Zap, never touch the registry — just say so.
+        res.evidence.append(
+            "task already exists (Client Center auto-created) — no Zap "
+            "fired, nothing duplicated")
     elif action == REUSE:
         res.task_id = entry.task_id if entry else None
         res.evidence.append(f"reusing open task {res.task_id}")
