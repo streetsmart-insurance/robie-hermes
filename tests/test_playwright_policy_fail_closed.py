@@ -176,6 +176,25 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         self.assertEqual(wrong.fills, [])
 
     def test_numeric_form_entry_requires_visible_robie_test_policy_attestation(self):
+        # This test verifies the two-tier attestation logic, not the default
+        # allowlist. Explicitly allowlist 220250094 so the non-test-account
+        # path (account-link attestation only) can be exercised. The default
+        # allowlist is fail-closed to 220250093 (see test_ezlynx_write_scope).
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"ROBIE_EZLYNX_WRITE_APPLICANT_IDS": "220250093,220250094"}):
+            import importlib
+            import robie_job_engine.ezlynx_write_scope as _scope
+            importlib.reload(_scope)
+            try:
+                self._run_form_entry_attestation_cases()
+            finally:
+                with mock.patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("ROBIE_EZLYNX_WRITE_APPLICANT_IDS", None)
+                    importlib.reload(_scope)
+
+    def _run_form_entry_attestation_cases(self):
         class EvidenceLocator:
             def __init__(self, *, count=1, visible=True, text="", href=None):
                 self._count = count

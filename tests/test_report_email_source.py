@@ -622,6 +622,11 @@ class Mortgagee4372SubjectPickerTests(unittest.TestCase):
         self.assertEqual(rows[0]["policy_number"], "P-4247")
 
     def test_4246_still_uses_4360_fingerprint_not_mortgagee_subject(self):
+        # 4246's real daily mail is the separate 4360 transaction-feed
+        # delivery ("Workers Comp Renewal Audit Queue - ROBIE"), proven
+        # 2026-09-25 — NOT the generic "ROBIE daily CSV" envelope. The
+        # 4360 24-col schema is still what validates the attachment, and
+        # the mortgagee decoy must not be picked up.
         service = FakeMailboxGmail(
             [
                 _mailbox_item(
@@ -632,7 +637,7 @@ class Mortgagee4372SubjectPickerTests(unittest.TestCase):
                     ),
                     filename="ROBIE_daily_CSV_2026-09-20T0605.csv",
                     received_at=self.received,
-                    subject="ROBIE daily CSV",
+                    subject=ing.AUDIT_4246_SUBJECT,
                 ),
                 _mailbox_item(
                     message_id="msg-mortgagee",
