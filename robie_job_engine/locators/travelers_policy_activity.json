@@ -1,0 +1,109 @@
+{
+  "portal": "travelers",
+  "page_name": "policy_activity",
+  "version": "1.0",
+  "fields": {
+    "personal_insurance": {
+      "name": "personal_insurance",
+      "primary_strategy": "role",
+      "primary_selector": "tab:Personal Insurance",
+      "fallback_strategy": "role",
+      "fallback_selector": "link:Personal Insurance",
+      "exact": true,
+      "description": "Personal Lines shell tab. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    },
+    "business_insurance": {
+      "name": "business_insurance",
+      "primary_strategy": "role",
+      "primary_selector": "tab:Business Insurance",
+      "fallback_strategy": "role",
+      "fallback_selector": "link:Business Insurance",
+      "exact": true,
+      "description": "Commercial Lines shell tab. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "featured_reports": {
+      "name": "featured_reports",
+      "primary_strategy": "role",
+      "primary_selector": "link:Featured Reports",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Featured Reports",
+      "exact": true,
+      "description": "Personal Lines path into Policy Activity Report. UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "agency_reports": {
+      "name": "agency_reports",
+      "primary_strategy": "role",
+      "primary_selector": "link:Agency Reports",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Agency Reports",
+      "exact": true,
+      "description": "Commercial Lines path into Policy Activity Report. UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "policy_activity_report": {
+      "name": "policy_activity_report",
+      "primary_strategy": "role",
+      "primary_selector": "link:Policy Activity Report",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Policy Activity Report",
+      "exact": true,
+      "description": "Policy Activity Report entry. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_within": {
+      "name": "processed_within",
+      "primary_strategy": "label",
+      "primary_selector": "Processed Within",
+      "exact": true,
+      "description": "Last Day option for a single previous calendar day. A Monday weekend window does not use this dropdown.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_date_from": {
+      "name": "processed_date_from",
+      "primary_strategy": "label",
+      "primary_selector": "Processed date from",
+      "exact": true,
+      "description": "Inclusive custom-range start. Filled MM/DD/YYYY and read back. UNVERIFIED on the live portal.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_date_to": {
+      "name": "processed_date_to",
+      "primary_strategy": "label",
+      "primary_selector": "Processed date to",
+      "exact": true,
+      "description": "Inclusive custom-range end. Filled MM/DD/YYYY and read back. UNVERIFIED on the live portal.",
+      "last_updated": "2026-09-26"
+    },
+    "search": {
+      "name": "search",
+      "primary_strategy": "role",
+      "primary_selector": "button:Search",
+      "exact": true,
+      "description": "Apply the processed window. Live button name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "insured_pdf": {
+      "name": "insured_pdf",
+      "primary_strategy": "role",
+      "primary_selector": "link:Insured PDF",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Insured PDF",
+      "exact": true,
+      "description": "Preferred copy. Exactly one match or the row holds. UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "agent_pdf": {
+      "name": "agent_pdf",
+      "primary_strategy": "role",
+      "primary_selector": "link:Agent PDF",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Agent PDF",
+      "exact": true,
+      "description": "Commercial Lines fallback when no Insured PDF exists. Personal Lines does not download an agent-only copy.",
+      "last_updated": "2026-09-26"
+    }
+  }
+}
