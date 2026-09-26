@@ -23,9 +23,19 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+
+def _fold_unicode(text: str | None) -> str:
+    """Transliterate accented characters to ASCII (é -> e, ñ -> n).
+
+    "José García" and "Jose Garcia" are the same client for matching.
+    """
+    return unicodedata.normalize("NFKD", text or "").encode(
+        "ascii", "ignore").decode("ascii")
 
 REPORT_PATH_ENV = "CERT_APPLICANT_REPORT_PATH"
 
@@ -43,7 +53,7 @@ def normalize_account_name(name: str | None) -> str:
     """
     if not name:
         return ""
-    key = name.strip().lower()
+    key = _fold_unicode(name).strip().lower()
     key = re.sub(r"\s+", " ", key)
     key = re.sub(r"[^a-z0-9]", "", key)
     return key
@@ -76,6 +86,10 @@ class ApplicantIndex:
     by_name: dict[str, list[int]] = field(default_factory=dict)
     by_email: dict[str, int] = field(default_factory=dict)
     by_phone: dict[str, int] = field(default_factory=dict)
+    # DBA-fragment runs: "AMOUR BUSINESS GROUP LLC DBA ABG TRANSPORTATION"
+    # also answers to "abg transportation" (contiguous token runs of the
+    # DBA portion, length >= 2).
+    by_dba_run: dict[str, list[int]] = field(default_factory=dict)
     row_count: int = 0
     source_path: str = ""
     source_mtime: str = ""
@@ -88,11 +102,49 @@ class ApplicantIndex:
             "unique_names": len(self.by_name),
             "unique_emails": len(self.by_email),
             "unique_phones": len(self.by_phone),
+            "dba_runs": len(self.by_dba_run),
             "ambiguous_names": collisions,
             "source_path": self.source_path,
             "source_mtime": self.source_mtime,
             "built_at": self.built_at,
         }
+
+
+def _name_tokens(name: str | None) -> list[str]:
+    """Lowercase word tokens; punctuation becomes a separator (spaces kept).
+
+    Distinct from normalize_account_name (which collapses everything) —
+    DBA-fragment matching needs word boundaries. Apostrophes are removed
+    (not split on) so "Tony's Pizza" and "Tonys Pizza" tokenize alike.
+    """
+    cleaned = re.sub(r"['\u2019]", "", _fold_unicode(name).lower())
+    return re.sub(r"[^a-z0-9]+", " ", cleaned).split()
+
+
+def _dba_runs(account_name: str | None) -> list[str]:
+    """Contiguous token runs (length >= 2) of the DBA portion of a name.
+
+    Only the part after the first "dba" token is used: "abg transportation"
+    from "AMOUR BUSINESS GROUP LLC DBA ABG TRANSPORTATION". Runs shorter
+    than 2 tokens are too generic to match on ("abg" alone could be
+    anything).
+    """
+    tokens = _name_tokens(account_name)
+    try:
+        dba_at = tokens.index("dba")
+    except ValueError:
+        return []
+    dba_tokens = tokens[dba_at + 1:]
+    runs = []
+    for length in range(2, len(dba_tokens) + 1):
+        for i in range(len(dba_tokens) - length + 1):
+            runs.append(" ".join(dba_tokens[i:i + length]))
+    return runs
+
+
+def _dba_run_key(name: str | None) -> str:
+    """Lookup key for DBA-fragment matching: space-joined word tokens."""
+    return " ".join(_name_tokens(name))
 
 
 def build_index(rows: list[dict[str, Any]], source_path: str = "") -> ApplicantIndex:
@@ -114,6 +166,10 @@ def build_index(rows: list[dict[str, Any]], source_path: str = "") -> ApplicantI
         name_key = normalize_account_name(row.get("account_name"))
         if name_key:
             bucket = index.by_name.setdefault(name_key, [])
+            if applicant_id not in bucket:
+                bucket.append(applicant_id)
+        for run in _dba_runs(row.get("account_name")):
+            bucket = index.by_dba_run.setdefault(run, [])
             if applicant_id not in bucket:
                 bucket.append(applicant_id)
         email_key = normalize_email(row.get("email_primary"))
@@ -244,6 +300,33 @@ def match_applicant(
         if len(ids) > 1:
             return MatchResult(AMBIGUOUS, None,
                                f"dba {facts.dba!r}", candidates=list(ids))
+
+    # DBA-fragment: the email names the trade name ("Abg Transportation")
+    # while the book carries the legal name ("AMOUR BUSINESS GROUP LLC DBA
+    # ABG TRANSPORTATION"). Weaker than an exact name hit, so a sender
+    # email pointing at a DIFFERENT applicant makes it ambiguous -> hold.
+    for label, raw_name in (("insured name", getattr(facts, "insured_name", None)),
+                            ("dba", getattr(facts, "dba", None))):
+        run_key = _dba_run_key(raw_name)
+        if not run_key or len(run_key.split()) < 2:
+            continue
+        ids = index.by_dba_run.get(run_key, [])
+        if len(ids) == 1:
+            email_key = normalize_email(getattr(facts, "requester_email", None))
+            email_hit = index.by_email.get(email_key) if email_key else None
+            if email_hit and email_hit != ids[0]:
+                return MatchResult(
+                    AMBIGUOUS, None,
+                    f"{label} DBA-fragment {raw_name!r} -> applicant {ids[0]} "
+                    f"but sender email maps to applicant {email_hit}",
+                    candidates=[ids[0], email_hit])
+            return _with_requester_flag(facts, index, MatchResult(
+                MATCHED, ids[0],
+                f"{label} DBA-fragment {raw_name!r}"))
+        if len(ids) > 1:
+            return MatchResult(AMBIGUOUS, None,
+                               f"{label} DBA-fragment {raw_name!r}",
+                               candidates=list(ids))
 
     email_key = normalize_email(getattr(facts, "requester_email", None))
     if email_key and email_key in index.by_email:
