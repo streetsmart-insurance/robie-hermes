@@ -4,14 +4,14 @@ The allowlist is fixed at process start. It is read once from
 ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` (preferred) or the legacy alias
 ``EZLYNX_WRITE_APPLICANT_IDS`` (comma-separated applicant IDs).
 
-Ops flip (Carlo 2026-09-17):
+Ops flip (Carlo 2026-09-17; fail-closed default 2026-09-26):
 
-- **Agency-wide** (default): leave the variable unset or empty. Any
-  plausible EZLynx applicant ID is write-eligible for note append,
-  document upload, and other already write-scoped PolicyApi calls.
-- **Restricted**: set the variable to a comma list, e.g.
-  ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=220250093``. Only those IDs pass
-  the compiled allowlist.
+- **Test-account only** (default): leave the variable unset or empty. Only
+  the test account 220250093 is write-eligible for note append, document
+  upload, and other write-scoped calls. This is the safe default.
+- **Widened**: set the variable to a comma list, e.g.
+  ``ROBIE_EZLYNX_WRITE_APPLICANT_IDS=220250093,123456789``. Only those IDs
+  pass the compiled allowlist.
 
 A Job payload, prompt, or any other runtime input cannot widen a
 restricted list — authorizing a new account is a deployment-config
@@ -165,26 +165,32 @@ def _raw_allowlist_env() -> str | None:
     return None
 
 
-def _load_allowed_applicant_ids() -> frozenset[str] | None:
+def _load_allowed_applicant_ids() -> frozenset[str]:
     """Read the allowlist once at import; job payloads can never widen it.
 
-    ``None`` means unrestricted (env unset or empty). A frozenset means
-    only those applicant IDs are compiled-allowed.
+    Fail-closed: when the env var is unset or empty, the allowlist defaults
+    to just the test account (220250093). Set ROBIE_EZLYNX_WRITE_APPLICANT_IDS
+    explicitly to widen it — a deployment-config change, never a runtime input.
     """
 
     raw = _raw_allowlist_env()
-    if raw is None:
-        return None
+    if raw is None or not raw.strip():
+        return frozenset({TEST_EZLYNX_WRITE_APPLICANT_ID})
     ids = {normalize_applicant_id(part) for part in raw.split(",")}
     ids.discard("")
-    return frozenset(ids) if ids else None
+    return frozenset(ids) if ids else frozenset({TEST_EZLYNX_WRITE_APPLICANT_ID})
 
 
 ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
 
 
 def write_allowlist_is_unrestricted() -> bool:
-    """True when ops left the allowlist unset/empty (agency-wide writes)."""
+    """True only when the allowlist was explicitly cleared (legacy mode).
+
+    The default compiled allowlist is fail-closed to the test account; this
+    returns True only if ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None (e.g.
+    monkeypatched in tests simulating the old agency-wide mode).
+    """
 
     return ALLOWED_EZLYNX_WRITE_APPLICANT_IDS is None
 
