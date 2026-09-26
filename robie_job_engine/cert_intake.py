@@ -381,6 +381,10 @@ class RequestFacts:
     pdf_unreadable: bool = False
     raw_subject: str = ""
     raw_from: str = ""
+    # Plain-text email body. The verifier classifies requested_action on
+    # subject + body + PDF texts; without the body, "Please issue a
+    # certificate" in the body is invisible and genuine requests hold.
+    body_text: str = ""
 
     @property
     def requester_is_third_party(self) -> bool:
@@ -438,6 +442,7 @@ def extract_request_facts(
     the request belongs to our client.
     """
     facts = RequestFacts(raw_subject=email.subject, raw_from=email.from_header)
+    facts.body_text = email.body_text or ""
     text = f"{email.subject}\n{email.body_text}"
 
     for pat in _INSURED_PATTERNS:

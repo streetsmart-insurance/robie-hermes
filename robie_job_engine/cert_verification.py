@@ -101,6 +101,12 @@ _AUTOREPLY_PATTERNS = [
     re.compile(r"\bdelivery (failure|status notification)\b", re.IGNORECASE),
     re.compile(r"\bmessage not delivered\b", re.IGNORECASE),
     re.compile(r"\bvacation responder\b", re.IGNORECASE),
+    # Bounce/NDR body language the earlier patterns missed: "Undeliverable
+    # email: Certificate of Insurance ..." quoted 39 such bounces in the
+    # 2026-09-26 sweep and they verified. Never again.
+    re.compile(r"\bundeliverable\b", re.IGNORECASE),
+    re.compile(r"\bdelivery has failed\b", re.IGNORECASE),
+    re.compile(r"\bmail delivery (failed|failure)\b", re.IGNORECASE),
 ]
 
 # Sender local-parts that are always automated responders. Kept narrow:
@@ -112,6 +118,28 @@ _AUTOREPLY_SENDERS = (
     "postmaster",
     "autoresponder",
 )
+
+# Bounce subjects: a delivery failure quoting the original request subject
+# ("Undeliverable email: Certificate of Insurance for ...") is never a new
+# request, even though the quoted tail carries certificate language.
+_BOUNCE_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(undeliverable|undelivered|delivery (status notification|"
+    r"failure)|failure notice|returned mail|mail delivery (failed|failure))"
+)
+
+# The subject is shaped like a certificate request when it names the
+# insured in one of the known request shapes ("Certificate of Insurance
+# LA Burger LLC to Anderson Market", "Renewal Certificate Request-
+# Abg Transportation", "COI - Fonseca General Contractor LLC"). The
+# subject must also carry certificate/coi language — a bare policy tail
+# ("Haris Uddin 008265/15/00") is not enough on its own.
+_CERT_SUBJECT_RE = re.compile(r"(?i)\b(certificate|coi)\b")
+
+
+def _subject_is_request_shape(subject: str) -> bool:
+    if not _CERT_SUBJECT_RE.search(subject or ""):
+        return False
+    return extract_subject_insured(subject) is not None
 
 
 def _sender_is_autoresponder(sender: str | None) -> bool:
@@ -130,7 +158,17 @@ def classify_requested_action(subject: str, body: str,
     the BODY always beats auto-reply boilerplate: vendor systems (RMIS et
     al.) routinely footer real requests with "please do not reply", and that
     footer must not turn a real request into an auto-reply.
+
+    A subject shaped like a certificate request ("Certificate of Insurance
+    X to Y", "Renewal Certificate Request- X", "COI - X") counts as request
+    language even when the body is a bare certificate PDF — the subject is
+    the request. Bounce/undeliverable subjects are checked first so a
+    failure notice quoting a request subject never classifies as a request.
     """
+    # A bounce quoting the original subject is definitive: it never issues
+    # a genuine request, even when the quoted tail names a certificate.
+    if _BOUNCE_SUBJECT_RE.search(subject or ""):
+        return ACTION_AUTOREPLY
     # A known autoresponder address is definitive: it never issues a
     # genuine request, even when it quotes the original subject.
     if _sender_is_autoresponder(sender):
@@ -144,7 +182,8 @@ def classify_requested_action(subject: str, body: str,
     text = f"{subject or ''}\n{body_text}"
     if any(p.search(text) for p in _ACK_PATTERNS):
         return ACTION_ACK
-    if any(p.search(text) for p in _NEW_REQUEST_PATTERNS):
+    if (any(p.search(text) for p in _NEW_REQUEST_PATTERNS)
+            or _subject_is_request_shape(subject)):
         return ACTION_NEW_REQUEST
     return ACTION_UNKNOWN
 
@@ -458,7 +497,14 @@ def verify_record(record: Any, index: Any,
             f"<{res.requester_email}> is not the insured")
 
     # Requested action: new request vs acknowledgement vs auto-reply.
-    body_text = " ".join(record.facts.pdf_texts)
+    # Classified on the email body AND the PDF texts: the request language
+    # usually lives in the body ("Please issue a certificate"), while
+    # attached request forms live in the PDFs. Subject is included by the
+    # classifier itself.
+    body_text = "\n".join(
+        t for t in [getattr(record.facts, "body_text", "") or ""]
+        + list(record.facts.pdf_texts) if t
+    )
     res.requested_action = classify_requested_action(
         record.subject, body_text,
         sender=getattr(record.facts, "requester_email", None))
@@ -473,6 +519,17 @@ def verify_record(record: Any, index: Any,
         return res.hold(
             "automated response (auto-reply/bounce), not a certificate "
             "request — holding, never filing or tasking")
+    elif res.requested_action == ACTION_UNKNOWN:
+        # Not a proven request: internal digests, call-analysis forwards,
+        # vendor-doc updates, and anything else without request language.
+        # Verifying these is what minted the 54 false positives in the
+        # 2026-09-26 sweep — hold, never file or task.
+        res.evidence.append(
+            "message could not be classified as a certificate request — "
+            "no request language in subject or body")
+        return res.hold(
+            "unclassifiable message (requested_action unknown): not a "
+            "proven certificate request — holding, never filing or tasking")
 
     match = record.match
     status = getattr(match, "status", "")

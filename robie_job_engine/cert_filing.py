@@ -285,7 +285,9 @@ def resolve_discussion(verified: Any, holder_names: list[str],
       2. exactly one cert-titled discussion anchored by the email's exact
          holder phrase or policy digits;
       3. exactly one cert-titled discussion matching a holder fragment;
-      4. HOLD — multiple candidates, or none for this request.
+      4. HOLD — multiple candidates, none for this request, or a single
+         candidate with NO holder/policy anchor (a lone discussion is not
+         evidence the request belongs in it).
 
     Recency never resolves on its own: it only strengthens the evidence for
     a single anchored candidate ("created N days before the request — looks
@@ -352,7 +354,16 @@ def resolve_discussion(verified: Any, holder_names: list[str],
                                  policy_numbers)
         anchors = ann[0]["_anchors"]
         age = age_days(did)
-        ev = "; ".join(anchors) if anchors else "holder fragment match"
+        if not anchors:
+            # A lone certificate discussion with NO holder or policy anchor
+            # is not evidence this request belongs in it — the old code
+            # printed "holder fragment match" here, a fabricated reason.
+            # Hold with the honest evidence, never file.
+            return None, None, (
+                f"HOLD: single certificates discussion {title!r} but no "
+                f"holder/policy anchor for this request — holding for "
+                f"human, never guessing")
+        ev = "; ".join(anchors)
         if age is not None and 0 <= age <= _CREATED_FOR_REQUEST_DAYS:
             ev += (f"; created {age} day(s) before the request — "
                    "looks created for it")

@@ -240,6 +240,20 @@ def load_index_from_workbook(path: str = "") -> ApplicantIndex:
     return build_index(rows, source_path=path)
 
 
+# Agency-internal sender domains. An internal address on an applicant
+# record is a staff contact, never the client — matching on it alone
+# verified internal ops digests as certificate requests (2026-09-26).
+_INTERNAL_SENDER_DOMAINS = ("streetsmart.insurance", "ssinj.com")
+
+
+def _sender_is_internal(email: str | None) -> bool:
+    if not email or "@" not in email:
+        return False
+    domain = email.split("@", 1)[1].lower()
+    return any(domain == d or domain.endswith("." + d)
+               for d in _INTERNAL_SENDER_DOMAINS)
+
+
 @dataclass
 class MatchResult:
     status: str  # MATCHED | NO_MATCH | AMBIGUOUS
@@ -275,7 +289,10 @@ def match_applicant(
     2. ``dba`` — same as the insured name.
     3. ``requester_email`` — only when no insured/dba matched; covers the
        common case of the client writing from their own address without
-       naming themselves.
+       naming themselves. NEVER for agency-internal senders
+       (@streetsmart.insurance, @ssinj.com): an internal address on an
+       applicant record is a contact, not the client, and matching it
+       verified internal ops digests as certificate requests (2026-09-26).
     4. phone numbers — optional extra signal.
 
     ``holder_names`` are NEVER match keys (holders are third parties).
@@ -330,8 +347,16 @@ def match_applicant(
 
     email_key = normalize_email(getattr(facts, "requester_email", None))
     if email_key and email_key in index.by_email:
-        return MatchResult(MATCHED, index.by_email[email_key],
-                           f"sender email {email_key}")
+        if _sender_is_internal(email_key):
+            # Agency-internal senders never verify on email alone: the
+            # address is a staff contact on the record, not the client.
+            # The insured name above is the client signal; without it this
+            # is NO_MATCH, never a match to whoever the staffer is filed
+            # under.
+            pass
+        else:
+            return MatchResult(MATCHED, index.by_email[email_key],
+                               f"sender email {email_key}")
 
     for raw in phones or []:
         for key in phone_keys(raw):

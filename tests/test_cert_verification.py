@@ -127,7 +127,8 @@ def test_action_classification():
 # --- verify_record ----------------------------------------------------------
 
 def test_verified_report_match_without_policy_numbers():
-    rec = make_record(insured="Fonseca General Contractor LLC",
+    rec = make_record(subject="Please issue a certificate of insurance",
+                      insured="Fonseca General Contractor LLC",
                       match=make_match("MATCHED", 116349171))
     res = verify_record(rec, index=None, verifier=FakeVerifier())
     assert res.status == VERIFIED
@@ -136,7 +137,8 @@ def test_verified_report_match_without_policy_numbers():
 
 
 def test_matched_but_policy_anchors_elsewhere_holds():
-    rec = make_record(insured="Fonseca General Contractor LLC",
+    rec = make_record(subject="Please issue a certificate of insurance",
+                      insured="Fonseca General Contractor LLC",
                       policy_numbers=["47VBR02289201"],
                       match=make_match("MATCHED", 116349171))
     verifier = FakeVerifier(policies={
@@ -160,7 +162,8 @@ def test_no_match_ezlynx_fallback_verifies():
 
 
 def test_no_match_multiple_applicants_holds():
-    rec = make_record(policy_numbers=["P1", "P2"],
+    rec = make_record(subject="Please issue a certificate of insurance",
+                      policy_numbers=["P1", "P2"],
                       match=make_match("NO_MATCH"))
     verifier = FakeVerifier(policies={
         "P1": [{"applicantId": 1}], "P2": [{"applicantId": 2}]})
