@@ -196,25 +196,18 @@ def dedupe_keys(email: CertEmail) -> dict[str, Any]:
 def is_duplicate(email: CertEmail, store: Any) -> tuple[bool, str]:
     """True when this email was already processed, with the reason.
 
-    Checks provider id, then RFC id, then body+attachments. A re-sent
-    email with a *changed* attachment (same filename, new bytes) is NOT
-    a duplicate — changed bytes may be a new version.
+    Only identity keys gate: the Gmail message id, then the RFC
+    Message-ID. Two distinct messages can legitimately share identical
+    body bytes (thread replies quoting prior content, recurring
+    auto-notifications) — skipping on body_hash drops real mail, which
+    violates the one-flag-per-message rule. Body/attachment hashes are
+    still marked for forensics but never suppress a distinct message.
     """
     keys = dedupe_keys(email)
     if store.seen(keys["provider_id"]):
         return True, "same Gmail message id already processed"
     if keys["rfc_id"] and store.seen(keys["rfc_id"]):
         return True, "same RFC Message-ID already processed"
-    if keys["attachment_hashes"]:
-        if all(store.seen(h) for h in keys["attachment_hashes"]) and store.seen(
-            keys["body_hash"]
-        ):
-            return (
-                True,
-                "identical body and identical attachment bytes already processed",
-            )
-    elif store.seen(keys["body_hash"]):
-        return True, "identical body already processed (no attachments)"
     return False, ""
 
 
