@@ -134,9 +134,12 @@ of this commit is installed on `hermes-test-01` (not done here):
    does not type the password or the OTP. It holds if the login host or a
    password field is visible.
 4. Leave **one** `foragentsonly.com` application tab. Extra FAO tabs hold.
-5. The shell must show agent code `CA33617` and no second `CA#####` code.
-   Override only with `--agent-code` / `PROGRESSIVE_FAO_AGENT_CODE` when the
-   Test session is actually that code.
+5. The shell must show StreetSmart agency `CA33617` and no second agency.
+   Live FAO Home may omit the `CA` prefix and show `(33617)` and/or login id
+   `33617c`; those are the same agent. A missing code, or a second
+   `CA#####`, `(#####)`, or `#####c` login, holds the pull. Override only
+   with `--agent-code` / `PROGRESSIVE_FAO_AGENT_CODE` when the Test session
+   is actually that code.
 6. The default output root is private (mode `0700`), and each date folder
    is too. The command creates them and holds if either is group- or
    world-accessible. Existing named PDFs that do not match the ledger are
