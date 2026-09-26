@@ -194,14 +194,14 @@ class FireTaskIntegrationTests(unittest.TestCase):
         self.zt = zapier_tasks
 
     def test_missing_script_raises(self):
-        with mock.patch.object(self.zt, "ZAP_TRIGGER_SCRIPT", "/nonexistent/zap-trigger"):
+        with mock.patch.dict(os.environ, {"ROBIE_ZAP_TRIGGER": "/nonexistent/zap-trigger"}):
             with self.assertRaises(RuntimeError):
                 self.zt.fire_task(_payload(), dry_run=True)
 
     def test_dry_run_through_in_tree_script(self):
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(self.zt, "ZAP_TRIGGER_SCRIPT", str(SCRIPT)), \
-                mock.patch.dict(os.environ, {"ZAPIER_CATCH_HOOK_URL": FAKE_URL, "HERMES_HOME": tmp}):
+                mock.patch.dict(os.environ, {"ROBIE_ZAP_TRIGGER": str(SCRIPT),
+                                             "ZAPIER_CATCH_HOOK_URL": FAKE_URL, "HERMES_HOME": tmp}):
             result = self.zt.fire_task(_payload(), dry_run=True)
         self.assertEqual(result["ok"], True)
         self.assertEqual(result["dry_run"], True)
