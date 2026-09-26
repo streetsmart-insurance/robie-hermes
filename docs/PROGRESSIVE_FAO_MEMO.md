@@ -113,8 +113,15 @@ is set, the local pack is still written, then the command fails closed and
 does not call Google or report the pack as uploaded. The manifest `drive`
 status becomes `HELD`.
 
-The browser steps use exact accessible names from the manual path. Zero or
-multiple matches hold. There is no positional click. A Memo open accepts one
+Manage Policies accepts the live header control: accessible name
+`Manage Policies Home`, any link or button whose accessible name matches
+`^Manage Policies`, or `a[data-at="header-nav__parent-link--manage-policies"]`.
+Those selectors are one element. Policy Activity accepts `Policy Activity`
+or `View policy activity reports`. If the chosen control is not visible,
+Main Navigation is clicked once and the control is resolved again. Zero
+matches, two visible matches, or two Manage Policies elements hold. There
+is no positional click. Dates, Search, Communications, and Memo stay exact
+names. A Memo open accepts one
 PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
 URL, or embed), or a same-tab PDF that can be returned to the list. HTML is
 not printed into a fake PDF. Two different PDFs hold.
@@ -170,10 +177,19 @@ not upload or write a note.
 
 ## UNVERIFIED until that Test run
 
-- Live accessible names: `Manage Policies`, `Policy Activity`,
-  `Processed date from`, `Processed date to`, `Search`, Communications tab
-  `aria-selected`, and a Memo link or button on each row. A mismatch holds;
-  do not widen these from Production.
+- Manage Policies and Policy Activity names below were read off the
+  authenticated FAO Home session that held on release `3f774852151c`. This
+  commit is not that release and has not been installed on `hermes-test-01`.
+  The header link's accessible name is `Manage Policies Home`
+  (`aria-label`), with `a[data-at="header-nav__parent-link--manage-policies"]`.
+  It was hidden until Main Navigation was clicked once. Policy Activity on
+  the landing is `View policy activity reports` and/or header `Policy Activity`,
+  which may also be hidden until that expand. A pull on the installed Test
+  release still holds at `Progressive control 'Manage Policies' is missing
+  or ambiguous` until this commit is released there.
+- Still exact, and still UNVERIFIED on a completed pull: `Processed date from`,
+  `Processed date to`, `Search`, Communications tab `aria-selected`, and a
+  Memo link or button on each row. A mismatch holds.
 - Whether the communications grid uses a Type column, and whether a disabled
   `Next` control is present. An enabled `Next` holds so a partial page is
   not treated as the full day.

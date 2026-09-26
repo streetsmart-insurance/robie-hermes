@@ -5,9 +5,14 @@ Manage Policies, Policy Activity, an explicit processed-date window,
 Communications, then each Memo row saved as
 ``[PolicyNumber] Progressive Memo [Reason].pdf``.
 
-Accessible names below are that path, not a certified live DOM. A missing or
-non-unique control raises IntakeHold. This module does not log in and does
-not submit OTP. Portal code does not upload, note, task, or label in EZLynx.
+On the authenticated FAO header the Manage Policies control's accessible
+name is ``Manage Policies Home`` (``aria-label`` wins over the visible text)
+and it is hidden until Main Navigation is expanded once. The same link is
+``a[data-at="header-nav__parent-link--manage-policies"]``. Policy Activity is
+either that header name or the landing link ``View policy activity reports``.
+A missing or non-unique control raises IntakeHold. This module does not log
+in and does not submit OTP. Portal code does not upload, note, task, or
+label in EZLynx.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
@@ -65,6 +70,18 @@ _PAREN_AGENCY_IN_TEXT = re.compile(r"\(\s*(\d{5})\s*\)")
 _LOGIN_AGENCY_IN_TEXT = re.compile(r"\b(\d{5})c\b", re.IGNORECASE)
 _BARE_STREETSMART_AGENCY = re.compile(rf"\b{DEFAULT_AGENT_CODE[2:]}\b")
 _POLICY_NUMBER = re.compile(r"^\d{6,12}$")
+# Live FAO header (hermes-test-01, authenticated Home): aria-label
+# "Manage Policies Home" on a[data-at="header-nav__parent-link--manage-policies"].
+# The prefix also matches a control whose accessible name is exactly
+# "Manage Policies". Policy Activity on that landing is either the header
+# name or "View policy activity reports".
+MANAGE_POLICIES_LABEL = "Manage Policies"
+MANAGE_POLICIES_CSS = 'a[data-at="header-nav__parent-link--manage-policies"]'
+MANAGE_POLICIES_NAME = re.compile(r"^Manage Policies")
+POLICY_ACTIVITY_LABEL = "Policy Activity"
+POLICY_ACTIVITY_NAMES = ("Policy Activity", "View policy activity reports")
+MAIN_NAVIGATION_NAME = "Main Navigation"
+_SHELL_NAV_ROLES = ("link", "button")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
 _EASTERN = ZoneInfo("America/New_York")
 
@@ -402,6 +419,124 @@ def click_named(page: Any, name: str, *, roles: tuple[str, ...]) -> None:
     matches[0][1].click()
 
 
+def _control_hold(label: str) -> IntakeHold:
+    return IntakeHold(f"Progressive control {label!r} is missing or ambiguous")
+
+
+def _union(locators: list[Any]) -> Any:
+    merged = locators[0]
+    for locator in locators[1:]:
+        merged = merged.or_(locator)
+    return merged
+
+
+def _role_locator(page: Any, name: str | re.Pattern, *, exact: bool) -> Any:
+    return _union([
+        page.get_by_role(role, name=name, exact=exact)
+        for role in _SHELL_NAV_ROLES
+    ])
+
+
+def _is_visible(locator: Any) -> bool:
+    probe = getattr(locator, "is_visible", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        return False
+
+
+def _survey(locator: Any) -> tuple[list[Any], int]:
+    total = int(locator.count())
+    visible: list[Any] = []
+    for index in range(total):
+        item = locator.nth(index)
+        if _is_visible(item):
+            visible.append(item)
+    return visible, total
+
+
+def _shell_ready(visible: list[Any], total: int, *, unique_element: bool) -> bool:
+    if unique_element:
+        return total == 1 and len(visible) == 1
+    return len(visible) == 1
+
+
+def _shell_ambiguous(visible: list[Any], total: int, *, unique_element: bool) -> bool:
+    if len(visible) > 1:
+        return True
+    if unique_element:
+        return total > 1
+    return total > 1 and len(visible) == 0
+
+
+def _expand_main_navigation(page: Any) -> None:
+    visible, total = _survey(_role_locator(page, MAIN_NAVIGATION_NAME, exact=True))
+    if len(visible) != 1 or total != 1:
+        raise _control_hold(MAIN_NAVIGATION_NAME)
+    visible[0].click()
+
+
+def click_shell_nav(
+    page: Any,
+    locator_factory: Callable[[], Any],
+    *,
+    label: str,
+    unique_element: bool,
+) -> None:
+    """Click one FAO shell control, expanding Main Navigation once if needed.
+
+    Manage Policies is ``unique_element``: the data-at link and the
+    ``^Manage Policies`` accessible name must be the same single element.
+    Policy Activity is not: ``Policy Activity`` and ``View policy activity
+    reports`` are the same destination, so one visible match is clicked and
+    a second hidden match does not hold. Two visible matches, or two hidden
+    matches, hold. A hidden or absent match expands Main Navigation once,
+    then the same rule runs again. The hidden control is never clicked.
+    """
+    visible, total = _survey(locator_factory())
+    if _shell_ready(visible, total, unique_element=unique_element):
+        visible[0].click()
+        return
+    if _shell_ambiguous(visible, total, unique_element=unique_element):
+        raise _control_hold(label)
+    _expand_main_navigation(page)
+    visible, total = _survey(locator_factory())
+    if not _shell_ready(visible, total, unique_element=unique_element):
+        raise _control_hold(label)
+    visible[0].click()
+
+
+def _manage_policies_locator(page: Any) -> Any:
+    """One Manage Policies element, or an empty locator when nothing matches.
+
+    The data-at selector and the ``^Manage Policies`` name are checked
+    separately. A union would be ambiguous when those queries hit different
+    elements, and it can also count one element twice. Both queries matching
+    one shared element is the live header link. Either query matching more
+    than one element holds.
+    """
+    css = page.locator(MANAGE_POLICIES_CSS)
+    role = _role_locator(page, MANAGE_POLICIES_NAME, exact=False)
+    css_count = int(css.count())
+    role_count = int(role.count())
+    if css_count > 1 or role_count > 1:
+        raise _control_hold(MANAGE_POLICIES_LABEL)
+    if css_count == 1 and role_count == 1 and int(css.and_(role).count()) != 1:
+        raise _control_hold(MANAGE_POLICIES_LABEL)
+    if css_count == 1:
+        return css
+    return role
+
+
+def _policy_activity_locator(page: Any) -> Any:
+    return _union([
+        _role_locator(page, name, exact=True)
+        for name in POLICY_ACTIVITY_NAMES
+    ])
+
+
 def fill_labeled_date(page: Any, label: str, day: date) -> None:
     locator = page.get_by_label(label, exact=True)
     if locator.count() != 1:
@@ -497,8 +632,18 @@ class PlaywrightFaoMemoBrowser:
             raise IntakeHold("Progressive FAO agent context is missing or ambiguous")
         assert_authenticated(self.page)
         assert_agent_context(self.page, self.agent_code)
-        click_named(self.page, "Manage Policies", roles=("link", "button"))
-        click_named(self.page, "Policy Activity", roles=("link", "button"))
+        click_shell_nav(
+            self.page,
+            lambda: _manage_policies_locator(self.page),
+            label=MANAGE_POLICIES_LABEL,
+            unique_element=True,
+        )
+        click_shell_nav(
+            self.page,
+            lambda: _policy_activity_locator(self.page),
+            label=POLICY_ACTIVITY_LABEL,
+            unique_element=False,
+        )
         fill_labeled_date(self.page, "Processed date from", start)
         fill_labeled_date(self.page, "Processed date to", end)
         click_named(self.page, "Search", roles=("button",))

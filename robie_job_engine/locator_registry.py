@@ -24,6 +24,7 @@ class FieldLocator:
     exact: bool = True
     description: str = ""
     last_updated: str = ""
+    name_pattern: str = ""
 
     def validate(self) -> None:
         if locator_is_positional_guess(self.primary_selector):
@@ -90,6 +91,7 @@ class LocatorRegistry:
                             exact=bool(fval.get("exact", True)),
                             description=fval.get("description", ""),
                             last_updated=fval.get("last_updated", ""),
+                            name_pattern=str(fval.get("name_pattern") or ""),
                         )
                         page_loc.add_field(floc)
                     self._pages[key] = page_loc

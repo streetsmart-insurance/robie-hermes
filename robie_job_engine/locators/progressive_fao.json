@@ -5,12 +5,13 @@
   "fields": {
     "manage_policies": {
       "name": "manage_policies",
-      "primary_strategy": "role",
-      "primary_selector": "link:Manage Policies",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-at=\"header-nav__parent-link--manage-policies\"]",
       "fallback_strategy": "role",
-      "fallback_selector": "button:Manage Policies",
+      "fallback_selector": "link:Manage Policies Home",
       "exact": true,
-      "description": "FAO shell link or button. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "name_pattern": "^Manage Policies",
+      "description": "FAO header parent link. Live accessible name is Manage Policies Home because aria-label wins over the visible text Manage Policies. The click accepts this data-at selector or one link/button whose accessible name matches ^Manage Policies. Hidden until Main Navigation is expanded once. Zero matches or more than one element holds.",
       "last_updated": "2026-09-26"
     },
     "policy_activity": {
@@ -18,9 +19,9 @@
       "primary_strategy": "role",
       "primary_selector": "link:Policy Activity",
       "fallback_strategy": "role",
-      "fallback_selector": "button:Policy Activity",
+      "fallback_selector": "link:View policy activity reports",
       "exact": true,
-      "description": "Policy Activity entry. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "description": "Header link Policy Activity, or the Manage Policies landing link View policy activity reports. Either may be hidden until Main Navigation is expanded once. Two visible matches hold.",
       "last_updated": "2026-09-26"
     },
     "processed_date_from": {

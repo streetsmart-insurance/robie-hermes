@@ -25,6 +25,10 @@ from robie_job_engine.progressive_fao_memo import (
     MemoGrid,
     MemoOpenObservation,
     PagePdfView,
+    MAIN_NAVIGATION_NAME,
+    MANAGE_POLICIES_CSS,
+    MANAGE_POLICIES_NAME,
+    POLICY_ACTIVITY_NAMES,
     PlaywrightFaoMemoBrowser,
     assert_agent_context,
     build_parser,
@@ -700,9 +704,22 @@ class LocatorContractTests(unittest.TestCase):
             selectors.append(field.primary_selector)
             if field.fallback_selector:
                 selectors.append(field.fallback_selector)
-        self.assertIn("link:Manage Policies", selectors)
+        manage = page.get_field("manage_policies")
+        activity = page.get_field("policy_activity")
+        self.assertEqual(manage.primary_strategy, "css")
+        self.assertEqual(manage.primary_selector, MANAGE_POLICIES_CSS)
+        self.assertEqual(manage.fallback_selector, "link:Manage Policies Home")
+        self.assertEqual(manage.name_pattern, MANAGE_POLICIES_NAME.pattern)
+        self.assertTrue(manage.exact)
+        self.assertEqual(activity.primary_selector, "link:" + POLICY_ACTIVITY_NAMES[0])
+        self.assertEqual(activity.fallback_selector, "link:" + POLICY_ACTIVITY_NAMES[1])
+        self.assertTrue(activity.exact)
         self.assertIn("tab:Communications", selectors)
         self.assertIn("Processed date from", selectors)
+        self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
+        self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
+        self.assertIsNone(MANAGE_POLICIES_NAME.search("Menu Manage Policies"))
+        self.assertIsNone(MANAGE_POLICIES_NAME.search("manage policies home"))
         for selector in selectors:
             self.assertFalse(locator_is_positional_guess(selector))
 
@@ -736,13 +753,14 @@ class LocatorContractTests(unittest.TestCase):
 
 
 class FakeNode:
-    def __init__(self, role, name="", text=None, children=None, attrs=None, disabled=False):
+    def __init__(self, role, name="", text=None, children=None, attrs=None, disabled=False, visible=True):
         self.role = role
         self.name = name
         self.text = name if text is None else text
         self.children = children or []
         self.attrs = attrs or {}
         self.disabled = disabled
+        self.visible = visible
         self.value = ""
         self.input_override = None
 
@@ -754,13 +772,24 @@ class FakeNode:
 
     def find_role(self, role, name, exact):
         found = []
-        if self.role == role and (name is None or ((self.name == name) if exact else name in self.name)):
+        if self.role == role and self._name_matches(name, exact):
             found.append(self)
         for child in self.children:
             found.extend(child.find_role(role, name, exact))
         return found
 
+    def _name_matches(self, name, exact):
+        if name is None:
+            return True
+        if hasattr(name, "search"):
+            return name.search(self.name or "") is not None
+        if exact:
+            return self.name == name
+        return str(name) in (self.name or "")
+
     def matches(self, selector):
+        if selector == MANAGE_POLICIES_CSS:
+            return self.role == "link" and self.attrs.get("data-at") == "header-nav__parent-link--manage-policies"
         return {
             "table": self.role == "table",
             "thead": self.role == "thead",
@@ -805,6 +834,24 @@ class NodeLocator:
     def is_disabled(self):
         return self.nodes[0].disabled
 
+    def is_visible(self, timeout=None):
+        return len(self.nodes) == 1 and bool(self.nodes[0].visible)
+
+    def nth(self, index):
+        return NodeLocator([self.nodes[index]], self.page)
+
+    def or_(self, other):
+        merged = []
+        for node in (*self.nodes, *other.nodes):
+            if node not in merged:
+                merged.append(node)
+        return NodeLocator(merged, self.page if self.page is not None else other.page)
+
+    def and_(self, other):
+        other_nodes = list(other.nodes)
+        merged = [node for node in self.nodes if node in other_nodes]
+        return NodeLocator(merged, self.page if self.page is not None else other.page)
+
     def all(self):
         return [NodeLocator([node], self.page) for node in self.nodes]
 
@@ -824,7 +871,11 @@ class NodeLocator:
 class NavPage:
     def __init__(self, *, body="StreetSmart Risk Mgr CA33617", url=LIST_URL, password=False,
                  duplicate_manage=False, next_mode="disabled", open_mode="download",
-                 date_override=None, go_back_restores=True):
+                 date_override=None, go_back_restores=True, manage_name="Manage Policies",
+                 manage_role="link", manage_visible=True, manage_attrs=None,
+                 extra_manage=None, policy_name="Policy Activity", policy_role="link",
+                 policy_visible=True, policy_items=None, include_main_nav=True,
+                 duplicate_main_nav=False, main_nav_visible=True):
         self.url = url
         self.list_url = url
         self.body_text = body
@@ -834,6 +885,18 @@ class NavPage:
         self.open_mode = open_mode
         self.date_override = date_override
         self.go_back_restores = go_back_restores
+        self.manage_name = manage_name
+        self.manage_role = manage_role
+        self.manage_visible = manage_visible
+        self.manage_attrs = manage_attrs or {}
+        self.extra_manage = extra_manage
+        self.policy_name = policy_name
+        self.policy_role = policy_role
+        self.policy_visible = policy_visible
+        self.policy_items = policy_items
+        self.include_main_nav = include_main_nav
+        self.duplicate_main_nav = duplicate_main_nav
+        self.main_nav_visible = main_nav_visible
         self.clicks = []
         self.memo_opens = []
         self.screenshot_calls = 0
@@ -847,11 +910,39 @@ class NavPage:
     def _build(self):
         self.body = FakeNode("body", text=self.body_text)
         self.password_node = FakeNode("input", attrs={"type": "password"})
-        manage = [FakeNode("link", "Manage Policies")]
+        manage = [FakeNode(
+            self.manage_role,
+            self.manage_name,
+            attrs=dict(self.manage_attrs),
+            visible=self.manage_visible,
+        )]
         if self.duplicate_manage:
-            manage.append(FakeNode("link", "Manage Policies"))
+            manage.append(FakeNode(
+                self.manage_role,
+                self.manage_name,
+                attrs=dict(self.manage_attrs),
+                visible=self.manage_visible,
+            ))
+        if self.extra_manage is not None:
+            role, name, visible = self.extra_manage
+            manage.append(FakeNode(role, name, visible=visible))
         self.home = manage
-        self.policies = [FakeNode("link", "Policy Activity")]
+        if self.policy_items is None:
+            self.policies = [FakeNode(self.policy_role, self.policy_name, visible=self.policy_visible)]
+        else:
+            self.policies = [
+                FakeNode(self.policy_role, name, visible=visible)
+                for name, visible in self.policy_items
+            ]
+        self.main_nav_nodes = []
+        if self.include_main_nav:
+            self.main_nav_nodes.append(
+                FakeNode("button", MAIN_NAVIGATION_NAME, visible=self.main_nav_visible)
+            )
+            if self.duplicate_main_nav:
+                self.main_nav_nodes.append(
+                    FakeNode("button", MAIN_NAVIGATION_NAME, visible=self.main_nav_visible)
+                )
         self.from_box = FakeNode("textbox", "Processed date from")
         self.to_box = FakeNode("textbox", "Processed date to")
         if self.date_override is not None:
@@ -890,7 +981,7 @@ class NavPage:
             ])
 
     def roots(self):
-        nodes = [self.body]
+        nodes = [self.body, *self.main_nav_nodes]
         if self.password:
             nodes.append(self.password_node)
         nodes.extend({"home": self.home, "policies": self.policies, "activity": self.activity, "comms": [self.tab]}[self.state])
@@ -931,9 +1022,13 @@ class NavPage:
             self.url = self.list_url
 
     def on_click(self, node):
-        if node.name == "Manage Policies" and self.state == "home":
+        if node in self.main_nav_nodes:
+            for item in (*self.home, *self.policies):
+                item.visible = True
+            return
+        if node in self.home and self.state == "home":
             self.state = "policies"
-        elif node.name == "Policy Activity" and self.state == "policies":
+        elif node in self.policies and self.state == "policies":
             self.state = "activity"
         elif node.name == "Search" and self.state == "activity":
             self.state = "comms"
@@ -1093,6 +1188,7 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(pdf_bytes_from_observation(observation), pdf_bytes(b"879512352"))
         self.assertEqual(page.memo_opens, ["879512352"])
         self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity", "Search", "Communications", "Memo"])
+        self.assertNotIn(MAIN_NAVIGATION_NAME, page.clicks)
         self.assertFalse(page.closed)
 
     def test_live_home_agency_display_without_ca_prefix_reaches_communications(self):
@@ -1101,6 +1197,135 @@ class NavigationTests(unittest.TestCase):
         grid = browser.load_communications(start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE)
         self.assertEqual(len(grid.rows), 2)
         self.assertIn("Search", page.clicks)
+
+    def _load(self, page):
+        return PlaywrightFaoMemoBrowser(page).load_communications(
+            start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE,
+        )
+
+    def test_manage_policies_home_hidden_until_main_navigation(self):
+        attrs = {"data-at": "header-nav__parent-link--manage-policies"}
+        hidden = NavPage(manage_name="Manage Policies Home", manage_attrs=attrs, manage_visible=False)
+        self._load(hidden)
+        self.assertEqual(
+            hidden.clicks[:3],
+            [MAIN_NAVIGATION_NAME, "Manage Policies Home", "Policy Activity"],
+        )
+        self.assertEqual(hidden.clicks.count(MAIN_NAVIGATION_NAME), 1)
+
+        visible = NavPage(manage_name="Manage Policies Home", manage_attrs=attrs, manage_visible=True)
+        self._load(visible)
+        self.assertEqual(visible.clicks[0], "Manage Policies Home")
+        self.assertNotIn(MAIN_NAVIGATION_NAME, visible.clicks)
+
+    def test_manage_policies_data_at_matches_without_the_accessible_name(self):
+        page = NavPage(
+            manage_name="Menu Manage Policies",
+            manage_attrs={"data-at": "header-nav__parent-link--manage-policies"},
+        )
+        self._load(page)
+        self.assertEqual(page.clicks[0], "Menu Manage Policies")
+        self.assertNotIn(MAIN_NAVIGATION_NAME, page.clicks)
+
+        button = NavPage(manage_role="button", manage_name="Manage Policies Home")
+        self._load(button)
+        self.assertEqual(button.clicks[0], "Manage Policies Home")
+
+    def test_manage_policies_ambiguity_stays_closed(self):
+        cases = (
+            ("two visible", NavPage(duplicate_manage=True), "Manage Policies", []),
+            (
+                "css and name are different elements",
+                NavPage(
+                    manage_name="Menu Manage Policies",
+                    manage_attrs={"data-at": "header-nav__parent-link--manage-policies"},
+                    extra_manage=("button", "Manage Policies Home", True),
+                ),
+                "Manage Policies",
+                [],
+            ),
+            (
+                "visible plus hidden",
+                NavPage(manage_name="Manage Policies Home", extra_manage=("link", "Manage Policies", False)),
+                "Manage Policies",
+                [],
+            ),
+            (
+                "two hidden",
+                NavPage(duplicate_manage=True, manage_visible=False),
+                "Manage Policies",
+                [],
+            ),
+            (
+                "missing expands once",
+                NavPage(manage_name="Open Manage Policies"),
+                "Manage Policies",
+                [MAIN_NAVIGATION_NAME],
+            ),
+            (
+                "hidden without main navigation",
+                NavPage(manage_name="Manage Policies Home", manage_visible=False, include_main_nav=False),
+                "Main Navigation",
+                [],
+            ),
+            (
+                "ambiguous main navigation",
+                NavPage(manage_visible=False, duplicate_main_nav=True),
+                "Main Navigation",
+                [],
+            ),
+            (
+                "hidden main navigation",
+                NavPage(manage_visible=False, main_nav_visible=False),
+                "Main Navigation",
+                [],
+            ),
+        )
+        for label, page, hold, clicks in cases:
+            with self.subTest(label):
+                with self.assertRaisesRegex(IntakeHold, hold):
+                    self._load(page)
+                self.assertEqual(page.clicks, clicks)
+                self.assertNotIn("Search", page.clicks)
+
+    def test_policy_activity_landing_label_and_collapsed_header(self):
+        landing = NavPage(policy_name="View policy activity reports")
+        self._load(landing)
+        self.assertEqual(landing.clicks[1], "View policy activity reports")
+        self.assertNotIn(MAIN_NAVIGATION_NAME, landing.clicks)
+
+        collapsed = NavPage(policy_visible=False)
+        self._load(collapsed)
+        self.assertEqual(
+            collapsed.clicks[:3],
+            ["Manage Policies", MAIN_NAVIGATION_NAME, "Policy Activity"],
+        )
+        self.assertEqual(collapsed.clicks.count(MAIN_NAVIGATION_NAME), 1)
+
+        both_hidden = NavPage(manage_visible=False, policy_visible=False)
+        self._load(both_hidden)
+        self.assertEqual(both_hidden.clicks.count(MAIN_NAVIGATION_NAME), 1)
+        self.assertEqual(
+            both_hidden.clicks[:3],
+            [MAIN_NAVIGATION_NAME, "Manage Policies", "Policy Activity"],
+        )
+
+        sibling = NavPage(policy_items=(
+            ("View policy activity reports", True),
+            ("Policy Activity", False),
+        ))
+        self._load(sibling)
+        self.assertEqual(sibling.clicks[1], "View policy activity reports")
+        self.assertNotIn(MAIN_NAVIGATION_NAME, sibling.clicks)
+
+        ambiguous = NavPage(policy_items=(
+            ("View policy activity reports", True),
+            ("Policy Activity", True),
+        ))
+        with self.assertRaisesRegex(IntakeHold, "Policy Activity"):
+            self._load(ambiguous)
+        self.assertEqual(ambiguous.clicks, ["Manage Policies"])
+        self.assertNotIn("Search", ambiguous.clicks)
 
     def test_login_password_wrong_agent_and_ambiguous_controls_do_not_search(self):
         cases = (
