@@ -1,6 +1,6 @@
 """Read-only QBO client for the Applied Pay matcher. Only GET/query calls. Rotated refresh
-tokens are written back to Secret Manager right away (approved by Carlo 9/23) so other users
-of qbo_production_* keep working."""
+tokens are written back to Secret Manager right away so other users
+of qbo_production_* keep working. Repeated unattended rotation requires explicit owner approval."""
 import json, subprocess, time, urllib.parse, urllib.request, base64, sys
 PROJECT = "streetsmart-hermes-poc"
 def _sec(name):

@@ -2,7 +2,10 @@
 their bank-side account, and deposits into Trust Checking WF (3021) (proxy for Wells deposits;
 sound only for reconciled periods). Also records which JEs each existing deposit already groups."""
 import json, re, sys
-from qbo_client import QBO
+try:
+    from .qbo_client import QBO
+except ImportError:  # direct CLI invocation from applied_pay/
+    from qbo_client import QBO
 RX = re.compile(r"EZLynx Receipt(?: reversal)? (\d{6}(?:-R)?)", re.I)
 TRUST_3021_ID = "27"
 CASH_SIDE = {"Undeposited Funds", "Trust", "Trust Checking WF (3021)", "Manasqan - Trust"}
