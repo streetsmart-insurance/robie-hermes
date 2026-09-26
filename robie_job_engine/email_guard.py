@@ -14,6 +14,85 @@ class EmailTaskPending(RuntimeError):
     """Leave the inbound message available until its durable job is terminal."""
 
 
+# Fallback reply when a worker draft contains internal reasoning that cannot be
+# safely separated from the customer-facing text. Must not itself contain the
+# "thought process" marker phrase.
+_REASONING_STRIP_FALLBACK = (
+    "Robie held this reply for review: the draft contained internal reasoning "
+    "text that could not be safely separated from the customer reply. "
+    "Please review and resend."
+)
+
+# A bolded agent-reasoning heading, e.g. **Continuing Thought Process** or
+# **Analyzing Interrupted Process**. Reasoning headings start with a gerund
+# ("Analyzing", "Investigating", ...) or name the thought process explicitly.
+_REASONING_HEADING = re.compile(
+    r"^\*\*\s*(?:[A-Za-z]*ing\b.*|.*\bthought process\b.*)\s*\*\*$",
+    re.IGNORECASE,
+)
+
+# First-person narration that follows a reasoning heading ("I am currently...",
+# "My goal is..."). Used to tell reasoning paragraphs apart from the
+# user-facing reply that follows them.
+_FIRST_PERSON_NARRATION = re.compile(r"^(I\b|I'm\b|I’ve\b|My\b|We\b)", re.IGNORECASE)
+
+
+def _strip_internal_reasoning(text):
+    """Remove agent reasoning sections from a worker draft before replying.
+
+    Drops bolded reasoning headings (``**Analyzing ...**``) and the
+    first-person narration paragraphs under them, preserving the user-facing
+    reply. Fails closed: if only reasoning remains, or the marker phrase
+    "thought process" survives without a strip-able heading, returns
+    ``_REASONING_STRIP_FALLBACK``. Empty and non-string inputs pass through.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        return text
+    if text == "":
+        return ""
+    lines = text.split("\n")
+    out = []
+    stripped_any = False
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _REASONING_HEADING.match(lines[i].strip()):
+            stripped_any = True
+            i += 1
+            # Skip the narration under the heading: blank lines and
+            # first-person sentences, stopping at user-facing content.
+            while i < n:
+                stripped = lines[i].strip()
+                if stripped == "":
+                    j = i + 1
+                    while j < n and lines[j].strip() == "":
+                        j += 1
+                    if j < n and (
+                        _REASONING_HEADING.match(lines[j].strip())
+                        or _FIRST_PERSON_NARRATION.match(lines[j].strip())
+                    ):
+                        i = j
+                        continue
+                    break
+                if _REASONING_HEADING.match(stripped):
+                    break
+                if _FIRST_PERSON_NARRATION.match(stripped):
+                    i += 1
+                    continue
+                break
+            continue
+        out.append(lines[i])
+        i += 1
+    result = "\n".join(out)
+    if stripped_any:
+        result = result.strip("\n").strip()
+    if not result.strip() or "thought process" in result.lower():
+        return _REASONING_STRIP_FALLBACK
+    return result
+
+
 class HermesEmailWorker:
     def __init__(self, run_agent: Callable[[str], str], store: JobStore, run_agent_with_context=None):
         self.run_agent = run_agent
@@ -176,6 +255,8 @@ def run_guarded_email_task(
     final = engine.run(job["id"])
     action = store.get_checkpoint(job["id"], "action") or {}
     response = action.get("detail", {}).get("response_text") or (store.get_checkpoint(job["id"], "email_response") or {}).get("response_text") or final.get("last_error") or "No worker response was stored."
+    # Never let agent-internal reasoning leak into the outbound reply.
+    response = _strip_internal_reasoning(response)
     from .message_results import verification_summary
     summary = verification_summary(store, job["id"])
     details = f"\n\n{summary}" if summary else ""
