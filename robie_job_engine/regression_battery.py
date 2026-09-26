@@ -112,6 +112,7 @@ LOGIC_PYTEST_MODULES = (
     "tests/test_playwright_route_fixtures.py",
     "tests/test_productivity_engine.py",
     "tests/test_video_to_skill.py",
+    "tests/test_staff_jobs.py",
 )
 PYTEST_ONLY_MODULES = frozenset(
     Path(item).stem for item in LOGIC_PYTEST_MODULES

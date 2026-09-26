@@ -4,10 +4,12 @@ New build from the policy-change SOP
 (``.agents/skills/ezlynx-policy-change-confirmation/SKILL.md`` + rebuild-brief
 sections 2.4/3.4). There is no old code to port; the SOP is the spec.
 
-Kill switch: :data:`POLICY_CHANGE_ENABLED` stays ``False`` until a human has
-verified the report 4359 (Policy Change Request OPEN) columns. Report 4359 has
-``schema_verified=False`` in ``report_registry``, so ``start_run()`` refuses it
-— that refusal is allowed to propagate; it is never bypassed.
+Report 4359 is Look 4602 (19 columns, verified 2026-09-18). Identity is
+``policy_number`` + ``change_request_created_date``. There is no ``request_id``
+column. :data:`POLICY_CHANGE_ENABLED` stays ``False`` and
+``schema_verified`` stays ``False`` until 3 clean hermes-test-01 post-job
+audits after Test install. ``start_run()`` refuses the report until that
+flag flips — the refusal is allowed to propagate; it is never bypassed.
 
 Safety invariants encoded here:
 - Cardinal rule: ROBIE never deletes a policy. This worker has no delete path;
@@ -23,6 +25,7 @@ Safety invariants encoded here:
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -30,8 +33,9 @@ from typing import Any, Iterable, Mapping, Sequence
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
 
 
-#: Kill switch. Stays False until report 4359's schema is verified by a human.
-#: Do NOT flip this without the verified 4359 column list.
+#: Kill switch. Stays False in this change.
+#: Flip only after 3 clean hermes-test-01 post-job audits following Test install.
+#: Do not set True in the same PR that maps Look 4602 columns.
 POLICY_CHANGE_ENABLED = False
 
 JOB_TYPE = "policy_change_verification"
@@ -68,6 +72,130 @@ EVIDENCE_CHANNELS = (
 )
 
 CARRIER_EMAIL_TEMPLATE_PREFIX = "Policy Change"
+
+#: Canonical worker fields for the 19 Look 4602 / Gmail CSV columns.
+#: Order matches the verified export. Do not append phantom fields.
+POLICY_CHANGE_FIELDS: tuple[str, ...] = (
+    "account_name",
+    "applicant_id",
+    "policy_number",
+    "line_of_business",
+    "effective_date",
+    "master_company",
+    "request_status",
+    "created_by",
+    "written_premium",
+    "annualized_premium",
+    "branch",
+    "department",
+    "service_team",
+    "assigned_producer",
+    "csr",
+    "preferred_language",
+    "applicant_labels",
+    "policy_labels",
+    "change_request_created_date",
+)
+
+#: Accepted spellings per canonical field: snake_case, Gmail CSV header,
+#: Look 4602 qualified header. Nothing else is read.
+_FIELD_KEYS: dict[str, tuple[str, ...]] = {
+    "account_name": (
+        "account_name",
+        "Account Name",
+        "Applicant Data Account Name",
+    ),
+    "applicant_id": (
+        "applicant_id",
+        "Applicant ID",
+        "Policy Transaction Data Applicant ID",
+    ),
+    "policy_number": (
+        "policy_number",
+        "Policy Number",
+        "Policy Change Request Detail Policy Number",
+    ),
+    "line_of_business": (
+        "line_of_business",
+        "Line Of Business",
+        "Policy Transaction Data Line Of Business",
+    ),
+    "effective_date": (
+        "effective_date",
+        "Effective Date",
+        "Policy Change Request Detail Policy Effective Date",
+    ),
+    "master_company": (
+        "master_company",
+        "Master Company",
+        "Policy Transaction Data Master Company",
+    ),
+    "request_status": (
+        "request_status",
+        "Request Status",
+        "Policy Change Request Detail Request Status",
+    ),
+    "created_by": (
+        "created_by",
+        "Created By",
+        "Policy Change Request Detail Created By",
+    ),
+    "written_premium": (
+        "written_premium",
+        "Written Premium",
+        "Policy Transaction Data Written Premium",
+    ),
+    "annualized_premium": (
+        "annualized_premium",
+        "Premium - Annualized",
+        "Policy Transaction Data Annualized Premium",
+    ),
+    "branch": (
+        "branch",
+        "Branch",
+        "Applicant Data Branch",
+    ),
+    "department": (
+        "department",
+        "Department",
+        "Policy Transaction Data Department",
+    ),
+    "service_team": (
+        "service_team",
+        "Service Team",
+        "Serviceteampolicychangerequest Service Team",
+    ),
+    "assigned_producer": (
+        "assigned_producer",
+        "Assigned Producer",
+        "Applicant Data Assigned Producer",
+    ),
+    "csr": (
+        "csr",
+        "CSR",
+        "Applicant Data CSR",
+    ),
+    "preferred_language": (
+        "preferred_language",
+        "Preferred Language",
+        "Applicant Data Preferred Language",
+    ),
+    "applicant_labels": (
+        "applicant_labels",
+        "Applicant Labels",
+        "Applicant Labels Applicant Labels",
+    ),
+    "policy_labels": (
+        "policy_labels",
+        "Policy Labels",
+        "Policy Labels Policy Labels",
+    ),
+    "change_request_created_date": (
+        "change_request_created_date",
+        "Change Request Created Date",
+        "Policy Change Request Detail Change Request Created Date",
+    ),
+}
 
 try:  # Built by a sibling agent; fail closed until it lands.
     from .verification_common import (  # type: ignore
@@ -117,75 +245,61 @@ def _carrier_mailer() -> Any | None:
 # Pure functions
 # ---------------------------------------------------------------------------
 
-_CHANGE_ACTION_KEYWORDS = (
-    ("add", ("add", "adding", "added", "include", "new driver", "new vehicle")),
-    ("delete", ("delete", "deleted", "remove", "removed", "drop", "cancel coverage")),
-    ("replace", ("replace", "replaced", "swap", "substitute", "exchange")),
-    ("modify", ("modify", "modified", "change", "changed", "update", "increase", "decrease", "endorse")),
-)
-
-_DATE_RE = re.compile(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b")
-
-
-def _classify_change_action(text: str) -> str | None:
-    lowered = text.lower()
-    for action, keywords in _CHANGE_ACTION_KEYWORDS:
-        if any(keyword in lowered for keyword in keywords):
-            return action
-    return None
+def _field_text(row: Mapping[str, Any], field_name: str) -> str:
+    """First non-blank spelling of one canonical field. Never invents a value."""
+    for key in _FIELD_KEYS[field_name]:
+        if key not in row or row.get(key) is None:
+            continue
+        text = str(row.get(key)).strip()
+        if text:
+            return text
+    return ""
 
 
-def _extract_date(text: str) -> str | None:
-    match = _DATE_RE.search(text or "")
-    if not match:
-        return None
-    year, month, day = (int(part) for part in match.groups())
-    try:
-        return datetime(year, month, day).date().isoformat()
-    except ValueError:
-        return None
+def parse_policy_change_row(row: Mapping[str, Any]) -> dict[str, str]:
+    """Project one report row onto the 19 real columns.
+
+    Accepts snake_case, the Gmail CSV headers, or the Look 4602 headers.
+    Keys that are not one of those 19 columns are dropped. Missing cells
+    are empty strings — they are not guessed from other columns.
+    """
+    source = dict(row or {})
+    return {name: _field_text(source, name) for name in POLICY_CHANGE_FIELDS}
 
 
 def reconstruct_request(
     row: Mapping[str, Any],
     discussion_text: str | None,
 ) -> dict[str, Any]:
-    """Reconstruct a policy-change request from a report row + discussion.
+    """Reconstruct a policy-change request from a report row.
 
-    Pure function. Returns the request record plus ``ambiguous`` /
-    ``ambiguity_reasons``; ambiguous requests map to ``request_unclear`` and
-    are routed to the CSR before any judgement is made.
+    Pure function. Uses only the 19 Look 4602 columns. ``discussion_text``
+    is ignored for field extraction: the export has no change-description
+    column, and this function does not infer add/delete/replace/modify.
+    Ambiguous requests (missing identity or policy effective date) map to
+    ``request_unclear`` and are routed to the CSR before any judgement.
     """
-    row = dict(row or {})
-    discussion_text = discussion_text or ""
-    combined = f"{row.get('change_description') or ''}\n{discussion_text}"
-    effective_date = row.get("effective_date") or _extract_date(combined)
-    change_action = row.get("change_action") or _classify_change_action(combined)
-    affected_item = row.get("affected_item") or row.get("item")
-    requested_values = dict(row.get("requested_values") or {})
-    premium_expectation = row.get("premium_expectation")
+    parsed = parse_policy_change_row(row)
     ambiguity_reasons: list[str] = []
-    if not effective_date:
-        ambiguity_reasons.append("missing effective date")
-    if not change_action:
-        ambiguity_reasons.append("change action unclear (add/delete/replace/modify)")
-    if not affected_item:
-        ambiguity_reasons.append("affected item not identified")
-    if not requested_values:
-        ambiguity_reasons.append("requested values not specified")
+    if not parsed["policy_number"]:
+        ambiguity_reasons.append("missing policy number")
+    if not parsed["change_request_created_date"]:
+        ambiguity_reasons.append("missing change request created date")
+    if not parsed["effective_date"]:
+        ambiguity_reasons.append("missing policy effective date")
+    premium_expectation = parsed["written_premium"] or parsed["annualized_premium"] or None
     return {
-        "request_id": row.get("request_id"),
-        "policy_number": row.get("policy_number"),
-        "insured_name": row.get("insured_name"),
-        "effective_date": effective_date,
-        "change_action": change_action,
-        "affected_item": affected_item,
-        "requested_values": requested_values,
+        **parsed,
+        "insured_name": parsed["account_name"],
+        "effective_date": parsed["effective_date"] or None,
         "premium_expectation": premium_expectation,
-        "required_evidence_signatures": list(row.get("required_evidence_signatures") or []),
-        "coverage_review_flag": bool(row.get("coverage_review_flag")),
+        "change_action": None,
+        "affected_item": None,
+        "requested_values": {},
+        "coverage_review_flag": False,
         "ambiguous": bool(ambiguity_reasons),
         "ambiguity_reasons": ambiguity_reasons,
+        "discussion_text": discussion_text or "",
     }
 
 
@@ -352,14 +466,17 @@ def build_confirmation_report(
         "",
         "## Policy change confirmation",
         "",
-        f"Request ID: {request.get('request_id')}",
+        f"Policy number: {request.get('policy_number')}",
+        f"Change request created: {request.get('change_request_created_date')}",
         f"Insured: {request.get('insured_name')}",
         "",
         "### Requested",
-        f"- Effective date: {request.get('effective_date')}",
-        f"- Change: {request.get('change_action')} — {request.get('affected_item')}",
-        f"- Requested values: {request.get('requested_values')}",
-        f"- Premium expectation: {request.get('premium_expectation')}",
+        f"- Policy effective date: {request.get('effective_date')}",
+        f"- Line of business: {request.get('line_of_business')}",
+        f"- Carrier: {request.get('master_company')}",
+        f"- Request status: {request.get('request_status')}",
+        f"- Written premium: {request.get('written_premium')}",
+        f"- Annualized premium: {request.get('annualized_premium')}",
         "",
         "### Carrier issued",
         f"- Document: {carrier_evidence.get('document_ref') or 'not yet received'}",
@@ -405,9 +522,29 @@ def build_confirmation_report(
 def _evidence_retrieval_intents(request: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Carrier evidence retrieval intents in SOP preference order."""
     return [
-        {"channel": channel, "request_id": request.get("request_id")}
+        {
+            "channel": channel,
+            "policy_number": request.get("policy_number"),
+            "change_request_created_date": request.get("change_request_created_date"),
+        }
         for channel in EVIDENCE_CHANNELS
     ]
+
+
+def _load_fetch_report_rows() -> Any:
+    try:
+        from .report_fetcher import fetch_report_rows
+    except ImportError as exc:  # pragma: no cover - sibling module missing
+        raise RuntimeError(
+            "report_fetcher.fetch_report_rows unavailable — cannot read report 4359"
+        ) from exc
+    return fetch_report_rows
+
+
+def _request_key(request: Mapping[str, Any]) -> str:
+    policy = str(request.get("policy_number") or "").strip()
+    created = str(request.get("change_request_created_date") or "").strip()
+    return f"{policy} | {created}"
 
 
 class PolicyChangeWorker:
@@ -505,39 +642,92 @@ class PolicyChangeWorker:
                 error="report 4359 schema unverified — policy-change worker disabled",
                 hold_status=JobStatus.NEEDS_CLARIFICATION,
             )
-        # Report 4359 is schema-unverified; start_run() must refuse. The
-        # refusal propagates as a hold — never bypassed.
+        # schema_verified stays False until 3 clean Test audits. fetch_report_rows
+        # calls start_run() and refuses before any email or Looker work. Do not
+        # bypass that gate here.
         try:
-            from .report_registry import ReportRunRegistry, ReportRegistryError
+            from .report_registry import get_report_spec
 
-            registry = ReportRunRegistry(":memory:")
-            registry.start_run(
-                run_id=idempotency_key,
-                report_id=REPORT_ID,
-                fields=["request_id"],
-            )
+            spec = get_report_spec(REPORT_ID)
         except Exception as exc:
             return WorkerResult(
                 False,
                 action,
                 {"report_id": REPORT_ID},
+                retryable=True,
+                error=f"report registry lookup failed for {REPORT_ID}: {type(exc).__name__}: {exc}",
+            )
+        if not spec.schema_verified:
+            return WorkerResult(
+                False,
+                action,
+                {"report_id": REPORT_ID, "look_id": spec.look_id},
                 retryable=False,
-                error=f"report 4359 run refused: {type(exc).__name__}: {exc}",
+                error="report 4359 schema unverified — policy-change worker disabled",
+                hold_status=JobStatus.NEEDS_CLARIFICATION,
+            )
+        identity_ok = spec.identity_fields == (
+            "policy_number",
+            "change_request_created_date",
+        )
+        if not identity_ok or spec.look_id != "4602":
+            return WorkerResult(
+                False,
+                action,
+                {"report_id": REPORT_ID, "look_id": spec.look_id},
+                retryable=False,
+                error=(
+                    "report 4359 registry does not match Look 4602 identity "
+                    "(policy_number, change_request_created_date)"
+                ),
                 hold_status=JobStatus.NEEDS_CLARIFICATION,
             )
         return self._process_open_requests(job, idempotency_key=idempotency_key)
 
     def _iter_open_requests(self, job: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
-        """Yield open report-4359 rows. Row fetching is wired once the report
-        schema is verified; until then the start_run() refusal above holds."""
-        raise NotImplementedError("report 4359 row fetcher is not wired (schema unverified)")
+        """Yield report-4359 rows from the email CSV or Look 4602.
+
+        Same entry point as the renewal and audit workers:
+        ``report_fetcher.fetch_report_rows``. That call fail-closes while
+        ``schema_verified`` is False (``start_run``), and when the export is
+        missing an identity column. This method does not invent rows.
+        """
+        fetch_report_rows = _load_fetch_report_rows()
+        payload = dict(job.get("payload") or {})
+        db_path = (
+            payload.get("db_path")
+            or payload.get("jobs_db_path")
+            or getattr(self._store, "path", None)
+            or os.environ.get("ROBIE_JOB_DB")
+            or None
+        )
+        rows = fetch_report_rows(
+            report_id=REPORT_ID,
+            fields=None,
+            filters=None,
+            db_path=str(db_path) if db_path else None,
+            session=payload.get("session"),
+            csv_bytes=payload.get("csv_bytes"),
+            gmail_service=payload.get("gmail_service"),
+            source=payload.get("report_source"),
+        )
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                f"fetch_report_rows returned {type(rows).__name__}, expected list[dict]"
+            )
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RuntimeError(
+                    "report 4359 row is not a dict; refusing to guess columns"
+                )
+            yield row
 
     def _process_open_requests(self, job: Mapping[str, Any], *, idempotency_key: str) -> WorkerResult:
         action = str(job.get("action_type") or JOB_TYPE)
         outcomes: list[dict[str, Any]] = []
         reports: list[dict[str, Any]] = []
         for row in self._iter_open_requests(job):
-            request = reconstruct_request(row, str(row.get("discussion_text") or ""))
+            request = reconstruct_request(row, None)
             intents = _evidence_retrieval_intents(request)
             # Carrier evidence + EZLynx keyed data are attached by the
             # retrieval layer once wired; empty here means "not yet retrieved".
@@ -582,24 +772,28 @@ class PolicyChangeWorker:
                 ezlynx_data=ezlynx_data or None,
                 document_refs=list(row.get("document_refs") or []),
                 next_action=next_action,
-                follow_up_date=follow_up,
+                follow_up_date=None,
             )
-            reports.append({"request_id": request.get("request_id"), "report": report})
+            request_key = _request_key(request)
+            reports.append({"request_key": request_key, "report": report})
             outcome = {
                 "policy_number": request.get("policy_number"),
-                "applicant_id": row.get("applicant_id"),
+                "applicant_id": request.get("applicant_id") or None,
                 "insured_name": request.get("insured_name"),
-                "department": row.get("department") or "Unassigned",
-                "carrier": (carrier_evidence or {}).get("carrier") or row.get("carrier"),
+                "department": request.get("department") or request.get("branch") or "Unassigned",
+                "carrier": (carrier_evidence or {}).get("carrier") or request.get("master_company"),
                 "status": status,
                 "reason": reason,
                 "actions_taken": actions_taken,
                 "waiting_on": waiting_on,
                 "next_action": next_action,
-                "follow_up_date": row.get("follow_up_date"),
+                "follow_up_date": None,
                 "evidence": {
                     "report_id": REPORT_ID,
-                    "request_id": request.get("request_id"),
+                    "look_id": "4602",
+                    "policy_number": request.get("policy_number"),
+                    "change_request_created_date": request.get("change_request_created_date"),
+                    "request_key": request_key,
                     "document_refs": list(row.get("document_refs") or []),
                     "match_state": match_result["state"],
                     "evidence_intents": intents,
@@ -686,7 +880,11 @@ class PolicyChangeVerifier:
             problems.append("worker closed the underlying request; only the Quality Controller may close")
 
         for outcome in outcomes:
-            policy = outcome.get("policy_number") or outcome.get("request_id") or "?"
+            policy = (
+                outcome.get("policy_number")
+                or (outcome.get("evidence") or {}).get("request_key")
+                or "?"
+            )
             for field_name in ("evidence", "actions_taken"):
                 hit = self._client_email_in(outcome.get(field_name), client_addresses)
                 if hit:

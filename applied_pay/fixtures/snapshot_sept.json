@@ -1,0 +1,69 @@
+{
+  "cutoff": "2026-09-25",
+  "payouts": [
+    {
+      "ref": "SYN-PAYOUT-A",
+      "payout_date": "2026-09-24",
+      "net": "100.00",
+      "status": "scheduled",
+      "lines": [
+        {
+          "type": "sale",
+          "amount": "100.00",
+          "payer": "Example Bakery",
+          "business": "Example Bakery",
+          "txn_date": "2026-09-24",
+          "psp_ref": "SYN-PSP-A"
+        }
+      ]
+    },
+    {
+      "ref": "SYN-PAYOUT-B",
+      "payout_date": "2026-09-25",
+      "net": "45.00",
+      "status": "scheduled",
+      "lines": [
+        {
+          "type": "sale",
+          "amount": "50.00",
+          "payer": "Example Florist",
+          "business": "Example Florist",
+          "txn_date": "2026-09-25",
+          "psp_ref": "SYN-PSP-B"
+        }
+      ]
+    }
+  ],
+  "ledger": [
+    {
+      "je_id": "SYN-JE-A",
+      "receipt_no": "SYN-RECEIPT-A",
+      "customer": "Example Bakery",
+      "kind": "receipt",
+      "amount": "100.00",
+      "date": "2026-09-24",
+      "bank_account": "Undeposited Funds"
+    },
+    {
+      "je_id": "SYN-JE-B",
+      "receipt_no": "SYN-RECEIPT-B",
+      "customer": "Example Florist",
+      "kind": "receipt",
+      "amount": "50.00",
+      "date": "2026-09-25",
+      "bank_account": "Undeposited Funds"
+    }
+  ],
+  "bank_deposits": [],
+  "cleared_bank_deposits": [
+    {
+      "id": "SYN-BANK-NOTICE-A",
+      "date": "2026-09-24",
+      "amount": "100.00",
+      "account": "10002 Trust Checking WF (3021)",
+      "status": "scheduled"
+    }
+  ],
+  "aliases": {},
+  "_note": "Entirely invented amounts, dates, names and identifiers. No production transactions."
+}

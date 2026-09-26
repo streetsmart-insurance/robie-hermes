@@ -519,6 +519,43 @@ def parse_google_chat_interaction(payload: dict[str, Any]) -> ChatDecisionIntera
     )
 
 
+def has_decision(db_path: str, decision_id: str) -> bool:
+    """Whether ``db_path`` already contains this decision id.
+
+    Read-only. A missing file or a missing ``decisions`` table means this
+    gateway does not own the click. This does not construct DecisionStore
+    and does not create tables.
+    """
+    decision_id = str(decision_id or "").strip()
+    if not decision_id:
+        return False
+    from pathlib import Path
+
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("decisions",),
+        ).fetchone()
+        if present is None:
+            return False
+        row = conn.execute(
+            "SELECT 1 FROM decisions WHERE id = ?",
+            (decision_id,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def resolve_google_chat_interaction(
     db_path: str, payload: dict[str, Any]
 ) -> DecisionResult:
