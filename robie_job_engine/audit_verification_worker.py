@@ -120,6 +120,71 @@ WORKER_NAME = "audit-verification"
 AUDIT_REPORT_ID = "4246"
 DURABLE_NAMESPACE = "audit_verification"
 
+
+def _mirror_outcomes_to_durable(
+    db_path: str,
+    outcomes: list[dict[str, Any]],
+    *,
+    namespace: str = DURABLE_NAMESPACE,
+) -> None:
+    """Persist per-audit outcome JSON into durable_work_items.
+
+    The verifier (verify()) looks up mirrors by the raw audit_id or
+    policy_number string via ``self._durable_get(namespace, str(identity))``.
+    This mirror uses the same key format so the verifier can find it.
+    Uses raw sqlite; one row per audit identity; upsert is atomic per row.
+    This table is append/merge only - nothing here deletes.
+    """
+    import sqlite3
+
+    def _utcnow() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    now = _utcnow()
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS durable_work_items (
+                namespace TEXT NOT NULL,
+                work_item_key TEXT NOT NULL,
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                external_actions INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT,
+                verified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, work_item_key)
+            )"""
+        )
+        for outcome in outcomes:
+            if not isinstance(outcome, dict):
+                continue
+            # Match the verifier's key: raw audit_id or policy_number string.
+            identity = outcome.get("audit_id") or outcome.get("policy_number")
+            # Also check evidence dict (audit_id is stashed there).
+            if not identity:
+                evidence = outcome.get("evidence") or {}
+                if isinstance(evidence, dict):
+                    identity = evidence.get("audit_id") or evidence.get("audit_key")
+            if not identity:
+                continue
+            key = str(identity)
+            payload = json.dumps(outcome, sort_keys=True, default=str)
+            conn.execute(
+                """INSERT INTO durable_work_items
+                   (namespace, work_item_key, created_at, updated_at, outcome)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(namespace, work_item_key) DO UPDATE SET
+                     outcome=excluded.outcome, updated_at=excluded.updated_at""",
+                (namespace, key, now, now, payload),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # Post-renewal audit window (days since the policy's renewal effective date).
 WORK_WINDOW_START_DAYS = 30
 WORK_WINDOW_END_DAYS = 45
@@ -1539,6 +1604,17 @@ class AuditVerificationWorker:
             )
 
         serialized = [self._serialize_outcome(o) for o in outcomes]
+        # Mirror to durable_work_items with the verifier's key format
+        # (raw audit_id/policy_number). The verification_common.record_outcomes
+        # above uses a prefixed key format that the verifier does not look up.
+        try:
+            store = self._resolve_store(job)
+            db_path = getattr(store, "path", None)
+            if db_path:
+                _mirror_outcomes_to_durable(db_path, serialized)
+        except Exception:
+            # Mirror is best-effort; the verifier will flag if missing.
+            logger.exception("durable mirror write failed")
         counts: dict[str, int] = {}
         for item in serialized:
             counts[item.get("status", "unknown")] = counts.get(item.get("status", "unknown"), 0) + 1
@@ -1634,6 +1710,11 @@ class AuditVerificationVerifier:
         captured_at = datetime.now(timezone.utc).isoformat()
         violations: list[str] = []
         observed: dict[str, Any] = {"job_id": job_id, "action_type": action_type}
+        # Track per-check outcomes for the expected/observed evidence contract.
+        well_formed_ok = True
+        done_evidence_ok = True
+        voice_ok = True
+        mirror_ok = True
 
         fresh, authoritative = self._fresh_action(job)
         if self._store is not None and fresh is None:
@@ -1656,30 +1737,38 @@ class AuditVerificationVerifier:
             label = f"outcomes[{index}]"
             if not isinstance(item, dict):
                 violations.append(f"{label} is not an object")
+                well_formed_ok = False
                 continue
             identity = item.get("audit_id") or item.get("policy_number")
             if not identity:
                 violations.append(f"{label} missing policy_number/audit identity")
+                well_formed_ok = False
                 identity = f"#{index}"
             status = item.get("status")
             if status not in VALID_OUTCOME_STATUSES:
                 violations.append(
                     f"{label} ({identity}) has invalid status {status!r}"
                 )
+                well_formed_ok = False
             if not item.get("reason"):
                 violations.append(f"{label} ({identity}) missing reason")
+                well_formed_ok = False
             if not item.get("updated_at"):
                 violations.append(f"{label} ({identity}) missing updated_at")
+                well_formed_ok = False
             waiting_on = item.get("waiting_on")
             if waiting_on not in VALID_WAITING_ON:
                 violations.append(
                     f"{label} ({identity}) has invalid waiting_on {waiting_on!r}"
                 )
+                well_formed_ok = False
             evidence = item.get("evidence")
             if status == "done" and not evidence:
                 violations.append(
                     f"{label} ({identity}) is done but carries no evidence refs"
                 )
+                well_formed_ok = False
+                done_evidence_ok = False
             # Voice authorization + directory-proof checks.
             if isinstance(evidence, dict):
                 voice = evidence.get("voice") or {}
@@ -1689,6 +1778,7 @@ class AuditVerificationVerifier:
                             f"{label} ({identity}) records a placed voice call "
                             "while voice_enabled was false"
                         )
+                        voice_ok = False
                     job_authorized = (job.get("payload") or {}).get(
                         "authorized_actions", []
                     ) or []
@@ -1697,11 +1787,13 @@ class AuditVerificationVerifier:
                             f"{label} ({identity}) records a placed voice call "
                             "without place_carrier_voice_call authorization"
                         )
+                        voice_ok = False
                     if not voice.get("phone_from_directory"):
                         violations.append(
                             f"{label} ({identity}) records a placed voice call "
                             "without proof the number came from the carrier directory"
                         )
+                        voice_ok = False
             # Durable mirror check.
             key = str(identity)
             checked_keys.append(key)
@@ -1712,14 +1804,22 @@ class AuditVerificationVerifier:
                     f"{label} ({identity}) missing durable_work_items mirror "
                     f"(namespace {DURABLE_NAMESPACE!r})"
                 )
+                mirror_ok = False
             else:
                 if durable_outcome.get("status") != status:
                     violations.append(
                         f"{label} ({identity}) status {status!r} != durable mirror "
                         f"{durable_outcome.get('status')!r}"
                     )
+                    mirror_ok = False
         observed["checked_keys"] = checked_keys
         observed["violations"] = violations
+        # Populate the expected/observed contract flags. These must always be
+        # set (never None) so the COMPLETE gate can evaluate them.
+        observed["all_outcomes_well_formed"] = well_formed_ok and bool(outcomes)
+        observed["done_outcomes_have_evidence"] = done_evidence_ok
+        observed["no_unauthorized_voice"] = voice_ok
+        observed["durable_mirror_present"] = mirror_ok and bool(outcomes)
 
         verified = not violations
         evidence_obj = VerificationEvidence(

@@ -10,17 +10,20 @@ workers import. It:
    report 4359 (``schema_verified=False``). The flag is never flipped here;
    the error propagates and no browser is touched.
 3. For email-first report ids (4247 manual renewals, 4246 audits / 4360
-   Active daily feed, 4372 mortgagee) prefers today's robie@ CSV via
-   :mod:`robie_job_engine.report_email_source`. 4372 requires the
-   ``Mortgagee Verification Queue - ROBIE`` subject; 4246/4247 keep
+   Active daily feed, 4372 mortgagee, 4359 policy change) prefers today's
+   robie@ CSV via :mod:`robie_job_engine.report_email_source`. 4372 requires
+   the ``Mortgagee Verification Queue - ROBIE`` subject; 4246/4247/4359 keep
    ``ROBIE daily CSV`` + header fingerprint. Looker saved-report
    favorites are not the system of record. 4372 may fall back to Shared
-   look 4601 only when the mortgagee email is missing — never when that
-   subject is present but the CSV is stale or the wrong schema.
+   look 4601, and 4359 to look 4602, only when that email is missing —
+   never when the subject is present but the CSV is stale or the wrong
+   schema. Report 4359 still fail-closes in ``start_run()`` while
+   ``schema_verified`` is False, before any email or Looker fetch.
 4. Other reports still drive the Reports 5.0 Looker UI
    (https://app.ezlynx.com/web/looker-reports). Mapped reports open the
-   Shared Looker look by look id (4372 → look 4601) instead of searching
-   the hub for a saved-report link named or numbered with the report id.
+   Shared Looker look by look id (4372 → look 4601, 4359 → look 4602)
+   instead of searching the hub for a saved-report link named or numbered
+   with the report id.
 5. Parses and validates the CSV: email path uses the Gmail header
    fingerprint; Looker path keys rows by the registry ``identity_fields``.
    Missing identity columns or missing identity values fail closed — rows
@@ -84,7 +87,52 @@ def _resolve_column(name: str, lookup: dict[str, str]) -> str | None:
     return lookup.get(_normalize_column_name(name))
 
 
+def _apply_header_aliases(report_id: str, lookup: dict[str, str]) -> None:
+    """Register CSV short names for Looker headers that are actually present.
+
+    A target is added only when its Looker source column is in the file.
+    Existing columns are left in place. Missing sources are not invented.
+    """
+    for source, target in ALIASES.get(str(report_id), {}).items():
+        actual = lookup.get(_normalize_column_name(source))
+        if not actual:
+            continue
+        lookup.setdefault(_normalize_column_name(target), actual)
+
+
 logger = logging.getLogger("robie.report_fetcher")
+
+# Looker qualified header -> Gmail CSV short header.
+# Report 4359 / Look 4602, verified 2026-09-18 (19 columns). The CSV export
+# strips view-name prefixes, and one column is renamed rather than merely
+# prefixed: "Policy Transaction Data Annualized Premium" is the CSV header
+# "Premium - Annualized". Map only these. Do not add phantom columns
+# (request_id, change_description, change_action, and the rest).
+ALIASES: dict[str, dict[str, str]] = {
+    "4359": {
+        "Applicant Data Account Name": "Account Name",
+        "Policy Transaction Data Applicant ID": "Applicant ID",
+        "Policy Change Request Detail Policy Number": "Policy Number",
+        "Policy Transaction Data Line Of Business": "Line Of Business",
+        "Policy Change Request Detail Policy Effective Date": "Effective Date",
+        "Policy Transaction Data Master Company": "Master Company",
+        "Policy Change Request Detail Request Status": "Request Status",
+        "Policy Change Request Detail Created By": "Created By",
+        "Policy Transaction Data Written Premium": "Written Premium",
+        "Policy Transaction Data Annualized Premium": "Premium - Annualized",
+        "Applicant Data Branch": "Branch",
+        "Policy Transaction Data Department": "Department",
+        "Serviceteampolicychangerequest Service Team": "Service Team",
+        "Applicant Data Assigned Producer": "Assigned Producer",
+        "Applicant Data CSR": "CSR",
+        "Applicant Data Preferred Language": "Preferred Language",
+        "Applicant Labels Applicant Labels": "Applicant Labels",
+        "Policy Labels Policy Labels": "Policy Labels",
+        "Policy Change Request Detail Change Request Created Date": (
+            "Change Request Created Date"
+        ),
+    },
+}
 
 REPORT_DOWNLOAD_DIR = Path(
     os.environ.get("ROBIE_EZLYNX_REPORTS_DIR", "/tmp/ezlynx_reports")
@@ -191,6 +239,7 @@ def _parse_report_csv(
     reader = csv.DictReader(io.StringIO(csv_text))
     columns = list(reader.fieldnames or [])
     lookup = _column_lookup(columns)
+    _apply_header_aliases(spec.report_id, lookup)
     identity_actual: list[str] = []
     missing_identity: list[str] = []
     for name in spec.identity_fields:
@@ -210,6 +259,12 @@ def _parse_report_csv(
     for name in spec.identity_fields:
         if name not in wanted:
             wanted.append(name)
+    # Emit the CSV short name beside each Looker header that was present so
+    # workers can read one shape from either export. Targets whose source
+    # column is absent are not added.
+    for source, target in ALIASES.get(spec.report_id, {}).items():
+        if lookup.get(_normalize_column_name(source)) and target not in wanted:
+            wanted.append(target)
     missing_fields = [
         name for name in wanted if _resolve_column(name, lookup) is None
     ]
@@ -411,11 +466,13 @@ def fetch_report_rows(
 ) -> list[dict[str, Any]]:
     """Fetch work-queue rows for a registered report.
 
-    Email-first ids (4246, 4247, 4372) ingest today's robie@ CSV and do not
-    open Looker favorites. ``session`` is unused on that path. Optional
+    Email-first ids (4246, 4247, 4372, 4359) ingest today's robie@ CSV and do not
+    open Looker favorites unless the email is missing and a look id is mapped
+    (4372 → 4601, 4359 → 4602). ``session`` is unused on the email path. Optional
     ``csv_bytes`` / ``gmail_service`` / ``ingested`` inject the email source
     for tests. ``source="looker"`` forces the Reports 5.0 path;
-    ``source="email"`` refuses Looker fallback.
+    ``source="email"`` refuses Looker fallback. Report 4359 still raises from
+    ``start_run()`` while ``schema_verified`` is False, before either source.
 
     ``session`` may be an :class:`EzlynxSessionPort` (or anything exposing
     ``.page``); when omitted on the Looker path, a
@@ -471,8 +528,8 @@ def fetch_report_rows(
             )
             return rows
         except GmailReportMissingError:
-            # Email absent: 4372 may use mapped look 4601. 4246/4247 have no
-            # look map — the 0 saved-report-link miss is not a fallback.
+            # Email absent: mapped looks may fall back (4372 → 4601, 4359 → 4602).
+            # 4246/4247 have no look map — the 0 saved-report-link miss is not a fallback.
             can_fallback = (
                 source_norm != "email"
                 and not inject_email

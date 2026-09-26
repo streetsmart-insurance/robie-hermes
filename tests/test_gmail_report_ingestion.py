@@ -59,8 +59,15 @@ class SubjectFingerprintTests(unittest.TestCase):
         self.assertFalse(ing.subject_matches_report("Mortgagee Verification Queue", "4372"))
         self.assertFalse(ing.subject_matches_report("", "4372"))
 
-    def test_4246_4247_keep_generic_daily_csv_subject(self):
-        for report_id in ("4246", "4247", "4359"):
+    def test_4247_keeps_generic_daily_csv_subject_4246_has_dedicated(self):
+        # 4246's daily email is the 4360 transaction feed, not the generic envelope.
+        self.assertTrue(
+            ing.subject_matches_report(
+                "Workers Comp Renewal Audit Queue - ROBIE", "4246"
+            )
+        )
+        self.assertFalse(ing.subject_matches_report("ROBIE daily CSV", "4246"))
+        for report_id in ("4247", "4359"):
             self.assertTrue(ing.subject_matches_report("ROBIE daily CSV", report_id))
             self.assertFalse(
                 ing.subject_matches_report(ing.MORTGAGEE_4372_SUBJECT, report_id)
@@ -68,8 +75,10 @@ class SubjectFingerprintTests(unittest.TestCase):
 
     def test_4372_gmail_query_is_mortgagee_subject_not_daily_csv(self):
         self.assertEqual(ing.gmail_subject_queries(["4372"]), [ing.MORTGAGEE_4372_SUBJECT])
+        self.assertEqual(ing.gmail_subject_queries(["4246"]), [ing.AUDIT_4246_SUBJECT])
         self.assertEqual(
-            ing.gmail_subject_queries(["4247", "4246"]), [ing.DEFAULT_SUBJECT_CONTAINS]
+            ing.gmail_subject_queries(["4247", "4246"]),
+            [ing.DEFAULT_SUBJECT_CONTAINS, ing.AUDIT_4246_SUBJECT],
         )
         self.assertEqual(
             ing.gmail_subject_queries(["4247", "4372"]),
@@ -139,6 +148,153 @@ class ParseValidateTests(unittest.TestCase):
         # Fail-closed: a stale self-test assertion is a CI failure, not a
         # silently skipped Ralph script.
         ing._self_test()
+
+
+class MondayTimerRegressionTests(unittest.TestCase):
+    """Regression tests for the 2026-09-25 Monday-timer failures.
+
+    4247/4246 timers crashed on an unrecognized 19-col CSV in the shared
+    envelope; 4246's Gmail query could never find its 4360 email; 4372
+    failed on a closed test task with an empty Policy Number.
+    """
+
+    def test_4246_gmail_query_is_audit_queue_subject(self):
+        self.assertEqual(
+            ing.gmail_subject_queries(["4246"]), [ing.AUDIT_4246_SUBJECT]
+        )
+        self.assertEqual(
+            ing.gmail_subject_queries(["4247", "4246"]),
+            [ing.DEFAULT_SUBJECT_CONTAINS, ing.AUDIT_4246_SUBJECT],
+        )
+
+    def test_4246_subject_matching_uses_dedicated_subject(self):
+        self.assertTrue(
+            ing.subject_matches_report(
+                "Workers Comp Renewal Audit Queue - ROBIE", "4246"
+            )
+        )
+        # The generic daily-CSV envelope is NOT 4246's mail.
+        self.assertFalse(ing.subject_matches_report("ROBIE daily CSV", "4246"))
+        # 4247 still uses the generic envelope.
+        self.assertTrue(ing.subject_matches_report("ROBIE daily CSV", "4247"))
+        self.assertFalse(
+            ing.subject_matches_report(
+                "Workers Comp Renewal Audit Queue - ROBIE", "4247"
+            )
+        )
+
+    def test_empty_identity_row_is_skipped_not_raised(self):
+        headers = ing.expected_headers("4372")
+        id_col = ing.identity_column("4372")
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        good = [""] * len(headers)
+        good[headers.index("Policy Number")] = "POL123"
+        good[headers.index("Account Name")] = "Good Account"
+        writer.writerow(good)
+        # Closed test task: empty Policy Number, data in other columns.
+        bad = [""] * len(headers)
+        bad[headers.index("Account Name")] = "ROBIE Test LLC"
+        bad[headers.index("Task ID")] = "63010391"
+        writer.writerow(bad)
+        rows, skipped = ing.parse_and_validate_csv(
+            "4372", buffer.getvalue().encode("utf-8"), source_label="unittest"
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Policy Number"], "POL123")
+        self.assertEqual(skipped, 1)
+
+    def test_all_empty_identity_rows_still_fails_closed(self):
+        headers = ing.expected_headers("4372")
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        bad = [""] * len(headers)
+        bad[headers.index("Account Name")] = "ROBIE Test LLC"
+        writer.writerow(bad)
+        with self.assertRaises(ing.GmailReportIngestionError) as ctx:
+            ing.parse_and_validate_csv(
+                "4372", buffer.getvalue().encode("utf-8"), source_label="unittest"
+            )
+        self.assertIn("no data rows", str(ctx.exception))
+
+    def test_unknown_fingerprint_csv_does_not_kill_ingest(self):
+        """An unrecognized CSV in the envelope is skipped, not fatal."""
+        import base64
+        from datetime import date
+
+        def b64_csv(headers, rows):
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(headers)
+            w.writerows(rows)
+            return base64.urlsafe_b64encode(
+                buf.getvalue().encode("utf-8")
+            ).decode()
+
+        good_headers = ing.expected_headers("4247")
+        good_row = ["x"] * len(good_headers)
+        good_row[good_headers.index("Policy Number")] = "POL999"
+        # 19-col foreign CSV: matches no known fingerprint.
+        foreign_headers = (
+            ["Account Name"] + [f"Col{i}" for i in range(2, 19)] + ["Total Written Premium"]
+        )
+        foreign_row = ["y"] * len(foreign_headers)
+
+        messages = {
+            "msg-good": (
+                "ROBIE daily CSV",
+                b64_csv(good_headers, [good_row]),
+            ),
+            "msg-foreign": (
+                "ROBIE daily CSV",
+                b64_csv(foreign_headers, [foreign_row]),
+            ),
+        }
+
+        class _Exec:
+            def __init__(self, v):
+                self.v = v
+
+            def execute(self):
+                return self.v
+
+        class _Messages:
+            def list(self, **kw):
+                return _Exec({"messages": [{"id": mid} for mid in messages]})
+
+            def get(self, userId=None, id=None, format=None):
+                subject, data = messages[id]
+                return _Exec({
+                    "id": id,
+                    "internalDate": "1758790891000",
+                    "payload": {
+                        "headers": [
+                            {"name": "Subject", "value": subject},
+                            {"name": "From", "value": "donotreply@appliedsystems.com"},
+                        ],
+                        "parts": [{
+                            "filename": "r.csv",
+                            "mimeType": "text/csv",
+                            "body": {"data": data},
+                        }],
+                    },
+                })
+
+        class _Users:
+            def messages(self):
+                return _Messages()
+
+        class FakeService:
+            def users(self):
+                return _Users()
+
+        got = ing.ingest_daily_reports(
+            FakeService(), day=date(2026, 9, 25), report_ids=["4247"]
+        )
+        self.assertIn("4247", got)
+        self.assertEqual(got["4247"].row_count, 1)
 
 
 if __name__ == "__main__":

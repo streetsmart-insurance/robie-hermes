@@ -56,7 +56,19 @@ DEFAULT_DB_PATH = Path("/opt/streetsmart-hermes/robie-job-engine/data/ascend_syn
 
 
 def send_google_chat_alert(message: str, webhook_url: Optional[str] = None) -> bool:
-    """Dispatches real-time message notification to Google Chat space."""
+    """Dispatches real-time message notification to Google Chat space.
+
+    M4 DOCUMENTED EXCEPTION to the Chat single-identity rule: this is NOT the
+    Chat-app identity path (``chat_app_post.post_as_chat_app``) — it is an
+    intentional, separate, operator-configured alert channel:
+    - it posts only to the explicit ``ROBIE_GOOGLE_CHAT_WEBHOOK_URL`` target
+      (a known incoming webhook for the agency ops space);
+    - there is no credential fallback and no second identity: an unconfigured
+      URL returns False and nothing is posted anywhere;
+    - it is used only for low-risk operational notices (agreement signed,
+      reinstatement paid), never for HITL and never for operator fail-notify;
+    - webhook posts appear under the webhook's own app name, never as Robie.
+    """
     target_url = webhook_url or os.environ.get("ROBIE_GOOGLE_CHAT_WEBHOOK_URL", "").strip()
     logger.info("GOOGLE CHAT ALERT: %s", message.replace("\n", " "))
     if not target_url:

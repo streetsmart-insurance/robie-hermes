@@ -263,6 +263,7 @@ class ContractTests(unittest.TestCase):
                 "test_playwright_route_fixtures",
                 "test_productivity_engine",
                 "test_video_to_skill",
+                "test_staff_jobs",
             },
         )
         with durable_temporary_directory() as tmp:

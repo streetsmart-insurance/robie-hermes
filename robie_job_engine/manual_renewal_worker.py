@@ -2440,6 +2440,13 @@ class ManualRenewalVerifier:
         captured_at = datetime.now(timezone.utc).isoformat()
         violations: list[str] = []
         observed: dict[str, Any] = {"job_id": job_id, "action_type": action_type}
+        # Track per-check outcomes for the expected/observed evidence contract.
+        # These feed observed["all_outcomes_well_formed"] etc. below; they must
+        # never be left unset (None) or the COMPLETE gate cannot evaluate them.
+        well_formed_ok = True
+        done_evidence_ok = True
+        voice_ok = True
+        mirror_ok = True
 
         if action_type and action_type != JOB_TYPE:
             violations.append(
@@ -2470,33 +2477,41 @@ class ManualRenewalVerifier:
             label = f"outcomes[{index}]"
             if not isinstance(item, dict):
                 violations.append(f"{label} is not an object")
+                well_formed_ok = False
                 continue
             policy_number = item.get("policy_number")
             identity = policy_number or f"#{index}"
             if not policy_number:
                 violations.append(f"{label} missing policy_number")
+                well_formed_ok = False
             status = item.get("status")
             if status not in VALID_OUTCOME_STATUSES:
                 violations.append(
                     f"{label} ({identity}) has invalid status {status!r}"
                 )
+                well_formed_ok = False
             if not item.get("reason"):
                 violations.append(f"{label} ({identity}) missing reason")
+                well_formed_ok = False
             if not _valid_updated_at(item.get("updated_at")):
                 violations.append(
                     f"{label} ({identity}) missing or invalid updated_at"
                 )
+                well_formed_ok = False
             waiting_on = item.get("waiting_on")
             if waiting_on is not None and waiting_on not in VALID_WAITING_ON:
                 violations.append(
                     f"{label} ({identity}) has invalid waiting_on {waiting_on!r}"
                 )
+                well_formed_ok = False
             evidence = item.get("evidence")
             if status == "done" and not _evidence_has_done_proof(evidence):
                 violations.append(
                     f"{label} ({identity}) is done but carries no evidence ref "
                     "(need ezlynx_note_id, document_path, or an email message id)"
                 )
+                well_formed_ok = False
+                done_evidence_ok = False
             # Voice authorization + directory-proof checks.
             if isinstance(evidence, dict):
                 voice = evidence.get("voice_call") or {}
@@ -2506,11 +2521,13 @@ class ManualRenewalVerifier:
                             f"{label} ({identity}) records a placed voice call "
                             "while voice_enabled was false"
                         )
+                        voice_ok = False
                     if not voice.get("phone_from_directory"):
                         violations.append(
                             f"{label} ({identity}) records a placed voice call "
                             "without proof the number came from the carrier directory"
                         )
+                        voice_ok = False
             # Durable mirror check (fresh read, never the worker's memory).
             key = _normalize_key(policy_number) if policy_number else ""
             checked_keys.append(key)
@@ -2518,6 +2535,7 @@ class ManualRenewalVerifier:
                 violations.append(
                     f"{label} has no policy_number - durable mirror cannot be located"
                 )
+                mirror_ok = False
                 continue
             durable_row = self._durable_get(NAMESPACE, key)
             durable_outcome = self._durable_outcome_dict(durable_row)
@@ -2526,13 +2544,21 @@ class ManualRenewalVerifier:
                     f"{label} ({identity}) missing durable_work_items mirror "
                     f"(namespace {NAMESPACE!r})"
                 )
+                mirror_ok = False
             elif durable_outcome.get("status") != status:
                 violations.append(
                     f"{label} ({identity}) status {status!r} != durable mirror "
                     f"{durable_outcome.get('status')!r}"
                 )
+                mirror_ok = False
         observed["checked_keys"] = checked_keys
         observed["violations"] = violations
+        # Populate the expected/observed contract flags. These must always be
+        # set (never None) so the COMPLETE gate can evaluate them.
+        observed["all_outcomes_well_formed"] = well_formed_ok and bool(outcomes)
+        observed["done_outcomes_have_evidence"] = done_evidence_ok
+        observed["no_unauthorized_voice"] = voice_ok
+        observed["durable_mirror_present"] = mirror_ok and bool(outcomes)
 
         verified = not violations
         evidence_obj = VerificationEvidence(

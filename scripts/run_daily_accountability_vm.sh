@@ -1,85 +1,69 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# StreetSmart Insurance — Daily Accountability VM Runner
+# Designed for headless automated execution on GCP Compute Engine.
+# ==============================================================================
 # Source of truth for streetsmart-accountability-prod:
 #   /opt/streetsmart-daily-accountability/scripts/run_daily_accountability_vm.sh
-# GitHub org search found no prior copy; the live tree was VM-only.
+# Based on the live copy read 2026-09-24
+# (sha256 74c56724f60ca76d74affcbd136a196076cc651270027cc3439f0b98259fa358)
+# plus the intentional-stop trap below. The ACCOUNTABILITY_* overrides exist
+# for tests only; their defaults are the live values.
 set -euo pipefail
 
-# util-linux flock -w/--timeout accepts integer seconds only (not 15m).
-# A suffix such as 15m is "invalid timeout value" and exits EX_USAGE (64)
-# or EX_TEMPFAIL (75) in tens of milliseconds. That is not lock-busy
-# timeout (exit 1). 900 seconds = 15 minutes.
-FLOCK_WAIT_SECONDS="${ACCOUNTABILITY_FLOCK_WAIT_SECONDS:-900}"
+PROJECT_ROOT="${ACCOUNTABILITY_APP_ROOT:-/opt/streetsmart-daily-accountability}"
+VENV_PY="${ACCOUNTABILITY_PYTHON:-$PROJECT_ROOT/venv/bin/python}"
+LOG_FILE="$PROJECT_ROOT/data/logs/daily_run.log"
+LOCK_FILE="${ACCOUNTABILITY_LOCK_FILE:-/tmp/streetsmart_daily_accountability.lock}"
 
-APP_ROOT="${ACCOUNTABILITY_APP_ROOT:-/opt/streetsmart-daily-accountability}"
-LOG_FILE="${ACCOUNTABILITY_LOG_FILE:-${APP_ROOT}/daily_run.log}"
-LOCK_FILE="${ACCOUNTABILITY_LOCK_FILE:-${APP_ROOT}/data/run_state/accountability.lock}"
-BUSY_MESSAGE="Accountability lock remained busy for 15 minutes"
+# Workspace DWD key lives in Secret Manager (never on disk).
+export GOOGLE_DWD_SECRET="${GOOGLE_DWD_SECRET:-accountability-google-dwd-key}"
 
-log() {
-  mkdir -p "$(dirname "${LOG_FILE}")"
-  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a "${LOG_FILE}"
+mkdir -p "$PROJECT_ROOT/data/logs" "$PROJECT_ROOT/data/outputs"
+
+# An intentional `systemctl stop` sends SIGTERM to the whole unit cgroup.
+# Untrapped, bash exits 143, Type=oneshot counts that as failure, and
+# OnFailure= sends a false ACTION REQUIRED alert. Exit with a dedicated code
+# the unit lists in SuccessExitStatus= instead. Real failures keep their own
+# nonzero exit and still alert: the inner `timeout` expiring exits 124, and
+# python killed on its own (not this wrapper) exits 143. A systemd
+# TimeoutStartSec expiry is Result=timeout and alerts regardless of exit 80.
+STOPPED_EXIT=80
+on_stop() {
+    trap - TERM ERR
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Received SIGTERM (intentional stop); exiting $STOPPED_EXIT so OnFailure does not alert." >> "$LOG_FILE"
+    exit "$STOPPED_EXIT"
 }
+trap on_stop TERM
 
-case "${FLOCK_WAIT_SECONDS}" in
-  ''|*[!0-9]*)
-    log "flock wait must be integer seconds on util-linux; got '${FLOCK_WAIT_SECONDS}'"
-    exit 64
-    ;;
-esac
-
-if [ ! -d "${APP_ROOT}" ]; then
-  log "accountability app root is missing: ${APP_ROOT}"
-  exit 66
+# Hold a real kernel lock for the entire run. The report can take more than
+# eight minutes, so timestamp-based lock files are not sufficient protection.
+exec 9>"$LOCK_FILE"
+if ! flock -w 900 9; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Accountability lock remained busy for 15 minutes." >> "$LOG_FILE"
+    exit 75
 fi
 
-mkdir -p "$(dirname "${LOCK_FILE}")" "$(dirname "${LOG_FILE}")"
+trap 'code=$?; echo "[$(date "+%Y-%m-%d %H:%M:%S")] Accountability run FAILED (exit $code); no success was recorded." >> "$LOG_FILE"; exit "$code"' ERR
 
-if [ -n "${ACCOUNTABILITY_PYTHON:-}" ]; then
-  PYTHON="${ACCOUNTABILITY_PYTHON}"
-elif [ -x "${APP_ROOT}/venv/bin/python" ]; then
-  PYTHON="${APP_ROOT}/venv/bin/python"
-else
-  log "accountability python is missing: ${APP_ROOT}/venv/bin/python"
-  exit 66
+# Agency holiday calendar: do not issue an accountability report for a closed day.
+TODAY=$(date '+%Y-%m-%d')
+if PYTHONPATH="$PROJECT_ROOT" "$VENV_PY" -c 'from datetime import date; import sys; from src.engine.date_utils import federal_holidays; value=date.fromisoformat(sys.argv[1]); raise SystemExit(0 if value in federal_holidays(value.year) else 1)' "$TODAY"; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Agency closed for a federal holiday ($TODAY). Skipping automated morning run." >> "$LOG_FILE"
+    exit 0
 fi
 
-if [ ! -x "${PYTHON}" ]; then
-  log "accountability python is not executable: ${PYTHON}"
-  exit 66
-fi
+echo "============================================================" >> "$LOG_FILE"
+echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Starting StreetSmart Daily Accountability Run on GCP VM ===" >> "$LOG_FILE"
+echo "============================================================" >> "$LOG_FILE"
 
-exec 9>"${LOCK_FILE}"
-flock_status=0
-flock_err="$(mktemp)"
-flock -w "${FLOCK_WAIT_SECONDS}" 9 2>"${flock_err}" || flock_status=$?
-if [ -s "${flock_err}" ]; then
-  tee -a "${LOG_FILE}" < "${flock_err}" >/dev/null
-  cat "${flock_err}" >&2 || true
-fi
-rm -f "${flock_err}"
+# Fail-closed Production pipeline: exact scheduled attachments + Magellan +
+# authoritative trackers -> persistent department-only Doc + department workbook.
+cd "$PROJECT_ROOT"
+# Run below normal CPU priority and stop an unhealthy browser/API wait after
+# 45 minutes. A timed-out run sends no success notice and cron records failure.
+timeout --signal=TERM --kill-after=30s 55m nice -n 10 \
+    "$VENV_PY" -m src.production_main --publish --deliver \
+    --prefer-prepared --source-wait-minutes 30 >> "$LOG_FILE" 2>&1
 
-# Distinguish util-linux timeout/busy (exit 1) from usage/syntax errors
-# (64 EX_USAGE, 75 EX_TEMPFAIL, or any other non-1 failure). Never map
-# "invalid timeout value" onto the lock-busy message.
-if [ "${flock_status}" -eq 1 ]; then
-  log "${BUSY_MESSAGE}"
-  exit 1
-fi
-if [ "${flock_status}" -ne 0 ]; then
-  log "flock failed with a usage or system error (exit ${flock_status}); not a lock timeout. util-linux -w requires integer seconds."
-  exit "${flock_status}"
-fi
-
-log "acquired accountability lock; starting python -m src.production_main --publish --deliver"
-cd "${APP_ROOT}"
-export PYTHONPATH="${APP_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-set +e
-"${PYTHON}" -m src.production_main --publish --deliver 2>&1 | tee -a "${LOG_FILE}"
-main_status=${PIPESTATUS[0]}
-set -e
-if [ "${main_status}" -ne 0 ]; then
-  log "production_main exited ${main_status}"
-  exit "${main_status}"
-fi
-log "production_main completed"
-exit 0
+echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Run Complete Successfully ===" >> "$LOG_FILE"

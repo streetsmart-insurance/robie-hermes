@@ -1,0 +1,58 @@
+# Dynamic passing-grade registry for evidence-loop job types.
+#
+# ADDING A JOB TYPE = adding a block here. No code changes, no deploys of
+# new logic -- the grader in grade_registry.py is deterministic and
+# data-driven. Unknown job types FAIL CLOSED (cannot be graded).
+#
+# passing_rule is one of the deterministic rules in grade_registry.py:
+#   all_fields_matched              every field_match item matched
+#   document_present_and_values_match  a quote_document present AND every
+#                                      quoted_value_match matched
+#   completed_with_disposition      a call_record completed with a
+#                                   non-empty disposition
+#
+# required_fields declares the exact required field set the H2 enforcement
+# point (board.grade_locked_plan / board.grade_derived_evidence) checks
+# before the passing rule runs. One of:
+#   plan                every field in the locked plan's own field set
+#                       must have an evidence item with provenance
+#   document_and_plan   a quote document must be present with provenance,
+#                       AND every requested value (the plan's field set)
+#                       must have a quoted_value_match item with provenance
+#   call_record         a completed call record with a captured disposition
+#                       and provenance must exist
+# A plan missing fields or provenance is UNGRADABLE (passed=False) -- it
+# must not grade clean. Specs that omit required_fields default to "plan".
+#
+# extraction_model: the model used to turn a raw request into a
+# structured draft for this job type. null = this job type needs no
+# model extraction. Kept as a cheap, fast model per job type -- extraction
+# is a structured task, not a reasoning task, and the deterministic
+# validator (not the model) guarantees correctness.
+
+version: 1
+
+job_types:
+  policy_change:
+    label: "Policy change"
+    description: "Change field values on an EZLynx policy and prove each landed."
+    evidence_kinds: ["field_match"]
+    passing_rule: "all_fields_matched"
+    required_fields: "plan"
+    extraction_model: "gemini-3.8-flash"
+
+  carrier_quote:
+    label: "Carrier website quote"
+    description: "Quote an account on a carrier website; prove the quote document exists and the quoted values match what was requested."
+    evidence_kinds: ["quote_document", "quoted_value_match"]
+    passing_rule: "document_present_and_values_match"
+    required_fields: "document_and_plan"
+    extraction_model: "gemini-3.8-flash"
+
+  carrier_call:
+    label: "Carrier call"
+    description: "Call a carrier; prove the call happened and the outcome was captured."
+    evidence_kinds: ["call_record"]
+    passing_rule: "completed_with_disposition"
+    required_fields: "call_record"
+    extraction_model: null
