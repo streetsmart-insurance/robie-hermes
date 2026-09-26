@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from datetime import date
@@ -13,6 +15,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from robie_job_engine.geico_pending_cancellation_noc import (
+    CARRIER_QA_DRIVE_PARENT_ID,
+    DEFAULT_OUTPUT_ROOT,
+    DRIVE_UPLOAD_UNAVAILABLE,
+    GEICO_QA_DRIVE_FOLDER_ID,
     PROCESS,
     AlertGrid,
     LocalDeliveryLedger,
@@ -27,7 +33,9 @@ from robie_job_engine.geico_pending_cancellation_noc import (
     noc_filename,
     parse_alert_grid,
     pdf_bytes_from_observation,
+    qa_pack_dir,
     read_playwright_pdf_view,
+    require_hermes_test_host,
     require_loopback_cdp,
     require_noc_pdf_parity,
     run_pull,
@@ -397,7 +405,7 @@ class PullTests(unittest.TestCase):
             self.pull(browser)
         self.assertEqual(browser.downloads, [GUEVARA])
         self.assertTrue((self.output / PERSONAL_NAMES[0]).is_file())
-        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertTrue((self.output / "geico-pending-cancellations-2026-09-26.png").is_file())
         self.assertNotIn(COMMERCIAL, browser.downloads)
 
     def test_count_mismatch_does_not_save_the_screenshot_or_claim_success(self):
@@ -409,21 +417,24 @@ class PullTests(unittest.TestCase):
         ledger = ShortLedger(self.output)
         with self.assertRaisesRegex(IntakeHold, "2 targeted and 1 PDFs"):
             self.pull(ledger=ledger)
-        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertTrue((self.output / "geico-pending-cancellations-2026-09-26.png").is_file())
         self.assertTrue((self.output / PERSONAL_NAMES[0]).is_file())
 
     def test_enabled_next_and_bad_screenshot_hold_before_download(self):
         paged = ScriptedBrowser(prove_grid(more_pages=True), prove_paths(), self.pdfs)
         with self.assertRaisesRegex(IntakeHold, "incomplete or ambiguous"):
             self.pull(paged)
-        self.assertEqual(paged.shots, 0)
+        self.assertEqual(paged.shots, 1)
         self.assertEqual(paged.inspections, [])
+        shot = self.output / "geico-pending-cancellations-2026-09-26.png"
+        self.assertEqual(shot.read_bytes(), LIST_PNG)
 
         self.browser.screenshot_bytes = b"GIF89a-not-a-png"
         with self.assertRaisesRegex(IntakeHold, "not a PNG"):
             self.pull()
         self.assertEqual(self.browser.inspections, [])
-        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertEqual(shot.read_bytes(), LIST_PNG)
+        self.assertEqual(list(self.output.glob("*.png")), [shot])
 
     def test_conflicting_personal_file_and_commercial_file_are_kept(self):
         self.ledger.ensure_private()
@@ -464,7 +475,7 @@ class PullTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}), patch("sys.stdout", stdout):
-            code = main(["--as-of", "2026-09-26", "--output", str(self.output)], browser_factory=factory)
+            code = main(["--as-of", "2026-09-26", "--output-root", str(self.output)], browser_factory=factory)
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
         self.assertEqual(json.loads(stdout.getvalue())["status"], "HELD")
@@ -473,7 +484,7 @@ class PullTests(unittest.TestCase):
         stdout.seek(0)
         stdout.truncate()
         with patch.dict(os.environ, {"ROBIE_ENV": ""}), patch("sys.stdout", stdout):
-            code = main(["--as-of", "2026-09-26", "--output", str(self.output)], browser_factory=factory)
+            code = main(["--as-of", "2026-09-26", "--output-root", str(self.output)], browser_factory=factory)
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
         self.assertIn("TEST", json.loads(stdout.getvalue())["reason"])
@@ -483,7 +494,7 @@ class PullTests(unittest.TestCase):
         with patch("robie_job_engine.geico_pending_cancellation_noc.socket.gethostname", return_value="hermes-poc-01"), \
              patch("robie_job_engine.geico_pending_cancellation_noc.socket.getfqdn", return_value="hermes-poc-01.c.streetsmart-hermes-poc.internal"), \
              patch("sys.stdout", stdout):
-            code = main(["--as-of", "2026-09-26", "--output", str(self.output)], browser_factory=factory)
+            code = main(["--as-of", "2026-09-26", "--output-root", str(self.output)], browser_factory=factory)
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
         self.assertIn("hermes-poc-01", json.loads(stdout.getvalue())["reason"])
@@ -492,7 +503,7 @@ class PullTests(unittest.TestCase):
         stdout = io.StringIO()
         with patch("sys.stdout", stdout):
             code = main(
-                ["--as-of", "2026-09-26", "--output", str(self.output)],
+                ["--as-of", "2026-09-26", "--output-root", str(self.output)],
                 browser_factory=lambda args: self.browser,
             )
         self.assertEqual(code, 0)
@@ -502,6 +513,31 @@ class PullTests(unittest.TestCase):
         self.assertEqual(payload["count"], 2)
         self.assertEqual(payload["held"][0]["policy_number"], COMMERCIAL)
         self.assertTrue(payload["verification"]["screenshot"].endswith("geico-pending-cancellations-2026-09-26.png"))
+        pack = self.output / "2026-09-26"
+        self.assertEqual(payload["pack"], str(pack))
+        manifest = json.loads((pack / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["carrier"], "geico")
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["screenshot"], str(pack / "geico-pending-cancellations-2026-09-26.png"))
+        self.assertEqual([item["filename"] for item in manifest["downloaded"]], list(PERSONAL_NAMES))
+        self.assertEqual([row["policy_number"] for row in manifest["rows"]], [COMMERCIAL, GUEVARA, PANELLA])
+        self.assertEqual(manifest["held"][0]["policy_number"], COMMERCIAL)
+        self.assertEqual(manifest["drive"]["status"], "not_run")
+        self.assertEqual(manifest["drive"]["folder_id"], GEICO_QA_DRIVE_FOLDER_ID)
+        self.assertEqual(manifest["drive"]["parent_id"], CARRIER_QA_DRIVE_PARENT_ID)
+        self.assertEqual(
+            manifest["drive"]["path"],
+            "Robie Carrier Pull QA (Nicole)/Geico/2026-09-26/",
+        )
+        readme = (pack / "README.md").read_text(encoding="utf-8")
+        self.assertIn("BYOND TRANSPORTATION LLC", readme)
+        self.assertIn("Billing only", readme)
+        self.assertIn(PERSONAL_NAMES[0], readme)
+        self.assertIn(PERSONAL_NAMES[1], readme)
+        self.assertIn("2026-09-26", readme)
+        self.assertIn("Drive: not_run", readme)
+        self.assertIn(GEICO_QA_DRIVE_FOLDER_ID, readme)
+        self.assertNotIn("geico-noc-ledger.json", readme)
 
         stdout.seek(0)
         stdout.truncate()
@@ -509,16 +545,63 @@ class PullTests(unittest.TestCase):
         fresh = Path(self.tmp.name) / "held"
         with patch("sys.stdout", stdout):
             code = main(
-                ["--as-of", "2026-09-26", "--output", str(fresh)],
+                ["--as-of", "2026-09-26", "--output-root", str(fresh)],
                 browser_factory=lambda args: broken,
+                run_ts="2026-09-26T12:00:00-04:00",
             )
         self.assertEqual(code, 2)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["status"], "HELD")
-        self.assertNotIn("screenshot", json.dumps(payload["verification"]) if "verification" in payload else "")
         self.assertEqual(payload["held"][0]["outcome"], "HELD")
-        self.assertTrue((fresh / PERSONAL_NAMES[0]).is_file())
-        self.assertEqual(list(fresh.glob("*.png")), [])
+        held_pack = fresh / "2026-09-26"
+        self.assertTrue((held_pack / PERSONAL_NAMES[0]).is_file())
+        self.assertTrue((held_pack / "geico-pending-cancellations-2026-09-26.png").is_file())
+        held_manifest = json.loads((held_pack / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(held_manifest["status"], "HELD")
+        self.assertEqual(held_manifest["carrier"], "geico")
+        self.assertIn("6260043796", held_manifest["reason"])
+        self.assertIn("Billing only", (held_pack / "README.md").read_text(encoding="utf-8"))
+
+    def test_default_pack_is_the_hermes_geico_date_folder(self):
+        self.assertEqual(
+            DEFAULT_OUTPUT_ROOT,
+            Path("/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/geico"),
+        )
+        self.assertEqual(qa_pack_dir(DEFAULT_OUTPUT_ROOT, AS_OF), DEFAULT_OUTPUT_ROOT / "2026-09-26")
+        self.assertEqual(qa_pack_dir(self.output, AS_OF), self.output / "2026-09-26")
+        with self.assertRaisesRegex(IntakeHold, "absolute"):
+            qa_pack_dir(Path("relative-root"), AS_OF)
+
+    def test_upload_drive_keeps_the_local_pack_and_does_not_call_google(self):
+        before = set(sys.modules)
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            code = main(
+                ["--as-of", "2026-09-26", "--output-root", str(self.output), "--upload-drive"],
+                browser_factory=lambda args: self.browser,
+            )
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "HELD")
+        self.assertEqual(payload["portal_gate"], "PULLED")
+        self.assertEqual(payload["reason"], DRIVE_UPLOAD_UNAVAILABLE)
+        self.assertEqual(payload["ezlynx"], "not_run")
+        pack = self.output / "2026-09-26"
+        self.assertTrue((pack / PERSONAL_NAMES[0]).is_file())
+        self.assertTrue((pack / PERSONAL_NAMES[1]).is_file())
+        self.assertTrue((pack / "geico-pending-cancellations-2026-09-26.png").is_file())
+        self.assertTrue((pack / "README.md").is_file())
+        manifest = json.loads((pack / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["carrier"], "geico")
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["drive"]["status"], "HELD")
+        self.assertEqual(manifest["drive"]["reason"], DRIVE_UPLOAD_UNAVAILABLE)
+        self.assertEqual(manifest["drive"]["parent_id"], CARRIER_QA_DRIVE_PARENT_ID)
+        self.assertEqual(manifest["drive"]["folder_id"], GEICO_QA_DRIVE_FOLDER_ID)
+        readme = (pack / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"Drive: HELD — {DRIVE_UPLOAD_UNAVAILABLE}", readme)
+        added = set(sys.modules) - before
+        self.assertFalse(any(name == "google" or name.startswith(("google.", "googleapiclient")) for name in added))
 
     def test_cli_unexpected_error_is_unverified_without_the_message(self):
         stdout = io.StringIO()
@@ -527,7 +610,7 @@ class PullTests(unittest.TestCase):
             raise RuntimeError("secret-boom")
 
         with patch("sys.stdout", stdout):
-            code = main(["--as-of", "2026-09-26", "--output", str(self.output)], browser_factory=explode)
+            code = main(["--as-of", "2026-09-26", "--output-root", str(self.output)], browser_factory=explode)
         self.assertEqual(code, 1)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["status"], "UNVERIFIED")
@@ -589,6 +672,10 @@ class LocatorContractTests(unittest.TestCase):
             ".fill(",
             "keyboard",
             "systemd",
+            "googleapis",
+            "googleapiclient",
+            "MediaFileUpload",
+            "google.auth",
         ):
             self.assertNotIn(banned, text)
         self.assertNotIn("otp", text.casefold())
@@ -884,7 +971,8 @@ class NavigationTests(unittest.TestCase):
                     as_of=AS_OF,
                 )
             self.assertFalse(any(click.isdigit() for click in page.clicks))
-            self.assertEqual(page.screenshot_calls, 0)
+            self.assertEqual(page.screenshot_calls, 1)
+            self.assertTrue((self.output / mode / "geico-pending-cancellations-2026-09-26.png").is_file())
 
     def test_billing_only_classifier_does_not_invent_a_notice(self):
         page = NavPage(start="list")
@@ -899,7 +987,7 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(personal.kind, "noc")
         self.assertEqual(personal.notice_name, "Pending Cancellation Notice")
 
-    def test_return_failure_after_a_pdf_holds_without_a_screenshot(self):
+    def test_return_failure_keeps_the_list_screenshot_and_does_not_claim_pulled(self):
         page = NavPage(start="list", go_back_restores=False)
         with self.assertRaisesRegex(IntakeHold, "left the Pending Cancellations list"):
             run_pull(
@@ -908,7 +996,8 @@ class NavigationTests(unittest.TestCase):
                 SourceArchive(self.output / "sources"),
                 as_of=AS_OF,
             )
-        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertTrue((self.output / "geico-pending-cancellations-2026-09-26.png").is_file())
+        self.assertEqual(list(self.output.glob("* NOC Geico.pdf")), [])
 
 
 class DocumentClassifyTests(unittest.TestCase):

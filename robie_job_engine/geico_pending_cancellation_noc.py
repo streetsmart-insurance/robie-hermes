@@ -37,6 +37,18 @@ DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "geico-noc-ledger.json"
 GATEWAY_HOST = "gateway2.geico.com"
+HERMES_TEST_HOST = "hermes-test-01"
+DEFAULT_OUTPUT_ROOT = Path(
+    "/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/geico"
+)
+# Shared Drive "Robie Carrier Pull QA (Nicole)". Folder upload is TODO.
+# --upload-drive fails closed and does not call Google.
+CARRIER_QA_DRIVE_PARENT_ID = "1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2"
+GEICO_QA_DRIVE_FOLDER_ID = "1mMy9nrYjN8PRRwihRLgjjDdb213WqBLt"
+DRIVE_UPLOAD_UNAVAILABLE = (
+    "Drive upload of the Geico QA pack is not available; "
+    "refusing to report the pack as uploaded"
+)
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _POLICY_NUMBER = re.compile(r"^\d{10}$")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
@@ -724,8 +736,9 @@ def run_pull(
 ) -> dict[str, Any]:
     """List Pending Cancellations, download personal-lines NOCs, hold commercial gaps.
 
-    Screenshot bytes are kept in memory and written only after the personal-lines
-    PDF count matches the targeted set.
+    Once the Pending Cancellations view is on screen, the list PNG is kept for
+    the dated QA pack on both a matched pull and a later hold. A hold before
+    that capture does not invent a screenshot.
     """
     require_test()
     refuse_production_host()
@@ -733,23 +746,50 @@ def run_pull(
         raise IntakeHold("Pending Cancellations as-of date is missing or ambiguous")
     grid = browser.load_pending_cancellations()
     alerts = parse_alert_grid(grid)
-    if grid.more_pages is not False:
-        raise IntakeHold("Pending Cancellations list is incomplete or ambiguous")
     png = require_png(browser.screenshot_pending_cancellations())
+    seen = {alert.policy_number: _row_payload(alert, outcome="LISTED") for alert in alerts}
     held: list[dict[str, Any]] = []
     downloaded: list[dict[str, Any]] = []
-    rows: list[dict[str, Any]] = []
     targeted: list[AlertRow] = []
     skipped: list[str] = []
+
+    def current_rows() -> list[dict[str, Any]]:
+        return [seen[alert.policy_number] for alert in alerts]
+
+    def fail(reason: str, *, pdfs: int | None = None) -> None:
+        try:
+            shot = str(ledger.save_screenshot(as_of, png))
+        except IntakeHold as exc:
+            raise IntakeHold(f"{reason}; screenshot was not saved ({exc})") from exc
+        held_exc = _held_now(reason, held, downloaded, current_rows(), targeted, pdfs=pdfs)
+        held_exc.details["screenshot"] = shot
+        held_exc.details["alerts"] = current_rows()
+        held_exc.details["as_of"] = as_of.isoformat()
+        raise held_exc
+
+    def remember(alert: AlertRow, row: dict[str, Any]) -> None:
+        seen[alert.policy_number] = row
+
+    def back() -> None:
+        try:
+            browser.return_to_pending_list()
+        except IntakeHold as exc:
+            fail(str(exc))
+
+    if grid.more_pages is not False:
+        fail("Pending Cancellations list is incomplete or ambiguous")
     for alert in alerts:
         if alert.line == "commercial":
             if ledger.has_named_file_or_record(document_id=alert.document_id, filename=alert.filename):
-                raise _held_now(
-                    f"commercial policy {alert.policy_number} has a local NOC file; not a personal-lines pull",
-                    held, downloaded, rows, targeted,
+                row = _row_payload(
+                    alert, outcome="HELD",
+                    reason=f"commercial policy {alert.policy_number} has a local NOC file; not a personal-lines pull",
                 )
+                held.append(row)
+                remember(alert, row)
+                fail(row["reason"])
             path = browser.inspect_notice_path(alert.policy_number)
-            _require_return(browser, held, downloaded, rows, targeted)
+            back()
             if path.kind == "billing_only":
                 row = _row_payload(
                     alert,
@@ -757,7 +797,7 @@ def run_pull(
                     reason="commercial policy: Documents path missing; Billing only",
                 )
                 held.append(row)
-                rows.append(row)
+                remember(alert, row)
                 continue
             if path.kind == "noc":
                 row = _row_payload(
@@ -766,18 +806,26 @@ def run_pull(
                     reason="commercial policy exposed a Pending Cancellation Notice; not downloaded as a personal-lines NOC",
                 )
                 held.append(row)
-                rows.append(row)
+                remember(alert, row)
                 continue
-            raise _held_now(
-                f"commercial policy {alert.policy_number} document path is missing or ambiguous",
-                held, downloaded, rows, targeted,
+            row = _row_payload(
+                alert, outcome="HELD",
+                reason=f"commercial policy {alert.policy_number} document path is missing or ambiguous",
             )
+            held.append(row)
+            remember(alert, row)
+            fail(row["reason"])
         if alert.line != "personal":
             raise IntakeHold("Pending Cancellation alert line is missing or ambiguous")
-        if ledger.delivery_status(document_id=alert.document_id, filename=alert.filename):
+        try:
+            already = ledger.delivery_status(document_id=alert.document_id, filename=alert.filename)
+        except IntakeHold as exc:
+            remember(alert, _row_payload(alert, outcome="HELD", reason=str(exc)))
+            fail(str(exc))
+        if already:
             targeted.append(alert)
             skipped.append(alert.document_id)
-            rows.append(_row_payload(alert, outcome="ALREADY_DELIVERED", filename=alert.filename))
+            remember(alert, _row_payload(alert, outcome="ALREADY_DELIVERED", filename=alert.filename))
             continue
         path = browser.inspect_notice_path(alert.policy_number)
         if path.kind != "noc":
@@ -785,13 +833,18 @@ def run_pull(
                 browser.return_to_pending_list()
             except IntakeHold:
                 pass
-            raise _held_now(
-                f"personal-lines policy {alert.policy_number} is missing Documents → Billing → Pending Cancellation Notice",
-                held, downloaded, rows, targeted,
+            reason = (
+                f"personal-lines policy {alert.policy_number} is missing "
+                "Documents → Billing → Pending Cancellation Notice"
             )
+            row = _row_payload(alert, outcome="HELD", reason=reason)
+            held.append(row)
+            remember(alert, row)
+            fail(reason)
         content = browser.download_notice(alert.policy_number)
         if not _is_pdf(content):
-            raise _held_now("NOC download is not a PDF", held, downloaded, rows, targeted)
+            remember(alert, _row_payload(alert, outcome="HELD", reason="NOC download is not a PDF"))
+            fail("NOC download is not a PDF")
         source = SourceItem(
             system=PROCESS,
             source_account=GATEWAY_HOST,
@@ -802,13 +855,14 @@ def run_pull(
             content=content,
         )
         source.validate()
-        saved = ledger.record(source, due_on=alert.due_on, policy_number=alert.policy_number)
         try:
+            saved = ledger.record(source, due_on=alert.due_on, policy_number=alert.policy_number)
             archive.preserve(source)
         except IntakeHold as exc:
-            raise _held_now(str(exc), held, downloaded, rows, targeted) from exc
-        _require_return(browser, held, downloaded, rows, targeted)
-        targeted.append(alert)
+            row = _row_payload(alert, outcome="HELD", reason=str(exc))
+            held.append(row)
+            remember(alert, row)
+            fail(str(exc))
         item = {
             "document_id": alert.document_id,
             "filename": alert.filename,
@@ -821,27 +875,43 @@ def run_pull(
             "path": str(saved),
         }
         downloaded.append(item)
-        rows.append(_row_payload(alert, outcome="PULLED", filename=alert.filename))
+        remember(alert, _row_payload(alert, outcome="PULLED", filename=alert.filename))
+        back()
+        targeted.append(alert)
     targeted_ids = {alert.document_id for alert in targeted}
     verified = ledger.verified_ids(targeted_ids)
     try:
         evidence = require_noc_pdf_parity(targeted_ids=targeted_ids, verified_ids=verified)
     except IntakeHold as exc:
-        raise _held_now(str(exc), held, downloaded, rows, targeted, pdfs=len(verified)) from exc
+        fail(str(exc), pdfs=len(verified))
     shot = ledger.save_screenshot(as_of, png)
     evidence["screenshot"] = str(shot)
+    pack_pdfs = downloaded + [
+        {
+            "filename": alert.filename,
+            "policy_number": alert.policy_number,
+            "insured_name": alert.insured_name,
+            "due_date": alert.due_on.isoformat(),
+            "path": str(ledger.root / alert.filename),
+            "already_present": True,
+        }
+        for alert in targeted
+        if alert.document_id in skipped
+    ]
     return {
         "status": "PULLED",
         "scope": SCOPE,
         "process": PROCESS,
         "as_of": as_of.isoformat(),
-        "alerts": len(alerts),
+        "alert_count": len(alerts),
         "targeted": len(targeted),
         "count": len(downloaded),
         "downloaded": downloaded,
+        "pack_pdfs": pack_pdfs,
         "skipped_already_delivered": skipped,
         "held": held,
-        "rows": rows,
+        "alerts": current_rows(),
+        "rows": current_rows(),
         "verification": evidence,
         "ezlynx": "not_run",
     }
@@ -851,6 +921,7 @@ def connect_cdp_browser(cdp_url: str | None) -> tuple[PlaywrightGeicoNocBrowser,
     """Attach to the local Test Chrome. Exactly one Gateway application tab."""
     require_test()
     refuse_production_host()
+    require_hermes_test_host()
     url = require_loopback_cdp(cdp_url or os.environ.get("ROBIE_BROWSER_CDP_URL") or DEFAULT_CDP_URL)
     from playwright.sync_api import sync_playwright
 
@@ -900,17 +971,304 @@ def require_list_url(url: str) -> str:
     return cleaned
 
 
+def require_hermes_test_host() -> None:
+    """Live packs are produced on hermes-test-01. Fixture runs inject a browser."""
+    raw = f"{socket.gethostname()} {socket.getfqdn()}".lower()
+    labels = [label for label in re.split(r"[\s.]+", raw) if label]
+    if HERMES_TEST_HOST not in labels:
+        raise IntakeHold("Geico QA pack must be produced on hermes-test-01")
+
+
+def _replace_private(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.is_symlink():
+        raise IntakeHold("QA pack file is missing or ambiguous")
+    if temporary.exists():
+        temporary.unlink()
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    os.chmod(path, 0o600)
+
+
+def qa_pack_dir(output_root: Path, day: date) -> Path:
+    """Return ``{output_root}/{YYYY-MM-DD}``.
+
+    The default root is ``.../carrier-pull-qa/geico``, so the dated pack is
+    ``.../carrier-pull-qa/geico/{YYYY-MM-DD}/``.
+    """
+    root = Path(output_root).expanduser()
+    if not root.is_absolute():
+        raise IntakeHold("QA pack output root must be an absolute path")
+    if not isinstance(day, date):
+        raise IntakeHold("Pending Cancellations as-of date is missing or ambiguous")
+    pack = root / day.isoformat()
+    resolved_root = root.resolve()
+    resolved_pack = pack.resolve()
+    if resolved_root != resolved_pack and resolved_root not in resolved_pack.parents:
+        raise IntakeHold("QA pack path is missing or ambiguous")
+    if pack.name != day.isoformat():
+        raise IntakeHold("QA pack path is missing or ambiguous")
+    return pack
+
+
+def drive_record(day: date) -> dict[str, Any]:
+    return {
+        "status": "not_run",
+        "parent_id": CARRIER_QA_DRIVE_PARENT_ID,
+        "folder_id": GEICO_QA_DRIVE_FOLDER_ID,
+        "path": f"Robie Carrier Pull QA (Nicole)/Geico/{day.isoformat()}/",
+    }
+
+
+def render_qa_readme(
+    *,
+    as_of: date,
+    run_ts: str,
+    status: str,
+    alerts: list[dict[str, Any]],
+    downloaded: list[dict[str, Any]],
+    held: list[dict[str, Any]],
+    reason: str = "",
+    drive: dict[str, Any] | None = None,
+) -> str:
+    lines = [
+        f"# Geico Pending Cancellation QA — {as_of.isoformat()}",
+        "",
+        f"Run: {run_ts}",
+        f"Processed date: {as_of.isoformat()}",
+        f"Status: {status}",
+        "",
+        "Robie listed Pending Cancellations on Geico Agent Gateway "
+        "(gateway2.geico.com/client-alerts). This pack was written under the "
+        "Test artifacts root on hermes-test-01. It does not file anything in EZLynx.",
+        "",
+        "## What Robie saw",
+        "",
+        "| Policy | Insured | Due | Status | Product | Line | Outcome |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in alerts:
+        lines.append(
+            "| {policy_number} | {insured_name} | {due_date} | {status} | {product} | {line} | {outcome} |".format(
+                policy_number=row.get("policy_number", ""),
+                insured_name=row.get("insured_name", ""),
+                due_date=row.get("due_date", ""),
+                status=row.get("status", ""),
+                product=row.get("product", ""),
+                line=row.get("line", ""),
+                outcome=row.get("outcome", ""),
+            )
+        )
+    lines.extend(["", "## Downloaded", ""])
+    if downloaded:
+        for item in downloaded:
+            lines.append(f"- `{item.get('filename', '')}`")
+    else:
+        lines.append("No PDFs saved on this run.")
+    lines.extend(["", "## HELD", ""])
+    if held:
+        for row in held:
+            lines.append(
+                f"- `{row.get('policy_number', '')}` {row.get('insured_name', '')}: {row.get('reason', '')}"
+            )
+    else:
+        lines.append("No held rows.")
+    if reason:
+        lines.extend(["", "## Job hold", "", reason])
+    info = drive or {}
+    lines.extend([
+        "",
+        f"Drive: {info.get('status', 'not_run')}",
+        f"Drive parent: {info.get('parent_id', '')}",
+        f"Drive Geico folder: {info.get('folder_id', '')}",
+        f"Drive path: {info.get('path', '')}",
+        "",
+    ])
+    lines.extend([
+        "",
+        "Nicole: open this day's folder, compare the Pending Cancellations screenshot "
+        "with the PDFs, then complete the EZLynx filing and the status sheet. "
+        "Add further carriers from the shared `_Carriers to add` note. "
+        "This pack does not do that filing.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def publish_qa_pack(
+    pack: Path,
+    *,
+    as_of: date,
+    run_ts: str,
+    status: str,
+    alerts: list[dict[str, Any]],
+    downloaded: list[dict[str, Any]],
+    held: list[dict[str, Any]],
+    screenshot: str,
+    reason: str = "",
+    drive: dict[str, Any] | None = None,
+    portal_gate: str = "",
+) -> dict[str, Any]:
+    """Write README.md and manifest.json next to the screenshot and PDFs."""
+    shot = Path(screenshot)
+    if shot.parent.resolve() != pack.resolve() or shot.is_symlink() or not shot.is_file():
+        raise IntakeHold("Pending Cancellations screenshot is missing or not a PNG")
+    require_png(shot.read_bytes())
+    drive_info = dict(drive or drive_record(as_of))
+    manifest: dict[str, Any] = {
+        "carrier": "geico",
+        "run_ts": run_ts,
+        "rows": alerts,
+        "alerts": alerts,
+        "downloaded": downloaded,
+        "held": held,
+        "screenshot": str(shot),
+        "status": status,
+        "as_of": as_of.isoformat(),
+        "ezlynx": "not_run",
+        "drive": drive_info,
+    }
+    if portal_gate:
+        manifest["portal_gate"] = portal_gate
+    if reason:
+        manifest["reason"] = reason
+    readme = render_qa_readme(
+        as_of=as_of, run_ts=run_ts, status=status, alerts=alerts,
+        downloaded=downloaded, held=held, reason=reason, drive=drive_info,
+    )
+    _replace_private(pack / "README.md", readme.encode("utf-8"))
+    _replace_private(pack / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n")
+    return manifest
+
+
+def refuse_geico_drive_upload(pack: Path) -> None:
+    """TODO: upload the date folder into the Nicole Geico Drive. Fail closed.
+
+    The local pack is left in place. This function does not import or call Google.
+    """
+    manifest_path = pack / "manifest.json"
+    readme_path = pack / "README.md"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        readme = readme_path.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE) from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("drive"), dict):
+        raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+    drive = manifest["drive"]
+    if drive.get("parent_id") != CARRIER_QA_DRIVE_PARENT_ID:
+        raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+    if drive.get("folder_id") != GEICO_QA_DRIVE_FOLDER_ID:
+        raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+    if "Drive: not_run\n" not in readme:
+        raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+    drive["status"] = "HELD"
+    drive["reason"] = DRIVE_UPLOAD_UNAVAILABLE
+    _replace_private(
+        manifest_path,
+        json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+    )
+    _replace_private(
+        readme_path,
+        readme.replace(
+            "Drive: not_run\n",
+            f"Drive: HELD — {DRIVE_UPLOAD_UNAVAILABLE}\n",
+            1,
+        ).encode("utf-8"),
+    )
+    raise IntakeHold(DRIVE_UPLOAD_UNAVAILABLE)
+
+
+def _publish_held(pack: Path, exc: PullHeld, *, as_of: date, run_ts: str) -> dict[str, Any] | None:
+    shot = str(exc.details.get("screenshot") or "")
+    if not shot:
+        return None
+    return publish_qa_pack(
+        pack,
+        as_of=as_of,
+        run_ts=run_ts,
+        status="HELD",
+        alerts=list(exc.details.get("alerts") or exc.details.get("rows") or []),
+        downloaded=list(exc.details.get("downloaded") or []),
+        held=list(exc.details.get("held") or []),
+        screenshot=shot,
+        reason=str(exc),
+        drive=drive_record(as_of),
+        portal_gate="HELD",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pull Geico Pending Cancellation NOCs (Test only)")
     parser.add_argument("--as-of", required=True, help="List screenshot date, YYYY-MM-DD")
-    parser.add_argument("--output", required=True, help="Private directory for named PDFs and the ledger")
+    parser.add_argument(
+        "--output-root",
+        default=str(DEFAULT_OUTPUT_ROOT),
+        help=(
+            "Geico QA root on hermes-test-01. The pack is written to "
+            "{output-root}/{YYYY-MM-DD}/ "
+            "(default: .../carrier-pull-qa/geico)."
+        ),
+    )
+    parser.add_argument(
+        "--upload-drive",
+        action="store_true",
+        help=(
+            "Upload that day's QA folder to Nicole's Geico Drive folder "
+            f"({GEICO_QA_DRIVE_FOLDER_ID}) under parent {CARRIER_QA_DRIVE_PARENT_ID}. "
+            "Not implemented; fails closed and does not call Google."
+        ),
+    )
     parser.add_argument("--cdp-url", default=None, help="Loopback CDP URL. Defaults to 127.0.0.1:9222")
     return parser
 
 
-def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.Namespace], Any] | None = None) -> int:
+def _emit_drive_refusal(pack: Path, *, portal_gate: str, extra: dict[str, Any] | None = None) -> int:
+    """Local pack stays. The command is HELD because Drive was requested and refused."""
+    payload: dict[str, Any] = {
+        "status": "HELD",
+        "portal_gate": portal_gate,
+        "reason": DRIVE_UPLOAD_UNAVAILABLE,
+        "ezlynx": "not_run",
+        "pack": str(pack),
+        "drive": {
+            "status": "HELD",
+            "reason": DRIVE_UPLOAD_UNAVAILABLE,
+            "parent_id": CARRIER_QA_DRIVE_PARENT_ID,
+            "folder_id": GEICO_QA_DRIVE_FOLDER_ID,
+        },
+    }
+    if (pack / "manifest.json").is_file():
+        payload["manifest"] = str(pack / "manifest.json")
+        payload["readme"] = str(pack / "README.md")
+    if extra:
+        payload.update(extra)
+    _emit(payload)
+    return 2
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    browser_factory: Callable[[argparse.Namespace], Any] | None = None,
+    run_ts: str | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     closer: Callable[[], None] | None = None
+    pack: Path | None = None
     try:
         require_test()
         refuse_production_host()
@@ -918,15 +1276,65 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
             as_of = date.fromisoformat(args.as_of)
         except ValueError as exc:
             raise IntakeHold("Pending Cancellations as-of date is missing or ambiguous") from exc
-        output = Path(args.output)
-        ledger = LocalDeliveryLedger(output)
-        ledger.ensure_private()
-        archive = SourceArchive(output / "sources")
+        pack = qa_pack_dir(Path(args.output_root), as_of)
+        stamped = run_ts or datetime.now(_EASTERN).isoformat()
         if browser_factory is None:
+            require_hermes_test_host()
             browser, closer = connect_cdp_browser(args.cdp_url)
         else:
             browser = browser_factory(args)
-        receipt = run_pull(browser, ledger, archive, as_of=as_of)
+        ledger = LocalDeliveryLedger(pack)
+        archive = SourceArchive(pack / "sources")
+        try:
+            receipt = run_pull(browser, ledger, archive, as_of=as_of)
+        except PullHeld as exc:
+            published = _publish_held(pack, exc, as_of=as_of, run_ts=stamped)
+            if args.upload_drive:
+                if published is None:
+                    return _emit_drive_refusal(pack, portal_gate="HELD", extra={"pull_reason": str(exc)})
+                try:
+                    refuse_geico_drive_upload(pack)
+                except IntakeHold:
+                    return _emit_drive_refusal(
+                        pack,
+                        portal_gate="HELD",
+                        extra={"pull_reason": str(exc), "held": exc.details.get("held") or []},
+                    )
+            payload = {"status": "HELD", "reason": str(exc), "ezlynx": "not_run", "pack": str(pack)}
+            payload.update(exc.details)
+            payload["drive"] = drive_record(as_of)
+            if (pack / "manifest.json").is_file():
+                payload["manifest"] = str(pack / "manifest.json")
+                payload["readme"] = str(pack / "README.md")
+            _emit(payload)
+            return 2
+        publish_qa_pack(
+            pack,
+            as_of=as_of,
+            run_ts=stamped,
+            status="PULLED",
+            alerts=list(receipt.get("alerts") or []),
+            downloaded=list(receipt.get("pack_pdfs") or receipt.get("downloaded") or []),
+            held=list(receipt.get("held") or []),
+            screenshot=str(receipt["verification"]["screenshot"]),
+            drive=drive_record(as_of),
+        )
+        if args.upload_drive:
+            try:
+                refuse_geico_drive_upload(pack)
+            except IntakeHold:
+                return _emit_drive_refusal(
+                    pack,
+                    portal_gate="PULLED",
+                    extra={
+                        "downloaded": receipt.get("downloaded") or [],
+                        "held": receipt.get("held") or [],
+                    },
+                )
+        receipt["drive"] = drive_record(as_of)
+        receipt["pack"] = str(pack)
+        receipt["manifest"] = str(pack / "manifest.json")
+        receipt["readme"] = str(pack / "README.md")
         _emit(receipt)
         return 0
     except PullHeld as exc:

@@ -56,9 +56,14 @@ For the set targeted as downloadable personal-lines on this pull:
 **Targeted personal-lines alerts = PDFs saved for those alerts.**
 
 The Pending Cancellations list PNG is captured while that view is selected,
-before any policy is opened, and it is written only after the counts match:
+before any policy is opened:
 
 `geico-pending-cancellations-YYYY-MM-DD.png`
+
+A matched pull writes that PNG into the dated QA pack. A hold after the
+list is visible still writes the PNG, the README, and the manifest with
+status `HELD`. A hold before the list is on screen does not invent a
+screenshot.
 
 (`--as-of` is that date.) A mismatch holds the pull (`HELD`). The receipt
 is not `PULLED`. Already written PDFs are left in place for recovery; they
@@ -95,21 +100,52 @@ of this commit is installed on `hermes-test-01` (not done here):
    visible.
 4. Leave **one** `gateway2.geico.com` application tab. Extra Gateway tabs
    hold.
-5. Use a private output directory (mode `0700`). The command creates it and
-   holds if it is group- or world-accessible. Existing named PDFs that do
-   not match the ledger are left in place and the pull holds.
+5. The dated pack directory must be private (mode `0700`). The command
+   creates it and holds if it is group- or world-accessible. Existing named
+   PDFs that do not match the ledger are left in place and the pull holds.
+6. Do not pass `--upload-drive`. Folder upload is not implemented. The flag
+   writes the local pack, then exits `HELD` and does not call Google.
 
 ```bash
 cd /opt/streetsmart-hermes-test/releases/current
 ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.geico_pending_cancellation_noc \
-  --as-of 2026-09-26 \
-  --output /opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/geico-noc-pull
+  --as-of 2026-09-26
 ```
 
-After `PULLED`, the output folder must contain the PNG and the same number
+`--output-root` defaults to
+`/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/geico`.
+The command writes one date folder:
+
+```text
+/opt/streetsmart-hermes-test/robie-job-engine/data/artifacts/carrier-pull-qa/geico/2026-09-26/
+```
+
+That folder contains:
+
+1. `geico-pending-cancellations-2026-09-26.png`
+2. Each saved `[PolicyNumber] NOC Geico.pdf`
+3. `README.md` — what Robie saw, downloaded, and held
+4. `manifest.json` — `carrier` `geico`, `status` `PULLED` or `HELD`, `rows`,
+   `downloaded`, `held`, screenshot path, `ezlynx` `not_run`
+
+After `PULLED`, the date folder must contain the PNG and the same number
 of NOC PDFs as personal-lines alerts targeted on that page. Commercial rows
-appear in the receipt `"held"` array. A count mismatch is a failed pull,
-not a partial success.
+appear in the receipt `"held"` array and in the README. A count mismatch is
+a failed pull, not a partial success. The ledger file stays in the same
+date folder and is not part of the Nicole-facing README.
+
+## Drive
+
+Documented destination: `Robie Carrier Pull QA (Nicole)/Geico/{YYYY-MM-DD}/`.
+
+| | |
+| --- | --- |
+| Parent | `1cLEpR-0T6KdiVjcdAr0qpGTO447MetI2` |
+| Geico child | `1mMy9nrYjN8PRRwihRLgjjDdb213WqBLt` |
+
+`--upload-drive` is off by default. When set, the local pack is written,
+then the command fails closed. It does not call Google and it does not
+report the pack as uploaded. The local date folder is left in place.
 
 ## UNVERIFIED until that Test run
 
@@ -126,6 +162,8 @@ not a partial success.
 - The PDF response host. Fetches are limited to `geico.com` and its
   subdomains, plus `blob:`. A login host or a CDN host holds.
 - Prior delivery into EZLynx. The ledger is only this output directory.
+- Drive folder upload. The parent and Geico folder ids are documented.
+  `--upload-drive` fails closed and does not call Google.
 - Test release digest, pointer flip, and rollback target. No release was
   built or installed for this change.
 - N=3 clean Test jobs. Not started.
