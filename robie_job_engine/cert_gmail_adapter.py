@@ -99,28 +99,94 @@ def _dwd_key(sa_key_path: str, project: str, secret: str) -> dict[str, Any]:
     raise RuntimeError(f"could not read DWD secret {secret}: {last}")
 
 
-def build_dwd_session(mailbox: str = "") -> Any:
-    """Return an authorized ``requests.Session`` impersonating ``mailbox``."""
-    import requests  # lazy: unit tests never need it
+def _key_file_dwd_token(mailbox: str, scopes: list[str]) -> str:
+    """DWD token via the Secret-Manager key flow (fallback)."""
     import google.auth.transport.requests
     from google.oauth2 import service_account
 
-    mailbox = mailbox or _env("CERT_GMAIL_MAILBOX", DEFAULT_MAILBOX)
     dwd = _dwd_key(
         _env("CERT_GMAIL_SA_KEY_PATH", "~/.config/gcp/hermes-poc-key.json"),
         _env("CERT_GMAIL_PROJECT", "streetsmart-hermes-poc"),
         _env("CERT_GMAIL_DWD_SECRET", "accountability-google-dwd-key"),
     )
     creds = service_account.Credentials.from_service_account_info(
-        dwd, scopes=[READONLY_SCOPE], subject=mailbox,
+        dwd, scopes=scopes, subject=mailbox,
     )
+    creds.refresh(google.auth.transport.requests.Request())
+    return creds.token
+
+
+def _keyless_dwd_token(mailbox: str, scopes: list[str]) -> str:
+    """Mint a DWD access token using the VM's own service account.
+
+    No key files: the VM SA signs a JWT asserting the delegated subject via
+    the IAM signJwt API (the SA needs iam.serviceAccounts.signJwt on itself),
+    then exchanges it at the OAuth token endpoint. Proven on hermes-poc-01
+    2026-09-26.
+    """
+    import google.auth
+    from google.auth.transport.requests import Request as AuthRequest
+
+    creds, _project = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/iam"])
+    creds.refresh(AuthRequest())
+    sa_email = creds.service_account_email
+
+    def b64(d: bytes) -> str:
+        return base64.urlsafe_b64encode(d).rstrip(b"=").decode()
+
+    now = int(time.time())
+    unsigned = b64(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()) + "." + b64(
+        json.dumps({
+            "iss": sa_email,
+            "sub": mailbox,
+            "scope": " ".join(scopes),
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": now,
+            "exp": now + 3600,
+        }).encode()
+    )
+    sign_req = urllib.request.Request(
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts"
+        f"/{sa_email}:signJwt",
+        data=json.dumps({"payload": unsigned}).encode(),
+        headers={"Authorization": f"Bearer {creds.token}",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(sign_req, timeout=30) as r:
+        signed_jwt = json.load(r)["signedJwt"]
+    token_req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer"
+              f"&assertion={signed_jwt}").encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(token_req, timeout=30) as r:
+        return json.load(r)["access_token"]
+
+
+def build_dwd_session(mailbox: str = "") -> Any:
+    """Return an authorized ``requests.Session`` impersonating ``mailbox``.
+
+    Tries the keyless VM-SA flow first (the worker host), then falls back to
+    the Secret-Manager key flow.
+    """
+    import requests  # lazy: unit tests never need it
+
+    mailbox = mailbox or _env("CERT_GMAIL_MAILBOX", DEFAULT_MAILBOX)
+    scopes = [READONLY_SCOPE]
+    token = ""
+    try:
+        token = _keyless_dwd_token(mailbox, scopes)
+    except Exception:
+        token = ""
+    if not token:
+        token = _key_file_dwd_token(mailbox, scopes)
     session = requests.Session()
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    session.headers.update({"Authorization": f"Bearer {creds.token}"})
-    # stash a refresher so long runs don't die on token expiry
-    session._dwd_creds = creds  # type: ignore[attr-defined]
-    session._dwd_auth_req = auth_req  # type: ignore[attr-defined]
+    session.headers.update({"Authorization": f"Bearer {token}",
+                            "_dwd_mailbox": mailbox})
     return session
 
 
@@ -164,10 +230,14 @@ class CertGmailAdapter:
         raise RuntimeError(f"Gmail GET {path} failed: {last}")
 
     def _refresh(self) -> None:
-        creds = getattr(self._s, "_dwd_creds", None)
-        if creds is not None:
-            creds.refresh(self._s._dwd_auth_req)
-            self._s.headers.update({"Authorization": f"Bearer {creds.token}"})
+        try:
+            token = _keyless_dwd_token(
+                self._s.headers.get("_dwd_mailbox", self._mailbox),
+                [READONLY_SCOPE],
+            )
+            self._s.headers.update({"Authorization": f"Bearer {token}"})
+        except Exception:
+            pass
 
     def list_message_ids(
         self, query: str, page_token: str | None, page_size: int = 50
