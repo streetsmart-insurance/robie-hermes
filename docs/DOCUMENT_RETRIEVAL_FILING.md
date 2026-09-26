@@ -41,17 +41,43 @@ include the policy number.
 
 ## Workflow and folder
 
-Progressive memos attach to an existing discussion titled
-`Additional Information - Progressive Memo`. DiscussionApi can append to an
-existing titled discussion and has no create call. When Mail Sorting requires
-that workflow and it is not already on the applicant, the item holds **before
-upload**. This stage does not invent a create-discussion endpoint.
+Progressive memos attach a note to an existing discussion titled
+`Additional Information - Progressive Memo` when that discussion is already
+on the applicant. DiscussionApi can append to an existing titled discussion
+and has no create call. This stage does not invent one.
+
+When that titled discussion is missing, ambiguous, or the filing rule has no
+confirmed title, the stage still uploads the PDF (after the document dedupe),
+skips Notes, and calls `robie_job_engine.zapier_tasks.fire_task`. The webhook
+stays in the vault as `custom.zapier-webhook` and is loaded by `bin/zap-trigger`.
+The payload is:
+
+- `applicant_id`
+- `assignee`: `Nicole Segovia`
+- `source`: `document-retrieval`
+- `due_date`: the Eastern filing day, ISO `YYYY-MM-DD`
+- `task_title`: `Document Retrieval review — {Carrier} {DocType} — {Insured} — {PolicyNumber}`
+
+The status-sheet comment on that path is exactly:
+
+`Doc filed (no WF); Nicole EZLynx task created for review`
+
+A task is created only after DocumentApi returns a numeric read-back
+`document_id`, and that comment is written only after `fire_task` returns
+`ok: true`. Unit tests pass `zapier_dry_run=True`, which forwards `--dry-run`
+to `zap-trigger`. The live Test path uses `dry_run=False` and is still behind
+the kill switch. There is no Production timer.
+
+Applicant search that is not exactly one applicant holds before upload.
+A DocumentApi error, or an upload with no read-back document id, holds and
+does not fire a task. A missing daily tab or carrier section still holds the
+batch before any EZLynx write and does not invent a row.
 
 The proven DocumentApi upload fields are document name, file bytes, and
 policy master id. There is no folder id on that call. A filed result sets
-`folder_field` to `not_in_proven_document_upload`. The Nicole comment is
-still the Mail Sorting sentence, and it is written only after both the
-document id and the note id read back:
+`folder_field` to `not_in_proven_document_upload`. When the workflow exists,
+the Nicole comment is written only after both the document id and the note id
+read back:
 
 `Added to the Additional Information folder and WF: Additional Information - Progressive Memo`
 
@@ -81,13 +107,19 @@ applicant ids holds that item.
 - Progressive BOP pending-cancel NOC (`progressive_bop`)
 - NatGen pending-cancellation NOC (`natgen_pending_cancellation`)
 
-Each should call `file_carrier_batch` with its own `FilingRule` (folder,
-workflow title, carrier section, document type). Do not copy a second
-EZLynx client.
+Each should call `file_carrier_batch` with a `FilingRule`. This branch
+sketches those hooks and does not rewrite the carrier pull PRs:
 
-A proven workflow-create API is still required before a missing
-`Additional Information - Progressive Memo` discussion can be opened.
-Until then the item holds.
+- `GEICO_NOC_RULE` — section `GEICO`, type `Cancellation`
+- `PROGRESSIVE_BOP_RULE` — section `Progressive BOP/CGL`, type `Cancellation`
+- `NATGEN_NOC_RULE` — section `NatGen`, type `NOC`
+- `TRAVELERS_ACTIVITY_RULE` — section `Travelers`, type `Policy Activity`
+
+`sketch_carrier_rule` leaves `workflow_title` and `folder` empty until that
+carrier's Mail Sorting row is known. An empty title uploads the PDF, skips
+Notes, and opens the same Nicole review task. Fill the title later to attach
+the note when the discussion already exists. Do not copy a second EZLynx
+client.
 
 ## hermes-test-01
 

@@ -2,8 +2,11 @@
 
 Test-only list and download for For Agents Only **Communications → Memo**
 rows. Process name stays `progressive`. Scope stays `fao_communications`.
-This slice does not upload to EZLynx, file notes, create tasks, apply labels,
-mark carrier rows processed, deploy, or enable a timer.
+The pull itself does not upload to EZLynx. The optional filing stage, behind
+the Test kill switch, can upload a document, append a note when the titled
+workflow already exists, or open a Nicole review task when it does not.
+This change does not apply labels, mark carrier rows processed, deploy, or
+enable a timer.
 
 Manual prove (Dusty, 2026-09-26, not re-run by this code): login at
 foragentsonly.com → foragentsonlylogin.progressive.com (user id, password,
@@ -38,9 +41,11 @@ below. That is not Job Engine `COMPLETE`.
 `--file-ezlynx`, asks the shared filing stage to run after the pull. The
 stage still does not write unless `ROBIE_ENV=TEST`, the host is
 `hermes-test-01`, and `ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1`. With the
-switch off the receipt stays `PULLED` and `"ezlynx": "disabled"`. Dates must
-sit in the standing window: yesterday and today in `America/New_York`.
-Monday also includes Friday through Sunday. See
+switch off the receipt stays `PULLED` and `"ezlynx": "disabled"`. A missing
+`Additional Information - Progressive Memo` discussion uploads the PDF,
+skips the note, and asks Zapier for a Nicole review task. Dates must sit in
+the standing window: yesterday and today in `America/New_York`. Monday also
+includes Friday through Sunday. See
 [DOCUMENT_RETRIEVAL_FILING.md](DOCUMENT_RETRIEVAL_FILING.md).
 
 ## Hermes QA pack

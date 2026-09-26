@@ -8,10 +8,12 @@ Live EZLynx writes stay off unless ``ROBIE_ENV=TEST``, the hostname is
 is refused. No timer is installed here.
 
 Documents go through :func:`robie_job_engine.ezlynx_api_only_writes.upload_document_via_api`.
-Notes go through :func:`robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion`.
-Browser automation is not used for either write. DiscussionApi only appends to
-an existing titled discussion, so a required workflow that is not already on
-the applicant holds before any upload.
+Notes go through :func:`robie_job_engine.ezlynx_api_only_writes.add_note_to_discussion`
+when the titled workflow already exists. Browser automation is not used for
+either write. DiscussionApi has no create call. A missing workflow still
+uploads the PDF, skips the note, and asks :func:`robie_job_engine.zapier_tasks.fire_task`
+to open a Nicole review task. The webhook URL stays in the vault
+(``custom.zapier-webhook``) and is loaded by ``bin/zap-trigger``.
 
 The status-sheet writer uses the Sheets API when Application Default
 Credentials are present. A missing library, credential, daily tab, or carrier
@@ -63,13 +65,20 @@ class FilingDecision:
     reason: str
 
 
+NICOLE_ASSIGNEE = "Nicole Segovia"
+ZAPIER_SOURCE = "document-retrieval"
+NO_WORKFLOW_SHEET_COMMENT = "Doc filed (no WF); Nicole EZLynx task created for review"
+
+
 @dataclass(frozen=True)
 class FilingRule:
     """Mail Sorting destination for one carrier document type.
 
-    ``create_workflow_when_missing`` records that the directory requires a
-    workflow. The existing DiscussionApi client has no create call, so a
-    missing titled discussion still holds.
+    ``workflow_title`` empty means this carrier has no confirmed discussion
+    title yet. The stage then uploads and opens the Nicole review task.
+    ``task_on_missing_workflow`` does the same when a title is set and the
+    applicant does not already have that discussion. DiscussionApi is never
+    asked to create one.
     """
 
     carrier_section: str
@@ -77,7 +86,36 @@ class FilingRule:
     folder: str
     workflow_title: str
     note_label: str
-    create_workflow_when_missing: bool = True
+    task_on_missing_workflow: bool = True
+    carrier_label: str = ""
+
+
+def sketch_carrier_rule(
+    *,
+    carrier_section: str,
+    carrier_label: str,
+    document_type: str,
+    folder: str = "",
+    workflow_title: str = "",
+    note_label: str = "",
+) -> FilingRule:
+    """Hook for a pull worker that is not wired in this change.
+
+    Geico, Progressive BOP, NatGen, and Travelers call ``file_carrier_batch``
+    with this rule once their draft branch includes the module. Leave
+    ``workflow_title`` and ``folder`` empty until that carrier's Mail Sorting
+    row is known. An empty title skips Notes and uses the Nicole task.
+    """
+
+    return FilingRule(
+        carrier_section=carrier_section,
+        document_type=document_type,
+        folder=folder,
+        workflow_title=workflow_title,
+        note_label=note_label or f"{carrier_label} {document_type}",
+        task_on_missing_workflow=True,
+        carrier_label=carrier_label,
+    )
 
 
 PROGRESSIVE_MEMO_RULE = FilingRule(
@@ -86,7 +124,32 @@ PROGRESSIVE_MEMO_RULE = FilingRule(
     folder="Additional Information",
     workflow_title="Additional Information - Progressive Memo",
     note_label="Progressive memo",
-    create_workflow_when_missing=True,
+    task_on_missing_workflow=True,
+    carrier_label="Progressive",
+)
+
+# Sheet section and document type match the 9/26 status tab. Workflow titles
+# for these four are not confirmed in this PR, so the hook files the PDF and
+# creates the Nicole task instead of guessing a discussion title.
+GEICO_NOC_RULE = sketch_carrier_rule(
+    carrier_section="GEICO",
+    carrier_label="Geico",
+    document_type="Cancellation",
+)
+PROGRESSIVE_BOP_RULE = sketch_carrier_rule(
+    carrier_section="Progressive BOP/CGL",
+    carrier_label="Progressive BOP",
+    document_type="Cancellation",
+)
+NATGEN_NOC_RULE = sketch_carrier_rule(
+    carrier_section="NatGen",
+    carrier_label="NatGen",
+    document_type="NOC",
+)
+TRAVELERS_ACTIVITY_RULE = sketch_carrier_rule(
+    carrier_section="Travelers",
+    carrier_label="Travelers",
+    document_type="Policy Activity",
 )
 
 
@@ -101,6 +164,7 @@ class FilingDeps:
     add_note: Callable[..., dict]
     sheets: Any
     activities: Callable[[str], list] | None = None
+    fire_task: Callable[..., dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +242,39 @@ def sheet_date_text(day: date) -> str:
 
 def nicole_status_comment(rule: FilingRule) -> str:
     return f"Added to the {rule.folder} folder and WF: {rule.workflow_title}"
+
+
+def review_task_title(rule: FilingRule, *, insured_name: str, policy_number: str) -> str:
+    carrier = rule.carrier_label or rule.carrier_section
+    return (
+        f"Document Retrieval review — {carrier} {rule.document_type} — "
+        f"{insured_name} — {policy_number}"
+    )
+
+
+def review_task_payload(
+    rule: FilingRule,
+    *,
+    applicant_id: str,
+    insured_name: str,
+    policy_number: str,
+    due_on: date,
+) -> dict[str, Any]:
+    """Zapier catch-hook payload. ``due_on`` is the Eastern filing day, ISO YYYY-MM-DD."""
+
+    from .zapier_tasks import validate_task_payload
+
+    payload = {
+        "applicant_id": str(applicant_id).strip(),
+        "assignee": NICOLE_ASSIGNEE,
+        "source": ZAPIER_SOURCE,
+        "due_date": due_on.isoformat(),
+        "task_title": review_task_title(
+            rule, insured_name=insured_name, policy_number=policy_number
+        ),
+    }
+    validate_task_payload(payload)
+    return payload
 
 
 def filing_note(rule: FilingRule, processed_on: date) -> str:
@@ -409,7 +506,13 @@ def _pdf_bytes(item: Mapping[str, Any]) -> bytes:
 
 
 def _item_result(status: str, item: Mapping[str, Any], **extra: Any) -> dict[str, Any]:
-    wrote = status in {"filed", "document_filed_note_held", "filed_sheet_held"}
+    wrote = status in {
+        "filed",
+        "filed_no_workflow",
+        "document_filed_note_held",
+        "document_filed_task_held",
+        "filed_sheet_held",
+    }
     payload: dict[str, Any] = {
         "status": status,
         "policy_number": str(item.get("policy_number") or ""),
@@ -468,12 +571,77 @@ def _apply_sheet(deps: FilingDeps, tab: str, edit: SheetEdit) -> None:
     raise FilingHeld("status sheet edit is not update or insert")
 
 
+def _resolve_workflow(
+    deps: FilingDeps, applicant_id: str, rule: FilingRule
+) -> tuple[str, dict[str, Any] | None, str]:
+    """Choose a note on the existing workflow, or the Nicole task fallback.
+
+    Returns ``(mode, discussion, detail)``. ``mode`` is ``note``, ``task``, or
+    ``hold``. A missing or ambiguous title does not hold when the rule asks
+    for the task fallback. Applicant matching and the document upload are
+    separate and can still hold before a write.
+    """
+
+    title = str(rule.workflow_title or "").strip()
+    if not title:
+        return "task", None, "filing rule has no workflow title"
+    try:
+        matched = _matching_discussion(deps.list_discussions(applicant_id), title)
+    except FilingHeld as exc:
+        if rule.task_on_missing_workflow:
+            return "task", None, str(exc)
+        return "hold", None, str(exc)
+    except Exception as exc:
+        if rule.task_on_missing_workflow:
+            return "task", None, f"discussion lookup failed ({type(exc).__name__})"
+        return "hold", None, f"discussion lookup failed ({type(exc).__name__})"
+    if matched is not None and discussion_id_of(matched):
+        return "note", matched, ""
+    detail = f"workflow {title!r} is not on the applicant"
+    if rule.task_on_missing_workflow:
+        return "task", None, detail
+    return "hold", None, detail
+
+
+def _read_back_document_id(uploaded: Mapping[str, Any] | None) -> str:
+    document_id = str((uploaded or {}).get("document_id") or "").strip()
+    if not document_id or not document_id.isdigit() or not (uploaded or {}).get("read_back"):
+        raise FilingHeld("DocumentApi upload did not return a read-back document_id")
+    return document_id
+
+
+def _write_status_comment(
+    deps: FilingDeps,
+    *,
+    tab: str,
+    rule: FilingRule,
+    insured_name: str,
+    policy_number: str,
+    department: str,
+    processed_on: date,
+    comment: str,
+) -> None:
+    current = deps.sheets.read(tab)
+    edit = plan_status_sheet_edit(
+        current,
+        carrier=rule.carrier_section,
+        insured_name=insured_name,
+        policy_number=policy_number,
+        department=department,
+        document_type=rule.document_type,
+        memo_date=sheet_date_text(processed_on),
+        comment=comment,
+    )
+    _apply_sheet(deps, tab, edit)
+
+
 def _file_one(
     item: Mapping[str, Any],
     *,
     rule: FilingRule,
     deps: FilingDeps,
     sheet_day: date,
+    zapier_dry_run: bool = False,
 ) -> dict[str, Any]:
     """File one document, then the next caller waits. Never parallel."""
 
@@ -511,100 +679,143 @@ def _file_one(
             applicant_id=applicant_id,
             reason=f"matching {duplicate} already exists; upload skipped",
         )
-    try:
-        discussions = deps.list_discussions(applicant_id)
-        matched = _matching_discussion(discussions, rule.workflow_title)
-    except FilingHeld as exc:
-        return _item_result("held", item, applicant_id=applicant_id, reason=str(exc))
-    except Exception as exc:
-        return _item_result("held", item, reason=f"discussion lookup failed ({type(exc).__name__})")
-    if matched is None:
-        if rule.create_workflow_when_missing:
-            return _item_result(
-                "held",
-                item,
-                applicant_id=applicant_id,
-                reason=(
-                    f"Mail Sorting requires workflow {rule.workflow_title!r} and none exists. "
-                    "DiscussionApi only appends to an existing titled discussion and has no "
-                    "create call. Refusing to invent one and refusing to upload."
-                ),
-            )
-        return _item_result(
-            "held",
-            item,
-            applicant_id=applicant_id,
-            reason=f"workflow {rule.workflow_title!r} is not on the applicant",
-        )
-    if not discussion_id_of(matched):
-        return _item_result("held", item, applicant_id=applicant_id, reason="matched workflow has no discussion id")
+    mode, matched, workflow_detail = _resolve_workflow(deps, applicant_id, rule)
+    if mode == "hold":
+        return _item_result("held", item, applicant_id=applicant_id, reason=workflow_detail)
     tab = status_tab_title(sheet_day)
     try:
         uploaded = deps.upload(applicant_id, filename, pdf, filename=filename)
+        document_id = _read_back_document_id(uploaded)
+    except FilingHeld as exc:
+        return _item_result("held", item, applicant_id=applicant_id, reason=str(exc))
     except Exception as exc:
-        return _item_result("held", item, applicant_id=applicant_id, reason=f"document upload failed ({type(exc).__name__})")
-    document_id = str((uploaded or {}).get("document_id") or "").strip()
-    if not document_id or not document_id.isdigit() or not (uploaded or {}).get("read_back"):
         return _item_result(
             "held",
             item,
             applicant_id=applicant_id,
-            reason="DocumentApi upload did not return a read-back document_id",
+            reason=f"document upload failed ({type(exc).__name__})",
+        )
+    if mode == "note":
+        try:
+            note_text = filing_note(rule, processed_on)
+            noted = deps.add_note(applicant_id, note_text, discussion_title=rule.workflow_title)
+        except Exception as exc:
+            return _item_result(
+                "document_filed_note_held",
+                item,
+                applicant_id=applicant_id,
+                document_id=document_id,
+                reason=f"note failed after upload ({type(exc).__name__})",
+            )
+        note_id = str((noted or {}).get("note_id") or "").strip()
+        if (noted or {}).get("status") != "filed" or not note_id or not (noted or {}).get("read_back"):
+            return _item_result(
+                "document_filed_note_held",
+                item,
+                applicant_id=applicant_id,
+                document_id=document_id,
+                reason="DiscussionApi did not return a read-back note_id",
+            )
+        comment = nicole_status_comment(rule)
+        discussion_id = str((noted or {}).get("discussion_id") or "") or discussion_id_of(matched or {})
+        try:
+            _write_status_comment(
+                deps,
+                tab=tab,
+                rule=rule,
+                insured_name=insured_name,
+                policy_number=policy_number,
+                department=department,
+                processed_on=processed_on,
+                comment=comment,
+            )
+        except Exception as exc:
+            return _item_result(
+                "filed_sheet_held",
+                item,
+                applicant_id=applicant_id,
+                document_id=document_id,
+                note_id=note_id,
+                discussion_id=discussion_id,
+                reason=f"status sheet update failed ({type(exc).__name__})",
+            )
+        return _item_result(
+            "filed",
+            item,
+            applicant_id=applicant_id,
+            document_id=document_id,
+            note_id=note_id,
+            discussion_id=discussion_id,
+            comment=comment,
+            folder=rule.folder,
+            workflow_title=rule.workflow_title,
+            folder_field="not_in_proven_document_upload",
+        )
+    if deps.fire_task is None:
+        return _item_result(
+            "document_filed_task_held",
+            item,
+            applicant_id=applicant_id,
+            document_id=document_id,
+            reason="Zapier task client is not configured",
         )
     try:
-        note_text = filing_note(rule, processed_on)
-        noted = deps.add_note(applicant_id, note_text, discussion_title=rule.workflow_title)
+        payload = review_task_payload(
+            rule,
+            applicant_id=applicant_id,
+            insured_name=insured_name,
+            policy_number=policy_number,
+            due_on=sheet_day,
+        )
+        fired = deps.fire_task(payload, dry_run=zapier_dry_run)
     except Exception as exc:
         return _item_result(
-            "document_filed_note_held",
+            "document_filed_task_held",
             item,
             applicant_id=applicant_id,
             document_id=document_id,
-            reason=f"note failed after upload ({type(exc).__name__})",
+            reason=f"review task failed after upload ({type(exc).__name__})",
         )
-    note_id = str((noted or {}).get("note_id") or "").strip()
-    if (noted or {}).get("status") != "filed" or not note_id or not (noted or {}).get("read_back"):
+    if not isinstance(fired, dict) or fired.get("ok") is not True:
         return _item_result(
-            "document_filed_note_held",
+            "document_filed_task_held",
             item,
             applicant_id=applicant_id,
             document_id=document_id,
-            reason="DiscussionApi did not return a read-back note_id",
+            reason="zap-trigger did not accept the review task",
         )
-    comment = nicole_status_comment(rule)
     try:
-        current = deps.sheets.read(tab)
-        edit = plan_status_sheet_edit(
-            current,
-            carrier=rule.carrier_section,
+        _write_status_comment(
+            deps,
+            tab=tab,
+            rule=rule,
             insured_name=insured_name,
             policy_number=policy_number,
             department=department,
-            document_type=rule.document_type,
-            memo_date=sheet_date_text(processed_on),
-            comment=comment,
+            processed_on=processed_on,
+            comment=NO_WORKFLOW_SHEET_COMMENT,
         )
-        _apply_sheet(deps, tab, edit)
     except Exception as exc:
         return _item_result(
             "filed_sheet_held",
             item,
             applicant_id=applicant_id,
             document_id=document_id,
-            note_id=note_id,
-            discussion_id=str((noted or {}).get("discussion_id") or "") or discussion_id_of(matched),
+            task_title=payload["task_title"],
             reason=f"status sheet update failed ({type(exc).__name__})",
         )
     return _item_result(
-        "filed",
+        "filed_no_workflow",
         item,
         applicant_id=applicant_id,
         document_id=document_id,
-        note_id=note_id,
-        discussion_id=str((noted or {}).get("discussion_id") or "") or discussion_id_of(matched),
-        comment=comment,
-        folder=rule.folder,
-        workflow_title=rule.workflow_title,
+        comment=NO_WORKFLOW_SHEET_COMMENT,
+        task_title=payload["task_title"],
+        task_due_date=payload["due_date"],
+        task_assignee=payload["assignee"],
+        task_source=payload["source"],
+        zapier_dry_run=zapier_dry_run,
+        workflow_detail=workflow_detail,
         folder_field="not_in_proven_document_upload",
     )
 
@@ -613,10 +824,12 @@ def _overall_status(results: list[dict[str, Any]]) -> str:
     statuses = {row["status"] for row in results}
     if not results:
         return "empty"
-    if statuses & {"held", "document_filed_note_held", "filed_sheet_held"}:
+    if statuses & {"held", "document_filed_note_held", "document_filed_task_held", "filed_sheet_held"}:
         return "held"
     if "filed" in statuses:
         return "filed"
+    if statuses == {"filed_no_workflow"} or statuses == {"filed_no_workflow", "skipped_duplicate"}:
+        return "filed_no_workflow"
     if statuses == {"skipped_duplicate"}:
         return "skipped_duplicate"
     return "held"
@@ -649,6 +862,7 @@ def file_carrier_batch(
     hostname: str | None = None,
     client_factory: Callable[[], FilingDeps] | None = None,
     sheet_day: date | None = None,
+    zapier_dry_run: bool = False,
 ) -> dict[str, Any]:
     """File each item only after the previous one returns. The kill switch is checked first."""
 
@@ -684,11 +898,14 @@ def file_carrier_batch(
         return _batch("held", str(exc) if isinstance(exc, FilingHeld) else f"status sheet is unavailable ({type(exc).__name__})")
     results: list[dict[str, Any]] = []
     for item in items:
-        results.append(_file_one(item, rule=rule, deps=deps, sheet_day=day))
+        results.append(
+            _file_one(item, rule=rule, deps=deps, sheet_day=day, zapier_dry_run=zapier_dry_run)
+        )
     status = _overall_status(results)
     activities_check = "checked" if deps.activities is not None else "not_used"
     reason = {
         "filed": "documents and notes were read back",
+        "filed_no_workflow": "documents were filed and a Nicole review task was created",
         "skipped_duplicate": "every document was already filed",
         "held": "one or more documents were not filed",
     }.get(status, status)
@@ -702,6 +919,7 @@ def file_progressive_memos(
     hostname: str | None = None,
     client_factory: Callable[[], FilingDeps] | None = None,
     sheet_day: date | None = None,
+    zapier_dry_run: bool = False,
 ) -> dict[str, Any]:
     """Progressive Communications memos use the Additional Information workflow."""
 
@@ -712,6 +930,7 @@ def file_progressive_memos(
         hostname=hostname,
         client_factory=client_factory,
         sheet_day=sheet_day,
+        zapier_dry_run=zapier_dry_run,
     )
 
 
@@ -754,6 +973,11 @@ def build_live_deps() -> FilingDeps:
             discussion_client=discussions,
         )
 
+    def fire(payload: dict, *, dry_run: bool = False) -> dict:
+        from .zapier_tasks import fire_task
+
+        return fire_task(payload, dry_run=dry_run)
+
     return FilingDeps(
         policy_search=api.search_policy_by_number,
         documents_search=api.search_applicant_documents,
@@ -762,6 +986,7 @@ def build_live_deps() -> FilingDeps:
         add_note=add_note,
         sheets=sheets,
         activities=None,
+        fire_task=fire,
     )
 
 
@@ -857,9 +1082,14 @@ class GoogleStatusSheetClient:
 
 
 __all__ = [
+    "GEICO_NOC_RULE",
     "KILL_SWITCH_ENV",
+    "NATGEN_NOC_RULE",
+    "NO_WORKFLOW_SHEET_COMMENT",
+    "PROGRESSIVE_BOP_RULE",
     "PROGRESSIVE_MEMO_RULE",
     "STATUS_SHEET_ID",
+    "TRAVELERS_ACTIVITY_RULE",
     "FilingDeps",
     "FilingHeld",
     "FilingRule",
@@ -873,6 +1103,9 @@ __all__ = [
     "live_filing_decision",
     "nicole_status_comment",
     "plan_status_sheet_edit",
+    "review_task_payload",
+    "review_task_title",
+    "sketch_carrier_rule",
     "require_retrieval_window",
     "retrieval_date_window",
     "status_tab_title",

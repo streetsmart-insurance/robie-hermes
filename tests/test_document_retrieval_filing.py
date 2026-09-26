@@ -7,12 +7,18 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from robie_job_engine.document_retrieval_filing import (
+    GEICO_NOC_RULE,
     KILL_SWITCH_ENV,
+    NATGEN_NOC_RULE,
+    NO_WORKFLOW_SHEET_COMMENT,
+    PROGRESSIVE_BOP_RULE,
+    TRAVELERS_ACTIVITY_RULE,
     PROGRESSIVE_MEMO_RULE,
     FilingDeps,
     FilingUnavailable,
     document_is_duplicate,
     eastern_today,
+    file_carrier_batch,
     file_progressive_memos,
     filing_note,
     live_filing_decision,
@@ -20,7 +26,9 @@ from robie_job_engine.document_retrieval_filing import (
     plan_status_sheet_edit,
     require_retrieval_window,
     retrieval_date_window,
+    review_task_payload,
 )
+from robie_job_engine import zapier_tasks
 from robie_job_engine.ezlynx_discussions import reject_phone_numbers
 
 
@@ -101,6 +109,7 @@ class FakeDeps:
         self.applicants = applicants
         self.activity_rows = activities
         self.sheets = sheet if sheet is not None else FakeSheet()
+        self.tasks = []
 
     def policy_search(self, policy_number):
         return policy_payload(*self.applicants, policy=policy_number)
@@ -128,6 +137,11 @@ class FakeDeps:
     def activities(self, applicant_id):
         return list(self.activity_rows or [])
 
+    def fire_task(self, payload, *, dry_run=False):
+        zapier_tasks.validate_task_payload(payload)
+        self.tasks.append({"payload": dict(payload), "dry_run": dry_run})
+        return {"ok": True, "dry_run": dry_run}
+
     def as_deps(self):
         return FilingDeps(
             policy_search=self.policy_search,
@@ -137,17 +151,23 @@ class FakeDeps:
             add_note=self.add_note,
             sheets=self.sheets,
             activities=self.activities if self.activity_rows is not None else None,
+            fire_task=self.fire_task,
         )
 
 
-def file_with(deps, items, environ=None):
-    return file_progressive_memos(
-        items,
+def file_with(deps, items, environ=None, *, rule=None, zapier_dry_run=True):
+    factory = deps.as_deps if isinstance(deps, FakeDeps) else deps
+    kwargs = dict(
+        items=items,
         environ=ENABLED if environ is None else environ,
         hostname=HOST,
-        client_factory=deps.as_deps if isinstance(deps, FakeDeps) else deps,
+        client_factory=factory,
         sheet_day=SHEET_DAY,
+        zapier_dry_run=zapier_dry_run,
     )
+    if rule is None:
+        return file_progressive_memos(**kwargs)
+    return file_carrier_batch(rule=rule, **kwargs)
 
 
 class DateWindowTests(unittest.TestCase):
@@ -262,6 +282,7 @@ class FilingGateTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped_duplicate")
         self.assertEqual(deps.uploads, [])
         self.assertEqual(deps.notes, [])
+        self.assertEqual(deps.tasks, [])
         self.assertFalse(result["attempted_writes"])
         self.assertEqual(result["results"][0]["status"], "skipped_duplicate")
         self.assertNotIn("document_id", result["results"][0])
@@ -282,19 +303,128 @@ class FilingGateTests(unittest.TestCase):
         self.assertEqual(result["activities_check"], "not_used")
         self.assertEqual(len(deps.uploads), 1)
 
-    def test_missing_workflow_holds_before_upload(self):
+    def test_missing_workflow_uploads_skips_the_note_and_dry_runs_the_task(self):
         deps = FakeDeps(discussions=[])
         result = file_with(deps, [memo_item()])
+        self.assertEqual(result["status"], "filed_no_workflow")
+        self.assertEqual(len(deps.uploads), 1)
+        self.assertEqual(deps.notes, [])
+        self.assertEqual(len(deps.tasks), 1)
+        self.assertTrue(deps.tasks[0]["dry_run"])
+        payload = deps.tasks[0]["payload"]
+        self.assertEqual(payload["applicant_id"], "220250093")
+        self.assertEqual(payload["assignee"], "Nicole Segovia")
+        self.assertEqual(payload["source"], "document-retrieval")
+        self.assertEqual(payload["due_date"], "2026-09-26")
+        self.assertEqual(
+            payload["task_title"],
+            "Document Retrieval review — Progressive Memo — Yolanda Concepcion — 993334183",
+        )
+        row = result["results"][0]
+        self.assertEqual(row["document_id"], "501")
+        self.assertEqual(row["comment"], NO_WORKFLOW_SHEET_COMMENT)
+        self.assertNotIn("note_id", row)
+        self.assertEqual(deps.sheets.writes[-1][1][6], NO_WORKFLOW_SHEET_COMMENT)
+        self.assertTrue(result["attempted_writes"])
+
+    def test_document_upload_failure_does_not_fire_a_task(self):
+        deps = FakeDeps(discussions=[])
+
+        def upload(*args, **kwargs):
+            raise RuntimeError("document api down")
+
+        deps.upload = upload
+        result = file_with(deps, [memo_item()])
         self.assertEqual(result["status"], "held")
-        self.assertEqual(deps.uploads, [])
-        self.assertIn("Refusing to invent", result["results"][0]["reason"])
+        self.assertEqual(deps.tasks, [])
+        self.assertEqual(deps.notes, [])
         self.assertNotIn("document_id", result["results"][0])
+
+    def test_zapier_dry_run_reaches_fire_task_without_a_live_hook(self):
+        import json
+        import os
+        import tempfile
+
+        script = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+        script.write(
+            "import json, sys\n"
+            "if '--dry-run' not in sys.argv:\n"
+            "    print(json.dumps({'ok': False, 'fired': True}))\n"
+            "    raise SystemExit(2)\n"
+            "print(json.dumps({'ok': True, 'dry_run': True}))\n"
+        )
+        script.close()
+        deps = FakeDeps(discussions=[])
+
+        def fire(payload, *, dry_run=False):
+            deps.tasks.append({"payload": dict(payload), "dry_run": dry_run})
+            return zapier_tasks.fire_task(payload, dry_run=dry_run)
+
+        deps.fire_task = fire
+        original = zapier_tasks.ZAP_TRIGGER_SCRIPT
+        zapier_tasks.ZAP_TRIGGER_SCRIPT = script.name
+        try:
+            result = file_with(deps, [memo_item()], zapier_dry_run=True)
+        finally:
+            zapier_tasks.ZAP_TRIGGER_SCRIPT = original
+            os.unlink(script.name)
+        self.assertEqual(result["status"], "filed_no_workflow")
+        self.assertEqual(deps.notes, [])
+        self.assertTrue(deps.tasks[0]["dry_run"])
+        self.assertTrue(result["results"][0]["zapier_dry_run"])
+        expected = review_task_payload(
+            PROGRESSIVE_MEMO_RULE,
+            applicant_id="220250093",
+            insured_name="Yolanda Concepcion",
+            policy_number="993334183",
+            due_on=SHEET_DAY,
+        )
+        self.assertEqual(deps.tasks[0]["payload"]["task_title"], expected["task_title"])
+
+    def test_geico_sketch_uses_the_same_task_fallback(self):
+        deps = FakeDeps(discussions=[])
+        item = memo_item(
+            policy_number="6253395526",
+            insured_name="Charlemagne Guevara",
+            filename="6253395526 NOC Geico.pdf",
+        )
+        result = file_with(deps, [item], rule=GEICO_NOC_RULE)
+        self.assertEqual(result["status"], "filed_no_workflow")
+        self.assertEqual(deps.notes, [])
+        self.assertEqual(len(deps.uploads), 1)
+        self.assertEqual(
+            deps.tasks[0]["payload"]["task_title"],
+            "Document Retrieval review — Geico Cancellation — Charlemagne Guevara — 6253395526",
+        )
+        self.assertEqual(PROGRESSIVE_BOP_RULE.carrier_section, "Progressive BOP/CGL")
+        self.assertEqual(PROGRESSIVE_BOP_RULE.workflow_title, "")
+        self.assertEqual(NATGEN_NOC_RULE.document_type, "NOC")
+        self.assertEqual(NATGEN_NOC_RULE.workflow_title, "")
+        self.assertEqual(TRAVELERS_ACTIVITY_RULE.document_type, "Policy Activity")
+        self.assertEqual(TRAVELERS_ACTIVITY_RULE.workflow_title, "")
+
+    def test_rejected_review_task_does_not_write_the_no_workflow_comment(self):
+        deps = FakeDeps(discussions=[])
+
+        def fire(payload, *, dry_run=False):
+            deps.tasks.append({"payload": dict(payload), "dry_run": dry_run})
+            return {"ok": False}
+
+        deps.fire_task = fire
+        result = file_with(deps, [memo_item()])
+        self.assertEqual(result["results"][0]["status"], "document_filed_task_held")
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(len(deps.uploads), 1)
+        self.assertEqual(deps.notes, [])
+        self.assertEqual(deps.sheets.writes, [])
+        self.assertNotEqual(result["results"][0].get("comment"), NO_WORKFLOW_SHEET_COMMENT)
 
     def test_two_applicants_hold_without_a_write(self):
         deps = FakeDeps(applicants=("220250093", "220250094"))
         result = file_with(deps, [memo_item()])
         self.assertEqual(result["status"], "held")
         self.assertEqual(deps.uploads, [])
+        self.assertEqual(deps.tasks, [])
         self.assertIn("one applicant", result["results"][0]["reason"])
 
     def test_successful_file_is_one_applicant_then_the_next(self):
@@ -312,6 +442,7 @@ class FilingGateTests(unittest.TestCase):
             "983754955 Progressive Memo General.pdf",
         ])
         self.assertEqual(len(deps.notes), 2)
+        self.assertEqual(deps.tasks, [])
         self.assertTrue(deps.notes[0]["text"].endswith("ROBIE was here"))
         self.assertEqual(deps.notes[0]["title"], PROGRESSIVE_MEMO_RULE.workflow_title)
         comment = nicole_status_comment(PROGRESSIVE_MEMO_RULE)
@@ -403,6 +534,8 @@ class SourceContractTests(unittest.TestCase):
         text = Path("robie_job_engine/document_retrieval_filing.py").read_text(encoding="utf-8")
         self.assertIn("upload_document_via_api", text)
         self.assertIn("add_note_to_discussion", text)
+        self.assertIn("fire_task", text)
+        self.assertIn("custom.zapier-webhook", text)
         self.assertNotIn("playwright", text.casefold())
         self.assertNotIn("discussions/v1/notes", text)
         self.assertIn("hermes-poc-01", text)
