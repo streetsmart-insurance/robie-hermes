@@ -58,7 +58,7 @@ class FilingResult:
     discussion_id: str | None = None
     note_id: str | None = None
     document_ids: list[str] = field(default_factory=list)
-    task_action: str = NONE
+    task_action: str = "not_reached"
     task_id: str | None = None
     evidence: list[str] = field(default_factory=list)
     hold_reasons: list[str] = field(default_factory=list)
@@ -202,8 +202,10 @@ def resolve_discussion(verified: Any, holder_names: list[str],
         did, title = candidates[0]
         return did, title, f"existing discussion {title!r}"
     if len(candidates) > 1:
-        return None, None, (f"{len(candidates)} certificates discussions "
-                            "match; refusing to guess")
+        shown = "; ".join(t for _, t in candidates[:5])
+        return None, None, (
+            f"{len(candidates)} certificates discussions match "
+            f"({shown}); refusing to guess")
     return None, None, ("no certificates discussion on file for this request — "
                         "create a named one in EZLynx or approve auto-creation")
 

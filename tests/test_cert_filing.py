@@ -229,6 +229,7 @@ def test_resolve_holds_on_ambiguous_matches(tmp_path):
     did, title, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
                                             deps.discussions_client)
     assert did is None and "refusing to guess" in reason
+    assert "COI for Big Client Inc renewal" in reason
 
 
 # --- filing pipeline ----------------------------------------------------------
