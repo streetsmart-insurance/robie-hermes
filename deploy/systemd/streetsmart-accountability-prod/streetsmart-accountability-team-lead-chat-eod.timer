@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekday Team Lead Chat end-of-day wrap-up at 5:05 PM Eastern
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:05:00 America/New_York
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=streetsmart-accountability-team-lead-chat-eod.service
+
+[Install]
+WantedBy=timers.target

@@ -1032,6 +1032,8 @@ class OperationsStore:
                 ).fetchone()
                 item["verified_evidence_count"] = int(counts["verified_count"] or 0)
                 item["authoritative_evidence_count"] = int(counts["authoritative_count"] or 0)
+                from .board import grade_label_for_conn
+                item["grade_label"] = grade_label_for_conn(conn, item["id"])
                 recording = conn.execute(
                     """SELECT status,drive_url,failure,failure_stage,reference_approved,training_approved,redacted
                        FROM job_recordings WHERE job_id=? ORDER BY segment_number DESC LIMIT 1""",

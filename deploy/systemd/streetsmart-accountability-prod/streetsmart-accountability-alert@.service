@@ -1,0 +1,12 @@
+[Unit]
+Description=Send StreetSmart accountability failure alert for %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/streetsmart-daily-accountability
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/streetsmart-daily-accountability/venv/bin/python -m src.alerts failure %i
+TimeoutStartSec=2min

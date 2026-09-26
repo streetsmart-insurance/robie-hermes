@@ -124,20 +124,29 @@ jobs:
         run: |
           set -euo pipefail
           script_path=scripts/preflight_dedicated_accountability_magellan.py
+          helper_path=scripts/magellan_session_acl.py
           script_sha="$(sha256sum "${script_path}" | awk '{print $1}')"
+          helper_sha="$(sha256sum "${helper_path}" | awk '{print $1}')"
           script_b64="$(base64 -w0 "${script_path}")"
+          helper_b64="$(base64 -w0 "${helper_path}")"
           remote_script="/tmp/preflight-dedicated-accountability-magellan-${GITHUB_RUN_ID}.py"
+          remote_helper="/tmp/magellan_session_acl-${GITHUB_RUN_ID}.py"
           gcloud compute ssh "${PRODUCTION_VM}" --project="${PROJECT_ID}" --zone="${ZONE}" \
             --tunnel-through-iap --quiet --command="sudo bash -s" <<REMOTE_EOF \
             | tee -a "${RUNNER_TEMP}/accountability-readonly-diagnostic.txt"
           set -euo pipefail
           remote_script="/tmp/preflight-dedicated-accountability-magellan-${GITHUB_RUN_ID}.py"
-          trap 'rm -f "${remote_script}"' EXIT
+          remote_helper="/tmp/magellan_session_acl-${GITHUB_RUN_ID}.py"
+          trap 'rm -f "${remote_script}" "${remote_helper}"' EXIT
+          printf '%s' '${helper_b64}' | base64 -d > "${remote_helper}"
+          chown ubuntu:ubuntu "${remote_helper}"
+          chmod 0700 "${remote_helper}"
+          test "\$(sha256sum "${remote_helper}" | awk '{print \$1}')" = '${helper_sha}'
           printf '%s' '${script_b64}' | base64 -d > "${remote_script}"
           chown ubuntu:ubuntu "${remote_script}"
           chmod 0700 "${remote_script}"
           test "\$(sha256sum "${remote_script}" | awk '{print \$1}')" = '${script_sha}'
-          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key "${APP_ROOT}/venv/bin/python" "${remote_script}" \
+          timeout 480s sudo -u ubuntu env PYTHONPATH="${APP_ROOT}" GOOGLE_DWD_SECRET=accountability-google-dwd-key MAGELLAN_SESSION_ACL_PATH="${remote_helper}" "${APP_ROOT}/venv/bin/python" "${remote_script}" \
             --app-root "${APP_ROOT}" --reliability-attempts 2
           REMOTE_EOF
 
