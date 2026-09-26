@@ -6,8 +6,13 @@ Communications, then each Memo row saved as
 ``[PolicyNumber] Progressive Memo [Reason].pdf``.
 
 Accessible names below are that path, not a certified live DOM. A missing or
-non-unique control raises IntakeHold. This module does not log in, does not
-submit OTP, and does not upload, note, task, or label in EZLynx.
+non-unique control raises IntakeHold. This module does not log in and does
+not submit OTP. Portal code does not upload, note, task, or label in EZLynx.
+
+``--pull-only`` stops after the local QA pack. The default path calls
+:func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
+after a successful pull. That filing stage is inert unless ``ROBIE_ENV=TEST``,
+the host is ``hermes-test-01``, and ``ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1``.
 """
 from __future__ import annotations
 
@@ -838,6 +843,26 @@ class FaoCommunicationsMemoPortal:
         except KeyError as exc:
             raise IntakeHold("Selected carrier document is missing or ambiguous") from exc
 
+    def filing_candidates(self, start: date, end: date) -> list[dict[str, Any]]:
+        """Local in-window memo PDFs. One dict per file, in list order."""
+
+        items: list[dict[str, Any]] = []
+        for memo in self._memos.values():
+            if not start <= memo.processed_on <= end:
+                continue
+            path = self.ledger.pdf_path(memo.processed_on, memo.filename)
+            if not path.is_file():
+                continue
+            items.append({
+                "policy_number": memo.policy_number,
+                "insured_name": memo.insured_name,
+                "reason": memo.reason,
+                "filename": memo.filename,
+                "processed_on": memo.processed_on.isoformat(),
+                "path": str(path),
+            })
+        return items
+
     def _mark_delivered(self, document_id: str) -> None:
         if self._cache_result is None:
             return
@@ -897,8 +922,26 @@ def require_list_url(url: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pull Progressive FAO Communications memos (Test only)")
-    parser.add_argument("--start", required=True, help="Processed date window start, YYYY-MM-DD")
-    parser.add_argument("--end", required=True, help="Processed date window end, YYYY-MM-DD")
+    parser.add_argument("--start", help="Processed date window start, YYYY-MM-DD. Default: standing window.")
+    parser.add_argument("--end", help="Processed date window end, YYYY-MM-DD. Default: standing window.")
+    parser.add_argument(
+        "--as-of",
+        help="Eastern day treated as today for the standing window, YYYY-MM-DD. Default: today.",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--pull-only",
+        action="store_true",
+        help="Portal pull and local QA pack only. Does not call EZLynx.",
+    )
+    mode.add_argument(
+        "--file-ezlynx",
+        action="store_true",
+        help="After a successful pull, file via Documents API and Notes API. "
+        "This is also the default when --pull-only is omitted. Writes stay off "
+        "unless ROBIE_ENV=TEST, the host is hermes-test-01, and "
+        "ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1.",
+    )
     parser.add_argument(
         "--output",
         default=str(DEFAULT_QA_ROOT),
@@ -915,17 +958,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_processed_window(
+    start: str | None, end: str | None, as_of: str | None
+) -> tuple[date, date, date]:
+    """Standing window: yesterday and today. Monday includes Friday through Monday."""
+
+    from .document_retrieval_filing import (
+        FilingHeld,
+        eastern_today,
+        require_retrieval_window,
+        retrieval_date_window,
+    )
+
+    if as_of:
+        try:
+            today = date.fromisoformat(as_of)
+        except ValueError as exc:
+            raise IntakeHold("As-of date is missing or ambiguous") from exc
+    else:
+        today = eastern_today()
+    if bool(start) != bool(end):
+        raise IntakeHold("Processed date window needs both start and end, or neither")
+    if not start and not end:
+        window_start, window_end = retrieval_date_window(today)
+        return window_start, window_end, today
+    try:
+        parsed_start = date.fromisoformat(str(start))
+        parsed_end = date.fromisoformat(str(end))
+    except ValueError as exc:
+        raise IntakeHold("Processed date window is missing or ambiguous") from exc
+    try:
+        require_retrieval_window(parsed_start, parsed_end, as_of=today)
+    except FilingHeld as exc:
+        raise IntakeHold(str(exc)) from exc
+    return parsed_start, parsed_end, today
+
+
 def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.Namespace], Any] | None = None) -> int:
     args = build_parser().parse_args(argv)
     closer: Callable[[], None] | None = None
     portal: FaoCommunicationsMemoPortal | None = None
     try:
         require_test()
-        try:
-            start = date.fromisoformat(args.start)
-            end = date.fromisoformat(args.end)
-        except ValueError as exc:
-            raise IntakeHold("Processed date window is missing or ambiguous") from exc
+        start, end, as_of = resolve_processed_window(args.start, args.end, args.as_of)
         agent_code = require_agent_code(args.agent_code)
         require_bounded_scope(FAO_SCOPE, start, end)
         output = Path(args.output)
@@ -956,8 +1031,14 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
             refuse_progressive_drive_upload(
                 ledger, start=start, end=end, verification=portal.verification,
             )
+        filing = {"status": "not_run", "attempted_writes": False, "results": []}
+        if not args.pull_only:
+            filing = _run_memo_filing(portal, start, end, as_of)
+            record_filing_on_packs(ledger, start=start, end=end, filing=filing)
+        ezlynx_status = "not_run" if args.pull_only else str(filing.get("status") or "held")
+        command_status = "HELD" if ezlynx_status == "held" else "PULLED"
         _emit({
-            "status": "PULLED",
+            "status": command_status,
             "scope": FAO_SCOPE,
             "process": ProgressiveRetrieval.process,
             "agent_code": agent_code,
@@ -967,9 +1048,10 @@ def main(argv: list[str] | None = None, *, browser_factory: Callable[[argparse.N
             "downloaded": downloaded,
             "skipped_already_delivered": list(portal.skipped_document_ids),
             "verification": portal.verification,
-            "ezlynx": "not_run",
+            "ezlynx": ezlynx_status,
+            "filing": filing,
         })
-        return 0
+        return 2 if command_status == "HELD" else 0
     except IntakeHold as exc:
         payload: dict[str, Any] = {"status": "HELD", "reason": str(exc), "ezlynx": "not_run"}
         if portal is not None and portal.verification is not None:
@@ -1104,6 +1186,71 @@ def write_progressive_qa_packs(
         packs[key] = str(folder)
         day += timedelta(days=1)
     return packs
+
+
+def _run_memo_filing(portal: FaoCommunicationsMemoPortal, start: date, end: date, as_of: date) -> dict[str, Any]:
+    """Call the shared filing stage. A missing module holds; it does not upload from here."""
+
+    try:
+        from .document_retrieval_filing import file_progressive_memos
+    except Exception as exc:
+        return {
+            "status": "held",
+            "reason": f"filing stage unavailable ({type(exc).__name__})",
+            "attempted_writes": False,
+            "results": [],
+        }
+    try:
+        return file_progressive_memos(portal.filing_candidates(start, end), sheet_day=as_of)
+    except Exception as exc:
+        return {
+            "status": "held",
+            "reason": f"filing stage failed ({type(exc).__name__})",
+            "attempted_writes": False,
+            "results": [],
+        }
+
+
+def record_filing_on_packs(
+    ledger: LocalDeliveryLedger,
+    *,
+    start: date,
+    end: date,
+    filing: dict[str, Any],
+) -> None:
+    """Stamp the QA pack with the filing receipt. Does not claim a write the stage did not make."""
+
+    status = str(filing.get("status") or "held")
+    reason = str(filing.get("reason") or "")
+    day = start
+    try:
+        while day <= end:
+            folder = ledger.date_dir(day)
+            manifest_path = folder / "manifest.json"
+            readme_path = folder / "README.md"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            readme = readme_path.read_text(encoding="utf-8")
+            if not isinstance(manifest, dict):
+                raise IntakeHold("QA manifest is missing")
+            manifest["ezlynx"] = status
+            manifest["filing"] = {
+                "status": status,
+                "reason": reason,
+                "attempted_writes": bool(filing.get("attempted_writes")),
+            }
+            _write_private_file(
+                manifest_path,
+                json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+            )
+            if "EZLynx: not_run\n" in readme:
+                replacement = f"EZLynx: {status}\n"
+                if reason:
+                    replacement += f"EZLynx detail: {reason}\n"
+                readme = readme.replace("EZLynx: not_run\n", replacement, 1)
+                _write_private_file(readme_path, readme.encode("utf-8"))
+            day += timedelta(days=1)
+    except Exception as exc:
+        filing["pack_record"] = f"held ({type(exc).__name__})"
 
 
 def refuse_progressive_drive_upload(
