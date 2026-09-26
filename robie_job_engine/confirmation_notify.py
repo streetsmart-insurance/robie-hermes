@@ -540,6 +540,8 @@ REQUESTER_LOGINS: dict[str, str] = {
     "zeus quezada": "Zeus12",
 }
 
+# Legacy constant kept for importers; resolution goes through
+# zapier_tasks.resolve_zap_trigger (in-tree release copy first).
 ZAP_TRIGGER = os.path.expanduser("~/workspace/skills/zapier/bin/zap-trigger")
 
 
@@ -563,8 +565,11 @@ def _default_due_date() -> str:
 
 def _fire_zap_task(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Fire the EZLynx follow-up-task Zap. Fail-closed on any error."""
+    from .zapier_tasks import resolve_zap_trigger
+
+    script = resolve_zap_trigger()
     completed = subprocess.run(
-        [ZAP_TRIGGER, "--payload", json.dumps(dict(payload)), "--applicant-verified"],
+        [script, "--payload", json.dumps(dict(payload)), "--applicant-verified"],
         capture_output=True,
         text=True,
         timeout=60,
