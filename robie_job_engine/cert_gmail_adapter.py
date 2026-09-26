@@ -136,20 +136,19 @@ def _keyless_dwd_token(mailbox: str, scopes: list[str]) -> str:
         return base64.urlsafe_b64encode(d).rstrip(b"=").decode()
 
     now = int(time.time())
-    unsigned = b64(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()) + "." + b64(
-        json.dumps({
-            "iss": sa_email,
-            "sub": mailbox,
-            "scope": " ".join(scopes),
-            "aud": "https://oauth2.googleapis.com/token",
-            "iat": now,
-            "exp": now + 3600,
-        }).encode()
-    )
+    claims = {
+        "iss": sa_email,
+        "sub": mailbox,
+        "scope": " ".join(scopes),
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now,
+        "exp": now + 3600,
+    }
+    # signJwt takes the serialized claims set; it builds the JWT header itself.
     sign_req = urllib.request.Request(
         "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts"
         f"/{sa_email}:signJwt",
-        data=json.dumps({"payload": unsigned}).encode(),
+        data=json.dumps({"payload": json.dumps(claims)}).encode(),
         headers={"Authorization": f"Bearer {creds.token}",
                  "Content-Type": "application/json"},
         method="POST",
