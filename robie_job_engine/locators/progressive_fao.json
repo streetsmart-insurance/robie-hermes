@@ -1,0 +1,59 @@
+{
+  "portal": "progressive_fao",
+  "page_name": "communications_memo",
+  "version": "1.0",
+  "fields": {
+    "manage_policies": {
+      "name": "manage_policies",
+      "primary_strategy": "role",
+      "primary_selector": "link:Manage Policies",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Manage Policies",
+      "exact": true,
+      "description": "FAO shell link or button. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    },
+    "policy_activity": {
+      "name": "policy_activity",
+      "primary_strategy": "role",
+      "primary_selector": "link:Policy Activity",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Policy Activity",
+      "exact": true,
+      "description": "Policy Activity entry. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_date_from": {
+      "name": "processed_date_from",
+      "primary_strategy": "label",
+      "primary_selector": "Processed date from",
+      "exact": true,
+      "description": "Inclusive processed-date start. Filled MM/DD/YYYY and read back.",
+      "last_updated": "2026-09-26"
+    },
+    "processed_date_to": {
+      "name": "processed_date_to",
+      "primary_strategy": "label",
+      "primary_selector": "Processed date to",
+      "exact": true,
+      "description": "Inclusive processed-date end. Filled MM/DD/YYYY and read back.",
+      "last_updated": "2026-09-26"
+    },
+    "search": {
+      "name": "search",
+      "primary_strategy": "role",
+      "primary_selector": "button:Search",
+      "exact": true,
+      "description": "Apply the processed-date window. Live button name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "communications_tab": {
+      "name": "communications_tab",
+      "primary_strategy": "role",
+      "primary_selector": "tab:Communications",
+      "exact": true,
+      "description": "Communications tab. The run holds unless aria-selected becomes true.",
+      "last_updated": "2026-09-26"
+    }
+  }
+}
