@@ -200,6 +200,10 @@ def _subject_is_coi_request(subject: str, sender: str | None = None) -> bool:
         return False
     if _VENDOR_COI_UPDATE_RE.search(sender or ""):
         return False
+    # Auto-reply-shaped subjects ("Automatic reply Re: COI") are never
+    # requests, even though they name a COI.
+    if any(p.search(subject or "") for p in _AUTOREPLY_PATTERNS):
+        return False
     return True
 
 
