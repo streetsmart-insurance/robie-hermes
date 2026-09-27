@@ -54,8 +54,10 @@ class EnrichmentPorts:
         (EZLynx PolicyApi search?PolicyNumber= — read-only).
     additional_interests_fn(applicant_id) -> list of mortgagee dicts, each
         with "lender_name" and "loan_number" keys when known.
-    browser_interests_fn(applicant_id) -> same shape; used only when the
-        API path misses and live_browser is on.
+    browser_interests_fn(policy_number) -> same shape; used only when the
+        API path misses and live_browser is on. Takes the policy NUMBER
+        (not applicant id): the browser read needs the internal policyId
+        for the summary URL, which only a policy-number search yields.
     lender_directory_fn(lender_name) -> dict with portal/contact info.
     """
 
@@ -268,9 +270,9 @@ def enrich_work_item(
             )
         mortgages = _mortgages_from_entries(entries, "api")
         source = "api"
-    if not mortgages and resolved_applicant and ports.browser_interests_fn:
+    if not mortgages and ports.browser_interests_fn:
         try:
-            entries = ports.browser_interests_fn(resolved_applicant) or []
+            entries = ports.browser_interests_fn(policy_number) or []
         except Exception as exc:
             return EnrichmentResult(
                 status=STATUS_HOLD,

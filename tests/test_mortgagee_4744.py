@@ -366,5 +366,141 @@ class LivePortsTests(unittest.TestCase):
         self.assertEqual(result.mortgages[0].source, "browser")
 
 
+class BrowserAdditionalInterestsReaderTests(unittest.TestCase):
+    # Deterministic reader for the classic policy summary's Additional
+    # Interests section. Fixture mirrors the DOM observed live on
+    # 2026-09-27 (BOP #4714413, policyId 57408580). No network, no
+    # browser: the HTML fetch is injected as a fake.
+
+    FIXTURE_HTML = """<html><body>
+<h5> Additional Interests </h5>
+<table>
+<tr><th>Name</th><th>Address</th><th>City / State / Zip</th><th>Type</th><th>Account #</th><th>Location #</th><th>Building #</th></tr>
+<tr><td><span>Valley National Bank Its Succ &amp;/Or Assigns Atim</span></td><td><a href="http://maps.google.com/maps?q=PO Box 3409+Coppell+TX+75019-6403">PO Box 3409</a></td><td>Coppell, TX 75019-6403</td><td>Mortgagee</td><td>---</td><td>2</td><td>1</td></tr>
+<tr><td><span>Somebody Additional Insured LLC</span></td><td>123 Main St</td><td>Anytown, NJ 08001</td><td>Additional Insured</td><td>---</td><td>1</td><td>1</td></tr>
+</table>
+</body></html>"""
+
+    def test_parse_extracts_observed_row(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        entries = mlp.parse_additional_interests_html(self.FIXTURE_HTML)
+        self.assertEqual(len(entries), 2)
+        first = entries[0]
+        self.assertEqual(first["lender_name"],
+                         "Valley National Bank Its Succ &/Or Assigns Atim")
+        self.assertEqual(first["address"], "PO Box 3409")
+        self.assertEqual(first["city_state_zip"], "Coppell, TX 75019-6403")
+        self.assertEqual(first["interest_type"], "Mortgagee")
+        # Observed page has no "Loan Number" field; "Account #" renders
+        # "---" when empty -> "".
+        self.assertEqual(first["loan_number"], "")
+        self.assertEqual(first["location_number"], "2")
+        self.assertEqual(first["building_number"], "1")
+
+    def test_parse_no_section_returns_empty(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        html = ("<html><body><h5> Coverages </h5><table>"
+                "<tr><th>X</th></tr><tr><td>y</td></tr></table></body></html>")
+        self.assertEqual(mlp.parse_additional_interests_html(html), [])
+
+    def test_parse_empty_string_returns_empty(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        self.assertEqual(mlp.parse_additional_interests_html(""), [])
+
+    def test_reader_builds_summary_url_from_policy_search(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        seen_urls = []
+
+        def fake_fetch(url):
+            seen_urls.append(url)
+            return self.FIXTURE_HTML
+
+        reader = mlp.build_browser_interests_reader(
+            lambda number: {"applicant_id": "22769703",
+                            "policy_id": "57408580"},
+            fake_fetch)
+        entries = reader("4714413")
+        self.assertEqual(
+            seen_urls,
+            ["https://app.ezlynx.com/applicantportal/policy/"
+             "57408580/summary/index"])
+        # Only the Mortgagee row survives; the Additional Insured row
+        # must not become a "mortgage".
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["lender_name"],
+                         "Valley National Bank Its Succ &/Or Assigns Atim")
+
+    def test_reader_unresolved_policy_id_raises_loud(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        reader = mlp.build_browser_interests_reader(
+            lambda number: None, lambda url: self.FIXTURE_HTML)
+        with self.assertRaises(RuntimeError):
+            reader("4714413")
+
+    def test_reader_blank_policy_number_raises(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        reader = mlp.build_browser_interests_reader(
+            lambda number: {"policy_id": "1"}, lambda url: "")
+        with self.assertRaises(ValueError):
+            reader("  ")
+
+    def test_build_live_ports_prefers_fetch_html_over_legacy_reader(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+
+        class FakeOAuth:
+            def search_policy_by_number(self, number):
+                return {"data": {"results": [
+                    {"accountId": "22769703", "policyId": "57408580"}]}}
+
+        legacy = lambda number: [{"lender_name": "Legacy Bank"}]
+        ports = mlp.build_live_ports(
+            policy_api_client=FakeOAuth(),
+            browser_interests_reader=legacy,
+            fetch_html_fn=lambda url: self.FIXTURE_HTML)
+        self.assertIsNot(ports.browser_interests_fn, legacy)
+        entries = ports.browser_interests_fn("4714413")
+        self.assertEqual(entries[0]["lender_name"],
+                         "Valley National Bank Its Succ &/Or Assigns Atim")
+
+    def test_enrichment_end_to_end_browser_reader_ready(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+
+        class FakeOAuth:
+            def search_policy_by_number(self, number):
+                return {"data": {"results": [
+                    {"accountId": "22769703", "policyId": "57408580"}]}}
+
+        ports = mlp.build_live_ports(
+            policy_api_client=FakeOAuth(),
+            fetch_html_fn=lambda url: self.FIXTURE_HTML)
+        result = menc.enrich_work_item(policy_number="4714413",
+                                       ports=ports, dry_run=False)
+        self.assertEqual(result.status, menc.STATUS_READY)
+        self.assertEqual(len(result.mortgages), 1)
+        self.assertEqual(result.mortgages[0].lender_name,
+                         "Valley National Bank Its Succ &/Or Assigns Atim")
+        self.assertEqual(result.mortgages[0].loan_number, "")
+        self.assertEqual(result.mortgages[0].source, "browser")
+
+    def test_enrichment_browser_fetch_failure_holds_loud(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+
+        class FakeOAuth:
+            def search_policy_by_number(self, number):
+                return {"data": {"results": [
+                    {"accountId": "22769703", "policyId": "57408580"}]}}
+
+        def boom(url):
+            raise ConnectionError("portal session expired")
+
+        ports = mlp.build_live_ports(policy_api_client=FakeOAuth(),
+                                     fetch_html_fn=boom)
+        result = menc.enrich_work_item(policy_number="4714413",
+                                       ports=ports, dry_run=False)
+        self.assertEqual(result.status, menc.STATUS_HOLD)
+        self.assertIn("browser additional-interests read failed",
+                      result.reason)
+
+
 if __name__ == "__main__":
     unittest.main()
