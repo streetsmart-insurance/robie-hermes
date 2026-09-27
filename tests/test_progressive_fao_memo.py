@@ -61,6 +61,7 @@ from robie_job_engine.progressive_fao_memo import (
     memo_filename,
     PROCESSED_DATE_RESULTS_HOLD,
     parse_memo_grid,
+    open_communications_section,
     require_communications_section,
     pdf_bytes_from_observation,
     require_processed_date_results,
@@ -755,7 +756,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("header-drawer__content--show", drawer.primary_selector)
         self.assertIn("Policy Activity", drawer.description)
         self.assertIn("Agency Admin", drawer.description)
-        self.assertEqual(page.version, "1.8")
+        self.assertEqual(page.version, "1.9")
         view = page.get_field("view_activity_by")
         self.assertIn("#606", view.description)
         self.assertIn("does not ask Gemini", view.description)
@@ -806,6 +807,10 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("policy-activity-tab-communications", communications.description)
         self.assertIn("underwriting", communications.description)
         self.assertIn("does not require role=tab", communications.description)
+        self.assertIn("does not ask Gemini", communications.description)
+        self.assertIn("Zero matches", communications.description)
+        self.assertIn("not click targets", communications.description)
+        self.assertIn("link:Communications", communications.description)
         self.assertIn("link:" + COMMUNICATIONS_LINK_LABEL, selectors)
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
@@ -843,6 +848,7 @@ class LocatorContractTests(unittest.TestCase):
             self.assertNotIn(banned, text)
         self.assertIn("success path does not call Gemini", text)
         self.assertIn("View Activity By does not ask Gemini", text)
+        self.assertIn("Communications does not ask Gemini", text)
         self.assertIn("does not call Jev", text)
         self.assertIn("gemini-api-key", text)
         self.assertIn("TypeSafe System One", text)
@@ -1415,6 +1421,15 @@ class NavPage:
             return [
                 FakeNode("tab", "Communications", attrs={"aria-selected": "false"}),
                 FakeNode("link", "Communications", attrs=dict(attrs)),
+            ]
+        if mode == "late":
+            node = FakeNode("link", "Communications", attrs=dict(attrs), visible=False)
+            node.reveal_on_wait = True
+            return [node]
+        if mode == "different":
+            return [
+                FakeNode("link", "Alerts", text="Alerts", attrs=dict(attrs)),
+                FakeNode("link", "Communications"),
             ]
         return [FakeNode("link", "Communications", attrs=dict(attrs))]
 
@@ -2428,6 +2443,150 @@ class NavigationTests(unittest.TestCase):
                 self.assertEqual(page.url, page.communications_url)
                 self.assertNotIn("Search", page.clicks)
                 self.assertIn("Communications", page.clicks)
+
+    def test_communications_unique_match_continues_without_gemini(self):
+        for mode in ("ok", "named", "unlabeled", "tab-and-link", "late"):
+            with self.subTest(mode=mode):
+                page = NavPage(comms_mode=mode, search_on_results=True)
+                with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                    grid = self._load(page)
+                rescued.assert_not_called()
+                self.assertEqual(len(grid.rows), 2)
+                self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
+                self.assertNotIn("Search", page.clicks)
+                if mode == "unlabeled":
+                    self.assertNotIn("Communications", page.clicks)
+                else:
+                    self.assertEqual(page.clicks.count("Communications"), 1)
+                self.assertEqual(page.get_by_role("tab", name="Communications", exact=True).count(), 0 if mode != "tab-and-link" else 1)
+                if mode == "tab-and-link":
+                    tab = next(node for node in page.communications_nodes if node.role == "tab")
+                    self.assertEqual(tab.attrs["aria-selected"], "false")
+
+    def test_communications_zero_multi_hidden_or_wrong_name_holds_without_gemini(self):
+        cancels = (
+            "page https://www.foragentsonly.com/managepolicies/policyactivity/"
+            "processeddateresults/cancels/"
+        )
+        cases = (
+            ("missing", "missing", "matched 0 elements", "link:Communications matched 0", ""),
+            ("tab only", "tab", "matched 0 elements", "link:Communications matched 0", ""),
+            ("duplicate", "duplicate", "matched 2 elements", "link:Communications matched 2", ""),
+            ("split", "split", "matched 1 element", "link:Communications matched 2", ""),
+            (
+                "different elements",
+                "different",
+                "matched 1 element",
+                "link:Communications matched 1",
+                "registered link is not that named link",
+            ),
+            ("hidden", "hidden", "matched 1 element", "link:Communications matched 1", "was not visible"),
+            (
+                "mistitled",
+                "mistitled",
+                "matched 1 element",
+                "link:Communications matched 0",
+                "not the registered link",
+            ),
+            (
+                "mislabeled",
+                "mislabeled",
+                "matched 1 element",
+                "link:Communications matched 1",
+                "not the registered link",
+            ),
+            (
+                "foreign label",
+                "foreign-label",
+                "matched 1 element",
+                "link:Communications matched 1",
+                "not the registered link",
+            ),
+        )
+        for label, mode, matched, named, detail in cases:
+            with self.subTest(label):
+                page = NavPage(comms_mode=mode, search_on_results=True)
+                client = _RescueClient(json.dumps({
+                    "decision": "unique",
+                    "locator": 'a[data-at="policy-activity-tab-communications"] >> nth=0',
+                }))
+                with patch(
+                    "robie_job_engine.gemini_ui_rescue.build_default_client",
+                    return_value=client,
+                ):
+                    with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                        with self.assertRaises(IntakeHold) as caught:
+                            self._load(page)
+                        rescued.assert_not_called()
+                message = str(caught.exception)
+                self.assertFalse(is_rescuable_control_failure(caught.exception))
+                self.assertIn("Communications", message)
+                self.assertIn(matched, message)
+                self.assertIn(COMMUNICATIONS_LINK_CSS, message)
+                self.assertIn(named, message)
+                self.assertIn(cancels, message)
+                if detail:
+                    self.assertIn(detail, message)
+                self.assertIn("Communications was not clicked", message)
+                self.assertNotIn("gemini:", message)
+                self.assertNotIn("nth=", message)
+                self.assertNotIn("Search", message)
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(page.clicks[-1], "Get Policy Activity")
+                self.assertNotIn("Communications", page.clicks)
+                self.assertNotIn("Search", page.clicks)
+                self.assertEqual(page.memo_opens, [])
+
+    def test_communications_wrong_page_holds_without_gemini(self):
+        cases = (
+            (
+                "home",
+                "https://www.foragentsonly.com/",
+                "page https://www.foragentsonly.com/;",
+            ),
+            (
+                "policy activity form",
+                "https://www.foragentsonly.com/managepolicies/policyactivity",
+                "page https://www.foragentsonly.com/managepolicies/policyactivity;",
+            ),
+            (
+                "secret query",
+                "https://user:secretpass@www.foragentsonly.com/?token=sekret",
+                "page https://www.foragentsonly.com/;",
+            ),
+        )
+        for label, url, safe in cases:
+            with self.subTest(label):
+                page = NavPage(search_on_results=True)
+                page.state = "results"
+                page.url = url
+                client = _RescueClient(json.dumps({
+                    "decision": "unique",
+                    "locator": "link:Communications >> nth=0",
+                }))
+                with patch(
+                    "robie_job_engine.gemini_ui_rescue.build_default_client",
+                    return_value=client,
+                ):
+                    with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                        with self.assertRaises(IntakeHold) as caught:
+                            open_communications_section(page)
+                        rescued.assert_not_called()
+                message = str(caught.exception)
+                self.assertFalse(is_rescuable_control_failure(caught.exception))
+                self.assertIn("page is not processed-date results", message)
+                self.assertIn("matched 1 element", message)
+                self.assertIn("link:Communications matched 1", message)
+                self.assertIn(safe, message)
+                self.assertIn("Communications was not clicked", message)
+                self.assertNotIn("secretpass", message)
+                self.assertNotIn("sekret", message)
+                self.assertNotIn("gemini:", message)
+                self.assertNotIn("nth=", message)
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(page.clicks, [])
+                self.assertNotIn("Communications", page.clicks)
+                self.assertNotIn("Search", page.clicks)
 
     def test_results_page_holds_closed_without_clicking_search(self):
         cases = (

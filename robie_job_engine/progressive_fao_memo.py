@@ -33,14 +33,19 @@ task, or label in EZLynx.
 On ``ROBIE_ENV=TEST``, one missing or ambiguous named control — or a
 Playwright timeout on that UI step — may ask Gemini once for a single
 unique locator (secret id ``gemini-api-key``). View Activity By does not ask Gemini.
-That step uses the registered selector
-``select#PDDateType[name="DateType"]`` only. One visible match selects
-``PROCESSEDDATE``. Zero matches, more than one match, a hidden match, or a
-different accessible name holds before any option is selected. The Gemini
-helper is shared with the other Playwright sites; FAO is one caller.
-Production skips that rescue. The success path does not call Gemini. This
-module does not call Jev. The document-retrieval filing kill switch is
-unchanged.
+Communications does not ask Gemini. View Activity By uses the
+registered selector ``select#PDDateType[name="DateType"]`` only. One
+visible match selects ``PROCESSEDDATE``. Zero matches, more than one
+match, a hidden match, or a different accessible name holds before any
+option is selected. Communications uses the registered section link
+``a[data-at="policy-activity-tab-communications"]``, or one link named
+Communications when that element is absent. One visible match on
+processed-date results is clicked. Zero matches, more than one match, a
+hidden match, a different page, or a different accessible name holds
+before that click. The Gemini helper is shared with the other Playwright
+sites; FAO is one caller. Production skips that rescue. The success path
+does not call Gemini. This module does not call Jev. The document-retrieval
+filing kill switch is unchanged.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
@@ -181,7 +186,11 @@ END_DATE_CSS = 'input[type="date"][data-at="datatable-daterangepicker-enddate"]'
 GET_POLICY_ACTIVITY_LABEL = "Get Policy Activity"
 GET_POLICY_ACTIVITY_CSS = '[data-at="ProcessedDateButton"]'
 COMMUNICATIONS_LINK_LABEL = "Communications"
+# #614 / #616 contract, already on main. Not a new selector. The live hold
+# after #634 cleared View Activity By is this control failing to resolve
+# to one element, then Gemini answering unsure.
 COMMUNICATIONS_LINK_CSS = 'a[data-at="policy-activity-tab-communications"]'
+COMMUNICATIONS_LINK_ROLE = "link:" + COMMUNICATIONS_LINK_LABEL
 PROCESSED_DATE_RESULTS_HOLD = (
     "Policy Activity processed-date results page is missing or ambiguous"
 )
@@ -1143,11 +1152,11 @@ def apply_processed_date_window(page: Any, start: date, end: date) -> None:
     filter we expect, or quote-only versus complete. View Activity By does
     not ask Gemini. It selects PROCESSEDDATE only when the one registered
     select is visible on the Policy Activity form. A miss holds with id and
-    name counts and does not click those counts. On Test, a later missing or
-    ambiguous named control,
-    or a Playwright timeout on that control, may ask Gemini once for one
-    unique locator. Production skips that rescue. The success path does not
-    call Gemini. This function does not call Jev.
+    name counts and does not click those counts. Communications does not
+    ask Gemini either. On Test, a later missing or ambiguous named control
+    other than Communications, or a Playwright timeout on that control, may
+    ask Gemini once for one unique locator. Production skips that rescue.
+    The success path does not call Gemini. This function does not call Jev.
     """
     _select_processed_date_view(page)
     _select_custom_date_range(page)
@@ -1189,44 +1198,144 @@ def require_processed_date_results(page: Any) -> str:
     return _processed_date_results_section(str(getattr(page, "url", "") or ""))
 
 
-def _communications_link(page: Any) -> Any:
-    """The one Communications section link. A tab is not this control.
+def _on_processed_date_results(page: Any) -> bool:
+    safe = _safe_page_url(str(getattr(page, "url", "") or ""))
+    return _PROCESSED_DATE_RESULTS_URL.fullmatch(safe) is not None
 
-    Live DOM on the processed-date results page is
-    ``a[data-at="policy-activity-tab-communications"]``. A unique link named
-    Communications is that control when the data-at element is absent. When
-    both queries match they must be the same element. Zero links, two links,
-    a hidden link, visible text other than Communications, or a different
-    accessible name holds. ``role=tab`` is not required and is not clicked.
-    """
-    css = page.locator(COMMUNICATIONS_LINK_CSS)
-    named = page.get_by_role("link", name=COMMUNICATIONS_LINK_LABEL, exact=True)
-    css_count = int(css.count())
-    named_count = int(named.count())
-    if css_count > 1 or named_count > 1:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
-    if css_count == 1 and named_count == 1 and int(css.and_(named).count()) != 1:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
-    if css_count == 1:
-        located = css
-    elif named_count == 1:
-        located = named
-    else:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
-    visible, total = _survey(located)
-    if total != 1 or len(visible) != 1:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
-    link = visible[0]
+
+def _named_communications_count(page: Any) -> int:
+    """Count of ``link:Communications``. Not a click target."""
+    get_by_role = getattr(page, "get_by_role", None)
+    if not callable(get_by_role):
+        return -1
     try:
-        text = _norm(str(link.inner_text() or ""))
+        return int(get_by_role("link", name=COMMUNICATIONS_LINK_LABEL, exact=True).count())
+    except Exception:
+        return -1
+
+
+def _communications_hold(page: Any, *, detail: str = "") -> IntakeHold:
+    """Hold with the counts that distinguish a miss. Do not click either count."""
+    css_count = _locator_count(page, COMMUNICATIONS_LINK_CSS)
+    named_count = _named_communications_count(page)
+    noun = "element" if css_count == 1 else "elements"
+    url = _safe_page_url(str(getattr(page, "url", "") or "")) or "(url withheld)"
+    extra = f" {detail}" if detail else ""
+    return IntakeHold(
+        "Progressive control 'Communications' matched "
+        f"{css_count} {noun} ({COMMUNICATIONS_LINK_CSS}); "
+        f"{COMMUNICATIONS_LINK_ROLE} matched {named_count}; "
+        f"page {url};{extra} "
+        "Communications was not clicked"
+    )
+
+
+def _wait_communications_visible(located: Any) -> None:
+    """Wait for one Communications link. A timeout is a miss, not a guess."""
+    wait = getattr(located, "wait_for", None)
+    if not callable(wait):
+        return
+    try:
+        wait(state="visible", timeout=DATE_CONTROL_TIMEOUT_MS)
     except IntakeHold:
         raise
+    except Exception:
+        return
+
+
+def _communications_queries(page: Any) -> tuple[Any, Any, int, int]:
+    css = page.locator(COMMUNICATIONS_LINK_CSS)
+    named = page.get_by_role("link", name=COMMUNICATIONS_LINK_LABEL, exact=True)
+    try:
+        css_count = int(css.count())
+    except Exception:
+        css_count = -1
+    try:
+        named_count = int(named.count())
+    except Exception:
+        named_count = -1
+    return css, named, css_count, named_count
+
+
+def _resolve_communications_locator(page: Any) -> Any | None:
+    """The one registered locator, or None when neither query matches.
+
+    More than one data-at match, more than one named link, or one of each
+    that are different elements holds. Those counts are not clicked.
+    """
+    css, named, css_count, named_count = _communications_queries(page)
+    if css_count < 0 or named_count < 0 or css_count > 1 or named_count > 1:
+        raise _communications_hold(page)
+    if css_count == 1 and named_count == 1:
+        try:
+            same = int(css.and_(named).count()) == 1
+        except Exception as exc:
+            raise _communications_hold(page) from exc
+        if not same:
+            raise _communications_hold(
+                page, detail="and the registered link is not that named link;",
+            )
+    if css_count == 1:
+        return css
+    if named_count == 1:
+        return named
+    return None
+
+
+def _accept_communications_link(page: Any, located: Any) -> Any:
+    """The locator is the Communications link, or a hold. No click yet."""
+    if int(located.count()) != 1 or not _is_visible(located):
+        raise _communications_hold(page, detail="but it was not visible;")
+    try:
+        text = _norm(str(located.inner_text() or ""))
     except Exception as exc:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
+        raise _communications_hold(
+            page, detail="and it is not the registered link;",
+        ) from exc
     if text and text != COMMUNICATIONS_LINK_LABEL:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
-    _require_expected_label(page, link, COMMUNICATIONS_LINK_LABEL)
-    return link
+        raise _communications_hold(page, detail="and it is not the registered link;")
+    try:
+        _require_expected_label(page, located, COMMUNICATIONS_LINK_LABEL)
+    except IntakeHold as exc:
+        raise _communications_hold(
+            page, detail="and it is not the registered link;",
+        ) from exc
+    return located
+
+
+def _unique_communications_link(page: Any) -> Any:
+    """The one Communications section link, or a hold. No Gemini.
+
+    ``a[data-at="policy-activity-tab-communications"]`` is already the
+    registered control. ``link:Communications`` is the existing fallback
+    when that element is absent. Neither query is a new selector, and
+    neither count is a click target. ``role=tab`` is not required and is
+    not clicked. The page must be processed-date results (the cancels
+    landing, or a sibling section). A different URL holds before a click.
+    More than one match holds immediately. Zero matches wait once for the
+    data-at selector. A hidden match or a different accessible name holds
+    before Communications is clicked.
+    """
+    if not _on_processed_date_results(page):
+        raise _communications_hold(page, detail="page is not processed-date results;")
+    located = _resolve_communications_locator(page)
+    if located is None:
+        _wait_communications_visible(page.locator(COMMUNICATIONS_LINK_CSS))
+        if not _on_processed_date_results(page):
+            raise _communications_hold(page, detail="page is not processed-date results;")
+        located = _resolve_communications_locator(page)
+        if located is None:
+            raise _communications_hold(page)
+    if int(located.count()) != 1 or not _is_visible(located):
+        if int(located.count()) > 1:
+            raise _communications_hold(page)
+        _wait_communications_visible(located)
+        if int(located.count()) != 1 or not _is_visible(located):
+            detail = "but it was not visible;" if int(located.count()) == 1 else ""
+            raise _communications_hold(page, detail=detail)
+        if not _on_processed_date_results(page):
+            raise _communications_hold(page, detail="page is not processed-date results;")
+    return _accept_communications_link(page, located)
 
 
 def require_communications_section(page: Any) -> str:
@@ -1255,28 +1364,19 @@ def require_communications_section(page: Any) -> str:
 def open_communications_section(page: Any) -> str:
     """Open Communications from processed-date results via the section link.
 
-    Does not click Search and does not require ``role=tab``. After the click
-    the URL must be in the Communications/underwriting section family. Memo
-    and PDF controls are not clicked here.
+    Does not click Search, does not require ``role=tab``, and does not ask
+    Gemini. After the click the URL must be in the Communications/underwriting
+    section family. Memo and PDF controls are not clicked here. A miss holds
+    with the data-at count, the ``link:Communications`` count, and the safe
+    page URL. Those counts are not clicked.
     """
-    def primary() -> None:
-        link = _communications_link(page)
-        try:
-            link.click()
-        except IntakeHold:
-            raise
-        except Exception as exc:
-            raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
-
-    def retry(locator: Any) -> None:
-        try:
-            locator.click()
-        except IntakeHold:
-            raise
-        except Exception as exc:
-            raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
-
-    run_named_control_step(page, COMMUNICATIONS_LINK_LABEL, primary, retry)
+    link = _unique_communications_link(page)
+    try:
+        link.click()
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _communications_hold(page, detail="the click did not complete;") from exc
     return require_communications_section(page)
 
 
