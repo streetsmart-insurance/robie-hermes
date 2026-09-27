@@ -258,7 +258,19 @@ before Communications is clicked. The hold names the data-at count, the
 userinfo removed. Those counts are not clicked. The hold does not ask
 Gemini and does not contain `gemini:`. Search is not clicked. Staying on
 `cancels` after a click, or any other section, holds. Memo stays the same
-exact name.
+exact name. The memo table does not ask Gemini. A page body that says
+`0 Records Found` or `No records found`, and that has no memo-like row,
+is an empty memo grid even when more than one `<table>` is present.
+Verification is `0 == 0`. The list screenshot and QA pack are still
+written. No PDF is clicked and no row is invented. When memo rows are
+present, the grid is the one table whose headers are the Communications
+columns. If several tables have those headers, it is the one of them
+that contains the Memo control and every memo-like row. Any other count
+holds. The hold names the table count, the signal (`empty-list present`
+or `empty-list absent`, memo-header tables, memo-control tables,
+memo-like rows), and the page URL with query, fragment, and userinfo
+removed. `.first` and `.nth` are not used.
+
 A Memo open accepts one PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
 URL, or embed), or a same-tab PDF that can be returned to the list. HTML is
 not printed into a fake PDF. Two different PDFs hold.
@@ -314,6 +326,27 @@ not upload or write a note.
 
 ## UNVERIFIED until that Test run
 
+- Communications memo table. Tip `19f0caaf` (#636) on hermes-test-01,
+  `--pull-only` prove5, cleared View Activity By and Communications.
+  The page was `processeddateresults/underwritinglegacy/`. Search was not
+  clicked. The next hold was `Communications memo table is missing or
+  ambiguous` because `extract_memo_grid` required `tables.count()==1`.
+  The live page had 3 tables, showed `0 Records Found` / `No records
+  found`, and `pdf_count` 0. The log
+  `/tmp/progressive-fao-pull-only-20260927-19f0caaf-prove5.log` is not in
+  this repository and was not readable from this builder. This change
+  treats that empty-list text, with no memo-like row, as an empty memo
+  grid (`0 == 0`), including when several tables are present. It does not
+  invent rows and it does not click a PDF. When memo rows are present,
+  one table is used only when the Communications headers identify it, or
+  when several header tables exist and exactly one of them contains the
+  Memo control and every memo-like row. Any other shape holds. The hold
+  names the table count, the signal, and the page URL with query,
+  fragment, and userinfo removed. It does not ask Gemini and does not use
+  `.first` or `.nth`. View Activity By and the Communications link
+  contracts from #634–#636 are unchanged. This commit is not installed on
+  `hermes-test-01`. Live clear remains UNVERIFIED until Document Downloads
+  re-proves after merge and a Test zip.
 - Main Nav drawer. A `--pull-only` hold left Policy Activity blocked by
   `header-drawer__content--show` (Agency Admin). #630 closes that drawer
   before the Policy Activity click and holds if the class remains. Tip
@@ -420,7 +453,9 @@ not upload or write a note.
   or that slug with a legacy suffix). A manual click loaded Communications.
   The Saturday–Sunday window showed 0 Records Found. That empty list is
   data; this commit does not invent Memo rows or PDF clicks for it. A
-  missing memo table still holds after the section opens. Official
+  missing memo table still held after the section opens on that older
+  commit. Prove5 on tip `19f0caaf` hit that hold with three tables.
+  The Communications memo table bullet above is the current contract. Official
   `--pull-only` can still time out re-entering Policy Activity from Manage
   Policies (about 30 seconds on the Playwright click). That flake is
   unchanged. This commit clicks the unique Communications section link and
@@ -438,11 +473,13 @@ not upload or write a note.
   is added. A Gemini answer that is unsure, positional, or not unique
   stays `HELD`.
 - Still exact, and still UNVERIFIED on a completed pull: a Memo link or
-  button on each row. A mismatch holds. The Communications page observed
-  after the section link showed 0 Records Found. Memo and PDF controls were
-  not in that DOM, so this commit does not add a click for them. If that
-  empty page has no single memo table, the pull holds after the section
-  URL matches. Do not treat that hold as a zero-row success.
+  button on each row when the list is populated. A mismatch holds. The
+  empty Communications list (`0 Records Found` or `No records found`,
+  with no memo-like row) does not invent those controls and does not
+  click a PDF. A populated list still requires one Memo control on the
+  chosen row. An empty page that also shows a policy number or a Memo
+  control, without one identifiable memo table, holds. Do not treat that
+  hold as a zero-row success.
 - Whether the communications grid uses a Type column, and whether a disabled
   `Next` control is present. An enabled `Next` holds so a partial page is
   not treated as the full day.
