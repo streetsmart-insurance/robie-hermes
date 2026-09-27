@@ -257,9 +257,16 @@ def load_applicant_index(csv_path: str = "") -> Any:
 def gmail_query(days: int = QUERY_WINDOW_DAYS,
                 now: datetime | None = None) -> str:
     """Relative Gmail search window. The checkpoint is the ledger; the
-    window only needs to cover un-checkpointed mail."""
+    window only needs to cover un-checkpointed mail.
+
+    Zap callback emails (``[cert-task-callback]``) are excluded: they are
+    task proofs ingested by ``ingest_callback_emails``, not certificate
+    requests.
+    """
+    from .cert_callback import CALLBACK_SUBJECT_PREFIX
     anchor = (now or datetime.now(timezone.utc)) - timedelta(days=days)
-    return f"after:{anchor.strftime('%Y/%m/%d')}"
+    return (f"after:{anchor.strftime('%Y/%m/%d')} "
+            f'-subject:"{CALLBACK_SUBJECT_PREFIX}"')
 
 
 def build_gmail() -> Any:
@@ -351,6 +358,9 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
     from .cert_filing import FilingDeps, FilingStore
     from .cert_task_registry import TaskRegistry
     from .cert_zapier import ASSIGNEE_SCANALES, CertZapierClient
+    from .cert_callback import (
+        CallbackStore, callback_task_prover, require_callback_auth,
+    )
     from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
     from .ezlynx_api_only_writes import add_note_to_discussion
 
@@ -363,8 +373,20 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
             "(CERT_ZAPIER_TRIGGER) — refusing to file: documents without "
             "Steffany's review task are a partial state")
 
+    # Nonce-guarded Zap callback proof prerequisites: the sweep must fail
+    # BEFORE every write (document, note, Zap) unless callback sender
+    # allowlist + shared secret are configured. Without them, callbacks
+    # cannot be authenticated and every filing would be UNVERIFIED.
+    # This runs before any EZLynx client is built — a missing config
+    # means deps is never constructed and the sweep files nothing.
+    require_callback_auth()
+
     api_config = load_ezlynx_api_config()  # ROBIE_ENV/Secret Manager path
     doc_client = EzlynxApiClient(api_config)
+
+    # Nonce-guarded Zap callback proof (cert_callback): no Task API exists,
+    # so the Zap's validated callback is the only task proof.
+    callback_store = CallbackStore(db_path)
 
     return FilingDeps(
         discussions_client=_discussion_client_for(api_config),
@@ -376,6 +398,8 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
                                 assignee=ASSIGNEE_SCANALES),
         registry=TaskRegistry(db_path),
         store=FilingStore(db_path),
+        callback_store=callback_store,
+        task_prover=callback_task_prover(callback_store),
     )
 
 
@@ -480,6 +504,20 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
     }
     if deps_error:
         summary["errors"].append(deps_error)
+
+    # Ingest Zap callback emails BEFORE intake: a validated callback is the
+    # only task proof (no Task API exists). Best-effort — a missed callback
+    # just leaves the filing UNVERIFIED for this sweep.
+    cb_store = getattr(deps, "callback_store", None)
+    if cb_store is not None and gmail is not None:
+        from .cert_callback import ingest_callback_emails
+        try:
+            cb_stats = ingest_callback_emails(gmail=gmail, store=cb_store)
+            summary["stats"]["callbacks_found"] = cb_stats["found"]
+            summary["stats"]["callbacks_accepted"] = cb_stats["accepted"]
+            summary["stats"]["callbacks_rejected"] = cb_stats["rejected"]
+        except Exception as exc:  # noqa: BLE001 — ingestion is best-effort
+            summary["errors"].append(f"callback ingestion failed: {exc}")
 
     def mark_unverified(gmail_id: str, subject: str,
                         applicant_id: Any, reason: str) -> None:

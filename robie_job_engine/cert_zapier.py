@@ -1,15 +1,15 @@
 """Certificates chunk 3: Zapier client for certificate review tasks.
 
 Fires the agency's EZLynx follow-up-task Zap through the Webhooks-by-Zapier
-catch hook (see the zapier skill). Two gaps are handled honestly:
+catch hook (see the zapier skill). Proof comes from the nonce-guarded
+callback (see :mod:`robie_job_engine.cert_callback`): every fire mints a
+``filing_id`` the Zap must echo back with EZLynx's own create-task
+response. Until the validated callback arrives the filing stays
+UNVERIFIED and re-drives HOLD instead of risking a duplicate fire.
 
-1. The Zap is fire-and-forget: the worker learns the created task ID only
-   when the Zap POSTs it back to the task-callback webhook. Until the
-   callback arrives the registry entry stays ``task_id=None`` and follow-ups
-   HOLD instead of risking a duplicate.
-2. Task open/closed lookup needs a lookup hook that does not exist yet.
-   Until Carlo adds it, ``get_task_state`` returns ``unknown`` and the
-   registry's last-known state rules (fail-closed toward REUSE, never CREATE).
+Task open/closed lookup needs a lookup hook that does not exist yet.
+Until Carlo adds it, ``get_task_state`` returns ``unknown`` and the
+registry's last-known state rules (fail-closed toward REUSE, never CREATE).
 
 Nothing here invents a hook path: a missing ``~/.config/zapier/hook_path``
 (or the skill script) raises instead of firing into the void.
@@ -18,7 +18,6 @@ Nothing here invents a hook path: a missing ``~/.config/zapier/hook_path``
 from __future__ import annotations
 
 import json
-import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -39,6 +38,9 @@ class ZapResult:
     reason: str = ""
     stdout: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
+    #: Unique per-fire nonce. The Zap's callback step must echo it back so
+    #: the worker can tie the callback to THIS fire (see cert_callback).
+    filing_id: str = ""
 
 
 def certificate_due_date(days: int = 3) -> str:
@@ -86,9 +88,14 @@ class CertZapierClient:
                     due_date: str = "") -> ZapResult:
         """Fire the EZLynx follow-up-task Zap for a new certificate request.
 
-        The created task's ID comes back via the Zap's callback webhook
-        (see record_task_callback); this call alone never invents one.
+        Mints a ``filing_id`` nonce and includes it in the payload: the
+        Zap's callback step must echo it back (see
+        :mod:`robie_job_engine.cert_callback`). The created task's ID comes
+        back via that callback; this call alone never invents one.
         """
+        from .cert_callback import new_filing_id
+
+        filing_id = new_filing_id()
         payload = {
             "applicant_id": str(applicant_id),
             "task_title": title,
@@ -97,8 +104,10 @@ class CertZapierClient:
             "email_subject": email_subject,
             "due_date": due_date or certificate_due_date(),
             "note_text": note_text,
+            "filing_id": filing_id,
         }
         result = self._fire(payload, applicant_verified=True)
+        result.filing_id = filing_id
         # Delayed verification (2026-09-27): when the Zap actually fires, queue
         # the expected task for the verifier. Creation is NOT delayed — only
         # the completion-status check waits. Never let this break the firing.
@@ -113,6 +122,7 @@ class CertZapierClient:
                     assignee=self.assignee,
                 )
             except Exception as exc:  # noqa: BLE001 — verification is best-effort here
+                import logging
                 logging.getLogger(__name__).warning(
                     "task_verifier record_pending failed: %s", exc
                 )

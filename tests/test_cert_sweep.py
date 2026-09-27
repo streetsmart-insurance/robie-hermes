@@ -463,7 +463,11 @@ def test_sweep_redrives_retry_ledger_record(tmp_path):
 
 def test_gmail_query_window_is_relative():
     now = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)
-    assert gmail_query(now=now) == "after:2026/09/20"
+    q = gmail_query(now=now)
+    assert "after:2026/09/20" in q
+    # Zap callback emails are task proofs, not certificate requests —
+    # the intake must not swallow them.
+    assert '-subject:"[cert-task-callback]"' in q
 
 
 def test_load_applicant_index_maps_csv_columns(tmp_path):
@@ -793,3 +797,72 @@ def test_run_sweep_registers_index_as_write_allowlist(tmp_path, monkeypatch):
         assert write_scope.applicant_is_write_allowed("999999999") is False
     finally:
         write_scope._CERT_SWEEP_INDEX_APPLICANT_IDS = None
+
+
+# ---------------------------------------------------------------------------
+# Callback auth prerequisites: build_filing_deps fails closed unless
+# CERT_CALLBACK_SENDERS and CERT_CALLBACK_SECRET are configured.
+# Zero document, note, or Zap writes can occur — deps is never built.
+# ---------------------------------------------------------------------------
+
+def _make_trigger_file(tmp_path):
+    trigger = tmp_path / "zap-trigger"
+    trigger.write_text("#!/bin/sh\n")
+    return str(trigger)
+
+
+def test_build_filing_deps_fails_closed_without_callback_senders(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CERT_ZAPIER_TRIGGER", _make_trigger_file(tmp_path))
+    monkeypatch.delenv("CERT_CALLBACK_SENDERS", raising=False)
+    monkeypatch.setenv("CERT_CALLBACK_SECRET", "test-secret")
+    with pytest.raises(RuntimeError, match="CERT_CALLBACK_SENDERS"):
+        build_filing_deps(os.path.join(str(tmp_path), "sweep.db"))
+
+
+def test_build_filing_deps_fails_closed_without_callback_secret(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CERT_ZAPIER_TRIGGER", _make_trigger_file(tmp_path))
+    monkeypatch.setenv("CERT_CALLBACK_SENDERS", "zapier@zapier.com")
+    monkeypatch.delenv("CERT_CALLBACK_SECRET", raising=False)
+    with pytest.raises(RuntimeError, match="CERT_CALLBACK_SECRET"):
+        build_filing_deps(os.path.join(str(tmp_path), "sweep.db"))
+
+
+def test_build_filing_deps_fails_closed_without_callback_auth(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("CERT_ZAPIER_TRIGGER", _make_trigger_file(tmp_path))
+    monkeypatch.delenv("CERT_CALLBACK_SENDERS", raising=False)
+    monkeypatch.delenv("CERT_CALLBACK_SECRET", raising=False)
+    with pytest.raises(RuntimeError, match="callback auth not configured"):
+        build_filing_deps(os.path.join(str(tmp_path), "sweep.db"))
+
+
+def test_callback_auth_missing_means_unverified_not_filed(tmp_path):
+    """Zero writes when callback auth is absent.
+
+    build_filing_deps raises -> deps is None -> every candidate is
+    marked UNVERIFIED and file_record is never invoked. No document,
+    note, or Zap write can occur.
+    """
+    calls = []
+
+    def exploding_file_record(record, verified, d, **kw):
+        calls.append(record)
+        raise AssertionError(
+            "nothing may be filed without callback auth configured")
+
+    summary, ctx = sweep_harness(
+        tmp_path, [make_record()], deps=None,
+        deps_error=("cannot build filing deps, nothing will be filed: "
+                    "callback auth not configured (CERT_CALLBACK_SENDERS, "
+                    "CERT_CALLBACK_SECRET missing)"),
+        file_record_fn=exploding_file_record)
+
+    assert calls == []
+    assert summary["filed"] == []
+    assert len(summary["unverified"]) == 1
+    assert "callback auth not configured" in summary["unverified"][0]["reason"]
+    assert any("callback auth not configured" in e
+               for e in summary["errors"])
+    ctx["retry_conn"].close()
