@@ -760,3 +760,36 @@ def test_adapter_mark_read_never_raises(monkeypatch):
     ok, reason = adapter.mark_read("abc")
     assert ok is False
     assert "token service down" in reason
+
+
+def test_run_sweep_registers_index_as_write_allowlist(tmp_path, monkeypatch):
+    """run_sweep registers the applicant index with the write-scope gate.
+
+    Regression for the 2026-09-27 EZLYNX_WRITE_SCOPE_REFUSED incidents
+    (Top Notch Tree Service LLC / 199729236, Lanali Enterprises LLC /
+    40280643): the sweep must allow writes to any indexed applicant, not
+    just the compiled test-account-only allowlist.
+    """
+    from robie_job_engine import ezlynx_write_scope as write_scope
+
+    monkeypatch.setenv("CERT_SWEEP_DATA_DIR", str(tmp_path))
+
+    def intake_fn(gmail, checkpoint, index, *, query, now):
+        return {"records": [],
+                "stats": {"discovered": 0, "matched": 0, "held": 0,
+                          "errors": 0}}
+
+    # Start from a clean (unregistered) scope to prove run_sweep registers.
+    write_scope._CERT_SWEEP_INDEX_APPLICANT_IDS = None
+    try:
+        assert write_scope.cert_sweep_index_is_registered() is False
+        run_sweep(
+            gmail=FakeGmail(), index=make_index(),
+            verifier=None, verifier_note="fake",
+            deps=make_deps(tmp_path), intake_fn=intake_fn,
+            now=datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc))
+        assert write_scope.cert_sweep_index_is_registered() is True
+        assert write_scope.applicant_is_write_allowed(str(APPLICANT_ID)) is True
+        assert write_scope.applicant_is_write_allowed("999999999") is False
+    finally:
+        write_scope._CERT_SWEEP_INDEX_APPLICANT_IDS = None

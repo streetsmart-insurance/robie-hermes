@@ -184,6 +184,43 @@ def _load_allowed_applicant_ids() -> frozenset[str]:
 ALLOWED_EZLYNX_WRITE_APPLICANT_IDS = _load_allowed_applicant_ids()
 
 
+#: Certificate-sweep index allowlist (process-scoped).
+#:
+#: The certificate sweep matches requests against the full-book applicant
+#: index (``CERT_APPLICANT_INDEX_PATH``) and files for ANY client in that
+#: directory — the index IS the allowlist for the sweep. This is registered
+#: once at sweep startup via :func:`register_cert_sweep_applicant_index`
+#: and is ``None`` (unregistered) in every other process, so policy-setup
+#: and other jobs keep the restrictive compiled allowlist above.
+#:
+#: Third-party senders (holders, lenders, brokers) are never checked here:
+#: the allowlist governs the DESTINATION applicant only. The sender is
+#: matched as an applicant through the normal index path; a non-client
+#: sender simply never becomes a write destination.
+_CERT_SWEEP_INDEX_APPLICANT_IDS: frozenset[str] | None = None
+
+
+def register_cert_sweep_applicant_index(applicant_ids) -> None:
+    """Register the cert-sweep applicant index as an additional allowlist.
+
+    Call once at certificate-sweep startup after loading
+    ``CERT_APPLICANT_INDEX_PATH``. Process-scoped: it affects only the
+    process that calls it. Never call from policy-setup or Chat paths —
+    their restrictive allowlist must not be widened.
+    """
+
+    global _CERT_SWEEP_INDEX_APPLICANT_IDS
+    normalized = {normalize_applicant_id(a) for a in applicant_ids or ()}
+    normalized.discard("")
+    _CERT_SWEEP_INDEX_APPLICANT_IDS = frozenset(normalized)
+
+
+def cert_sweep_index_is_registered() -> bool:
+    """True when the cert-sweep applicant index allowlist was registered."""
+
+    return _CERT_SWEEP_INDEX_APPLICANT_IDS is not None
+
+
 def write_allowlist_is_unrestricted() -> bool:
     """True only when the allowlist was explicitly cleared (legacy mode).
 
@@ -206,7 +243,19 @@ def applicant_is_write_allowed(value: object) -> bool:
         return applicant == live
     if write_allowlist_is_unrestricted():
         return True
-    return applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS
+    if applicant in ALLOWED_EZLYNX_WRITE_APPLICANT_IDS:
+        return True
+    # Certificate-sweep process: the applicant index IS the allowlist. The
+    # sweep matched this applicant against the full-book directory before
+    # any write was attempted. Only registered by the cert-sweep driver;
+    # policy-setup and other jobs never register it, so their restrictive
+    # scope is unchanged.
+    if (
+        _CERT_SWEEP_INDEX_APPLICANT_IDS is not None
+        and applicant in _CERT_SWEEP_INDEX_APPLICANT_IDS
+    ):
+        return True
+    return False
 
 
 def require_allowed_ezlynx_write_applicant(value: object) -> str:

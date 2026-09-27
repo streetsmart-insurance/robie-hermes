@@ -620,6 +620,13 @@ def run_sweep(*, gmail: Any | None = None, checkpoint: Any | None = None,
 
     if index is None:
         index = load_applicant_index()
+    # The applicant index IS the sweep's write allowlist: any client in the
+    # directory is a legitimate filing destination. Register it so the
+    # shared EZLynx write-scope gate (used by document upload and note
+    # append) allows indexed applicants. Process-scoped — other jobs that
+    # never call this keep the restrictive compiled allowlist.
+    from .ezlynx_write_scope import register_cert_sweep_applicant_index
+    register_cert_sweep_applicant_index(index.all_applicant_ids())
     if gmail is None:
         try:
             gmail = build_gmail()
