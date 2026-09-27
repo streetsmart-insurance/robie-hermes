@@ -271,6 +271,21 @@ or `empty-list absent`, memo-header tables, memo-control tables,
 memo-like rows), and the page URL with query, fragment, and userinfo
 removed. `.first` and `.nth` are not used.
 
+Next pagination does not ask Gemini. `more_pages` is False when no
+link or button named Next is present. It is also False when every Next
+control is disabled, including when more than one visible Next is
+disabled, so that empty list can finish: verification is `0 == 0` and
+the list screenshot is still written. `more_pages` is True only when
+exactly one visible Next is enabled and every Next control agrees.
+That still holds, so a partial page is not the full list. Mixed
+enabled and disabled Next controls, an `aria-disabled` value other
+than `true`, `false`, or absent, a hidden or duplicated enabled Next,
+only hidden Next controls, or Next controls that cannot be counted
+hold. The hold names the Next control count, then visible, hidden,
+disabled, enabled, and unreadable, and the page URL with query,
+fragment, and userinfo removed. Those counts are not clicked.
+`.first` and `.nth` are not used.
+
 A Memo open accepts one PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
 URL, or embed), or a same-tab PDF that can be returned to the list. HTML is
 not printed into a fake PDF. Two different PDFs hold.
@@ -347,6 +362,24 @@ not upload or write a note.
   contracts from #634–#636 are unchanged. This commit is not installed on
   `hermes-test-01`. Live clear remains UNVERIFIED until Document Downloads
   re-proves after merge and a Test zip.
+- Communications Next pagination. Tip `bcbec597` (#637) on hermes-test-01,
+  `--pull-only` prove6, cleared View Activity By and Communications and
+  found the unique empty memo grid (`rows=0`). The next hold was
+  `Communications memo list is incomplete or ambiguous` because
+  `more_pages` returned None: two visible disabled Next controls failed
+  the uniqueness gate (`len!=1`). Search was not clicked. `pdf_count` was
+  0. The log had no `gemini:`. The log
+  `/tmp/progressive-fao-pull-only-20260927-bcbec597-prove6.log` is not in
+  this repository and was not readable from this builder. This change
+  treats every disabled Next control, including duplicate visible Next
+  controls, as no further page, so that empty list can reach `0 == 0`
+  and the list PNG. Mixed, unreadable, or non-unique enabled Next still
+  holds with the Next counts and the page URL with query, fragment, and
+  userinfo removed. It does not ask Gemini and does not use `.first` or
+  `.nth`. View Activity By, the Communications link, and empty memo-grid
+  selection from #634–#637 are unchanged except for this pagination
+  decision. This commit is not installed on `hermes-test-01`. Live clear
+  remains UNVERIFIED until a Test zip and `--pull-only` re-prove.
 - Main Nav drawer. A `--pull-only` hold left Policy Activity blocked by
   `header-drawer__content--show` (Agency Admin). #630 closes that drawer
   before the Policy Activity click and holds if the class remains. Tip
@@ -480,9 +513,11 @@ not upload or write a note.
   chosen row. An empty page that also shows a policy number or a Memo
   control, without one identifiable memo table, holds. Do not treat that
   hold as a zero-row success.
-- Whether the communications grid uses a Type column, and whether a disabled
-  `Next` control is present. An enabled `Next` holds so a partial page is
-  not treated as the full day.
+- Whether the communications grid uses a Type column. A single visible
+  enabled Next still holds so a partial page is not treated as the full
+  day. Duplicate disabled Next controls mean no further page. The live
+  clear of that empty list stays UNVERIFIED until the Test re-prove in
+  the Next pagination bullet above.
 - The PDF response host. Fetches are limited to `foragentsonly.com` and
   `progressive.com` (and their subdomains), plus `blob:`. A CDN host holds.
 - Prior delivery into EZLynx. The ledger is only this output directory.
