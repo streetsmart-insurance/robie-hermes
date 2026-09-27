@@ -196,15 +196,23 @@ The click waits until `header-drawer__content--show` is gone. If the drawer
 stays open, the pull holds and Policy Activity is not clicked. Zero
 matches, two visible matches, or two Manage Policies elements hold. There
 is no positional click. Agency Admin is not a dismiss target. Policy Activity then selects View Activity By
-`Processed Date` only when `select#PDDateType[name="DateType"]` is the one
-visible control. The accessible name `View Activity By` must be that same
-element, or the select is unlabeled. That match chooses option value
-`PROCESSEDDATE` and continues to the date range, Get Policy Activity, and
-Communications. Zero matches, more than one match, a hidden match, or a
-different accessible name holds before any option is selected. The reason
-names the match count. This step does not ask Gemini and does not use
-`.first` or `.nth`. A second `select[name="DateType"]` that is not this
-element is not a candidate. `select#PDDateRange` is a preset list (Yesterday, Last 30
+`Processed Date` only when the existing #606 selector
+`select#PDDateType[name="DateType"]` is the one visible control on
+`/managepolicies/policyactivity` (host `foragentsonly.com`). That selector
+is already on main. This change does not add a replacement id, name, or
+label. A URL that is not that form waits once, then holds if it is still
+somewhere else. Zero matches on the form wait once for the same selector.
+The accessible name `View Activity By` must be that same element, or the
+select is unlabeled. That match chooses option value `PROCESSEDDATE` and
+continues to the date range, Get Policy Activity, and Communications. Zero
+matches after the wait, more than one match, a hidden match, a different
+page (including home and `processeddateresults`), or a different accessible
+name holds before any option is selected. The hold names the registered
+match count, the `select#PDDateType` count, the `select[name="DateType"]`
+count, and the page URL with query, fragment, and userinfo removed. Those
+two extra counts are not clicked. This step does not ask Gemini and does
+not use `.first` or `.nth`. A second `select[name="DateType"]` that is not
+`#PDDateType` is not a candidate. `select#PDDateRange` is a preset list (Yesterday, Last 30
 Days, Select Date Range, and others), not a wrapper around the date fields.
 The run chooses the single option whose visible text is `Select Date Range`.
 The option value is read from that option. It then waits until the page-level
@@ -294,20 +302,29 @@ not upload or write a note.
   `22fe67e` on hermes-test-01 got past that drawer and reached Policy
   Activity. Communications and Memo were still not opened (0 PDFs) because
   the next hold was View Activity By.
-- View Activity By. That same `--pull-only` held with
+- View Activity By. Tip `22fe67e` (after #630 drawer dismiss, with #606
+  already merged) held on Policy Activity with
   `Progressive control 'View Activity By' is missing or ambiguous` and
-  Gemini UI rescue returned `gemini: unsure`. This commit does not ask
-  Gemini for that control. The registered selector stays
-  `select#PDDateType[name="DateType"]`. No DOM captured in this repository
-  shows a renamed id or name, so a renamed select is not adopted. A second
-  `select[name="DateType"]` that is not `#PDDateType` is not clicked. One
-  visible match selects `PROCESSEDDATE` and continues. Zero matches, more
-  than one match, a hidden match, or a label on a different element holds
-  before any option is selected. The hold names the match count and does
-  not contain `gemini:`. This commit is not installed on `hermes-test-01`.
-  After merge and a Test zip, re-run `--pull-only` there. A receipt that
-  still names this selector and a match count means the live control was
-  not that one element; do not treat that as a Communications success.
+  Gemini UI rescue returned `gemini: unsure`. The prove logs named for that
+  run, `/tmp/progressive-fao-pull-only-20260927-22fe67e2-prove.log` and
+  `prove2.log` on `hermes-test-01`, were not readable from this builder
+  (no `gcloud`, no SSH key, and the files are not in the repository). The
+  failure shape used here is that hold: the #606 selector did not resolve
+  to one element, and Gemini was not a usable answer. This change keeps
+  `select#PDDateType[name="DateType"]`. It does not add a fallback id,
+  name, or label. A unique visible match on
+  `/managepolicies/policyactivity` selects `PROCESSEDDATE`. Any other
+  count, a hidden match, a different accessible name, or a page that is
+  not that form holds before an option is selected. The hold reports the
+  `select#PDDateType` count, the `select[name="DateType"]` count, and the
+  safe page URL so the next Test receipt can show whether the id, the
+  name, or the page missed. Those counts are not click targets. The hold
+  does not ask Gemini and does not contain `gemini:`. This commit is not
+  installed on `hermes-test-01`. After merge and a Test zip, re-run
+  `--pull-only` there. A receipt that still names this selector and a
+  match count means the live control was not that one element on that
+  page; do not treat that as a Communications success. That prove remains
+  UNVERIFIED until Document Downloads records it.
 - Manage Policies and Policy Activity names below were read off the
   authenticated FAO Home session that held on release `3f774852151c`. This
   commit is not that release and has not been installed on `hermes-test-01`.

@@ -755,11 +755,15 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("header-drawer__content--show", drawer.primary_selector)
         self.assertIn("Policy Activity", drawer.description)
         self.assertIn("Agency Admin", drawer.description)
-        self.assertEqual(page.version, "1.7")
+        self.assertEqual(page.version, "1.8")
         view = page.get_field("view_activity_by")
+        self.assertIn("#606", view.description)
         self.assertIn("does not ask Gemini", view.description)
         self.assertIn("Zero matches", view.description)
         self.assertIn("PROCESSEDDATE", view.description)
+        self.assertIn("not click targets", view.description)
+        self.assertIn("/managepolicies/policyactivity", view.description)
+        self.assertEqual(view.primary_selector, VIEW_ACTIVITY_BY_CSS)
         self.assertEqual(activity.primary_selector, "link:" + POLICY_ACTIVITY_NAMES[0])
         self.assertEqual(activity.fallback_selector, "link:" + POLICY_ACTIVITY_NAMES[1])
         self.assertTrue(activity.exact)
@@ -1084,6 +1088,7 @@ class NavPage:
                  duplicate_main_nav=False, main_nav_visible=True,
                  drawer_mode=None, drawer_open=False, drawer_on_main_nav=False,
                  view_mode="ok", option_mode="ok", range_mode="reveal",
+                 form_url_on_wait=False,
                  start_mode="ok", end_mode="ok", button_mode="ok",
                  legacy_dates=False, results_section="cancels", results_url=None,
                  results_mode="navigate", comms_mode="ok", search_on_results=False,
@@ -1113,6 +1118,7 @@ class NavPage:
         self.drawer_open = drawer_open
         self.drawer_on_main_nav = drawer_on_main_nav
         self.view_mode = view_mode
+        self.form_url_on_wait = form_url_on_wait
         self.option_mode = option_mode
         self.range_mode = range_mode
         self.start_mode = start_mode
@@ -1426,6 +1432,10 @@ class NavPage:
         return nodes
 
     def wait_for_url(self, url, timeout=None):
+        pattern = getattr(url, "pattern", "")
+        if self.form_url_on_wait and pattern.endswith("policyactivity/?$"):
+            self.url = LIST_URL
+            self.form_url_on_wait = False
         if hasattr(url, "search"):
             if url.search(self.url):
                 return None
@@ -1448,6 +1458,8 @@ class NavPage:
             nodes[0].reveal_on_wait = True
         if self.view_mode == "duplicate":
             nodes.append(self._view_select(label, dict(attrs)))
+        if self.view_mode == "extra-name":
+            nodes.append(self._view_select("", {"id": "OtherDateType", "name": "DateType"}))
         return nodes
 
     def _view_select(self, label, attrs):
@@ -2066,7 +2078,7 @@ class NavigationTests(unittest.TestCase):
                 self.assertNotIn("Search", page.clicks)
 
     def test_view_activity_by_unique_match_continues_without_gemini(self):
-        for mode in ("ok", "unlabeled", "late"):
+        for mode in ("ok", "unlabeled", "late", "extra-name"):
             with self.subTest(mode=mode):
                 page = NavPage(view_mode=mode)
                 with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
@@ -2079,17 +2091,47 @@ class NavigationTests(unittest.TestCase):
                 self.assertIn("Communications", page.clicks)
                 self.assertNotIn("Search", page.clicks)
                 self.assertEqual(page.view_nodes[0].value, PROCESSED_DATE_OPTION_VALUE)
+                if mode == "extra-name":
+                    self.assertEqual(page.view_nodes[1].value, "")
+
+    def test_view_activity_by_form_url_with_query_continues(self):
+        page = NavPage(
+            url="https://user:secretpass@www.foragentsonly.com/managepolicies/policyactivity?token=sekret",
+        )
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            self._load(page)
+        rescued.assert_not_called()
+        self.assertIn("Processed Date", page.clicks)
+        self.assertEqual(page.view_nodes[0].value, PROCESSED_DATE_OPTION_VALUE)
+
+    def test_view_activity_by_waits_for_policy_activity_form_then_continues(self):
+        page = NavPage(url="https://www.foragentsonly.com/", form_url_on_wait=True)
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            self._load(page)
+        rescued.assert_not_called()
+        self.assertEqual(page.view_nodes[0].value, PROCESSED_DATE_OPTION_VALUE)
+        self.assertIn("Processed Date", page.clicks)
 
     def test_view_activity_by_zero_or_multiple_holds_without_gemini(self):
+        form = "page https://www.foragentsonly.com/managepolicies/policyactivity"
         cases = (
-            ("missing", "missing", "matched 0 elements"),
-            ("renamed id or name", "renamed", "matched 0 elements"),
-            ("duplicate", "duplicate", "matched 2 elements"),
-            ("hidden", "hidden", "was not visible"),
-            ("mistitled", "mistitled", "is not the registered select"),
-            ("split label", "split-label", "is not the registered select"),
+            ("missing", "missing", "matched 0 elements", (
+                "select#PDDateType matched 0",
+                'select[name="DateType"] matched 0',
+            )),
+            ("renamed id or name", "renamed", "matched 0 elements", (
+                "select#PDDateType matched 1",
+                'select[name="DateType"] matched 0',
+            )),
+            ("duplicate", "duplicate", "matched 2 elements", (
+                "select#PDDateType matched 2",
+                'select[name="DateType"] matched 2',
+            )),
+            ("hidden", "hidden", "was not visible", ()),
+            ("mistitled", "mistitled", "is not the registered select", ()),
+            ("split label", "split-label", "is not the registered select", ()),
         )
-        for label, mode, reason in cases:
+        for label, mode, reason, diagnostics in cases:
             with self.subTest(label):
                 page = NavPage(view_mode=mode)
                 client = _RescueClient(json.dumps({
@@ -2105,17 +2147,66 @@ class NavigationTests(unittest.TestCase):
                             with self.assertRaises(IntakeHold) as caught:
                                 self._load(page)
                             rescued.assert_not_called()
+                message = str(caught.exception)
                 self.assertFalse(is_rescuable_control_failure(caught.exception))
-                self.assertIn("View Activity By", str(caught.exception))
-                self.assertIn(reason, str(caught.exception))
-                self.assertIn("date filter was not changed", str(caught.exception))
-                self.assertNotIn("gemini:", str(caught.exception))
+                self.assertIn("View Activity By", message)
+                self.assertIn(reason, message)
+                self.assertIn(VIEW_ACTIVITY_BY_CSS, message)
+                self.assertIn(form, message)
+                for phrase in diagnostics:
+                    self.assertIn(phrase, message)
+                self.assertIn("date filter was not changed", message)
+                self.assertNotIn("gemini:", message)
+                self.assertNotIn("nth=", message)
                 self.assertEqual(client.calls, 0)
                 self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity"])
                 self.assertNotIn("Processed Date", page.clicks)
                 self.assertNotIn("Get Policy Activity", page.clicks)
                 self.assertNotIn("Communications", page.clicks)
                 self.assertNotIn("Search", page.clicks)
+
+    def test_view_activity_by_wrong_page_holds_without_gemini(self):
+        cases = (
+            ("home", "https://www.foragentsonly.com/", "page https://www.foragentsonly.com/;"),
+            (
+                "results",
+                "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/",
+                "page https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/;",
+            ),
+            (
+                "secret query",
+                "https://user:secretpass@www.foragentsonly.com/?token=sekret",
+                "page https://www.foragentsonly.com/;",
+            ),
+        )
+        for label, url, safe in cases:
+            with self.subTest(label):
+                page = NavPage(url=url)
+                client = _RescueClient(json.dumps({
+                    "decision": "unique",
+                    "locator": 'select#PDDateType[name="DateType"] >> nth=0',
+                }))
+                with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+                    with patch(
+                        "robie_job_engine.gemini_ui_rescue.build_default_client",
+                        return_value=client,
+                    ):
+                        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                            with self.assertRaises(IntakeHold) as caught:
+                                self._load(page)
+                            rescued.assert_not_called()
+                message = str(caught.exception)
+                self.assertFalse(is_rescuable_control_failure(caught.exception))
+                self.assertIn("page is not the Policy Activity form", message)
+                self.assertIn("matched 1 element", message)
+                self.assertIn(safe, message)
+                self.assertNotIn("secretpass", message)
+                self.assertNotIn("sekret", message)
+                self.assertNotIn("gemini:", message)
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity"])
+                self.assertNotIn("Processed Date", page.clicks)
+                self.assertEqual(page.view_nodes[0].value, "")
 
     def test_date_filter_fails_closed_when_controls_are_missing_or_ambiguous(self):
         cases = (

@@ -156,7 +156,15 @@ _DRAWER_CLICK_REFUSED = frozenset({
 # live option. The same strings are the locator contract in
 # locators/progressive_fao.json.
 VIEW_ACTIVITY_BY_LABEL = "View Activity By"
+# #606 contract, already on main. Not a new selector. The live hold after
+# #630 is this selector failing to resolve to one element.
 VIEW_ACTIVITY_BY_CSS = 'select#PDDateType[name="DateType"]'
+VIEW_ACTIVITY_BY_ID_CSS = "select#PDDateType"
+VIEW_ACTIVITY_BY_NAME_CSS = 'select[name="DateType"]'
+_POLICY_ACTIVITY_FORM_URL = re.compile(
+    r"^https://(?:[a-z0-9-]+\.)*foragentsonly\.com/managepolicies/policyactivity/?$",
+    re.IGNORECASE,
+)
 PROCESSED_DATE_OPTION_LABEL = "Processed Date"
 PROCESSED_DATE_OPTION_VALUE = "PROCESSEDDATE"
 PROCESSED_DATE_OPTION_CSS = 'option[value="PROCESSEDDATE"]'
@@ -905,27 +913,37 @@ def _apply_processed_date_view(view: Any) -> None:
         raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
 
 
-def _view_activity_by_count_hold(matched: int) -> IntakeHold:
+def _safe_page_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.hostname, parsed.path or "", "", ""))
+
+
+def _on_policy_activity_form(page: Any) -> bool:
+    return _POLICY_ACTIVITY_FORM_URL.fullmatch(_safe_page_url(str(getattr(page, "url", "") or ""))) is not None
+
+
+def _locator_count(page: Any, css: str) -> int:
+    try:
+        return int(page.locator(css).count())
+    except Exception:
+        return -1
+
+
+def _view_activity_by_hold(page: Any, matched: int, *, detail: str = "") -> IntakeHold:
+    """Hold with the counts that distinguish a miss. Do not click either count."""
     noun = "element" if matched == 1 else "elements"
+    id_count = _locator_count(page, VIEW_ACTIVITY_BY_ID_CSS)
+    name_count = _locator_count(page, VIEW_ACTIVITY_BY_NAME_CSS)
+    url = _safe_page_url(str(getattr(page, "url", "") or "")) or "(url withheld)"
+    extra = f" {detail}" if detail else ""
     return IntakeHold(
         "Progressive control 'View Activity By' matched "
         f"{matched} {noun} ({VIEW_ACTIVITY_BY_CSS}); "
-        "Policy Activity date filter was not changed"
-    )
-
-
-def _view_activity_by_hidden_hold() -> IntakeHold:
-    return IntakeHold(
-        "Progressive control 'View Activity By' matched 1 element "
-        f"({VIEW_ACTIVITY_BY_CSS}) but it was not visible; "
-        "Policy Activity date filter was not changed"
-    )
-
-
-def _view_activity_by_label_hold() -> IntakeHold:
-    return IntakeHold(
-        "Progressive control 'View Activity By' is not the registered select "
-        f"({VIEW_ACTIVITY_BY_CSS}); "
+        f"{VIEW_ACTIVITY_BY_ID_CSS} matched {id_count}; "
+        f"{VIEW_ACTIVITY_BY_NAME_CSS} matched {name_count}; "
+        f"page {url};{extra} "
         "Policy Activity date filter was not changed"
     )
 
@@ -943,32 +961,64 @@ def _wait_view_activity_by_visible(located: Any) -> None:
         return
 
 
-def _unique_view_activity_by(page: Any) -> Any:
-    """The one registered View Activity By select, or a hold. No Gemini.
+def _wait_policy_activity_form(page: Any) -> None:
+    """Wait until the URL is the Policy Activity form. A timeout is a miss."""
+    if _on_policy_activity_form(page):
+        return
+    wait = getattr(page, "wait_for_url", None)
+    if not callable(wait):
+        return
+    try:
+        wait(_POLICY_ACTIVITY_FORM_URL, timeout=DATE_CONTROL_TIMEOUT_MS)
+    except IntakeHold:
+        raise
+    except Exception:
+        return
 
-    The selector is ``select#PDDateType[name="DateType"]``. A renamed id or
-    name is not adopted here: this tree has no live DOM that proves a new
-    one, and a second ``select[name="DateType"]`` that is not this element
-    is not a candidate. Zero matches or more than one match hold before any
-    option is selected. The accessible name must be this element or empty.
+
+def _unique_view_activity_by(page: Any) -> Any:
+    """The one #606 View Activity By select, or a hold. No Gemini.
+
+    ``select#PDDateType[name="DateType"]`` is already the registered control.
+    ``select#PDDateType`` and ``select[name="DateType"]`` are counted only so
+    a hold can say whether the id, the name, or both missed. Neither count
+    is a click target. The page must be
+    ``/managepolicies/policyactivity``. A different URL waits once for that
+    form, then holds if it is still somewhere else, including when a select
+    is already visible. More than one registered match on the form holds
+    immediately. Zero matches wait once for that same selector. A hidden
+    match or a different accessible name holds before any option is selected.
     """
+    if not _on_policy_activity_form(page):
+        _wait_policy_activity_form(page)
     located = page.locator(VIEW_ACTIVITY_BY_CSS)
     matched = int(located.count())
-    if matched != 1 or not _is_visible(located):
+    if not _on_policy_activity_form(page):
+        raise _view_activity_by_hold(
+            page, matched, detail="page is not the Policy Activity form;",
+        )
+    ready = matched == 1 and _is_visible(located)
+    if not ready:
         if matched > 1:
-            raise _view_activity_by_count_hold(matched)
+            raise _view_activity_by_hold(page, matched)
         _wait_view_activity_by_visible(located)
         matched = int(located.count())
         if matched != 1:
-            raise _view_activity_by_count_hold(matched)
+            raise _view_activity_by_hold(page, matched)
         if not _is_visible(located):
-            raise _view_activity_by_hidden_hold()
+            raise _view_activity_by_hold(page, matched, detail="but it was not visible;")
+        if not _on_policy_activity_form(page):
+            raise _view_activity_by_hold(
+                page, matched, detail="page is not the Policy Activity form;",
+            )
     try:
         _require_expected_label(page, located, VIEW_ACTIVITY_BY_LABEL)
     except IntakeHold as exc:
-        raise _view_activity_by_label_hold() from exc
+        raise _view_activity_by_hold(
+            page, 1, detail="and it is not the registered select;",
+        ) from exc
     if int(located.count()) != 1:
-        raise _view_activity_by_count_hold(int(located.count()))
+        raise _view_activity_by_hold(page, int(located.count()))
     return located
 
 
@@ -1091,8 +1141,10 @@ def apply_processed_date_window(page: Any, start: date, end: date) -> None:
     Jev (TypeSafe System One) for a typed judgment (boolean, choice, or
     score, plus confidence) — for example whether this is the processed-date
     filter we expect, or quote-only versus complete. View Activity By does
-    not ask Gemini. It selects PROCESSEDDATE only on the one visible
-    registered select. On Test, a later missing or ambiguous named control,
+    not ask Gemini. It selects PROCESSEDDATE only when the one registered
+    select is visible on the Policy Activity form. A miss holds with id and
+    name counts and does not click those counts. On Test, a later missing or
+    ambiguous named control,
     or a Playwright timeout on that control, may ask Gemini once for one
     unique locator. Production skips that rescue. The success path does not
     call Gemini. This function does not call Jev.
