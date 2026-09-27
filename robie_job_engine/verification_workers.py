@@ -48,6 +48,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from collections.abc import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gmail_report_ingestion as ing  # noqa: E402
@@ -288,6 +289,39 @@ def _4744_window_reason(item: WorkItem, today: date) -> str | None:
     if days > MORTGAGEE_WINDOW_MAX_DAYS:
         return (f"expires in {days}d ({exp.isoformat()}) — beyond "
                 f"{MORTGAGEE_WINDOW_MAX_DAYS}d, outside the 30-45d mortgagee window")
+    return None
+
+
+def _4744_mortgagee_eligibility_reason(item: WorkItem,
+                                       facts: dict | None) -> str | None:
+    """Return the exclusion reason when a 4744 row can never need mortgagee
+    verification; None = keep.
+
+    Two proven exclusions (Carlo 2026-09-27, from the live read of the
+    Sharpe policy NJH00002121393 — sub-LOB "Renters", payor "Insured"):
+    - sub-LOB is Renters: a renter's policy has no mortgagee by definition.
+    - policy payor is Insured: the insured pays directly, so there is no
+      lender payment to verify and no lender portal to upload to.
+
+    The 4744 CSV carries neither field (its LOB column is only
+    "Homeowners"/"Flood"), so `facts` comes from a policy summary page
+    read: {"sub_lob": ..., "payor": ...} via
+    mortgagee_live_ports.parse_policy_billing_facts.
+
+    Fail-closed: `facts` None, or either field blank/unreadable, keeps the
+    policy — exclusion happens only on a positive read of the field.
+    Unknown payor values are kept too (only the proven "Insured" excludes).
+    """
+    if not facts:
+        return None
+    sub_lob = str(facts.get("sub_lob") or "").strip()
+    if sub_lob and "renter" in sub_lob.lower():
+        return (f"sub-LOB is {sub_lob} — renter's policy, no mortgagee "
+                f"possible; excluded from the mortgagee queue")
+    payor = str(facts.get("payor") or "").strip()
+    if payor and payor.lower() == "insured":
+        return (f"policy payor is {payor} — insured pays directly, no lender "
+                f"payment to verify; excluded from the mortgagee queue")
     return None
 
 
@@ -745,8 +779,16 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                gmail_service=None, allow_unverified: bool = False,
                enrichment_ports: menc.EnrichmentPorts | None = None,
                test_enrichment: bool = False,
-               browser_read: bool = False) -> WorkerRun:
-    """Run one verification worker for one day. Fail-closed throughout."""
+               browser_read: bool = False,
+               policy_facts_fn: Callable[[str], dict | None] | None = None,
+               ) -> WorkerRun:
+    """Run one verification worker for one day. Fail-closed throughout.
+
+    policy_facts_fn: optional callable taking a policy number and returning
+    {"sub_lob": ..., "payor": ...} (or None when unreadable), used only by
+    the 4744 mortgagee queue to exclude renter's policies and insured-pay
+    policies. None (default) preserves current behavior exactly.
+    """
     worker = WORKERS[report_id]["name"]
     run = WorkerRun(report_id=report_id, worker=worker,
                     day=day.isoformat(), mode=mode,
@@ -812,10 +854,19 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
     # everything expiring within 45 days; the worker keeps only Carlo's
     # 30-45 day window. Out-of-window rows are recorded with a reason,
     # never silently dropped.
+    #
+    # 2d. 4744 mortgagee eligibility. Renter's policies (sub-LOB Renters)
+    # and insured-pay policies (payor Insured) can never need mortgagee
+    # verification — excluded with a reason when policy_facts_fn supplies
+    # the page facts. Without the callable, this step is skipped and
+    # behavior is unchanged.
     if report_id == "4744":
         kept = []
         for item in items:
             reason = _4744_window_reason(item, day)
+            if reason is None and policy_facts_fn is not None:
+                reason = _4744_mortgagee_eligibility_reason(
+                    item, policy_facts_fn(item.policy_number))
             if reason:
                 run.excluded_stale.append({
                     "item_key": item.key,
