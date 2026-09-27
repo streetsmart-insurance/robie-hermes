@@ -273,5 +273,97 @@ class CarrierRoutingTests(unittest.TestCase):
         self.assertEqual(routing.route_carrier("coterie")["channel"], "PORTAL")
 
 
+class LivePortsTests(unittest.TestCase):
+    """mortgagee_live_ports: the live adapter factory.
+
+    Uses a fake OAuth client (no network, no credentials). The real
+    client's shape was verified 2026-09-27 against Production
+    (search?PolicyNumber= -> rows with accountId/policyId).
+    """
+
+    class FakeOAuth:
+        def __init__(self, rows=None, error=None):
+            self._rows = rows or []
+            self._error = error
+            self.seen = []
+
+        def search_policy_by_number(self, number):
+            self.seen.append(number)
+            if self._error is not None:
+                raise self._error
+            return {"status": "success",
+                    "data": {"results": self._rows}}
+
+    def test_policy_search_maps_account_id(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(rows=[{"accountId": 22769703,
+                                     "policyId": 54248667,
+                                     "policyNumber": "0296536326"}])
+        out = mlp.policy_search_via_oauth("0296536326", client=fake)
+        self.assertEqual(out, {"applicant_id": "22769703",
+                               "policy_id": "54248667"})
+        self.assertEqual(fake.seen, ["0296536326"])
+
+    def test_policy_search_no_rows_returns_none(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(rows=[])
+        self.assertIsNone(mlp.policy_search_via_oauth("NOPE", client=fake))
+
+    def test_policy_search_blank_number_returns_none(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(rows=[{"accountId": 1}])
+        self.assertIsNone(mlp.policy_search_via_oauth("  ", client=fake))
+        self.assertEqual(fake.seen, [])
+
+    def test_policy_search_error_propagates_for_enrichment_hold(self):
+        # The adapter does not swallow transport errors; enrich_work_item
+        # converts an adapter exception into HOLD (fail-closed).
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(error=RuntimeError("transport failed"))
+        with self.assertRaises(RuntimeError):
+            mlp.policy_search_via_oauth("0296536326", client=fake)
+
+    def test_build_live_ports_wiring(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(rows=[{"accountId": 9, "policyId": 8}])
+        browser_reader = lambda aid: [{"lender_name": "Bank",
+                                       "loan_number": "L1"}]
+        ports = mlp.build_live_ports(policy_api_client=fake,
+                                     browser_interests_reader=browser_reader)
+        self.assertIsNotNone(ports.policy_search_fn)
+        # No API exposes Additional Interests (proven 2026-09-27) —
+        # the port stays None so enrichment HOLDs instead of guessing.
+        self.assertIsNone(ports.additional_interests_fn)
+        self.assertIs(ports.browser_interests_fn, browser_reader)
+
+    def test_live_ports_end_to_end_hold_without_browser(self):
+        # Live policy search resolves the applicant, but with no
+        # additional-interests source the item HOLDs with a clear reason.
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(rows=[{"accountId": 22769703,
+                                     "policyId": 54248667}])
+        ports = mlp.build_live_ports(policy_api_client=fake)
+        result = menc.enrich_work_item(policy_number="0296536326",
+                                       ports=ports, dry_run=False)
+        self.assertEqual(result.status, menc.STATUS_HOLD)
+        self.assertEqual(result.applicant_id, "22769703")
+        # HOLD names the gap: applicant resolved, but no interests source.
+        self.assertIn("no source", result.reason)
+
+    def test_live_ports_browser_reader_resolves_ready(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        fake = self.FakeOAuth(rows=[{"accountId": 22769703,
+                                     "policyId": 54248667}])
+        ports = mlp.build_live_ports(
+            policy_api_client=fake,
+            browser_interests_reader=lambda aid: [
+                {"lender_name": "First Bank", "loan_number": "LN-9"}])
+        result = menc.enrich_work_item(policy_number="0296536326",
+                                       ports=ports, dry_run=False)
+        self.assertEqual(result.status, menc.STATUS_READY)
+        self.assertEqual(result.mortgages[0].lender_name, "First Bank")
+        self.assertEqual(result.mortgages[0].source, "browser")
+
+
 if __name__ == "__main__":
     unittest.main()
