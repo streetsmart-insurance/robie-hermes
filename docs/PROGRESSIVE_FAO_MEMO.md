@@ -186,9 +186,14 @@ Manage Policies accepts the live header control: accessible name
 `^Manage Policies`, or `a[data-at="header-nav__parent-link--manage-policies"]`.
 Those selectors are one element. Policy Activity accepts `Policy Activity`
 or `View policy activity reports`. If the chosen control is not visible,
-Main Navigation is clicked once and the control is resolved again. Zero
+Main Navigation is clicked once and the control is resolved again. An open
+Main Nav drawer (`header-drawer__content--show`, the Agency Admin panel)
+is closed before that Policy Activity click: Escape, then one overlay,
+then one close control, then Main Navigation when `aria-expanded` is true.
+The click waits until `header-drawer__content--show` is gone. If the drawer
+stays open, the pull holds and Policy Activity is not clicked. Zero
 matches, two visible matches, or two Manage Policies elements hold. There
-is no positional click. Policy Activity then selects View Activity By
+is no positional click. Agency Admin is not a dismiss target. Policy Activity then selects View Activity By
 `Processed Date` (`select#PDDateType[name="DateType"]`, option value
 `PROCESSEDDATE`). `select#PDDateRange` is a preset list (Yesterday, Last 30
 Days, Select Date Range, and others), not a wrapper around the date fields.
@@ -274,6 +279,13 @@ not upload or write a note.
 
 ## UNVERIFIED until that Test run
 
+- Main Nav drawer. A `--pull-only` hold left Policy Activity blocked by
+  `header-drawer__content--show` (Agency Admin). This commit closes that
+  drawer before the Policy Activity click and holds if the class remains.
+  It has not been installed on `hermes-test-01`. After merge and a Test
+  zip, re-run `--pull-only` and confirm the pull is not held on that class.
+  If it still holds, the drawer did not close; do not treat that as a
+  Communications success.
 - Manage Policies and Policy Activity names below were read off the
   authenticated FAO Home session that held on release `3f774852151c`. This
   commit is not that release and has not been installed on `hermes-test-01`.
