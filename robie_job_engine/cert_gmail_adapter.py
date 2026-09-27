@@ -6,9 +6,19 @@ sandbox/box proxy breaks ``googleapiclient.discovery`` and httplib2 — proven
 ``certificates@streetsmart.insurance`` using the service-account key material
 in Secret Manager, mirroring ``robie-manual-ops/dwd_gmail.py``.
 
-Scope is strictly ``gmail.readonly``: the adapter can never mark, move, send,
-or delete. The unread flag is never the processing ledger (see
+Scope is strictly ``gmail.readonly`` for intake: the adapter can never
+move, send, or delete. The one narrow exception is
+:meth:`CertGmailAdapter.mark_read`, which removes the UNREAD label only,
+and only after a destination-proven filing (Carlo 2026-09-27: "mark as
+read if it is read"). It mints a separate ``gmail.modify`` token for that
+single call — the read-only intake session is never widened. The unread
+flag is never the processing ledger (see
 ``cert_intake.discover_messages``); the durable SQLite checkpoint owns that.
+
+``gmail.modify`` must be authorized for the DWD client in Google Workspace
+Admin (Security > API controls > Domain-wide delegation); without it the
+modify call returns 403 and the message simply stays unread. That is a
+safe failure: the filing is already proven and checkpointed.
 
 Configuration (environment):
 - ``CERT_GMAIL_MAILBOX`` — default ``certificates@streetsmart.insurance``
@@ -25,11 +35,13 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 
 GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users"
 READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 DEFAULT_MAILBOX = "certificates@streetsmart.insurance"
 
 
@@ -166,6 +178,102 @@ def _keyless_dwd_token(mailbox: str, scopes: list[str]) -> str:
         return json.load(r)["access_token"]
 
 
+def _modify_dwd_token(mailbox: str) -> str:
+    """DWD token carrying only ``gmail.modify`` (the mark-read path).
+
+    Separate from the read-only intake session: the intake scope is never
+    widened. Tries the keyless VM-SA flow first, then the key flow.
+    """
+    scopes = [MODIFY_SCOPE]
+    try:
+        return _keyless_dwd_token(mailbox, scopes)
+    except Exception:
+        return _key_file_dwd_token(mailbox, scopes)
+
+
+def _gmail_modify(token: str, mailbox: str, gmail_id: str,
+                  body: dict[str, Any]) -> dict[str, Any]:
+    """POST users.messages.modify. Raises urllib.error.HTTPError on 4xx/5xx."""
+    req = urllib.request.Request(
+        f"{GMAIL_BASE}/{mailbox}/messages/{gmail_id}/modify",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def _gmail_label_ids(token: str, mailbox: str,
+                     gmail_id: str) -> list[str]:
+    """Read-back for the mark-read path: the message's current labelIds."""
+    req = urllib.request.Request(
+        f"{GMAIL_BASE}/{mailbox}/messages/{gmail_id}?format=minimal",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return list(json.load(r).get("labelIds") or [])
+
+
+def _mark_read_uncertain(token: str, mailbox: str, gmail_id: str,
+                       body: dict[str, Any],
+                       first_err: Exception) -> tuple[bool, str]:
+    """Read-back-first recovery for an uncertain modify outcome.
+
+    Used for BOTH HTTP transport failures and generic exceptions
+    (timeout, connection reset, DNS): the remove may have landed despite
+    the lost response, so the labels are read back before any re-send.
+    Re-sends only when UNREAD is verifiably still present; fails closed
+    (stays unread) when the read-back itself cannot complete.
+    """
+    try:
+        labels = _gmail_label_ids(token, mailbox, gmail_id)
+    except Exception as rb_exc:
+        return False, (f"modify failed ({first_err}) and label "
+                       f"read-back failed: {rb_exc} — leaving unread")
+    if "UNREAD" not in labels:
+        return True, "ok (read-back: UNREAD already removed)"
+    try:
+        _gmail_modify(token, mailbox, gmail_id, body)
+        return True, "ok (re-sent after read-back)"
+    except Exception as exc2:
+        return False, (f"modify failed after read-back: {exc2} — "
+                       "leaving unread")
+
+
+def mark_message_read(mailbox: str, gmail_id: str) -> tuple[bool, str]:
+    """Remove UNREAD from one message. Returns ``(ok, reason)``.
+
+    Retry discipline (Carlo's standing rule): a failed POST is never
+    blind-retried — read the labels back first; re-send only when UNREAD
+    is verifiably still present; fail closed (stays unread) when the
+    read-back itself cannot complete. Never raises: a mark-read failure
+    must not fail an already destination-proven filing.
+    """
+    try:
+        token = _modify_dwd_token(mailbox)
+    except Exception as exc:
+        return False, f"could not mint modify token: {exc}"
+    body = {"removeLabelIds": ["UNREAD"]}
+    try:
+        _gmail_modify(token, mailbox, gmail_id, body)
+        return True, "ok"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            return False, (
+                "gmail.modify not authorized for the DWD client — "
+                "Workspace Admin must authorize the scope; leaving unread")
+        # HTTP transport/server failure: read back before any re-send.
+        return _mark_read_uncertain(token, mailbox, gmail_id, body, exc)
+    except Exception as exc:
+        # Generic transport failure (timeout, reset, DNS): the outcome is
+        # uncertain — the remove may have landed. Read back first, same as
+        # the HTTPError path above; never report failure without checking.
+        return _mark_read_uncertain(token, mailbox, gmail_id, body, exc)
+
+
 def build_dwd_session(mailbox: str = "") -> Any:
     """Return an authorized ``requests.Session`` impersonating ``mailbox``.
 
@@ -198,6 +306,8 @@ class CertGmailAdapter:
       -> ``(list[str], next_page_token | None)``
     - ``get_full_message(gmail_id)`` -> ``format=full`` payload dict
     - ``get_attachment_bytes(gmail_id, attachment_id)`` -> bytes
+    - ``mark_read(gmail_id)`` -> ``(ok, reason)``; removes UNREAD after a
+      destination-proven filing only (never raises)
     """
 
     def __init__(self, session: Any, mailbox: str = "") -> None:
@@ -258,3 +368,15 @@ class CertGmailAdapter:
 
     def attachment_fetcher(self, gmail_id: str, attachment_id: str) -> bytes:
         return self.get_attachment_bytes(gmail_id, attachment_id)
+
+    def mark_read(self, gmail_id: str) -> tuple[bool, str]:
+        """Remove the UNREAD label after a destination-proven filing.
+
+        The sweep driver calls this only for FILED records — anything
+        UNVERIFIED or errored stays unread. Returns ``(ok, reason)`` and
+        never raises.
+        """
+        try:
+            return mark_message_read(self._mailbox, gmail_id)
+        except Exception as exc:  # belt and suspenders
+            return False, f"{type(exc).__name__}: {exc}"
