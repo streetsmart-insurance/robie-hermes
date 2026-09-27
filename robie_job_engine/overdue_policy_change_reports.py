@@ -61,7 +61,27 @@ RENAG_DAYS = 7
 AGENCY_EMAIL_SUFFIX = "@streetsmart.insurance"
 CC_CARLO = "carlo@streetsmart.insurance"
 SENDER = "robie@streetsmart.insurance"
-SUBJECT = "Action needed: policy change requests waiting on your update"
+SUBJECT = "Overdue policy change requests need an update"
+# Carlo 2026-09-27: every weekly CSR nag CCs these three in addition to the
+# department manager, Carlo, and the assigned producer. Verified addresses
+# from the manually-sent 2026-09-27 nag emails (robie@streetsmart.insurance).
+FIXED_CCS: tuple[tuple[str, str], ...] = (
+    ("Jake Ferrara", "jake@streetsmart.insurance"),
+    ("Gabriela Chutin", "gabrielac@streetsmart.insurance"),
+    ("Sandy Santana", "sandy@streetsmart.insurance"),
+)
+# Abbreviated policy-change SOP closure gate (Carlo 2026-09-27). Every nag
+# email carries this so CSRs know exactly what "done" means. The full SOP
+# lives at
+# .agents/skills/ezlynx-policy-change-confirmation/SKILL.md.
+SOP_CLOSURE_GATE = (
+    "A change request isn't closed until all four of these are true:\n"
+    "1. The carrier's endorsement or revised declarations page is received and filed.\n"
+    "2. The original request, the carrier-issued change, and the EZLynx record are "
+    "compared field by field \u2014 they must match.\n"
+    "3. Any premium or billing impact is recorded, or confirmed as not applicable.\n"
+    "4. Marking a task complete does not close the change request itself."
+)
 # HOST-ONLY DiscussionApi base. Never derive this from document_base_url —
 # that produces .../DocumentApi/DiscussionApi/ and 404s every call.
 DISCUSSION_BASE_URL = "https://app.ezlynx.com/DiscussionApi/"
@@ -827,6 +847,8 @@ def build_csr_report(
         "",
         "Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.",
         "",
+        SOP_CLOSURE_GATE,
+        "",
         cc_line,
         "",
         "-Robie",
@@ -851,12 +873,16 @@ def build_csr_report_html(
     else:
         cc_line = "Looping in the team so everyone's in the loop."
     bullets = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in _item_bullets(items, today))
+    sop_paragraphs = "".join(
+        f"<p>{html.escape(line)}</p>" for line in SOP_CLOSURE_GATE.split("\n")
+    )
     return "\n".join([
         "<div>",
         f"<p>Hi {html.escape(' '.join(str(csr).split()).split(' ')[0])},</p>",
         "<p>The following policy change requests are still open and waiting on an update:</p>",
         f"<ul>{bullets}</ul>",
         "<p>Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.</p>",
+        sop_paragraphs,
         f"<p>{html.escape(cc_line)}</p>",
         "<p>-Robie</p>",
         "</div>",
@@ -1245,11 +1271,16 @@ class OverduePolicyChangeReportWorker:
             receipts: list[dict[str, Any]] = []
             for csr in sorted(targets):
                 target = targets[csr]
-                cc_names = [target["manager_name"], *target["producer_names"]]
+                fixed_names = [name for name, _ in FIXED_CCS
+                               if name != target["manager_name"]]
+                cc_names = [target["manager_name"], *fixed_names,
+                            *target["producer_names"]]
                 body = build_csr_report(csr, target["items"], target["manager_name"], today, cc_names=cc_names)
                 html_body = build_csr_report_html(csr, target["items"], target["manager_name"], today, cc_names=cc_names)
                 cc: list[str] = []
-                for addr in [target["manager_email"], CC_CARLO, *target["producer_emails"]]:
+                for addr in [target["manager_email"], CC_CARLO,
+                             *[email for _, email in FIXED_CCS],
+                             *target["producer_emails"]]:
                     if addr and addr not in cc:
                         cc.append(addr)
                 receipts.append(
