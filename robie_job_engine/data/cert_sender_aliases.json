@@ -1,0 +1,301 @@
+{
+  "generated": "2026-09-27",
+  "scope": "certificate intake sender aliases. Human-verified 2026-09-26/27 from held-record research. Vendor, broker, holder, lender, and agency-internal senders are NEVER aliased (enforced in code); they resolve per message via pattern rules.",
+  "rule": "alias saved only when the sender is the client themselves (own domain / exact report email / signature-confirmed) and evidence shows consistent use. Vendor, broker, holder, lender, and internal senders are NEVER aliased; they get pattern rules in patterns.md.",
+  "aliases": [
+    {
+      "sender": "bdkbnj@gmail.com",
+      "applicant_id": 190835268,
+      "account_name": "Panda Kitchen and Bath NJ Llc",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; own COI request thread (Panda Kitchen to 340 East 93rd Street Corp)"
+    },
+    {
+      "sender": "brandybarrett716@gmail.com",
+      "applicant_id": 43436694,
+      "account_name": "Best Renovation Construction LLC DBA Waterfront Home Improvement",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; 'I am Best Renovation Construction/ DBA Waterfront Home Improvement'"
+    },
+    {
+      "sender": "fer@matruckinglogistics.com",
+      "applicant_id": 122128715,
+      "account_name": "M&A Trucking & Logistics LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Fernando Marquez replying on own cert thread"
+    },
+    {
+      "sender": "haulazz626@gmail.com",
+      "applicant_id": 195714182,
+      "account_name": "HAUL AZZ LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; 'Haul Azz' own COI request to RMIS"
+    },
+    {
+      "sender": "joe@faviaglass.com",
+      "applicant_id": 202362081,
+      "account_name": "Favia Glass Co Inc",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Joseph Favia requesting cert for Valley National Bank lien holder"
+    },
+    {
+      "sender": "info@legacyconstructionnj.com",
+      "applicant_id": 42095012,
+      "account_name": "Legacy Construction Services LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Legacy Construction own cert thread"
+    },
+    {
+      "sender": "superiorexteriornyc@gmail.com",
+      "applicant_id": 32270524,
+      "account_name": "Superior Exterior Services LLC DBA Roof Doctors",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; William Truszkowski own cert thread (Superior Exterior to GAF)"
+    },
+    {
+      "sender": "klavish.llc@gmail.com",
+      "applicant_id": 150953048,
+      "account_name": "Klavish Construction LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Slawomir Pisarczyk own COI request"
+    },
+    {
+      "sender": "info@ekarhomeimprovement.com",
+      "applicant_id": 108402270,
+      "account_name": "Ekar Home Improvement LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; original external sender of internal forward ('Request for Insurnace coi')"
+    },
+    {
+      "sender": "jhagen@sailpointcg.com",
+      "applicant_id": 189918626,
+      "account_name": "Sailpoint Development Group Inc.",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; owner Jeffrey Hagen correcting own cert"
+    },
+    {
+      "sender": "future271129@gmail.com",
+      "applicant_id": 92948949,
+      "account_name": "Future Freight Transport LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Steven Lora / Future Freight own COI thread (to Protecall)"
+    },
+    {
+      "sender": "grandcrewcontracting@gmail.com",
+      "applicant_id": 21715999,
+      "account_name": "Grand Crews Contracting LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Todd Viserto own COI request"
+    },
+    {
+      "sender": "hugosimoes59@gmail.com",
+      "applicant_id": 217287572,
+      "account_name": "Pinnacle Security Solutions LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; Hugo Simoes (Project Manager) own cert thread (to Hake Industries)"
+    },
+    {
+      "sender": "dtrtruckingmke@gmail.com",
+      "applicant_id": 128861937,
+      "account_name": "Dreams to Reality Trucking LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; 'Dreams To Reality Trucking LLC MC 1516263' own request"
+    },
+    {
+      "sender": "greg@ameplumbingnj.com",
+      "applicant_id": 38142343,
+      "account_name": "AME Plumbing LLC",
+      "confidence": "strong",
+      "evidence": "client domain ameplumbingnj.com; Greg Bottomly own COI request (Hidden Village, Aberdeen)"
+    },
+    {
+      "sender": "tom@ameplumbingnj.com",
+      "applicant_id": 38142343,
+      "account_name": "AME Plumbing LLC",
+      "confidence": "strong",
+      "evidence": "client domain ameplumbingnj.com; Tom Anzalone, AME Plumbing Heating & Cooling, own road-permit COI request"
+    },
+    {
+      "sender": "kmfline@gmail.com",
+      "applicant_id": 46332878,
+      "account_name": "KM Freight Line LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; signature 'Konstantinas Mastauskas, KM Freight line, LLC'. NOTE: policy number in message did not anchor to applicant in EZLynx; filing must still fail closed until policy discrepancy is resolved"
+    },
+    {
+      "sender": "psimechanical@hotmail.com",
+      "applicant_id": 73142907,
+      "account_name": "PSI Mechanical Inc",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; display name 'PSI Mechanical'"
+    },
+    {
+      "sender": "topnotchtree5050@gmail.com",
+      "applicant_id": 199729236,
+      "account_name": "Top Notch Tree Service LLC",
+      "confidence": "strong",
+      "evidence": "exact email match in client report; James Cramer own cert thread (to Christ Church - Rockaway)"
+    },
+    {
+      "sender": "mela@seciinc.com",
+      "applicant_id": 78540038,
+      "account_name": "Seci Construction Inc",
+      "confidence": "medium",
+      "evidence": "client domain seciinc.com (report has sami@seciinc.com, same domain); exact company name 'SEci Construction INC' in 11 consistent COI requests; signed 'Mela'"
+    },
+    {
+      "sender": "botirconstruction@gmail.com",
+      "applicant_id": 114073986,
+      "account_name": "Botir Construction LLC",
+      "confidence": "medium",
+      "evidence": "phone 732-492-2082 in signature matched client report; signature 'BOTIR HVAC, LLC / Utkir Batyrov'; own certificate-holder request"
+    },
+    {
+      "sender": "altitransportationservice@gmail.com",
+      "applicant_id": 217780869,
+      "account_name": "ALTI TRANSPORT LLC",
+      "confidence": "medium",
+      "evidence": "From display 'Alti Transport LLC' across 13 messages of own requests and RMIS forwards"
+    },
+    {
+      "sender": "litricco@aol.com",
+      "applicant_id": 61102253,
+      "account_name": "DANNY TRUCKING LLC",
+      "confidence": "medium",
+      "evidence": "display name 'Danny Litric' matches account; own COI update request. Applicant is Prospect/Lead in report"
+    },
+    {
+      "sender": "willreed@travelertransllc.com",
+      "applicant_id": 88789196,
+      "account_name": "Traveler Transportation LLC",
+      "confidence": "medium",
+      "evidence": "same domain as report email (travelertransllc.com); signature 'William Reed, Senior VP, Traveler Transportation DBA Traveler Trans'; own urgent COI request"
+    },
+    {
+      "sender": "sales@apple-link.com",
+      "applicant_id": 65902840,
+      "account_name": "Apple Communications LLC",
+      "confidence": "medium",
+      "evidence": "client domain apple-link.com (report: jerry@apple-link.com); 'Anil A., Apple Communication' own COI request"
+    },
+    {
+      "sender": "service@espressomio.com",
+      "applicant_id": 128308885,
+      "account_name": "Espresso Mio LLC",
+      "confidence": "medium",
+      "evidence": "own cert thread (136 Madison COI requirements); signed 'Armando Gonzalez, Espresso Mio LLC'"
+    },
+    {
+      "sender": "nj@procleanconnect.com",
+      "applicant_id": 199633282,
+      "account_name": "ProClean NJ Inc",
+      "confidence": "medium",
+      "evidence": "display name 'ProClean NJ Inc'; 'Natella from ProClean NJ Inc' own COI request (report email procleanconnect@gmail.com, near match)"
+    },
+    {
+      "sender": "fsilva@smartfiberinnovation.com",
+      "applicant_id": 107830497,
+      "account_name": "Smart Fiber Innovations LLC",
+      "confidence": "medium",
+      "evidence": "client domain + company name; 'For and on behalf of Smart Fiber Innovation' own COI request"
+    },
+    {
+      "sender": "info@asphaltechpavement.com",
+      "applicant_id": 126827834,
+      "account_name": "Asphaltech Pavement Solutions LLC",
+      "confidence": "medium",
+      "evidence": "client domain asphaltechpavement.com; own COI request to Ferrandino"
+    },
+    {
+      "sender": "info@jerseyshorepicnicco.com",
+      "applicant_id": 117168638,
+      "account_name": "Jersey Shore Picnic Co Llc",
+      "confidence": "medium",
+      "evidence": "client domain jerseyshorepicnicco.com; 'Brielle Roche' own request to add Sean Lee as additional insured (report email jerseyshorepicnicco@gmail.com)"
+    },
+    {
+      "sender": "lmatos@alistcleaningservice.com",
+      "applicant_id": 186530244,
+      "account_name": "A List Cleaning Service LLC",
+      "confidence": "medium",
+      "evidence": "phone 732-705-3222 in body matched client report; client domain; own cert-correction thread (Tutor Perini / Broadway Bridge)"
+    },
+    {
+      "sender": "dremarllc@gmail.com",
+      "applicant_id": 179664527,
+      "account_name": "Dremar Transport & Logistics, LLC",
+      "confidence": "medium",
+      "evidence": "'Dre Mar' own 'DREMAR TRANSPORT COI' request"
+    },
+    {
+      "sender": "psimech1790@gmail.com",
+      "applicant_id": 73142907,
+      "account_name": "PSI Mechanical Inc",
+      "confidence": "medium",
+      "evidence": "internal PSI forward (Ahmet Sangiray fwd from George Wong) requesting COI for PSI job site; same applicant as psimechanical@hotmail.com"
+    },
+    {
+      "sender": "cynthia@jarroofingrepair.com",
+      "applicant_id": 88962847,
+      "account_name": "JAR Roofing Repair LLC",
+      "confidence": "medium",
+      "evidence": "client domain jarroofingrepair.com; 'Cynthia Leon / JAR Roofing Repair LLC' own policy-email request"
+    },
+    {
+      "sender": "sohocleaning1@gmail.com",
+      "applicant_id": 87312138,
+      "account_name": "Soho Steam Carpet Cleaning Inc",
+      "confidence": "medium",
+      "evidence": "own cert thread (Soho Steam Carpet Cleaning Inc to Baltusrol Golf Club)"
+    },
+    {
+      "sender": "prettycleanconstruction2024@yahoo.com",
+      "applicant_id": 28565306,
+      "account_name": "Pretty Clean Construction LLC",
+      "confidence": "medium",
+      "evidence": "Isaiah Chalmers own COI request for Pretty Clean Construction"
+    },
+    {
+      "sender": "thecafeonloach@gmail.com",
+      "applicant_id": 198544957,
+      "account_name": "ACPM BUSINESS SOLUTIONS LLC",
+      "confidence": "medium",
+      "evidence": "Alfreda McLean authorizing COI release for ACPM (MC 618194); report email alfredamclean114@gmail.com belongs to same person"
+    },
+    {
+      "sender": "aiantes.construction@gmail.com",
+      "applicant_id": 21587220,
+      "account_name": "Aiantes Construction Comp Inc",
+      "confidence": "medium",
+      "evidence": "sender 'Gerard de baar' matches report contact gerard_de_baar@hotmail.com; own certificate requests"
+    },
+    {
+      "sender": "watsondispatch1000@gmail.com",
+      "applicant_id": 44459433,
+      "account_name": "Watson Enterprises, LLC",
+      "confidence": "medium",
+      "evidence": "'Watson Dispatch' own COI requests (Becker Logistics, Logistics Specialists of Lavaca holders). Applicant type Unknown in report"
+    },
+    {
+      "sender": "absolutedecks2010@yahoo.com",
+      "applicant_id": 83286108,
+      "account_name": "Absolute Decks & Basements Contracting Llc",
+      "confidence": "medium",
+      "evidence": "own request: Absolute Decks & Basements requesting cert for holder Gateway at Royce Brook, LLC"
+    },
+    {
+      "sender": "xkillswitchllcdispatch@gmail.com",
+      "applicant_id": 103400598,
+      "account_name": "XKillSwitch LLC",
+      "confidence": "medium",
+      "evidence": "'XKILLSWITCH LLC Dispatch' own 'COI request for Xkillswitch LLC MC-1178031'"
+    },
+    {
+      "sender": "juliostreeservices@gmail.com",
+      "applicant_id": 26042781,
+      "account_name": "Julio's Tree Service LLC",
+      "confidence": "medium",
+      "evidence": "original external sender of internal forward; 'Julio`S Tree Services LLC' asking Carlo for COI for Robert Stawicki"
+    }
+  ]
+}

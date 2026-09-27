@@ -437,6 +437,19 @@ _SUBJECT_PATTERNS = [
     # Highway: "Renewal COI Request: COI for ECMANAGEMENT GROUP ... Expires Tomorrow"
     re.compile(r"\bcoi\s+for\s+(.+?)(?:\s+expires?\b.*|\s+expiring\b.*)?$",
                re.IGNORECASE),
+    # Certificial: "Ekmg Logistics LLC's Policy has Expired" — the insured
+    # owns the expiring policy. Only the possessive + expiry shape; never
+    # a bare "policy" mention.
+    re.compile(r"^(.+?)'s\s+policy\s+has\s+expired\b", re.IGNORECASE),
+    # TrustLayer/compliance-platform tail: "... for MALAS BROTHERS PAINTING"
+    # or "Document request for All Force Construction from The Fania
+    # Company, Inc." LAST in the list — the specific patterns above win
+    # first; this only catches leftovers. The lookahead keeps bare
+    # request-words ("Request for COI") from becoming a junk insured.
+    # Fail-closed: the extracted name still needs an exact report match
+    # to verify anything.
+    re.compile(r"\bfor\s+(?!(?:coi|certificate|cert)\b)(.+?)(?:\s+from\s+|\s*$)",
+               re.IGNORECASE),
 ]
 
 _NAME_LIKE = re.compile(r"[A-Za-z]{2,}")

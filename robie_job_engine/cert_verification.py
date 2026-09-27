@@ -583,6 +583,10 @@ class VerificationResult:
     # "client_center" when the request came through the EZLynx Client
     # Center portal — the task already exists, never duplicate it.
     origin: str = ""
+    # "medium" when the applicant came from a medium-confidence sender
+    # alias (human-resolved but worth a human glance). Review tooling
+    # surfaces these; the match itself still resolves.
+    alias_confidence: str | None = None
 
     def hold(self, reason: str) -> "VerificationResult":
         self.status = HOLD
@@ -746,6 +750,12 @@ def verify_record(record: Any, index: Any,
         res.source = "report"
         res.evidence.append(
             f"full-book report match: applicant {match.applicant_id}")
+        if getattr(match, "alias_confidence", None):
+            res.alias_confidence = match.alias_confidence
+            res.evidence.append(
+                f"sender-alias match is {match.alias_confidence} confidence "
+                "(human-verified 2026-09-26/27 mapping) — surfaced for "
+                "human review")
         if res.policy_numbers and verifier is not None:
             anchored = False
             for num in res.policy_numbers:
