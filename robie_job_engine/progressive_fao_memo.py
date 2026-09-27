@@ -45,7 +45,14 @@ Inner text and the label helper are not a second veto of that pair. A
 data-at-only or named-only match still requires visible text of
 Communications or no readable name. Zero matches, more than one match, a
 hidden match, a different page, or two queries that are different
-elements holds before that click. The Gemini helper is shared with the other Playwright
+elements holds before that click. The memo table does not ask Gemini.
+Empty-list text (``0 Records Found`` or ``No records found``) with no
+memo data row is an empty grid even when several tables are on the page.
+Memo rows are read from the one table whose headers are the Communications
+columns, or from the one of those tables that contains the Memo control.
+Any other count holds with the table count, that signal, and the page URL
+with query, fragment, and userinfo removed. ``.first`` and ``.nth`` are
+not used for that choice. The Gemini helper is shared with the other Playwright
 sites; FAO is one caller. Production skips that rescue. The success path
 does not call Gemini. This module does not call Jev. The document-retrieval
 filing kill switch is unchanged.
@@ -112,6 +119,17 @@ _PAREN_AGENCY_IN_TEXT = re.compile(r"\(\s*(\d{5})\s*\)")
 _LOGIN_AGENCY_IN_TEXT = re.compile(r"\b(\d{5})c\b", re.IGNORECASE)
 _BARE_STREETSMART_AGENCY = re.compile(rf"\b{DEFAULT_AGENT_CODE[2:]}\b")
 _POLICY_NUMBER = re.compile(r"^\d{6,12}$")
+# Live Communications empty list (hermes-test-01 prove5, tip 19f0caaf):
+# three tables, body text "0 Records Found" / "No records found", pdf_count 0.
+# Either phrase is the empty-list signal. The memo table does not ask Gemini.
+_EMPTY_LIST_TEXT = re.compile(
+    r"\b(?:0\s+records\s+found|no\s+records\s+found)\b",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_ROW_TEXT = re.compile(
+    r"(?:0\s+records\s+found|no\s+records\s+found)\.?",
+    re.IGNORECASE,
+)
 # Live FAO header (hermes-test-01, authenticated Home): aria-label
 # "Manage Policies Home" on a[data-at="header-nav__parent-link--manage-policies"].
 # The prefix also matches a control whose accessible name is exactly
@@ -365,6 +383,8 @@ def parse_memo_grid(grid: MemoGrid, *, agent_code: str) -> tuple[MemoRow, ...]:
     list_url = require_list_url(grid.list_url)
     if len(grid.rows) != len(grid.memo_controls):
         raise IntakeHold("Communications memo list is ambiguous")
+    if not grid.headers and not grid.rows and not grid.memo_controls:
+        return ()
     indexes = header_indexes(grid.headers)
     memos: list[MemoRow] = []
     for index, (cells, controls) in enumerate(zip(grid.rows, grid.memo_controls)):
@@ -1437,22 +1457,245 @@ def click_memo_control(row: Any) -> None:
     run_named_control_step(row, "Memo", primary, retry)
 
 
+def _memo_table_hold(page: Any, *, table_count: int, signal: str) -> IntakeHold:
+    """Fail closed. The counts and the URL are not click targets."""
+    shown = str(table_count) if table_count >= 0 else "unknown"
+    url = _safe_page_url(str(getattr(page, "url", "") or "")) or "(url withheld)"
+    return IntakeHold(
+        "Communications memo table is missing or ambiguous; "
+        f"tables matched {shown}; "
+        f"signal {signal}; "
+        f"page {url}"
+    )
+
+
+def _memo_table_signal(
+    *,
+    empty: bool,
+    header_tables: int,
+    control_tables: int,
+    memo_like_rows: int,
+) -> str:
+    state = "empty-list present" if empty else "empty-list absent"
+    return (
+        f"{state}; memo-header tables {header_tables}; "
+        f"memo-control tables {control_tables}; memo-like rows {memo_like_rows}"
+    )
+
+
+def _empty_list_signal(page: Any) -> bool:
+    """True when the page body states a clear empty Communications list.
+
+    The memo table does not ask Gemini. ``0 Records Found`` or
+    ``No records found`` is enough. Playwright's body text includes the
+    list. A missing or ambiguous body is not an empty list.
+    """
+    try:
+        body = page.locator("body")
+        if int(body.count()) != 1:
+            return False
+        text = _norm(str(body.inner_text() or ""))
+    except Exception:
+        return False
+    return _EMPTY_LIST_TEXT.search(text) is not None
+
+
+def _placeholder_row_text(cells: tuple[str, ...]) -> bool:
+    text = _norm(" ".join(cell for cell in cells if _norm(cell)))
+    if not text:
+        return True
+    return _PLACEHOLDER_ROW_TEXT.fullmatch(text) is not None
+
+
+def _row_kind(cells: tuple[str, ...], controls: int, *, header_ok: bool) -> str:
+    if controls > 0 or any(_POLICY_NUMBER.fullmatch(cell) for cell in cells):
+        return "memo"
+    if _placeholder_row_text(cells):
+        return "placeholder"
+    if header_ok:
+        return "memo"
+    return "layout"
+
+
+@dataclass(frozen=True)
+class _MemoTableView:
+    headers: tuple[str, ...]
+    kept_rows: tuple[tuple[str, ...], ...]
+    kept_controls: tuple[int, ...]
+    kept_locators: tuple[Any, ...]
+    memo_controls: int
+    data_rows: int
+    header_ok: bool
+    unreadable: bool
+
+
+def _blank_table_view(
+    *,
+    unreadable: bool = False,
+    memo_controls: int = 0,
+    data_rows: int = 0,
+) -> _MemoTableView:
+    return _MemoTableView(
+        headers=(),
+        kept_rows=(),
+        kept_controls=(),
+        kept_locators=(),
+        memo_controls=memo_controls,
+        data_rows=data_rows,
+        header_ok=False,
+        unreadable=unreadable,
+    )
+
+
+def _policy_like_cells(table: Any) -> bool:
+    for cell in table.locator("td").all():
+        if _POLICY_NUMBER.fullmatch(_norm(str(cell.inner_text() or ""))):
+            return True
+    return False
+
+
+def _read_memo_table(table: Any) -> _MemoTableView:
+    """Describe one table. A layout table is not a memo table."""
+    try:
+        table_controls = int(memo_control_count(table))
+        thead = table.locator("thead")
+        tbody = table.locator("tbody")
+        thead_count = int(thead.count())
+        tbody_count = int(tbody.count())
+        headers: tuple[str, ...] = ()
+        header_ok = False
+        if thead_count == 1:
+            headers = tuple(
+                _norm(str(node.inner_text() or ""))
+                for node in thead.locator("th").all()
+            )
+            if headers:
+                try:
+                    header_indexes(headers)
+                except IntakeHold:
+                    header_ok = False
+                else:
+                    header_ok = True
+        if not header_ok or tbody_count != 1:
+            data_rows = 1 if table_controls or _policy_like_cells(table) else 0
+            return _blank_table_view(
+                unreadable=header_ok,
+                memo_controls=table_controls,
+                data_rows=data_rows,
+            )
+        kept_rows = []
+        kept_controls = []
+        kept_locators = []
+        data_rows = 0
+        row_controls_total = 0
+        for row in tbody.locator("tr").all():
+            cells = tuple(
+                _norm(str(cell.inner_text() or ""))
+                for cell in row.locator("td").all()
+            )
+            controls = int(memo_control_count(row))
+            row_controls_total += controls
+            if _row_kind(cells, controls, header_ok=True) != "memo":
+                continue
+            data_rows += 1
+            kept_rows.append(cells)
+            kept_controls.append(controls)
+            kept_locators.append(row)
+        if row_controls_total != table_controls:
+            return _blank_table_view(
+                unreadable=True,
+                memo_controls=table_controls,
+                data_rows=max(data_rows, 1),
+            )
+        return _MemoTableView(
+            headers=headers,
+            kept_rows=tuple(kept_rows),
+            kept_controls=tuple(kept_controls),
+            kept_locators=tuple(kept_locators),
+            memo_controls=table_controls,
+            data_rows=data_rows,
+            header_ok=True,
+            unreadable=False,
+        )
+    except IntakeHold:
+        raise
+    except Exception:
+        return _blank_table_view(unreadable=True)
+
+
+_EMPTY_MEMO_GRID: tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[int, ...], tuple[Any, ...]] = (
+    (),
+    (),
+    (),
+    (),
+)
+
+
 def extract_memo_grid(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[int, ...], tuple[Any, ...]]:
-    tables = page.locator("table")
-    if tables.count() != 1:
-        raise IntakeHold("Communications memo table is missing or ambiguous")
-    header_nodes = _unique_child(tables, "thead").locator("th").all()
-    if not header_nodes:
-        raise IntakeHold("Communications memo table is missing or ambiguous")
-    headers = tuple(_norm(node.inner_text()) for node in header_nodes)
-    row_locators = tuple(_unique_child(tables, "tbody").locator("tr").all())
-    grid_rows = []
-    controls = []
-    for row in row_locators:
-        cells = tuple(_norm(cell.inner_text()) for cell in row.locator("td").all())
-        grid_rows.append(cells)
-        controls.append(memo_control_count(row))
-    return headers, tuple(grid_rows), tuple(controls), row_locators
+    """Read the Communications memo grid. The memo table does not ask Gemini.
+
+    Enumeration uses ``locator.all()``. Positional locators are not used.
+    A clear empty list with no memo-like row is zero rows, including when
+    several tables are present. That path does not invent rows. When
+    memo-like rows exist, the table is the one Communications header table,
+    or, if several header tables exist, the one of them that contains the
+    Memo control and every memo-like row. Any other shape holds with the
+    table count, the signal, and the page URL with query, fragment, and
+    userinfo removed.
+    """
+    located = page.locator("table")
+    try:
+        table_count = int(located.count())
+        tables = list(located.all())
+    except Exception as exc:
+        raise _memo_table_hold(page, table_count=-1, signal="table lookup failed") from exc
+    if table_count != len(tables):
+        raise _memo_table_hold(
+            page,
+            table_count=table_count,
+            signal="table count disagreed with the table list",
+        )
+    views = [_read_memo_table(table) for table in tables]
+    empty = _empty_list_signal(page)
+    header_hits = [view for view in views if view.header_ok]
+    control_tables = sum(1 for view in views if view.memo_controls)
+    memo_like_rows = sum(view.data_rows for view in views)
+    signal = _memo_table_signal(
+        empty=empty,
+        header_tables=len(header_hits),
+        control_tables=control_tables,
+        memo_like_rows=memo_like_rows,
+    )
+    if any(view.unreadable for view in views):
+        raise _memo_table_hold(
+            page,
+            table_count=table_count,
+            signal=f"{signal}; unreadable table",
+        )
+
+    def outside(chosen: _MemoTableView) -> bool:
+        if chosen.data_rows != memo_like_rows:
+            return True
+        return any(view is not chosen and view.memo_controls for view in views)
+
+    if memo_like_rows == 0 and (empty or len(header_hits) == 1):
+        if len(header_hits) == 1 and not any(
+            view is not header_hits[0] and view.memo_controls for view in views
+        ):
+            chosen = header_hits[0]
+            return chosen.headers, chosen.kept_rows, chosen.kept_controls, chosen.kept_locators
+        if empty and control_tables == 0:
+            return _EMPTY_MEMO_GRID
+        raise _memo_table_hold(page, table_count=table_count, signal=signal)
+    if len(header_hits) == 1 and header_hits[0].data_rows and not outside(header_hits[0]):
+        chosen = header_hits[0]
+        return chosen.headers, chosen.kept_rows, chosen.kept_controls, chosen.kept_locators
+    if len(header_hits) > 1:
+        with_controls = [view for view in header_hits if view.memo_controls]
+        if len(with_controls) == 1 and with_controls[0].data_rows and not outside(with_controls[0]):
+            chosen = with_controls[0]
+            return chosen.headers, chosen.kept_rows, chosen.kept_controls, chosen.kept_locators
+    raise _memo_table_hold(page, table_count=table_count, signal=signal)
 
 
 def more_pages(page: Any) -> bool | None:
@@ -1568,7 +1811,15 @@ class PlaywrightFaoMemoBrowser:
             require_communications_section(self.page)
         except IntakeHold as exc:
             raise IntakeHold("Communications list screenshot is missing or not a PNG") from exc
-        if self.page.locator("table").count() != 1:
+        try:
+            current = extract_memo_grid(self.page)
+        except IntakeHold as exc:
+            raise IntakeHold("Communications list screenshot is missing or not a PNG") from exc
+        if (current[0], current[1], current[2]) != (
+            self._grid.headers,
+            self._grid.rows,
+            self._grid.memo_controls,
+        ):
             raise IntakeHold("Communications list screenshot is missing or not a PNG")
         data = self.page.screenshot(full_page=True, type="png")
         return require_png(data)
@@ -2476,13 +2727,6 @@ def _is_fao_app_url(url: str) -> bool:
     except IntakeHold:
         return False
     return True
-
-
-def _unique_child(parent: Any, selector: str) -> Any:
-    locator = parent.locator(selector)
-    if locator.count() != 1:
-        raise IntakeHold("Communications memo table is missing or ambiguous")
-    return locator
 
 
 def _embed_sources(page: Any) -> list[str]:

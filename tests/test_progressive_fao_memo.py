@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import io
 import json
 import os
@@ -56,6 +57,7 @@ from robie_job_engine.progressive_fao_memo import (
     build_parser,
     classify_memo_row,
     collect_memo_observation,
+    extract_memo_grid,
     main,
     memo_document_id,
     memo_filename,
@@ -756,7 +758,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("header-drawer__content--show", drawer.primary_selector)
         self.assertIn("Policy Activity", drawer.description)
         self.assertIn("Agency Admin", drawer.description)
-        self.assertEqual(page.version, "1.10")
+        self.assertEqual(page.version, "1.11")
         view = page.get_field("view_activity_by")
         self.assertIn("#606", view.description)
         self.assertIn("does not ask Gemini", view.description)
@@ -813,6 +815,15 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("link:Communications", communications.description)
         self.assertIn("not a second veto", communications.description)
         self.assertIn("link:" + COMMUNICATIONS_LINK_LABEL, selectors)
+        memo_table = page.get_field("communications_memo_table")
+        self.assertEqual(memo_table.primary_strategy, "text")
+        self.assertEqual(memo_table.primary_selector, "0 Records Found")
+        self.assertEqual(memo_table.fallback_strategy, "text")
+        self.assertEqual(memo_table.fallback_selector, "No records found")
+        self.assertIn("does not ask Gemini", memo_table.description)
+        self.assertIn("tables matched", memo_table.description)
+        self.assertIn("underwritinglegacy", memo_table.description)
+        self.assertIn("0 memo rows and 0 PDFs", memo_table.description)
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
         self.assertIsNone(MANAGE_POLICIES_NAME.search("Menu Manage Policies"))
@@ -850,6 +861,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("success path does not call Gemini", text)
         self.assertIn("View Activity By does not ask Gemini", text)
         self.assertIn("Communications does not ask Gemini", text)
+        self.assertIn("The memo table does not ask Gemini", text)
         self.assertIn("does not call Jev", text)
         self.assertIn("gemini-api-key", text)
         self.assertIn("TypeSafe System One", text)
@@ -1100,8 +1112,10 @@ class NavPage:
                  form_url_on_wait=False,
                  start_mode="ok", end_mode="ok", button_mode="ok",
                  legacy_dates=False, results_section="cancels", results_url=None,
-                 results_mode="navigate", comms_mode="ok", search_on_results=False,
-                 communications_section="underwriting"):
+                 results_mode="navigate", comms_mode="ok",                  search_on_results=False,
+                 communications_section="underwriting",
+                 chrome_table_count=0, memo_grid="prove",
+                 duplicate_memo_table=False):
         self.url = url
         self.list_url = url
         self.body_text = body
@@ -1139,6 +1153,9 @@ class NavPage:
         self.comms_mode = comms_mode
         self.search_on_results = search_on_results
         self.communications_section = communications_section
+        self.chrome_table_count = chrome_table_count
+        self.memo_grid = memo_grid
+        self.duplicate_memo_table = duplicate_memo_table
         self.results_url = results_url or (
             "https://www.foragentsonly.com/managepolicies/policyactivity/"
             f"processeddateresults/{results_section}/"
@@ -1286,25 +1303,20 @@ class NavPage:
             self.activity_extras.append(FakeNode("div", VIEW_ACTIVITY_BY_LABEL, label=VIEW_ACTIVITY_BY_LABEL))
         self.communications_nodes = self._communications_nodes()
         self.rows = []
-        body_rows = []
-        for policy, insured, reason, memo_type, processed in PROVE_ROWS[:2]:
-            link = FakeNode("link", "Memo", attrs={"policy": policy})
-            cells = [
-                FakeNode("td", text=policy),
-                FakeNode("td", text=insured),
-                FakeNode("td", text=reason),
-                FakeNode("td", text=memo_type),
-                FakeNode("td", text=processed),
-                FakeNode("td", text="Memo", children=[link]),
-            ]
-            row = FakeNode("tr", children=cells)
-            self.rows.append(row)
-            body_rows.append(row)
-        headers = [FakeNode("th", text=header) for header in HEADERS]
-        self.table = FakeNode("table", children=[
-            FakeNode("thead", children=[FakeNode("tr", children=headers)]),
-            FakeNode("tbody", children=body_rows),
-        ])
+        self.table = None
+        self.second_memo_table = None
+        if self.memo_grid == "prove":
+            self.table = self._memo_table(PROVE_ROWS[:2], record_rows=True)
+            if self.duplicate_memo_table:
+                self.second_memo_table = self._memo_table(PROVE_ROWS[:2], record_rows=False)
+        elif self.memo_grid == "placeholder":
+            self.table = self._memo_table((), record_rows=True, placeholder=True)
+        elif self.memo_grid != "absent":
+            raise AssertionError(self.memo_grid)
+        self.chrome_table_nodes = [
+            self._layout_table(f"Layout {index + 1}")
+            for index in range(self.chrome_table_count)
+        ]
         self.next_nodes = []
         if self.next_mode == "disabled":
             self.next_nodes.append(FakeNode("button", "Next", attrs={"aria-disabled": "true"}, disabled=True))
@@ -1315,6 +1327,44 @@ class NavPage:
                 FakeNode("button", "Next", disabled=False),
                 FakeNode("link", "Next", disabled=False),
             ])
+
+    def _layout_table(self, label):
+        return FakeNode("table", children=[
+            FakeNode("thead", children=[FakeNode("tr", children=[FakeNode("th", text=label)])]),
+            FakeNode("tbody", children=[FakeNode("tr", children=[FakeNode("td", text=label)])]),
+        ])
+
+    def _memo_table(self, specs, *, record_rows, placeholder=False, with_memo_control=True):
+        body_rows = []
+        recorded = []
+        if placeholder:
+            body_rows.append(FakeNode("tr", children=[FakeNode("td", text="No records found")]))
+        else:
+            for policy, insured, reason, memo_type, processed in specs:
+                cells = [
+                    FakeNode("td", text=policy),
+                    FakeNode("td", text=insured),
+                    FakeNode("td", text=reason),
+                    FakeNode("td", text=memo_type),
+                    FakeNode("td", text=processed),
+                ]
+                if with_memo_control:
+                    cells.append(FakeNode(
+                        "td", text="Memo",
+                        children=[FakeNode("link", "Memo", attrs={"policy": policy})],
+                    ))
+                else:
+                    cells.append(FakeNode("td", text="Open"))
+                row = FakeNode("tr", children=cells)
+                recorded.append(row)
+                body_rows.append(row)
+        if record_rows:
+            self.rows = recorded
+        headers = [FakeNode("th", text=header) for header in HEADERS]
+        return FakeNode("table", children=[
+            FakeNode("thead", children=[FakeNode("tr", children=headers)]),
+            FakeNode("tbody", children=body_rows),
+        ])
 
     def drawer_is_shown(self):
         if self.drawer is None:
@@ -1354,7 +1404,11 @@ class NavPage:
             "comms": self._results_roots(),
         }[self.state])
         if self.state == "comms" and self.table_visible:
-            nodes.append(self.table)
+            if self.table is not None:
+                nodes.append(self.table)
+            nodes.extend(self.chrome_table_nodes)
+            if self.second_memo_table is not None:
+                nodes.append(self.second_memo_table)
             nodes.extend(self.next_nodes)
         return nodes
 
@@ -2773,6 +2827,296 @@ class NavigationTests(unittest.TestCase):
                 PlaywrightFaoMemoBrowser(page),
                 LocalDeliveryLedger(Path(tempfile.mkdtemp()) / "out"),
             ).list_documents(scope="fao_communications", start=PROVE_DAY, end=PROVE_DAY)
+
+
+    def test_three_tables_and_zero_records_found_writes_a_zero_pack(self):
+        page = NavPage(
+            body="StreetSmart Risk Mgr CA33617\n0 Records Found\nNo records found",
+            memo_grid="absent",
+            chrome_table_count=3,
+            communications_section="underwritinglegacy",
+            next_mode="none",
+        )
+        out = Path(tempfile.mkdtemp()) / "qa"
+        portal = FaoCommunicationsMemoPortal(
+            PlaywrightFaoMemoBrowser(page),
+            LocalDeliveryLedger(out),
+        )
+        worker = ProgressiveRetrieval(SimpleNamespace(writes=0), SourceArchive(out / "sources"))
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            items = worker.pull_fao_communications(portal, start=PROVE_DAY, end=PROVE_DAY)
+        rescued.assert_not_called()
+        self.assertEqual(items, ())
+        self.assertEqual(page.memo_opens, [])
+        self.assertNotIn("Memo", page.clicks)
+        self.assertNotIn("Search", page.clicks)
+        self.assertIn("Communications", page.clicks)
+        self.assertEqual(page.locator("table").count(), 3)
+        self.assertEqual(page.url, page.communications_url)
+        self.assertIn("underwritinglegacy", page.url)
+        self.assertEqual(portal.verification["by_date"], [{
+            "processed_date": "2026-09-25", "memo_rows": 0, "pdfs": 0,
+        }])
+        day = out / "2026-09-25"
+        self.assertEqual((day / "fao-communications-memo-2026-09-25.png").read_bytes(), LIST_PNG)
+        manifest = json.loads((day / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["memos"], [])
+        self.assertEqual(manifest["memo_rows"], 0)
+        self.assertEqual(manifest["pdfs"], 0)
+        self.assertEqual(list(day.glob("*.pdf")), [])
+
+    def test_memo_rows_are_taken_from_the_one_header_table_among_three(self):
+        page = NavPage(chrome_table_count=2, next_mode="none")
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            grid = self._load(page)
+        rescued.assert_not_called()
+        self.assertEqual(page.locator("table").count(), 3)
+        self.assertEqual(
+            [row[0] for row in grid.rows],
+            ["860521214", "879512352"],
+        )
+        self.assertEqual(grid.memo_controls, (1, 1))
+        self.assertEqual(page.memo_opens, [])
+        self.assertNotIn("Memo", page.clicks)
+        self.assertNotIn("Search", page.clicks)
+
+    def test_two_memo_tables_hold_without_a_pdf_click_or_gemini(self):
+        page = NavPage(
+            duplicate_memo_table=True,
+            communications_section="underwritinglegacy",
+            next_mode="none",
+        )
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            with self.assertRaises(IntakeHold) as caught:
+                self._load(page)
+        rescued.assert_not_called()
+        message = str(caught.exception)
+        self.assertIn("tables matched 2", message)
+        self.assertIn("empty-list absent", message)
+        self.assertIn("memo-header tables 2", message)
+        self.assertIn("memo-control tables 2", message)
+        self.assertIn(page.communications_url, message)
+        self.assertNotIn("gemini:", message)
+        self.assertEqual(page.memo_opens, [])
+        self.assertNotIn("Memo", page.clicks)
+        self.assertNotIn("Search", page.clicks)
+
+
+def _fixture_memo_table(rows, *, with_memo_control=True, placeholder=False):
+    if placeholder:
+        body = [FakeNode("tr", children=[FakeNode("td", text="No records found")])]
+    else:
+        body = []
+        for policy, insured, reason, memo_type, processed in rows:
+            cells = [
+                FakeNode("td", text=policy),
+                FakeNode("td", text=insured),
+                FakeNode("td", text=reason),
+                FakeNode("td", text=memo_type),
+                FakeNode("td", text=processed),
+            ]
+            if with_memo_control:
+                cells.append(FakeNode(
+                    "td",
+                    text="Memo",
+                    children=[FakeNode("link", "Memo", attrs={"policy": policy})],
+                ))
+            else:
+                cells.append(FakeNode("td", text="Open"))
+            body.append(FakeNode("tr", children=cells))
+    headers = [FakeNode("th", text=header) for header in HEADERS]
+    return FakeNode("table", children=[
+        FakeNode("thead", children=[FakeNode("tr", children=headers)]),
+        FakeNode("tbody", children=body),
+    ])
+
+
+def _fixture_layout_table(label):
+    return FakeNode("table", children=[
+        FakeNode("thead", children=[FakeNode("tr", children=[FakeNode("th", text=label)])]),
+        FakeNode("tbody", children=[FakeNode("tr", children=[FakeNode("td", text=label)])]),
+    ])
+
+
+class MemoGridPage:
+    def __init__(self, tables, body, url):
+        self.url = url
+        self._body = FakeNode("body", text=body)
+        self._tables = list(tables)
+
+    def locator(self, selector):
+        found = []
+        for node in (self._body, *self._tables):
+            found.extend(node.find(selector))
+        return NodeLocator(found, self)
+
+    def get_by_role(self, role, name=None, exact=True):
+        found = []
+        for node in (self._body, *self._tables):
+            found.extend(node.find_role(role, name, exact))
+        return NodeLocator(found, self)
+
+
+_UNDERWRITING_LEGACY = (
+    "https://www.foragentsonly.com/managepolicies/policyactivity/"
+    "processeddateresults/underwritinglegacy/"
+)
+
+
+class MemoTableIdentityTests(unittest.TestCase):
+    def test_extract_does_not_use_a_positional_locator_or_gemini(self):
+        from robie_job_engine import progressive_fao_memo as memo
+
+        for name in (
+            "extract_memo_grid",
+            "_read_memo_table",
+            "_empty_list_signal",
+            "_memo_table_hold",
+            "_memo_table_signal",
+            "_row_kind",
+        ):
+            source = inspect.getsource(getattr(memo, name))
+            self.assertNotIn(".first", source, name)
+            self.assertNotIn(".nth", source, name)
+            self.assertNotIn("run_named_control_step", source, name)
+            self.assertNotIn("rescued_locator", source, name)
+            self.assertNotIn("gemini_ui_rescue", source, name)
+
+    def test_either_empty_phrase_with_three_layout_tables_is_zero_rows(self):
+        bodies = (
+            "StreetSmart Risk Mgr CA33617\n0 Records Found\nNo records found",
+            "0 Records Found",
+            "No records found.",
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                page = MemoGridPage(
+                    [_fixture_layout_table(f"Layout {index}") for index in range(3)],
+                    body,
+                    _UNDERWRITING_LEGACY,
+                )
+                headers, rows, controls, locators = extract_memo_grid(page)
+                self.assertEqual((headers, rows, controls, locators), ((), (), (), ()))
+                self.assertEqual(
+                    parse_memo_grid(
+                        MemoGrid(_UNDERWRITING_LEGACY, headers, rows, controls, False),
+                        agent_code=DEFAULT_AGENT_CODE,
+                    ),
+                    (),
+                )
+
+    def test_layout_word_records_without_the_empty_phrase_holds(self):
+        page = MemoGridPage(
+            [_fixture_layout_table(f"Layout {index}") for index in range(3)],
+            "StreetSmart Risk Mgr CA33617 Records",
+            _UNDERWRITING_LEGACY + "?token=abc#frag",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            extract_memo_grid(page)
+        message = str(caught.exception)
+        self.assertIn("tables matched 3", message)
+        self.assertIn("empty-list absent", message)
+        self.assertIn("memo-header tables 0", message)
+        self.assertIn("memo-like rows 0", message)
+        self.assertIn(_UNDERWRITING_LEGACY, message)
+        self.assertNotIn("token", message)
+        self.assertNotIn("gemini:", message)
+
+    def test_hold_scrubs_userinfo_query_and_fragment(self):
+        page = MemoGridPage(
+            [_fixture_memo_table(PROVE_ROWS[:1]), _fixture_memo_table(PROVE_ROWS[1:2])],
+            "StreetSmart Risk Mgr CA33617",
+            "https://user:secret@www.foragentsonly.com/managepolicies/policyactivity/"
+            "processeddateresults/underwritinglegacy/?token=abc#frag",
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            extract_memo_grid(page)
+        message = str(caught.exception)
+        self.assertIn("tables matched 2", message)
+        self.assertIn("signal empty-list absent; memo-header tables 2; memo-control tables 2", message)
+        self.assertIn(_UNDERWRITING_LEGACY, message)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("user", message)
+        self.assertNotIn("token", message)
+        self.assertNotIn("gemini:", message)
+
+    def test_memo_control_picks_the_one_populated_header_table(self):
+        page = MemoGridPage(
+            [
+                _fixture_layout_table("Layout"),
+                _fixture_memo_table((), placeholder=True),
+                _fixture_memo_table(PROVE_ROWS[:1]),
+            ],
+            "StreetSmart Risk Mgr CA33617",
+            _UNDERWRITING_LEGACY,
+        )
+        headers, rows, controls, locators = extract_memo_grid(page)
+        self.assertEqual(headers, HEADERS)
+        self.assertEqual(rows, (("860521214", "3JR Contracting LLC", "General", "Memo", "09/25/2026", "Memo"),))
+        self.assertEqual(controls, (1,))
+        self.assertEqual(len(locators), 1)
+
+    def test_a_second_populated_header_table_holds(self):
+        page = MemoGridPage(
+            [
+                _fixture_memo_table(
+                    (("111111111", "Other LLC", "General", "Memo", "09/25/2026"),),
+                    with_memo_control=False,
+                ),
+                _fixture_memo_table(PROVE_ROWS[:1]),
+            ],
+            "StreetSmart Risk Mgr CA33617",
+            _UNDERWRITING_LEGACY,
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            extract_memo_grid(page)
+        message = str(caught.exception)
+        self.assertIn("tables matched 2", message)
+        self.assertIn("memo-header tables 2", message)
+        self.assertIn("memo-control tables 1", message)
+        self.assertIn("memo-like rows 2", message)
+        self.assertNotIn("gemini:", message)
+
+    def test_policy_number_outside_the_header_table_holds(self):
+        stray = FakeNode("table", children=[
+            FakeNode("thead", children=[FakeNode("tr", children=[FakeNode("th", text="Other")])]) ,
+            FakeNode("tbody", children=[FakeNode("tr", children=[FakeNode("td", text="860521214")])]),
+        ])
+        page = MemoGridPage(
+            [_fixture_layout_table("Layout"), stray],
+            "0 Records Found\nNo records found",
+            _UNDERWRITING_LEGACY,
+        )
+        with self.assertRaises(IntakeHold) as caught:
+            extract_memo_grid(page)
+        message = str(caught.exception)
+        self.assertIn("empty-list present", message)
+        self.assertIn("memo-header tables 0", message)
+        self.assertIn("memo-like rows 1", message)
+        self.assertNotIn("gemini:", message)
+
+    def test_empty_phrase_does_not_drop_a_unique_memo_table(self):
+        page = MemoGridPage(
+            [_fixture_layout_table("Layout"), _fixture_memo_table(PROVE_ROWS[:2]), _fixture_layout_table("Aside")],
+            "0 Records Found",
+            _UNDERWRITING_LEGACY,
+        )
+        _headers, rows, controls, _locators = extract_memo_grid(page)
+        self.assertEqual([row[0] for row in rows], ["860521214", "879512352"])
+        self.assertEqual(controls, (1, 1))
+
+    def test_placeholder_row_in_the_one_memo_table_is_not_a_memo(self):
+        page = MemoGridPage(
+            [_fixture_memo_table((), placeholder=True), _fixture_layout_table("Layout")],
+            "No records found",
+            _UNDERWRITING_LEGACY,
+        )
+        headers, rows, controls, locators = extract_memo_grid(page)
+        self.assertEqual(headers, HEADERS)
+        self.assertEqual(rows, ())
+        self.assertEqual(controls, ())
+        self.assertEqual(locators, ())
 
 
 class WorkerRowTests(unittest.TestCase):
