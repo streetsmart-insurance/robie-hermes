@@ -222,6 +222,7 @@ def sweep_harness(tmp_path, records, **kw):
         now=datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc),
         intake_fn=intake_fn,
         file_record_fn=kw.get("file_record_fn"),
+        mark_read_fn=kw.get("mark_read_fn"),
         deps_error=kw.get("deps_error", ""),
     )
     return summary, ctx
@@ -491,3 +492,218 @@ def test_run_sweep_uses_real_dedupe_store(tmp_path, monkeypatch):
         now=datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc))
     assert summary["errors"] == []
     assert summary["data_dir"] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Mark-read after destination-proven filing
+# ---------------------------------------------------------------------------
+
+def test_filed_message_is_marked_read(tmp_path):
+    """A FILED record's source message gets mark_read called."""
+    calls = []
+
+    def mark_read_fn(gmail_id):
+        calls.append(gmail_id)
+        return True, "ok"
+
+    deps = make_deps(tmp_path)
+    summary, ctx = sweep_harness(tmp_path, [make_record()], deps=deps,
+                                 mark_read_fn=mark_read_fn)
+
+    assert summary["errors"] == []
+    assert len(summary["filed"]) == 1
+    assert calls == ["g1"]
+    entry = summary["filed"][0]
+    assert entry["marked_read"] is True
+    assert entry["mark_read_reason"] == "ok"
+    assert summary["stats"]["marked_read"] == 1
+    assert summary["stats"]["mark_read_failed"] == 0
+    ctx["retry_conn"].close()
+
+
+def test_unverified_message_stays_unread(tmp_path):
+    """Held/UNVERIFIED records never trigger mark_read."""
+    calls = []
+
+    def mark_read_fn(gmail_id):
+        calls.append(gmail_id)
+        return True, "ok"
+
+    def exploding_file_record(record, verified, d, **kw):
+        raise AssertionError("file_record must not run for a held record")
+
+    deps = make_deps(tmp_path)
+    rec = make_record()
+    rec.match = MatchResult(status=AMBIGUOUS, applicant_id=None,
+                            candidates=[111, 222])
+    rec.held = True
+    rec.hold_reason = "applicant name matches 2 records (111, 222)"
+    summary, ctx = sweep_harness(tmp_path, [rec], deps=deps,
+                                 file_record_fn=exploding_file_record,
+                                 mark_read_fn=mark_read_fn)
+
+    assert calls == []
+    assert summary["filed"] == []
+    assert len(summary["unverified"]) == 1
+    ctx["retry_conn"].close()
+
+
+def test_mark_read_failure_keeps_filing_filed(tmp_path):
+    """A mark-read failure is bookkeeping, never a filing failure."""
+    def failing_mark_read(gmail_id):
+        return False, "gmail.modify not authorized"
+
+    deps = make_deps(tmp_path)
+    summary, ctx = sweep_harness(tmp_path, [make_record()], deps=deps,
+                                 mark_read_fn=failing_mark_read)
+
+    assert len(summary["filed"]) == 1
+    entry = summary["filed"][0]
+    assert entry["marked_read"] is False
+    assert "not authorized" in entry["mark_read_reason"]
+    assert summary["stats"]["marked_read"] == 0
+    assert summary["stats"]["mark_read_failed"] == 1
+    # The filing is proven — a mark-read failure is not a sweep error.
+    assert summary["errors"] == []
+    ctx["retry_conn"].close()
+
+
+def test_mark_read_disabled_via_env(tmp_path, monkeypatch):
+    """CERT_GMAIL_MARK_READ=0 skips mark-read entirely."""
+    calls = []
+    monkeypatch.setenv("CERT_GMAIL_MARK_READ", "0")
+
+    def mark_read_fn(gmail_id):
+        calls.append(gmail_id)
+        return True, "ok"
+
+    deps = make_deps(tmp_path)
+    summary, ctx = sweep_harness(tmp_path, [make_record()], deps=deps,
+                                 mark_read_fn=mark_read_fn)
+
+    assert calls == []
+    assert summary["filed"][0]["marked_read"] is False
+    assert summary["filed"][0]["mark_read_reason"] == \
+        "disabled (CERT_GMAIL_MARK_READ=0)"
+    assert summary["errors"] == []
+    ctx["retry_conn"].close()
+
+
+def test_mark_read_never_raises_into_sweep(tmp_path):
+    """A raising mark_read port is caught; the filing still counts."""
+    def raising_mark_read(gmail_id):
+        raise RuntimeError("boom")
+
+    deps = make_deps(tmp_path)
+    summary, ctx = sweep_harness(tmp_path, [make_record()], deps=deps,
+                                 mark_read_fn=raising_mark_read)
+
+    assert len(summary["filed"]) == 1
+    assert summary["filed"][0]["marked_read"] is False
+    assert "boom" in summary["filed"][0]["mark_read_reason"]
+    assert summary["errors"] == []
+    ctx["retry_conn"].close()
+
+
+# ---------------------------------------------------------------------------
+# Adapter: mark_message_read retry discipline
+# ---------------------------------------------------------------------------
+
+def _http_error(code):
+    import urllib.error
+    return urllib.error.HTTPError(
+        "https://gmail.googleapis.com/", code, "err", {}, None)
+
+
+def test_mark_message_read_success(monkeypatch):
+    import robie_job_engine.cert_gmail_adapter as ga
+
+    monkeypatch.setattr(ga, "_modify_dwd_token", lambda mailbox: "tok")
+    posted = {}
+
+    def fake_modify(token, mailbox, gmail_id, body):
+        posted.update(token=token, mailbox=mailbox, gmail_id=gmail_id,
+                      body=body)
+        return {"id": gmail_id, "labelIds": []}
+
+    monkeypatch.setattr(ga, "_gmail_modify", fake_modify)
+    ok, reason = ga.mark_message_read("certificates@streetsmart.insurance",
+                                      "abc")
+    assert ok is True and reason == "ok"
+    assert posted["body"] == {"removeLabelIds": ["UNREAD"]}
+    assert posted["token"] == "tok"
+
+
+def test_mark_message_read_403_leaves_unread(monkeypatch):
+    """gmail.modify not authorized -> (False, reason), no retry."""
+    import robie_job_engine.cert_gmail_adapter as ga
+
+    monkeypatch.setattr(ga, "_modify_dwd_token", lambda mailbox: "tok")
+    attempts = []
+
+    def fake_modify(token, mailbox, gmail_id, body):
+        attempts.append(gmail_id)
+        raise _http_error(403)
+
+    monkeypatch.setattr(ga, "_gmail_modify", fake_modify)
+    ok, reason = ga.mark_message_read("certificates@streetsmart.insurance",
+                                      "abc")
+    assert ok is False
+    assert "not authorized" in reason
+    assert attempts == ["abc"]  # no retry on 403
+
+
+def test_mark_message_read_reads_back_before_resend(monkeypatch):
+    """Transport failure -> label read-back; UNREAD gone -> ok, no re-send."""
+    import robie_job_engine.cert_gmail_adapter as ga
+
+    monkeypatch.setattr(ga, "_modify_dwd_token", lambda mailbox: "tok")
+    attempts = []
+
+    def fake_modify(token, mailbox, gmail_id, body):
+        attempts.append(gmail_id)
+        raise _http_error(500)
+
+    monkeypatch.setattr(ga, "_gmail_modify", fake_modify)
+    monkeypatch.setattr(ga, "_gmail_label_ids",
+                        lambda token, mailbox, gmail_id: ["INBOX"])
+    ok, reason = ga.mark_message_read("certificates@streetsmart.insurance",
+                                      "abc")
+    assert ok is True
+    assert "read-back" in reason
+    assert attempts == ["abc"]  # re-send skipped: UNREAD already gone
+
+
+def test_mark_message_read_fails_closed_when_readback_fails(monkeypatch):
+    """Read-back itself failing -> (False, ...), never proceeds blind."""
+    import robie_job_engine.cert_gmail_adapter as ga
+
+    monkeypatch.setattr(ga, "_modify_dwd_token", lambda mailbox: "tok")
+
+    def fake_modify(token, mailbox, gmail_id, body):
+        raise _http_error(500)
+
+    def fake_labels(token, mailbox, gmail_id):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(ga, "_gmail_modify", fake_modify)
+    monkeypatch.setattr(ga, "_gmail_label_ids", fake_labels)
+    ok, reason = ga.mark_message_read("certificates@streetsmart.insurance",
+                                      "abc")
+    assert ok is False
+    assert "read-back failed" in reason
+
+
+def test_adapter_mark_read_never_raises(monkeypatch):
+    """CertGmailAdapter.mark_read catches everything from the module fn."""
+    import robie_job_engine.cert_gmail_adapter as ga
+
+    def boom(mailbox, gmail_id):
+        raise RuntimeError("token service down")
+
+    monkeypatch.setattr(ga, "mark_message_read", boom)
+    adapter = ga.CertGmailAdapter(session=None,
+                                  mailbox="certificates@streetsmart.insurance")
+    ok, reason = adapter.mark_read("abc")
+    assert ok is False
+    assert "token service down" in reason
