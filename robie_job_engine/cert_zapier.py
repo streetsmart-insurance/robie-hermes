@@ -18,6 +18,7 @@ Nothing here invents a hook path: a missing ``~/.config/zapier/hook_path``
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -97,7 +98,25 @@ class CertZapierClient:
             "due_date": due_date or certificate_due_date(),
             "note_text": note_text,
         }
-        return self._fire(payload, applicant_verified=True)
+        result = self._fire(payload, applicant_verified=True)
+        # Delayed verification (2026-09-27): when the Zap actually fires, queue
+        # the expected task for the verifier. Creation is NOT delayed — only
+        # the completion-status check waits. Never let this break the firing.
+        if result.fired:
+            try:
+                from .task_verifier import TaskVerificationStore
+
+                TaskVerificationStore().record_pending(
+                    producer="certificates",
+                    applicant_id=str(applicant_id),
+                    title=title,
+                    assignee=self.assignee,
+                )
+            except Exception as exc:  # noqa: BLE001 — verification is best-effort here
+                logging.getLogger(__name__).warning(
+                    "task_verifier record_pending failed: %s", exc
+                )
+        return result
 
     def reopen_task(self, *, task_id: str, applicant_id: int, title: str,
                     note_text: str) -> ZapResult:
