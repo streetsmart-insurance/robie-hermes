@@ -1,7 +1,7 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.2",
+  "version": "1.3",
   "fields": {
     "manage_policies": {
       "name": "manage_policies",
@@ -74,25 +74,25 @@
       "primary_selector": "[data-at=\"ProcessedDateButton\"]",
       "exact": true,
       "accessible_name": "Get Policy Activity",
-      "description": "Submits the processed-date window. Live control value is Get Policy Activity. Unique and visible on the page. It is not inside select#PDDateRange. Search is the next step and is unchanged.",
+      "description": "Submits the processed-date window and navigates to processed-date results. Live control value is Get Policy Activity. Unique and visible on the Policy Activity form. It is not inside select#PDDateRange. The next page is processeddateresults, not a Search button.",
       "last_updated": "2026-09-27"
     },
-    "search": {
-      "name": "search",
-      "primary_strategy": "role",
-      "primary_selector": "button:Search",
+    "processed_date_results": {
+      "name": "processed_date_results",
+      "primary_strategy": "text",
+      "primary_selector": "Policy Activity Processed Date Results",
       "exact": true,
-      "accessible_name": "Search",
-      "description": "Clicked after Get Policy Activity. Live button name is still UNVERIFIED on a completed pull.",
-      "last_updated": "2026-09-26"
+      "description": "Page reached by Get Policy Activity. Live prove on hermes-test-01 release 00a0ae294ec0 landed on https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/ with title Policy Activity Processed Date Results – Cancels, Lapses, Reinstates. Sibling sections are the same prefix with one other slug. The worker matches that URL. It does not click this title and it does not click Search. A missing URL, a query, or an extra path segment holds.",
+      "last_updated": "2026-09-27"
     },
     "communications_tab": {
       "name": "communications_tab",
       "primary_strategy": "role",
       "primary_selector": "tab:Communications",
       "exact": true,
-      "description": "Communications tab. The run holds unless aria-selected becomes true.",
-      "last_updated": "2026-09-26"
+      "accessible_name": "Communications",
+      "description": "Exact tab on the processed-date results page, including the cancels landing and sibling sections. Clicked after the results URL matches. A link named Communications is not this control. The run holds unless this one tab exists and aria-selected becomes true.",
+      "last_updated": "2026-09-27"
     }
   }
 }

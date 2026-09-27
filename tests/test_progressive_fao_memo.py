@@ -28,6 +28,7 @@ from robie_job_engine.progressive_fao_memo import (
     PagePdfView,
     END_DATE_CSS,
     END_DATE_LABEL,
+    COMMUNICATIONS_TAB_LABEL,
     GET_POLICY_ACTIVITY_CSS,
     GET_POLICY_ACTIVITY_LABEL,
     MAIN_NAVIGATION_NAME,
@@ -52,8 +53,10 @@ from robie_job_engine.progressive_fao_memo import (
     main,
     memo_document_id,
     memo_filename,
+    PROCESSED_DATE_RESULTS_HOLD,
     parse_memo_grid,
     pdf_bytes_from_observation,
+    require_processed_date_results,
     read_playwright_pdf_view,
     require_loopback_cdp,
     require_memo_pdf_parity,
@@ -64,6 +67,10 @@ from robie_job_engine.progressive_retrieval import ProgressiveRetrieval
 
 
 LIST_URL = "https://www.foragentsonly.com/managepolicies/policyactivity"
+RESULTS_CANCELS_URL = (
+    "https://www.foragentsonly.com/managepolicies/policyactivity/"
+    "processeddateresults/cancels/"
+)
 LIST_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
     "0000000c4944415408d763f8cfc00000000300010005fe02fedccc59e700000000"
@@ -757,7 +764,17 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn(CUSTOM_DATE_RANGE_LABEL, date_range.description)
         self.assertIn("select#PDDateRange", date_range.primary_selector)
         self.assertIn(PROCESSED_DATE_OPTION_VALUE, page.get_field("processed_date_option").primary_selector)
-        self.assertEqual(page.get_field("search").primary_selector, "button:Search")
+        self.assertIsNone(page.get_field("search"))
+        self.assertNotIn("button:Search", selectors)
+        results = page.get_field("processed_date_results")
+        self.assertEqual(results.primary_selector, "Policy Activity Processed Date Results")
+        self.assertIn("processeddateresults/cancels/", results.description)
+        self.assertIn("does not click Search", results.description)
+        communications = page.get_field("communications_tab")
+        self.assertEqual(communications.primary_selector, "tab:" + COMMUNICATIONS_TAB_LABEL)
+        self.assertEqual(communications.accessible_name, COMMUNICATIONS_TAB_LABEL)
+        self.assertIn("aria-selected", communications.description)
+        self.assertIn("cancels", communications.description)
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
         self.assertIsNone(MANAGE_POLICIES_NAME.search("Menu Manage Policies"))
@@ -1015,7 +1032,8 @@ class NavPage:
                  duplicate_main_nav=False, main_nav_visible=True,
                  view_mode="ok", option_mode="ok", range_mode="reveal",
                  start_mode="ok", end_mode="ok", button_mode="ok",
-                 legacy_dates=False):
+                 legacy_dates=False, results_section="cancels", results_url=None,
+                 results_mode="navigate", comms_mode="ok", search_on_results=False):
         self.url = url
         self.list_url = url
         self.body_text = body
@@ -1044,6 +1062,14 @@ class NavPage:
         self.end_mode = end_mode
         self.button_mode = button_mode
         self.legacy_dates = legacy_dates
+        self.results_section = results_section
+        self.results_mode = results_mode
+        self.comms_mode = comms_mode
+        self.search_on_results = search_on_results
+        self.results_url = results_url or (
+            "https://www.foragentsonly.com/managepolicies/policyactivity/"
+            f"processeddateresults/{results_section}/"
+        )
         self.clicks = []
         self.filled_while_hidden = []
         self.memo_opens = []
@@ -1182,7 +1208,8 @@ class NavPage:
             "home": self.home,
             "policies": self.policies,
             "activity": self._activity_roots(),
-            "comms": [self.tab],
+            "results": self._results_roots(),
+            "comms": self._results_roots(),
         }[self.state])
         if self.state == "comms" and self.table_visible:
             nodes.append(self.table)
@@ -1210,12 +1237,31 @@ class NavPage:
     def _activity_roots(self):
         return [
             *self.view_nodes,
-            self.search_button,
             *self.activity_extras,
             *self.preset_selects,
             *self.page_dates,
             *self.page_buttons,
         ]
+
+    def _results_roots(self):
+        nodes = []
+        if self.comms_mode == "link":
+            nodes.append(FakeNode("link", "Communications"))
+        elif self.comms_mode != "missing":
+            nodes.append(self.tab)
+            if self.comms_mode == "duplicate":
+                nodes.append(FakeNode("tab", "Communications", attrs={"aria-selected": "false"}))
+        if self.search_on_results:
+            nodes.append(self.search_button)
+        return nodes
+
+    def wait_for_url(self, url, timeout=None):
+        if hasattr(url, "search"):
+            if url.search(self.url):
+                return None
+        elif str(url) == self.url:
+            return None
+        raise TimeoutError("processed-date results page did not appear")
 
     def _view_nodes(self):
         if self.view_mode == "missing":
@@ -1316,10 +1362,14 @@ class NavPage:
             self.state = "policies"
         elif node in self.policies and self.state == "policies":
             self.state = "activity"
-        elif node.name == "Search" and self.state == "activity":
+        elif node is self.get_activity and self.state == "activity" and self.results_mode == "navigate":
+            self.state = "results"
+            self.url = self.results_url
+            self.list_url = self.results_url
+        elif node.role == "tab" and node.name == "Communications" and self.state == "results":
+            if self.comms_mode != "unselected":
+                node.attrs["aria-selected"] = "true"
             self.state = "comms"
-        elif node.name == "Communications" and self.state == "comms":
-            node.attrs["aria-selected"] = "true"
             self.table_visible = True
         elif node.name == "Memo":
             policy = node.attrs["policy"]
@@ -1498,10 +1548,11 @@ class NavigationTests(unittest.TestCase):
             "Processed Date",
             CUSTOM_DATE_RANGE_LABEL,
             "Get Policy Activity",
-            "Search",
             "Communications",
             "Memo",
         ])
+        self.assertNotIn("Search", page.clicks)
+        self.assertEqual(page.url, RESULTS_CANCELS_URL)
         self.assertNotIn(MAIN_NAVIGATION_NAME, page.clicks)
         self.assertFalse(page.closed)
 
@@ -1510,7 +1561,9 @@ class NavigationTests(unittest.TestCase):
         browser = PlaywrightFaoMemoBrowser(page)
         grid = browser.load_communications(start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE)
         self.assertEqual(len(grid.rows), 2)
-        self.assertIn("Search", page.clicks)
+        self.assertNotIn("Search", page.clicks)
+        self.assertIn("Communications", page.clicks)
+        self.assertEqual(page.url, RESULTS_CANCELS_URL)
 
     def _load(self, page):
         return PlaywrightFaoMemoBrowser(page).load_communications(
@@ -1732,7 +1785,8 @@ class NavigationTests(unittest.TestCase):
                 self.assertEqual(page.start_date.value, PROVE_DAY.isoformat())
                 self.assertEqual(page.end_date.value, PROVE_DAY.isoformat())
                 self.assertIn("Get Policy Activity", page.clicks)
-                self.assertIn("Search", page.clicks)
+                self.assertIn("Communications", page.clicks)
+                self.assertNotIn("Search", page.clicks)
 
     def test_date_filter_fails_closed_when_controls_are_missing_or_ambiguous(self):
         cases = (
@@ -1895,7 +1949,7 @@ class NavigationTests(unittest.TestCase):
         memo = parse_memo_grid(grid, agent_code=DEFAULT_AGENT_CODE)[0]
         blob = pdf_bytes_from_observation(browser.capture_memo(memo.document_id))
         self.assertEqual(blob, pdf_bytes(b"860521214"))
-        self.assertEqual(page.url, LIST_URL)
+        self.assertEqual(page.url, RESULTS_CANCELS_URL)
 
         stuck = NavPage(open_mode="same-stuck", next_mode="none")
         browser = PlaywrightFaoMemoBrowser(stuck)
@@ -1903,6 +1957,97 @@ class NavigationTests(unittest.TestCase):
         memo = parse_memo_grid(grid, agent_code=DEFAULT_AGENT_CODE)[0]
         with self.assertRaisesRegex(IntakeHold, "left the Communications list"):
             browser.capture_memo(memo.document_id)
+
+    def test_cancels_results_open_communications_without_search(self):
+        page = NavPage(search_on_results=True)
+        grid = self._load(page)
+        self.assertEqual(page.url, RESULTS_CANCELS_URL)
+        self.assertEqual(len(grid.rows), 2)
+        self.assertNotIn("Search", page.clicks)
+        self.assertIn("Communications", page.clicks)
+        self.assertEqual(page.get_by_role("button", name="Search", exact=True).count(), 1)
+        self.assertEqual(page.tab.attrs["aria-selected"], "true")
+
+    def test_sibling_processed_date_results_also_open_communications(self):
+        page = NavPage(results_section="renewals")
+        grid = self._load(page)
+        self.assertEqual(
+            page.url,
+            "https://www.foragentsonly.com/managepolicies/policyactivity/"
+            "processeddateresults/renewals/",
+        )
+        self.assertEqual(len(grid.rows), 2)
+        self.assertNotIn("Search", page.clicks)
+        self.assertEqual(page.clicks[-1], "Communications")
+
+    def test_results_page_holds_closed_without_clicking_search(self):
+        cases = (
+            ("stays on the form", dict(results_mode="stay"), PROCESSED_DATE_RESULTS_HOLD, "Get Policy Activity"),
+            (
+                "communications tab missing",
+                dict(comms_mode="missing"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "communications tab duplicated",
+                dict(comms_mode="duplicate"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "communications is a link",
+                dict(comms_mode="link"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "communications tab does not select",
+                dict(comms_mode="unselected"),
+                "did not become selected",
+                "Communications",
+            ),
+        )
+        for label, kwargs, hold, last_click in cases:
+            with self.subTest(label):
+                page = NavPage(search_on_results=True, **kwargs)
+                with self.assertRaisesRegex(IntakeHold, hold):
+                    self._load(page)
+                self.assertNotIn("Search", page.clicks)
+                self.assertEqual(page.clicks[-1], last_click)
+                self.assertEqual(page.memo_opens, [])
+
+    def test_processed_date_results_url_fails_closed(self):
+        class UrlPage:
+            def __init__(self, url):
+                self.url = url
+
+            def wait_for_url(self, pattern, timeout=None):
+                if not pattern.search(self.url):
+                    raise TimeoutError("processed-date results page did not appear")
+
+        accepted = (
+            RESULTS_CANCELS_URL,
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/Cancels",
+            "https://foragentsonly.com/managepolicies/policyactivity/processeddateresults/endorsements/",
+        )
+        for url in accepted:
+            with self.subTest(url=url):
+                self.assertTrue(require_processed_date_results(UrlPage(url)))
+        rejected = (
+            LIST_URL,
+            RESULTS_CANCELS_URL + "?day=2026-09-25",
+            RESULTS_CANCELS_URL + "#memo",
+            "http://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/extra/",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/",
+            "https://foragentsonlylogin.progressive.com/managepolicies/policyactivity/processeddateresults/cancels/",
+            "https://evil.example/managepolicies/policyactivity/processeddateresults/cancels/",
+        )
+        for url in rejected:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(IntakeHold, PROCESSED_DATE_RESULTS_HOLD):
+                    require_processed_date_results(UrlPage(url))
 
     def test_ambiguous_next_holds(self):
         page = NavPage(next_mode="ambiguous")
