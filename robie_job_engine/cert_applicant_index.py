@@ -21,6 +21,7 @@ Carlo's rules enforced here:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import unicodedata
@@ -240,6 +241,159 @@ def load_index_from_workbook(path: str = "") -> ApplicantIndex:
     return build_index(rows, source_path=path)
 
 
+# Agency-internal sender domains. An internal address on an applicant
+# record is a staff contact, never the client — matching on it alone
+# verified internal ops digests as certificate requests (2026-09-26).
+_INTERNAL_SENDER_DOMAINS = ("streetsmart.insurance", "ssinj.com")
+
+
+def _sender_is_internal(email: str | None) -> bool:
+    if not email or "@" not in email:
+        return False
+    domain = email.split("@", 1)[1].lower()
+    return any(domain == d or domain.endswith("." + d)
+               for d in _INTERNAL_SENDER_DOMAINS)
+
+
+# Vendor/compliance-system sender domains. Renewal notices from these
+# systems name the insured IN THE MESSAGE; the sender address is never
+# the client and must never be used as an email match key (sender !=
+# insured). The insured-name match above is the client signal.
+_VENDOR_SENDER_DOMAINS = (
+    "registrymonitoring.com",  # RMIS
+    "truckstop.com",           # RMIS support
+    "highway.com",             # Highway
+    "gohighway.com",
+    "certs.highway.com",
+    "mycoisolution.com",       # myCOI
+    "mycoitracking.com",
+    "certificial.com",         # Certificial
+    "certificial.ai",          # Certificial expiry notices (sarah@certificial.ai)
+    "trustlayer.io",           # TrustLayer compliance requests name the
+                               # insured after "for" in the subject
+    "operfi.com",              # OperFi compliance requests name the insured
+                               # in the subject
+    "nextinsurance.com",       # Next Insurance
+    "assurant.com",            # Assurant vendor notices
+    "vc.realpage.com",         # RealPage vendor credentialing (automated; skip intake)
+    "myinsuranceinfo.com",     # MyInsuranceInfo submission confirmations
+    "plus1solutions.net",      # PlusOne Solutions automated notices
+    "sandsbrokerageinc.com",   # Sands Brokerage: broker asking for a
+    "immensetrucking.com",     # carrier's COI — the insured is the carrier
+                               # named in the body, never the sender
+)
+
+
+def _sender_is_vendor_system(email: str | None) -> bool:
+    if not email or "@" not in email:
+        return False
+    domain = email.split("@", 1)[1].lower()
+    return any(domain == d or domain.endswith("." + d)
+               for d in _VENDOR_SENDER_DOMAINS)
+
+
+# ---------------------------------------------------------------------------
+# Human-verified sender aliases (2026-09-26/27 held-record research).
+#
+# Senders the report's email column doesn't know but a human resolved to a
+# client (e.g. mela@seciinc.com -> Seci Construction Inc, 78540038: "I need
+# a COI for Town of Berlin" names only the holder). Loaded from
+# robie_job_engine/data/cert_sender_aliases.json; the workbook is the
+# fast path, this file is the memory.
+#
+# Vendor/compliance-system, broker, holder, lender, and agency-internal
+# senders are NEVER aliased — they represent many insureds and resolve per
+# message. The loader drops any such entry even if the data file grew one
+# (defense in depth; the research file already excludes them).
+# ---------------------------------------------------------------------------
+
+_SENDER_ALIASES_ENV = "CERT_SENDER_ALIASES_PATH"
+_sender_alias_cache: dict[str, dict[str, Any]] | None = None
+_sender_alias_cache_path: str | None = None
+
+
+def _default_aliases_path() -> str:
+    env = os.environ.get(_SENDER_ALIASES_ENV)
+    if env:
+        return env
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data", "cert_sender_aliases.json")
+
+
+def load_sender_aliases(path: str | None = None) -> dict[str, dict[str, Any]]:
+    """Normalized sender email -> {applicant_id, confidence, ...}.
+
+    Confidence is "strong" or "medium" (medium = resolved but worth a
+    human glance; the record carries alias_confidence="medium" so review
+    tooling can surface it). Malformed entries are skipped, never fatal.
+    """
+    global _sender_alias_cache, _sender_alias_cache_path
+    path = path or _default_aliases_path()
+    if _sender_alias_cache is not None and _sender_alias_cache_path == path:
+        return _sender_alias_cache
+    aliases: dict[str, dict[str, Any]] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    entries = data.get("aliases") if isinstance(data, dict) else []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        email = normalize_email(entry.get("sender"))
+        try:
+            applicant_id = int(entry.get("applicant_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        confidence = (entry.get("confidence") or "").strip().lower()
+        if not email or "@" not in email or applicant_id <= 0:
+            continue
+        if confidence not in ("strong", "medium"):
+            continue
+        if _sender_is_internal(email) or _sender_is_vendor_system(email):
+            # Vendor/internal senders are never the client, even if an
+            # entry claimed otherwise — drop it rather than misfile.
+            continue
+        aliases[email] = {
+            "applicant_id": applicant_id,
+            "confidence": confidence,
+            "account_name": entry.get("account_name") or "",
+            "evidence": entry.get("evidence") or "",
+        }
+    _sender_alias_cache = aliases
+    _sender_alias_cache_path = path
+    return aliases
+
+
+def clear_sender_alias_cache() -> None:
+    """Test hook: forget the cached alias table."""
+    global _sender_alias_cache, _sender_alias_cache_path
+    _sender_alias_cache = None
+    _sender_alias_cache_path = None
+
+
+def _sender_signal(email: str | None, index: ApplicantIndex
+                   ) -> tuple[int | None, dict[str, Any] | None]:
+    """Resolve a sender email to (applicant_id, alias_entry|None).
+
+    The human-verified alias table is consulted first; the report's email
+    column is the fallback. Agency-internal and vendor-system senders never
+    produce a signal (they are staff contacts or name-the-insured systems,
+    never the client). Returns (None, None) when there is no signal.
+    """
+    email_key = normalize_email(email)
+    if not email_key or "@" not in email_key:
+        return None, None
+    if _sender_is_internal(email_key) or _sender_is_vendor_system(email_key):
+        return None, None
+    alias = load_sender_aliases().get(email_key)
+    if alias:
+        return alias["applicant_id"], alias
+    return index.by_email.get(email_key), None
+
+
 @dataclass
 class MatchResult:
     status: str  # MATCHED | NO_MATCH | AMBIGUOUS
@@ -247,6 +401,10 @@ class MatchResult:
     evidence: str = ""
     candidates: list[int] = field(default_factory=list)
     requester_also_client: bool = False
+    # "medium" when the match came from a medium-confidence sender alias
+    # (human-resolved but worth a human glance). Review tooling surfaces
+    # these; the match itself still resolves.
+    alias_confidence: str | None = None
 
     def hold_reason(self) -> str:
         if self.status == MATCHED:
@@ -275,7 +433,17 @@ def match_applicant(
     2. ``dba`` — same as the insured name.
     3. ``requester_email`` — only when no insured/dba matched; covers the
        common case of the client writing from their own address without
-       naming themselves.
+       naming themselves. The human-verified sender-alias table
+       (robie_job_engine/data/cert_sender_aliases.json) is consulted
+       first — a person resolved these senders to clients on 2026-09-26/27;
+       medium-confidence aliases resolve but flag alias_confidence so
+       review tooling can surface them. NEVER for agency-internal senders
+       (@streetsmart.insurance, @ssinj.com): an internal address on an
+       applicant record is a contact, not the client, and matching it
+       verified internal ops digests as certificate requests (2026-09-26).
+       NEVER for vendor-system senders (RMIS, Highway, myCOI, Certificial,
+       TrustLayer, OperFi, Next, ...): they name the insured in the message
+       and are never the insured themselves (sender != insured).
     4. phone numbers — optional extra signal.
 
     ``holder_names`` are NEVER match keys (holders are third parties).
@@ -312,8 +480,8 @@ def match_applicant(
             continue
         ids = index.by_dba_run.get(run_key, [])
         if len(ids) == 1:
-            email_key = normalize_email(getattr(facts, "requester_email", None))
-            email_hit = index.by_email.get(email_key) if email_key else None
+            email_hit, _ = _sender_signal(
+                getattr(facts, "requester_email", None), index)
             if email_hit and email_hit != ids[0]:
                 return MatchResult(
                     AMBIGUOUS, None,
@@ -328,10 +496,29 @@ def match_applicant(
                                f"{label} DBA-fragment {raw_name!r}",
                                candidates=list(ids))
 
-    email_key = normalize_email(getattr(facts, "requester_email", None))
-    if email_key and email_key in index.by_email:
-        return MatchResult(MATCHED, index.by_email[email_key],
-                           f"sender email {email_key}")
+    # Sender signal: the human-verified alias table first (a person resolved
+    # these senders to clients on 2026-09-26/27), then the report's email
+    # column. Agency-internal senders are staff contacts and vendor-system
+    # senders (RMIS/Highway/myCOI/Certificial/TrustLayer/OperFi/Next/...)
+    # name the insured in the message — neither is ever the client, so
+    # neither verifies on email alone. The insured name above is the client
+    # signal; without it this is NO_MATCH, never a match to whoever the
+    # sender is filed under.
+    sender_hit, alias = _sender_signal(
+        getattr(facts, "requester_email", None), index)
+    if sender_hit:
+        if alias:
+            result = _with_requester_flag(facts, index, MatchResult(
+                MATCHED, sender_hit,
+                f"sender alias {normalize_email(getattr(facts, 'requester_email', None))} "
+                f"(human-verified 2026-09-26/27): "
+                f"{alias['account_name'] or 'applicant'} {sender_hit} "
+                f"[{alias['confidence']} confidence]"))
+            if alias["confidence"] == "medium":
+                result.alias_confidence = "medium"
+            return result
+        return MatchResult(MATCHED, sender_hit,
+                           f"sender email {normalize_email(getattr(facts, 'requester_email', None))}")
 
     for raw in phones or []:
         for key in phone_keys(raw):

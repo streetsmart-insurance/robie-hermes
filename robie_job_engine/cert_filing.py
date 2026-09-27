@@ -26,7 +26,7 @@ from typing import Any
 
 from .cert_intake import summarize_for_note
 from .cert_task_registry import (
-    CREATE, HOLD, NONE, REOPEN, REUSE, TASK_OPEN,
+    ALREADY_EXISTS, CREATE, HOLD, NONE, REOPEN, REUSE, TASK_OPEN,
     TaskEntry, decide_task_action, holder_key_for, policy_key_for,
 )
 from .cert_verification import (
@@ -285,7 +285,9 @@ def resolve_discussion(verified: Any, holder_names: list[str],
       2. exactly one cert-titled discussion anchored by the email's exact
          holder phrase or policy digits;
       3. exactly one cert-titled discussion matching a holder fragment;
-      4. HOLD — multiple candidates, or none for this request.
+      4. HOLD — multiple candidates, none for this request, or a single
+         candidate with NO holder/policy anchor (a lone discussion is not
+         evidence the request belongs in it).
 
     Recency never resolves on its own: it only strengthens the evidence for
     a single anchored candidate ("created N days before the request — looks
@@ -352,7 +354,16 @@ def resolve_discussion(verified: Any, holder_names: list[str],
                                  policy_numbers)
         anchors = ann[0]["_anchors"]
         age = age_days(did)
-        ev = "; ".join(anchors) if anchors else "holder fragment match"
+        if not anchors:
+            # A lone certificate discussion with NO holder or policy anchor
+            # is not evidence this request belongs in it — the old code
+            # printed "holder fragment match" here, a fabricated reason.
+            # Hold with the honest evidence, never file.
+            return None, None, (
+                f"HOLD: single certificates discussion {title!r} but no "
+                f"holder/policy anchor for this request — holding for "
+                f"human, never guessing")
+        ev = "; ".join(anchors)
         if age is not None and 0 <= age <= _CREATED_FOR_REQUEST_DAYS:
             ev += (f"; created {age} day(s) before the request — "
                    "looks created for it")
@@ -441,6 +452,16 @@ def file_record(record: Any, verified: Any, deps: FilingDeps,
     if verified.status != VERIFIED or not verified.applicant_id:
         res.hold_reasons.append("record is not VERIFIED — refusing to file")
         return res
+    # Client Center portal requests: the task already exists (EZLynx
+    # auto-created it). Record that decision up front so it is visible
+    # even when discussion resolution holds the filing — the worker must
+    # never create or duplicate the task either way.
+    if getattr(verified, "origin", "") == "client_center":
+        res.task_action = ALREADY_EXISTS
+        res.evidence.append(
+            "Client Center origin: EZLynx auto-created the task when the "
+            "customer submitted the portal form — the worker never fires "
+            "the task Zap for this record")
     applicant_id = verified.applicant_id
     message_id = getattr(record, "gmail_id", None) or getattr(
         record, "message_id", "unknown")
@@ -603,6 +624,12 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
 
     if action == NONE:
         res.evidence.append("acknowledgement — task state left alone")
+    elif action == ALREADY_EXISTS:
+        # Client Center portal request: EZLynx auto-created the task.
+        # Never fire the Zap, never touch the registry — just say so.
+        res.evidence.append(
+            "task already exists (Client Center auto-created) — no Zap "
+            "fired, nothing duplicated")
     elif action == REUSE:
         res.task_id = entry.task_id if entry else None
         res.evidence.append(f"reusing open task {res.task_id}")

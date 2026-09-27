@@ -365,3 +365,36 @@ def test_writer_without_readback_is_flagged_not_failed(monkeypatch):
                         "owner", False)
     assert out.status == FILED
     assert any("did not report a read-back" in e for e in out.evidence)
+
+
+def test_single_discussion_no_anchor_holds_honestly():
+    # Bug A (2026-09-26): one certificate discussion, no holder extracted,
+    # no policy digits — the old code filed it MEDIUM with the fabricated
+    # reason "holder fragment match". A lone discussion is not evidence
+    # the request belongs in it. Hold with the honest reason.
+    discs = [
+        _d("1", "Master Certificate Renewal", "2026-09-20T10:00:00+00:00"),
+    ]
+    did, title, how = resolve_discussion(
+        _verified(), [], FakeRegistry(), FakeDiscussions(discs),
+        email_date="Fri, 26 Sep 2026 10:00:00 +0000")
+    assert did is None
+    assert title is None
+    assert how.startswith("HOLD")
+    assert "no holder/policy anchor" in how
+    assert "holder fragment match" not in how
+
+
+def test_single_discussion_holder_fragment_still_resolves_medium():
+    # The genuine fragment case keeps working: one cert discussion whose
+    # title carries the holder's name as a substring.
+    discs = [
+        _d("1", "Certificate of Insurance Request - Anderson Market LLC",
+           "2026-09-25T10:00:00+00:00"),
+    ]
+    did, title, how = resolve_discussion(
+        _verified(), ["Anderson"], FakeRegistry(),
+        FakeDiscussions(discs),
+        email_date="Fri, 26 Sep 2026 10:00:00 +0000")
+    assert did == "1"
+    assert not how.startswith("HOLD")

@@ -15,6 +15,11 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+try:
+    from .cert_verification import ACTION_CLIENT_CENTER
+except ImportError:  # loaded outside the package
+    from robie_job_engine.cert_verification import ACTION_CLIENT_CENTER
+
 TASK_OPEN = "open"
 TASK_CLOSED = "closed"
 TASK_UNKNOWN = "unknown"
@@ -25,6 +30,8 @@ REUSE = "reuse"      # open task on file -> file the email, no new task
 REOPEN = "reopen"    # closed task + genuinely new request -> reopen, never duplicate
 NONE = "none"        # acknowledgement -> leave task state alone
 HOLD = "hold"        # cannot decide safely -> human
+ALREADY_EXISTS = "already_exists"  # Client Center portal request: EZLynx
+                                   # auto-created the task -> never fire
 
 
 def policy_key_for(policy_numbers: list[str]) -> str:
@@ -110,12 +117,17 @@ def decide_task_action(requested_action: str, entry: TaskEntry | None,
                        live_state: str = TASK_UNKNOWN) -> str:
     """Apply Carlo's task rules (2026-09-26).
 
+    - Client Center portal request -> ALREADY_EXISTS: EZLynx auto-created
+      the task when the customer submitted the form — the worker never
+      fires the Zap, never duplicates.
     - New request + no entry -> CREATE.
     - New request + open task -> REUSE (file into the task's discussion).
     - New request + closed task -> REOPEN (never a duplicate).
     - Acknowledgement/thank-you -> NONE (file the email, leave the task).
     - Unknown action or unknown state -> HOLD for a human, never guess.
     """
+    if requested_action == ACTION_CLIENT_CENTER:
+        return ALREADY_EXISTS
     is_new = requested_action == "new_request"
     is_ack = requested_action == "acknowledgement"
     if not is_new and not is_ack:

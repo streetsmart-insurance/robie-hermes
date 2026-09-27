@@ -33,6 +33,10 @@ ACTION_NEW_REQUEST = "new_request"
 ACTION_ACK = "acknowledgement"
 ACTION_UNKNOWN = "unknown"
 ACTION_AUTOREPLY = "auto_reply"
+# EZLynx Client Center portal request: the customer submitted the form
+# themselves and EZLynx auto-created the task. Genuine request, but the
+# worker must never create a duplicate task (task_action already_exists).
+ACTION_CLIENT_CENTER = "client_center"
 
 POLICY_API_BASE = "https://app.ezlynx.com/PolicyApi"
 DISCUSSION_API_BASE = "https://app.ezlynx.com/DiscussionApi"
@@ -72,12 +76,29 @@ except ImportError:  # loaded outside the package
 # Requested-action classification (feeds the task-state rule)
 # ---------------------------------------------------------------------------
 
-_ACK_PATTERNS = [
-    re.compile(r"\bthank\s*you\b", re.IGNORECASE),
-    re.compile(r"\bthanks\b", re.IGNORECASE),
+# Strong acknowledgement: the certificate was RECEIVED. "Thank you for the
+# (renewal) certificate" is gratitude for something already done — never a
+# new request. Checked BEFORE request language.
+_ACK_RECEIPT_PATTERNS = [
+    re.compile(r"\bthank(s|\s+you)\b.{0,25}\bfor\b.{0,40}\b(certificate|coi)\b",
+               re.IGNORECASE),
     re.compile(r"\breceived the certificate\b", re.IGNORECASE),
     re.compile(r"\bgot the certificate\b", re.IGNORECASE),
     re.compile(r"\bconfirming receipt\b", re.IGNORECASE),
+    # A terse "COI received" subject is a statement, not a request — it must
+    # never be treated as new request language (false-positive guard for the
+    # coi-as-request-signal rule below).
+    re.compile(r"\b(coi|certificate)\s+received\b", re.IGNORECASE),
+    re.compile(r"\breceived\s+(the\s+)?(coi|certificate)\b", re.IGNORECASE),
+]
+
+# Weak acknowledgement: bare politeness ("Thanks", "Thank you!") with no
+# receipt language. Checked AFTER request language so a polite sign-off on
+# a genuine request ("Please provide current COI ... Thank you") does not
+# demote it to an acknowledgement.
+_ACK_POLITE_PATTERNS = [
+    re.compile(r"\bthank\s*you\b", re.IGNORECASE),
+    re.compile(r"\bthanks\b", re.IGNORECASE),
 ]
 
 _NEW_REQUEST_PATTERNS = [
@@ -85,6 +106,19 @@ _NEW_REQUEST_PATTERNS = [
     re.compile(r"\brequest(ing|ed)?\s+(a|the|for)?\s*(certificate|coi)\b", re.IGNORECASE),
     re.compile(r"\bneed\s+a\s+(certificate|coi)\b", re.IGNORECASE),
     re.compile(r"\brenewal\s+certificate\b", re.IGNORECASE),
+    # Follow-ups on an earlier request ("still waiting for my
+    # certificate", "where is the certificate", "send it to this email").
+    re.compile(r"\bstill waiting\b.{0,40}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bwaiting\b.{0,20}\bon\b.{0,20}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bwhere is\b.{0,20}\b(my|the)\b.{0,20}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bsend it\b.{0,20}\bto this email\b", re.IGNORECASE),
+    re.compile(r"\b(haven't|hasn't|have not|has not)\b.{0,20}\breceived\b.{0,20}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bfollow(?:ing)? up\b.{0,30}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bchecking on\b.{0,30}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    # Carrier/vendor change requests ("Progress Property LLC has requested
+    # changes to Advanced Electric Design & Service LLC's certificate").
+    re.compile(r"\brequested? changes?\b.{0,80}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\brequest for changes\b.{0,80}\b(certificate|cert|coi)\b", re.IGNORECASE),
 ]
 
 # Auto-replies quote the original request's subject ("Re: Renewal
@@ -94,6 +128,7 @@ _NEW_REQUEST_PATTERNS = [
 # genuine RMIS requests (donotreply@ senders are real requesters).
 _AUTOREPLY_PATTERNS = [
     re.compile(r"\bautomated response\b", re.IGNORECASE),
+    re.compile(r"\bautomatic reply\b", re.IGNORECASE),
     re.compile(r"\bauto[\-\s]?reply\b", re.IGNORECASE),
     re.compile(r"\bout of office\b", re.IGNORECASE),
     re.compile(r"\bdo not reply\b", re.IGNORECASE),
@@ -101,6 +136,12 @@ _AUTOREPLY_PATTERNS = [
     re.compile(r"\bdelivery (failure|status notification)\b", re.IGNORECASE),
     re.compile(r"\bmessage not delivered\b", re.IGNORECASE),
     re.compile(r"\bvacation responder\b", re.IGNORECASE),
+    # Bounce/NDR body language the earlier patterns missed: "Undeliverable
+    # email: Certificate of Insurance ..." quoted 39 such bounces in the
+    # 2026-09-26 sweep and they verified. Never again.
+    re.compile(r"\bundeliverable\b", re.IGNORECASE),
+    re.compile(r"\bdelivery has failed\b", re.IGNORECASE),
+    re.compile(r"\bmail delivery (failed|failure)\b", re.IGNORECASE),
 ]
 
 # Sender local-parts that are always automated responders. Kept narrow:
@@ -112,6 +153,133 @@ _AUTOREPLY_SENDERS = (
     "postmaster",
     "autoresponder",
 )
+
+# Bounce subjects: a delivery failure quoting the original request subject
+# ("Undeliverable email: Certificate of Insurance for ...") is never a new
+# request, even though the quoted tail carries certificate language.
+_BOUNCE_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(undeliverable|undelivered|delivery (status notification|"
+    r"failure)|failure notice|returned mail|mail delivery (failed|failure))"
+)
+
+# Auto-reply subjects: "Automatic reply: ..." / "Auto reply: ..." is an
+# out-of-office or canned response, never a new request — even when the
+# tail quotes the original certificate subject.
+_AUTOREPLY_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(automatic reply|auto reply|out of office)\b"
+)
+
+# The subject is shaped like a certificate request when it names the
+# insured in one of the known request shapes ("Certificate of Insurance
+# LA Burger LLC to Anderson Market", "Renewal Certificate Request-
+# Abg Transportation", "COI - Fonseca General Contractor LLC"). The
+# subject must also carry certificate/coi language — a bare policy tail
+# ("Haris Uddin 008265/15/00") is not enough on its own.
+_CERT_SUBJECT_RE = re.compile(r"(?i)\b(certificate|coi)\b")
+
+# A terse subject that is just "coi" (optionally after Re:/Fwd:) is a
+# genuine client certificate request — the word "certificate" spelled out
+# is not required. Deliberately narrow: "COI received" or "Coi attached"
+# (a statement, not a request) does NOT match — the ACK patterns above
+# catch those first.
+_BARE_COI_SUBJECT_RE = re.compile(r"^\s*coi\s*$", re.IGNORECASE)
+
+# Word-boundary "coi" anywhere in the subject is a certificate-request
+# signal (Carlo 2026-09-26: genuine terse client subjects like "COI
+# request", "New COI", "Coi needed" were held as unknown). Vendor
+# compliance platforms (myCOI, Certificial, ProfileGorilla/prequal) send
+# automated document-update mail that must stay held — never requests.
+_COI_WORD_RE = re.compile(r"\bcoi\b", re.IGNORECASE)
+_VENDOR_COI_UPDATE_RE = re.compile(
+    r"(?i)\b(my\s?coi|certificial|profile\s?gorilla|prequal|"
+    r"vendor\s+portal|upload\s+your\b.{0,40}\b(coi|certificate)\b)\b"
+)
+
+# "Attached/enclosed COI" language states the certificate is PROVIDED, not
+# requested — it must never flip into a request via the coi-in-body rule.
+_COI_PROVIDED_RE = re.compile(
+    r"(?i)\b(attached|enclosed|here\s+is\s+the|please\s+find)\b"
+    r".{0,30}\b(coi|certificate)\b"
+)
+
+# Explicit disclaimers ("This is NOT a request for a COI") beat the
+# word-boundary coi rule — Highway document requests state this outright.
+_COI_NOT_REQUEST_RE = re.compile(
+    r"(?i)\bnot a request for\b.{0,25}\b(coi|certificate)\b"
+)
+
+
+def _subject_is_request_shape(subject: str) -> bool:
+    if not _CERT_SUBJECT_RE.search(subject or ""):
+        return False
+    return extract_subject_insured(subject) is not None
+
+
+def _subject_is_bare_coi(subject: str) -> bool:
+    """True when the subject is exactly "Coi" (after Re:/Fwd: stripping).
+
+    Terse client subjects ("Coi") are genuine requests. The automated and
+    bounce filters in classify_requested_action run BEFORE this, so
+    postmaster bounces ("Undeliverable: Coi") and canned auto-replies
+    ("Re: Coi" from the agency responder) stay held.
+    """
+    return bool(_BARE_COI_SUBJECT_RE.match(
+        _strip_subject_prefixes(subject or "")))
+
+
+def _subject_is_coi_request(subject: str, sender: str | None = None) -> bool:
+    """True when a word-boundary "coi" in the subject signals a request.
+
+    Broader than _subject_is_bare_coi: terse client subjects like "COI
+    request", "New COI", "Coi needed", "COI Request for MHS LLC DOT: ..."
+    are genuine certificate requests even with trailing detail. The bounce,
+    autoresponder, and acknowledgement filters in classify_requested_action
+    run BEFORE this, so postmaster bounces, auto-replies ("Automatic reply
+    Re: COI"), and statements ("COI received") stay held. Automated vendor
+    compliance mail (myCOI/Certificial/ProfileGorilla, vendor-portal
+    update language) is excluded here and stays held.
+    """
+    if not _COI_WORD_RE.search(subject or ""):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(subject or ""):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(sender or ""):
+        return False
+    # Auto-reply-shaped subjects ("Automatic reply Re: COI") are never
+    # requests, even though they name a COI.
+    if any(p.search(subject or "") for p in _AUTOREPLY_PATTERNS):
+        return False
+    return True
+
+
+def _body_is_coi_request(body: str, sender: str | None = None) -> bool:
+    """True when a word-boundary "coi" in the BODY signals a request.
+
+    Mirrors the subject-side rule (Carlo 2026-09-26): a terse body that just
+    says "COI", or "issue a coi naming X as holder", is a genuine certificate
+    request even when no other request language appears. Exclusions, in
+    order of danger:
+
+    - provided language ("attached/enclosed COI") states the certificate is
+      being SENT, not requested;
+    - vendor compliance platforms (myCOI/Certificial/ProfileGorilla,
+      vendor-portal update language) send automated document updates;
+    - auto-reply/bounce body language is never a request.
+    """
+    b = body or ""
+    if not _COI_WORD_RE.search(b):
+        return False
+    if _COI_NOT_REQUEST_RE.search(b):
+        return False
+    if _COI_PROVIDED_RE.search(b):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(b):
+        return False
+    if _VENDOR_COI_UPDATE_RE.search(sender or ""):
+        return False
+    if any(p.search(b) for p in _AUTOREPLY_PATTERNS):
+        return False
+    return True
 
 
 def _sender_is_autoresponder(sender: str | None) -> bool:
@@ -130,7 +298,28 @@ def classify_requested_action(subject: str, body: str,
     the BODY always beats auto-reply boilerplate: vendor systems (RMIS et
     al.) routinely footer real requests with "please do not reply", and that
     footer must not turn a real request into an auto-reply.
+
+    A subject shaped like a certificate request ("Certificate of Insurance
+    X to Y", "Renewal Certificate Request- X", "COI - X") counts as request
+    language even when the body is a bare certificate PDF — the subject is
+    the request. Bounce/undeliverable subjects are checked first so a
+    failure notice quoting a request subject never classifies as a request.
+    A word-boundary "coi" in the subject is itself a request signal
+    ("COI request", "New COI", "Coi needed") unless it is a statement
+    ("COI received"), an auto-reply, or vendor compliance mail. The same
+    word-boundary rule applies to the body: a terse body that just says
+    "COI", or "issue a coi naming X as holder", is a request — unless the
+    body states the COI is provided ("attached"), reports a bounce, or is
+    vendor compliance mail.
     """
+    # A bounce quoting the original subject is definitive: it never issues
+    # a genuine request, even when the quoted tail names a certificate.
+    if _BOUNCE_SUBJECT_RE.search(subject or ""):
+        return ACTION_AUTOREPLY
+    # An auto-reply subject ("Automatic reply: ...") is definitive: it never
+    # issues a genuine request, even when the tail quotes the original.
+    if _AUTOREPLY_SUBJECT_RE.search(subject or ""):
+        return ACTION_AUTOREPLY
     # A known autoresponder address is definitive: it never issues a
     # genuine request, even when it quotes the original subject.
     if _sender_is_autoresponder(sender):
@@ -142,10 +331,28 @@ def classify_requested_action(subject: str, body: str,
             p.search(body_text) for p in _AUTOREPLY_PATTERNS):
         return ACTION_AUTOREPLY
     text = f"{subject or ''}\n{body_text}"
-    if any(p.search(text) for p in _ACK_PATTERNS):
+    # Receipt-language ("thank you for the certificate", "COI received")
+    # is a definitive acknowledgement — the certificate is already in hand.
+    if any(p.search(text) for p in _ACK_RECEIPT_PATTERNS):
         return ACTION_ACK
-    if any(p.search(text) for p in _NEW_REQUEST_PATTERNS):
+    # Explicit request language in the BODY wins over a polite sign-off:
+    # "Please provide current COI ... Thank you" is a request.
+    if any(p.search(body_text) for p in _NEW_REQUEST_PATTERNS):
         return ACTION_NEW_REQUEST
+    # A body that is purely polite ("Thank you!") with no request language
+    # is an acknowledgement — even when the (inherited, "Re:") subject
+    # looks like a request. Subject signals are checked after this.
+    if any(p.search(body_text) for p in _ACK_POLITE_PATTERNS):
+        return ACTION_ACK
+    if (any(p.search(subject or "") for p in _NEW_REQUEST_PATTERNS)
+            or _subject_is_request_shape(subject)
+            or _subject_is_bare_coi(subject)
+            or _subject_is_coi_request(subject, sender)
+            or _body_is_coi_request(body_text, sender)):
+        return ACTION_NEW_REQUEST
+    # Bare politeness in the subject with no request language anywhere.
+    if any(p.search(text) for p in _ACK_POLITE_PATTERNS):
+        return ACTION_ACK
     return ACTION_UNKNOWN
 
 
@@ -231,14 +438,19 @@ def _read_secret_json(resource_name: str) -> dict[str, Any]:
 
 
 def ezlynx_oauth_token(
-    scope_override: str | None = None,
     secret_resource: str = "",
+    scope_override: str | None = None,
     token_endpoint: str = "",
 ) -> str:
     """Mint an EZLynx OAuth token via the vendor_data_access grant.
 
     Reads the integration secret named by ROBIE_EZLYNX_API_PROD_SECRET
     (full Secret Manager resource name). Values are transient.
+
+    The secret resource name comes FIRST positionally: the old
+    (scope_override, secret_resource) order silently bound a positional
+    ``ezlynx_oauth_token(SECRET, "DiscussionApi")`` call's secret into
+    scope_override. Pass scope/token_endpoint as keywords.
     """
     secret_resource = secret_resource or _env("ROBIE_EZLYNX_API_PROD_SECRET")
     if not secret_resource:
@@ -368,6 +580,13 @@ class VerificationResult:
     evidence: list[str] = field(default_factory=list)
     hold_reasons: list[str] = field(default_factory=list)
     source: str = ""  # "report" | "ezlynx" | ""
+    # "client_center" when the request came through the EZLynx Client
+    # Center portal — the task already exists, never duplicate it.
+    origin: str = ""
+    # "medium" when the applicant came from a medium-confidence sender
+    # alias (human-resolved but worth a human glance). Review tooling
+    # surfaces these; the match itself still resolves.
+    alias_confidence: str | None = None
 
     def hold(self, reason: str) -> "VerificationResult":
         self.status = HOLD
@@ -423,6 +642,22 @@ def verify_record(record: Any, index: Any,
         record.facts.pdf_texts.extend(ocr_texts)
         res.evidence.append("OCR recovered text from scanned PDF")
 
+    # Automated senders and bounce/auto-reply subjects are never certificate
+    # requests: bucket them BEFORE identity/conflict work so a canned
+    # auto-reply cannot land in the conflict, no-applicant, unknown, or
+    # verified buckets.
+    if (_BOUNCE_SUBJECT_RE.search(record.subject or "")
+            or _AUTOREPLY_SUBJECT_RE.search(record.subject or "")
+            or _sender_is_autoresponder(
+                getattr(record.facts, "requester_email", None))):
+        res.requested_action = ACTION_AUTOREPLY
+        res.evidence.append(
+            "automated sender/subject identified before identity checks — "
+            "never a certificate request")
+        return res.hold(
+            "automated response (auto-reply/bounce), not a certificate "
+            "request — holding, never filing or tasking")
+
     # Gather insured candidates from every source; conflicts hold.
     pdf_names = []
     for text in record.facts.pdf_texts:
@@ -458,14 +693,36 @@ def verify_record(record: Any, index: Any,
             f"<{res.requester_email}> is not the insured")
 
     # Requested action: new request vs acknowledgement vs auto-reply.
-    body_text = " ".join(record.facts.pdf_texts)
-    res.requested_action = classify_requested_action(
-        record.subject, body_text,
-        sender=getattr(record.facts, "requester_email", None))
+    # Classified on the email body AND the PDF texts: the request language
+    # usually lives in the body ("Please issue a certificate"), while
+    # attached request forms live in the PDFs. Subject is included by the
+    # classifier itself.
+    #
+    # EZLynx Client Center notifications bypass generic classification:
+    # intake already proved the portal origin and the certificate request
+    # type. They are genuine requests whose task EZLynx auto-created.
+    if getattr(record.facts, "origin", None) == "client_center":
+        res.requested_action = ACTION_CLIENT_CENTER
+        res.origin = "client_center"
+        res.evidence.append(
+            "EZLynx Client Center notification: the customer submitted the "
+            "request in the portal and EZLynx auto-created the task — "
+            "the worker never creates a duplicate task")
+    else:
+        body_text = "\n".join(
+            t for t in [getattr(record.facts, "body_text", "") or ""]
+            + list(record.facts.pdf_texts) if t
+        )
+        res.requested_action = classify_requested_action(
+            record.subject, body_text,
+            sender=getattr(record.facts, "requester_email", None))
     if res.requested_action == ACTION_ACK:
         res.evidence.append(
             "message classified as acknowledgement/thank-you — not a new "
             "certificate request")
+        return res.hold(
+            "acknowledgement/thank-you reply — no certificate action "
+            "requested; never filing or tasking")
     elif res.requested_action == ACTION_AUTOREPLY:
         res.evidence.append(
             "message classified as automated response — never a new "
@@ -473,6 +730,17 @@ def verify_record(record: Any, index: Any,
         return res.hold(
             "automated response (auto-reply/bounce), not a certificate "
             "request — holding, never filing or tasking")
+    elif res.requested_action == ACTION_UNKNOWN:
+        # Not a proven request: internal digests, call-analysis forwards,
+        # vendor-doc updates, and anything else without request language.
+        # Verifying these is what minted the 54 false positives in the
+        # 2026-09-26 sweep — hold, never file or task.
+        res.evidence.append(
+            "message could not be classified as a certificate request — "
+            "no request language in subject or body")
+        return res.hold(
+            "unclassifiable message (requested_action unknown): not a "
+            "proven certificate request — holding, never filing or tasking")
 
     match = record.match
     status = getattr(match, "status", "")
@@ -482,6 +750,12 @@ def verify_record(record: Any, index: Any,
         res.source = "report"
         res.evidence.append(
             f"full-book report match: applicant {match.applicant_id}")
+        if getattr(match, "alias_confidence", None):
+            res.alias_confidence = match.alias_confidence
+            res.evidence.append(
+                f"sender-alias match is {match.alias_confidence} confidence "
+                "(human-verified 2026-09-26/27 mapping) — surfaced for "
+                "human review")
         if res.policy_numbers and verifier is not None:
             anchored = False
             for num in res.policy_numbers:

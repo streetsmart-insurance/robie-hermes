@@ -522,3 +522,146 @@ def test_subject_extractor_shared_by_intake_and_verifier():
     assert (cv.extract_subject_insured(
         "Renewal Certificate Request- Abg Transportation MC1121844")
         == "Abg Transportation")
+
+
+# ---------------------------------------------------------------------------
+# False-positive repair (2026-09-26 sweep: 54 of 142 VERIFIED were not
+# certificate requests). Each class below verified before the fix.
+# ---------------------------------------------------------------------------
+
+def test_bounce_subject_quoting_request_is_autoreply():
+    # "Undeliverable email: Certificate of Insurance for ..." — the quoted
+    # tail names a certificate, but the bounce subject is definitive.
+    assert classify_requested_action(
+        "Undeliverable email: Certificate of Insurance for Homegrown Moving",
+        "Delivery has failed to these recipients.\n"
+        "The original message is attached.",
+        sender="mailer-daemon@example.com") == ACTION_AUTOREPLY
+
+
+def test_bounce_body_undeliverable_is_autoreply():
+    assert classify_requested_action(
+        "Re: Certificate of Insurance LA Burger LLC to Anderson Market",
+        "This is the mail system at host example.com.\n"
+        "I'm sorry to have to inform you that your message could not "
+        "be delivered. Undeliverable: mailbox unavailable.",
+        sender="mailer-daemon@example.com") == ACTION_AUTOREPLY
+
+
+def test_e2e_bounce_never_verifies():
+    index = _book()
+    e = _email(
+        frm="Mail Delivery System <mailer-daemon@google.com>",
+        subject="Undeliverable email: Certificate of Insurance LA Burger LLC",
+        body=("Delivery has failed to these recipients.\n"
+              "Certificate of Insurance for LA Burger LLC was attached.\n"),
+    )
+    facts, match, result = _run(e, index)
+    assert result.requested_action == ACTION_AUTOREPLY
+    assert result.status == HOLD
+    assert result.applicant_id is None
+
+
+def test_e2e_ops_digest_from_internal_sender_holds():
+    # The 2026-09-26 sweep verified this shape to applicant 40014301 on the
+    # sender's email alone. Internal senders never match on email alone,
+    # and digests carry no request language — hold on both counts.
+    index = build_index([
+        {"account_name": "Some Client LLC", "applicant_id": 40014301,
+         "email_primary": "sandeep@streetsmart.insurance", "phones": []},
+    ])
+    e = _email(
+        frm="Sandeep Yadav <sandeep@streetsmart.insurance>",
+        subject="Re: Unresolved Text Messages - September 2026",
+        body=("Here is the September digest of unresolved text messages "
+              "for the agency.\n"),
+    )
+    facts, match, result = _run(e, index)
+    assert match.status == "NO_MATCH"
+    assert result.requested_action == ACTION_UNKNOWN
+    assert result.status == HOLD
+    assert result.applicant_id is None
+
+
+def test_internal_sender_email_never_matches_alone():
+    # Unit-level: the internal address IS in the index, the insured is
+    # unknown — still NO_MATCH, never a match to the staffer's record.
+    index = build_index([
+        {"account_name": "Some Client LLC", "applicant_id": 777,
+         "email_primary": "eimy@streetsmart.insurance", "phones": []},
+        {"account_name": "Harbor Marine Services LLC", "applicant_id": 555,
+         "email_primary": "harbor@example.com", "phones": []},
+    ])
+    facts = SimpleNamespace(insured_name="Unknown Entity", dba=None,
+                            requester_email="eimy@streetsmart.insurance")
+    assert match_applicant(facts, index).status == "NO_MATCH"
+    facts = SimpleNamespace(insured_name="Unknown Entity", dba=None,
+                            requester_email="Eimy@SSINJ.com")
+    assert match_applicant(facts, index).status == "NO_MATCH"
+    # External senders keep the email fallback.
+    facts = SimpleNamespace(insured_name="Unknown Entity", dba=None,
+                            requester_email="harbor@example.com")
+    match = match_applicant(facts, index)
+    assert match.status == "MATCHED" and match.applicant_id == 555
+
+
+def test_e2e_sonant_call_analysis_forward_holds():
+    index = _book()
+    e = _email(
+        frm="Eimy Ramos <eimy@streetsmart.insurance>",
+        subject="Fwd: Sonant Call Analysis - Phone: Other",
+        body=("Call analysis summary for today's calls.\n"
+              "Sentiment: positive.\n"),
+    )
+    facts, match, result = _run(e, index)
+    assert result.requested_action == ACTION_UNKNOWN
+    assert result.status == HOLD
+    assert result.applicant_id is None
+
+
+def test_e2e_vendor_document_update_holds():
+    index = _book()
+    e = _email(
+        frm="Vendor System <noreply@vendor.example.com>",
+        subject="Action Required: Updated Insurance & Vendor Documentation",
+        body=("Please upload your updated certificate of insurance and "
+              "vendor documentation to the portal.\n"),
+    )
+    facts, match, result = _run(e, index)
+    assert result.requested_action == ACTION_UNKNOWN
+    assert result.status == HOLD
+    assert result.applicant_id is None
+
+
+def test_subject_shaped_request_is_new_request():
+    # LA Burger's real shape: the body is certificate boilerplate with no
+    # request verbs — the subject "Certificate of Insurance X to Y" IS the
+    # request and must classify as one.
+    assert classify_requested_action(
+        "Certificate of Insurance LA Burger LLC to Anderson Marke",
+        "Certificate of Insurance for LA Burger LLC. This certificate "
+        "confirms that the listed insurance is in force.\n"
+        "Certificate Holder: Anderson Marke\n") == ACTION_NEW_REQUEST
+    assert classify_requested_action(
+        "COI - Fonseca General Contractor LLC",
+        "See attached certificate.") == ACTION_NEW_REQUEST
+    # A bare policy tail without certificate language is not a request.
+    assert classify_requested_action(
+        "Fwd: Haris Uddin 008265/15/00",
+        "Please see below.") == ACTION_UNKNOWN
+
+
+def test_e2e_la_burger_still_verifies():
+    # The genuine subject-shaped request keeps verifying after the repair.
+    index = _book()
+    e = _email(
+        frm="Michael Solomon <mike@littleandysburgers.com>",
+        subject="Certificate of Insurance LA Burger LLC to Anderson Marke",
+        body=("Certificate of Insurance for LA Burger LLC. This certificate "
+              "confirms that the listed insurance is in force.\n"
+              "Certificate Holder: Anderson Marke\n"),
+    )
+    facts, match, result = _run(e, index)
+    assert result.requested_action == ACTION_NEW_REQUEST
+    assert result.status == VERIFIED
+    assert result.applicant_id == 211722620
