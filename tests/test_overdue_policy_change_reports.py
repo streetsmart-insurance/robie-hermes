@@ -284,23 +284,46 @@ def test_build_roster_maps_rejects_ambiguous_name():
 
 def test_resolve_targets_groups_by_csr_with_manager():
     items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821"}]
-    targets = resolve_nag_targets(items, build_roster_maps(registry()))
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(registry()))
     assert targets["Eimy Ramos"]["email"] == "eimy@streetsmart.insurance"
     assert targets["Eimy Ramos"]["manager_email"] == "sandy@streetsmart.insurance"
 
 
-def test_resolve_targets_fails_closed_on_unknown_csr():
-    items = [{"CSR": "Nobody Here", "Policy Number": "S 2391821"}]
-    with pytest.raises(PolicyChangeReportContractError, match="could not be resolved"):
-        resolve_nag_targets(items, build_roster_maps(registry()))
+def test_resolve_targets_reports_unknown_csr_without_blocking():
+    # A CSR that does not resolve (terminated employee still named on the
+    # queue, e.g. Cesar Romero 2026-09-27) is reported, not raised: the rest
+    # of the team still gets their emails.
+    items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821"},
+             {"CSR": "Nobody Here", "Policy Number": "13WECAT1F8T"}]
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(registry()))
+    assert unresolved_csrs == ["Nobody Here"]
+    assert set(targets) == {"Eimy Ramos"}
+    assert targets["Eimy Ramos"]["email"] == "eimy@streetsmart.insurance"
 
 
-def test_resolve_targets_fails_closed_without_manager():
+def test_resolve_targets_reports_missing_manager_without_blocking():
+    # A CSR whose department has no Department Manager in the roster still
+    # gets their email (Carlo is always CC'd); the gap is reported.
     reg = registry()
     del reg["employees"]["Sandy Santana"]
     items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821"}]
-    with pytest.raises(PolicyChangeReportContractError, match="no department manager"):
-        resolve_nag_targets(items, build_roster_maps(reg))
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(
+        items, build_roster_maps(reg))
+    assert unresolved_csrs == []
+    assert unresolved_managers == ["Eimy Ramos (department: Commercial Lines)"]
+    assert targets["Eimy Ramos"]["email"] == "eimy@streetsmart.insurance"
+    assert targets["Eimy Ramos"]["manager_name"] == ""
+    assert targets["Eimy Ramos"]["manager_email"] == ""
+
+
+def test_build_csr_report_without_manager_name():
+    # The CC line stays grammatical when there is no department manager.
+    body = build_csr_report("Eimy Ramos", [], "", date(2026, 9, 27))
+    assert "CC'ing  " not in body
+    assert "Looping in the team" in body
+    body2 = build_csr_report("Eimy Ramos", [], "", date(2026, 9, 27),
+                             cc_names=["", "Taylor Cimei"])
+    assert "CC'ing Taylor Cimei so they're in the loop." in body2
 
 
 def test_resolve_targets_collects_distinct_producer():
@@ -310,7 +333,7 @@ def test_resolve_targets_collects_distinct_producer():
         "department": "Commercial Lines", "manager": "", "status": "Active"}
     items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821",
               "Assigned Producer": "Taylor Cimei"}]
-    targets = resolve_nag_targets(items, build_roster_maps(reg))
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(reg))
     target = targets["Eimy Ramos"]
     assert target["producer_emails"] == ["taylor@streetsmart.insurance"]
     assert target["producer_names"] == ["Taylor Cimei"]
@@ -319,7 +342,7 @@ def test_resolve_targets_collects_distinct_producer():
 def test_resolve_targets_unknown_producer_does_not_block():
     items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821",
               "Assigned Producer": "Nobody Here"}]
-    targets = resolve_nag_targets(items, build_roster_maps(registry()))
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(registry()))
     target = targets["Eimy Ramos"]
     assert target["email"] == "eimy@streetsmart.insurance"
     assert target["producer_emails"] == []
@@ -340,7 +363,7 @@ def test_resolve_targets_uses_producer_fallback(tmp_path):
     items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
               "Assigned Producer": "Andrea Illanes"}]
     fallbacks = load_producer_fallbacks(fb)
-    targets = resolve_nag_targets(items, build_roster_maps(reg), fallbacks)
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(reg), fallbacks)
     target = targets["Lenin Perdomo"]
     assert target["producer_emails"] == ["andrea@streetsmart.insurance"]
     assert target["producer_names"] == ["Andrea Illanes"]
@@ -362,11 +385,23 @@ def test_resolve_targets_resolves_first_last_alias():
         "department": "Commercial Lines", "manager": "", "status": "Active"}
     items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
               "Assigned Producer": "Andrea Illanes"}]
-    targets = resolve_nag_targets(items, build_roster_maps(reg))
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(reg))
     target = targets["Lenin Perdomo"]
     assert target["producer_emails"] == ["andrea@streetsmart.insurance"]
     assert target["producer_fallback_used"] == []
     assert target["unresolved_producers"] == []
+
+
+def test_build_roster_maps_skips_corporate_alias():
+    # "Streetsmart Risk Managers Inc." is an entity row in the roster, not a
+    # person: no "streetsmart inc." alias may be generated for it.
+    reg = registry()
+    reg["employees"]["Streetsmart Risk Managers Inc."] = {
+        "role": "Operations Technicians", "email": "hello@streetsmart.insurance",
+        "department": "Operations", "manager": "", "status": "Active"}
+    maps = build_roster_maps(reg)
+    assert "streetsmart inc." not in maps["directory"]
+    assert "streetsmart risk managers inc." in maps["directory"]
 
 
 def test_resolve_targets_skips_ambiguous_alias():
@@ -384,7 +419,7 @@ def test_resolve_targets_skips_ambiguous_alias():
         "department": "Commercial Lines", "manager": "", "status": "Active"}
     items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
               "Assigned Producer": "Andrea Illanes"}]
-    targets = resolve_nag_targets(items, build_roster_maps(reg))
+    targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(items, build_roster_maps(reg))
     target = targets["Lenin Perdomo"]
     assert target["producer_emails"] == []
     assert target["unresolved_producers"] == ["Andrea Illanes"]

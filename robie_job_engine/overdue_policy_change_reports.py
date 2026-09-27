@@ -607,11 +607,14 @@ def build_roster_maps(registry: Mapping[str, Any]) -> dict[str, dict[str, str]]:
         raise PolicyChangeReportContractError("approved roster contains no active employees")
     # First+last aliases: the 4359 queue names producers "Andrea Illanes" while
     # the AppSheet roster lists "Andrea Nicole Illanes". An alias is added
-    # only when it is unambiguous — never a wrong CC.
+    # only when it is unambiguous — never a wrong CC. Aliases containing
+    # corporate suffixes (e.g. "Streetsmart Risk Managers Inc." -> alias
+    # "streetsmart inc.") are skipped: they are entity rows, not people.
+    corporate_tokens = {"inc", "inc.", "corp", "corp.", "llc", "ltd", "ltd.", "co", "co."}
     alias_hits: dict[str, list[str]] = {}
     for full_key in directory:
         tokens = full_key.split()
-        if len(tokens) > 2:
+        if len(tokens) > 2 and not (set(tokens) & corporate_tokens):
             alias = f"{tokens[0]} {tokens[-1]}"
             if alias not in directory:
                 alias_hits.setdefault(alias, []).append(full_key)
@@ -651,12 +654,20 @@ def load_approved_csr_directory(manifest_path: str) -> dict[str, dict[str, str]]
 def resolve_nag_targets(
     items: list[dict[str, Any]], roster: Mapping[str, Mapping[str, str]],
     producer_fallbacks: Mapping[str, str] | None = None,
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
     """Group items by CSR; resolve CSR mailbox + department manager.
 
-    Fail-closed: blank CSR, unresolvable CSR mailbox, or no department
-    manager for the CSR's department raises the contract error and nothing
-    is emailed.
+    Fail-closed: a blank CSR raises the contract error and nothing is emailed.
+
+    A CSR that does not resolve to an active roster employee (e.g. a
+    terminated employee still named on the 4359 queue, like Cesar Romero
+    2026-09-27) does NOT block the run: those items are skipped and the CSR
+    names are returned as unresolved_csrs for the run summary.
+
+    A CSR whose department has no Department Manager in the roster (e.g.
+    Operations, Executive Team) also does not block the run: the CSR still
+    gets their email (Carlo is always CC'd) and the gap is returned as
+    unresolved_managers for the run summary.
 
     Producers are informational CC only: a producer missing from the roster
     falls back to the checked-in producer_email_fallbacks.json (reported in
@@ -684,11 +695,12 @@ def resolve_nag_targets(
         manager = managers.get(_name_key(dept))
         if not manager:
             missing_managers.append(f"{csr} (department: {dept or 'unknown'})")
-            continue
         entry = targets.setdefault(
             csr,
-            {"email": email, "manager_name": manager["name"],
-             "manager_email": manager["email"], "items": [],
+            {"email": email,
+             "manager_name": (manager or {}).get("name", ""),
+             "manager_email": (manager or {}).get("email", ""),
+             "items": [],
              "producer_emails": [], "producer_names": [],
              "producer_fallback_used": [], "unresolved_producers": []},
         )
@@ -707,15 +719,9 @@ def resolve_nag_targets(
                 # Producer is informational CC: a missing mailbox is reported,
                 # never a reason to block the CSR's email.
                 entry["unresolved_producers"].append(producer)
-    if missing_csrs:
-        raise PolicyChangeReportContractError(
-            "CSR work email could not be resolved for: " + ", ".join(sorted(set(missing_csrs)))
-        )
-    if missing_managers:
-        raise PolicyChangeReportContractError(
-            "no department manager found for: " + ", ".join(sorted(set(missing_managers)))
-        )
-    return targets
+    unresolved_csrs = sorted(set(missing_csrs))
+    unresolved_managers = sorted(set(missing_managers))
+    return targets, unresolved_csrs, unresolved_managers
 
 
 # -- dedupe: don't re-nag ------------------------------------------------------
@@ -804,10 +810,14 @@ def build_csr_report(
 ) -> str:
     first = " ".join(str(csr).split()).split(" ")[0]
     others = [name for name in (cc_names or []) if name and name != manager_name]
-    if others:
+    if manager_name and others:
         cc_line = f"CC'ing {manager_name} and {', '.join(others)} so they're in the loop."
-    else:
+    elif manager_name:
         cc_line = f"CC'ing {manager_name} so they're in the loop."
+    elif others:
+        cc_line = f"CC'ing {', '.join(others)} so they're in the loop."
+    else:
+        cc_line = "Looping in the team so everyone's in the loop."
     lines = [
         f"Hi {first},",
         "",
@@ -832,10 +842,14 @@ def build_csr_report_html(
     cc_names: list[str] | None = None,
 ) -> str:
     others = [name for name in (cc_names or []) if name and name != manager_name]
-    if others:
+    if manager_name and others:
         cc_line = f"CC'ing {manager_name} and {', '.join(others)} so they're in the loop."
-    else:
+    elif manager_name:
         cc_line = f"CC'ing {manager_name} so they're in the loop."
+    elif others:
+        cc_line = f"CC'ing {', '.join(others)} so they're in the loop."
+    else:
+        cc_line = "Looping in the team so everyone's in the loop."
     bullets = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in _item_bullets(items, today))
     return "\n".join([
         "<div>",
@@ -1224,7 +1238,10 @@ class OverduePolicyChangeReportWorker:
             producer_fallbacks = load_producer_fallbacks(
                 payload.get("producer_fallbacks_path") or default_producer_fallbacks_path()
             )
-            targets = resolve_nag_targets(due_items, roster, producer_fallbacks)
+            targets, unresolved_csrs, unresolved_managers = resolve_nag_targets(
+                due_items, roster, producer_fallbacks)
+            summary["unresolved_csrs"] = unresolved_csrs
+            summary["unresolved_managers"] = unresolved_managers
             receipts: list[dict[str, Any]] = []
             for csr in sorted(targets):
                 target = targets[csr]
