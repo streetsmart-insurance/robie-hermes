@@ -15,6 +15,23 @@ RUNTIME_REQUIREMENTS = ROOT / "deploy" / "requirements-test-gateway-playwright.t
 
 
 class TestDeployWorkflowContractTests(unittest.TestCase):
+    def test_verification_gate_installs_pypdf_before_regression_battery(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        gate = text.split("- name: Re-run verification gate", 1)[1].split(
+            "- name:", 1
+        )[0]
+        install = (
+            'python -m pip install "pytest>=8.3,<9" "openpyxl>=3.1,<4" '
+            '"pypdf>=5,<7"'
+        )
+        self.assertIn(install, gate)
+        self.assertLess(gate.index("pypdf>=5,<7"), gate.index("regression_battery --ci"))
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn('"pypdf>=5,<7"', pyproject)
+        self.assertIn('"pypdf>=5,<7"', ci)
+        self.assertNotIn("hermes-poc-01", text)
+
     def test_credentials_are_main_only_and_target_is_exact_test_vm(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", text)

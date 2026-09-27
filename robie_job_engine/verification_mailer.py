@@ -36,12 +36,40 @@ def _sender() -> str:
     ).strip()
 
 
+def _read_sa_from_accountability_env() -> str:
+    """Fallback: read the delegated SA from the accountability env file.
+
+    The verification worker systemd units load robie-recording.env and
+    robie-evidence-loop.env but not robie-accountability.env, so the
+    ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT env var is never set
+    for them. The service user can read that file (group-readable), so
+    fall back to parsing it directly rather than failing closed.
+    The value is never logged.
+    """
+    path = os.environ.get(
+        "ROBIE_ACCOUNTABILITY_ENV_PATH",
+        "/etc/streetsmart-hermes-test/robie-accountability.env",
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 def _delegated_service_account() -> str:
-    return (
+    sa = (
         os.environ.get("ROBIE_VERIFICATION_GMAIL_DELEGATED_SERVICE_ACCOUNT")
         or os.environ.get("ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT")
         or ""
     ).strip()
+    if not sa:
+        sa = _read_sa_from_accountability_env()
+    return sa
 
 
 def _redacted_log_context(to: list[str], cc: list[str], subject: str) -> dict[str, Any]:

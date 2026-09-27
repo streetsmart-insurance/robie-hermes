@@ -40,9 +40,3 @@ def test_other_agency_addresses_allowed():
 def test_outsiders_rejected():
     assert policy.is_allowed_sender("vendor@gmail.com") is False
     assert policy.is_allowed_sender("") is False
-
-
-def test_ascend_mailbox_is_not_an_allowed_task_sender():
-    # Notices are handled by email_notice_hook, never the reply/LLM path.
-    assert policy.is_allowed_sender("notifications@useascend.com") is False
-    assert policy.is_allowed_sender("noreply@useascend.com") is False

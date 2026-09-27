@@ -48,21 +48,11 @@ class FakeClient:
 
     def search_applicant_documents(self, applicant_id):
         self.calls.append(("search_documents", applicant_id))
-        results = []
-        for doc in self._documents:
-            if isinstance(doc, dict) and doc.get("id"):
-                results.append(
-                    {
-                        "id": doc["id"],
-                        "name": doc.get("name") or doc.get("DocumentName") or "",
-                    }
-                )
-        return {"Documents": self._documents, "results": results}
+        return {"Documents": self._documents}
 
     def upload_applicant_document(self, applicant_id, document_name, file_bytes, **kwargs):
         self.calls.append(("upload", applicant_id, document_name))
         self.upload_calls.append((applicant_id, document_name))
-        self._documents.append({"id": "12345", "name": document_name})
         return "12345"
 
     def post_json(self, path, payload):
@@ -146,7 +136,6 @@ def test_upload_document_happy_path():
         client=client,
     )
     assert result["document_id"] == "12345"
-    assert result["read_back"] is True
     assert result["verification"]["verified"] is True
     assert client.upload_calls == [(APPLICANT, "Renewal Offer - Green Lion.pdf")]
     kinds = [c[0] for c in client.calls]

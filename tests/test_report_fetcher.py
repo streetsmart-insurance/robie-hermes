@@ -592,9 +592,13 @@ class EmailCsvLiveFetchTests(unittest.TestCase):
         from robie_job_engine import report_email_source as email_source
         from tests.test_report_email_source import FakeScheduledReportGmail, DAY, NOW
         for report_id, row in (("4247", _row4247()), ("4246", _row4360())):
+            # 4246's real daily mail carries the dedicated audit-queue
+            # subject, not the generic daily-CSV envelope (proven 2026-09-25).
+            subject = ing.AUDIT_4246_SUBJECT if report_id == "4246" else "ROBIE daily CSV"
             service = FakeScheduledReportGmail(
                 csv_bytes=_email_csv(report_id, [row]),
-                filename="ROBIE_daily_CSV_2026-09-20T0600.csv", received_at=NOW)
+                filename="ROBIE_daily_CSV_2026-09-20T0600.csv", received_at=NOW,
+                subject=subject)
             with self.subTest(report_id=report_id), durable_temporary_directory() as tmp, \
                  unittest.mock.patch.dict("os.environ", {"ROBIE_ENV": "PRODUCTION"}), \
                  unittest.mock.patch.object(email_source, "build_default_gmail_service", return_value=service) as factory, \

@@ -737,9 +737,17 @@ class EzlynxPolicySetupPage:
         url = f"{EZLYNX_BASE_URL}/web/account/{applicant_id}/policies"
         await self.page.goto(url, wait_until="domcontentloaded")
 
+    async def _wait_visible(self, locator: Any, label: str, timeout_ms: int) -> Any:
+        from .gemini_ui_rescue import wait_visible_or_rescue_async
+
+        return await wait_visible_or_rescue_async(
+            self.page, locator, label, timeout_ms
+        )
+
     async def open_policy_add(self) -> None:
-        add_btn = self.page.locator("#add-policy")
-        await add_btn.wait_for(state="visible", timeout=10000)
+        add_btn = await self._wait_visible(
+            self.page.locator("#add-policy"), "Add Policy", 10000
+        )
         await add_btn.click()
         await self.page.wait_for_load_state("domcontentloaded")
 
@@ -822,14 +830,16 @@ class EzlynxPolicySetupPage:
 
         # 9. Submit action (Add & Edit vs Add Policy)
         if save_and_edit:
-            add_edit_btn = self.page.locator("#AddAndEditPolicyBtn")
-            await add_edit_btn.wait_for(state="visible", timeout=5000)
+            add_edit_btn = await self._wait_visible(
+                self.page.locator("#AddAndEditPolicyBtn"), "Add & Edit", 5000
+            )
             await add_edit_btn.click()
             await self.page.wait_for_load_state("domcontentloaded")
             return True
         else:
-            add_btn = self.page.locator("#AddPolicyBtn")
-            await add_btn.wait_for(state="visible", timeout=5000)
+            add_btn = await self._wait_visible(
+                self.page.locator("#AddPolicyBtn"), "Add Policy", 5000
+            )
             await add_btn.click()
             await self.page.wait_for_load_state("domcontentloaded")
             return True
@@ -1111,8 +1121,9 @@ class EzlynxPolicySetupPage:
         )
 
     async def save_and_close_form_entry(self) -> None:
-        save_close_btn = self.page.locator("#finishButton-header")
-        await save_close_btn.wait_for(state="visible", timeout=10000)
+        save_close_btn = await self._wait_visible(
+            self.page.locator("#finishButton-header"), "Save & Close", 10000
+        )
         await save_close_btn.click()
         await self.page.wait_for_load_state("domcontentloaded")
 
