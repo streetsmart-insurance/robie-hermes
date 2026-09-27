@@ -110,6 +110,29 @@ class ReportMatchTest(unittest.TestCase):
         )
         self.assertIsNone(match_task(self._pending(), rows))
 
+    def test_match_real_activity_detail_columns(self):
+        # Regression test (2026-09-27): the production "ROBIE task report CSV"
+        # uses Activity Detail column names. A naive substring lookup for
+        # "task" hit "Task Assigned To" (returning the assignee as the title)
+        # and "created" hit "Note Created by" (returning a name as the
+        # timestamp). Exact-match-first must resolve the right columns.
+        now = datetime.now(timezone.utc)
+        created = _iso(now - timedelta(minutes=30))
+        csv = (
+            b"Applicant ID,Account Name,Task Assigned To,Activity Type,"
+            b"Note Created by,Task Status,Note,Created Date,Task Created Date,"
+            b"Task ID\n"
+            b"177412857,139 TRUCKING LLC,Steffany Canales,Task Creation Note,"
+            b"Carlo Ferrara,Open,Certificate request - 139 Trucking,"
+            + created.encode() + b","
+            + now.strftime("%Y-%m-%d").encode() + b","
+            b"63227816\n"
+        )
+        rows = parse_task_report_csv(csv)
+        hit = match_task(self._pending(), rows)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["task id"], "63227816")
+
 
 class VerifyDueTest(unittest.TestCase):
     def test_verified_missing_unverified(self):

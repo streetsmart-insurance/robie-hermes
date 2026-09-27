@@ -284,6 +284,13 @@ def _assignee_match(report_val: str, expected_val: str) -> bool:
 
 
 def _row_field(row: dict[str, str], *names: str) -> str:
+    # Exact match first: the Activity Detail CSV has columns like
+    # "task assigned to" and "note created by" where a naive substring
+    # search for "task" or "created" hits the wrong column.
+    for name in names:
+        if name in row:
+            return row[name]
+    # Fallback: substring match for column-name variants.
     for name in names:
         for key, val in row.items():
             if name in key:
@@ -310,19 +317,19 @@ def match_task(
     window_end = fired + timedelta(minutes=VERIFY_AFTER_MINUTES + 15)
 
     for row in report_rows:
-        applicant = _row_field(row, "applicant", "account")
+        applicant = _row_field(row, "applicant id", "applicant", "account")
         if applicant != pending.applicant_id:
             continue
-        assignee = _row_field(row, "assignee", "assigned")
+        assignee = _row_field(row, "task assigned to", "assignee", "assigned")
         if not _assignee_match(assignee, pending.assignee):
             continue
-        title = _row_field(row, "title", "task", "subject")
+        title = _row_field(row, "title", "task title", "subject", "note")
         if not title or not (
             _norm(title) in _norm(pending.title)
             or _norm(pending.title) in _norm(title)
         ):
             continue
-        created_raw = _row_field(row, "created", "date")
+        created_raw = _row_field(row, "created date", "task created date", "created")
         if created_raw:
             try:
                 created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
