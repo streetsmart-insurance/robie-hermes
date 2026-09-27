@@ -116,6 +116,33 @@ def test_vendor_sender_never_aliased_even_if_listed(alias_file):
     assert res.status == NO_MATCH
 
 
+def test_researched_vendor_domains_are_vendor_systems():
+    # Every researched vendor/compliance/broker domain must be treated as
+    # "sender is never the client". Regression: certificial.ai (the actual
+    # Certificial sender domain, sarah@certificial.ai) was missing while
+    # only certificial.com was listed.
+    for email in [
+        "sarah@certificial.ai",
+        "no-reply@certs.highway.com",
+        "davinder.negi@trustlayer.io",
+        "insurance@operfi.com",
+        "noreply@vc.realpage.com",
+        "myinsuranceinfo-confirmation.do-not-reply@myinsuranceinfo.com",
+        "no-reply@plus1solutions.net",
+        "kendell@sandsbrokerageinc.com",
+        "samarth@immensetrucking.com",
+    ]:
+        assert cai._sender_is_vendor_system(email), email
+
+
+def test_broker_sender_never_aliased_even_if_listed(alias_file):
+    # Brokers ask for a carrier's COI; the insured is the carrier named in
+    # the body, never the broker. A broker address in the data file is
+    # dropped at load.
+    alias_file([entry("kendell@sandsbrokerageinc.com", 137191625, "strong")])
+    assert load_sender_aliases() == {}
+
+
 def test_internal_sender_never_aliased_even_if_listed(alias_file):
     alias_file([entry("sandy@streetsmart.insurance", 78540038, "strong")])
     assert load_sender_aliases() == {}

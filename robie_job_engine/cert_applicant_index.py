@@ -268,12 +268,19 @@ _VENDOR_SENDER_DOMAINS = (
     "mycoisolution.com",       # myCOI
     "mycoitracking.com",
     "certificial.com",         # Certificial
+    "certificial.ai",          # Certificial expiry notices (sarah@certificial.ai)
     "trustlayer.io",           # TrustLayer compliance requests name the
                                # insured after "for" in the subject
     "operfi.com",              # OperFi compliance requests name the insured
                                # in the subject
     "nextinsurance.com",       # Next Insurance
     "assurant.com",            # Assurant vendor notices
+    "vc.realpage.com",         # RealPage vendor credentialing (automated; skip intake)
+    "myinsuranceinfo.com",     # MyInsuranceInfo submission confirmations
+    "plus1solutions.net",      # PlusOne Solutions automated notices
+    "sandsbrokerageinc.com",   # Sands Brokerage: broker asking for a
+    "immensetrucking.com",     # carrier's COI — the insured is the carrier
+                               # named in the body, never the sender
 )
 
 
