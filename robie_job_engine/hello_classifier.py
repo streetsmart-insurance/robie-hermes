@@ -13,25 +13,40 @@ original request language):
     GENUINE      a real client/agency work item, with a request_type
     INTERNAL     agency-internal sender (Carlo/Jake forwarding carrier
                  notices into hello) — real work, already owned; not a
-                 new client request to match
+                 new client request to match. request_type carries the
+                 envelope subtype: "internal_forward" (a forwarded item —
+                 unwrap and classify the inner content) or
+                 "internal_discussion" (a team thread — FYI, no action).
     AUTO_REPLY   out-of-office / bounce / delivery failure — never a request
     ACK          thank-you / receipt language — the work is already done
-    NOISE        newsletters, carrier marketing, system notifications,
+    NOISE        newsletters, carrier marketing, system notifications
+                 (call-analysis digests — NOT voicemail/SMS relays),
                  vendor spam — never a request
     UNKNOWN      could not classify — holds for human review
 
-Genuine request types (hello-specific):
+Genuine request types (hello-specific, revised against 6 months of
+hello@ data):
 
     new_business    quote requests for new coverage
     renewal         renewal quotes / renewal requests
     midterm         policy changes (add/remove vehicle, trailer, driver,
                     address, coverage changes)
     client_issue    complaints / problems needing resolution
-    carrier_notice  cancellation / rescission / non-renewal / DNOC notices
-                    needing agency action
-    billing         premium finance, return premium, past-due, settlements
+    carrier_notice  cancellation / rescission / non-renewal / DNOC /
+                    reinstatement notices needing agency action
+    premium_finance premium-finance mail (Capital Premium, Ascend, USPF):
+                    financed premium, past-due, PF cancellations
+    invoice_billing carrier invoices, overdue carrier invoices, return
+                    premium — Accounting, distinct from premium finance
     endorsement     additional interest / additional insured / confirmations
     document        client sending documents in (license, dec pages, loss runs)
+    wholesaler_mga  MGA/wholesaler underwriting requirements, policy
+                    delivery, balance-due (Bridge, JJINS, RPS, CRC…)
+    voicemail_text_notify
+                    RingCentral voicemail / SMS relay notifications — a
+                    missed contact needing a callback, never noise
+    binder_bound    binders and bound policies (effective dates, premium,
+                    invoice — verify against the proposal, not just file)
     general_question everything else that reads like a real client question
 
 Identity extraction (extract_hello_identity): sender email, company/insured
@@ -57,10 +72,13 @@ ACK = "acknowledgement"
 NOISE = "noise"
 UNKNOWN = "unknown"
 
-# Canonical hello routing roles (from HelloIntake.assignment_for):
-#   new_business -> originating_producer
-#   renewal / midterm -> applicable_csr
-# The hello-specific types below route to applicable_csr until the intake
+# Canonical hello routing roles (from HelloIntake.assignment_for, extended
+# per the 6-month hello@ analysis):
+#   new_business / wholesaler_mga -> originating_producer
+#   premium_finance / invoice_billing -> accounting
+#   voicemail_text_notify -> on_duty (whoever holds the callback roster)
+#   everything else genuine -> applicable_csr
+# The hello-specific types route via the queue report until the intake
 # stub is extended; the wiring doc records this explicitly.
 
 ROUTE_FOR_REQUEST_TYPE = {
@@ -69,9 +87,13 @@ ROUTE_FOR_REQUEST_TYPE = {
     "midterm": "applicable_csr",
     "client_issue": "applicable_csr",
     "carrier_notice": "applicable_csr",
-    "billing": "applicable_csr",
+    "premium_finance": "accounting",
+    "invoice_billing": "accounting",
     "endorsement": "applicable_csr",
     "document": "applicable_csr",
+    "wholesaler_mga": "originating_producer",
+    "voicemail_text_notify": "on_duty",
+    "binder_bound": "applicable_csr",
     "general_question": "applicable_csr",
 }
 
@@ -131,11 +153,12 @@ _NEWSLETTER_PATTERNS = [
     re.compile(r"\bindustry (news|update)\b", re.IGNORECASE),
 ]
 
-# System notifications that are never client requests: text-message
-# relays, call-analysis summaries, chat digests.
+# System notifications that are never client requests: call-analysis
+# summaries, chat digests. NOTE: voicemail and SMS-text relays are NOT
+# here — a missed contact needing a callback is genuine work
+# (voicemail_text_notify), never noise. "Missed call" alone (no message)
+# stays noise: there is nothing to transcribe or act on.
 _SYSTEM_NOTIFICATION_PATTERNS = [
-    re.compile(r"\bhas sent you a text message\b", re.IGNORECASE),
-    re.compile(r"\bdo not reply\b.{0,40}\btext message\b", re.IGNORECASE),
     re.compile(r"\bcall analysis\b", re.IGNORECASE),
     re.compile(r"\bscheduled callback\b", re.IGNORECASE),
     re.compile(r"\bconversation digest\b", re.IGNORECASE),
@@ -143,9 +166,27 @@ _SYSTEM_NOTIFICATION_PATTERNS = [
 ]
 
 _NOISE_SENDERS = (
-    # Carrier marketing / vendor mail observed in hello@
+    # Carrier marketing / vendor mail observed in hello@.
+    # NOTE: wholesaler/MGA domains are deliberately NOT here — their
+    # mail is genuine work (see _WHOLESALER_SENDER_DOMAINS below).
     "swyfft.com",
     "britecore.com",
+)
+
+# Wholesaler/MGA sender domains (observed in hello@, Mar–Sep 2026).
+# Fallback only: any distinctive request-type shape (renewal, binder,
+# carrier_notice, …) wins first, and a wholesaler marketing blast is
+# still noise — _VENDOR_RE and the noise checks run before this is
+# consulted.
+_WHOLESALER_SENDER_DOMAINS = (
+    "bridgespecialty.com",
+    "jjins.com",
+    "rpsins.com",
+    "crcgroup.com",
+    "tuscano.com",
+    "bassuw.com",
+    "rlig.com",
+    "xptgroup.com",
 )
 
 # ---------------------------------------------------------------------------
@@ -173,10 +214,27 @@ _ACK_COMPLETION_PATTERNS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Genuine request-type patterns (observed in hello@ mail, Sep 2026)
+# Genuine request-type patterns (observed in hello@ mail; revised against
+# 6 months of data, Sep 2026). ORDER MATTERS: first match wins. The
+# missed-contact envelope (voicemail/SMS) and the binder artifact are
+# checked before looser shapes — they are the most specific signal present.
 # ---------------------------------------------------------------------------
 
 _REQUEST_TYPE_PATTERNS: list[tuple[str, list[re.Pattern]]] = [
+    ("voicemail_text_notify", [
+        re.compile(r"\bvoice(\s|-)?mails?\b", re.IGNORECASE),
+        re.compile(r"\bnew voicemail\b", re.IGNORECASE),
+        re.compile(r"\bvoicemail from\b", re.IGNORECASE),
+        re.compile(r"\bhas sent you a text message\b", re.IGNORECASE),
+        re.compile(r"\bdo not reply\b.{0,40}\btext message\b", re.IGNORECASE),
+        re.compile(r"\bnew text message\b", re.IGNORECASE),
+        re.compile(r"\byou have a new text\b", re.IGNORECASE),
+    ]),
+    ("binder_bound", [
+        re.compile(r"\bbinder\b", re.IGNORECASE),
+        re.compile(r"\bbound\b.{0,25}\bpolic", re.IGNORECASE),
+        re.compile(r"\bpolic\w*\b.{0,25}\bbound\b", re.IGNORECASE),
+    ]),
     ("new_business", [
         re.compile(r"\binsurance for a new\b", re.IGNORECASE),
         re.compile(r"\bnew business\b", re.IGNORECASE),
@@ -218,12 +276,25 @@ _REQUEST_TYPE_PATTERNS: list[tuple[str, list[re.Pattern]]] = [
         re.compile(r"\bdnoc\b", re.IGNORECASE),
         re.compile(r"\bnon[\-\s]?renewal\b", re.IGNORECASE),
         re.compile(r"\bnotice of intent to cancel\b", re.IGNORECASE),
+        re.compile(r"\breinstat\w*\b", re.IGNORECASE),
+        re.compile(r"\bpending cancel", re.IGNORECASE),
     ]),
-    ("billing", [
+    ("premium_finance", [
+        re.compile(r"\bpremium financ\w*\b", re.IGNORECASE),
+        re.compile(r"\bcapital premium\b", re.IGNORECASE),
+        re.compile(r"\bus premium finance\b", re.IGNORECASE),
+        re.compile(r"\buspf\b", re.IGNORECASE),
+        re.compile(r"\bascend\b", re.IGNORECASE),
+    ]),
+    ("invoice_billing", [
         re.compile(r"\breturn premium\b", re.IGNORECASE),
-        re.compile(r"\bpremium financ", re.IGNORECASE),
+        re.compile(r"\b(overdue|past[\s-]?due)\b.{0,30}\b(invoice|premium|"
+                   r"payment)\b", re.IGNORECASE),
+        re.compile(r"\bcarrier invoice\b", re.IGNORECASE),
+        re.compile(r"\binvoice\b.{0,30}\b(amount due|due date|overdue)\b",
+                   re.IGNORECASE),
+        re.compile(r"\bamount due\b", re.IGNORECASE),
         re.compile(r"\bsettlement offer\b", re.IGNORECASE),
-        re.compile(r"\b(overdue|past due) invoice\b", re.IGNORECASE),
         re.compile(r"\bpayment (failed|declined)\b", re.IGNORECASE),
         re.compile(r"\bbilling (question|issue|dispute)\b", re.IGNORECASE),
     ]),
@@ -241,6 +312,14 @@ _REQUEST_TYPE_PATTERNS: list[tuple[str, list[re.Pattern]]] = [
                    r"loss runs?)\b", re.IGNORECASE),
         re.compile(r"\bhere (is|are) (my|our) (license|documents?)\b",
                    re.IGNORECASE),
+    ]),
+    ("wholesaler_mga", [
+        re.compile(r"\bunderwriting\b", re.IGNORECASE),
+        re.compile(r"\b(uw|underwriter)\b.{0,30}\b(requirements?|conditions?|"
+                   r"needed|outstanding|requested)\b", re.IGNORECASE),
+        re.compile(r"\bsubject to\b.{0,30}\b(underwriting|uw)\b",
+                   re.IGNORECASE),
+        re.compile(r"\bbinder conditions?\b", re.IGNORECASE),
     ]),
 ]
 
@@ -277,13 +356,20 @@ def _sender_is_internal(sender: str | None) -> bool:
     return domain in _INTERNAL_DOMAINS
 
 
+def _sender_is_wholesaler(sender: str | None) -> bool:
+    domain = _domain_of(sender)
+    return any(domain == n or domain.endswith("." + n)
+               for n in _WHOLESALER_SENDER_DOMAINS)
+
+
 def classify_hello(subject: str, body: str,
                    sender: str | None = None) -> tuple[str, str | None, str]:
     """Classify one hello@ email.
 
-    Returns (action, request_type, reason). request_type is set only for
-    GENUINE; reason is a short human-readable explanation for the queue
-    report.
+    Returns (action, request_type, reason). request_type is set for
+    GENUINE and for INTERNAL (the envelope subtype "internal_forward" /
+    "internal_discussion"); reason is a short human-readable explanation
+    for the queue report.
     """
     subject = subject or ""
     body = body or ""
@@ -309,12 +395,20 @@ def classify_hello(subject: str, body: str,
     if _sender_is_noise(sender):
         return NOISE, None, f"marketing/vendor sender {sender}"
     if any(p.search(text) for p in _SYSTEM_NOTIFICATION_PATTERNS):
-        return NOISE, None, "system notification (text/call digest)"
+        return NOISE, None, "system notification (call digest)"
 
     # 3. Agency-internal senders forwarding into hello@ — real work items,
     #    but already owned by the forwarder; not new client requests.
+    #    The request_type carries the envelope: internal_forward means
+    #    "unwrap and classify the inner content", internal_discussion
+    #    means a team thread (FYI, no action).
     if _sender_is_internal(sender):
-        return INTERNAL, None, f"internal sender {sender}"
+        # Lazy import: hello_forwarding imports this module at function
+        # level as well; a top-level import would cycle.
+        from .hello_forwarding import detect_forward
+        subtype = ("internal_forward" if detect_forward(subject, body)
+                   else "internal_discussion")
+        return INTERNAL, subtype, f"internal sender {sender} ({subtype})"
 
     # 4. Acknowledgements: receipt language means the work is done.
     if any(p.search(text) for p in _ACK_COMPLETION_PATTERNS):
@@ -337,6 +431,10 @@ def classify_hello(subject: str, body: str,
             break
     if typed:
         return GENUINE, typed, f"matched {typed} request shape"
+    # Wholesaler/MGA sender with no stronger shape: genuine wholesaler
+    # work item (underwriting follow-ups, policy delivery, balance-due).
+    if _sender_is_wholesaler(sender):
+        return GENUINE, "wholesaler_mga", f"wholesaler/MGA sender {sender}"
     if body_polite:
         return ACK, None, "polite thank-you, no request language"
 

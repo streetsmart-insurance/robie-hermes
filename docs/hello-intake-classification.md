@@ -142,9 +142,91 @@ name -> sender alias -> policy anchor) against the hello alias store
 
 Note: `HelloIntake.assignment_for` only accepts `new_business`,
 `renewal`, `midterm`. The hello-specific types (client_issue,
-carrier_notice, billing, endorsement, document, general_question) route
-to `applicable_csr` in the queue report; extending the intake stub to
-accept them is a separate, small follow-up PR.
+carrier_notice, premium_finance, invoice_billing, endorsement, document,
+wholesaler_mga, voicemail_text_notify, binder_bound, general_question)
+route to their `ROUTE_FOR_REQUEST_TYPE` roles in the queue report;
+extending the intake stub to accept them is a separate, small follow-up
+PR.
+
+## Phase 2 — the six inbox fixes (2026-09-27)
+
+Built on this branch against the 6-month hello@ analysis
+(`~/workspace/your_files/hello-inbox/hello-inbox-analysis.md`).
+
+### 1. Forward unwrapping + dedupe — `hello_forwarding.py`
+
+53% of hello@ volume is forwards (mostly Carlo bare-forwarding carrier
+material). The module detects forward envelopes (Gmail
+`---------- Forwarded message ---------` and Outlook
+`-----Original Message-----` blocks, `Fwd:` subjects), unwraps to the
+original sender/subject/body/date, and collapses direct/forward
+duplicates on the (original sender, normalized subject, calendar day)
+key — falling back to body-hash when the sender is unknown so two
+different forwards never collapse. `classify_with_envelope()` returns
+the envelope (`internal_forward` / `internal_discussion` /
+`external_forward` / `external_direct`) and always classifies the INNER
+content — the forwarder's address never decides the request type.
+
+### 2. Per-category filing spec — `hello_filing.py`
+
+Single source of truth for what "filed" means per category: owner role,
+SLA, discussion hint, whether documents upload, whether a human task is
+required, whether an on-duty alert fires. `build_filing_plan()` produces
+pure data; `execute_plan()` runs it against injected interfaces
+(dry-run by default — zero writes unless interfaces are supplied AND
+`dry_run=False`). Fail-closed gates: triple identity verification
+(policy/sender-anchored high-confidence match only — name-only matches
+fail, the Rivera lesson), the money-claim rule (no "payment posted"
+without bank/feed/register + date + amount), placeholder rejection,
+task dedupe against open tasks (never duplicate a Client Center task).
+DONE = every required action read back AND every required human task
+exists (created or already open).
+
+### 3. Cancellation / non-pay workflow — `hello_cancellation.py`
+
+`notice_subtype()` (cancellation / reinstatement / non_renewal /
+renewal_notice / other; DNOC counts as cancellation) drives the plan.
+A cancellation creates ONE same-business-day client-call task
+(`cure_or_cancel`) that stays open until cure or confirmed cancel; the
+append-only JSONL `CancellationLedger` keeps the per-policy through-line
+so repeat notices (the PHLY PHPK2734817-000 loop: five notices, zero
+action) attach to the open entry instead of spawning new tasks.
+Reinstatement files its own note and proposes closing the open entry; a
+human confirms the close with `cure_confirmed` / `cancel_confirmed` /
+`replaced` — only those values are accepted.
+
+### 4. Premium-finance routing
+
+The old `billing` type is split: `premium_finance` (Capital Premium,
+Ascend, USPF) vs `invoice_billing` (carrier invoices, return premium).
+Past-due/cancellation PF mail files as `premium_finance_urgent`:
+Accounting owner, 24-hour SLA. Routine PF mail: Accounting, 48-hour
+SLA, filed for the record. Vendor-sender protection is untouched
+(`useascend.com`, `phly.com`, `brownandjoseph.net` still never become
+aliases).
+
+### 5. Voicemail / SMS callback — `hello_voicemail.py`
+
+`parse_voicemail_notification()` extracts message type, caller name,
+callback number, transcription, and received time from RingCentral
+relays. The filed summary note carries the transcription but NEVER the
+digits (`sanitize_note_body()`); the on-duty alert carries the callback
+number with the one-business-hour SLA task. The old classifier's
+"text-message relay is noise" behavior is retired — 14 unanswered
+notifications in 6 months is the evidence.
+
+### 6. Classifier updates — `hello_classifier.py`
+
+`billing` → `premium_finance` + `invoice_billing`; new
+`wholesaler_mga` (UW-requirement content patterns + sender-domain
+fallback — Bridge, JJINS, RPS, CRC, Tuscano, Bass, RLIG, XPT), new
+`voicemail_text_notify`, new `binder_bound`; `carrier_notice` gains
+reinstatement patterns; INTERNAL now returns the envelope subtype
+(`internal_forward` vs `internal_discussion`) in `request_type`.
+`notice_type_of()` (`hello_triage.py`) learned the observed
+"pending cancel" subject. Routes: premium_finance/invoice_billing →
+accounting, wholesaler_mga → originating_producer, voicemail_text_notify
+→ on_duty.
 
 ## Merge order vs the certificate PRs
 
@@ -156,5 +238,8 @@ accept them is a separate, small follow-up PR.
   the hello module can adopt them in a follow-up; it must not be blocked
   on #610.
 
-This PR touches zero existing files (4 new files + tests). It can merge
-before, after, or independently of #609/#610.
+This PR now touches existing files (`hello_classifier.py`,
+`hello_triage.py`, `hello_match.py`) plus new modules
+(`hello_forwarding.py`, `hello_filing.py`, `hello_cancellation.py`,
+`hello_voicemail.py`) and tests. It can merge before, after, or
+independently of #609/#610.

@@ -91,11 +91,14 @@ def test_carrier_marketing_is_noise():
     assert action == NOISE
 
 
-def test_text_message_notification_is_noise():
-    action, _, _ = classify_hello(
+def test_text_message_notification_is_callback_work():
+    # 2026-09-27: missed-contact relays are genuine work
+    # (voicemail_text_notify), never noise.
+    action, rtype, _ = classify_hello(
         "Re: Do Not Reply - Mununga Kipata has sent you a text message",
         "You have a new text.", "noreply@example.com")
-    assert action == NOISE
+    assert action == GENUINE
+    assert rtype == "voicemail_text_notify"
 
 
 def test_call_analysis_digest_is_noise():
@@ -158,9 +161,9 @@ def test_request_language_beats_politeness():
      "client_issue"),
     ("Fwd: Important: Policy Rescission Notice 1-HNY-NJ-01-014332", "",
      "carrier_notice"),
-    ("Return premium received for Policy 3AB025200", "", "billing"),
+    ("Return premium received for Policy 3AB025200", "", "invoice_billing"),
     ("SETTLEMENT OFFER / Case 13256517 / Capital Premium Financing", "",
-     "billing"),
+     "premium_finance"),
     ("Fwd: Additional Interest added - Business Owners BP00109727", "",
      "endorsement"),
     ("Re: my license", "Attached is my driver's license as requested.",

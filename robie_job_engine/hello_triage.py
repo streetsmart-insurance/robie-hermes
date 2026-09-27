@@ -178,7 +178,8 @@ _INSURED_PATTERNS = (
 )
 
 _NOTICE_TYPE_RULES = (
-    ("cancellation", ("cancellation", "cancel notice", "cancelled")),
+    ("cancellation", ("cancellation", "cancel notice", "cancelled",
+                     "pending cancel", "pending cancellation")),
     ("non-renewal", ("non-renewal", "nonrenewal")),
     ("reinstatement", ("reinstatement", "reinstated")),
     ("audit", ("audit",)),
