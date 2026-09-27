@@ -59,6 +59,13 @@ try:
     from . import mortgagee_enrichment as menc  # noqa: E402
 except ImportError:  # script-style: python robie_job_engine/verification_workers.py
     import mortgagee_enrichment as menc  # noqa: E402
+try:
+    from . import mortgagee_live_ports as _live_ports  # noqa: E402
+except ImportError:  # script-style
+    try:
+        import mortgagee_live_ports as _live_ports  # noqa: E402
+    except ImportError:
+        _live_ports = None  # type: ignore[assignment]  # pragma: no cover
 
 WORKERS = {
     "4247": {
@@ -444,7 +451,18 @@ def plan_4247(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
                            target=carrier, due=today.isoformat()),
                 "due_now", f"expires in {days}d — check EZLynx download first")
     route = _routing.route_carrier(carrier)
-    channel = str(route.get("channel") or "EMAIL").upper()
+    channel = str(route.get("channel") or "HOLD").upper()
+    if channel == "HOLD":
+        # Unknown carrier: fail closed. No outreach is planned against a
+        # guessed channel; the item waits for carrier-desk confirmation.
+        hold_reason = str(route.get("reason") or
+                          "carrier not in the carrier directory").strip()
+        return (ActionPlan("verify",
+                           f"Carrier '{carrier}' is unknown — {hold_reason}. "
+                           f"Confirm the carrier desk contact in EZLynx before "
+                           f"outreach. {pol_ref}{acct}. {exp_txt}.",
+                           target=carrier),
+                "blocked", f"unknown carrier — held: {hold_reason}")
     if channel == "PORTAL":
         portal_url = str(route.get("portal_url") or "").strip()
         url_txt = f" ({portal_url})" if portal_url else ""
@@ -497,7 +515,18 @@ def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str
                                target=carrier, due=entry.next_due),
                     "waiting", f"waiting — next follow-up {entry.next_due or 'due'}")
     route = _routing.route_carrier(carrier)
-    channel = str(route.get("channel") or "EMAIL").upper()
+    channel = str(route.get("channel") or "HOLD").upper()
+    if channel == "HOLD":
+        # Unknown carrier: fail closed — no call or email is planned
+        # against a guessed channel.
+        hold_reason = str(route.get("reason") or
+                          "carrier not in the carrier directory").strip()
+        return (ActionPlan("verify",
+                           f"Carrier '{carrier}' is unknown — {hold_reason}. "
+                           f"Confirm the carrier desk contact in EZLynx before "
+                           f"outreach. {pol_ref}{acct}.",
+                           target=carrier),
+                "blocked", f"unknown carrier — held: {hold_reason}")
     phone = str(route.get("phone") or "").strip()
     phone_label = str(route.get("phone_label") or "").strip()
     day_txt = f"day {days_since} — audit papers outstanding"
@@ -739,9 +768,18 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
         )
     elif gmail_service is not None:
         allow_unverified = report_id == "4359"
-        got = ing.ingest_daily_reports(gmail_service, day=day,
-                                       report_ids=[report_id],
-                                       allow_unverified=allow_unverified)
+        try:
+            got = ing.ingest_daily_reports(gmail_service, day=day,
+                                           report_ids=[report_id],
+                                           allow_unverified=allow_unverified)
+        except ing.GmailReportIngestionError:
+            raise
+        except Exception as exc:
+            # Gmail/API outage: typed and loud, never a silent empty run.
+            raise ing.GmailReportIngestionError(
+                f"gmail ingest failed for {report_id} on {day.isoformat()}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         ingested = got[report_id]
     else:
         raise ing.GmailReportIngestionError(
@@ -814,6 +852,17 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
     else:
         planner = {"4247": plan_4247, "4372": plan_4372,
                    "4744": plan_4372, "4359": plan_4359}[report_id]
+        # Mortgagee live wiring: when the runtime asks for live adapters
+        # (test_enrichment / browser_read) and the caller did not inject
+        # custom ports, build them from the live adapter factory. The
+        # factory fail-closes: policy_search_fn is the only live read
+        # (OAuth PolicyApi, read-only, LIVE-PROVEN 2026-09-27); no
+        # additional-interests API path exists, so enrichment still HOLDs
+        # on lender identity until the browser reader is injected.
+        if (report_id in ("4372", "4744") and enrichment_ports is None
+                and (test_enrichment or browser_read)
+                and _live_ports is not None):
+            enrichment_ports = _live_ports.build_live_ports()
         # 4247: most urgent first.
         if report_id == "4247":
             items.sort(key=lambda it: (parse_csv_date(it.expiration_date)

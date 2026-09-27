@@ -261,9 +261,10 @@ class CarrierRoutingTests(unittest.TestCase):
         self.assertEqual(route["channel"], "PORTAL")
         self.assertIn("coterie", route["portal_url"].casefold())
 
-    def test_unknown_carrier_fails_open_to_email(self):
+    def test_unknown_carrier_fails_closed_to_hold(self):
         route = routing.route_carrier("Nonexistent Mutual of Nowhere")
-        self.assertEqual(route, {"channel": "EMAIL"})
+        self.assertEqual(route["channel"], "HOLD")
+        self.assertIn("reason", route)
 
     def test_token_match_finds_njcrib(self):
         route = routing.route_carrier("NJCRIB")

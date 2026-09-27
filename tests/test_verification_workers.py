@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from robie_job_engine import gmail_report_ingestion as ing
+from robie_job_engine import mortgagee_enrichment as menc
 from robie_job_engine import verification_workers as vw
 
 DAY = date(2026, 9, 19)
@@ -101,7 +102,7 @@ class RootTestShadowingTests(unittest.TestCase):
 
 class Audit4246WorkerTests(unittest.TestCase):
     def test_4246_ingests_4360_format_daily_csv(self):
-        rows = [_row4360("WC999", "Test Co", "08/15/2026")]
+        rows = [_row4360("WC999", "Test Co", "08/15/2026", carrier="AmWINS MGA")]
         with tempfile.TemporaryDirectory() as tmp:
             run = vw.run_worker(
                 "4246",
@@ -121,9 +122,29 @@ class Audit4246WorkerTests(unittest.TestCase):
             )
             entry = saved["entries"][run.audit_added[0]]
             self.assertEqual(entry["renewal_date"], "2026-08-15")
-            self.assertEqual(entry["carrier"], "Test Carrier")
+            self.assertEqual(entry["carrier"], "AmWINS MGA")
             self.assertEqual(entry["account_name"], "Test Co")
             self.assertEqual(entry["department"], "Commercial Lines")
+
+    def test_4246_unknown_carrier_holds_fail_closed(self):
+        rows = [_row4360("WC-HOLD", "Hold Co", "08/15/2026",
+                          carrier="Nonexistent Mutual of Nowhere")]
+        with tempfile.TemporaryDirectory() as tmp:
+            run = vw.run_worker(
+                "4246",
+                day=DAY,
+                mode="dry_run",
+                queue_dir=tmp,
+                csv_bytes=_csv_bytes("4246", rows),
+            )
+            self.assertEqual(run.work_items, 1)
+            self.assertFalse(run.errors)
+            action = run.actions[0]
+            self.assertEqual(action.status, "blocked")
+            self.assertEqual(action.action.kind, "verify")
+            self.assertIn("unknown carrier", action.reason.casefold())
+            self.assertIn("Nonexistent Mutual of Nowhere",
+                          action.action.detail)
 
     def test_4246_rejects_old_19col_format(self):
         old_headers = ["Account Name", "Applicant ID", "Policy Number"]
@@ -145,8 +166,8 @@ class Audit4246WorkerTests(unittest.TestCase):
 
     def test_4246_incremental_queue_add_then_carry(self):
         rows = [
-            _row4360("WC-DAY45", "Day45 Co", "08/05/2026"),
-            _row4360("WC-DAY9", "Day9 Co", "09/10/2026"),
+            _row4360("WC-DAY45", "Day45 Co", "08/05/2026", carrier="AmWINS MGA"),
+            _row4360("WC-DAY9", "Day9 Co", "09/10/2026", carrier="AmWINS MGA"),
         ]
         data = _csv_bytes("4246", rows)
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +293,32 @@ class ManualRenewal4247WorkerTests(unittest.TestCase):
             self.assertIn("Manual Renewals", digest)
             self.assertIn("Commercial Lines", digest)
 
+    def test_4247_unknown_carrier_holds_fail_closed(self):
+        eff = (DAY - timedelta(days=330)).strftime("%m/%d/%Y")
+        exp = (DAY + timedelta(days=35)).strftime("%m/%d/%Y")
+        rows = [{
+            "Policy Number": "POL-4247-HOLD",
+            "Account Name": "Hold Account",
+            "Department": "Commercial Lines",
+            "Policy Effective Date": eff,
+            "Policy Expiration Date": exp,
+            "Master Company": "Nonexistent Mutual of Nowhere",
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            run = vw.run_worker(
+                "4247",
+                day=DAY,
+                mode="dry_run",
+                queue_dir=tmp,
+                csv_bytes=_csv_bytes("4247", rows),
+            )
+            self.assertEqual(run.work_items, 1)
+            self.assertFalse(run.errors)
+            action = run.actions[0]
+            self.assertEqual(action.status, "blocked")
+            self.assertEqual(action.action.kind, "verify")
+            self.assertIn("unknown carrier", action.reason.casefold())
+
 
 class PolicyChange4359WorkerTests(unittest.TestCase):
     def test_4359_per_request_items_and_turnaround_window(self):
@@ -331,7 +378,7 @@ class DigestShapeTests(unittest.TestCase):
             "Account Name": "Personal Account",
             "Department": "Personal Lines",
             "Policy Expiration Date": (DAY + timedelta(days=40)).strftime("%m/%d/%Y"),
-            "Master Company": "Test Carrier",
+            "Master Company": "AmWINS MGA",
         }]
         with tempfile.TemporaryDirectory() as tmp:
             run = vw.run_worker(
@@ -410,3 +457,196 @@ class PlanAPlusRegressionTests(unittest.TestCase):
         self.assertEqual(action.kind, "email")
         self.assertIn("assignedrisk@libertymutual.com", action.detail)
         self.assertIn("WC5-33S-381868-015", action.detail)
+
+
+class WorkerReliabilityTests(unittest.TestCase):
+    """Reliability: duplicate runs, stale input, partial failure, outages,
+    and safe retries. Added 2026-09-27 (PR #613 remaining-work item)."""
+
+    def _row4247(self, policy, exp_days, carrier="AmWINS MGA"):
+        eff = (DAY - timedelta(days=330)).strftime("%m/%d/%Y")
+        exp = (DAY + timedelta(days=exp_days)).strftime("%m/%d/%Y")
+        return {
+            "Policy Number": policy,
+            "Account Name": "Acct",
+            "Department": "Commercial Lines",
+            "Policy Effective Date": eff,
+            "Policy Expiration Date": exp,
+            "Master Company": carrier,
+        }
+
+    def _row4744(self, policy, exp):
+        exp_txt = exp if isinstance(exp, str) else (
+            DAY + timedelta(days=exp)).strftime("%m/%d/%Y")
+        return {
+            "Account Name": "Acct",
+            "Policy Number": policy,
+            "Master Company": "AmWINS MGA",
+            "Policy Expiration Date": exp_txt,
+        }
+
+    @staticmethod
+    def _snapshot(run):
+        return [(a.policy_number, a.status, a.action.kind, a.reason)
+                for a in run.actions]
+
+    def test_duplicate_invocation_same_result(self):
+        rows = [self._row4247("DUP-1", 40), self._row4247("DUP-2", 41)]
+        data = _csv_bytes("4247", rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            run1 = vw.run_worker("4247", day=DAY, mode="dry_run",
+                                 queue_dir=tmp, csv_bytes=data)
+            run2 = vw.run_worker("4247", day=DAY, mode="dry_run",
+                                 queue_dir=tmp, csv_bytes=data)
+        self.assertFalse(run1.errors)
+        self.assertFalse(run2.errors)
+        self.assertEqual(self._snapshot(run1), self._snapshot(run2))
+
+    def test_overlap_next_day_carries_without_duplicates(self):
+        rows = [_row4360("WC-O1", "O1 Co", "08/20/2026", carrier="AmWINS MGA")]
+        data = _csv_bytes("4246", rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            run1 = vw.run_worker("4246", day=DAY, mode="dry_run",
+                                 queue_dir=tmp, csv_bytes=data)
+            self.assertEqual(len(run1.audit_added), 1)
+            run2 = vw.run_worker("4246", day=DAY + timedelta(days=1),
+                                 mode="dry_run", queue_dir=tmp, csv_bytes=data)
+            self.assertEqual(len(run2.audit_added), 0)
+            self.assertEqual(len(run2.audit_carried), 1)
+            saved = json.loads(
+                Path(tmp, "audit-working-queue.json").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(len(saved["entries"]), 1)
+
+    def test_stale_4744_input_excluded_with_reasons(self):
+        rows = [
+            self._row4744("STALE-1", -200),   # long expired
+            self._row4744("STALE-2", -10),    # just expired
+            self._row4744("STALE-3", 100),    # too far out
+            self._row4744("BAD-DATE", "not-a-date"),  # kept, flagged
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            run = vw.run_worker("4744", day=DAY, mode="dry_run",
+                                queue_dir=tmp,
+                                csv_bytes=_csv_bytes("4744", rows))
+        self.assertFalse(run.errors)
+        self.assertEqual(run.work_items, 1)
+        self.assertEqual(len(run.excluded_stale), 3)
+        for ex in run.excluded_stale:
+            self.assertTrue(ex["reason"], ex)
+        self.assertEqual(run.actions[0].policy_number, "BAD-DATE")
+
+    def test_partial_enrichment_failure_holds_not_crashes(self):
+        def boom(policy_number):
+            raise RuntimeError("policy api down")
+
+        ports = menc.EnrichmentPorts(policy_search_fn=boom)
+        rows = [self._row4744("P1", 35), self._row4744("P2", 36)]
+        with tempfile.TemporaryDirectory() as tmp:
+            run = vw.run_worker("4744", day=DAY, mode="dry_run",
+                                queue_dir=tmp,
+                                csv_bytes=_csv_bytes("4744", rows),
+                                enrichment_ports=ports)
+        self.assertEqual(run.work_items, 2)
+        self.assertFalse(run.errors)
+        self.assertEqual(len(run.actions), 2)
+        for action in run.actions:
+            self.assertEqual(action.status, "blocked")
+            self.assertIn("policy search failed", action.reason)
+
+    def test_queue_dir_unwritable_fails_loud(self):
+        import os
+
+        rows = [_row4360("WC-Q", "Q Co", "08/15/2026", carrier="AmWINS MGA")]
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "no-such-dir", "deeper")
+            with self.assertRaises(OSError):
+                vw.run_worker("4246", day=DAY, mode="dry_run",
+                              queue_dir=bad,
+                              csv_bytes=_csv_bytes("4246", rows))
+
+    def test_gmail_outage_raises_typed_error(self):
+        class _DeadService:
+            def users(self):
+                raise ConnectionError("gmail is down")
+
+        # NOTE: verification_workers imports gmail_report_ingestion as a
+        # top-level module (sys.path), so its exception class object is
+        # vw.ing.GmailReportIngestionError, not the package-qualified one.
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(
+                    vw.ing.GmailReportIngestionError) as ctx:
+                vw.run_worker("4247", day=DAY, mode="dry_run",
+                              queue_dir=tmp, gmail_service=_DeadService())
+        self.assertIn("gmail ingest failed", str(ctx.exception))
+
+    def test_safe_retry_after_partial_failure(self):
+        def boom(policy_number):
+            raise RuntimeError("down")
+
+        rows = [self._row4744("R1", 35)]
+        data = _csv_bytes("4744", rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            run1 = vw.run_worker(
+                "4744", day=DAY, mode="dry_run", queue_dir=tmp,
+                csv_bytes=data,
+                enrichment_ports=menc.EnrichmentPorts(policy_search_fn=boom))
+            self.assertEqual(run1.actions[0].status, "blocked")
+            self.assertIn("policy search failed", run1.actions[0].reason)
+            # Retry with a working adapter: no poisoned state, the hold
+            # now names the missing lender read instead of the outage.
+            run2 = vw.run_worker(
+                "4744", day=DAY, mode="dry_run", queue_dir=tmp,
+                csv_bytes=data,
+                enrichment_ports=menc.EnrichmentPorts(
+                    policy_search_fn=lambda pn: {"applicant_id": "A1"}))
+            self.assertEqual(run2.actions[0].status, "blocked")
+            self.assertNotIn("policy search failed", run2.actions[0].reason)
+            self.assertEqual(run2.enrichment[0].get("applicant_id"), "A1")
+
+    def test_live_ports_factory_used_when_test_enrichment_flag_set(self):
+        self.assertIsNotNone(vw._live_ports,
+                             "mortgagee_live_ports must import for wiring")
+        fake_ports = menc.EnrichmentPorts(
+            policy_search_fn=lambda pn: {"applicant_id": "A9"})
+        orig = vw._live_ports.build_live_ports
+        calls = []
+
+        def spy(**kwargs):
+            calls.append(kwargs)
+            return fake_ports
+
+        vw._live_ports.build_live_ports = spy
+        try:
+            rows = [self._row4744("W1", 35)]
+            with tempfile.TemporaryDirectory() as tmp:
+                run = vw.run_worker(
+                    "4744", day=DAY, mode="dry_run", queue_dir=tmp,
+                    csv_bytes=_csv_bytes("4744", rows),
+                    test_enrichment=True)
+        finally:
+            vw._live_ports.build_live_ports = orig
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(run.enrichment[0].get("applicant_id"), "A9")
+
+    def test_live_ports_factory_not_used_without_flags(self):
+        self.assertIsNotNone(vw._live_ports)
+        orig = vw._live_ports.build_live_ports
+        calls = []
+
+        def spy(**kwargs):
+            calls.append(kwargs)
+            return orig(**kwargs)
+
+        vw._live_ports.build_live_ports = spy
+        try:
+            rows = [self._row4744("W2", 35)]
+            with tempfile.TemporaryDirectory() as tmp:
+                run = vw.run_worker(
+                    "4744", day=DAY, mode="dry_run", queue_dir=tmp,
+                    csv_bytes=_csv_bytes("4744", rows))
+        finally:
+            vw._live_ports.build_live_ports = orig
+        self.assertEqual(calls, [])
+        # Empty ports in dry_run: the honest HOLD naming the live read.
+        self.assertIn("dry_run", run.actions[0].reason)

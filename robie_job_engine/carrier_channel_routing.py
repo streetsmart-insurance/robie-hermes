@@ -8,9 +8,10 @@ name to a routing dict the verification workers consume:
      "portal_url": ..., "underwriter_email": ...,
      "phone": ..., "phone_label": ..., "notes": ...}
 
-Unknown carriers fail OPEN to a safe default ({"channel": "EMAIL"}) — the
-worker then emails the underwriter instead of assuming a portal exists.
-Matching is case-insensitive on the full name, then on distinctive tokens.
+Unknown carriers fail CLOSED to a HOLD route ({"channel": "HOLD"}) — the
+worker then holds the item for carrier-desk contact confirmation instead
+of planning outreach against a guessed channel. Matching is
+case-insensitive on the full name, then on distinctive tokens.
 """
 from __future__ import annotations
 
@@ -21,7 +22,11 @@ from typing import Any
 
 DIRECTORY_PATH = Path(__file__).resolve().parent / "data" / "carrier_directory.json"
 
-DEFAULT_ROUTE: dict[str, Any] = {"channel": "EMAIL"}
+DEFAULT_ROUTE: dict[str, Any] = {
+    "channel": "HOLD",
+    "reason": "carrier not in the carrier directory — confirm the carrier "
+              "desk contact in EZLynx before any outreach",
+}
 
 
 @lru_cache(maxsize=1)
@@ -43,7 +48,7 @@ def route_carrier(carrier: str) -> dict[str, Any]:
 
     Exact (case-insensitive) match first; then a token-subset match so
     "NJCRIB" finds "NJCRIB - Hartford Assigned Risk". Unknown carriers
-    get the safe EMAIL default — never a guessed portal.
+    get the fail-closed HOLD default — never a guessed channel or portal.
     """
     directory = _directory()
     want = _normalize(carrier)
