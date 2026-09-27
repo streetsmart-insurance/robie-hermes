@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ROBIE weekly 4359 overdue policy-change CSR nag every Tuesday 08:00 ET
+
+[Timer]
+OnCalendar=Tue *-*-* 08:00:00 America/New_York
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=robie-4359-policy-change.service
+
+[Install]
+WantedBy=timers.target

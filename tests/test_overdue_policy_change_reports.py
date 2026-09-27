@@ -504,11 +504,66 @@ def test_worker_sends_one_email_per_csr(tmp_path):
     assert len(sent) == 1
     email = sent[0]
     assert email["to"] == ["eimy@streetsmart.insurance"]
-    assert email["cc"] == ["sandy@streetsmart.insurance", CC_CARLO]
+    assert email["cc"] == ["sandy@streetsmart.insurance", CC_CARLO,
+                           "jake@streetsmart.insurance",
+                           "gabrielac@streetsmart.insurance"]
     assert "SAPP Construction Corp" in email["text_body"]
     assert "S 2391821" in email["text_body"]
     assert "41 days ago" in email["text_body"]
     assert "8 notes" in email["text_body"]
+
+
+def test_worker_ccs_fixed_ccs_and_producer_after_them(tmp_path):
+    # Carlo 2026-09-27: Jake, Gabby and Sandy are CC'd on every nag, after
+    # the department manager and Carlo, before the assigned producer.
+    reg = registry()
+    reg["employees"]["Taylor Cimei"] = {
+        "role": "Producer", "email": "taylor@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    worker, sent = make_worker(
+        tmp_path,
+        queue_reader=lambda payload: parse_4359_csv(csv_bytes(
+            row(producer="Taylor Cimei"))),
+        directory_loader=lambda manifest: build_roster_maps(reg),
+    )
+    result = worker.perform(job(), idempotency_key="k1")
+    assert result.succeeded
+    assert sent[0]["cc"] == ["sandy@streetsmart.insurance", CC_CARLO,
+                             "jake@streetsmart.insurance",
+                             "gabrielac@streetsmart.insurance",
+                             "taylor@streetsmart.insurance"]
+    cc_names_line = [line for line in sent[0]["text_body"].splitlines()
+                     if line.startswith("CC'ing")]
+    assert len(cc_names_line) == 1
+    for name in ("Sandy Santana", "Jake Ferrara", "Gabriela Chutin",
+                 "Taylor Cimei"):
+        assert name in cc_names_line[0]
+    assert cc_names_line[0].count("Sandy Santana") == 1
+
+
+def test_worker_subject_matches_carlo_approved_nag(tmp_path):
+    worker, sent = make_worker(tmp_path)
+    worker.perform(job(), idempotency_key="k1")
+    assert sent[0]["subject"] == "Overdue policy change requests need an update"
+
+
+def test_csr_report_includes_sop_closure_gate():
+    body = build_csr_report("Eimy Ramos", [], "Sandy Santana", date(2026, 9, 27))
+    for point in (
+        "carrier's endorsement or revised declarations page is received and filed",
+        "compared field by field",
+        "premium or billing impact is recorded, or confirmed as not applicable",
+        "Marking a task complete does not close the change request itself",
+    ):
+        assert point in body
+    html_body = build_csr_report_html("Eimy Ramos", [], "Sandy Santana",
+                                      date(2026, 9, 27))
+    for point in (
+        "carrier&#x27;s endorsement or revised declarations page is received and filed",
+        "compared field by field",
+        "Marking a task complete does not close the change request itself",
+    ):
+        assert point in html_body
 
 
 def test_worker_rerun_does_not_renag(tmp_path):
@@ -572,8 +627,10 @@ def test_worker_ccs_distinct_producer(tmp_path):
     assert result.succeeded
     email = sent[0]
     assert email["cc"] == ["sandy@streetsmart.insurance", CC_CARLO,
+                           "jake@streetsmart.insurance",
+                           "gabrielac@streetsmart.insurance",
                            "taylor@streetsmart.insurance"]
-    assert "CC'ing Sandy Santana and Taylor Cimei" in email["text_body"]
+    assert "CC'ing Sandy Santana and Jake Ferrara, Gabriela Chutin, Taylor Cimei" in email["text_body"]
 
 
 def test_load_exclusions_missing_file_is_empty(tmp_path):
