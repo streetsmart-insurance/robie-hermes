@@ -605,6 +605,20 @@ def build_roster_maps(registry: Mapping[str, Any]) -> dict[str, dict[str, str]]:
                 managers[dept_key] = {"name": " ".join(str(name).split()), "email": directory[key]}
     if not directory:
         raise PolicyChangeReportContractError("approved roster contains no active employees")
+    # First+last aliases: the 4359 queue names producers "Andrea Illanes" while
+    # the AppSheet roster lists "Andrea Nicole Illanes". An alias is added
+    # only when it is unambiguous — never a wrong CC.
+    alias_hits: dict[str, list[str]] = {}
+    for full_key in directory:
+        tokens = full_key.split()
+        if len(tokens) > 2:
+            alias = f"{tokens[0]} {tokens[-1]}"
+            if alias not in directory:
+                alias_hits.setdefault(alias, []).append(full_key)
+    for alias, full_keys in alias_hits.items():
+        if len(full_keys) == 1:
+            directory[alias] = directory[full_keys[0]]
+            departments[alias] = departments[full_keys[0]]
     return {"directory": directory, "departments": departments, "managers": managers}
 
 

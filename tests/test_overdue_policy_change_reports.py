@@ -326,9 +326,12 @@ def test_resolve_targets_unknown_producer_does_not_block():
     assert target["unresolved_producers"] == ["Nobody Here"]
 
 
-def test_resolve_targets_uses_producer_fallback():
-    # Andrea Illanes is not in the AppSheet roster; the checked-in fallback
-    # resolves her so she is CC'd and reported, not silently dropped.
+def test_resolve_targets_uses_producer_fallback(tmp_path):
+    # A producer missing from the AppSheet roster resolves via the checked-in
+    # fallback file, is CC'd, and the use is reported — not silently dropped.
+    fb = tmp_path / "fallbacks.json"
+    fb.write_text('{"fallbacks": [{"name": "Andrea Illanes", '
+                   '"email": "andrea@streetsmart.insurance"}]}')
     reg = registry()
     reg["employees"]["Lenin Perdomo"] = {
         "role": "Commercial Lines Account Technician",
@@ -336,14 +339,55 @@ def test_resolve_targets_uses_producer_fallback():
         "department": "Commercial Lines", "manager": "", "status": "Active"}
     items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
               "Assigned Producer": "Andrea Illanes"}]
-    fallbacks = load_producer_fallbacks(default_producer_fallbacks_path())
-    assert fallbacks.get("andrea illanes") == "andrea@streetsmart.insurance"
+    fallbacks = load_producer_fallbacks(fb)
     targets = resolve_nag_targets(items, build_roster_maps(reg), fallbacks)
     target = targets["Lenin Perdomo"]
     assert target["producer_emails"] == ["andrea@streetsmart.insurance"]
     assert target["producer_names"] == ["Andrea Illanes"]
     assert target["producer_fallback_used"] == ["Andrea Illanes"]
     assert target["unresolved_producers"] == []
+
+
+def test_resolve_targets_resolves_first_last_alias():
+    # The 4359 queue says "Andrea Illanes"; the roster lists
+    # "Andrea Nicole Illanes". The unambiguous first+last alias resolves.
+    reg = registry()
+    reg["employees"]["Andrea Nicole Illanes"] = {
+        "role": "Commercial Lines Account Manager",
+        "email": "andrea@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    reg["employees"]["Lenin Perdomo"] = {
+        "role": "Commercial Lines Account Technician",
+        "email": "lenin@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
+              "Assigned Producer": "Andrea Illanes"}]
+    targets = resolve_nag_targets(items, build_roster_maps(reg))
+    target = targets["Lenin Perdomo"]
+    assert target["producer_emails"] == ["andrea@streetsmart.insurance"]
+    assert target["producer_fallback_used"] == []
+    assert target["unresolved_producers"] == []
+
+
+def test_resolve_targets_skips_ambiguous_alias():
+    # Two different "Andrea ... Illanes" -> no alias, producer unresolved
+    # rather than CC'ing the wrong person.
+    reg = registry()
+    for full in ("Andrea Nicole Illanes", "Andrea Marie Illanes"):
+        reg["employees"][full] = {
+            "role": "Commercial Lines Account Manager",
+            "email": f"{full.split()[1].lower()}@streetsmart.insurance",
+            "department": "Commercial Lines", "manager": "", "status": "Active"}
+    reg["employees"]["Lenin Perdomo"] = {
+        "role": "Commercial Lines Account Technician",
+        "email": "lenin@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
+              "Assigned Producer": "Andrea Illanes"}]
+    targets = resolve_nag_targets(items, build_roster_maps(reg))
+    target = targets["Lenin Perdomo"]
+    assert target["producer_emails"] == []
+    assert target["unresolved_producers"] == ["Andrea Illanes"]
 
 
 def test_load_producer_fallbacks_missing_file_returns_empty(tmp_path):
