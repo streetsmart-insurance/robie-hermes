@@ -829,7 +829,7 @@ def build_csr_report(
         "",
         cc_line,
         "",
-        "-Roby",
+        "-Robie",
     ]
     return "\n".join(lines)
 
@@ -858,7 +858,7 @@ def build_csr_report_html(
         f"<ul>{bullets}</ul>",
         "<p>Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.</p>",
         f"<p>{html.escape(cc_line)}</p>",
-        "<p>-Roby</p>",
+        "<p>-Robie</p>",
         "</div>",
     ])
 

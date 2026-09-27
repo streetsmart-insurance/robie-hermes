@@ -15,6 +15,7 @@ from robie_job_engine.overdue_policy_change_reports import (
     PolicyChangeReportContractError,
     apply_exclusions,
     build_csr_report,
+    build_csr_report_html,
     build_roster_maps,
     classify_policy_liveness,
     deconcatenated_variants,
@@ -324,6 +325,16 @@ def test_build_csr_report_without_manager_name():
     body2 = build_csr_report("Eimy Ramos", [], "", date(2026, 9, 27),
                              cc_names=["", "Taylor Cimei"])
     assert "CC'ing Taylor Cimei so they're in the loop." in body2
+
+
+def test_csr_report_signs_as_robie():
+    # The worker persona is "Robie" — never "Roby" (that's Jake's assistant).
+    body = build_csr_report("Eimy Ramos", [], "", date(2026, 9, 27))
+    assert body.rstrip().endswith("-Robie")
+    assert "-Roby" not in body
+    html_body = build_csr_report_html("Eimy Ramos", [], "", date(2026, 9, 27))
+    assert "<p>-Robie</p>" in html_body
+    assert "-Roby" not in html_body
 
 
 def test_resolve_targets_collects_distinct_producer():
@@ -646,7 +657,7 @@ def test_email_body_is_plain_and_concise():
     assert "S 2391821" in body
 
 
-def test_email_signs_as_roby():
+def test_email_signs_as_robie():
     items = [{
         "Account Name": "SAPP Construction Corp", "Policy Number": "S 2391821",
         "Master Company": "Selective Insurance", "Line Of Business": "Commercial Pkg",
@@ -654,7 +665,8 @@ def test_email_signs_as_roby():
         "discussion": disc("Commercial Auto Policy Change Request", 8, "2026-09-25T10:00:00"),
     }]
     body = build_csr_report("Eimy Ramos", items, "Sandy Santana", TODAY)
-    assert body.rstrip().endswith("-Roby")
+    assert body.rstrip().endswith("-Robie")
+    assert "-Roby" not in body
     assert "on behalf of Carlo" not in body
 
 
