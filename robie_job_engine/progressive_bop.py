@@ -12,6 +12,13 @@ The pack is PULLED only when a PNG exists and every listed policy has one
 saved NOC. This module does not log in, submit OTP, upload to EZLynx, file
 notes, create tasks, deploy, or install a timer.
 
+Agent context is the shared FAO rule: literal ``CA33617``, ``(33617)``, bare
+``33617``, and login ``33617c`` are one StreetSmart agency. Any other agency
+holds. If the attached tab is not FAO Home / Manage Policies Home (for
+example Communications / underwritinglegacy), the pull clicks the existing
+Manage Policies Home header control before that assert. That step does not
+ask Gemini. A missing or ambiguous Home control holds.
+
 Accessible names are the playbook, not a certified live DOM. Zero or multiple
 matches hold. Live FAO on hermes-test-01 is UNVERIFIED.
 """
@@ -35,11 +42,16 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .intake_core import IntakeHold, SourceArchive, SourceItem, require_test
+from .progressive_agent_context import (
+    DEFAULT_AGENT_CODE,
+    agent_codes_in_text,
+    assert_agent_context,
+    require_agent_code,
+)
 from .progressive_retrieval import SCOPES
 
 
 BOP_SCOPE = "bop_pending_cancel_nonpayment"
-DEFAULT_AGENT_CODE = "CA33617"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
 LEDGER_NAME = "bop-noc-ledger.json"
@@ -59,8 +71,6 @@ DRIVE_UPLOAD_UNAVAILABLE = (
     "Progressive BOP child under parent "
     f"{DRIVE_QA_PARENT_ID}. Refusing to report the pack as uploaded"
 )
-_AGENT_CODE = re.compile(r"^CA\d{5}$")
-_AGENT_CODE_IN_TEXT = re.compile(r"\bCA\d{5}\b")
 _POLICY_NUMBER = re.compile(r"^\d{6,12}$")
 _POLICY_LINE = re.compile(
     r"policy(?:\s*(?:number|no\.?|#))?\s*[:#-]?\s*(\d{6,12})(?!\d)",
@@ -182,13 +192,6 @@ class PolicyOutcome:
     reason: str | None = None
     sha256: str | None = None
     byte_count: int | None = None
-
-
-def require_agent_code(value: str) -> str:
-    code = str(value or "").strip().upper()
-    if not _AGENT_CODE.fullmatch(code):
-        raise IntakeHold("Progressive FAO agent code is missing or ambiguous")
-    return code
 
 
 def noc_filename(policy_number: str) -> str:
@@ -1028,11 +1031,209 @@ def assert_authenticated(page: Any) -> None:
         raise IntakeHold("Progressive FAO session is not authenticated")
 
 
-def assert_agent_context(page: Any, agent_code: str) -> None:
-    body = page.locator("body").inner_text()
-    found = set(_AGENT_CODE_IN_TEXT.findall(str(body or "")))
-    if found != {require_agent_code(agent_code)}:
-        raise IntakeHold("Progressive FAO agent context is missing or ambiguous")
+# Existing FAO header contract (progressive_fao_memo / locators/progressive_fao.json).
+# Not a new selector. Live accessible name is "Manage Policies Home".
+MANAGE_POLICIES_CSS = 'a[data-at="header-nav__parent-link--manage-policies"]'
+MANAGE_POLICIES_NAME = re.compile(r"^Manage Policies")
+MAIN_NAVIGATION_NAME = "Main Navigation"
+_SHELL_NAV_ROLES = ("link", "button")
+# FAO shell Home, or the Manage Policies Home landing that header control opens.
+# Communications / underwritinglegacy is processed-date results and is not this page.
+_FAO_SHELL_HOME_URL = re.compile(
+    r"^https://(?:[a-z0-9-]+\.)*foragentsonly\.com"
+    r"(?:/(?:home|managepolicies(?:/home)?))?/?$",
+    re.IGNORECASE,
+)
+
+
+class _HomeNotReady(Exception):
+    """Home control is absent or hidden. Ambiguous controls are an IntakeHold."""
+
+    def __init__(self, reason: str, css_count: int, role_count: int):
+        self.reason = reason
+        self.css_count = css_count
+        self.role_count = role_count
+
+
+def _safe_page_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.hostname, parsed.path or "", "", ""))
+
+
+def _tab_hint(safe_url: str) -> str:
+    path = urllib.parse.urlsplit(safe_url).path.lower()
+    if "underwritinglegacy" in path or "underwriting-legacy" in path or "underwriting_legacy" in path:
+        return "underwritinglegacy"
+    if "/communications" in path:
+        return "communications"
+    if "processeddateresults" in path:
+        return "processeddateresults"
+    if not safe_url:
+        return "(url withheld)"
+    return "not-fao-home"
+
+
+def _home_hold(page: Any, *, css_count: int, role_count: int, detail: str) -> IntakeHold:
+    """Fail closed. The counts are not click targets. No Gemini."""
+    url = _safe_page_url(str(getattr(page, "url", "") or "")) or "(url withheld)"
+    return IntakeHold(
+        "Progressive FAO Home is missing or ambiguous; "
+        f"{MANAGE_POLICIES_CSS} matched {css_count}; "
+        f"Manage Policies Home matched {role_count}; "
+        f"tab {_tab_hint(url)}; page {url}; {detail}"
+    )
+
+
+def _on_fao_shell_home(page: Any) -> bool:
+    return _FAO_SHELL_HOME_URL.fullmatch(_safe_page_url(str(getattr(page, "url", "") or ""))) is not None
+
+
+def _union(locators: list[Any]) -> Any:
+    merged = locators[0]
+    for locator in locators[1:]:
+        merged = merged.or_(locator)
+    return merged
+
+
+def _role_locator(page: Any, name: str | re.Pattern, *, exact: bool) -> Any:
+    return _union([
+        page.get_by_role(role, name=name, exact=exact)
+        for role in _SHELL_NAV_ROLES
+    ])
+
+
+def _is_visible_one(locator: Any) -> bool:
+    if int(locator.count()) != 1:
+        return False
+    probe = getattr(locator, "is_visible", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe())
+    except Exception:
+        return False
+
+
+def _locator_count(locator: Any) -> int:
+    try:
+        return int(locator.count())
+    except Exception:
+        return -1
+
+
+def _resolve_visible_home(page: Any) -> Any:
+    """One Manage Policies Home element. Zero, hidden, or several do not click."""
+    css = page.locator(MANAGE_POLICIES_CSS)
+    role = _role_locator(page, MANAGE_POLICIES_NAME, exact=False)
+    css_count = _locator_count(css)
+    role_count = _locator_count(role)
+    if css_count < 0 or role_count < 0 or css_count > 1 or role_count > 1:
+        raise _home_hold(
+            page,
+            css_count=css_count,
+            role_count=role_count,
+            detail="Home control was not clicked",
+        )
+    if css_count == 1 and role_count == 1 and _locator_count(css.and_(role)) != 1:
+        raise _home_hold(
+            page,
+            css_count=css_count,
+            role_count=role_count,
+            detail="Home control queries are different elements; Home control was not clicked",
+        )
+    chosen = css if css_count == 1 else role if role_count == 1 else None
+    if chosen is None:
+        raise _HomeNotReady("missing", css_count, role_count)
+    if not _is_visible_one(chosen):
+        raise _HomeNotReady("hidden", css_count, role_count)
+    return chosen
+
+
+def _expand_main_navigation_once(page: Any, *, css_count: int, role_count: int) -> None:
+    """Open the shell drawer once so a hidden Manage Policies Home link can show.
+
+    The existing FAO header contract hides that link until Main Navigation is
+    expanded. This click is not a Gemini rescue. A missing or second Main
+    Navigation control holds.
+    """
+    matches = []
+    for role in _SHELL_NAV_ROLES:
+        locator = page.get_by_role(role, name=MAIN_NAVIGATION_NAME, exact=True)
+        count = _locator_count(locator)
+        if count:
+            matches.append((count, locator))
+    if len(matches) != 1 or matches[0][0] != 1 or not _is_visible_one(matches[0][1]):
+        raise _home_hold(
+            page,
+            css_count=css_count,
+            role_count=role_count,
+            detail="Main Navigation is missing or ambiguous; FAO Home was not opened",
+        )
+    try:
+        matches[0][1].click()
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _home_hold(
+            page,
+            css_count=css_count,
+            role_count=role_count,
+            detail="Main Navigation click did not complete; FAO Home was not opened",
+        ) from exc
+
+
+def ensure_fao_shell_home(page: Any) -> None:
+    """Land on FAO Home / Manage Policies Home before the agent-context assert.
+
+    A Communications / underwritinglegacy tab, or any other non-home FAO URL,
+    is not where this pull reads the agency. The click uses the existing
+    Manage Policies Home header control. It does not ask Gemini. Already on
+    that landing is a no-op. Missing, hidden after one Main Navigation expand,
+    or ambiguous holds with the scrubbed URL.
+    """
+    if _on_fao_shell_home(page):
+        return
+    try:
+        target = _resolve_visible_home(page)
+    except _HomeNotReady as miss:
+        if miss.reason == "hidden":
+            _expand_main_navigation_once(page, css_count=miss.css_count, role_count=miss.role_count)
+            try:
+                target = _resolve_visible_home(page)
+            except _HomeNotReady as still:
+                raise _home_hold(
+                    page,
+                    css_count=still.css_count,
+                    role_count=still.role_count,
+                    detail="Home control stayed missing or hidden; FAO Home was not opened",
+                ) from still
+        else:
+            raise _home_hold(
+                page,
+                css_count=miss.css_count,
+                role_count=miss.role_count,
+                detail="Home control was not found; FAO Home was not opened",
+            ) from miss
+    try:
+        target.click()
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _home_hold(
+            page,
+            css_count=_locator_count(page.locator(MANAGE_POLICIES_CSS)),
+            role_count=_locator_count(_role_locator(page, MANAGE_POLICIES_NAME, exact=False)),
+            detail="Home control click did not complete; FAO Home was not opened",
+        ) from exc
+    if not _on_fao_shell_home(page):
+        raise _home_hold(
+            page,
+            css_count=_locator_count(page.locator(MANAGE_POLICIES_CSS)),
+            role_count=_locator_count(_role_locator(page, MANAGE_POLICIES_NAME, exact=False)),
+            detail="FAO Home did not open",
+        )
 
 
 def click_named(page: Any, name: str, *, roles: tuple[str, ...], error: type[IntakeHold] = IntakeHold) -> None:
@@ -1089,6 +1290,7 @@ def open_pending_cancel_report(report_page: Any) -> None:
 def navigate_to_pending_cancel(page: Any, agent_code: str) -> Any:
     """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report."""
     assert_authenticated(page)
+    ensure_fao_shell_home(page)
     assert_agent_context(page, agent_code)
     report_page = open_businessowner_window(page)
     open_pending_cancel_report(report_page)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from datetime import date
@@ -13,15 +14,19 @@ from unittest.mock import patch
 from openpyxl import Workbook
 
 from robie_job_engine.intake_core import IntakeHold
+from robie_job_engine.progressive_agent_context import assert_agent_context as shared_assert_agent_context
 from robie_job_engine.progressive_bop import (
     BOP_SCOPE,
     DEFAULT_OUTPUT_ROOT,
     DRIVE_QA_PARENT_ID,
     DRIVE_BOP_CHILD_NAME,
+    MANAGE_POLICIES_CSS,
     PendingCancelPolicy,
     PolicyDocument,
     ReportCapture,
     RowHold,
+    agent_codes_in_text,
+    assert_agent_context,
     assess_bop_gate,
     build_parser,
     main,
@@ -38,6 +43,7 @@ from robie_job_engine.progressive_bop import (
     select_fao_page,
     select_notice,
 )
+from robie_job_engine.progressive_fao_memo import assert_agent_context as fao_assert_agent_context
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -539,6 +545,283 @@ class ProgressiveBopTests(unittest.TestCase):
             self.assertEqual(code, 2, env)
             self.assertFalse(target.exists(), env)
             self.assertIn("HELD", stdout.getvalue())
+
+
+COMMUNICATIONS_URL = (
+    "https://www.foragentsonly.com/managepolicies/policyactivity/"
+    "processeddateresults/underwritinglegacy/"
+)
+
+
+class _Query:
+    def __init__(self, page, kind):
+        self.page = page
+        self.kind = kind
+
+    def count(self):
+        return self.page.query_count(self.kind)
+
+    def is_visible(self):
+        return self.page.query_visible(self.kind)
+
+    def click(self):
+        self.page.query_click(self.kind)
+
+    def or_(self, other):
+        return _Combo(self.page, "or", self, other)
+
+    def and_(self, other):
+        return _Combo(self.page, "and", self, other)
+
+
+class _Combo:
+    def __init__(self, page, mode, left, right):
+        self.page = page
+        self.mode = mode
+        self.left = left
+        self.right = right
+
+    def count(self):
+        if self.mode == "or":
+            return self.left.count() + self.right.count()
+        return self.page.and_count(self.left, self.right)
+
+    def is_visible(self):
+        if self.count() != 1:
+            return False
+        if self.mode == "or":
+            return any(part.count() == 1 and part.is_visible() for part in (self.left, self.right))
+        return self.left.is_visible() and self.right.is_visible()
+
+    def click(self):
+        chosen = self.left if self.left.count() else self.right
+        chosen.click()
+
+    def or_(self, other):
+        return _Combo(self.page, "or", self, other)
+
+    def and_(self, other):
+        return _Combo(self.page, "and", self, other)
+
+
+class _AttachedShell(FakePage):
+    """FAO tab that can sit on Communications until Manage Policies Home is clicked."""
+
+    def __init__(self, url, *, body="Streetsmart Risk Mgr (33617)", home="unique", main_nav="one", lands=True):
+        report = FakePage(
+            {("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")},
+            url="https://www.foragentsonly.com/bop",
+        )
+        super().__init__(
+            {("link", "Manage Policies"), ("link", "Businessowner/Contractor GL")},
+            body=body,
+            url=url,
+            popup=report,
+        )
+        self.home = home
+        self.main_nav = main_nav
+        self.lands = lands
+
+    def locator(self, selector):
+        if selector == MANAGE_POLICIES_CSS:
+            return _Query(self, "css")
+        return super().locator(selector)
+
+    def get_by_role(self, role, name=None, exact=True):
+        if name == "Main Navigation":
+            return _Query(self, f"main-{role}")
+        if isinstance(name, re.Pattern) and name.pattern == r"^Manage Policies":
+            return _Query(self, f"role-{role}")
+        return super().get_by_role(role, name=name, exact=exact)
+
+    def query_count(self, kind):
+        if kind == "css":
+            if self.home in {"missing", "role-only"}:
+                return 0
+            if self.home == "ambiguous":
+                return 2
+            return 1
+        if kind == "role-link":
+            if self.home in {"missing", "css-only"}:
+                return 0
+            if self.home == "ambiguous":
+                return 2
+            return 1
+        if kind in {"role-button", "main-link"}:
+            return 0
+        if kind == "main-button":
+            if self.main_nav == "missing":
+                return 0
+            if self.main_nav == "ambiguous":
+                return 2
+            return 1
+        raise AssertionError(kind)
+
+    def query_visible(self, kind):
+        if self.query_count(kind) != 1:
+            return False
+        if kind.startswith("main-"):
+            return True
+        return self.home not in {"hidden", "stuck-hidden"}
+
+    def and_count(self, left, right):
+        if self.home == "split":
+            return 0
+        if left.count() == 1 and right.count() == 1:
+            return 1
+        return 0
+
+    def query_click(self, kind):
+        if kind.startswith("main-"):
+            self.clicked.append(("button", "Main Navigation"))
+            if self.home == "hidden":
+                self.home = "unique"
+            return
+        self.clicked.append(("home", "Manage Policies Home"))
+        if self.lands:
+            self.url = "https://www.foragentsonly.com/managepolicies/"
+
+
+class _HomeGuard(FakePage):
+    def locator(self, selector):
+        if selector == MANAGE_POLICIES_CSS:
+            raise AssertionError("home control queried on FAO Home")
+        return super().locator(selector)
+
+
+class AgentContextAndHomeTests(unittest.TestCase):
+    def test_helper_is_shared_with_fao_memo(self):
+        self.assertIs(assert_agent_context, shared_assert_agent_context)
+        self.assertIs(assert_agent_context, fao_assert_agent_context)
+        self.assertFalse(any("gemini" in name for name in module_import_names()))
+
+    def test_agent_code_shapes_accept_streetsmart_and_reject_other_agencies(self):
+        accepted = (
+            "StreetSmart Risk Mgr CA33617",
+            "Streetsmart Risk Mgr (33617)",
+            "33617",
+            "Welcome, Carlo Ferrara\n33617c",
+            "33617C",
+            "CA33617 (33617) 33617c",
+            "Streetsmart Risk Mgr (33617)\nTampa FL 90210",
+        )
+        for body in accepted:
+            with self.subTest(body=body):
+                self.assertEqual(agent_codes_in_text(body), frozenset({"CA33617"}))
+                assert_agent_context(FakePage(set(), body=body), "ca33617")
+        self.assertEqual(agent_codes_in_text("(11111)"), frozenset({"CA11111"}))
+        self.assertEqual(agent_codes_in_text("99999c"), frozenset({"CA99999"}))
+        self.assertEqual(agent_codes_in_text("Tampa FL 90210"), frozenset())
+        self.assertEqual(
+            agent_codes_in_text("(33617) (11111)"),
+            frozenset({"CA33617", "CA11111"}),
+        )
+        rejected = (
+            "",
+            "Welcome",
+            "CA33617 CA11111",
+            "Streetsmart Risk Mgr (33617) CA11111",
+            "(33617) (11111)",
+            "33617c 99999c",
+            "CA33617 (11111)",
+        )
+        for body in rejected:
+            with self.subTest(body=body):
+                with self.assertRaisesRegex(IntakeHold, "agent context is missing or ambiguous"):
+                    assert_agent_context(FakePage(set(), body=body), "CA33617")
+        with self.assertRaisesRegex(IntakeHold, "agent context is missing or ambiguous"):
+            assert_agent_context(FakePage(set(), body="Streetsmart Risk Mgr (33617) 33617c"), "CA11111")
+
+    def test_shell_home_does_not_click_the_home_control(self):
+        report = FakePage(
+            {("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")},
+            url="https://www.foragentsonly.com/bop",
+        )
+        urls = (
+            "https://www.foragentsonly.com/",
+            "https://www.foragentsonly.com/home",
+            "https://www.foragentsonly.com/managepolicies/",
+            "https://www.foragentsonly.com/managepolicies/home",
+            "https://user:secret@www.foragentsonly.com/home?token=sekret#frag",
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                page = _HomeGuard(
+                    {("link", "Manage Policies"), ("link", "Businessowner/Contractor GL")},
+                    body="Streetsmart Risk Mgr (33617)",
+                    url=url,
+                    popup=report,
+                )
+                opened = navigate_to_pending_cancel(page, "CA33617")
+                self.assertIs(opened, report)
+                self.assertEqual(
+                    page.clicked,
+                    [("link", "Manage Policies"), ("link", "Businessowner/Contractor GL")],
+                )
+
+    def test_communications_tab_opens_home_before_the_agent_assert(self):
+        page = _AttachedShell(COMMUNICATIONS_URL, body="Streetsmart Risk Mgr (33617) 33617c")
+        opened = navigate_to_pending_cancel(page, "CA33617")
+        self.assertIs(opened, page.popup)
+        self.assertEqual(
+            page.clicked,
+            [
+                ("home", "Manage Policies Home"),
+                ("link", "Manage Policies"),
+                ("link", "Businessowner/Contractor GL"),
+            ],
+        )
+        self.assertEqual(page.url, "https://www.foragentsonly.com/managepolicies/")
+        self.assertEqual(
+            page.popup.clicked,
+            [("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")],
+        )
+        for home in ("css-only", "role-only"):
+            with self.subTest(home=home):
+                landed = _AttachedShell(COMMUNICATIONS_URL, home=home)
+                navigate_to_pending_cancel(landed, "CA33617")
+                self.assertEqual(landed.clicked[0], ("home", "Manage Policies Home"))
+                self.assertEqual(landed.url, "https://www.foragentsonly.com/managepolicies/")
+
+    def test_hidden_home_expands_main_navigation_once_without_gemini(self):
+        page = _AttachedShell(COMMUNICATIONS_URL, home="hidden")
+        navigate_to_pending_cancel(page, "CA33617")
+        self.assertEqual(page.clicked[0], ("button", "Main Navigation"))
+        self.assertEqual(page.clicked[1], ("home", "Manage Policies Home"))
+        self.assertIn(("link", "Businessowner/Contractor GL"), page.clicked)
+        self.assertNotIn("gemini", " ".join(str(item) for item in page.clicked))
+
+    def test_missing_or_ambiguous_home_holds_with_the_scrubbed_url(self):
+        secret_url = (
+            "https://user:secret@www.foragentsonly.com/managepolicies/policyactivity/"
+            "processeddateresults/underwritinglegacy/?token=sekret#frag"
+        )
+        cases = (
+            ("missing", "one", True, "Home control was not found"),
+            ("ambiguous", "one", True, "Home control was not clicked"),
+            ("split", "one", True, "different elements"),
+            ("unique", "one", False, "FAO Home did not open"),
+            ("stuck-hidden", "one", True, "stayed missing or hidden"),
+            ("hidden", "missing", True, "Main Navigation is missing or ambiguous"),
+        )
+        for home, main_nav, lands, detail in cases:
+            with self.subTest(home=home, main_nav=main_nav):
+                page = _AttachedShell(secret_url, home=home, main_nav=main_nav, lands=lands)
+                with self.assertRaises(IntakeHold) as caught:
+                    navigate_to_pending_cancel(page, "CA33617")
+                reason = str(caught.exception)
+                self.assertIn(detail, reason)
+                self.assertIn("tab underwritinglegacy", reason)
+                self.assertIn(
+                    "page https://www.foragentsonly.com/managepolicies/policyactivity/"
+                    "processeddateresults/underwritinglegacy/",
+                    reason,
+                )
+                self.assertNotIn("secret", reason)
+                self.assertNotIn("sekret", reason)
+                self.assertNotIn("gemini", reason.lower())
+                self.assertNotIn(("link", "Businessowner/Contractor GL"), page.clicked)
+                self.assertNotIn(("link", "Manage Policies"), page.clicked)
 
 
 if __name__ == "__main__":

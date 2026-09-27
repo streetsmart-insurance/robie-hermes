@@ -88,11 +88,16 @@ from .gemini_ui_rescue import (
     run_named_control_step,
 )
 from .intake_core import IntakeHold, SourceArchive, SourceItem, require_test
+from .progressive_agent_context import (
+    DEFAULT_AGENT_CODE,
+    agent_codes_in_text,
+    assert_agent_context,
+    require_agent_code,
+)
 from .progressive_retrieval import ProgressiveRetrieval, require_bounded_scope
 
 
 FAO_SCOPE = "fao_communications"
-DEFAULT_AGENT_CODE = "CA33617"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
 DATE_CONTROL_TIMEOUT_MS = 8000
@@ -111,16 +116,6 @@ DRIVE_UPLOAD_UNAVAILABLE = (
     "Drive upload of the Progressive QA pack is not available; "
     "refusing to report the pack as uploaded"
 )
-_AGENT_CODE = re.compile(r"^CA\d{5}$")
-_AGENT_CODE_IN_TEXT = re.compile(r"\bCA\d{5}\b")
-# Live FAO Home renders StreetSmart as "Streetsmart Risk Mgr (33617)" and the
-# login id "33617c", with no "CA33617" literal. Parenthesized ##### and a
-# #####c login are agency displays for whichever agency they name. A bare
-# 5-digit token counts only for this agency (33617); other bare numbers are
-# not agent codes (ZIP codes and similar).
-_PAREN_AGENCY_IN_TEXT = re.compile(r"\(\s*(\d{5})\s*\)")
-_LOGIN_AGENCY_IN_TEXT = re.compile(r"\b(\d{5})c\b", re.IGNORECASE)
-_BARE_STREETSMART_AGENCY = re.compile(rf"\b{DEFAULT_AGENT_CODE[2:]}\b")
 _POLICY_NUMBER = re.compile(r"^\d{6,12}$")
 # Live Communications empty list (hermes-test-01 prove5, tip 19f0caaf):
 # three tables, body text "0 Records Found" / "No records found", pdf_count 0.
@@ -301,13 +296,6 @@ class PagePdfView:
 class MemoOpenObservation:
     downloads: tuple[bytes, ...]
     pages: tuple[PagePdfView, ...]
-
-
-def require_agent_code(value: str) -> str:
-    code = str(value or "").strip().upper()
-    if not _AGENT_CODE.fullmatch(code):
-        raise IntakeHold("Progressive FAO agent code is missing or ambiguous")
-    return code
 
 
 def normalize_reason(reason: str) -> str:
@@ -548,29 +536,6 @@ def assert_authenticated(page: Any) -> None:
         raise IntakeHold("Progressive FAO session is not authenticated")
     if page.locator("input[type='password']").count() != 0:
         raise IntakeHold("Progressive FAO session is not authenticated")
-
-
-def agent_codes_in_text(text: str) -> frozenset[str]:
-    """Canonical ``CA#####`` codes implied by FAO page text.
-
-    ``CA33617``, ``(33617)``, bare ``33617``, and login ``33617c`` are one
-    StreetSmart agency. Any other ``CA#####``, parenthesized ``(#####)``, or
-    ``#####c`` login is a different agency. No recognized code is an empty set.
-    """
-    raw = str(text or "")
-    found = set(_AGENT_CODE_IN_TEXT.findall(raw))
-    found.update(f"CA{digits}" for digits in _PAREN_AGENCY_IN_TEXT.findall(raw))
-    found.update(f"CA{digits}" for digits in _LOGIN_AGENCY_IN_TEXT.findall(raw))
-    if _BARE_STREETSMART_AGENCY.search(raw):
-        found.add(DEFAULT_AGENT_CODE)
-    return frozenset(found)
-
-
-def assert_agent_context(page: Any, agent_code: str) -> None:
-    body = page.locator("body").inner_text()
-    found = agent_codes_in_text(str(body or ""))
-    if found != {require_agent_code(agent_code)}:
-        raise IntakeHold("Progressive FAO agent context is missing or ambiguous")
 
 
 def _control_hold(label: str) -> IntakeHold:
