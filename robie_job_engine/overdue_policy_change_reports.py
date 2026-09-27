@@ -1087,13 +1087,49 @@ class PolicyApiSearchClient:
         return [dict(row) for row in results if isinstance(row, dict)]
 
 
+def _resolve_ezlynx_oauth(prefix: str) -> dict[str, str]:
+    """Resolve EZLynx OAuth fields for the 4359 runner.
+
+    Explicit ``{prefix}_*`` env vars win (tests, explicit config). Otherwise
+    fall back to the repo-standard Secret Manager JSON via
+    ``load_ezlynx_api_config()`` (``ROBIE_EZLYNX_API_PROD_SECRET`` on the box).
+    Raises PolicyChangeReportContractError when neither is configured.
+    """
+    direct = {
+        "token_endpoint": os.environ.get(f"{prefix}_TOKEN_ENDPOINT", ""),
+        "client_id": os.environ.get(f"{prefix}_CLIENT_ID", ""),
+        "client_secret": os.environ.get(f"{prefix}_CLIENT_SECRET", ""),
+        "username": os.environ.get(f"{prefix}_USERNAME", ""),
+        "integration_group_id": os.environ.get(f"{prefix}_INTEGRATION_GROUP_ID", ""),
+    }
+    if all(str(direct[k]).strip() for k in ("token_endpoint", "client_id", "client_secret")):
+        return {k: str(v) for k, v in direct.items()}
+    try:
+        from .ezlynx_api import load_ezlynx_api_config
+        config = load_ezlynx_api_config()
+    except Exception as exc:
+        raise PolicyChangeReportContractError(
+            f"{prefix} is not configured: set {prefix}_TOKEN_ENDPOINT/"
+            f"{prefix}_CLIENT_ID/{prefix}_CLIENT_SECRET, or configure "
+            f"ROBIE_ENV + ROBIE_EZLYNX_API_PROD_SECRET ({type(exc).__name__}: {exc})"
+        ) from exc
+    return {
+        "token_endpoint": config.token_endpoint,
+        "client_id": config.client_id,
+        "client_secret": config.client_secret,
+        "username": config.username,
+        "integration_group_id": config.integration_group_id,
+    }
+
+
 def default_policy_search(policy_number: str) -> list[dict[str, Any]]:
+    oauth = _resolve_ezlynx_oauth("EZLYNX_POLICY_API")
     client = PolicyApiSearchClient(
-        token_endpoint=os.environ.get("EZLYNX_POLICY_API_TOKEN_ENDPOINT", ""),
-        client_id=os.environ.get("EZLYNX_POLICY_API_CLIENT_ID", ""),
-        client_secret=os.environ.get("EZLYNX_POLICY_API_CLIENT_SECRET", ""),
-        username=os.environ.get("EZLYNX_POLICY_API_USERNAME", ""),
-        integration_group_id=os.environ.get("EZLYNX_POLICY_API_INTEGRATION_GROUP_ID", ""),
+        token_endpoint=oauth["token_endpoint"],
+        client_id=oauth["client_id"],
+        client_secret=oauth["client_secret"],
+        username=oauth["username"],
+        integration_group_id=oauth["integration_group_id"],
         scope=os.environ.get("EZLYNX_POLICY_API_SCOPE", "PolicyApi openid"),
     )
     return client.search_by_number(policy_number)
@@ -1108,26 +1144,14 @@ def default_discussion_lookup(applicant_id: str) -> list[dict[str, Any]]:
     """
     from .ezlynx_discussions import DiscussionApiClient, DiscussionApiConfig, DiscussionApiError
 
-    missing = [
-        name for name, var in (
-            ("EZLYNX_DISCUSSION_TOKEN_ENDPOINT", os.environ.get("EZLYNX_DISCUSSION_TOKEN_ENDPOINT", "")),
-            ("EZLYNX_DISCUSSION_CLIENT_ID", os.environ.get("EZLYNX_DISCUSSION_CLIENT_ID", "")),
-            ("EZLYNX_DISCUSSION_CLIENT_SECRET", os.environ.get("EZLYNX_DISCUSSION_CLIENT_SECRET", "")),
-            ("EZLYNX_DISCUSSION_USERNAME", os.environ.get("EZLYNX_DISCUSSION_USERNAME", "")),
-            ("EZLYNX_DISCUSSION_INTEGRATION_GROUP_ID", os.environ.get("EZLYNX_DISCUSSION_INTEGRATION_GROUP_ID", "")),
-        ) if not str(var or "").strip()
-    ]
-    if missing:
-        raise PolicyChangeReportContractError(
-            "DiscussionApi lookup is not configured (missing: " + ", ".join(missing) + ")"
-        )
+    oauth = _resolve_ezlynx_oauth("EZLYNX_DISCUSSION")
     config = DiscussionApiConfig(
         discussion_base_url=DISCUSSION_BASE_URL,
-        token_endpoint=os.environ["EZLYNX_DISCUSSION_TOKEN_ENDPOINT"],
-        client_id=os.environ["EZLYNX_DISCUSSION_CLIENT_ID"],
-        client_secret=os.environ["EZLYNX_DISCUSSION_CLIENT_SECRET"],
-        username=os.environ["EZLYNX_DISCUSSION_USERNAME"],
-        integration_group_id=os.environ["EZLYNX_DISCUSSION_INTEGRATION_GROUP_ID"],
+        token_endpoint=oauth["token_endpoint"],
+        client_id=oauth["client_id"],
+        client_secret=oauth["client_secret"],
+        username=oauth["username"],
+        integration_group_id=oauth["integration_group_id"],
     )
     try:
         return DiscussionApiClient(config).get_discussions(applicant_id)

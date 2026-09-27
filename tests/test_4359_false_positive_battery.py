@@ -482,3 +482,62 @@ def test_recipient_safety_exact_addresses(tmp_path):
     assert len(set(sent[0]["cc"])) == len(sent[0]["cc"])  # no duplicates
     for addr in sent[0]["to"] + sent[0]["cc"]:
         assert addr.endswith("@streetsmart.insurance"), addr  # no outside addresses
+
+
+# -- EZLynx OAuth resolution: explicit env wins, else Secret Manager ---------
+from robie_job_engine.overdue_policy_change_reports import _resolve_ezlynx_oauth  # noqa: E402
+
+
+def _clear_oauth_env(monkeypatch, prefix):
+    for suffix in ("TOKEN_ENDPOINT", "CLIENT_ID", "CLIENT_SECRET",
+                   "USERNAME", "INTEGRATION_GROUP_ID"):
+        monkeypatch.delenv(f"{prefix}_{suffix}", raising=False)
+
+
+def test_oauth_explicit_env_wins_over_secret_manager(monkeypatch):
+    import robie_job_engine.overdue_policy_change_reports as mod
+    monkeypatch.setenv("EZLYNX_POLICY_API_TOKEN_ENDPOINT", "https://t")
+    monkeypatch.setenv("EZLYNX_POLICY_API_CLIENT_ID", "cid")
+    monkeypatch.setenv("EZLYNX_POLICY_API_CLIENT_SECRET", "csec")
+
+    def boom():
+        raise AssertionError("Secret Manager must not be consulted when env is set")
+
+    monkeypatch.setitem(__import__("sys").modules, "x", None)  # no-op guard
+    import robie_job_engine.ezlynx_api as ez
+    monkeypatch.setattr(ez, "load_ezlynx_api_config", boom)
+    oauth = _resolve_ezlynx_oauth("EZLYNX_POLICY_API")
+    assert oauth["token_endpoint"] == "https://t"
+    assert oauth["client_id"] == "cid"
+
+
+def test_oauth_falls_back_to_secret_manager(monkeypatch):
+    import robie_job_engine.ezlynx_api as ez
+
+    _clear_oauth_env(monkeypatch, "EZLYNX_POLICY_API")
+
+    class FakeConfig:
+        token_endpoint = "https://sm/token"
+        client_id = "sm-cid"
+        client_secret = "sm-csec"
+        username = "sm-user"
+        integration_group_id = "sm-ig"
+
+    monkeypatch.setattr(ez, "load_ezlynx_api_config", lambda *a, **k: FakeConfig())
+    oauth = _resolve_ezlynx_oauth("EZLYNX_POLICY_API")
+    assert oauth["token_endpoint"] == "https://sm/token"
+    assert oauth["client_id"] == "sm-cid"
+    assert oauth["integration_group_id"] == "sm-ig"
+
+
+def test_oauth_unconfigured_fails_closed(monkeypatch):
+    import robie_job_engine.ezlynx_api as ez
+
+    _clear_oauth_env(monkeypatch, "EZLYNX_DISCUSSION")
+
+    def missing():
+        raise RuntimeError("ROBIE_ENV must be TEST or PRODUCTION")
+
+    monkeypatch.setattr(ez, "load_ezlynx_api_config", missing)
+    with pytest.raises(PolicyChangeReportContractError, match="not configured"):
+        _resolve_ezlynx_oauth("EZLYNX_DISCUSSION")

@@ -13,6 +13,7 @@ UMask=0077
 # this worker. Re-pin the symlink on each 4359 release (see RUNBOOK.md).
 WorkingDirectory=/opt/streetsmart-hermes/4359-weekly
 Environment=PYTHONPATH=/opt/streetsmart-hermes/4359-weekly
+Environment=ROBIE_ENV=PRODUCTION
 Environment=ROBIE_4359_MODE=dry-run
 Environment=ROBIE_4359_MANIFEST=/etc/streetsmart-hermes/robie-4359-manifest.json
 Environment=ROBIE_4359_SENT_STORE=/opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/sent.json
