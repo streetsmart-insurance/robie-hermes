@@ -109,7 +109,16 @@ def _click_control(page: Page, label: str) -> None:
         if any(candidate.nth(index).is_visible() for index in range(candidate.count())):
             _activate(candidate, label)
             return
-    raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {label} control not found")
+    failure = RuntimeError(f"PLAYWRIGHT_BLOCKED: {label} control not found")
+    from .gemini_ui_rescue import rescue_enabled, retry_failed_locator_action
+
+    if not rescue_enabled():
+        raise failure
+
+    def retry(locator: Locator) -> None:
+        _activate(locator, label)
+
+    retry_failed_locator_action(page, label, failure, retry)
 
 
 def _select_single(page: Page, label: str, option: str) -> None:

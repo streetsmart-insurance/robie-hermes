@@ -1,7 +1,12 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.4",
+  "version": "1.5",
+  "gemini_ui_rescue": {
+    "environment": "TEST",
+    "secret_id": "gemini-api-key",
+    "note": "Shared Test-only helper robie_job_engine.gemini_ui_rescue. Registered selectors stay the primary path. On ROBIE_ENV=TEST, one missing or ambiguous named control, a coded locator that does not resolve to one element, or a Playwright timeout on that wait may ask Gemini once for a single unique locator. The same helper is wired for EZLynx, Ascend, this FAO page, and the Playwright write guard (Geico and other portals that run through playwright_exec). Production skips the rescue. Positional .first/.nth answers are refused. This does not file EZLynx documents or notes."
+  },
   "fields": {
     "manage_policies": {
       "name": "manage_policies",

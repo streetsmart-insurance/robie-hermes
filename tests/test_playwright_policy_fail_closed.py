@@ -414,6 +414,18 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         self.assertEqual(page.fields["Carrier"].fills, ["travelers"])
 
     def test_blocked_write_asks_gemini_and_applies_only_a_unique_label(self):
+        # Rescue is Test-only. This case is the Vertex unique-write path.
+        env = patch.dict(
+            os.environ,
+            {
+                "ROBIE_ENV": "",
+                "ROBIE_GEMINI_UI_RESCUE": "",
+                "ROBIE_FAO_GEMINI_UI_RESCUE": "",
+            },
+            clear=False,
+        )
+        env.start()
+        self.addCleanup(env.stop)
         vin = FakeLocator(1, "VIN")
         year = FakeLocator(1, "Year")
         page = FakePage({"VIN": vin, "Year": year}, title="Add Vehicle")
@@ -439,6 +451,18 @@ class PlaywrightPolicyFailClosedTests(unittest.TestCase):
         self.assertEqual(year.fills, [])
 
     def test_blocked_write_hitls_carlo_when_gemini_is_unsure_or_not_unique(self):
+        # Rescue is Test-only. This case is the Vertex HITL path.
+        env = patch.dict(
+            os.environ,
+            {
+                "ROBIE_ENV": "",
+                "ROBIE_GEMINI_UI_RESCUE": "",
+                "ROBIE_FAO_GEMINI_UI_RESCUE": "",
+            },
+            clear=False,
+        )
+        env.start()
+        self.addCleanup(env.stop)
         vin = FakeLocator(2, "VIN")
         page = FakePage({"VIN": vin}, title="Add Vehicle", visible_labels=["VIN"])
         ambiguous = FakeLocator(2, "input", page=page)
