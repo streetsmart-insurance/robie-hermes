@@ -94,6 +94,11 @@ worker. The service runs from the stable symlink `/opt/streetsmart-hermes/4359-w
   (sha256 keys → ISO dates; re-nag after 7 days).
 - Delivery verification: each receipt carries the Gmail `message_id`; the
   `OverduePolicyChangeReportVerifier` reads them back from the Sent mailbox.
+  Every `--live` run invokes the verifier automatically after sending and
+  records `verified` / `expected` / `observed` / `method` in the evidence
+  file (a verifier failure is recorded as `verified: false` with an
+  `UNVERIFIED: ...` error, never a silent skip). Dry runs skip verification
+  because nothing was sent.
 
 ## Rollback
 

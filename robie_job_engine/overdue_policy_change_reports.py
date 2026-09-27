@@ -364,6 +364,17 @@ def classify_policy_liveness(
         return str(row.get("policyStatus") or row.get("status") or "").strip().casefold() == "active"
 
     def summarize(row: Mapping[str, Any], via: str) -> dict[str, Any]:
+        # Best-effort live insured name: the PolicyApi row shape is not
+        # contractual, so probe the known candidate keys. Used only to
+        # surface a name mismatch in the CSR email (e.g. ISCA vs ICSA) —
+        # never for matching (matching is policy-number + applicant-ID).
+        live_name = ""
+        for key in ("insuredName", "accountName", "namedInsured",
+                    "insured_name", "account_name"):
+            candidate = str(row.get(key) or "").strip()
+            if candidate:
+                live_name = candidate
+                break
         return {
             "verdict": "LIVE",
             "reason": via,
@@ -371,6 +382,7 @@ def classify_policy_liveness(
             "policy_status": str(row.get("policyStatus") or row.get("status") or "").strip(),
             "expiration_date": _policy_expiration(row),
             "premium": row.get("premium"),
+            "live_account_name": live_name,
         }
 
     exact_search_rows = policy_search(number)
@@ -803,6 +815,43 @@ class NotificationStore:
 # -- email ---------------------------------------------------------------------
 
 
+def _normalized_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+
+def liveness_identity_note(item: Mapping[str, Any]) -> str:
+    """Plain-English identity flags for the CSR email.
+
+    Surfaces exactly which live policy the nag matched (critical for
+    de-concatenated queue numbers like BDG-312624001 -> BDG-3126240-02) and
+    flags an insured-name mismatch between the queue row and the live
+    policy record (the ISCA Contracting INC vs ICSA Construction Inc case).
+    Matching itself is always policy-number + applicant-ID; the name is
+    display-only, compared on normalized alphanumeric characters so
+    "ISCA Contracting INC" vs "ISCA Contracting Inc." does not false-flag.
+    """
+    liveness = item.get("liveness")
+    if not isinstance(liveness, dict):
+        return ""
+    notes: list[str] = []
+    queue_number = normalize_policy_number(item.get("Policy Number"))
+    matched = normalize_policy_number(liveness.get("matched_policy_number"))
+    if matched and matched != queue_number:
+        notes.append(
+            f"Live policy on file: {matched} ({liveness.get('reason') or 'matched live record'})."
+        )
+    queue_name = str(item.get("Account Name") or "").strip()
+    live_name = str(liveness.get("live_account_name") or "").strip()
+    if (queue_name and live_name
+            and _normalized_name(queue_name) != _normalized_name(live_name)):
+        notes.append(
+            f'Name check: the queue shows "{queue_name}" but the live policy '
+            f'reads "{live_name}" — please confirm the correct legal name '
+            f"with the carrier."
+        )
+    return " ".join(notes)
+
+
 def _item_bullets(items: list[Mapping[str, Any]], today: date) -> list[str]:
     bullets = []
     for item in sorted(items, key=lambda row: int(row.get("age_days") or 0), reverse=True):
@@ -817,6 +866,9 @@ def _item_bullets(items: list[Mapping[str, Any]], today: date) -> list[str]:
         if detail:
             head += f" ({detail})"
         head += f". Request opened {created} ({age} days ago)."
+        identity_note = liveness_identity_note(item)
+        if identity_note:
+            head += f" {identity_note}"
         bullets.append(head + " " + change_request_context(item, today))
     return bullets
 

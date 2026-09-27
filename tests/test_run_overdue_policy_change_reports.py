@@ -98,3 +98,96 @@ def test_seed_sent_store_rejects_incomplete_entry(tmp_path):
     seed.write_text(json.dumps([{"csr": "Lenin Perdomo"}]))
     with pytest.raises(Exception):
         seed_sent_store(str(seed), str(tmp_path / "sent.json"))
+
+
+def _fake_live_run(monkeypatch, tmp_path, verifier_factory):
+    """Patch the runner's worker so --live runs without network; returns (code, evidence, calls)."""
+    import robie_job_engine.run_overdue_policy_change_reports as runner
+
+    class FakeResult:
+        succeeded = True
+        error = ""
+        hold_status = None
+        destination = {"delivery_receipts": [], "csr_count": 0}
+        detail = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            pass
+
+        def perform(self, job, idempotency_key=None):
+            return FakeResult()
+
+    monkeypatch.setattr(runner, "OverduePolicyChangeReportWorker", FakeWorker)
+    args = runner.build_parser().parse_args(
+        ["--mode", "live", "--manifest", "/tmp/m.json",
+         "--sent-store", str(tmp_path / "sent.json"),
+         "--evidence-out", str(tmp_path / "ev.json")])
+    return runner.run(args, verifier_factory=verifier_factory)
+
+
+def test_live_run_calls_verifier_and_records_result(tmp_path, monkeypatch):
+    class FakeEvidence:
+        expected = 1
+        observed = 1
+        method = "fake-readback"
+        captured_at = "2026-09-27T00:00:00+00:00"
+
+    class FakeVerification:
+        verified = True
+        error = ""
+        evidence = FakeEvidence()
+
+    calls = []
+
+    class FakeVerifier:
+        def verify(self, job, action):
+            calls.append((job, action))
+            return FakeVerification()
+
+    code, evidence = _fake_live_run(monkeypatch, tmp_path, FakeVerifier)
+    assert code == 0
+    assert len(calls) == 1
+    assert evidence["verification"]["verified"] is True
+    assert evidence["verification"]["method"] == "fake-readback"
+
+
+def test_live_run_verifier_failure_is_recorded_not_fatal(tmp_path, monkeypatch):
+    class BoomVerifier:
+        def verify(self, job, action):
+            raise RuntimeError("gmail read-back down")
+
+    code, evidence = _fake_live_run(monkeypatch, tmp_path, BoomVerifier)
+    assert code == 0  # the sends happened; verification is evidence, not a retry trigger
+    assert evidence["verification"]["verified"] is False
+    assert "UNVERIFIED" in evidence["verification"]["error"]
+
+
+def test_dry_run_skips_verifier(tmp_path, monkeypatch):
+    import robie_job_engine.run_overdue_policy_change_reports as runner
+
+    class FakeResult:
+        succeeded = True
+        error = ""
+        hold_status = None
+        destination = {"delivery_receipts": [], "csr_count": 0}
+        detail = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            pass
+
+        def perform(self, job, idempotency_key=None):
+            return FakeResult()
+
+    def boom():
+        raise AssertionError("verifier must not run in dry-run")
+
+    monkeypatch.setattr(runner, "OverduePolicyChangeReportWorker", FakeWorker)
+    args = runner.build_parser().parse_args(
+        ["--mode", "dry-run", "--manifest", "/tmp/m.json",
+         "--sent-store", str(tmp_path / "sent.json"),
+         "--evidence-out", str(tmp_path / "ev.json")])
+    code, evidence = runner.run(args, verifier_factory=boom)
+    assert code == 0
+    assert evidence["verification"]["skipped"] is True

@@ -52,6 +52,7 @@ from .overdue_policy_change_reports import (
     JOB_TYPE,
     NotificationStore,
     OverduePolicyChangeReportWorker,
+    OverduePolicyChangeReportVerifier,
     PolicyChangeReportContractError,
     default_mailer,
 )
@@ -156,7 +157,7 @@ def seed_sent_store(seed_path: str, sent_store_path: str) -> dict[str, Any]:
     return {"seeded": seeded, "sent_store": str(Path(sent_store_path).expanduser())}
 
 
-def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
+def run(args: argparse.Namespace, *, verifier_factory=None) -> tuple[int, dict[str, Any]]:
     today = date.today()
     if args.seed_file:
         result = seed_sent_store(args.seed_file, args.sent_store)
@@ -219,8 +220,29 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     if dry_run:
         evidence["dry_run_note"] = (
             "No email was sent and the sent store was not modified. "
-            "Recipients and bodies below are what a live run would produce."
+            "Recipients and bodies below are what a live run would produce. "
+            "Delivery verification is skipped in dry-run (nothing was sent)."
         )
+        evidence["verification"] = {"skipped": True, "reason": "dry-run sent nothing"}
+    elif result.succeeded:
+        # --live: prove what was sent and what was held via Gmail read-back.
+        try:
+            factory = verifier_factory or OverduePolicyChangeReportVerifier
+            verification = factory().verify(
+                job, {"destination": result.destination})
+            evidence["verification"] = {
+                "verified": verification.verified,
+                "error": verification.error,
+                "expected": verification.evidence.expected,
+                "observed": verification.evidence.observed,
+                "method": verification.evidence.method,
+                "captured_at": verification.evidence.captured_at,
+            }
+        except Exception as exc:  # noqa: BLE001
+            evidence["verification"] = {
+                "verified": False,
+                "error": f"UNVERIFIED: verifier raised {type(exc).__name__}: {exc}",
+            }
 
     if args.evidence_out:
         out = Path(args.evidence_out).expanduser()
