@@ -134,8 +134,15 @@ End is `input[type=date][data-at="datatable-daterangepicker-enddate"]`. Both
 can sit in the DOM hidden until Select Date Range is chosen, and neither is
 a child of `select#PDDateRange`. The labels `Processed date from` and
 `Processed date to` are not in that DOM. A missing, still-hidden, or second
-match holds. Search, Communications, and Memo
-stay the same exact names. A missing or second match holds. A unique
+match holds. Get Policy Activity then requires the processed-date results
+URL (`/managepolicies/policyactivity/processeddateresults/<section>/`).
+The live landing is section `cancels` (title Policy Activity Processed Date
+Results – Cancels, Lapses, Reinstates). Sibling sections are the same page
+family. There is no Search button on that page. The worker does not click
+Search. The next control is the Communications tab (exact name, then
+`aria-selected`). A link named Communications is not that control. A missing
+results URL, or a missing or second Communications tab, holds. Memo stays
+the same exact name. A missing or second match holds. A unique
 `data-at` or id match is used when that element has no accessible name; a
 different accessible name, or the expected name on another element, holds.
 A Memo open accepts one PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
@@ -214,10 +221,20 @@ not upload or write a note.
   `[data-at=ProcessedDateButton]` is present and visible. #606 scoped
   Start/End under `#PDDateRange`, so the scoped count was not 1. This
   commit selects `Select Date Range`, waits until Start and End are
-  visible at page scope, then fills them. It has not been installed, and a
-  completed pull is still UNVERIFIED. After merge and a Test zip, re-run
-  `--pull-only` on `hermes-test-01` to prove the run passes Start Date and
-  reaches Search, Communications, and Memo.
+  visible at page scope, then fills them. Release `00a0ae294ec0` (#612) is
+  that change. Official `--pull-only` on hermes-test-01 cleared the date
+  window, clicked Get Policy Activity, and landed on
+  `https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/`
+  (Policy Activity Processed Date Results – Cancels, Lapses, Reinstates).
+  The next line clicked a Search button. The receipt was
+  `Progressive control 'Search' is missing or ambiguous` (`ezlynx: not_run`,
+  `status: HELD`). Communications and Memo were not reached (0 PDFs).
+  Search is not on that results page. This commit stops that click, requires
+  the processed-date results URL (cancels or a sibling section), then opens
+  the Communications tab. It has not been installed, and a completed pull
+  is still UNVERIFIED. After merge and a Test zip, re-run `--pull-only` on
+  `hermes-test-01` to prove the run gets past the results page into
+  Communications and Memo.
 - Ambiguous date UI stays fail-closed in this commit. The StreetSmart HITL
   ladder for a later change is Gemini for an open-ended read (“what am I
   looking at / which control”), then **Jev** (TypeSafe System One) as the
@@ -225,9 +242,12 @@ not upload or write a note.
   example “does this look like the processed-date filter we expect?” or
   “quote-only vs complete.” No Jev client, network call, or secret is added
   here. Keys are not configured.
-- Still exact, and still UNVERIFIED on a completed pull: `Search`,
-  Communications tab `aria-selected`, and a
-  Memo link or button on each row. A mismatch holds.
+- Still exact, and still UNVERIFIED on a completed pull: the Communications
+  tab (`aria-selected`) on the cancels results page, and a Memo link or
+  button on each row. A mismatch holds. The results page was observed only
+  far enough to show that Search is absent. If Communications is a link, a
+  different name, or already showing Memo rows with no tab, this commit
+  holds on that control and does not guess a click.
 - Whether the communications grid uses a Type column, and whether a disabled
   `Next` control is present. An enabled `Next` holds so a partial page is
   not treated as the full day.

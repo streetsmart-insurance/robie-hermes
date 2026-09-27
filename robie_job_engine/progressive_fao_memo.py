@@ -15,10 +15,14 @@ Policy Activity then requires View Activity By ``Processed Date``
 ``select#PDDateRange`` option ``Select Date Range`` (its value is read from
 that option), then the page-level Start Date and End Date inputs that the
 option reveals, and ``Get Policy Activity``. Those date inputs are not
-children of the preset select; they stay hidden until it is chosen. A
-missing, hidden, or non-unique control raises IntakeHold. This module does
-not log in and does not submit OTP. Portal code does not upload, note,
-task, or label in EZLynx.
+children of the preset select; they stay hidden until it is chosen.
+Get Policy Activity navigates to Policy Activity processed-date results.
+The live landing is ``.../processeddateresults/cancels/`` (Cancels, Lapses,
+Reinstates). Sibling sections share that prefix. There is no Search button
+on that page. The next control is the Communications tab. A missing results
+URL, or a missing or ambiguous Communications tab, raises IntakeHold. This
+module does not log in and does not submit OTP. Portal code does not upload,
+note, task, or label in EZLynx.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
@@ -111,6 +115,19 @@ END_DATE_LABEL = "End Date"
 END_DATE_CSS = 'input[type="date"][data-at="datatable-daterangepicker-enddate"]'
 GET_POLICY_ACTIVITY_LABEL = "Get Policy Activity"
 GET_POLICY_ACTIVITY_CSS = '[data-at="ProcessedDateButton"]'
+COMMUNICATIONS_TAB_LABEL = "Communications"
+PROCESSED_DATE_RESULTS_HOLD = (
+    "Policy Activity processed-date results page is missing or ambiguous"
+)
+# Live landing after Get Policy Activity (hermes-test-01, release 00a0ae294ec0):
+# https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/
+# Title: Policy Activity Processed Date Results – Cancels, Lapses, Reinstates.
+# One section slug. Sibling sections use the same prefix. No Search control.
+_PROCESSED_DATE_RESULTS_URL = re.compile(
+    r"^https://(?:[a-z0-9-]+\.)*foragentsonly\.com"
+    r"/managepolicies/policyactivity/processeddateresults/([a-z0-9_-]+)/?$",
+    re.IGNORECASE,
+)
 _SHELL_NAV_ROLES = ("link", "button")
 _REMOTE_PDF = re.compile(r"https?://[^\s\"'<>]+?\.pdf(?:\?[^\s\"'<>]*)?", re.IGNORECASE)
 _EASTERN = ZoneInfo("America/New_York")
@@ -761,9 +778,48 @@ def apply_processed_date_window(page: Any, start: date, end: date) -> None:
     _click_get_policy_activity(page)
 
 
+def _processed_date_results_section(url: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise IntakeHold(PROCESSED_DATE_RESULTS_HOLD)
+    normalized = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    match = _PROCESSED_DATE_RESULTS_URL.fullmatch(normalized)
+    if match is None:
+        raise IntakeHold(PROCESSED_DATE_RESULTS_HOLD)
+    return match.group(1).lower()
+
+
+def require_processed_date_results(page: Any) -> str:
+    """Return the results section after Get Policy Activity. Do not click Search.
+
+    Release ``00a0ae294ec0`` (#612) submitted the date window and landed on
+    ``/processeddateresults/cancels/``. The following ``click_named(..., "Search")``
+    held with ``Progressive control 'Search' is missing or ambiguous`` because
+    that button is not on the results page. Cancels is the default section.
+    Any other single section under ``processeddateresults`` is the same page
+    family. A missing URL, a query, or an extra path segment holds. The
+    Communications tab is the next control.
+    """
+    wait = getattr(page, "wait_for_url", None)
+    if callable(wait):
+        try:
+            wait(_PROCESSED_DATE_RESULTS_URL, timeout=DATE_CONTROL_TIMEOUT_MS)
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            raise IntakeHold(PROCESSED_DATE_RESULTS_HOLD) from exc
+    return _processed_date_results_section(str(getattr(page, "url", "") or ""))
+
+
 def open_communications_tab(page: Any) -> None:
-    click_named(page, "Communications", roles=("tab",))
-    locator = page.get_by_role("tab", name="Communications", exact=True)
+    """Open the Communications tab on the processed-date results page.
+
+    Exact role ``tab``. A link with the same name is not this control and
+    is not clicked. Zero tabs, or two tabs, hold. The tab must report
+    ``aria-selected=true`` after the click.
+    """
+    click_named(page, COMMUNICATIONS_TAB_LABEL, roles=("tab",))
+    locator = page.get_by_role("tab", name=COMMUNICATIONS_TAB_LABEL, exact=True)
     if locator.count() != 1 or locator.get_attribute("aria-selected") != "true":
         raise IntakeHold("Communications tab did not become selected")
 
@@ -856,7 +912,7 @@ class PlaywrightFaoMemoBrowser:
             unique_element=False,
         )
         apply_processed_date_window(self.page, start, end)
-        click_named(self.page, "Search", roles=("button",))
+        require_processed_date_results(self.page)
         open_communications_tab(self.page)
         assert_authenticated(self.page)
         assert_agent_context(self.page, self.agent_code)
