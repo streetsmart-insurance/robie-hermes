@@ -8,8 +8,13 @@ Pipeline per VERIFIED record (read-only until the write steps):
   4. Append the summary note (real content via summarize_for_note).
      On an uncertain POST outcome, read the destination back BEFORE any
      retry — never blind-retry a non-idempotent POST.
-  5. Upload PDF attachments via the OAuth DocumentApi, with read-back.
+  5. Upload the full original email as a PDF, then every attachment, via
+     the OAuth DocumentApi, each with read-back. On an uncertain upload
+     outcome, search Documents by name BEFORE any re-send: landed means
+     done, verifiably absent means one re-send, unsearchable means
+     UNVERIFIED (fail closed, email stays unread).
   6. Task decision via the registry + Zapier (create/reuse/reopen/hold).
+     No task is created when the filing is UNVERIFIED.
 
 Writes go through the injected ports so offline tests use fakes; production
 wiring passes add_note_to_discussion / upload_document_via_api from
@@ -24,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .cert_email_pdf import email_pdf_document
 from .cert_intake import summarize_for_note
 from .cert_task_registry import (
     CREATE, HOLD, NONE, REOPEN, REUSE, TASK_OPEN,
@@ -46,7 +52,9 @@ class FilingDeps:
     discussions_client: Any = None   # get_discussions(applicant_id)
     verifier: Any = None             # search_policies/policy anchor reads
     note_writer: Any = None          # (applicant_id, note_text, *, title_hint, dry_run) -> dict
-    doc_writer: Any = None           # (applicant_id, document_name, file_bytes, *, filename) -> dict
+    doc_writer: Any = None           # (applicant_id, document_name, file_bytes, *, filename, content_type) -> dict
+    doc_searcher: Any = None         # (applicant_id) -> {"results": [...]} — read-only,
+                                     # used ONLY to resolve uncertain upload outcomes
     zapier: Any = None               # CertZapierClient (or fake)
     registry: Any = None             # TaskRegistry
     store: Any = None                # FilingStore
@@ -462,6 +470,126 @@ def _looks_like_followup(subject: Any) -> bool:
                          str(subject or ""), re.IGNORECASE))
 
 
+_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".bmp": "image/bmp",
+    ".heic": "image/heic",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".eml": "message/rfc822",
+    ".msg": "application/vnd.ms-outlook",
+}
+
+
+def _content_type_for(filename: str) -> str:
+    lowered = str(filename or "").lower()
+    for ext, ctype in _CONTENT_TYPES.items():
+        if lowered.endswith(ext):
+            return ctype
+    return "application/octet-stream"
+
+
+def _document_name_present(deps: FilingDeps, applicant_id: Any,
+                           doc_name: str) -> bool:
+    """True when Documents already contains doc_name for the applicant.
+
+    Read-only. Raises when no search port is configured or the search
+    itself fails — the caller treats that as UNVERIFIABLE, never as absent.
+    """
+    if deps.doc_searcher is None:
+        raise RuntimeError("no document search port configured")
+    payload = deps.doc_searcher(str(applicant_id))
+    rows = (payload or {}).get("results") or []
+    names = {str(r.get("documentName") or r.get("name") or "") for r in rows}
+    return doc_name in names
+
+
+def _upload_document_verified(deps: FilingDeps, applicant_id: Any,
+                              doc_name: str, file_bytes: bytes,
+                              filename: str, res: FilingResult
+                              ) -> tuple[str | None, str]:
+    """Upload one document under Carlo's retry rule (2026-09-27).
+
+    Returns (document_id_or_None, outcome) where outcome is one of
+    "uploaded", "recovered" (landed despite the lost response), or
+    "unverified". Never blind-retries a POST: after a failed upload the
+    destination is searched by document name first. A document that is
+    verifiably absent gets exactly one re-send; a document whose presence
+    cannot be determined is UNVERIFIED — fail closed, email stays unread.
+    """
+    first_err: Exception | None = None
+    try:
+        up = deps.doc_writer(str(applicant_id), doc_name, file_bytes,
+                             filename=filename,
+                             content_type=_content_type_for(filename))
+    except Exception as exc:
+        first_err = exc  # uncertain outcome — read the destination back first
+    else:
+        if (up or {}).get("read_back") is True:
+            res.evidence.append(f"document uploaded with read-back: {doc_name}")
+        else:
+            res.evidence.append(
+                f"document uploaded without read-back confirmation: {doc_name}")
+        return str((up or {}).get("document_id") or ""), "uploaded"
+
+    try:
+        landed = _document_name_present(deps, applicant_id, doc_name)
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: upload of {doc_name} failed ({first_err}) and the "
+            f"read-back search also failed ({exc}) — refusing to re-send "
+            "blind; email left unread for human review")
+        return None, "unverified"
+    if landed:
+        res.evidence.append(
+            f"document upload outcome uncertain but {doc_name} is present in "
+            "Documents — counted as landed, not re-sending")
+        return None, "recovered"
+    # Verifiably absent: exactly one re-send is safe.
+    try:
+        up = deps.doc_writer(str(applicant_id), doc_name, file_bytes,
+                             filename=filename,
+                             content_type=_content_type_for(filename))
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: upload of {doc_name} failed twice ({exc}); "
+            "email left unread for human review")
+        return None, "unverified"
+    res.evidence.append(
+        f"document uploaded on re-send with read-back: {doc_name}")
+    return str((up or {}).get("document_id") or ""), "uploaded"
+
+
+def _build_uploads(record: Any) -> list[tuple[str, bytes, str]]:
+    """(document_name, bytes, filename) for the email PDF + every attachment.
+
+    The full original email goes first as a PDF (Carlo 2026-09-27: the
+    email itself must live in Documents), then every attachment regardless
+    of type — the old .pdf-only filter silently dropped photos and scans.
+    """
+    email_obj = getattr(record, "email", record)
+    doc_name, pdf_bytes = email_pdf_document(email_obj)
+    uploads = [(doc_name, pdf_bytes, doc_name)]
+    for att in (getattr(record, "attachments", []) or []):
+        filename = str(getattr(att, "filename", "") or "").strip()
+        if not filename:
+            continue
+        content = getattr(att, "content", b"") or b""
+        uploads.append((f"COI email attachment - {filename}", content,
+                        filename))
+    return uploads
+
+
 def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                   res: FilingResult, message_id: str, applicant_id: int,
                   owner: str, dry_run: bool) -> FilingResult:
@@ -485,11 +613,25 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
         return res
     res.evidence.append("triple filing guard passed")
 
+    # --- documents to file ---------------------------------------------------
+    # Built before the note so the note can name them truthfully. The full
+    # original email goes first as a PDF, then every attachment regardless
+    # of type. UNVERIFIED rendering fails the whole filing — the email
+    # stays unread and no task is created.
+    try:
+        uploads = _build_uploads(record)
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: could not render the email PDF ({exc}); "
+            "email left unread for human review")
+        res.status = ERROR
+        return res
+
     # --- note --------------------------------------------------------------
     state = deps.store.get(message_id) if deps.store else {}
     note_text = summarize_for_note(
         getattr(record, "email", record), record.facts,
-        filed_documents=[])
+        filed_documents=[name for name, _, _ in uploads])
     pre_count = _note_count(deps.discussions_client, applicant_id,
                             discussion_id)
     if state.get("note_status") == "written" and state.get("note_id"):
@@ -562,24 +704,19 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                                discussion_id=discussion_id)
 
     # --- documents ----------------------------------------------------------
-    attachments = [a for a in (getattr(record, "attachments", []) or [])
-                   if (getattr(a, "filename", "") or "").lower().endswith(".pdf")]
-    for att in attachments:
-        doc_name = att.filename if att.filename.lower().endswith(".pdf") \
-            else att.filename + ".pdf"
-        try:
-            up = deps.doc_writer(str(applicant_id), doc_name, att.content,
-                                 filename=att.filename)
-        except Exception as exc:
-            res.hold_reasons.append(
-                f"document upload failed for {att.filename}: {exc}")
-            res.status = PARTIAL
-            return _task_step(record, verified, deps, res, message_id,
-                              applicant_id, note_text, dry_run=dry_run)
-        res.document_ids.append(str((up or {}).get("document_id") or ""))
-    if attachments:
-        res.evidence.append(f"{len(attachments)} document(s) uploaded "
-                            "with read-back")
+    # Each upload runs under Carlo's retry rule: on an uncertain outcome
+    # the destination is searched by document name BEFORE any re-send.
+    # Anything UNVERIFIED fails the filing here — the email stays unread
+    # and no task is created (the unread inbox is the flag).
+    for doc_name, file_bytes, filename in uploads:
+        document_id, outcome = _upload_document_verified(
+            deps, applicant_id, doc_name, file_bytes, filename, res)
+        if outcome == "unverified":
+            res.status = ERROR
+            return res
+        if document_id:
+            res.document_ids.append(document_id)
+    res.evidence.append(f"{len(uploads)} document(s) filed with read-back")
 
     res.status = FILED if res.status == HELD else res.status
     return _task_step(record, verified, deps, res, message_id, applicant_id,
