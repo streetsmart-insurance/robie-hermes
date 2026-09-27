@@ -97,6 +97,61 @@ first PNG; it adds a sibling file.
 There is no systemd timer. Do not enable one from this slice. Production
 is not a target.
 
+## Test-only Gemini UI rescue
+
+When `ROBIE_ENV=TEST` and a named control is missing or ambiguous
+(`Progressive control '…' is missing or ambiguous`), or a Playwright
+timeout hits that UI step, the pull asks Gemini **once** for one locator.
+The step retries only when that locator matches one visible control.
+Production (`ROBIE_ENV=PRODUCTION`, `PROD`, or `LIVE`) skips the rescue
+even if `ROBIE_FAO_GEMINI_UI_RESCUE=1`. Set
+`ROBIE_FAO_GEMINI_UI_RESCUE=0` to skip it on Test as well.
+
+The API key is the existing Secret Manager secret id **`gemini-api-key`**
+(`projects/<project>/secrets/gemini-api-key/versions/latest`, or
+`ROBIE_GEMINI_API_KEY_SECRET` when that resource name still contains
+`gemini-api-key`). Do not print the value. A missing or unreadable key
+holds with `gemini: not_configured` and does not raise an unexpected
+exception. `gemini: unsure` or a locator that is not unique and visible
+(`gemini: ambiguous`, including `.first` / `.nth`) stays fail-closed.
+A control that is already unique does not call Gemini. The model is
+`ROBIE_GEMINI_MODEL` (same default as the staff-job helper).
+
+The prompt is host, URL path, and visible control labels only. Query
+strings, userinfo, passwords, and the page body are not sent. This rescue
+does not upload a document, file a note, create a task, or flip
+`ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX`. Jev is not called.
+
+Prove on `hermes-test-01` only after this commit is in a Test zip (not
+done from the PR):
+
+1. `hostname` is `hermes-test-01`. Do not run this on `hermes-poc-01`.
+2. Confirm secret `gemini-api-key` has an enabled version the Test
+   runtime can access. Do not print the payload. If the version is
+   missing, `--pull-only` should hold with `gemini: not_configured`
+   instead of crashing.
+3. Leave the filing kill switch unset. Do not export
+   `ROBIE_DOCUMENT_RETRIEVAL_FILE_EZLYNX=1`.
+4. From the installed Test release, run:
+
+   ```bash
+   cd /opt/streetsmart-hermes-test/releases/current
+   ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.progressive_fao_memo \
+     --pull-only \
+     --as-of 2026-09-26 \
+     --start 2026-09-25 \
+     --end 2026-09-25
+   ```
+
+   A receipt that already has a unique control must not need Gemini. If a
+   named control holds, the reason contains `gemini: not_configured` (no
+   key), `gemini: unsure` / `gemini: ambiguous` (no single visible locator),
+   or the step continues once when Gemini names one visible locator. A
+   later failure stays `HELD` and does not ask Gemini again. That receipt
+   is not Job Engine `COMPLETE`. With the key present, a rescued step is
+   proven only when the receipt shows the pull moved past the control that
+   used to hold.
+
 ## Drive
 
 The documented destination for a day's folder is shared Drive
@@ -252,13 +307,12 @@ not upload or write a note.
   Test zip, re-run `--pull-only` on `hermes-test-01` and confirm the page
   leaves `cancels` for `underwriting` or `communications` without a Search
   click.
-- Ambiguous date UI stays fail-closed in this commit. The StreetSmart HITL
-  ladder for a later change is Gemini for an open-ended read (“what am I
-  looking at / which control”), then **Jev** (TypeSafe System One) as the
-  typed judgment gate (boolean, choice, or score, plus confidence) — for
-  example “does this look like the processed-date filter we expect?” or
-  “quote-only vs complete.” No Jev client, network call, or secret is added
-  here. Keys are not configured.
+- Ambiguous date UI stays fail-closed unless the Test-only Gemini rescue
+  above names one unique visible locator. That rescue reads secret id
+  `gemini-api-key` and has not been proven on `hermes-test-01`. Jev
+  (TypeSafe System One) is still not called. No Jev client or Jev secret
+  is added. A Gemini answer that is unsure, positional, or not unique
+  stays `HELD`.
 - Still exact, and still UNVERIFIED on a completed pull: a Memo link or
   button on each row. A mismatch holds. The Communications page observed
   after the section link showed 0 Records Found. Memo and PDF controls were

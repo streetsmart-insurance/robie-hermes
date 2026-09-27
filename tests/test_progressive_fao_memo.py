@@ -822,7 +822,9 @@ class LocatorContractTests(unittest.TestCase):
             "GoogleDriveUploader",
         ):
             self.assertNotIn(banned, text)
-        self.assertIn("does not call Gemini or Jev", text)
+        self.assertIn("success path does not call Gemini", text)
+        self.assertIn("does not call Jev", text)
+        self.assertIn("gemini-api-key", text)
         self.assertIn("TypeSafe System One", text)
         self.assertNotIn("JEV_", text)
         self.assertNotIn("typesafe", text.casefold().replace("typesafe system one", ""))
@@ -2243,6 +2245,163 @@ class WorkerRowTests(unittest.TestCase):
                 with self.assertRaisesRegex(IntakeHold, "ambiguous"):
                     worker.pull_fao_communications(portal, start=PROVE_DAY, end=PROVE_DAY)
             self.assertEqual(downloads, [])
+
+
+class GeminiUiRescueWiringTests(unittest.TestCase):
+    """Progressive FAO pull uses the Test-only rescue. No live Gemini call."""
+
+    def _load(self, page):
+        return PlaywrightFaoMemoBrowser(page).load_communications(
+            start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE,
+        )
+
+    def test_unique_control_does_not_call_gemini(self):
+        page = NavPage()
+
+        def forbid_client():
+            raise AssertionError("Gemini was called for a unique control")
+
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                forbid_client,
+            ):
+                grid = self._load(page)
+        self.assertEqual(len(grid.rows), 2)
+        self.assertIn("Communications", page.clicks)
+
+    def test_production_skips_rescue_even_if_the_test_flag_is_set(self):
+        page = NavPage(view_mode="missing")
+
+        def forbid_client():
+            raise AssertionError("Production called Gemini")
+
+        with patch.dict(
+            os.environ,
+            {"ROBIE_ENV": "PRODUCTION", "ROBIE_FAO_GEMINI_UI_RESCUE": "1"},
+            clear=False,
+        ):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                forbid_client,
+            ):
+                with self.assertRaises(IntakeHold) as caught:
+                    self._load(page)
+        self.assertIn("View Activity By", str(caught.exception))
+        self.assertNotIn("gemini:", str(caught.exception))
+        self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity"])
+
+    def test_missing_key_holds_not_configured(self):
+        page = NavPage(view_mode="missing")
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.load_gemini_api_key",
+                return_value="",
+            ):
+                with self.assertRaisesRegex(IntakeHold, "gemini: not_configured") as caught:
+                    self._load(page)
+        self.assertIn("View Activity By", str(caught.exception))
+        self.assertNotIn("Processed Date", page.clicks)
+        self.assertNotIn("Search", page.clicks)
+
+    def test_unique_locator_retries_the_renamed_view_once(self):
+        page = NavPage(view_mode="renamed")
+        page.url = "https://user:secretpass@www.foragentsonly.com/managepolicies/policyactivity?token=sekret"
+        client = _RescueClient(json.dumps({
+            "decision": "unique",
+            "locator": 'select#PDDateType[name="DateKind"]',
+        }))
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                return_value=client,
+            ):
+                grid = self._load(page)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(len(grid.rows), 2)
+        self.assertIn("Communications", page.clicks)
+        self.assertNotIn("token=", client.prompts[0])
+        self.assertNotIn("sekret", client.prompts[0])
+        self.assertNotIn("secretpass", client.prompts[0])
+        self.assertNotIn("860521214", client.prompts[0])
+        self.assertIn("www.foragentsonly.com", client.prompts[0])
+        self.assertIn("View Activity By", client.prompts[0])
+
+    def test_unsure_and_ambiguous_locators_hold(self):
+        unsure = NavPage(view_mode="missing")
+        unsure_client = _RescueClient(json.dumps({
+            "decision": "unsure",
+            "reason": "two controls",
+        }))
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                return_value=unsure_client,
+            ):
+                with self.assertRaisesRegex(IntakeHold, "gemini: unsure"):
+                    self._load(unsure)
+        self.assertEqual(unsure_client.calls, 1)
+        self.assertNotIn("Processed Date", unsure.clicks)
+
+        ambiguous = NavPage(view_mode="duplicate")
+        ambiguous_client = _RescueClient(json.dumps({
+            "decision": "unique",
+            "locator": 'select#PDDateType[name="DateType"]',
+        }))
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                return_value=ambiguous_client,
+            ):
+                with self.assertRaisesRegex(IntakeHold, "gemini: ambiguous"):
+                    self._load(ambiguous)
+        self.assertEqual(ambiguous_client.calls, 1)
+        self.assertNotIn("Processed Date", ambiguous.clicks)
+
+        positional = NavPage(view_mode="duplicate")
+        positional_client = _RescueClient(json.dumps({
+            "decision": "unique",
+            "locator": 'select#PDDateType[name="DateType"] >> nth=0',
+        }))
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                return_value=positional_client,
+            ):
+                with self.assertRaisesRegex(IntakeHold, "gemini: ambiguous"):
+                    self._load(positional)
+        self.assertNotIn("Processed Date", positional.clicks)
+        self.assertIn("nth=", positional_client.prompts[0])
+
+    def test_second_failure_does_not_call_gemini_again(self):
+        page = NavPage(view_mode="renamed", start_mode="missing")
+        client = _RescueClient(json.dumps({
+            "decision": "unique",
+            "locator": 'select#PDDateType[name="DateKind"]',
+        }))
+        with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                return_value=client,
+            ):
+                with self.assertRaises(IntakeHold) as caught:
+                    self._load(page)
+        self.assertEqual(client.calls, 1)
+        self.assertIn("Start Date", str(caught.exception))
+        self.assertNotIn("gemini:", str(caught.exception))
+        self.assertNotIn("Get Policy Activity", page.clicks)
+
+
+class _RescueClient:
+    def __init__(self, raw: str):
+        self.raw = raw
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def generate_unique_locator(self, prompt: str) -> str:
+        self.calls += 1
+        self.prompts.append(prompt)
+        return self.raw
 
 
 if __name__ == "__main__":

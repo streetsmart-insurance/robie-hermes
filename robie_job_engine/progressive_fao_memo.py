@@ -27,6 +27,12 @@ ambiguous link, or any other section raises IntakeHold. This module does
 not log in and does not submit OTP. Portal code does not upload, note,
 task, or label in EZLynx.
 
+On ``ROBIE_ENV=TEST``, one missing or ambiguous named control — or a
+Playwright timeout on that UI step — may ask Gemini once for a single
+unique locator (secret id ``gemini-api-key``). Production skips that
+rescue. The success path does not call Gemini. This module does not call
+Jev. The document-retrieval filing kill switch is unchanged.
+
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
 after a successful pull. That filing stage is inert unless ``ROBIE_ENV=TEST``,
@@ -49,6 +55,11 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from .gemini_ui_rescue import (
+    RescueBudget,
+    gemini_ui_rescue_budget,
+    run_named_control_step,
+)
 from .intake_core import IntakeHold, SourceArchive, SourceItem, require_test
 from .progressive_retrieval import ProgressiveRetrieval, require_bounded_scope
 
@@ -529,10 +540,16 @@ def _shell_ambiguous(visible: list[Any], total: int, *, unique_element: bool) ->
 
 
 def _expand_main_navigation(page: Any) -> None:
-    visible, total = _survey(_role_locator(page, MAIN_NAVIGATION_NAME, exact=True))
-    if len(visible) != 1 or total != 1:
-        raise _control_hold(MAIN_NAVIGATION_NAME)
-    visible[0].click()
+    def primary() -> None:
+        visible, total = _survey(_role_locator(page, MAIN_NAVIGATION_NAME, exact=True))
+        if len(visible) != 1 or total != 1:
+            raise _control_hold(MAIN_NAVIGATION_NAME)
+        visible[0].click()
+
+    def retry(locator: Any) -> None:
+        locator.click()
+
+    run_named_control_step(page, MAIN_NAVIGATION_NAME, primary, retry)
 
 
 def click_shell_nav(
@@ -551,18 +568,26 @@ def click_shell_nav(
     a second hidden match does not hold. Two visible matches, or two hidden
     matches, hold. A hidden or absent match expands Main Navigation once,
     then the same rule runs again. The hidden control is never clicked.
+    A Test-only Gemini rescue may retry this click once. The success path
+    does not call Gemini.
     """
-    visible, total = _survey(locator_factory())
-    if _shell_ready(visible, total, unique_element=unique_element):
+    def primary() -> None:
+        visible, total = _survey(locator_factory())
+        if _shell_ready(visible, total, unique_element=unique_element):
+            visible[0].click()
+            return
+        if _shell_ambiguous(visible, total, unique_element=unique_element):
+            raise _control_hold(label)
+        _expand_main_navigation(page)
+        visible, total = _survey(locator_factory())
+        if not _shell_ready(visible, total, unique_element=unique_element):
+            raise _control_hold(label)
         visible[0].click()
-        return
-    if _shell_ambiguous(visible, total, unique_element=unique_element):
-        raise _control_hold(label)
-    _expand_main_navigation(page)
-    visible, total = _survey(locator_factory())
-    if not _shell_ready(visible, total, unique_element=unique_element):
-        raise _control_hold(label)
-    visible[0].click()
+
+    def retry(locator: Any) -> None:
+        locator.click()
+
+    run_named_control_step(page, label, primary, retry)
 
 
 def _manage_policies_locator(page: Any) -> Any:
@@ -678,8 +703,7 @@ def _unique_visible_control(page: Any, css: str, label: str) -> Any:
     return visible[0]
 
 
-def _select_processed_date_view(page: Any) -> None:
-    view = _unique_labeled(page, VIEW_ACTIVITY_BY_CSS, VIEW_ACTIVITY_BY_LABEL)
+def _apply_processed_date_view(view: Any) -> None:
     option = view.locator(PROCESSED_DATE_OPTION_CSS)
     if int(option.count()) != 1 or _norm(str(option.inner_text())) != PROCESSED_DATE_OPTION_LABEL:
         raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
@@ -703,14 +727,21 @@ def _select_processed_date_view(page: Any) -> None:
         raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
 
 
-def _select_custom_date_range(page: Any) -> None:
-    """Choose the preset that reveals page-level Start Date and End Date.
+def _select_processed_date_view(page: Any) -> None:
+    def primary() -> None:
+        _apply_processed_date_view(
+            _unique_labeled(page, VIEW_ACTIVITY_BY_CSS, VIEW_ACTIVITY_BY_LABEL)
+        )
 
-    ``select#PDDateRange`` is not a container. The option value is whatever
-    the single ``Select Date Range`` option carries. A missing value, a
-    second option with that text, or a second option with that value holds.
-    """
-    ranged = page.locator(PROCESSED_DATE_RANGE_CSS)
+    def retry(view: Any) -> None:
+        _require_expected_label(page, view, VIEW_ACTIVITY_BY_LABEL)
+        _apply_processed_date_view(view)
+
+    run_named_control_step(page, VIEW_ACTIVITY_BY_LABEL, primary, retry)
+
+
+def _apply_custom_date_range(ranged: Any) -> None:
+    """Choose the preset option that reveals page-level Start Date and End Date."""
     if int(ranged.count()) != 1 or not _is_visible(ranged):
         raise _control_hold(PROCESSED_DATE_RANGE_LABEL)
     options = ranged.locator("option").all()
@@ -740,8 +771,25 @@ def _select_custom_date_range(page: Any) -> None:
         raise _control_hold(CUSTOM_DATE_RANGE_LABEL)
 
 
-def _fill_html_date(page: Any, css: str, label: str, day: date) -> None:
-    locator = _unique_visible_control(page, css, label)
+def _select_custom_date_range(page: Any) -> None:
+    """Choose the preset that reveals page-level Start Date and End Date.
+
+    ``select#PDDateRange`` is not a container. The option value is whatever
+    the single ``Select Date Range`` option carries. A missing value, a
+    second option with that text, or a second option with that value holds.
+    """
+    def primary() -> None:
+        _apply_custom_date_range(page.locator(PROCESSED_DATE_RANGE_CSS))
+
+    run_named_control_step(
+        page,
+        PROCESSED_DATE_RANGE_LABEL,
+        primary,
+        _apply_custom_date_range,
+    )
+
+
+def _fill_resolved_date(page: Any, locator: Any, label: str, day: date) -> None:
     _require_expected_label(page, locator, label)
     try:
         locator.fill(day.isoformat())
@@ -754,8 +802,17 @@ def _fill_html_date(page: Any, css: str, label: str, day: date) -> None:
         raise IntakeHold("Processed date filter did not stick")
 
 
-def _click_get_policy_activity(page: Any) -> None:
-    button = _unique_visible_control(page, GET_POLICY_ACTIVITY_CSS, GET_POLICY_ACTIVITY_LABEL)
+def _fill_html_date(page: Any, css: str, label: str, day: date) -> None:
+    def primary() -> None:
+        _fill_resolved_date(page, _unique_visible_control(page, css, label), label, day)
+
+    def retry(locator: Any) -> None:
+        _fill_resolved_date(page, locator, label, day)
+
+    run_named_control_step(page, label, primary, retry)
+
+
+def _click_resolved_get_policy_activity(button: Any) -> None:
     value = _norm(str(button.get_attribute("value") or ""))
     text = _norm(str(button.inner_text() or ""))
     names = {part for part in (value, text) if part}
@@ -769,6 +826,20 @@ def _click_get_policy_activity(page: Any) -> None:
         raise _control_hold(GET_POLICY_ACTIVITY_LABEL) from exc
 
 
+def _click_get_policy_activity(page: Any) -> None:
+    def primary() -> None:
+        _click_resolved_get_policy_activity(
+            _unique_visible_control(page, GET_POLICY_ACTIVITY_CSS, GET_POLICY_ACTIVITY_LABEL)
+        )
+
+    run_named_control_step(
+        page,
+        GET_POLICY_ACTIVITY_LABEL,
+        primary,
+        _click_resolved_get_policy_activity,
+    )
+
+
 def apply_processed_date_window(page: Any, start: date, end: date) -> None:
     """Select Processed Date, reveal the custom range, fill it, and submit.
 
@@ -779,7 +850,10 @@ def apply_processed_date_window(page: Any, start: date, end: date) -> None:
     future HITL ladder may ask Gemini what the open page is showing, then
     Jev (TypeSafe System One) for a typed judgment (boolean, choice, or
     score, plus confidence) — for example whether this is the processed-date
-    filter we expect, or quote-only versus complete. This function does not call Gemini or Jev.
+    filter we expect, or quote-only versus complete. On Test, a missing or
+    ambiguous named control, or a Playwright timeout on that control, may
+    ask Gemini once for one unique locator. Production skips that rescue.
+    The success path does not call Gemini. This function does not call Jev.
     """
     _select_processed_date_view(page)
     _select_custom_date_range(page)
@@ -891,13 +965,24 @@ def open_communications_section(page: Any) -> str:
     the URL must be in the Communications/underwriting section family. Memo
     and PDF controls are not clicked here.
     """
-    link = _communications_link(page)
-    try:
-        link.click()
-    except IntakeHold:
-        raise
-    except Exception as exc:
-        raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
+    def primary() -> None:
+        link = _communications_link(page)
+        try:
+            link.click()
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
+
+    def retry(locator: Any) -> None:
+        try:
+            locator.click()
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
+
+    run_named_control_step(page, COMMUNICATIONS_LINK_LABEL, primary, retry)
     return require_communications_section(page)
 
 
@@ -909,15 +994,21 @@ def memo_control_count(row: Any) -> int:
 
 
 def click_memo_control(row: Any) -> None:
-    matches = []
-    for role in ("link", "button"):
-        locator = row.get_by_role(role, name="Memo", exact=True)
-        count = locator.count()
-        if count:
-            matches.append((count, locator))
-    if len(matches) != 1 or matches[0][0] != 1:
-        raise IntakeHold("Memo open control is missing or ambiguous")
-    matches[0][1].click()
+    def primary() -> None:
+        matches = []
+        for role in ("link", "button"):
+            locator = row.get_by_role(role, name="Memo", exact=True)
+            count = locator.count()
+            if count:
+                matches.append((count, locator))
+        if len(matches) != 1 or matches[0][0] != 1:
+            raise IntakeHold("Memo open control is missing or ambiguous")
+        matches[0][1].click()
+
+    def retry(locator: Any) -> None:
+        locator.click()
+
+    run_named_control_step(row, "Memo", primary, retry)
 
 
 def extract_memo_grid(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[int, ...], tuple[Any, ...]]:
@@ -967,11 +1058,16 @@ class PlaywrightFaoMemoBrowser:
     def __init__(self, page: Any, *, agent_code: str = DEFAULT_AGENT_CODE):
         self.page = page
         self.agent_code = require_agent_code(agent_code)
+        self._ui_rescue_budget = RescueBudget()
         self._grid: MemoGrid | None = None
         self._row_locators: tuple[Any, ...] = ()
         self._list_url = ""
 
     def load_communications(self, *, start: date, end: date, agent_code: str) -> MemoGrid:
+        with gemini_ui_rescue_budget(self._ui_rescue_budget):
+            return self._load_communications(start=start, end=end, agent_code=agent_code)
+
+    def _load_communications(self, *, start: date, end: date, agent_code: str) -> MemoGrid:
         if require_agent_code(agent_code) != self.agent_code:
             raise IntakeHold("Progressive FAO agent context is missing or ambiguous")
         assert_authenticated(self.page)
@@ -1008,6 +1104,10 @@ class PlaywrightFaoMemoBrowser:
         return grid
 
     def capture_memo(self, document_id: str) -> MemoOpenObservation:
+        with gemini_ui_rescue_budget(self._ui_rescue_budget):
+            return self._capture_memo(document_id)
+
+    def _capture_memo(self, document_id: str) -> MemoOpenObservation:
         if self._grid is None or str(getattr(self.page, "url", "") or "") != self._list_url:
             raise IntakeHold("Communications memo list is missing or ambiguous")
         matches = [
