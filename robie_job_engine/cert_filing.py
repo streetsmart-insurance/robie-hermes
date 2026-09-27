@@ -58,6 +58,10 @@ class FilingDeps:
     zapier: Any = None               # CertZapierClient (or fake)
     registry: Any = None             # TaskRegistry
     store: Any = None                # FilingStore
+    task_prover: Any = None          # (applicant_id, task_title) -> {"task_id": str, "assignee": str}
+                                     # Proves a certificate-review task exists in EZLynx and is
+                                     # assigned to SCanales. Read-only. When None (not yet
+                                     # implemented), task creation fails closed as UNVERIFIED.
 
 
 @dataclass
@@ -521,12 +525,41 @@ def _upload_document_verified(deps: FilingDeps, applicant_id: Any,
     """Upload one document under Carlo's retry rule (2026-09-27).
 
     Returns (document_id_or_None, outcome) where outcome is one of
-    "uploaded", "recovered" (landed despite the lost response), or
-    "unverified". Never blind-retries a POST: after a failed upload the
-    destination is searched by document name first. A document that is
-    verifiably absent gets exactly one re-send; a document whose presence
-    cannot be determined is UNVERIFIED — fail closed, email stays unread.
+    "uploaded", "already_present" (exact name was already in Documents —
+    a previous attempt landed it; not re-uploading), "recovered" (landed
+    despite the lost response), or "unverified". Never blind-retries a
+    POST.
+
+    Discipline, in order:
+    1. Exact-name pre-check: present means a previous attempt landed it —
+       skip, never duplicate. A search that cannot complete fails closed
+       (UNVERIFIED) — never upload on an assumed-empty state.
+    2. Upload. On success the exact document NAME must be present in a
+       fresh Documents search (Carlo: exact-name HIT). The writer's
+       numeric-ID read-back alone is not enough. A succeeded POST whose
+       name cannot be confirmed is UNVERIFIED — never re-sent, because
+       re-sending a succeeded POST would duplicate.
+    3. On a failed POST (uncertain outcome) the destination is searched by
+       name first: landed means done, verifiably absent means exactly one
+       re-send (which itself must pass the exact-name proof), unsearchable
+       means UNVERIFIED.
     """
+    # --- 1. idempotency: exact-name pre-check ---
+    try:
+        already = _document_name_present(deps, applicant_id, doc_name)
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: cannot verify whether {doc_name} is already in "
+            f"Documents ({exc}) — refusing to upload on an assumed-empty "
+            "state; email left unread for human review")
+        return None, "unverified"
+    if already:
+        res.evidence.append(
+            f"document {doc_name} already present in Documents — "
+            "counted as filed, not re-uploading")
+        return None, "already_present"
+
+    # --- 2. upload ---
     first_err: Exception | None = None
     try:
         up = deps.doc_writer(str(applicant_id), doc_name, file_bytes,
@@ -534,14 +567,14 @@ def _upload_document_verified(deps: FilingDeps, applicant_id: Any,
                              content_type=_content_type_for(filename))
     except Exception as exc:
         first_err = exc  # uncertain outcome — read the destination back first
-    else:
-        if (up or {}).get("read_back") is True:
-            res.evidence.append(f"document uploaded with read-back: {doc_name}")
-        else:
-            res.evidence.append(
-                f"document uploaded without read-back confirmation: {doc_name}")
+
+    if first_err is None:
+        if not _exact_name_proven(deps, applicant_id, doc_name, res,
+                                  "upload", up):
+            return None, "unverified"
         return str((up or {}).get("document_id") or ""), "uploaded"
 
+    # --- 3. uncertain outcome: read back before any re-send ---
     try:
         landed = _document_name_present(deps, applicant_id, doc_name)
     except Exception as exc:
@@ -565,9 +598,36 @@ def _upload_document_verified(deps: FilingDeps, applicant_id: Any,
             f"UNVERIFIED: upload of {doc_name} failed twice ({exc}); "
             "email left unread for human review")
         return None, "unverified"
-    res.evidence.append(
-        f"document uploaded on re-send with read-back: {doc_name}")
+    if not _exact_name_proven(deps, applicant_id, doc_name, res,
+                              "re-send", up):
+        return None, "unverified"
     return str((up or {}).get("document_id") or ""), "uploaded"
+
+
+def _exact_name_proven(deps: FilingDeps, applicant_id: Any, doc_name: str,
+                       res: FilingResult, how: str, up: Any) -> bool:
+    """Exact-name HIT after a succeeded POST. False = UNVERIFIED (holds set).
+
+    A succeeded POST is never re-sent (that would duplicate); when the
+    name cannot be confirmed the filing fails closed instead.
+    """
+    try:
+        hit = _document_name_present(deps, applicant_id, doc_name)
+    except Exception as exc:
+        res.hold_reasons.append(
+            f"UNVERIFIED: {how} of {doc_name} succeeded but the exact-name "
+            f"read-back search failed ({exc}); email left unread for human "
+            "review")
+        return False
+    if not hit:
+        res.hold_reasons.append(
+            f"UNVERIFIED: {how} of {doc_name} succeeded but the exact name "
+            "is not in Documents — refusing to claim it; email left unread "
+            "for human review")
+        return False
+    res.evidence.append(
+        f"document {how}ed with exact-name read-back: {doc_name}")
+    return True
 
 
 def _build_uploads(record: Any) -> list[tuple[str, bytes, str]]:
@@ -605,19 +665,28 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
     res.discussion_id = discussion_id
     res.evidence.append(f"discussion resolved: {how}")
 
-    # --- triple guard before ANY write ------------------------------------
-    try:
-        verify_filing_target(verified, discussion_id, deps.verifier)
-    except FilingTargetMismatch as e:
-        res.hold_reasons.append(f"triple guard refused: {e}")
+    # --- applicant proof before every write --------------------------------
+    # Carlo's rule: the identity guard runs immediately before EACH write
+    # (note, documents, task) — not just once up front. A guard that fails
+    # fails the filing closed; the email stays unread.
+    def _prove_target(what: str) -> bool:
+        try:
+            verify_filing_target(verified, discussion_id, deps.verifier)
+        except FilingTargetMismatch as e:
+            res.hold_reasons.append(
+                f"{what} refused: applicant proof failed: {e}")
+            return False
+        res.evidence.append(f"applicant proof before {what}: passed")
+        return True
+
+    if not _prove_target("triple guard before note/documents/task writes"):
         return res
     res.evidence.append("triple filing guard passed")
 
     # --- documents to file ---------------------------------------------------
-    # Built before the note so the note can name them truthfully. The full
-    # original email goes first as a PDF, then every attachment regardless
-    # of type. UNVERIFIED rendering fails the whole filing — the email
-    # stays unread and no task is created.
+    # The full original email goes first as a PDF, then every attachment
+    # regardless of type. UNVERIFIED rendering fails the whole filing — the
+    # email stays unread and no task is created.
     try:
         uploads = _build_uploads(record)
     except Exception as exc:
@@ -627,7 +696,40 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
         res.status = ERROR
         return res
 
+    # --- documents (before the note) -----------------------------------------
+    # Documents are uploaded and exact-name-proven BEFORE the note is
+    # written, so a document failure can never leave a note claiming
+    # everything was filed. Each upload runs under Carlo's retry rule: on
+    # an uncertain outcome the destination is searched by document name
+    # BEFORE any re-send. Anything UNVERIFIED fails the filing here — the
+    # email stays unread and no task is created (the unread inbox is the
+    # flag).
+    if dry_run:
+        res.evidence.append("dry run: documents not uploaded")
+    else:
+        if not _prove_target("document uploads"):
+            res.status = ERROR
+            return res
+        outcome_counts = {"uploaded": 0, "already_present": 0,
+                          "recovered": 0}
+        for doc_name, file_bytes, filename in uploads:
+            document_id, outcome = _upload_document_verified(
+                deps, applicant_id, doc_name, file_bytes, filename, res)
+            if outcome == "unverified":
+                res.status = ERROR
+                return res
+            outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+            if document_id:
+                res.document_ids.append(document_id)
+        res.evidence.append(
+            f"{len(uploads)} document(s) proven in Documents: "
+            f"{outcome_counts['uploaded']} uploaded, "
+            f"{outcome_counts['already_present']} already present, "
+            f"{outcome_counts['recovered']} recovered after uncertain POST")
+
     # --- note --------------------------------------------------------------
+    # Written only after every document is destination-proven, so the note
+    # can name them truthfully.
     state = deps.store.get(message_id) if deps.store else {}
     note_text = summarize_for_note(
         getattr(record, "email", record), record.facts,
@@ -638,7 +740,15 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
         res.note_id = state["note_id"]
         res.evidence.append(
             f"note already filed as {res.note_id} — not duplicating")
+    elif dry_run:
+        res.status = DRY_RUN
+        res.evidence.append("dry run: note validated, nothing written")
+        return _task_step(record, verified, deps, res, message_id,
+                          applicant_id, note_text, dry_run=True)
     else:
+        if not _prove_target("note write"):
+            res.status = ERROR
+            return res
         try:
             filed = deps.note_writer(
                 str(applicant_id), note_text,
@@ -703,21 +813,9 @@ def _file_claimed(record: Any, verified: Any, deps: FilingDeps,
                                note_id=res.note_id,
                                discussion_id=discussion_id)
 
-    # --- documents ----------------------------------------------------------
-    # Each upload runs under Carlo's retry rule: on an uncertain outcome
-    # the destination is searched by document name BEFORE any re-send.
-    # Anything UNVERIFIED fails the filing here — the email stays unread
-    # and no task is created (the unread inbox is the flag).
-    for doc_name, file_bytes, filename in uploads:
-        document_id, outcome = _upload_document_verified(
-            deps, applicant_id, doc_name, file_bytes, filename, res)
-        if outcome == "unverified":
-            res.status = ERROR
-            return res
-        if document_id:
-            res.document_ids.append(document_id)
-    res.evidence.append(f"{len(uploads)} document(s) filed with read-back")
-
+    if not _prove_target("task create/reuse/reopen"):
+        res.status = ERROR
+        return res
     res.status = FILED if res.status == HELD else res.status
     return _task_step(record, verified, deps, res, message_id, applicant_id,
                       note_text, dry_run=dry_run)
@@ -756,12 +854,43 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
             res.hold_reasons.append(f"task creation failed: {exc}")
             res.status = PARTIAL if res.status == FILED else res.status
             return res
-        res.evidence.append(f"task Zap fired: {zap.reason}; task ID arrives "
-                            "via the Zap callback")
+        # Carlo's rule: Zapier HTTP 200 is not proof. The task must be read
+        # back from EZLynx proving it exists and is assigned to SCanales.
+        # Without a task prover, fail closed as UNVERIFIED — never mark
+        # FILED on an unproven task.
+        if deps.task_prover is None:
+            res.hold_reasons.append(
+                "UNVERIFIED: certificate-review task Zap fired but no task "
+                "prover is configured — cannot prove the task exists in "
+                "EZLynx assigned to SCanales; email left unread for human "
+                "review")
+            res.status = ERROR
+            return res
+        try:
+            proof = deps.task_prover(applicant_id, title)
+        except Exception as exc:
+            res.hold_reasons.append(
+                f"UNVERIFIED: task proof failed ({exc}); email left unread "
+                "for human review")
+            res.status = ERROR
+            return res
+        task_id = (proof or {}).get("task_id")
+        assignee = (proof or {}).get("assignee")
+        if not task_id or assignee != "SCanales":
+            res.hold_reasons.append(
+                f"UNVERIFIED: task proof did not confirm assignment to "
+                f"SCanales (task_id={task_id!r}, assignee={assignee!r}); "
+                "email left unread for human review")
+            res.status = ERROR
+            return res
+        res.task_id = str(task_id)
+        res.evidence.append(
+            f"task {task_id} proven in EZLynx assigned to SCanales")
         new_entry = entry or TaskEntry(
             applicant_id=applicant_id, policy_key=policy_key,
             holder_key=holder_key, task_status=TASK_OPEN)
         new_entry.discussion_id = res.discussion_id
+        new_entry.task_id = str(task_id)
         deps.registry.put(new_entry)
     elif action == REOPEN:
         try:
