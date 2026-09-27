@@ -14,10 +14,13 @@ notes, create tasks, deploy, or install a timer.
 
 Agent context is the shared FAO rule: literal ``CA33617``, ``(33617)``, bare
 ``33617``, and login ``33617c`` are one StreetSmart agency. Any other agency
-holds. If the attached tab is not FAO Home / Manage Policies Home (for
-example Communications / underwritinglegacy), the pull clicks the existing
-Manage Policies Home header control before that assert. That step does not
-ask Gemini. A missing or ambiguous Home control holds.
+holds. If the attached tab is not FAO Home / Manage Policies Home —
+``/``, ``/home``, ``/managepolicies`` or ``/landingpages/managepolicies``
+(optional ``/home``, optional trailing slash) — for example Communications
+/ underwritinglegacy, the pull clicks the existing Manage Policies Home
+header control before that assert. Already on one of those URLs does not
+click. That step does not ask Gemini. A missing or ambiguous Home control
+holds.
 
 Accessible names are the playbook, not a certified live DOM. Zero or multiple
 matches hold. Live FAO on hermes-test-01 is UNVERIFIED.
@@ -1038,10 +1041,11 @@ MANAGE_POLICIES_NAME = re.compile(r"^Manage Policies")
 MAIN_NAVIGATION_NAME = "Main Navigation"
 _SHELL_NAV_ROLES = ("link", "button")
 # FAO shell Home, or the Manage Policies Home landing that header control opens.
+# Live Manage Policies Home is /landingpages/managepolicies/ (optional /home).
 # Communications / underwritinglegacy is processed-date results and is not this page.
 _FAO_SHELL_HOME_URL = re.compile(
     r"^https://(?:[a-z0-9-]+\.)*foragentsonly\.com"
-    r"(?:/(?:home|managepolicies(?:/home)?))?/?$",
+    r"(?:/(?:home|(?:landingpages/)?managepolicies(?:/home)?))?/?$",
     re.IGNORECASE,
 )
 

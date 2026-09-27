@@ -607,7 +607,16 @@ class _Combo:
 class _AttachedShell(FakePage):
     """FAO tab that can sit on Communications until Manage Policies Home is clicked."""
 
-    def __init__(self, url, *, body="Streetsmart Risk Mgr (33617)", home="unique", main_nav="one", lands=True):
+    def __init__(
+        self,
+        url,
+        *,
+        body="Streetsmart Risk Mgr (33617)",
+        home="unique",
+        main_nav="one",
+        lands=True,
+        land_url="https://www.foragentsonly.com/managepolicies/",
+    ):
         report = FakePage(
             {("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")},
             url="https://www.foragentsonly.com/bop",
@@ -621,6 +630,7 @@ class _AttachedShell(FakePage):
         self.home = home
         self.main_nav = main_nav
         self.lands = lands
+        self.land_url = land_url
 
     def locator(self, selector):
         if selector == MANAGE_POLICIES_CSS:
@@ -679,7 +689,7 @@ class _AttachedShell(FakePage):
             return
         self.clicked.append(("home", "Manage Policies Home"))
         if self.lands:
-            self.url = "https://www.foragentsonly.com/managepolicies/"
+            self.url = self.land_url
 
 
 class _HomeGuard(FakePage):
@@ -742,7 +752,12 @@ class AgentContextAndHomeTests(unittest.TestCase):
             "https://www.foragentsonly.com/home",
             "https://www.foragentsonly.com/managepolicies/",
             "https://www.foragentsonly.com/managepolicies/home",
+            "https://www.foragentsonly.com/landingpages/managepolicies",
+            "https://www.foragentsonly.com/landingpages/managepolicies/",
+            "https://www.foragentsonly.com/landingpages/managepolicies/home",
+            "https://www.foragentsonly.com/landingpages/managepolicies/home/",
             "https://user:secret@www.foragentsonly.com/home?token=sekret#frag",
+            "https://user:secret@www.foragentsonly.com/landingpages/managepolicies/?token=sekret#frag",
         )
         for url in urls:
             with self.subTest(url=url):
@@ -782,6 +797,47 @@ class AgentContextAndHomeTests(unittest.TestCase):
                 navigate_to_pending_cancel(landed, "CA33617")
                 self.assertEqual(landed.clicked[0], ("home", "Manage Policies Home"))
                 self.assertEqual(landed.url, "https://www.foragentsonly.com/managepolicies/")
+
+    def test_home_click_that_lands_on_manage_policies_landing_succeeds(self):
+        landings = (
+            "https://www.foragentsonly.com/landingpages/managepolicies/",
+            "https://www.foragentsonly.com/landingpages/managepolicies",
+            "https://www.foragentsonly.com/landingpages/managepolicies/home",
+            "https://www.foragentsonly.com/landingpages/managepolicies/home/",
+        )
+        for landing in landings:
+            with self.subTest(landing=landing):
+                page = _AttachedShell(COMMUNICATIONS_URL, land_url=landing)
+                opened = navigate_to_pending_cancel(page, "CA33617")
+                self.assertIs(opened, page.popup)
+                self.assertEqual(
+                    page.clicked,
+                    [
+                        ("home", "Manage Policies Home"),
+                        ("link", "Manage Policies"),
+                        ("link", "Businessowner/Contractor GL"),
+                    ],
+                )
+                self.assertEqual(page.url, landing)
+                self.assertNotIn("gemini", " ".join(str(item) for item in page.clicked))
+
+    def test_near_miss_manage_policies_landing_still_holds(self):
+        near = (
+            "https://www.foragentsonly.com/landingpages/",
+            "https://www.foragentsonly.com/landingpages/managepolicies/policyactivity/",
+            "https://www.foragentsonly.com/landingpages/managepolicies/home/extra",
+            "http://www.foragentsonly.com/landingpages/managepolicies/",
+            "https://evil.example/landingpages/managepolicies/",
+        )
+        for landing in near:
+            with self.subTest(landing=landing):
+                page = _AttachedShell(COMMUNICATIONS_URL, land_url=landing)
+                with self.assertRaisesRegex(IntakeHold, "FAO Home did not open"):
+                    navigate_to_pending_cancel(page, "CA33617")
+                self.assertEqual(page.clicked[0], ("home", "Manage Policies Home"))
+                self.assertNotIn(("link", "Manage Policies"), page.clicked)
+                self.assertNotIn(("link", "Businessowner/Contractor GL"), page.clicked)
+                self.assertNotIn("gemini", str(page.clicked).lower())
 
     def test_hidden_home_expands_main_navigation_once_without_gemini(self):
         page = _AttachedShell(COMMUNICATIONS_URL, home="hidden")
