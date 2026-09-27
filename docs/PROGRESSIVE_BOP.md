@@ -144,14 +144,16 @@ is a failed pull, not a partial success. This code has not been run on
 
 ## UNVERIFIED until that Test run
 
-- Agent context on a non-home tab. The pull treats `/`, `/home`, and
-  `/managepolicies` (optional `/home`) on `foragentsonly.com` as FAO Home /
-  Manage Policies Home and does not click. Any other FAO URL, including
-  `processeddateresults/underwritinglegacy/`, must open that landing through
-  the existing Manage Policies Home header control before the agent check.
-  The live URL after that click is UNVERIFIED. A click that stays off those
-  paths holds. This step does not ask Gemini. It does not change the later
-  `Manage Policies` → Businessowner/Contractor GL clicks.
+- Agent context on a non-home tab. The pull treats `/`, `/home`,
+  `/managepolicies` (optional `/home`), and `/landingpages/managepolicies`
+  (optional `/home`, optional trailing slash) on `foragentsonly.com` as FAO
+  Home / Manage Policies Home and does not click. Any other FAO URL, including
+  `processeddateresults/underwritinglegacy/` and Communications, must open
+  that landing through the existing Manage Policies Home header control
+  before the agent check. A click that lands on `/landingpages/managepolicies/`
+  is Home. A click that stays off those paths holds. This step does not ask
+  Gemini. It does not change the later `Manage Policies` →
+  Businessowner/Contractor GL clicks.
 - Live accessible names: `Manage Policies`, `Businessowner/Contractor GL`,
   `View Reports`, `Pending Cancel for Nonpayment`, the shell policy search,
   `Documents`, and the `Policy` document tab. A mismatch holds; do not widen
