@@ -756,7 +756,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("header-drawer__content--show", drawer.primary_selector)
         self.assertIn("Policy Activity", drawer.description)
         self.assertIn("Agency Admin", drawer.description)
-        self.assertEqual(page.version, "1.9")
+        self.assertEqual(page.version, "1.10")
         view = page.get_field("view_activity_by")
         self.assertIn("#606", view.description)
         self.assertIn("does not ask Gemini", view.description)
@@ -811,6 +811,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("Zero matches", communications.description)
         self.assertIn("not click targets", communications.description)
         self.assertIn("link:Communications", communications.description)
+        self.assertIn("not a second veto", communications.description)
         self.assertIn("link:" + COMMUNICATIONS_LINK_LABEL, selectors)
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
@@ -1003,6 +1004,8 @@ class NodeLocator:
         return node.value if node.input_override is None else node.input_override
 
     def inner_text(self, timeout=None):
+        if getattr(self.nodes[0], "text_error", False):
+            raise TimeoutError("inner_text failed")
         return self.nodes[0].text
 
     def get_attribute(self, name):
@@ -1417,6 +1420,19 @@ class NavPage:
                 FakeNode("link", "Communications", attrs=dict(attrs)),
                 FakeNode("span", "Elsewhere", label=COMMUNICATIONS_LINK_LABEL),
             ]
+        if mode == "icon-text":
+            return [FakeNode(
+                "link",
+                "Communications",
+                text="\u2709 Communications",
+                attrs=dict(attrs),
+            )]
+        if mode == "text-raises":
+            node = FakeNode("link", "Communications", attrs=dict(attrs))
+            node.text_error = True
+            return [node]
+        if mode == "named-icon":
+            return [FakeNode("link", "Communications", text="\u2709 Communications")]
         if mode == "tab-and-link":
             return [
                 FakeNode("tab", "Communications", attrs={"aria-selected": "false"}),
@@ -2489,16 +2505,9 @@ class NavigationTests(unittest.TestCase):
                 "not the registered link",
             ),
             (
-                "mislabeled",
-                "mislabeled",
-                "matched 1 element",
-                "link:Communications matched 1",
-                "not the registered link",
-            ),
-            (
-                "foreign label",
-                "foreign-label",
-                "matched 1 element",
+                "named link inner text is not Communications",
+                "named-icon",
+                "matched 0 elements",
                 "link:Communications matched 1",
                 "not the registered link",
             ),
@@ -2536,6 +2545,47 @@ class NavigationTests(unittest.TestCase):
                 self.assertNotIn("Communications", page.clicks)
                 self.assertNotIn("Search", page.clicks)
                 self.assertEqual(page.memo_opens, [])
+
+    def test_agreed_communications_pair_clicks_when_identity_probes_disagree(self):
+        """prove4: 1 data-at and 1 link:Communications, then identity held.
+
+        Tip e1023d5 matched both queries on processeddateresults/cancels/
+        and held with "it is not the registered link". Icon text, a throwing
+        inner_text, an aria-label the role query did not use, and a
+        Communications label on another element are that shape. The pair is
+        clicked. Gemini is not asked. Search is not clicked.
+        """
+        for mode in ("icon-text", "mislabeled", "foreign-label", "text-raises"):
+            with self.subTest(mode=mode):
+                page = NavPage(comms_mode=mode, search_on_results=True)
+                page.state = "results"
+                page.url = RESULTS_CANCELS_URL
+                self.assertEqual(page.locator(COMMUNICATIONS_LINK_CSS).count(), 1)
+                self.assertEqual(
+                    page.get_by_role("link", name="Communications", exact=True).count(),
+                    1,
+                )
+                client = _RescueClient(json.dumps({
+                    "decision": "unique",
+                    "locator": 'a[data-at="policy-activity-tab-communications"] >> nth=0',
+                }))
+                with patch(
+                    "robie_job_engine.gemini_ui_rescue.build_default_client",
+                    return_value=client,
+                ):
+                    with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                        section = open_communications_section(page)
+                    rescued.assert_not_called()
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(section, "underwriting")
+                self.assertEqual(page.clicks, ["Communications"])
+                self.assertNotIn("Search", page.clicks)
+                self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
+                self.assertEqual(page.locator(COMMUNICATIONS_LINK_CSS).count(), 1)
+                self.assertEqual(
+                    page.get_by_role("link", name="Communications", exact=True).count(),
+                    1,
+                )
 
     def test_communications_wrong_page_holds_without_gemini(self):
         cases = (
@@ -2618,18 +2668,6 @@ class NavigationTests(unittest.TestCase):
             (
                 "section link text is not Communications",
                 dict(comms_mode="mistitled"),
-                "Communications",
-                "Get Policy Activity",
-            ),
-            (
-                "section link accessible name differs",
-                dict(comms_mode="mislabeled"),
-                "Communications",
-                "Get Policy Activity",
-            ),
-            (
-                "Communications label is on another element",
-                dict(comms_mode="foreign-label"),
                 "Communications",
                 "Get Policy Activity",
             ),
