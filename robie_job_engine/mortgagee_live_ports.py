@@ -43,6 +43,7 @@ imported lazily so unit tests and dry runs never need credentials.
 """
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 from typing import Any, Callable
 
@@ -186,6 +187,99 @@ def parse_additional_interests_html(html: str) -> list[dict[str, Any]]:
         if entry:
             entries.append(entry)
     return entries
+
+
+# Labels on the classic policy summary page whose values the worker needs.
+# "Line of Business" carries the sub-LOB in parentheses, e.g.
+# "Homeowners (Renters)"; "Policy Payor" is "Insured" or "Mortgagee".
+# The remaining labels are terminators: the header line packs
+# "Line of Business: ... | Term: ... | Carrier: ..." into one row.
+_BILLING_FACT_LABELS = (
+    "Line of Business:",
+    "Term:",
+    "Carrier:",
+    "Full Term Premium:",
+    "Policy Number:",
+    "Effective Date:",
+    "Expiration Date:",
+    "Total Premium:",
+    "Policy Payor:",
+)
+
+
+class _TextNodeCollector(HTMLParser):
+    """Collect stripped text nodes in document order (stdlib only)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.nodes: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        text = " ".join(data.split())
+        if text:
+            self.nodes.append(text)
+
+
+def _label_value(nodes: list[str], label: str) -> str:
+    """Value following `label` among the page's text nodes.
+
+    Handles both `<div>Policy Payor: Insured</div>` (label + value in one
+    text node) and `<span>Policy Payor:</span> <span>Insured</span>`
+    (value in the next node). The value ends at the next known label in
+    the same node, or at the end of the scanned node(s).
+    """
+    for i, node in enumerate(nodes):
+        idx = node.find(label)
+        if idx < 0:
+            continue
+        rest = node[idx + len(label):]
+        cut = len(rest)
+        for other in _BILLING_FACT_LABELS:
+            if other == label:
+                continue
+            j = rest.find(other)
+            if j >= 0:
+                cut = min(cut, j)
+        value = rest[:cut].strip(" |-")
+        if value:
+            return value
+        # Label filled its whole node — the value is the next text node.
+        if i + 1 < len(nodes):
+            nxt = nodes[i + 1]
+            cut = len(nxt)
+            for other in _BILLING_FACT_LABELS:
+                j = nxt.find(other)
+                if j >= 0:
+                    cut = min(cut, j)
+            return nxt[:cut].strip(" |-")
+        return ""
+    return ""
+
+
+def parse_policy_billing_facts(html: str) -> dict[str, Any]:
+    """Extract LOB/sub-LOB and payor from a policy summary page.
+
+    The 4744 CSV carries only the top-level LOB ("Homeowners"/"Flood") —
+    the sub-LOB ("Renters") and the policy payor ("Insured"/"Mortgagee")
+    live only on the policy summary page, and the worker needs both to
+    exclude policies that can never need mortgagee verification.
+
+    Returns {"line_of_business": str, "sub_lob": str, "payor": str}.
+    Missing fields come back as "" — the eligibility check treats ""
+    as unknown and keeps the policy (fail-closed: never exclude on
+    unreadable data).
+    """
+    collector = _TextNodeCollector()
+    collector.feed(html or "")
+    nodes = collector.nodes
+    lob_raw = _label_value(nodes, "Line of Business:")
+    payor = _label_value(nodes, "Policy Payor:")
+    lob, sub_lob = lob_raw, ""
+    m = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", lob_raw)
+    if m:
+        lob, sub_lob = m.group(1).strip(), m.group(2).strip()
+    return {"line_of_business": lob.strip(), "sub_lob": sub_lob,
+            "payor": payor.strip()}
 
 
 def build_browser_interests_reader(

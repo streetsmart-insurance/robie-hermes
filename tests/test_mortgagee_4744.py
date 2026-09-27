@@ -502,5 +502,125 @@ class BrowserAdditionalInterestsReaderTests(unittest.TestCase):
                       result.reason)
 
 
+class BillingFacts4744Tests(unittest.TestCase):
+    # Fixture mirrors the live Sharpe read (2026-09-27): the summary
+    # header carries "Line of Business: Homeowners (Renters)" and the
+    # POLICY INFORMATION section carries "Policy Payor: Insured".
+    SHARPE_LIKE_HTML = """
+    <html><body>
+    <div>Policy Number: NJH00002121393 - Active</div>
+    <div>Line of Business: Homeowners (Renters) | Term: 11/1/2025 - 11/1/2026 | Carrier: Plymouth Rock Assurance Corp | Full Term Premium: $279.00</div>
+    <h5>POLICY INFORMATION</h5>
+    <div>Policy Number: NJH00002121393</div>
+    <div>Effective Date: 11-01-2025</div>
+    <div>Expiration Date: 11-01-2026</div>
+    <div>Total Premium: $279.00</div>
+    <div>Policy Payor: Insured</div>
+    </body></html>
+    """
+
+    SPLIT_NODE_HTML = """
+    <html><body>
+    <div><span>Line of Business:</span> <span>Homeowners (Renters)</span></div>
+    <div><span>Policy Payor:</span></div>
+    <div><span>Mortgagee</span></div>
+    </body></html>
+    """
+
+    def test_parse_sharpe_like_page(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        facts = mlp.parse_policy_billing_facts(self.SHARPE_LIKE_HTML)
+        self.assertEqual(facts["line_of_business"], "Homeowners")
+        self.assertEqual(facts["sub_lob"], "Renters")
+        self.assertEqual(facts["payor"], "Insured")
+
+    def test_parse_split_nodes(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        facts = mlp.parse_policy_billing_facts(self.SPLIT_NODE_HTML)
+        self.assertEqual(facts["line_of_business"], "Homeowners")
+        self.assertEqual(facts["sub_lob"], "Renters")
+        self.assertEqual(facts["payor"], "Mortgagee")
+
+    def test_parse_lob_without_sub_lob(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        facts = mlp.parse_policy_billing_facts(
+            "<html><body><div>Line of Business: Flood</div>"
+            "<div>Policy Payor: Mortgagee</div></body></html>")
+        self.assertEqual(facts["line_of_business"], "Flood")
+        self.assertEqual(facts["sub_lob"], "")
+        self.assertEqual(facts["payor"], "Mortgagee")
+
+    def test_parse_missing_fields_blank(self):
+        from robie_job_engine import mortgagee_live_ports as mlp
+        facts = mlp.parse_policy_billing_facts(
+            "<html><body><p>nothing here</p></body></html>")
+        self.assertEqual(facts,
+                         {"line_of_business": "", "sub_lob": "", "payor": ""})
+
+
+class Eligibility4744Tests(unittest.TestCase):
+    def test_renters_excluded(self):
+        reason = vw._4744_mortgagee_eligibility_reason(
+            None, {"sub_lob": "Renters", "payor": "Insured"})
+        self.assertIsNotNone(reason)
+        self.assertIn("renter", reason.lower())
+
+    def test_insured_payor_excluded(self):
+        reason = vw._4744_mortgagee_eligibility_reason(
+            None, {"sub_lob": "", "payor": "Insured"})
+        self.assertIsNotNone(reason)
+        self.assertIn("insured pays directly", reason.lower())
+
+    def test_mortgagee_payor_kept(self):
+        self.assertIsNone(vw._4744_mortgagee_eligibility_reason(
+            None, {"sub_lob": "", "payor": "Mortgagee"}))
+
+    def test_no_facts_kept(self):
+        self.assertIsNone(
+            vw._4744_mortgagee_eligibility_reason(None, None))
+
+    def test_blank_fields_kept(self):
+        self.assertIsNone(vw._4744_mortgagee_eligibility_reason(
+            None, {"sub_lob": "", "payor": ""}))
+
+    def test_unknown_payor_kept(self):
+        # Fail-closed: only the proven "Insured" payor excludes.
+        self.assertIsNone(vw._4744_mortgagee_eligibility_reason(
+            None, {"sub_lob": "", "payor": "Premium Finance"}))
+
+
+class EligibilityWiring4744Tests(unittest.TestCase):
+    def test_run_worker_excludes_renters_and_insured_pay(self):
+        facts_by_policy = {
+            "RENT1": {"sub_lob": "Renters", "payor": "Insured"},
+            "INSPAY1": {"sub_lob": "", "payor": "Insured"},
+            "MORT1": {"sub_lob": "", "payor": "Mortgagee"},
+        }
+        rows = [_row4744(pol, f"Acct {pol}",
+                         (DAY + timedelta(days=35)).isoformat())
+                for pol in facts_by_policy]
+        with tempfile.TemporaryDirectory() as tmp:
+            run = vw.run_worker(
+                "4744", day=DAY, mode="dry_run", queue_dir=tmp,
+                csv_bytes=_csv4744(rows),
+                policy_facts_fn=lambda pol: facts_by_policy.get(pol))
+        kept = sorted(a.policy_number for a in run.actions)
+        self.assertEqual(kept, ["MORT1"])
+        excluded = {e["policy_number"]: e["reason"]
+                    for e in run.excluded_stale}
+        self.assertEqual(set(excluded), {"RENT1", "INSPAY1"})
+        self.assertIn("renter", excluded["RENT1"].lower())
+        self.assertIn("insured pays directly", excluded["INSPAY1"].lower())
+
+    def test_run_worker_without_facts_fn_unchanged(self):
+        rows = [_row4744("POL1", "Acct 1",
+                         (DAY + timedelta(days=35)).isoformat())]
+        with tempfile.TemporaryDirectory() as tmp:
+            run = vw.run_worker("4744", day=DAY, mode="dry_run",
+                                queue_dir=tmp, csv_bytes=_csv4744(rows))
+        self.assertEqual([a.policy_number for a in run.actions], ["POL1"])
+        self.assertEqual(run.excluded_stale, [])
+
+
 if __name__ == "__main__":
     unittest.main()
