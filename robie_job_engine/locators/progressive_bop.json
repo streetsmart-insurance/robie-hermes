@@ -20,8 +20,8 @@
       "fallback_strategy": "role",
       "fallback_selector": "button:Businessowner/Contractor GL",
       "exact": true,
-      "description": "Opens the Businessowner/Contractor GL product in one new window. Live accessible name is UNVERIFIED.",
-      "last_updated": "2026-09-26"
+      "description": "Opens the Businessowner/Contractor GL product in one new window. Off FAO shell Home the click is this exact name after Manage Policies. Already on shell Home skips Manage Policies and accepts this exact name or exact 'Go to Businessowner/Contractor GL policy search'. Zero or several matches hold. Live name on /landingpages/managepolicies/ is UNVERIFIED until the next hermes-test-01 prove.",
+      "last_updated": "2026-09-27"
     },
     "view_reports": {
       "name": "view_reports",
