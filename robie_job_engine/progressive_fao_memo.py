@@ -11,11 +11,14 @@ and it is hidden until Main Navigation is expanded once. The same link is
 ``a[data-at="header-nav__parent-link--manage-policies"]``. Policy Activity is
 either that header name or the landing link ``View policy activity reports``.
 Policy Activity then requires View Activity By ``Processed Date``
-(``select#PDDateType``, option ``PROCESSEDDATE``), the ``#PDDateRange``
-start and end dates, and ``Get Policy Activity``. A missing or non-unique
-control raises IntakeHold. This module does not log
-in and does not submit OTP. Portal code does not upload, note, task, or
-label in EZLynx.
+(``select#PDDateType``, option ``PROCESSEDDATE``), the preset
+``select#PDDateRange`` option ``Select Date Range`` (its value is read from
+that option), then the page-level Start Date and End Date inputs that the
+option reveals, and ``Get Policy Activity``. Those date inputs are not
+children of the preset select; they stay hidden until it is chosen. A
+missing, hidden, or non-unique control raises IntakeHold. This module does
+not log in and does not submit OTP. Portal code does not upload, note,
+task, or label in EZLynx.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
@@ -47,6 +50,7 @@ FAO_SCOPE = "fao_communications"
 DEFAULT_AGENT_CODE = "CA33617"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
+DATE_CONTROL_TIMEOUT_MS = 8000
 LEDGER_NAME = "fao-memo-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 DEFAULT_QA_ROOT = Path(
@@ -84,16 +88,20 @@ MANAGE_POLICIES_NAME = re.compile(r"^Manage Policies")
 POLICY_ACTIVITY_LABEL = "Policy Activity"
 POLICY_ACTIVITY_NAMES = ("Policy Activity", "View policy activity reports")
 MAIN_NAVIGATION_NAME = "Main Navigation"
-# Policy Activity date filter observed on hermes-test-01 release 3b651fadabb6.
-# get_by_label("Processed date from" / "Processed date to") matched nothing.
-# The same strings are the locator contract in locators/progressive_fao.json.
+# Policy Activity date filter. Release 65740660 (includes #606) cleared the
+# old "Processed date from" hold, then held on Start Date: #PDDateRange is a
+# preset <select>, not a wrapper, and the date inputs stay hidden until the
+# "Select Date Range" option is chosen. The option value is read from the
+# live option. The same strings are the locator contract in
+# locators/progressive_fao.json.
 VIEW_ACTIVITY_BY_LABEL = "View Activity By"
 VIEW_ACTIVITY_BY_CSS = 'select#PDDateType[name="DateType"]'
 PROCESSED_DATE_OPTION_LABEL = "Processed Date"
 PROCESSED_DATE_OPTION_VALUE = "PROCESSEDDATE"
 PROCESSED_DATE_OPTION_CSS = 'option[value="PROCESSEDDATE"]'
 PROCESSED_DATE_RANGE_LABEL = "Processed date range"
-PROCESSED_DATE_RANGE_CSS = "#PDDateRange"
+PROCESSED_DATE_RANGE_CSS = "select#PDDateRange"
+CUSTOM_DATE_RANGE_LABEL = "Select Date Range"
 START_DATE_LABEL = "Start Date"
 START_DATE_CSS = (
     'input[type="date"]#js-datepicker__date-start'
@@ -607,15 +615,40 @@ def _unique_labeled(page: Any, css: str, label: str) -> Any:
     return located
 
 
-def _unique_in_date_range(page: Any, css: str, label: str) -> Any:
-    ranged = page.locator(PROCESSED_DATE_RANGE_CSS)
-    if int(ranged.count()) != 1:
-        raise _control_hold(PROCESSED_DATE_RANGE_LABEL)
-    scoped = ranged.locator(css)
-    page_level = page.locator(css)
-    if int(scoped.count()) != 1 or int(page_level.count()) != 1:
+def _option_text(option: Any, label: str) -> str:
+    try:
+        return _norm(str(option.inner_text()))
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(label) from exc
+
+
+def _option_value(option: Any, label: str) -> str:
+    try:
+        return _norm(str(option.get_attribute("value") or ""))
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(label) from exc
+
+
+def _unique_visible_control(page: Any, css: str, label: str) -> Any:
+    """One page-level match that is visible. Hidden or extra matches hold."""
+    located = page.locator(css)
+    wait = getattr(located, "wait_for", None)
+    if not callable(wait):
         raise _control_hold(label)
-    return scoped
+    try:
+        wait(state="visible", timeout=DATE_CONTROL_TIMEOUT_MS)
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(label) from exc
+    visible, total = _survey(located)
+    if total != 1 or len(visible) != 1:
+        raise _control_hold(label)
+    return visible[0]
 
 
 def _select_processed_date_view(page: Any) -> None:
@@ -643,8 +676,45 @@ def _select_processed_date_view(page: Any) -> None:
         raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
 
 
+def _select_custom_date_range(page: Any) -> None:
+    """Choose the preset that reveals page-level Start Date and End Date.
+
+    ``select#PDDateRange`` is not a container. The option value is whatever
+    the single ``Select Date Range`` option carries. A missing value, a
+    second option with that text, or a second option with that value holds.
+    """
+    ranged = page.locator(PROCESSED_DATE_RANGE_CSS)
+    if int(ranged.count()) != 1 or not _is_visible(ranged):
+        raise _control_hold(PROCESSED_DATE_RANGE_LABEL)
+    options = ranged.locator("option").all()
+    matched = [
+        item for item in options
+        if _option_text(item, CUSTOM_DATE_RANGE_LABEL) == CUSTOM_DATE_RANGE_LABEL
+    ]
+    if len(matched) != 1:
+        raise _control_hold(CUSTOM_DATE_RANGE_LABEL)
+    value = _option_value(matched[0], CUSTOM_DATE_RANGE_LABEL)
+    if not value:
+        raise _control_hold(CUSTOM_DATE_RANGE_LABEL)
+    same_value = [
+        item for item in options
+        if _option_value(item, CUSTOM_DATE_RANGE_LABEL) == value
+    ]
+    if len(same_value) != 1:
+        raise _control_hold(CUSTOM_DATE_RANGE_LABEL)
+    try:
+        ranged.select_option(value=value)
+        selected = _norm(str(ranged.input_value()))
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(CUSTOM_DATE_RANGE_LABEL) from exc
+    if selected != value:
+        raise _control_hold(CUSTOM_DATE_RANGE_LABEL)
+
+
 def _fill_html_date(page: Any, css: str, label: str, day: date) -> None:
-    locator = _unique_in_date_range(page, css, label)
+    locator = _unique_visible_control(page, css, label)
     _require_expected_label(page, locator, label)
     try:
         locator.fill(day.isoformat())
@@ -658,7 +728,7 @@ def _fill_html_date(page: Any, css: str, label: str, day: date) -> None:
 
 
 def _click_get_policy_activity(page: Any) -> None:
-    button = _unique_in_date_range(page, GET_POLICY_ACTIVITY_CSS, GET_POLICY_ACTIVITY_LABEL)
+    button = _unique_visible_control(page, GET_POLICY_ACTIVITY_CSS, GET_POLICY_ACTIVITY_LABEL)
     value = _norm(str(button.get_attribute("value") or ""))
     text = _norm(str(button.inner_text() or ""))
     names = {part for part in (value, text) if part}
@@ -673,17 +743,19 @@ def _click_get_policy_activity(page: Any) -> None:
 
 
 def apply_processed_date_window(page: Any, start: date, end: date) -> None:
-    """Select Processed Date, fill the HTML date range, and click Get Policy Activity.
+    """Select Processed Date, reveal the custom range, fill it, and submit.
 
-    Ambiguous Policy Activity date UI fails closed. A future HITL ladder may
-    ask Gemini what the open page is showing, then Jev (TypeSafe System One)
-    for a typed judgment (boolean, choice, or score, plus confidence) — for
-    example whether this is the processed-date filter we expect, or quote-only
-    versus complete. This function does not call Gemini or Jev.
+    ``select#PDDateRange`` is a preset list. ``Select Date Range`` is chosen
+    by the value on that option, then Start Date and End Date must become
+    visible at page scope before they are filled. Get Policy Activity is
+    page-level as well. Ambiguous or still-hidden controls fail closed. A
+    future HITL ladder may ask Gemini what the open page is showing, then
+    Jev (TypeSafe System One) for a typed judgment (boolean, choice, or
+    score, plus confidence) — for example whether this is the processed-date
+    filter we expect, or quote-only versus complete. This function does not call Gemini or Jev.
     """
     _select_processed_date_view(page)
-    if int(page.locator(PROCESSED_DATE_RANGE_CSS).count()) != 1:
-        raise _control_hold(PROCESSED_DATE_RANGE_LABEL)
+    _select_custom_date_range(page)
     _fill_html_date(page, START_DATE_CSS, START_DATE_LABEL, start)
     _fill_html_date(page, END_DATE_CSS, END_DATE_LABEL, end)
     _click_get_policy_activity(page)
