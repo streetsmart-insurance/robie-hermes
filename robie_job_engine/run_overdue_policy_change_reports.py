@@ -120,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("ROBIE_4359_REPORT_MAX_AGE_HOURS", "48")),
         help="Fail closed when the newest 4359 report is older than this.")
     parser.add_argument(
+        "--report-allowed-sender-domains",
+        default=os.environ.get("ROBIE_4359_REPORT_ALLOWED_SENDER_DOMAINS", ""),
+        help="Comma-separated sender domains accepted for the 4359 report email "
+             "(default: ezlynx.com,appliedsystems.com — the real daily report "
+             "arrives from DoNotReply@appliedsystems.com).")
+    parser.add_argument(
         "--evidence-out", default="",
         help="Write the run evidence JSON here (default: stdout only).")
     parser.add_argument(
@@ -179,6 +185,10 @@ def run(args: argparse.Namespace, *, verifier_factory=None) -> tuple[int, dict[s
     if args.report_mailbox:
         payload["report_mailbox"] = str(args.report_mailbox)
     payload["report_max_age_hours"] = int(args.report_max_age_hours)
+    sender_domains = str(args.report_allowed_sender_domains or "").strip()
+    payload["report_allowed_sender_domains"] = [
+        d.strip() for d in sender_domains.split(",") if d.strip()
+    ] or ["ezlynx.com", "appliedsystems.com"]
 
     job = {"action_type": ACTION, "payload": payload}
     idempotency_key = args.idempotency_key or f"4359-weekly-{today.isoformat()}"

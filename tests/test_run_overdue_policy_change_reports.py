@@ -191,3 +191,57 @@ def test_dry_run_skips_verifier(tmp_path, monkeypatch):
     code, evidence = runner.run(args, verifier_factory=boom)
     assert code == 0
     assert evidence["verification"]["skipped"] is True
+
+
+def _capture_payload(monkeypatch, tmp_path, extra_args):
+    """Run with a fake worker; return the job payload the worker received."""
+    import robie_job_engine.run_overdue_policy_change_reports as runner
+
+    captured = {}
+
+    class FakeResult:
+        succeeded = True
+        error = ""
+        hold_status = None
+        destination = {"delivery_receipts": [], "csr_count": 0}
+        detail = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            pass
+
+        def perform(self, job, idempotency_key=None):
+            captured.update(job["payload"])
+            return FakeResult()
+
+    class NoopVerifier:
+        def verify(self, job, action):
+            raise AssertionError("not used")
+
+    monkeypatch.setattr(runner, "OverduePolicyChangeReportWorker", FakeWorker)
+    args = runner.build_parser().parse_args(
+        ["--mode", "dry-run", "--manifest", "/tmp/m.json",
+         "--sent-store", str(tmp_path / "sent.json"),
+         "--evidence-out", str(tmp_path / "ev.json"), *extra_args])
+    runner.run(args, verifier_factory=NoopVerifier)
+    return captured
+
+
+def test_report_sender_domains_default_covers_appliedsystems(tmp_path, monkeypatch):
+    # The real daily 4359 CSV arrives from DoNotReply@appliedsystems.com
+    # (proven on hermes-poc-01 2026-09-27); the default allowlist must accept it.
+    payload = _capture_payload(monkeypatch, tmp_path, [])
+    assert "appliedsystems.com" in payload["report_allowed_sender_domains"]
+    assert "ezlynx.com" in payload["report_allowed_sender_domains"]
+
+
+def test_report_sender_domains_flag_overrides(tmp_path, monkeypatch):
+    payload = _capture_payload(
+        monkeypatch, tmp_path, ["--report-allowed-sender-domains", "example.com"])
+    assert payload["report_allowed_sender_domains"] == ["example.com"]
+
+
+def test_report_sender_domains_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBIE_4359_REPORT_ALLOWED_SENDER_DOMAINS", "a.com, b.com")
+    payload = _capture_payload(monkeypatch, tmp_path, [])
+    assert payload["report_allowed_sender_domains"] == ["a.com", "b.com"]
