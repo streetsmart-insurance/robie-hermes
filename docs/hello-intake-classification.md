@@ -71,11 +71,29 @@ for each hello@ message:
                            gmail_id=..., evidence=[...])
 ```
 
-The `match()` step is not built in this PR — it reuses the certificate
-intake's matching strategy order (report email → report name → sender
-alias → EZLynx policy anchor) against the hello alias store
-(`hello_sender_aliases.json`, separate from the cert store: hello senders
-and cert senders overlap but their routing differs).
+The `match()` step is built in `robie_job_engine/hello_match.py`
+(tests in `tests/test_hello_match.py`):
+
+- **Document retrieval**: attachments -> text (PDF via pypdf, .txt);
+  direct document links in the body are fetched over HTTP and extracted
+  the same way. Links that resolve to HTML / 401 / 403 are NOT logged
+  into — recorded as `portal_link_needs_human` on the queue entry.
+- **True identity**: policy numbers + insured names as printed on the
+  carrier doc outrank the email body's claims; conflicts are evidence.
+- **Reconciliation ladder**: hello sender alias (skipped for
+  vendor/carrier/system senders — never fixed aliases) -> report email
+  -> policy exact -> policy normalized (formatting + carrier letter
+  affixes) -> EZLynx policy anchor (fail-closed, reuses
+  `hello_triage.resolve_applicant_id`) -> fuzzy name (scored; a weak
+  fuzzy match is never a hit; name-only never auto-files).
+- **Confidence**: only `high` auto-files. `medium`/`low` go to
+  `hello_unmatched_queue` via `handle_match_result()` with the doc
+  evidence and portal links attached.
+
+The original design note below is kept for context: the match order
+follows the certificate intake's strategy order (report email -> report
+name -> sender alias -> policy anchor) against the hello alias store
+(`hello_sender_aliases.json`, separate from the cert store).
 
 Note: `HelloIntake.assignment_for` only accepts `new_business`,
 `renewal`, `midterm`. The hello-specific types (client_issue,
