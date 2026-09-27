@@ -38,13 +38,16 @@ Only 1 autopay verified via carrier portal. 40 of 46 "All Star Calls" have no ca
 
 ### 3. New Customer CSR (43 rows)
 **RED FLAGS (6):** Not issued - app sent, shell only, bound not downloaded
-**WITH POLICY NUMBERS (8):** Need EZLynx issuance check
+**EZLynx PolicyApi checks DONE (2026-09-27, PRODUCTION API):**
+- CONFIRMED Active (5): 879834477 (Stopka), 6192642562061 (Mendelson), HONJ052827 (Kelso), 6192966482061 (Calhoun), ESP0440988661 (1812 Marketing)
+- FLAGGED (3): 13579_83445947 (Huntley) = **Deleted**; CDNJ004781 (Korkowski) = **Inactive**, 2025-2026 term — renewal, not new business; R2WC555848 (Jaguar Tree) = **Inactive**, cancelled 2024-04-29 — wrong/old policy number
 **REMAINING (29):** Need review
 
 By employee: Karla 19, Jazmin 7, Ashley 5, Zeus 4, Taylor 4, Mike 4
 
 ### 4. Cross Sell (13 rows)
 **STRONG (3):** Issued, verify in EZLynx (Top Notch Lawn, SK Direct, Bruder)
+**EZLynx PolicyApi check DONE:** VEP0386394 (Bruder) = **Inactive**, 2025-2026 term — note says "new GL issued" but cites old policy number. New policy may not be keyed in EZLynx yet.
 **NEEDS VERIFICATION (5):** Sold/bound, check issuance
 **WEAK (4):** App sent/shell/bind requested - not issued
 **FLAGGED (1):** Top Notch Tree Service - BOR renewal, not a cross-sell. Pending review.
@@ -64,9 +67,9 @@ By employee: Karla 19, Jazmin 7, Ashley 5, Zeus 4, Taylor 4, Mike 4
 ### 7. All Star Call (46 rows)
 **WITH AI NOTES (6):** Need Magellan verification (criteria UNCONFIRMED, awaiting Alejandro)
 **WITHOUT CALL EVIDENCE (40):** No proof a call occurred in notes. Flagged pending Magellan pull.
+**MAGELLAN PULL BLOCKED:** Robie has no API or browser access to the Bridge/Magellan phone system. Needs Alejandro's pull.
 
 By employee: Karla 24, Jazmin 10, Zeus 5, Taylor 5, Ashley 2
-Karla's 24 claims with minimal evidence needs verification.
 
 ## AppSheet Status
 - August 2026: 167 rows uploaded ✓

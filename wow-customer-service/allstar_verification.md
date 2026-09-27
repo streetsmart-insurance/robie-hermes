@@ -31,7 +31,7 @@ The 6 with AI Notes need Magellan verification to confirm they meet the All Star
 This label has the most claims relative to available call evidence. Karla's 24 claims with minimal call evidence in notes needs verification.
 
 ## NEXT STEPS
-1. Alejandro confirms All Star Call criteria
-2. Pull Magellan/Sonant data for September
+1. Alejandro confirms All Star Call criteria (call occurred? quality/positive-sentiment standard?)
+2. **Alejandro pulls Magellan/Bridge call data for September** — no API/browser access available to Robie; needs Alejandro's pull
 3. Match the 6 AI Notes calls to Magellan records
 4. Flag the 40 without call evidence unless employee provides proof

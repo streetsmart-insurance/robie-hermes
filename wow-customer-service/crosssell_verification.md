@@ -31,5 +31,9 @@
 ## FLAGGED FOR REVIEW (not a cross-sell)
 13. Taylor Cimei | Top Notch Tree Service LLC | "sent updated BOR for renewal" - This is a renewal BOR, NOT a new sale to existing client. Pending review.
 
+## EZLynx PolicyApi Issuance Check (2026-09-27, PRODUCTION API)
+
+**VEP0386394** (Taylor Cimei | Jeffrey and Theresa Bruder) — **Inactive**, CGL, term 2025-08-12 to 2026-08-12. The note says "New Vacant Express gl was issued. Please key in new policy" but cites last year's policy number. FLAGGED: the cited policy number is the old term, not a new issuance. (The "please key in new policy" note suggests the new policy may not be keyed in EZLynx yet — check for the new policy number.)
+
 ## Total: 13 rows
 ## By employee: Zeus 6, Taylor 5, Jazmin 2
