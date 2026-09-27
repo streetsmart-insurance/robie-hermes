@@ -9,11 +9,21 @@ Runs via cron (hourly). Checks the things that have actually bitten us:
   4. HITL dry-run: Gemini reachable? Email path constructible? Chat webhook present?
   5. Stuck job leases
   6. Disk usage (/tmp screenshots pile up)
+  7. Credential probes (auth-only): phone-watchdog Gmail SA key, RingCentral JWT,
+     EZLynx OAuth token — catches dead keys like the 2026-09-27 invalid_grant
+     that silenced the Sonant sweep 09:19–11:22 EDT with no alert.
+  8. Sweep freshness: is each scheduled job producing successful runs on time?
+  9. Service error scan: failure signatures (invalid_grant, tracebacks) in the
+     trailing journal window per service.
 
 Output:
   - JSON status file (always written, even when healthy)
   - Google Chat ping ONLY on failure (quiet when healthy)
   - Exit 0 = healthy, 1 = issues found, 2 = check itself errored
+
+All probes are AUTH-ONLY / READ-ONLY: no operations, no writes, no sends.
+A check must never crash the run; failures are reported, not raised.
+Secret values are never logged — names and statuses only.
 
 Usage (on hermes-poc-01):
   python3 robie_health_check.py [--status-dir /tmp/robie-health] [--no-chat]
@@ -27,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -85,7 +96,10 @@ def check_code_version() -> tuple[bool, str, dict]:
     """What CODE_VERSION is importable? Does it match main's HEAD?"""
     extra: dict = {}
     try:
-        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current/robie-main2")
+        # NOTE 2026-09-27: was "releases/current/robie-main2" which does not
+        # exist — the import always failed. The package lives directly under
+        # releases/current.
+        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
         from robie_job_engine.ezlynx_policy_setup import CODE_VERSION
         extra["loaded_version"] = CODE_VERSION
     except Exception as exc:
@@ -223,6 +237,302 @@ def check_disk() -> tuple[bool, str, dict]:
         return False, f"disk check failed: {type(exc).__name__}", extra
 
 
+# ---------------------------------------------------------------------------
+# Server-wide watchdog checks (added 2026-09-27)
+#
+# Incident: the phone-watchdog's Gmail service account key was deleted on
+# Google's side (invalid_grant). The Sonant sweep failed silently 09:19–11:22
+# EDT and nothing alerted anyone — the checks above don't probe credential
+# validity, sweep freshness, or per-service errors. These checks close that gap.
+#
+# All probes are AUTH-ONLY / READ-ONLY: no operations, no writes, no sends.
+# Secret values are never logged — names and statuses only.
+# ---------------------------------------------------------------------------
+
+# Phone-watchdog service key resolution: systemd drop-in override wins over the
+# base unit, which wins over the repo default. (On 2026-09-27 the live key is
+# service_key_hermes_poc.json via the drop-in; service_key.json is dead.)
+WATCHDOG_UNIT_PATHS = [
+    "/etc/systemd/system/streetsmart-phone-watchdog.service.d/override.conf",
+    "/etc/systemd/system/streetsmart-phone-watchdog.service",
+    "/lib/systemd/system/streetsmart-phone-watchdog.service",
+]
+WATCHDOG_DEFAULT_KEY = "/opt/streetsmart-phone-watchdog/service_key.json"
+WATCHDOG_MAILBOX = "carlo@streetsmart.insurance"
+
+# Freshness: max seconds of sweep silence before we alert. The watchdog runs a
+# continuous ~5-minute sweep loop, so 20 minutes = ~4 missed cycles.
+SWEEP_STALE_SECONDS = 20 * 60
+
+# Journal failure signatures that always warrant an alert.
+ERROR_PATTERNS = [
+    "invalid_grant",
+    "Invalid signature for token",
+    "Traceback (most recent call last)",
+]
+
+# Services whose journals we scan for ERROR_PATTERNS (trailing 1 hour).
+ERROR_SCAN_SERVICES = [
+    "streetsmart-phone-watchdog.service",
+    "streetsmart-phone-eod.service",
+    "robie-4359-policy-change.service",
+]
+
+# Timer jobs and their freshness limits. max_age_seconds is generous on purpose:
+# it must not false-alarm across normal schedule gaps (weekends, weekly jobs).
+# (timer_name, max_age_seconds, description)
+TIMER_FRESHNESS = [
+    ("streetsmart-phone-eod.timer", 100 * 3600, "EOD phone report (Mon–Fri 17:00)"),
+    ("robie-4359-policy-change.timer", 10 * 24 * 3600, "4359 worker (Tue 08:00 weekly)"),
+    ("streetsmart-phone-hourly-missed.timer", 70 * 3600, "missed-call digest (Mon–Fri 2-hourly)"),
+]
+
+GCP_PROJECT = os.environ.get("GCP_PROJECT", "streetsmart-hermes-poc")
+
+
+def _resolve_watchdog_service_key() -> str:
+    """Return the --service-key path the phone-watchdog service actually uses.
+
+    Reads the systemd unit files in override order; the first --service-key
+    found wins. Falls back to the repo default when nothing is configured.
+    """
+    for path in WATCHDOG_UNIT_PATHS:
+        try:
+            with open(path) as f:
+                content = f.read()
+        except OSError:
+            continue
+        m = re.search(r"--service-key\s+(\S+)", content)
+        if m:
+            return m.group(1)
+    return WATCHDOG_DEFAULT_KEY
+
+
+def _read_secret(secret_id: str) -> str:
+    """Read one Secret Manager secret (latest version). Empty string on failure."""
+    try:
+        from google.cloud import secretmanager
+
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{GCP_PROJECT}/secrets/{secret_id}/versions/latest"
+        resp = client.access_secret_version(request={"name": name})
+        return resp.payload.data.decode("utf-8").strip()
+    except Exception:
+        return ""
+
+
+def check_gmail_sa_key() -> tuple[bool, str, dict]:
+    """Is the phone-watchdog's Gmail service account key alive?
+
+    Resolves the LIVE key from systemd (not a hardcoded filename), then does
+    an auth-only Gmail getProfile with domain-wide delegation — the exact call
+    chain that died on 2026-09-27 with invalid_grant.
+    """
+    extra: dict = {}
+    try:
+        key_path = _resolve_watchdog_service_key()
+        extra["key_path"] = key_path
+        with open(key_path) as f:
+            key_data = json.load(f)
+        client_email = str(key_data.get("client_email", ""))
+        extra["client_email"] = client_email
+        if not key_data.get("private_key") or not client_email:
+            return False, f"key file {key_path} is not a valid SA key", extra
+
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        creds = service_account.Credentials.from_service_account_file(
+            key_path,
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            subject=WATCHDOG_MAILBOX,
+        )
+        svc = build("gmail", "v1", credentials=creds)
+        profile = svc.users().getProfile(userId="me").execute()
+        extra["gmail_user"] = profile.get("emailAddress", "")
+        return True, f"gmail SA key OK ({client_email})", extra
+    except FileNotFoundError:
+        return False, f"key file not found: {extra.get('key_path', '?')}", extra
+    except Exception as exc:
+        # invalid_grant and friends land here — this is the alert we missed.
+        return False, f"gmail auth failed: {type(exc).__name__}: {str(exc)[:120]}", extra
+
+
+def check_ringcentral_auth() -> tuple[bool, str, dict]:
+    """Can we exchange the RingCentral JWT for an access token? Auth-only."""
+    extra: dict = {}
+    try:
+        import base64
+        import urllib.error
+        import urllib.parse
+
+        # Secret names mirror the phone-watchdog's ringcentral_client.py.
+        client_id = _read_secret("ringcentral-accountability-client-id") or os.environ.get("RINGCENTRAL_CLIENT_ID", "")
+        client_secret = _read_secret("ringcentral-accountability-client-secret") or os.environ.get("RINGCENTRAL_CLIENT_SECRET", "")
+        jwt = _read_secret("ringcentral-accountability-jwt") or os.environ.get("RINGCENTRAL_JWT", "")
+        server_url = (_read_secret("ringcentral-accountability-server-url")
+                      or os.environ.get("RINGCENTRAL_SERVER_URL", "")
+                      or "https://platform.ringcentral.com").rstrip("/")
+        extra["server_url"] = server_url
+        extra["creds_visible"] = bool(client_id and jwt)
+        if not client_id or not jwt:
+            return False, "ringcentral credentials not visible (Secret Manager + env)", extra
+
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        data = urllib.parse.urlencode({
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": jwt,
+        }).encode()
+        req = urllib.request.Request(
+            f"{server_url}/restapi/oauth/token", data=data, method="POST",
+            headers={"Authorization": f"Basic {basic}",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode())
+        if body.get("access_token"):
+            return True, "ringcentral JWT exchange OK", extra
+        return False, "ringcentral token endpoint returned no access_token", extra
+    except urllib.error.HTTPError as exc:
+        return False, f"ringcentral auth failed: HTTP {exc.code}", extra
+    except Exception as exc:
+        return False, f"ringcentral auth failed: {type(exc).__name__}: {str(exc)[:100]}", extra
+
+
+def check_ezlynx_auth() -> tuple[bool, str, dict]:
+    """Can we obtain an EZLynx OAuth token? Auth-only, no operations.
+
+    Uses the released robie_job_engine client so config/secret handling stays
+    in one place. Skips (not fails) when the EZLynx config isn't visible to the
+    health-check environment — deploy must set ROBIE_ENV + the secret ref for
+    this probe to activate.
+    """
+    extra: dict = {}
+    try:
+        sys.path.insert(0, "/opt/streetsmart-hermes/releases/current")
+        from robie_job_engine.ezlynx_api import load_ezlynx_api_config, EzlynxApiClient
+
+        try:
+            config = load_ezlynx_api_config()
+        except Exception as exc:
+            extra["skipped"] = True
+            return True, f"ezlynx probe skipped (config not visible: {type(exc).__name__})", extra
+
+        client = EzlynxApiClient(config)
+        token = client.get_token()
+        if token:
+            return True, "ezlynx OAuth token OK", extra
+        return False, "ezlynx token endpoint returned empty token", extra
+    except Exception as exc:
+        return False, f"ezlynx auth failed: {type(exc).__name__}: {str(exc)[:100]}", extra
+
+
+def _journal_since(unit: str, since: str) -> str:
+    """Return journal output for a unit since a relative time. Empty on failure."""
+    try:
+        out = subprocess.run(
+            ["journalctl", "-u", unit, "--since", since, "--no-pager"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.stdout
+    except Exception:
+        return ""
+
+
+def check_sweep_freshness() -> tuple[bool, str, dict]:
+    """Is each job producing successful runs on time?
+
+    - Phone-watchdog (continuous ~5m loop): journal must show sweep activity
+      in the trailing window.
+    - Timer jobs: the timer must be active and its last trigger recent enough.
+    """
+    extra: dict = {}
+    problems: list[str] = []
+
+    # 1. Phone-watchdog continuous sweep.
+    try:
+        active_out = subprocess.run(
+            ["systemctl", "is-active", "streetsmart-phone-watchdog.service"],
+            capture_output=True, text=True, timeout=10,
+        )
+        wd_active = active_out.stdout.strip() == "active"
+        extra["watchdog_active"] = wd_active
+        if not wd_active:
+            problems.append("phone-watchdog service is not active")
+        else:
+            log = _journal_since("streetsmart-phone-watchdog.service", "20 minutes ago")
+            # Sweep markers from watchdog_phone_alerts.py
+            markers = ["Sweep complete", "Fetched", "Queue watch", "Triaged Call"]
+            recent = any(m in log for m in markers)
+            extra["watchdog_recent_sweep"] = recent
+            if not recent:
+                problems.append(
+                    f"phone-watchdog silent for 20m (no sweep markers in journal)"
+                )
+    except Exception as exc:
+        problems.append(f"watchdog freshness check failed: {type(exc).__name__}")
+
+    # 2. Timer jobs.
+    for timer, max_age, desc in TIMER_FRESHNESS:
+        try:
+            out = subprocess.run(
+                ["systemctl", "show", timer, "-p", "ActiveState", "-p", "LastTriggerUSec"],
+                capture_output=True, text=True, timeout=10,
+            )
+            props = {}
+            for line in out.stdout.strip().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    props[k.strip()] = v.strip()
+            state = props.get("ActiveState", "unknown")
+            last_trigger = props.get("LastTriggerUSec", "")
+            extra[f"{timer}_state"] = state
+            if state != "active":
+                problems.append(f"{desc}: timer not active (state={state})")
+                continue
+            # LastTriggerUSec looks like "Sun 2026-09-27 11:00:00 EDT" or "n/a".
+            if last_trigger.strip().lower() in ("n/a", "", "0"):
+                problems.append(f"{desc}: timer never triggered")
+                continue
+            try:
+                # Parse "Day YYYY-MM-DD HH:MM:SS TZ" (22 chars before the TZ).
+                ts = datetime.strptime(last_trigger.strip()[:22], "%a %Y-%m-%d %H:%M:%S")
+                age = (datetime.now() - ts).total_seconds()
+                extra[f"{timer}_age_hours"] = round(age / 3600, 1)
+                if age > max_age:
+                    problems.append(f"{desc}: last trigger {age/3600:.1f}h ago (limit {max_age/3600:.0f}h)")
+            except (ValueError, IndexError):
+                extra[f"{timer}_last_trigger_unparsed"] = last_trigger[:40]
+        except Exception as exc:
+            problems.append(f"{desc}: freshness check failed: {type(exc).__name__}")
+
+    if problems:
+        return False, "; ".join(problems), extra
+    return True, "all jobs fresh", extra
+
+
+def check_service_errors() -> tuple[bool, str, dict]:
+    """Any failure signatures in service journals in the trailing hour?"""
+    extra: dict = {}
+    problems: list[str] = []
+    for svc in ERROR_SCAN_SERVICES:
+        log = _journal_since(svc, "1 hour ago")
+        if not log:
+            extra[svc] = "no journal output"
+            continue
+        hits: dict[str, int] = {}
+        for pat in ERROR_PATTERNS:
+            n = log.count(pat)
+            if n:
+                hits[pat] = n
+        extra[svc] = hits if hits else "clean"
+        if hits:
+            problems.append(f"{svc}: {', '.join(f'{p}×{n}' for p, n in hits.items())}")
+    if problems:
+        return False, "; ".join(problems), extra
+    return True, "no failure signatures in trailing hour", extra
+
+
 CHECKS = [
     ("worker_alive", check_worker_alive),
     ("code_version", check_code_version),
@@ -230,6 +540,11 @@ CHECKS = [
     ("hitl_dry_run", check_hitl_dry_run),
     ("stuck_leases", check_stuck_leases),
     ("disk", check_disk),
+    ("gmail_sa_key", check_gmail_sa_key),
+    ("ringcentral_auth", check_ringcentral_auth),
+    ("ezlynx_auth", check_ezlynx_auth),
+    ("sweep_freshness", check_sweep_freshness),
+    ("service_errors", check_service_errors),
 ]
 
 
