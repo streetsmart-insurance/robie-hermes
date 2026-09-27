@@ -11,6 +11,14 @@
   },
   "sender": "robie@streetsmart.insurance",
   "state_path": "/opt/streetsmart-hermes/lost-customer-retention/state.json",
+  "magellan": {
+    "enabled": false,
+    "snapshot_path": "",
+    "snapshot_dir": "/opt/streetsmart-hermes/accountability/reports",
+    "snapshot_glob": "magellan-*.json",
+    "write_back": true,
+    "source": "Read-only snapshots from accountability Magellan collect (magellan-YYYY-MM-DD-*.json written by collect_magellan_snapshot) or a phone-watchdog parse_magellan_data JSON list. Leave the unused path empty. No Magellan portal login."
+  },
   "recipients": {
     "commercial": "sandy@streetsmart.insurance",
     "personal": "ashley@streetsmart.insurance",

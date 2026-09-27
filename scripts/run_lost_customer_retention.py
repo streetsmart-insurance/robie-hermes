@@ -12,8 +12,10 @@ from zoneinfo import ZoneInfo
 
 from robie_job_engine.accountability_delivery import _delegated_gmail_sender
 from robie_job_engine.lost_customer_retention import (
-    CANONICAL_DEPARTMENTS, build_messages, employee_directory, load_state, records,
-    resolve_department, save_state, send_message, summarize,
+    CANONICAL_DEPARTMENTS, account_phones_by_applicant, build_messages,
+    employee_directory, enrich_review_with_magellan, load_magellan_source,
+    load_state, magellan_cell_updates, magellan_write_back_enabled,
+    resolve_department, review_sheet_rows, save_state, send_message, summarize,
     validate_monthly_source,
 )
 
@@ -57,8 +59,17 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
         sheets, config["appsheet_spreadsheet_id"], "'Employees'!A1:AM250"
     ))
     months = BACKFILL_MONTHS if backfill else (prior_completed_month(),)
-    monthly = [validate_monthly_source(values(sheets, spreadsheet_id, f"'{m}'!A1:AK997"), m) for m in months]
-    review = [r for r in records(values(sheets, spreadsheet_id, "'3-Month Account Review'!A1:U2000")) if r["Month"] in months]
+    monthly_sheets = [values(sheets, spreadsheet_id, f"'{m}'!A1:AK997") for m in months]
+    monthly = [validate_monthly_source(sheet, month) for sheet, month in zip(monthly_sheets, months)]
+    review_pairs = [
+        (row_number, item)
+        for row_number, item in review_sheet_rows(values(sheets, spreadsheet_id, "'3-Month Account Review'!A1:U2000"))
+        if item["Month"] in months
+    ]
+    review = [item for _, item in review_pairs]
+    magellan_source = load_magellan_source(config.get("magellan"))
+    phones = account_phones_by_applicant(monthly_sheets) if magellan_source.status == "available" else {}
+    magellan_summary = enrich_review_with_magellan(review, magellan_source, phones)
     if not review or any(m["policy_rows"] == 0 for m in monthly):
         raise RuntimeError(f"fail-closed: no validated source/account review for {', '.join(months)}")
     department_exceptions = []
@@ -88,9 +99,15 @@ def run(config_path: Path, *, dry_run: bool, send: bool, backfill: bool) -> dict
     messages = build_messages(review, config["recipients"], run_id)
     result = {"run_id": run_id, "dry_run": dry_run, "source": monthly,
               "summary": summarize(review), "department_exceptions": department_exceptions,
-              "sop_sources": config["sop_sources"],
+              "magellan": magellan_summary, "sop_sources": config["sop_sources"],
               "message_previews": [{"key": m.key, "to": list(m.to), "subject": m.subject,
                                     "bytes": len(m.body.encode())} for m in messages], "receipts": []}
+    if magellan_write_back_enabled(config, dry_run=dry_run, status=magellan_source.status):
+        sheets.spreadsheets().values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": "RAW", "data": magellan_cell_updates(review_pairs)},
+        ).execute()
+        result["magellan_sheet_updates"] = len(review_pairs)
     if dry_run:
         return result
     if previous.get("digest") == digest and previous.get("complete"):
