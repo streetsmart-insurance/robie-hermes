@@ -76,9 +76,12 @@ except ImportError:  # loaded outside the package
 # Requested-action classification (feeds the task-state rule)
 # ---------------------------------------------------------------------------
 
-_ACK_PATTERNS = [
-    re.compile(r"\bthank\s*you\b", re.IGNORECASE),
-    re.compile(r"\bthanks\b", re.IGNORECASE),
+# Strong acknowledgement: the certificate was RECEIVED. "Thank you for the
+# (renewal) certificate" is gratitude for something already done — never a
+# new request. Checked BEFORE request language.
+_ACK_RECEIPT_PATTERNS = [
+    re.compile(r"\bthank(s|\s+you)\b.{0,25}\bfor\b.{0,40}\b(certificate|coi)\b",
+               re.IGNORECASE),
     re.compile(r"\breceived the certificate\b", re.IGNORECASE),
     re.compile(r"\bgot the certificate\b", re.IGNORECASE),
     re.compile(r"\bconfirming receipt\b", re.IGNORECASE),
@@ -89,11 +92,33 @@ _ACK_PATTERNS = [
     re.compile(r"\breceived\s+(the\s+)?(coi|certificate)\b", re.IGNORECASE),
 ]
 
+# Weak acknowledgement: bare politeness ("Thanks", "Thank you!") with no
+# receipt language. Checked AFTER request language so a polite sign-off on
+# a genuine request ("Please provide current COI ... Thank you") does not
+# demote it to an acknowledgement.
+_ACK_POLITE_PATTERNS = [
+    re.compile(r"\bthank\s*you\b", re.IGNORECASE),
+    re.compile(r"\bthanks\b", re.IGNORECASE),
+]
+
 _NEW_REQUEST_PATTERNS = [
     re.compile(r"\bplease\s+(issue|provide|send|forward)\b", re.IGNORECASE),
     re.compile(r"\brequest(ing|ed)?\s+(a|the|for)?\s*(certificate|coi)\b", re.IGNORECASE),
     re.compile(r"\bneed\s+a\s+(certificate|coi)\b", re.IGNORECASE),
     re.compile(r"\brenewal\s+certificate\b", re.IGNORECASE),
+    # Follow-ups on an earlier request ("still waiting for my
+    # certificate", "where is the certificate", "send it to this email").
+    re.compile(r"\bstill waiting\b.{0,40}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bwaiting\b.{0,20}\bon\b.{0,20}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bwhere is\b.{0,20}\b(my|the)\b.{0,20}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bsend it\b.{0,20}\bto this email\b", re.IGNORECASE),
+    re.compile(r"\b(haven't|hasn't|have not|has not)\b.{0,20}\breceived\b.{0,20}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bfollow(?:ing)? up\b.{0,30}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\bchecking on\b.{0,30}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    # Carrier/vendor change requests ("Progress Property LLC has requested
+    # changes to Advanced Electric Design & Service LLC's certificate").
+    re.compile(r"\brequested? changes?\b.{0,80}\b(certificate|cert|coi)\b", re.IGNORECASE),
+    re.compile(r"\brequest for changes\b.{0,80}\b(certificate|cert|coi)\b", re.IGNORECASE),
 ]
 
 # Auto-replies quote the original request's subject ("Re: Renewal
@@ -170,6 +195,12 @@ _COI_PROVIDED_RE = re.compile(
     r".{0,30}\b(coi|certificate)\b"
 )
 
+# Explicit disclaimers ("This is NOT a request for a COI") beat the
+# word-boundary coi rule — Highway document requests state this outright.
+_COI_NOT_REQUEST_RE = re.compile(
+    r"(?i)\bnot a request for\b.{0,25}\b(coi|certificate)\b"
+)
+
 
 def _subject_is_request_shape(subject: str) -> bool:
     if not _CERT_SUBJECT_RE.search(subject or ""):
@@ -231,6 +262,8 @@ def _body_is_coi_request(body: str, sender: str | None = None) -> bool:
     b = body or ""
     if not _COI_WORD_RE.search(b):
         return False
+    if _COI_NOT_REQUEST_RE.search(b):
+        return False
     if _COI_PROVIDED_RE.search(b):
         return False
     if _VENDOR_COI_UPDATE_RE.search(b):
@@ -287,14 +320,28 @@ def classify_requested_action(subject: str, body: str,
             p.search(body_text) for p in _AUTOREPLY_PATTERNS):
         return ACTION_AUTOREPLY
     text = f"{subject or ''}\n{body_text}"
-    if any(p.search(text) for p in _ACK_PATTERNS):
+    # Receipt-language ("thank you for the certificate", "COI received")
+    # is a definitive acknowledgement — the certificate is already in hand.
+    if any(p.search(text) for p in _ACK_RECEIPT_PATTERNS):
         return ACTION_ACK
-    if (any(p.search(text) for p in _NEW_REQUEST_PATTERNS)
+    # Explicit request language in the BODY wins over a polite sign-off:
+    # "Please provide current COI ... Thank you" is a request.
+    if any(p.search(body_text) for p in _NEW_REQUEST_PATTERNS):
+        return ACTION_NEW_REQUEST
+    # A body that is purely polite ("Thank you!") with no request language
+    # is an acknowledgement — even when the (inherited, "Re:") subject
+    # looks like a request. Subject signals are checked after this.
+    if any(p.search(body_text) for p in _ACK_POLITE_PATTERNS):
+        return ACTION_ACK
+    if (any(p.search(subject or "") for p in _NEW_REQUEST_PATTERNS)
             or _subject_is_request_shape(subject)
             or _subject_is_bare_coi(subject)
             or _subject_is_coi_request(subject, sender)
             or _body_is_coi_request(body_text, sender)):
         return ACTION_NEW_REQUEST
+    # Bare politeness in the subject with no request language anywhere.
+    if any(p.search(text) for p in _ACK_POLITE_PATTERNS):
+        return ACTION_ACK
     return ACTION_UNKNOWN
 
 
@@ -380,14 +427,19 @@ def _read_secret_json(resource_name: str) -> dict[str, Any]:
 
 
 def ezlynx_oauth_token(
-    scope_override: str | None = None,
     secret_resource: str = "",
+    scope_override: str | None = None,
     token_endpoint: str = "",
 ) -> str:
     """Mint an EZLynx OAuth token via the vendor_data_access grant.
 
     Reads the integration secret named by ROBIE_EZLYNX_API_PROD_SECRET
     (full Secret Manager resource name). Values are transient.
+
+    The secret resource name comes FIRST positionally: the old
+    (scope_override, secret_resource) order silently bound a positional
+    ``ezlynx_oauth_token(SECRET, "DiscussionApi")`` call's secret into
+    scope_override. Pass scope/token_endpoint as keywords.
     """
     secret_resource = secret_resource or _env("ROBIE_EZLYNX_API_PROD_SECRET")
     if not secret_resource:
@@ -575,6 +627,19 @@ def verify_record(record: Any, index: Any,
         record.facts.pdf_texts.extend(ocr_texts)
         res.evidence.append("OCR recovered text from scanned PDF")
 
+    # Automated senders and bounce-shaped subjects are never certificate
+    # requests: bucket them BEFORE identity/conflict work so a canned
+    # auto-reply cannot land in the conflict or no-applicant buckets.
+    if _BOUNCE_SUBJECT_RE.search(record.subject or "") or _sender_is_autoresponder(
+            getattr(record.facts, "requester_email", None)):
+        res.requested_action = ACTION_AUTOREPLY
+        res.evidence.append(
+            "automated sender/subject identified before identity checks — "
+            "never a certificate request")
+        return res.hold(
+            "automated response (auto-reply/bounce), not a certificate "
+            "request — holding, never filing or tasking")
+
     # Gather insured candidates from every source; conflicts hold.
     pdf_names = []
     for text in record.facts.pdf_texts:
@@ -637,6 +702,9 @@ def verify_record(record: Any, index: Any,
         res.evidence.append(
             "message classified as acknowledgement/thank-you — not a new "
             "certificate request")
+        return res.hold(
+            "acknowledgement/thank-you reply — no certificate action "
+            "requested; never filing or tasking")
     elif res.requested_action == ACTION_AUTOREPLY:
         res.evidence.append(
             "message classified as automated response — never a new "

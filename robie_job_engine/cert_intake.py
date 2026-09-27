@@ -366,6 +366,17 @@ def parse_client_center_notification(
 # Certificate requests name the insured in a handful of shapes. Every
 # pattern below is fail-soft: no match means None, never a guess.
 _INSURED_PATTERNS = (
+    # Vendor-system notification shapes (RMIS, Highway, myCOI, Next): the
+    # insured is named in a labeled field, often with the value on the NEXT
+    # line of the HTML-converted body. These run BEFORE the generic
+    # "insured:" pattern so the generic one cannot capture the field label
+    # itself (RMIS "for your insured:\nCompany Name:" used to extract the
+    # literal text "Company Name:").
+    re.compile(r"(?i)\bcompany name\s*:\s*(.+?)(?:\n|$)"),
+    re.compile(r"(?i)\blegal name\s*:\s*(.+?)(?:\n|$)"),
+    re.compile(r"(?i)\bhave on file for\s+\*?(.+?)\*?(?:\s+has\b|\n|$)"),
+    re.compile(r"(?i)\bone of your customers,\s+([^\n(]{3,}?)\s*(?:\(|\n|$)"),
+    re.compile(r"(?i)\byour insured,\s+(.+?)(?:\s+is\b|\n|$)"),
     re.compile(r"(?i)named insured\s*[:\-]\s*(.+?)(?:\n|$)"),
     re.compile(r"(?i)insured\s*[:\-]\s*(.+?)(?:\n|$)"),
     re.compile(r"(?i)certificate (?:of insurance )?for\s+(.+?)(?:\s+(?:pol#|policy\b)|\n|$)"),
@@ -402,8 +413,17 @@ _REQUESTER_RE = re.compile(r"(?i)(?:requested by|requester)\s*[:\-]\s*(.+?)(?:\n
 _SUBJECT_PREFIXES = re.compile(r"^(?:\s*(?:re|fwd?)\s*:\s*)+", re.IGNORECASE)
 _MC_SUFFIX = re.compile(r"\s+(?:MC|DOT|USDOT)\s*\d+\s*$", re.IGNORECASE)
 _POLICY_TAIL = re.compile(r"\s+[A-Z0-9][A-Z0-9/\-]{3,}\s*$")
+# A trailing token that looks like a policy/ID number rather than a name
+# word: it MUST contain a digit, so real name words ("EXPRESS") are never
+# stripped. RMIS glues the policy number to the name ("MM Heavy Hauls LLC
+# 008985366C" -> "MM Heavy Hauls LLC").
+_POLICY_NUM_TAIL = re.compile(r"\s+[A-Z0-9]*\d[A-Z0-9/\-]{3,}\s*$")
 
 _SUBJECT_PATTERNS = [
+    # Next Insurance: "Progress Property LLC has requested changes to
+    # Advanced Electric Design & Service LLC's certificate"
+    re.compile(r"has requested changes to\s+(.+?)(?:'s)?\s+certificate\b",
+               re.IGNORECASE),
     # "Certificate of Insurance for Homegrown Moving Company"
     re.compile(r"certificate of insurance for\s+(.+?)(?:\s+to\s+|\s*$)", re.IGNORECASE),
     # "Request for COI for Ameritesting LLC Covering SilverLini"
@@ -414,9 +434,22 @@ _SUBJECT_PATTERNS = [
     re.compile(r"certificate request\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
     # "COI - Fonseca General Contractor LLC"
     re.compile(r"\bcoi\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
+    # Highway: "Renewal COI Request: COI for ECMANAGEMENT GROUP ... Expires Tomorrow"
+    re.compile(r"\bcoi\s+for\s+(.+?)(?:\s+expires?\b.*|\s+expiring\b.*)?$",
+               re.IGNORECASE),
 ]
 
 _NAME_LIKE = re.compile(r"[A-Za-z]{2,}")
+
+# Field labels that are never an insured name. Vendor forms (RMIS) put the
+# value on the line AFTER the label; when a value is empty, the next label
+# ("Company Name:\nAddress:") must not be captured as the name.
+_FIELD_LABEL_RE = re.compile(
+    r"(?i)^(company name|legal name|address|phone|email|fax|name)\s*:?\s*$")
+
+
+def _is_field_label(text: str) -> bool:
+    return bool(_FIELD_LABEL_RE.match((text or "").strip()))
 
 
 def _strip_subject_prefixes(subject: str) -> str:
@@ -433,7 +466,8 @@ def extract_subject_insured(subject: str) -> str | None:
     for pat in _SUBJECT_PATTERNS:
         m = pat.search(clean)
         if m:
-            name = _MC_SUFFIX.sub("", m.group(1)).strip(" -:,")
+            name = _MC_SUFFIX.sub("", m.group(1))
+            name = _POLICY_NUM_TAIL.sub("", name).strip(" -:,")
             if _NAME_LIKE.search(name):
                 return name
     # "Haris Uddin 008265/15/00": leading name before a policy-like tail.
@@ -489,7 +523,19 @@ def _truncate_sentence_runoff(name: str) -> str:
 
 def _clean_name(value: str) -> str:
     value = re.sub(r"\s+", " ", (value or "").strip())
+    # Instruction tails pasted into subjects ("Certificate of Insurance LA
+    # Burger LLC to Anderson Market & Metrovation *WORDING LOCATED ON PAGE
+    # 2*") are never part of a name — strip every *...* segment.
+    value = re.sub(r"\*[^*]*\*", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    # Trailing commas/semicolons from mid-sentence captures ("your insured,
+    # TMA Contracting LLC, is renewing") are not part of the name.
+    value = re.sub(r"[,;:]+$", "", value).strip()
     value = _truncate_sentence_runoff(value)
+    # A space before a trailing period ("ALTI TRANSPORT LLC .") is sentence
+    # punctuation that leaked into the name — drop it entirely, before the
+    # entity-suffix check below can mistake it for an abbreviation.
+    value = re.sub(r"\s+\.\s*$", "", value)
     # A trailing period is sentence punctuation, not part of the name —
     # unless the name ends in an abbreviation/entity suffix ("P.C.").
     if value.endswith("."):
@@ -585,8 +631,11 @@ def extract_request_facts(
 
     for pat in _INSURED_PATTERNS:
         m = pat.search(text)
-        if m and _clean_name(m.group(1)):
-            facts.insured_name = _clean_name(m.group(1))
+        cleaned = _clean_name(m.group(1)) if m else ""
+        # A captured field label ("Company Name:") is never the insured —
+        # keep looking instead of locking in the label.
+        if cleaned and not _is_field_label(cleaned):
+            facts.insured_name = cleaned
             break
     if not facts.insured_name:
         # Subject lines often carry the cleanest name
@@ -672,8 +721,9 @@ def extract_request_facts(
                     if not facts.insured_name:
                         for pat in _INSURED_PATTERNS:
                             m = pat.search(pdf_text)
-                            if m and _clean_name(m.group(1)):
-                                facts.insured_name = _clean_name(m.group(1))
+                            cleaned = _clean_name(m.group(1)) if m else ""
+                            if cleaned and not _is_field_label(cleaned):
+                                facts.insured_name = cleaned
                                 break
                     for m in _POLICY_RE.finditer(pdf_text):
                         num = m.group(1).strip().upper()
@@ -736,11 +786,10 @@ def summarize_for_note(
     the note can never trip the call automation's phone-number guard.
     """
     insured = facts.insured_name or "insured not identified in email"
-    policy = (
-        _mask_policy_for_note(facts.policy_numbers[0])
-        if facts.policy_numbers
-        else "policy number not shown"
-    )
+    if facts.policy_numbers:
+        policy_bit = f"(policy {_mask_policy_for_note(facts.policy_numbers[0])})"
+    else:
+        policy_bit = "(policy number not shown)"
     requester = facts.requester_name or facts.requester_email or "sender not identified"
     docs = (
         f"{len(filed_documents)} attachment(s) saved to the file"
@@ -755,6 +804,6 @@ def summarize_for_note(
         missing = " A PDF attachment could not be read as text — human to verify its contents."
     return (
         f"Certificate request {email.date or 'date not shown'}: {requester} "
-        f"asked for a certificate for {insured} (policy {policy}). "
+        f"asked for a certificate for {insured} {policy_bit}. "
         f"{docs}.{third} Steffany to review and issue.{missing}"
     ).strip()

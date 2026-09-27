@@ -254,6 +254,32 @@ def _sender_is_internal(email: str | None) -> bool:
                for d in _INTERNAL_SENDER_DOMAINS)
 
 
+# Vendor/compliance-system sender domains. Renewal notices from these
+# systems name the insured IN THE MESSAGE; the sender address is never
+# the client and must never be used as an email match key (sender !=
+# insured). The insured-name match above is the client signal.
+_VENDOR_SENDER_DOMAINS = (
+    "registrymonitoring.com",  # RMIS
+    "truckstop.com",           # RMIS support
+    "highway.com",             # Highway
+    "gohighway.com",
+    "certs.highway.com",
+    "mycoisolution.com",       # myCOI
+    "mycoitracking.com",
+    "certificial.com",         # Certificial
+    "nextinsurance.com",       # Next Insurance
+    "assurant.com",            # Assurant vendor notices
+)
+
+
+def _sender_is_vendor_system(email: str | None) -> bool:
+    if not email or "@" not in email:
+        return False
+    domain = email.split("@", 1)[1].lower()
+    return any(domain == d or domain.endswith("." + d)
+               for d in _VENDOR_SENDER_DOMAINS)
+
+
 @dataclass
 class MatchResult:
     status: str  # MATCHED | NO_MATCH | AMBIGUOUS
@@ -293,6 +319,9 @@ def match_applicant(
        (@streetsmart.insurance, @ssinj.com): an internal address on an
        applicant record is a contact, not the client, and matching it
        verified internal ops digests as certificate requests (2026-09-26).
+       NEVER for vendor-system senders (RMIS, Highway, myCOI, Certificial,
+       Next, ...): they name the insured in the message and are never the
+       insured themselves (sender != insured).
     4. phone numbers — optional extra signal.
 
     ``holder_names`` are NEVER match keys (holders are third parties).
@@ -330,7 +359,10 @@ def match_applicant(
         ids = index.by_dba_run.get(run_key, [])
         if len(ids) == 1:
             email_key = normalize_email(getattr(facts, "requester_email", None))
-            email_hit = index.by_email.get(email_key) if email_key else None
+            email_hit = None
+            if (email_key and not _sender_is_internal(email_key)
+                    and not _sender_is_vendor_system(email_key)):
+                email_hit = index.by_email.get(email_key)
             if email_hit and email_hit != ids[0]:
                 return MatchResult(
                     AMBIGUOUS, None,
@@ -347,12 +379,13 @@ def match_applicant(
 
     email_key = normalize_email(getattr(facts, "requester_email", None))
     if email_key and email_key in index.by_email:
-        if _sender_is_internal(email_key):
-            # Agency-internal senders never verify on email alone: the
-            # address is a staff contact on the record, not the client.
-            # The insured name above is the client signal; without it this
-            # is NO_MATCH, never a match to whoever the staffer is filed
-            # under.
+        if _sender_is_internal(email_key) or _sender_is_vendor_system(email_key):
+            # Agency-internal senders are staff contacts, and vendor-system
+            # senders (RMIS/Highway/myCOI/Certificial/Next/...) name the
+            # insured in the message — neither is ever the client, so
+            # neither verifies on email alone. The insured name above is
+            # the client signal; without it this is NO_MATCH, never a
+            # match to whoever the sender is filed under.
             pass
         else:
             return MatchResult(MATCHED, index.by_email[email_key],
