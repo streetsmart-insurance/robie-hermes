@@ -94,6 +94,54 @@ REQUIRED_COLUMNS = [
 
 DEAD_POLICY_STATUSES = {"cancelled", "canceled", "deleted", "expired", "inactive"}
 
+EXCLUSIONS_FILENAME = "policy_change_exclusions.json"
+
+
+def _exclusion_key(policy_number: Any, created_date: Any) -> tuple[str, str]:
+    return (normalize_policy_number(policy_number), str(created_date or "").strip())
+
+
+def default_exclusions_path() -> str:
+    return str(Path(__file__).with_name(EXCLUSIONS_FILENAME))
+
+
+def load_exclusions(path: str | Path) -> set[tuple[str, str]]:
+    """Load the persistent stale-row denylist.
+
+    Missing file = no exclusions. A corrupt file fails closed: the run stops
+    rather than emailing rows someone already ruled stale.
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PolicyChangeReportContractError(
+            f"exclusions file {path} is not valid JSON: {exc}"
+        ) from exc
+    entries = data.get("exclusions") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise PolicyChangeReportContractError(
+            f"exclusions file {path} must contain an 'exclusions' list"
+        )
+    return {
+        _exclusion_key(entry.get("policy_number"), entry.get("created_date"))
+        for entry in entries if isinstance(entry, dict)
+    }
+
+
+def apply_exclusions(
+    rows: list[dict[str, Any]], exclusions: set[tuple[str, str]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for row in rows:
+        key = _exclusion_key(row.get("Policy Number"), row.get("created_date"))
+        (excluded if key in exclusions else kept).append(row)
+    return kept, excluded
+
 
 class PolicyChangeReportContractError(RuntimeError):
     """Queue, liveness, roster, or discussion evidence did not satisfy the send contract."""
@@ -367,23 +415,44 @@ def discussion_context_line(discussion: Mapping[str, Any] | None, today: date) -
     if discussion is None:
         return "No EZLynx discussion found for this change request."
     title = str(discussion.get("title") or "Untitled discussion").strip()
+    return f'Discussion "{title}": ' + _discussion_activity_bits(discussion, today)
+
+
+def _discussion_activity_bits(discussion: Mapping[str, Any], today: date) -> str:
+    """'8 notes, last activity 2 days ago.' / 'no notes yet.' (no title)."""
     count = discussion.get("noteCount", discussion.get("note_count"))
     try:
         notes = int(count) if count is not None else None
     except (TypeError, ValueError):
         notes = None
     if not notes:
-        return f'Discussion "{title}": no notes yet.'
+        return "no notes yet."
+    noun = "note" if notes == 1 else "notes"
     days = _days_since_last_activity(discussion, today)
     if days is None:
-        return f'Discussion "{title}": {notes} notes, last activity date unknown.'
+        return f"{notes} {noun}, last activity date unknown."
     if days == 0:
         when = "today"
     elif days == 1:
         when = "yesterday"
     else:
         when = f"{days} days ago"
-    return f'Discussion "{title}": {notes} notes, last activity {when}.'
+    return f"{notes} {noun}, last activity {when}."
+
+
+def change_request_context(item: Mapping[str, Any], today: date) -> str:
+    """What the change request IS (discussion title) + its activity signal.
+
+    Note bodies are not API-readable, so the discussion title is the richest
+    description available without a browser session.
+    """
+    if item.get("discussion_unverified"):
+        return "Change request discussion: UNVERIFIED (lookup failed)."
+    discussion = item.get("discussion")
+    if not isinstance(discussion, dict):
+        return "No EZLynx discussion found for this change request."
+    title = str(discussion.get("title") or "Untitled discussion").strip()
+    return f'Change request: "{title}" — ' + _discussion_activity_bits(discussion, today)
 
 
 # -- roster: CSR directory + department managers ------------------------------
@@ -501,9 +570,21 @@ def resolve_nag_targets(
         entry = targets.setdefault(
             csr,
             {"email": email, "manager_name": manager["name"],
-             "manager_email": manager["email"], "items": []},
+             "manager_email": manager["email"], "items": [],
+             "producer_emails": [], "producer_names": [],
+             "unresolved_producers": []},
         )
         entry["items"].append(item)
+        producer = str(item.get("Assigned Producer") or "").strip()
+        if producer and producer not in entry["producer_names"]:
+            producer_email = directory.get(_name_key(producer), "")
+            if producer_email and producer_email not in entry["producer_emails"]:
+                entry["producer_emails"].append(producer_email)
+                entry["producer_names"].append(producer)
+            elif not producer_email and producer not in entry["unresolved_producers"]:
+                # Producer is informational CC: a missing mailbox is reported,
+                # never a reason to block the CSR's email.
+                entry["unresolved_producers"].append(producer)
     if missing_csrs:
         raise PolicyChangeReportContractError(
             "CSR work email could not be resolved for: " + ", ".join(sorted(set(missing_csrs)))
@@ -588,15 +669,23 @@ def _item_bullets(items: list[Mapping[str, Any]], today: date) -> list[str]:
         if detail:
             head += f" ({detail})"
         head += f". Request opened {created} ({age} days ago)."
-        if item.get("discussion_unverified"):
-            bullets.append(head + " Discussion activity: UNVERIFIED (lookup failed).")
-        else:
-            bullets.append(head + " " + discussion_context_line(item.get("discussion"), today))
+        bullets.append(head + " " + change_request_context(item, today))
     return bullets
 
 
-def build_csr_report(csr: str, items: list[Mapping[str, Any]], manager_name: str, today: date) -> str:
+def build_csr_report(
+    csr: str,
+    items: list[Mapping[str, Any]],
+    manager_name: str,
+    today: date,
+    cc_names: list[str] | None = None,
+) -> str:
     first = " ".join(str(csr).split()).split(" ")[0]
+    others = [name for name in (cc_names or []) if name and name != manager_name]
+    if others:
+        cc_line = f"CC'ing {manager_name} and {', '.join(others)} so they're in the loop."
+    else:
+        cc_line = f"CC'ing {manager_name} so they're in the loop."
     lines = [
         f"Hi {first},",
         "",
@@ -606,14 +695,25 @@ def build_csr_report(csr: str, items: list[Mapping[str, Any]], manager_name: str
         "",
         "Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.",
         "",
-        f"CC'ing {manager_name} so they're in the loop.",
+        cc_line,
         "",
-        "-ROBIE AI on behalf of Carlo",
+        "-Roby",
     ]
     return "\n".join(lines)
 
 
-def build_csr_report_html(csr: str, items: list[Mapping[str, Any]], manager_name: str, today: date) -> str:
+def build_csr_report_html(
+    csr: str,
+    items: list[Mapping[str, Any]],
+    manager_name: str,
+    today: date,
+    cc_names: list[str] | None = None,
+) -> str:
+    others = [name for name in (cc_names or []) if name and name != manager_name]
+    if others:
+        cc_line = f"CC'ing {manager_name} and {', '.join(others)} so they're in the loop."
+    else:
+        cc_line = f"CC'ing {manager_name} so they're in the loop."
     bullets = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in _item_bullets(items, today))
     return "\n".join([
         "<div>",
@@ -621,8 +721,8 @@ def build_csr_report_html(csr: str, items: list[Mapping[str, Any]], manager_name
         "<p>The following policy change requests are still open and waiting on an update:</p>",
         f"<ul>{bullets}</ul>",
         "<p>Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.</p>",
-        f"<p>CC'ing {html.escape(manager_name)} so they're in the loop.</p>",
-        "<p>-ROBIE AI on behalf of Carlo</p>",
+        f"<p>{html.escape(cc_line)}</p>",
+        "<p>-Roby</p>",
         "</div>",
     ])
 
@@ -948,6 +1048,10 @@ class OverduePolicyChangeReportWorker:
         try:
             rows = self.queue_reader(payload)
             qualified = qualify_rows(rows, today)
+            exclusions = load_exclusions(
+                payload.get("exclusions_path") or default_exclusions_path()
+            )
+            qualified, excluded_stale = apply_exclusions(qualified, exclusions)
             live_items: list[dict[str, Any]] = []
             held: list[dict[str, Any]] = []
             dead_count = 0
@@ -973,6 +1077,7 @@ class OverduePolicyChangeReportWorker:
             summary = {
                 "resource_id": RESOURCE_ID,
                 "queue_rows": len(rows),
+                "excluded_stale": len(excluded_stale),
                 "overdue_live": len(live_items),
                 "overdue_dead_excluded": dead_count,
                 "on_hold": len(held),
@@ -990,12 +1095,17 @@ class OverduePolicyChangeReportWorker:
             receipts: list[dict[str, Any]] = []
             for csr in sorted(targets):
                 target = targets[csr]
-                body = build_csr_report(csr, target["items"], target["manager_name"], today)
-                html_body = build_csr_report_html(csr, target["items"], target["manager_name"], today)
+                cc_names = [target["manager_name"], *target["producer_names"]]
+                body = build_csr_report(csr, target["items"], target["manager_name"], today, cc_names=cc_names)
+                html_body = build_csr_report_html(csr, target["items"], target["manager_name"], today, cc_names=cc_names)
+                cc: list[str] = []
+                for addr in [target["manager_email"], CC_CARLO, *target["producer_emails"]]:
+                    if addr and addr not in cc:
+                        cc.append(addr)
                 receipts.append(
                     self.mailer(
                         to=[target["email"]],
-                        cc=[target["manager_email"], CC_CARLO],
+                        cc=cc,
                         subject=SUBJECT,
                         text_body=body,
                         html_body=html_body,
@@ -1017,7 +1127,12 @@ class OverduePolicyChangeReportWorker:
             )
         return WorkerResult(
             True, JOB_TYPE,
-            {**summary, "delivery_receipts": receipts, "csr_count": len(targets)},
+            {**summary, "delivery_receipts": receipts, "csr_count": len(targets),
+             "unresolved_producers": sorted({
+                 producer
+                 for target in targets.values()
+                 for producer in target.get("unresolved_producers", [])
+             })},
             {"idempotency_key": idempotency_key, "held": held},
             retryable=False,
         )

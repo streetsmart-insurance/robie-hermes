@@ -13,11 +13,13 @@ from robie_job_engine.overdue_policy_change_reports import (
     OverduePolicyChangeReportVerifier,
     OverduePolicyChangeReportWorker,
     PolicyChangeReportContractError,
+    apply_exclusions,
     build_csr_report,
     build_roster_maps,
     classify_policy_liveness,
     deconcatenated_variants,
     discussion_context_line,
+    load_exclusions,
     parse_4359_csv,
     qualify_rows,
     resolve_nag_targets,
@@ -41,11 +43,12 @@ def csv_bytes(*rows: str) -> bytes:
 
 def row(account="SAPP Construction Corp", applicant="41055091", policy="S 2391821",
         created="2026-08-17", csr="Eimy Ramos", status="Open",
-        carrier="Selective Insurance", lob="Commercial Pkg") -> str:
+        carrier="Selective Insurance", lob="Commercial Pkg",
+        producer="Sandy Santana") -> str:
     return (
         f"{account},{applicant},{policy},{lob},2025-12-10,{carrier},{status},"
         f"\"Quezada, Zeus\",$28936.00,$28936.00,Streetsmart Insurance,"
-        f"Commercial Lines,,Sandy Santana,{csr},English,,,{created}"
+        f"Commercial Lines,,{producer},{csr},English,,,{created}"
     )
 
 
@@ -201,6 +204,8 @@ def test_select_discussion_none_when_no_match():
 def test_context_line_reports_activity():
     line = discussion_context_line(disc("PCR", 8, "2026-09-25T10:00:00"), TODAY)
     assert "8 notes" in line and "2 days ago" in line
+    one = discussion_context_line(disc("PCR", 1, "2026-09-25T10:00:00"), TODAY)
+    assert "1 note," in one and "1 notes" not in one
 
 
 def test_context_line_no_notes_and_no_discussion():
@@ -262,6 +267,29 @@ def test_resolve_targets_fails_closed_without_manager():
     items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821"}]
     with pytest.raises(PolicyChangeReportContractError, match="no department manager"):
         resolve_nag_targets(items, build_roster_maps(reg))
+
+
+def test_resolve_targets_collects_distinct_producer():
+    reg = registry()
+    reg["employees"]["Taylor Cimei"] = {
+        "role": "Producer", "email": "taylor@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821",
+              "Assigned Producer": "Taylor Cimei"}]
+    targets = resolve_nag_targets(items, build_roster_maps(reg))
+    target = targets["Eimy Ramos"]
+    assert target["producer_emails"] == ["taylor@streetsmart.insurance"]
+    assert target["producer_names"] == ["Taylor Cimei"]
+
+
+def test_resolve_targets_unknown_producer_does_not_block():
+    items = [{"CSR": "Eimy Ramos", "Policy Number": "S 2391821",
+              "Assigned Producer": "Nobody Here"}]
+    targets = resolve_nag_targets(items, build_roster_maps(registry()))
+    target = targets["Eimy Ramos"]
+    assert target["email"] == "eimy@streetsmart.insurance"
+    assert target["producer_emails"] == []
+    assert target["unresolved_producers"] == ["Nobody Here"]
 
 
 # -- dedupe -----------------------------------------------------------------------
@@ -349,6 +377,62 @@ def test_worker_excludes_dead_and_holds_noresult(tmp_path):
     assert len(sent) == 1  # only the live item is emailed
 
 
+def test_worker_skips_excluded_stale_rows(tmp_path):
+    import json
+    exclusions = tmp_path / "exclusions.json"
+    exclusions.write_text(json.dumps({"exclusions": [{
+        "policy_number": "S 2391821", "created_date": "2026-08-17",
+        "reason": "stale queue row per Carlo"}]}))
+    rows = parse_4359_csv(csv_bytes(row()))
+    search = fake_search({"S 2391821": [policy_row("S 2391821")]})
+    worker, sent = make_worker(tmp_path, queue_reader=lambda payload: rows,
+                               policy_search=search)
+    payload_job = {"action_type": ACTION,
+                   "payload": {"manifest_path": "/tmp/manifest.json",
+                               "exclusions_path": str(exclusions)}}
+    result = worker.perform(payload_job, idempotency_key="k1")
+    assert result.succeeded
+    assert result.destination["excluded_stale"] == 1
+    assert result.destination["overdue_live"] == 0
+    assert len(sent) == 0
+
+
+def test_worker_ccs_distinct_producer(tmp_path):
+    reg = registry()
+    reg["employees"]["Taylor Cimei"] = {
+        "role": "Producer", "email": "taylor@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    rows = parse_4359_csv(csv_bytes(row(producer="Taylor Cimei")))
+    worker, sent = make_worker(
+        tmp_path, queue_reader=lambda payload: rows,
+        directory_loader=lambda manifest: build_roster_maps(reg))
+    result = worker.perform(job(), idempotency_key="k1")
+    assert result.succeeded
+    email = sent[0]
+    assert email["cc"] == ["sandy@streetsmart.insurance", CC_CARLO,
+                           "taylor@streetsmart.insurance"]
+    assert "CC'ing Sandy Santana and Taylor Cimei" in email["text_body"]
+
+
+def test_load_exclusions_missing_file_is_empty(tmp_path):
+    assert load_exclusions(tmp_path / "nope.json") == set()
+
+
+def test_load_exclusions_corrupt_fails_closed(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(PolicyChangeReportContractError, match="not valid JSON"):
+        load_exclusions(bad)
+
+
+def test_apply_exclusions_matches_normalized_policy_and_date():
+    rows = [{"Policy Number": "S 2391821", "created_date": "2026-08-17"},
+            {"Policy Number": "OTHER1", "created_date": "2026-08-01"}]
+    kept, excluded = apply_exclusions(rows, {("S 2391821", "2026-08-17")})
+    assert [r["Policy Number"] for r in kept] == ["OTHER1"]
+    assert [r["Policy Number"] for r in excluded] == ["S 2391821"]
+
+
 def test_worker_marks_unverified_on_discussion_failure(tmp_path):
     def boom(applicant_id):
         raise RuntimeError("socket exploded")
@@ -409,6 +493,43 @@ def test_email_body_is_plain_and_concise():
     assert "status update" in body
     assert "CC'ing Sandy Santana" in body
     assert "S 2391821" in body
+
+
+def test_email_signs_as_roby():
+    items = [{
+        "Account Name": "SAPP Construction Corp", "Policy Number": "S 2391821",
+        "Master Company": "Selective Insurance", "Line Of Business": "Commercial Pkg",
+        "created_date": "2026-08-17", "age_days": 41,
+        "discussion": disc("Commercial Auto Policy Change Request", 8, "2026-09-25T10:00:00"),
+    }]
+    body = build_csr_report("Eimy Ramos", items, "Sandy Santana", TODAY)
+    assert body.rstrip().endswith("-Roby")
+    assert "on behalf of Carlo" not in body
+
+
+def test_email_names_producer_in_cc_line():
+    items = [{
+        "Account Name": "SAPP Construction Corp", "Policy Number": "S 2391821",
+        "Master Company": "Selective Insurance", "Line Of Business": "Commercial Pkg",
+        "created_date": "2026-08-17", "age_days": 41,
+        "discussion": disc("Commercial Auto Policy Change Request", 8, "2026-09-25T10:00:00"),
+    }]
+    body = build_csr_report("Eimy Ramos", items, "Sandy Santana", TODAY,
+                            cc_names=["Sandy Santana", "Taylor Cimei"])
+    assert "CC'ing Sandy Santana and Taylor Cimei so they're in the loop." in body
+
+
+def test_bullet_includes_change_request_subject():
+    items = [{
+        "Account Name": "SAPP Construction Corp", "Policy Number": "S 2391821",
+        "Master Company": "Selective Insurance", "Line Of Business": "Commercial Pkg",
+        "created_date": "2026-08-17", "age_days": 41,
+        "discussion": disc("Commercial Auto Policy Change Request - Add driver", 8,
+                           "2026-09-25T10:00:00"),
+    }]
+    body = build_csr_report("Eimy Ramos", items, "Sandy Santana", TODAY)
+    assert 'Change request: "Commercial Auto Policy Change Request - Add driver"' in body
+    assert "8 notes" in body
 
 
 # -- verifier -----------------------------------------------------------------------
