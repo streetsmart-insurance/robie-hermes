@@ -31,7 +31,7 @@ from .secrets import redact_text
 PLAYWRIGHT_BLOCKED = "PLAYWRIGHT_BLOCKED"
 HITL_OPERATOR = "Carlo"
 DEFAULT_VERTEX_LOCATION = "us-central1"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 _POSITIONAL_MARKERS = (".first", ".nth", ".last", "nth=", " >> nth")
 _SECRET_LABEL = re.compile(
     r"\b(password|passwd|pwd|mfa|otp|totp|one[- ]time|secret|token|ssn|fein)\b",
