@@ -118,6 +118,53 @@ class ExplodingSearcher:
         raise RuntimeError("search transport failed")
 
 
+class StatefulFakeDocStore:
+    """Writer + searcher sharing one document set, like EZLynx itself.
+
+    An uploaded name becomes searchable immediately, so the exact-name
+    read-back the filing requires can actually succeed in tests.
+    """
+
+    def __init__(self, names=()):
+        self.names = set(names)
+        self.write_calls = []
+
+    def write(self, applicant_id, document_name, file_bytes, **kw):
+        self.write_calls.append((applicant_id, document_name, kw))
+        self.names.add(document_name)
+        return {"document_id": "doc9", "read_back": True}
+
+    def search(self, applicant_id):
+        return {"results": [{"documentName": n} for n in self.names]}
+
+
+class StatefulFlakyDocStore(StatefulFakeDocStore):
+    """Flaky writer simulating 'server processed it but the response was lost'.
+
+    fail_names: document names that raise on their first write attempt.
+    landed_on_failure: when True the failed write still lands server-side
+        (the name becomes searchable) — the classic uncertain outcome.
+        When False the failed write truly did not land.
+    """
+
+    def __init__(self, fail_names=(), landed_on_failure=True, names=()):
+        super().__init__(names=names)
+        self.fail_names = set(fail_names)
+        self.failed = set()
+        self.landed_on_failure = landed_on_failure
+
+    def write(self, applicant_id, document_name, file_bytes, **kw):
+        self.write_calls.append((applicant_id, document_name, kw))
+        if (document_name in self.fail_names
+                and document_name not in self.failed):
+            self.failed.add(document_name)
+            if self.landed_on_failure:
+                self.names.add(document_name)  # server processed it
+            raise RuntimeError("transport failed")
+        self.names.add(document_name)
+        return {"document_id": "doc9", "read_back": True}
+
+
 class NamedFlakyDocWriter(FakeDocWriter):
     """Fails the POST once for the named documents, then behaves.
 
@@ -163,22 +210,38 @@ class FakeZapier:
         return SimpleNamespace(fired=True, reason="fake-reopened")
 
 
+class FakeTaskProver:
+    """Proves tasks exist, assigned to SCanales — like a real EZLynx read-back."""
+
+    def __init__(self, task_id="task123", assignee="SCanales"):
+        self.task_id = task_id
+        self.assignee = assignee
+        self.calls = []
+
+    def __call__(self, applicant_id, task_title):
+        self.calls.append((applicant_id, task_title))
+        return {"task_id": self.task_id, "assignee": self.assignee}
+
+
 def make_deps(tmp, **kw):
     os.makedirs(tmp, exist_ok=True)
     registry = TaskRegistry(os.path.join(tmp, "tasks.db"))
     store = FilingStore(os.path.join(tmp, "filing.db"))
     rows = [{"id": "d1", "title": "Certificate request - Big Client Inc",
              "noteCount": 2}]
+    doc_store = StatefulFakeDocStore()
     deps = FilingDeps(
         discussions_client=FakeDiscussions(rows),
         verifier=FakeVerifier(discussions=rows),
         note_writer=FakeNoteWriter(),
-        doc_writer=FakeDocWriter(),
-        doc_searcher=FakeDocSearcher(),
+        doc_writer=doc_store.write,
+        doc_searcher=doc_store.search,
         zapier=FakeZapier(),
         registry=registry,
         store=store,
+        task_prover=FakeTaskProver(),
     )
+    deps.doc_store = doc_store  # test hook: inspect write_calls / names
     for k, val in kw.items():
         setattr(deps, k, val)
     return deps
@@ -350,8 +413,8 @@ def test_file_record_uploads_pdf_attachments(tmp_path):
     assert res.status == FILED, res.hold_reasons
     # email PDF first, then the attachment
     assert res.document_ids == ["doc9", "doc9"]
-    assert deps.doc_writer.calls[0][1].startswith("COI request email - ")
-    assert deps.doc_writer.calls[1][1] == "COI email attachment - request.pdf"
+    assert deps.doc_store.write_calls[0][1].startswith("COI request email - ")
+    assert deps.doc_store.write_calls[1][1] == "COI email attachment - request.pdf"
 
 
 def test_file_record_uploads_email_pdf_first_and_all_attachment_types(tmp_path):
@@ -363,12 +426,12 @@ def test_file_record_uploads_email_pdf_first_and_all_attachment_types(tmp_path):
     res = file_record(make_record(attachments=[jpg, pdf]), make_verified(),
                       deps)
     assert res.status == FILED, res.hold_reasons
-    names = [c[1] for c in deps.doc_writer.calls]
+    names = [c[1] for c in deps.doc_store.write_calls]
     assert names[0].startswith("COI request email - ")
     assert names[0].endswith(".pdf")
     assert names[1] == "COI email attachment - photo.jpg"
     assert names[2] == "COI email attachment - request.pdf"
-    ctypes = [c[2]["content_type"] for c in deps.doc_writer.calls]
+    ctypes = [c[2]["content_type"] for c in deps.doc_store.write_calls]
     assert ctypes[0] == "application/pdf"
     assert ctypes[1] == "image/jpeg"
     assert ctypes[2] == "application/pdf"
@@ -388,13 +451,14 @@ def test_file_record_uncertain_upload_recovered_via_readback(tmp_path):
     """Defect 1: POST raised but the file landed. Read-back by name finds
     it — the code must NOT re-send."""
     att_name = "COI email attachment - photo.jpg"
-    writer = NamedFlakyDocWriter(fail_names={att_name})
-    searcher = FakeDocSearcher(names={att_name})
-    deps = make_deps(str(tmp_path), doc_writer=writer, doc_searcher=searcher)
+    doc_store = StatefulFlakyDocStore(fail_names={att_name},
+                                     landed_on_failure=True)
+    deps = make_deps(str(tmp_path), doc_writer=doc_store.write,
+                     doc_searcher=doc_store.search)
     jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
     res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
     assert res.status == FILED, res.hold_reasons
-    assert len(writer.calls) == 2  # email PDF + one attachment attempt only
+    assert len(doc_store.write_calls) == 2  # email PDF + one attempt only
     assert any("not re-sending" in e for e in res.evidence)
 
 
@@ -402,28 +466,31 @@ def test_file_record_uncertain_upload_absent_gets_one_resend(tmp_path):
     """Defect 1: POST raised and the file is verifiably absent — exactly one
     re-send is safe."""
     att_name = "COI email attachment - photo.jpg"
-    writer = NamedFlakyDocWriter(fail_names={att_name})
-    searcher = FakeDocSearcher(names=set())
-    deps = make_deps(str(tmp_path), doc_writer=writer, doc_searcher=searcher)
+    doc_store = StatefulFlakyDocStore(fail_names={att_name},
+                                     landed_on_failure=False)
+    deps = make_deps(str(tmp_path), doc_writer=doc_store.write,
+                     doc_searcher=doc_store.search)
     jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
     res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
     assert res.status == FILED, res.hold_reasons
-    assert len(writer.calls) == 3  # email PDF + failed attempt + one re-send
+    assert len(doc_store.write_calls) == 3  # email PDF + failed + one re-send
     assert any("re-send" in e for e in res.evidence)
 
 
 def test_file_record_uncertain_upload_unsearchable_is_unverified(tmp_path):
-    """Defect 1: POST raised and the read-back itself fails — fail closed as
-    UNVERIFIED. No blind re-send, no task, email stays unread."""
+    """Defect 1: the read-back itself fails — fail closed as UNVERIFIED.
+    No upload is attempted on an assumed-empty state, no task, email stays
+    unread."""
     att_name = "COI email attachment - photo.jpg"
-    writer = NamedFlakyDocWriter(fail_names={att_name})
-    deps = make_deps(str(tmp_path), doc_writer=writer,
+    doc_store = StatefulFlakyDocStore(fail_names={att_name},
+                                     landed_on_failure=True)
+    deps = make_deps(str(tmp_path), doc_writer=doc_store.write,
                      doc_searcher=ExplodingSearcher())
     jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
     res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
     assert res.status == "ERROR"
     assert any("UNVERIFIED" in h for h in res.hold_reasons)
-    assert len(writer.calls) == 2  # email PDF + one attempt — never retried
+    assert len(doc_store.write_calls) == 0  # never upload when unsearchable
     assert not deps.zapier.created  # no task on an unverified filing
 
 
@@ -438,6 +505,94 @@ def test_file_record_repeated_upload_failure_is_unverified(tmp_path):
     # email PDF: first attempt + exactly one re-send, then stop
     assert len(writer.calls) == 2
     assert not deps.zapier.created
+
+
+def test_file_record_skips_upload_when_name_already_present(tmp_path):
+    """Idempotency: an exact document name already in Documents is counted
+    as filed — the POST is never re-sent, so a retried filing cannot
+    create duplicates."""
+    doc_store = StatefulFakeDocStore(names={
+        "COI request email - COI-request.pdf",
+        "COI email attachment - photo.jpg",
+    })
+    deps = make_deps(str(tmp_path), doc_writer=doc_store.write,
+                     doc_searcher=doc_store.search)
+    jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
+    res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
+    assert res.status == FILED, res.hold_reasons
+    assert doc_store.write_calls == []  # nothing re-uploaded
+    assert any("already present" in e for e in res.evidence)
+
+
+def test_file_record_doc_failure_writes_no_note(tmp_path):
+    """Documents are proven before the note is written. If a document
+    cannot be filed, the filing fails with no note — a note must never
+    claim documents were filed when they were not."""
+    writer = AlwaysFailDocWriter()
+    doc_store = StatefulFakeDocStore()
+    deps = make_deps(str(tmp_path), doc_writer=writer,
+                     doc_searcher=doc_store.search)
+    res = file_record(make_record(), make_verified(), deps)
+    assert res.status == "ERROR"
+    assert any("UNVERIFIED" in h for h in res.hold_reasons)
+    assert not deps.note_writer.calls  # note never written
+    assert not deps.zapier.created  # no task on an unverified filing
+
+
+def test_file_record_reproves_applicant_before_each_write(tmp_path):
+    """The applicant identity guard runs immediately before every write.
+    If the discussion stops belonging to the applicant mid-filing, the
+    filing fails closed before the next write."""
+    rows = [{"id": "d1", "title": "Certificate request - Big Client Inc",
+             "noteCount": 2}]
+
+    class FlipFlopVerifier(FakeVerifier):
+        def __init__(self):
+            super().__init__(discussions=rows)
+            self.calls = 0
+
+        def get_discussions(self, applicant_id):
+            self.calls += 1
+            if self.calls >= 2:
+                # Discussion no longer belongs to the applicant.
+                return [{"id": "other", "title": "Something else"}]
+            return self._discussions
+
+    deps = make_deps(str(tmp_path))
+    deps.verifier = FlipFlopVerifier()
+    res = file_record(make_record(), make_verified(), deps)
+    assert res.status == "ERROR"
+    assert any("applicant proof failed" in h for h in res.hold_reasons)
+    # The document uploads (2nd write) must never have been attempted.
+    assert deps.doc_store.write_calls == []
+    assert not deps.note_writer.calls
+    assert not deps.zapier.created
+
+
+def test_file_record_task_without_prover_is_unverified(tmp_path):
+    """Carlo's rule: Zapier HTTP 200 is not proof. Without a task prover
+    the filing fails closed as UNVERIFIED — never FILED on an unproven
+    task."""
+    deps = make_deps(str(tmp_path))
+    deps.task_prover = None  # prover not yet implemented
+    res = file_record(make_record(), make_verified(), deps)
+    assert res.status == "ERROR"
+    assert any("UNVERIFIED" in h for h in res.hold_reasons)
+    assert any("task prover" in h for h in res.hold_reasons)
+    # Note and documents were filed; only the task proof is missing.
+    assert res.note_id == "n1"
+    assert len(deps.doc_store.write_calls) == 1  # email PDF
+
+
+def test_file_record_task_wrong_assignee_is_unverified(tmp_path):
+    """The task must be proven assigned to SCanales. A different assignee
+    fails closed as UNVERIFIED."""
+    deps = make_deps(str(tmp_path))
+    deps.task_prover = FakeTaskProver(task_id="task123", assignee="SomeoneElse")
+    res = file_record(make_record(), make_verified(), deps)
+    assert res.status == "ERROR"
+    assert any("UNVERIFIED" in h for h in res.hold_reasons)
+    assert any("SCanales" in h for h in res.hold_reasons)
 
 
 def test_file_record_uncertain_note_outcome_reads_back_first(tmp_path):

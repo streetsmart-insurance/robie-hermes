@@ -296,11 +296,17 @@ def _deps(note_result, discussions):
     def note_writer(applicant_id, note_text, **kw):
         return note_result
 
+    # Documents must be proven before the note is written; use a stateful
+    # store so the exact-name read-back succeeds.
+    from test_cert_filing import FakeTaskProver, StatefulFakeDocStore
+    doc_store = StatefulFakeDocStore()
     return FilingDeps(
         discussions_client=FakeDiscussions(discussions),
         verifier=None, note_writer=note_writer,
-        doc_writer=lambda *a, **k: {"document_id": "d1"},
-        zapier=FakeZapier(), registry=FakeRegistry(), store=_Store())
+        doc_writer=doc_store.write,
+        doc_searcher=doc_store.search,
+        zapier=FakeZapier(), registry=FakeRegistry(), store=_Store(),
+        task_prover=FakeTaskProver())
 
 
 def _record_and_verified(did_title):

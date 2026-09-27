@@ -34,8 +34,14 @@ Safety rules (non-negotiable):
 
 - Read-only until the match is proven: no note, document, or task is ever
   written for an unverified or ambiguous match.
-- The Gmail adapter is read-only by design; this driver never attempts
-  mark-read/mark-unread/send.
+- Gmail intake is read-only by design. The one write the driver ever makes
+  is removing the UNREAD label, and only after a FILED outcome (every
+  document and Steffany's task destination-proven). Anything UNVERIFIED
+  or errored stays unread. The modify call uses a separate
+  ``gmail.modify`` token (``CERT_GMAIL_MARK_READ=0`` disables it); the
+  read-only intake session is never widened. A mark-read failure never
+  fails a proven filing — the message simply stays unread and the
+  checkpoint still prevents re-filing.
 - GETs retry with backoff (inside the adapters); POSTs are never
   blind-retried — the filing library reads the destination back before
   any re-send, and fails UNVERIFIED when the read-back cannot complete.
@@ -415,17 +421,38 @@ def _reintake_message(gmail: Any, gmail_id: str, index: Any) -> Any:
     )
 
 
+def _mark_read_after_filed(gmail_id: str, mark_read_fn: Any,
+                           enabled: bool) -> tuple[bool, str]:
+    """Mark the source message read after a FILED outcome.
+
+    Returns ``(ok, reason)`` and never raises: a mark-read failure must
+    not fail an already destination-proven filing.
+    """
+    if not enabled:
+        return False, "disabled (CERT_GMAIL_MARK_READ=0)"
+    if mark_read_fn is None:
+        return False, "gmail adapter has no mark_read port"
+    try:
+        ok, reason = mark_read_fn(gmail_id)
+    except Exception as exc:
+        return False, f"mark_read raised: {type(exc).__name__}: {exc}"
+    return bool(ok), str(reason)
+
+
 def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                 verifier: Any, verifier_note: str, deps: Any,
                 retry_conn: sqlite3.Connection,
                 query: str, now: datetime,
                 intake_fn: Any = None, file_record_fn: Any = None,
+                mark_read_fn: Any = None,
                 deps_error: str = "",
                 ) -> dict[str, Any]:
     """Run one sweep. All ports are injected — tests pass fakes.
 
     ``intake_fn`` defaults to :func:`run_intake_once`; ``file_record_fn``
-    defaults to :func:`file_record`. Tests may substitute either.
+    defaults to :func:`file_record`; ``mark_read_fn`` defaults to the
+    gmail adapter's ``mark_read`` when it has one. Tests may substitute
+    any of them.
     """
     from .cert_intake_runner import run_intake_once
     from .cert_verification import VERIFIED, verify_record
@@ -433,6 +460,11 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
 
     intake_fn = intake_fn or run_intake_once
     file_record_fn = file_record_fn or file_record
+    if mark_read_fn is None:
+        mark_read_fn = getattr(gmail, "mark_read", None)
+    mark_read_enabled = _env(
+        "CERT_GMAIL_MARK_READ", "1").strip().lower() not in (
+            "0", "false", "no", "off")
 
     summary: dict[str, Any] = {
         "sweep_at": now.isoformat(timespec="seconds"),
@@ -441,7 +473,8 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
         "unverified": [],
         "errors": [],
         "stats": {"discovered": 0, "matched": 0, "held": 0,
-                  "retried": 0, "filed": 0, "unverified": 0},
+                  "retried": 0, "filed": 0, "unverified": 0,
+                  "marked_read": 0, "mark_read_failed": 0},
         "verifier": verifier_note,
         "applicant_index": index.stats() if hasattr(index, "stats") else {},
     }
@@ -531,6 +564,8 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
 
         if result.status == FILED:
             retry_clear(retry_conn, gmail_id)
+            marked_read, mark_reason = _mark_read_after_filed(
+                gmail_id, mark_read_fn, mark_read_enabled)
             summary["filed"].append({
                 "gmail_id": gmail_id,
                 "subject": record.subject,
@@ -541,8 +576,17 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                 "task_action": result.task_action,
                 "task_id": result.task_id,
                 "evidence": list(result.evidence),
+                "marked_read": marked_read,
+                "mark_read_reason": mark_reason,
             })
             summary["stats"]["filed"] += 1
+            if marked_read:
+                summary["stats"]["marked_read"] += 1
+            elif mark_read_enabled and mark_read_fn is not None:
+                # A mark-read failure is bookkeeping, not a sweep error:
+                # the filing is proven and checkpointed, the message
+                # simply stays unread for the next run to see.
+                summary["stats"]["mark_read_failed"] += 1
         else:
             mark_unverified(
                 gmail_id, record.subject, verified.applicant_id,
@@ -557,6 +601,7 @@ def run_sweep(*, gmail: Any | None = None, checkpoint: Any | None = None,
               verifier_note: str = "", deps: Any | None = None,
               now: datetime | None = None,
               intake_fn: Any = None, file_record_fn: Any = None,
+              mark_read_fn: Any = None,
               ) -> dict[str, Any]:
     """Build the production ports and run one sweep.
 
@@ -604,6 +649,7 @@ def run_sweep(*, gmail: Any | None = None, checkpoint: Any | None = None,
             verifier=verifier, verifier_note=verifier_note, deps=deps,
             retry_conn=retry_conn, query=query, now=moment,
             intake_fn=intake_fn, file_record_fn=file_record_fn,
+            mark_read_fn=mark_read_fn,
             deps_error=deps_error)
     finally:
         retry_conn.close()
