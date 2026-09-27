@@ -33,13 +33,19 @@ VERIFIED_REPORTS: dict[str, ReportSpec] = {
     "4372": ReportSpec(
         "4372", "Mortgagee", True, ("loan_number",), filter_name="ROBIE Intake"
     ),
+    # 4744 supersedes 4372 as the mortgagee source (Carlo 2026-09-27):
+    # policy-expiration report (Homeowners + Flood), not the task export.
+    "4744": ReportSpec(
+        "4744", "Mortgagee", True, ("policy_number",),
+        filter_name="Mortgagee Verification Queue - ROBIE",
+    ),
     "4246": ReportSpec(
         "4246", "Audit", True, ("audit_id",)
     ),
     "4359": ReportSpec(
         "4359",
         "Policy Change",
-        False,
+        True,
         ("request_id",),
         filter_name="Open Requests - ROBIE",
     ),

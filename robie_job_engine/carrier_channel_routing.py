@@ -1,104 +1,74 @@
-"""Carrier -> retrieval-channel routing for the verification workers.
+"""Carrier channel routing: portal-first contact ladder per carrier.
 
-Ports ``data/carrier_directory.json`` (29 carriers, channels
-``PORTAL`` / ``EMAIL`` / ``EMAIL_ASK_PORTAL``) from the renewal-automation-system
-into ``robie_job_engine/data/carrier_directory.json``, with a loader and the
-original fuzzy name match.
+Reads the curated directory at robie_job_engine/data/carrier_directory.json
+(31 carriers, added PR #607). route_carrier() resolves a Master Company
+name to a routing dict the verification workers consume:
 
-This is intentionally separate from :mod:`carrier_directory` (the DB-backed
-carrier/endpoint/credential/LOB-rule store): that module never covered
-carrier-to-channel routing, so this adds the missing piece without duplicating
-it.
+    {"channel": "PORTAL"|"EMAIL"|"EMAIL_ASK_PORTAL",
+     "portal_url": ..., "underwriter_email": ...,
+     "phone": ..., "phone_label": ..., "notes": ...}
+
+Unknown carriers fail CLOSED to a HOLD route ({"channel": "HOLD"}) — the
+worker then holds the item for carrier-desk contact confirmation instead
+of planning outreach against a guessed channel. Matching is
+case-insensitive on the full name, then on distinctive tokens.
 """
-
 from __future__ import annotations
 
 import json
-import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("robie.carrier_channel_routing")
-
-CHANNELS = frozenset({"PORTAL", "EMAIL", "EMAIL_ASK_PORTAL"})
-
 DIRECTORY_PATH = Path(__file__).resolve().parent / "data" / "carrier_directory.json"
 
-DEFAULT_UNKNOWN_CARRIER = {
-    "channel": "EMAIL",
-    "notes": "Unregistered carrier; default to email outreach.",
+DEFAULT_ROUTE: dict[str, Any] = {
+    "channel": "HOLD",
+    "reason": "carrier not in the carrier directory — confirm the carrier "
+              "desk contact in EZLynx before any outreach",
 }
 
 
 @lru_cache(maxsize=1)
-def load_channel_directory() -> dict[str, dict[str, Any]]:
-    """Load the packaged 29-carrier channel directory. Fail closed on corruption."""
+def _directory() -> dict[str, dict[str, Any]]:
     try:
-        data = json.loads(DIRECTORY_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            f"carrier channel directory is missing: {DIRECTORY_PATH}"
-        ) from exc
-    except ValueError as exc:
-        raise RuntimeError(
-            f"carrier channel directory is corrupt: {DIRECTORY_PATH}: {exc}"
-        ) from exc
-    if not isinstance(data, dict) or not data:
-        raise RuntimeError(
-            f"carrier channel directory is empty or malformed: {DIRECTORY_PATH}"
-        )
-    cleaned: dict[str, dict[str, Any]] = {}
-    for name, entry in data.items():
-        if not isinstance(entry, dict):
-            raise RuntimeError(
-                f"carrier channel directory entry {name!r} is malformed"
-            )
-        channel = str(entry.get("channel") or "").strip().upper()
-        if channel not in CHANNELS:
-            raise RuntimeError(
-                f"carrier channel directory entry {name!r} has unknown "
-                f"channel {channel!r}"
-            )
-        item = dict(entry)
-        item["channel"] = channel
-        cleaned[str(name)] = item
-    return cleaned
+        with open(DIRECTORY_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def list_carriers() -> list[str]:
-    """Sorted carrier names in the directory."""
-    return sorted(load_channel_directory())
+def _normalize(name: str) -> str:
+    return " ".join(str(name or "").casefold().split())
 
 
-def route_carrier(carrier_name: str | None) -> dict[str, Any]:
-    """Return the channel config for a carrier name (fuzzy match).
+def route_carrier(carrier: str) -> dict[str, Any]:
+    """Return the contact route for a carrier name.
 
-    Exact match first, then case-insensitive/partial match (ported from the
-    original ``CarrierRoutingMatrix.get_carrier_config``). Unknown or blank
-    names fall back to ``EMAIL`` — never raise for an unregistered carrier, so
-    workers can always proceed to email outreach.
+    Exact (case-insensitive) match first; then a token-subset match so
+    "NJCRIB" finds "NJCRIB - Hartford Assigned Risk". Unknown carriers
+    get the fail-closed HOLD default — never a guessed channel or portal.
     """
-    directory = load_channel_directory()
-    if not carrier_name or not str(carrier_name).strip():
-        return dict(DEFAULT_UNKNOWN_CARRIER)
-    name = str(carrier_name).strip()
-    if name in directory:
-        return dict(directory[name])
-    lowered = name.casefold()
-    for key, config in directory.items():
-        key_lowered = key.casefold()
-        if key_lowered in lowered or lowered in key_lowered:
-            logger.info("carrier %r fuzzy-matched to directory entry %r", name, key)
-            return dict(config)
-    logger.info("carrier %r not in directory; defaulting to EMAIL", name)
-    return dict(DEFAULT_UNKNOWN_CARRIER)
+    directory = _directory()
+    want = _normalize(carrier)
+    if not want:
+        return dict(DEFAULT_ROUTE)
+    for name, route in directory.items():
+        if _normalize(name) == want:
+            return dict(route)
+    want_tokens = set(want.split())
+    for name, route in directory.items():
+        name_tokens = set(_normalize(name).split())
+        if want_tokens and want_tokens <= name_tokens:
+            return dict(route)
+    # Distinctive single-token fallback (e.g. "hartford" in a longer name).
+    for name, route in directory.items():
+        if want in _normalize(name) or _normalize(name) in want:
+            return dict(route)
+    return dict(DEFAULT_ROUTE)
 
 
-def portal_carriers() -> list[str]:
-    """Carrier names routed to portal retrieval."""
-    return sorted(
-        name
-        for name, config in load_channel_directory().items()
-        if config.get("channel") == "PORTAL"
-    )
+def clear_cache() -> None:
+    """Test hook: drop the cached directory."""
+    _directory.cache_clear()

@@ -202,6 +202,25 @@ EXPECTED_HEADERS: dict[str, list[str]] = {
         "Department",
         "Service Team",
     ],
+    # 4744 Mortgagee Verification Queue - ROBIE: 8 cols. This is the
+    # CORRECTED mortgagee source (Carlo 2026-09-27): a policy-expiration
+    # report (Homeowners + Flood, Active, expiring within the next 45
+    # days), NOT the old 32-col task-based report 4372. Verified
+    # 2026-09-27 against the real 2026-09-27 05:00 EDT scheduled delivery
+    # (Gmail 1a0e2187fc894d5a): exact 8-column header match, 187 rows.
+    # NOTE: the scheduled CSV export uses the base field names — the
+    # Looker viewer shows them prefixed ("Policy Data ..."), the export
+    # does not. Fingerprint against the EXPORT headers.
+    "4744": [
+        "Account Name",
+        "Policy Number",
+        "Master Company",
+        "Line Of Business",
+        "Premium - Annualized",
+        "Assigned Producer",
+        "CSR",
+        "Policy Expiration Date",
+    ],
     # 4359 Policy Change Request Confirmation Queue - ROBIE: 19 cols
     # (viewer had shown 18 — the export adds "Change Request Created
     # Date"); 2026-09-19 test CSV had 69 data rows, no totals row.
@@ -232,6 +251,7 @@ REPORT_DISPLAY_NAMES: dict[str, str] = {
     "4247": "Manual Renewal Queue - ROBIE",
     "4246": "Audit Verification Queue - ROBIE",
     "4372": "Mortgagee Verification Queue - ROBIE",
+    "4744": "Mortgagee Verification Queue - ROBIE",
     "4359": "Policy Change Request Confirmation Queue - ROBIE",
 }
 
@@ -246,6 +266,7 @@ SCHEMA_VERIFIED: dict[str, bool] = {
     "4247": True,
     "4246": True,
     "4372": True,
+    "4744": True,
     "4359": True,
 }
 
@@ -259,6 +280,7 @@ IDENTITY_COLUMNS: dict[str, str] = {
     "4247": "Policy Number",
     "4246": "Policy Number",
     "4372": "Policy Number",
+    "4744": "Policy Number",
     "4359": "Policy Number",
 }
 
@@ -629,7 +651,7 @@ def ingest_daily_reports(
     service: Any,
     *,
     day: date,
-    report_ids: Sequence[str] = ("4247", "4246", "4372", "4359"),
+    report_ids: Sequence[str] = ("4247", "4246", "4744", "4359"),
     subject_contains: str = DEFAULT_SUBJECT_CONTAINS,
     allowed_senders: Sequence[str] = DEFAULT_ALLOWED_SENDERS,
     allowed_sender_domains: Sequence[str] = (),
@@ -749,7 +771,7 @@ def _self_test() -> None:
         else:
             failures.append(f"{name}: expected GmailReportIngestionError, got success")
 
-    expected_counts = {"4247": 22, "4246": 24, "4372": 32, "4359": 19}
+    expected_counts = {"4247": 22, "4246": 24, "4372": 32, "4744": 8, "4359": 19}
 
     for report_id, count in expected_counts.items():
         def make_ok(rid=report_id, want=count):
@@ -866,7 +888,7 @@ def _self_test() -> None:
     )
 
     def identity_other_reports_per_policy():
-        for rid in ("4247", "4246", "4372"):
+        for rid in ("4247", "4246", "4372", "4744"):
             rows, _ = parse_and_validate_csv(
                 rid, _synthetic_csv(rid, n_rows=1), source_label="selftest"
             )

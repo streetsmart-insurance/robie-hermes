@@ -3,7 +3,7 @@
 Process truth: ~/workspace/robie-manual-ops/worker-sops.md (SOPs) and
 call-pack.md (Carlo's approved call scripts, 2026-09-13). Identity rules:
 gmail_report_ingestion.identity_value (Policy Number per policy for
-4247/4246/4372; per request for 4359 — Carlo 2026-09-19).
+4247/4246/4372/4744; per request for 4359 — Carlo 2026-09-19).
 
 Pipeline per worker run:
   1. INGEST — today's validated CSV via gmail_report_ingestion
@@ -17,6 +17,10 @@ Pipeline per worker run:
   4. NEXT ACTION — per-SOP contact ladder: PORTAL first, then EMAIL, then
      CALL. Carriers/MGAs/mortgage companies ONLY — never clients.
      Business hours only (weekdays 9 AM-5 PM ET). Never bind/quote/cancel.
+     4372/4744 runs mortgagee_enrichment (Additional Interests read,
+     lender + loan resolution, then lender verification checks;
+     dry-run by default) before planning. Portal/Bland stay out of that
+     scaffold. HITL on source conflict; skip only on proven-zero empty table.
   5. EVIDENCE — every action records destination evidence; in dry-run the
      planned action is recorded as evidence of intent.
   6. DIGEST — done / not done / pending + reason, per policy, grouped by
@@ -44,9 +48,25 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from collections.abc import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gmail_report_ingestion as ing  # noqa: E402
+try:
+    from . import carrier_channel_routing as _routing  # noqa: E402
+except ImportError:  # pragma: no cover - script mode
+    import carrier_channel_routing as _routing  # noqa: E402
+try:
+    from . import mortgagee_enrichment as menc  # noqa: E402
+except ImportError:  # script-style: python robie_job_engine/verification_workers.py
+    import mortgagee_enrichment as menc  # noqa: E402
+try:
+    from . import mortgagee_live_ports as _live_ports  # noqa: E402
+except ImportError:  # script-style
+    try:
+        import mortgagee_live_ports as _live_ports  # noqa: E402
+    except ImportError:
+        _live_ports = None  # type: ignore[assignment]  # pragma: no cover
 
 WORKERS = {
     "4247": {
@@ -63,7 +83,16 @@ WORKERS = {
         "name": "Mortgagee Verifications",
         "queue": "Mortgagee Verification Queue - ROBIE",
         "timing": "verify + deliver dec package 30-45 days BEFORE expiration; "
-                  "7-day payment sweep after delivery",
+                  "7-day payment sweep after delivery "
+                  "(legacy task-based report; superseded by 4744)",
+    },
+    "4744": {
+        "name": "Mortgagee Verifications",
+        "queue": "Mortgagee Verification Queue - ROBIE",
+        "timing": "verify + deliver dec package 30-45 days BEFORE expiration; "
+                  "7-day payment sweep after delivery "
+                  "(policy-expiration report: Homeowners + Flood, Active, "
+                  "expiring within 45 days; worker narrows to 30-45)",
     },
     "4359": {
         "name": "Policy Change Checks",
@@ -174,7 +203,10 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
     dup_counts: dict[str, int] = {}
     for row in ingested.rows:
         key = ing.identity_value(report_id, row)
-        policy = _cell(row, "Policy Number")
+        # 4744's scheduled export uses base field names; the Looker viewer
+        # shows them prefixed ("Policy Data ..."). Accept both, preferring
+        # the export names.
+        policy = _cell(row, "Policy Number", "Policy Data Policy Number")
         if report_id != "4359" and key in seen:
             dup_counts[key] = dup_counts.get(key, 1) + 1
             continue
@@ -182,13 +214,16 @@ def build_work_items(report_id: str, ingested: ing.IngestedReport) -> list[WorkI
             key=key,
             report_id=report_id,
             policy_number=policy,
-            account_name=_cell(row, "Account Name"),
+            account_name=_cell(row, "Account Name",
+                               "Applicant Data Account Name"),
             department=_cell(row, "Department", "Branch") or "Unassigned",
-            carrier=_cell(row, "Master Company"),
-            producer=_cell(row, "Assigned Producer"),
-            csr=_cell(row, "CSR"),
+            carrier=_cell(row, "Master Company", "Policy Data Master Company"),
+            producer=_cell(row, "Assigned Producer",
+                            "Applicant Data Assigned Producer"),
+            csr=_cell(row, "CSR", "Applicant Data CSR"),
             effective_date=_cell(row, "Policy Effective Date", "Effective Date"),
-            expiration_date=_cell(row, "Policy Expiration Date"),
+            expiration_date=_cell(row, "Policy Expiration Date",
+                                  "Policy Data Policy Expiration Date"),
             row=dict(row),
         )
         # 4246's daily feed (4360 format) carries Effective Date directly;
@@ -224,6 +259,69 @@ def _4372_closed_reason(item: WorkItem) -> str | None:
         if closed_by:
             detail += f" by {closed_by}"
         return f"task already {detail} — no work remaining"
+    return None
+
+
+# --- 4744 mortgagee window: 30-45 days before expiration --------------------
+
+MORTGAGEE_WINDOW_MIN_DAYS = 30
+MORTGAGEE_WINDOW_MAX_DAYS = 45
+
+
+def _4744_window_reason(item: WorkItem, today: date) -> str | None:
+    """Return the exclusion reason when a 4744 row is outside the 30-45d
+    window; None = keep.
+
+    Report 4744's rolling filter delivers everything expiring within 45
+    days. The worker narrows to Carlo's 30-45 day mortgagee window:
+    earlier than 30 days is too soon to verify payment, and anything past
+    expiration (or already inside 30 days) belongs to a different urgency.
+    Unparseable expiration dates are kept (never silently drop work on a
+    date-shape surprise) and flagged in the reason downstream.
+    """
+    exp = parse_csv_date(item.expiration_date)
+    if exp is None:
+        return None
+    days = (exp - today).days
+    if days < MORTGAGEE_WINDOW_MIN_DAYS:
+        return (f"expires in {days}d ({exp.isoformat()}) — inside "
+                f"{MORTGAGEE_WINDOW_MIN_DAYS}d, outside the 30-45d mortgagee window")
+    if days > MORTGAGEE_WINDOW_MAX_DAYS:
+        return (f"expires in {days}d ({exp.isoformat()}) — beyond "
+                f"{MORTGAGEE_WINDOW_MAX_DAYS}d, outside the 30-45d mortgagee window")
+    return None
+
+
+def _4744_mortgagee_eligibility_reason(item: WorkItem,
+                                       facts: dict | None) -> str | None:
+    """Return the exclusion reason when a 4744 row can never need mortgagee
+    verification; None = keep.
+
+    Two proven exclusions (Carlo 2026-09-27, from the live read of the
+    Sharpe policy NJH00002121393 — sub-LOB "Renters", payor "Insured"):
+    - sub-LOB is Renters: a renter's policy has no mortgagee by definition.
+    - policy payor is Insured: the insured pays directly, so there is no
+      lender payment to verify and no lender portal to upload to.
+
+    The 4744 CSV carries neither field (its LOB column is only
+    "Homeowners"/"Flood"), so `facts` comes from a policy summary page
+    read: {"sub_lob": ..., "payor": ...} via
+    mortgagee_live_ports.parse_policy_billing_facts.
+
+    Fail-closed: `facts` None, or either field blank/unreadable, keeps the
+    policy — exclusion happens only on a positive read of the field.
+    Unknown payor values are kept too (only the proven "Insured" excludes).
+    """
+    if not facts:
+        return None
+    sub_lob = str(facts.get("sub_lob") or "").strip()
+    if sub_lob and "renter" in sub_lob.lower():
+        return (f"sub-LOB is {sub_lob} — renter's policy, no mortgagee "
+                f"possible; excluded from the mortgagee queue")
+    payor = str(facts.get("payor") or "").strip()
+    if payor and payor.lower() == "insured":
+        return (f"policy payor is {payor} — insured pays directly, no lender "
+                f"payment to verify; excluded from the mortgagee queue")
     return None
 
 
@@ -354,7 +452,13 @@ def _dept(item: WorkItem) -> str:
 
 
 def plan_4247(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
-    """Manual renewal: most urgent first; Progressive BOR download check."""
+    """Manual renewal: most urgent first; Progressive BOR download check.
+
+    Channel comes from carrier_channel_routing (Carlo 2026-09-15: EZLynx
+    directory for identity, packaged JSON for channel). Never hardcode
+    "portal" — NJCRIB assigned-risk carriers are EMAIL_ASK_PORTAL.
+    Every plan names the policy number and expiration date.
+    """
     exp = parse_csv_date(item.expiration_date)
     if exp is None:
         return (ActionPlan("verify",
@@ -368,25 +472,61 @@ def plan_4247(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
                            target=item.carrier),
                 "blocked", "already expired — needs review")
     carrier = item.carrier or "carrier"
+    pol_ref = f"Policy {item.policy_number}" if item.policy_number else "policy"
+    acct = f" ({item.account_name})" if item.account_name else ""
+    exp_txt = f"Expires {exp.isoformat()} ({days} days)"
     if "progressive" in carrier.casefold():
         # Carlo 2026-09-14: Progressive manuals are BOR takeovers — the
         # renewal should download automatically.
         return (ActionPlan("verify",
-                           "Progressive BOR takeover — check whether the renewal downloaded into "
-                           "EZLynx. If downloaded: done via download. If not: chase it.",
+                           f"Progressive BOR takeover — check whether the renewal downloaded into "
+                           f"EZLynx. If downloaded: done via download. If not: chase it. "
+                           f"{pol_ref}{acct}. {exp_txt}.",
                            target=carrier, due=today.isoformat()),
                 "due_now", f"expires in {days}d — check EZLynx download first")
-    return (ActionPlan("portal",
-                       f"Pull renewal packet from {carrier} portal; if missing, email then call. "
-                       f"Expires in {days} days.",
-                       target=carrier, due=today.isoformat()),
+    route = _routing.route_carrier(carrier)
+    channel = str(route.get("channel") or "HOLD").upper()
+    if channel == "HOLD":
+        # Unknown carrier: fail closed. No outreach is planned against a
+        # guessed channel; the item waits for carrier-desk confirmation.
+        hold_reason = str(route.get("reason") or
+                          "carrier not in the carrier directory").strip()
+        return (ActionPlan("verify",
+                           f"Carrier '{carrier}' is unknown — {hold_reason}. "
+                           f"Confirm the carrier desk contact in EZLynx before "
+                           f"outreach. {pol_ref}{acct}. {exp_txt}.",
+                           target=carrier),
+                "blocked", f"unknown carrier — held: {hold_reason}")
+    if channel == "PORTAL":
+        portal_url = str(route.get("portal_url") or "").strip()
+        url_txt = f" ({portal_url})" if portal_url else ""
+        return (ActionPlan("portal",
+                           f"Pull renewal packet for {pol_ref}{acct} from {carrier} portal{url_txt}; "
+                           f"if missing, email then call. {exp_txt}.",
+                           target=carrier, due=today.isoformat()),
+                "due_now", f"expires in {days}d — renewal packet needed")
+    # EMAIL or EMAIL_ASK_PORTAL: email the underwriter first.
+    email = str(route.get("underwriter_email") or "").strip()
+    email_txt = email if email else "underwriter"
+    ask_portal = "; ask if a self-service portal is available" if channel == "EMAIL_ASK_PORTAL" else ""
+    kind = "email"
+    return (ActionPlan(kind,
+                       f"Email {email_txt} for the renewal packet for {pol_ref}{acct}{ask_portal}; "
+                       f"if no reply in 2 business days, call. {exp_txt}.",
+                       target=email_txt, due=today.isoformat()),
             "due_now", f"expires in {days}d — renewal packet needed")
 
 
 def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str]:
-    """Audit: day-30 entry, follow-ups every 3-5 business days, day-45 enforce."""
+    """Audit: day-30 entry, follow-ups every 3-5 business days, day-45 enforce.
+
+    Channel and phone come from carrier_channel_routing. Every plan names
+    the policy number so the caller has it in hand.
+    """
     renewal = parse_csv_date(entry.renewal_date)
     carrier = entry.carrier or "carrier"
+    pol_ref = f"Policy {entry.policy_number}" if entry.policy_number else "policy"
+    acct = f" ({entry.account_name})" if entry.account_name else ""
     if renewal is None:
         return (ActionPlan("verify",
                            "Renewal date unreadable — confirm the renewed term in EZLynx",
@@ -395,8 +535,8 @@ def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str
     days_since = (today - renewal).days
     if days_since >= 45 and not entry.escalated:
         return (ActionPlan("escalate",
-                           f"Day {days_since}: ENFORCE — call the carrier audit desk directly, cite "
-                           "non-compliance surcharge risk, log the escalation",
+                           f"Day {days_since}: ENFORCE — call the carrier audit desk directly for "
+                           f"{pol_ref}{acct}, cite non-compliance surcharge risk, log the escalation",
                            target=carrier, due=today.isoformat()),
                 "due_now", f"day {days_since} — escalation due")
     if entry.last_follow_up:
@@ -408,31 +548,107 @@ def plan_4246(entry: AuditQueueEntry, today: date) -> tuple[ActionPlan, str, str
                                f"{entry.next_due or 'per cadence'}",
                                target=carrier, due=entry.next_due),
                     "waiting", f"waiting — next follow-up {entry.next_due or 'due'}")
-    pie = "pie" in carrier.casefold()
-    if pie:
+    route = _routing.route_carrier(carrier)
+    channel = str(route.get("channel") or "HOLD").upper()
+    if channel == "HOLD":
+        # Unknown carrier: fail closed — no call or email is planned
+        # against a guessed channel.
+        hold_reason = str(route.get("reason") or
+                          "carrier not in the carrier directory").strip()
+        return (ActionPlan("verify",
+                           f"Carrier '{carrier}' is unknown — {hold_reason}. "
+                           f"Confirm the carrier desk contact in EZLynx before "
+                           f"outreach. {pol_ref}{acct}.",
+                           target=carrier),
+                "blocked", f"unknown carrier — held: {hold_reason}")
+    phone = str(route.get("phone") or "").strip()
+    phone_label = str(route.get("phone_label") or "").strip()
+    day_txt = f"day {days_since} — audit papers outstanding"
+    if phone:
+        who = f"{carrier} {phone_label} {phone}".strip() if phone_label else f"{carrier} {phone}"
         return (ActionPlan("call",
-                           "Pie Insurance Partner Support 855-965-1840 — ask for the final payroll "
-                           "audit statement; have it emailed to robie@streetsmart.insurance",
-                           target="Pie Insurance 855-965-1840", due=today.isoformat()),
-                "due_now", f"day {days_since} — audit papers outstanding")
-    return (ActionPlan("portal",
-                       f"Check {carrier} portal for the final payroll audit statement; "
-                       "then email, then call. Request it at robie@streetsmart.insurance",
-                       target=carrier, due=today.isoformat()),
-            "due_now", f"day {days_since} — audit papers outstanding")
+                           f"{who} — ask for the final payroll audit statement for {pol_ref}{acct}; "
+                           f"have it emailed to robie@streetsmart.insurance",
+                           target=who, due=today.isoformat()),
+                "due_now", day_txt)
+    if channel == "PORTAL":
+        portal_url = str(route.get("portal_url") or "").strip()
+        url_txt = f" ({portal_url})" if portal_url else ""
+        return (ActionPlan("portal",
+                           f"Check {carrier} portal{url_txt} for the final payroll audit statement "
+                           f"for {pol_ref}{acct}; then email, then call. "
+                           f"Request it at robie@streetsmart.insurance",
+                           target=carrier, due=today.isoformat()),
+                "due_now", day_txt)
+    # EMAIL / EMAIL_ASK_PORTAL: email first, then call.
+    email = str(route.get("underwriter_email") or "").strip() or "underwriter"
+    ask_portal = "; ask if a portal download is available" if channel == "EMAIL_ASK_PORTAL" else ""
+    return (ActionPlan("email",
+                       f"Email {email} for the final payroll audit statement for {pol_ref}{acct}"
+                       f"{ask_portal}; if no reply in 2 business days, call. "
+                       f"Request it at robie@streetsmart.insurance",
+                       target=email, due=today.isoformat()),
+            "due_now", day_txt)
 
 
-def plan_4372(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
-    """Mortgagee: lender/loan are manual enrichment — flag until provided."""
-    due = parse_csv_date(_cell(item.row, "Task Due Date"))
-    due_txt = f"task due {due.isoformat()}" if due else "no task due date"
-    return (ActionPlan("verify",
-                       "Lender name and loan number are NOT in the export — add them manually, "
-                       "verify the lender of record, then pull the dec and deliver via the "
-                       "lender portal (agent section, no login; never SSN). "
-                       f"({due_txt})",
-                       target="lender TBD", due=today.isoformat()),
-            "blocked", "lender/loan not on file — manual enrichment needed")
+def plan_4372(
+    item: WorkItem,
+    today: date,
+    enrichment: menc.EnrichmentResult | None = None,
+    *,
+    lender_checks: list[menc.MortgageLenderCheck] | None = None,
+    verify_lender_fn=None,
+    verify_of_record_fn=None,
+    producer_gate_fn=None,
+) -> tuple[ActionPlan, str, str]:
+    """Mortgagee: structured enrichment first, then lender input checks.
+
+    Closed tasks never reach this planner (see ``_4372_closed_reason``).
+    ``ready`` runs ``verify_lender`` per mortgage (not blocked forever for
+    missing lender/loan). Producer gate still blocks delivery. Portal /
+    Bland stay out of this scaffold. HITL on source conflict. Proven-zero
+    is an explicit empty result, never a silent skip.
+
+    For 4744 (policy-expiration report) there is no task: the due context
+    is the policy expiration date and the 30-45d window.
+    """
+    if item.report_id == "4744" or not _cell(item.row, "Task Due Date"):
+        exp = parse_csv_date(item.expiration_date)
+        if exp is not None:
+            days = (exp - today).days
+            due_txt = f"expires {exp.isoformat()} ({days} days out)"
+        else:
+            due_txt = "expiration date unreadable"
+    else:
+        due = parse_csv_date(_cell(item.row, "Task Due Date"))
+        due_txt = f"task due {due.isoformat()}" if due else "no task due date"
+    result = enrichment
+    if result is None:
+        applicant_id = _cell(item.row, "Applicant ID")
+        result = menc.enrich_work_item(
+            policy_number=item.policy_number,
+            applicant_id=applicant_id,
+            row=item.row,
+            ports=menc.EnrichmentPorts(),
+            dry_run=True,
+        )
+    kind, detail, target, status, reason = menc.plan_from_enrichment(
+        result,
+        due_txt=due_txt,
+        property_zip=menc.property_zip_from_row(item.row) or (
+            result.property_zip if result is not None else ""
+        ),
+        portal_lookup=item.row.get("portal_lender_lookup")
+        if isinstance(item.row.get("portal_lender_lookup"), dict)
+        else None,
+        producer_state=item.row,
+        lender_checks=lender_checks,
+        verify_lender_fn=verify_lender_fn,
+        verify_of_record_fn=verify_of_record_fn,
+        producer_gate_fn=producer_gate_fn,
+    )
+    return (ActionPlan(kind, detail, target=target, due=today.isoformat()),
+            status, reason)
 
 
 def plan_4359(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
@@ -459,7 +675,8 @@ def plan_4359(item: WorkItem, today: date) -> tuple[ActionPlan, str, str]:
             "due_now", f"open {age_bd} business days — follow-up due")
 
 
-PLANNERS = {"4247": None, "4246": None, "4372": None, "4359": None}  # wired in run_worker
+PLANNERS = {"4247": None, "4246": None, "4372": None, "4744": None,
+            "4359": None}  # wired in run_worker
 
 
 # --- run --------------------------------------------------------------------
@@ -479,6 +696,7 @@ class WorkerRun:
     evidence: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     excluded_stale: list = field(default_factory=list)
+    enrichment: list = field(default_factory=list)
 
 
 def _execute_live_action(pa: PlannedAction, item: WorkItem | None) -> str:
@@ -558,8 +776,19 @@ def _record_evidence(run: WorkerRun, action: PlannedAction, note: str) -> None:
 
 def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
                queue_dir: str = ".", csv_bytes: bytes | None = None,
-               gmail_service=None, allow_unverified: bool = False) -> WorkerRun:
-    """Run one verification worker for one day. Fail-closed throughout."""
+               gmail_service=None, allow_unverified: bool = False,
+               enrichment_ports: menc.EnrichmentPorts | None = None,
+               test_enrichment: bool = False,
+               browser_read: bool = False,
+               policy_facts_fn: Callable[[str], dict | None] | None = None,
+               ) -> WorkerRun:
+    """Run one verification worker for one day. Fail-closed throughout.
+
+    policy_facts_fn: optional callable taking a policy number and returning
+    {"sub_lob": ..., "payor": ...} (or None when unreadable), used only by
+    the 4744 mortgagee queue to exclude renter's policies and insured-pay
+    policies. None (default) preserves current behavior exactly.
+    """
     worker = WORKERS[report_id]["name"]
     run = WorkerRun(report_id=report_id, worker=worker,
                     day=day.isoformat(), mode=mode,
@@ -581,9 +810,18 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
         )
     elif gmail_service is not None:
         allow_unverified = report_id == "4359"
-        got = ing.ingest_daily_reports(gmail_service, day=day,
-                                       report_ids=[report_id],
-                                       allow_unverified=allow_unverified)
+        try:
+            got = ing.ingest_daily_reports(gmail_service, day=day,
+                                           report_ids=[report_id],
+                                           allow_unverified=allow_unverified)
+        except ing.GmailReportIngestionError:
+            raise
+        except Exception as exc:
+            # Gmail/API outage: typed and loud, never a silent empty run.
+            raise ing.GmailReportIngestionError(
+                f"gmail ingest failed for {report_id} on {day.isoformat()}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         ingested = got[report_id]
     else:
         raise ing.GmailReportIngestionError(
@@ -601,6 +839,34 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
         kept: list[WorkItem] = []
         for item in items:
             reason = _4372_closed_reason(item)
+            if reason:
+                run.excluded_stale.append({
+                    "item_key": item.key,
+                    "policy_number": item.policy_number,
+                    "account_name": item.account_name,
+                    "reason": reason,
+                })
+            else:
+                kept.append(item)
+        items = kept
+
+    # 2c. 4744 mortgagee window. The report's rolling filter delivers
+    # everything expiring within 45 days; the worker keeps only Carlo's
+    # 30-45 day window. Out-of-window rows are recorded with a reason,
+    # never silently dropped.
+    #
+    # 2d. 4744 mortgagee eligibility. Renter's policies (sub-LOB Renters)
+    # and insured-pay policies (payor Insured) can never need mortgagee
+    # verification — excluded with a reason when policy_facts_fn supplies
+    # the page facts. Without the callable, this step is skipped and
+    # behavior is unchanged.
+    if report_id == "4744":
+        kept = []
+        for item in items:
+            reason = _4744_window_reason(item, day)
+            if reason is None and policy_facts_fn is not None:
+                reason = _4744_mortgagee_eligibility_reason(
+                    item, policy_facts_fn(item.policy_number))
             if reason:
                 run.excluded_stale.append({
                     "item_key": item.key,
@@ -635,13 +901,64 @@ def run_worker(report_id: str, *, day: date, mode: str = "dry_run",
             _record_evidence(run, pa, "audit queue state evaluated")
         queue.save()
     else:
-        planner = {"4247": plan_4247, "4372": plan_4372, "4359": plan_4359}[report_id]
+        planner = {"4247": plan_4247, "4372": plan_4372,
+                   "4744": plan_4372, "4359": plan_4359}[report_id]
+        # Mortgagee live wiring: when the runtime asks for live adapters
+        # (test_enrichment / browser_read) and the caller did not inject
+        # custom ports, build them from the live adapter factory. The
+        # factory fail-closes: policy_search_fn is the only live read
+        # (OAuth PolicyApi, read-only, LIVE-PROVEN 2026-09-27); no
+        # additional-interests API path exists, so enrichment still HOLDs
+        # on lender identity until the browser reader is injected.
+        if (report_id in ("4372", "4744") and enrichment_ports is None
+                and (test_enrichment or browser_read)
+                and _live_ports is not None):
+            enrichment_ports = _live_ports.build_live_ports()
         # 4247: most urgent first.
         if report_id == "4247":
             items.sort(key=lambda it: (parse_csv_date(it.expiration_date)
                                        or date.max))
         for item in items:
-            action, status, reason = planner(item, day)
+            enrichment = None
+            if report_id in ("4372", "4744"):
+                ports = menc.resolve_enrichment_ports(
+                    enrichment_ports,
+                    live_test=test_enrichment,
+                    live_browser=browser_read,
+                )
+                enrichment = menc.enrich_work_item(
+                    policy_number=item.policy_number,
+                    applicant_id=_cell(item.row, "Applicant ID"),
+                    row=item.row,
+                    ports=ports,
+                    dry_run=(mode != "live"),
+                )
+                payload = enrichment.to_dict()
+                lender_checks = None
+                if enrichment.status == menc.STATUS_READY:
+                    zip_code = (
+                        menc.property_zip_from_row(item.row) or enrichment.property_zip
+                    )
+                    lender_checks = menc.check_ready_mortgages(
+                        enrichment.mortgages,
+                        property_zip=zip_code,
+                        portal_lookup=item.row.get("portal_lender_lookup")
+                        if isinstance(item.row.get("portal_lender_lookup"), dict)
+                        else None,
+                    )
+                    payload["lender_checks"] = [c.to_dict() for c in lender_checks]
+                    clear, gate_reason = menc.producer_gate_from_row(item.row)
+                    payload["producer"] = {
+                        "clear": clear,
+                        "reason": gate_reason,
+                    }
+                item.row["_mortgagee_enrichment"] = payload
+                run.enrichment.append(payload)
+                action, status, reason = plan_4372(
+                    item, day, enrichment=enrichment, lender_checks=lender_checks,
+                )
+            else:
+                action, status, reason = planner(item, day)
             pa = PlannedAction(item.key, item.policy_number, item.account_name,
                                _dept(item), worker, action, status, reason, mode)
             run.actions.append(pa)
@@ -716,7 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run ROBIE verification workers")
     parser.add_argument("--report", required=True,
                         choices=sorted(WORKERS),
-                        help="4247 renewals, 4246 audits, 4372 mortgagee, 4359 changes")
+                        help="4247 renewals, 4246 audits, 4372/4744 mortgagee, 4359 changes")
     parser.add_argument("--day", default=date.today().isoformat(),
                         help="YYYY-MM-DD (default: today)")
     parser.add_argument("--mode", default="dry_run", choices=["dry_run", "live"])
@@ -728,6 +1045,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="write digest markdown here (default: stdout)")
     parser.add_argument("--allow-unverified", action="store_true",
                         help="bypass the schema gate (4359 until verified)")
+    parser.add_argument("--test-enrichment", action="store_true",
+                        help="bind Test-only EzlynxApiClient (ROBIE_ENV=TEST required; "
+                             "never Production)")
+    parser.add_argument("--browser-read", action="store_true",
+                        help="bind Test-only Additional Interests CDP read "
+                             "(ROBIE_ENV=TEST; attaches existing SSRobie Chrome; "
+                             "never launches a browser; never Production)")
     args = parser.parse_args(argv)
 
     day = datetime.strptime(args.day, "%Y-%m-%d").date()
@@ -737,7 +1061,9 @@ def main(argv: list[str] | None = None) -> int:
             csv_bytes = fh.read()
     run = run_worker(args.report, day=day, mode=args.mode,
                      queue_dir=args.queue_dir, csv_bytes=csv_bytes,
-                     allow_unverified=args.allow_unverified)
+                     allow_unverified=args.allow_unverified,
+                     test_enrichment=args.test_enrichment,
+                     browser_read=args.browser_read)
     digest = build_digest([run])
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

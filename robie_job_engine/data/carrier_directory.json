@@ -144,5 +144,15 @@
     "channel": "PORTAL",
     "portal_url": "https://www.markel.com",
     "notes": "Markel Agent Portal."
+  },
+  "Pie Insurance": {
+    "channel": "EMAIL",
+    "phone": "855-965-1840",
+    "phone_label": "Partner Support",
+    "notes": "Call Partner Support for audit statements; have them emailed to robie@streetsmart.insurance."
+  },
+  "NJCRIB - Pennsylvania Manufacturers Assoc Ins Co": {
+    "channel": "EMAIL_ASK_PORTAL",
+    "notes": "NJCRIB assigned risk via PA Manufacturers; email underwriter — address not yet on file, ask if a self-service portal is available."
   }
 }
