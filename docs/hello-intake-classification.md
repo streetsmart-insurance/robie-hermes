@@ -76,8 +76,15 @@ The `match()` step is built in `robie_job_engine/hello_match.py`
 
 - **Document retrieval**: attachments -> text (PDF via pypdf, .txt);
   direct document links in the body are fetched over HTTP and extracted
-  the same way. Links that resolve to HTML / 401 / 403 are NOT logged
-  into — recorded as `portal_link_needs_human` on the queue entry.
+  the same way. Links that resolve to HTML / 401 / 403 are portal links:
+  they are ATTEMPTED through a carrier portal login
+  (`robie_job_engine/hello_portal_fetch.py` — portal registry by domain,
+  credentials read at runtime from GCP Secret Manager via ADC, one
+  Playwright login attempt on the box Chrome, no retry loop). Fetched
+  bytes flow into the normal extraction pipeline with `via_portal=True`.
+  When the portal domain is unknown, or the login fetch fails or times
+  out, the link is recorded as `portal_link_needs_human` on the queue
+  entry — the deferral is the fallback, never a silent drop.
 - **True identity**: policy numbers + insured names as printed on the
   carrier doc outrank the email body's claims; conflicts are evidence.
 - **Reconciliation ladder**: hello sender alias (skipped for
@@ -89,6 +96,44 @@ The `match()` step is built in `robie_job_engine/hello_match.py`
 - **Confidence**: only `high` auto-files. `medium`/`low` go to
   `hello_unmatched_queue` via `handle_match_result()` with the doc
   evidence and portal links attached.
+
+## Portal login fetch — adding a new carrier portal
+
+Portal links (HTML / 401 / 403) are attempted through
+`robie_job_engine/hello_portal_fetch.py` before deferring to a human.
+To add a portal:
+
+1. Create the two secrets in GCP Secret Manager (project
+   `streetsmart-hermes-poc`) — record only the NAMES, never the values:
+   `gcloud secrets create <carrier>-portal-username --project=streetsmart-hermes-poc`
+   `gcloud secrets create <carrier>-portal-password --project=streetsmart-hermes-poc`
+2. Register the portal where the worker starts up (the registry is
+   in-code; unknown domains keep deferring to a human):
+
+```python
+from robie_job_engine.hello_portal_fetch import register_portal, PortalConfig
+
+register_portal(PortalConfig(
+    domain="agents.examplecarrier.com",   # matches subdomains too
+    username_secret="projects/streetsmart-hermes-poc/secrets/<carrier>-portal-username/versions/latest",
+    password_secret="projects/streetsmart-hermes-poc/secrets/<carrier>-portal-password/versions/latest",
+    login_url="https://agents.examplecarrier.com/login",
+    handler="generic_form",  # or a custom handler via register_handler()
+))
+```
+
+3. The worker passes the real fetcher into retrieval:
+   `retrieve_link_docs(body, portal_fetch=make_portal_fetch())`
+   (no args = ADC secrets + box Chrome, exactly one login attempt).
+
+Per-portal quirks (MFA, multi-step logins, non-form sign-ins) are
+follow-ups: add a handler via `register_handler(name, fn)` and point the
+portal's `handler` at it. The generic username/password form handler
+covers the common case.
+
+Safety recap: secret values are transient-only (ADC at runtime on
+hermes-poc-01, never a key file in the repo, never logged, never in
+errors); failed logins are never retried in a loop; timeouts everywhere.
 
 The original design note below is kept for context: the match order
 follows the certificate intake's strategy order (report email -> report

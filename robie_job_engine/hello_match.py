@@ -10,8 +10,11 @@ Pipeline for one genuine hello@ message:
 
   1. retrieve_docs: attachments -> text; direct document links in the
      body -> text. Links that need a logged-in carrier portal session
-     are NOT fetched — recorded as portal_link_needs_human and the
-     worker moves on.
+     are attempted through a portal login fetch (hello_portal_fetch:
+     Secret Manager credentials + box-Chrome Playwright, one attempt,
+     no retry loop); when the portal is unknown or the login fails the
+     link is recorded as portal_link_needs_human and the worker moves
+     on.
   2. extract_doc_identity: policy numbers + insured names as printed on
      the CARRIER DOC. These outrank the email body's claims; any
      conflict is recorded as evidence.
@@ -33,8 +36,11 @@ Pipeline for one genuine hello@ message:
 Read-only: no EZLynx writes, no Zapier, no email. Network happens only
 through injected fetchers (tests inject fakes); the default URL fetcher
 is plain urllib GET with a timeout and size cap, no credentials, no
-POST. The Gmail attachment bytes are passed in by the caller — this
-module never calls the Gmail API itself.
+POST. Portal links are attempted through an injected portal_fetch
+(hello_portal_fetch.make_portal_fetch builds the real one: Secret
+Manager credentials + box-Chrome Playwright). The Gmail attachment bytes
+are passed in by the caller — this module never calls the Gmail API
+itself.
 """
 
 from __future__ import annotations
@@ -141,23 +147,72 @@ def _default_url_fetch(url: str) -> tuple[bytes, str]:
         return b"".join(chunks), content_type
 
 
+def _bytes_to_text(content: bytes, url: str) -> str | None:
+    """Best-effort text from fetched bytes when content-type is unknown.
+
+    Portal fetches return raw bytes from a logged-in session with no
+    reliable content-type, so sniff: PDF magic or .pdf suffix -> pypdf,
+    .txt suffix -> decode, else decode as text unless it looks like HTML.
+    """
+    lowered = (url or "").lower()
+    if content[:4] == b"%PDF" or lowered.endswith(".pdf"):
+        return extract_pdf_text(content)
+    if lowered.endswith(".txt"):
+        return content.decode("utf-8", errors="replace") or None
+    try:
+        text = content.decode("utf-8", errors="replace").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not text or text[:100].lstrip().lower().startswith(
+            ("<html", "<!doctype")):
+        return None
+    return text
+
+
 def retrieve_link_docs(body: str,
-                       url_fetch=None) -> tuple[list[dict], list[str]]:
+                       url_fetch=None,
+                       portal_fetch=None) -> tuple[list[dict], list[str]]:
     """Fetch documents linked directly in the email body.
 
     Returns (doc_texts, portal_links). doc_texts are {source_url, text}
-    for links that resolved to an actual document. portal_links are URLs
+    for links that resolved to an actual document. Portal links — URLs
     that need a logged-in carrier portal session (HTML login/portal
-    pages, 401/403) — the worker must NOT attempt a login; these go to
-    the queue entry as portal_link_needs_human for a human to open.
+    pages, 401/403) — are ATTEMPTED through portal_fetch when one is
+    given; fetched bytes flow into doc_texts with via_portal=True.
+    When the portal is unknown, or the login fetch fails or times out,
+    the link lands in portal_links (portal_link_needs_human) exactly as
+    before — the deferral is the fallback, never a silent drop.
 
     url_fetch(url) -> (bytes, content_type); inject a fake in tests.
+    portal_fetch(url) -> (bytes | None, reason); build the real one with
+      hello_portal_fetch.make_portal_fetch(), inject a fake in tests.
     """
     fetch = url_fetch or _default_url_fetch
     doc_texts: list[dict] = []
     portal_links: list[str] = []
     seen: set[str] = set()
     urls = [u for u in _URL_RE.findall(body or "") if not _looks_like_non_doc(u)]
+
+    def _attempt_portal(url: str) -> None:
+        if portal_fetch is None:
+            portal_links.append(url)
+            return
+        try:
+            content, reason = portal_fetch(url)
+        except Exception:  # noqa: BLE001 - one bad link never kills the run
+            content, reason = None, "portal_fetch raised"
+        if content:
+            text = _bytes_to_text(content, url)
+            doc_texts.append({"source_url": url, "text": text,
+                              "via_portal": True,
+                              "note": None if text else
+                              "portal document had no extractable text"})
+        else:
+            portal_links.append(url)
+            doc_texts.append({"source_url": url, "text": None,
+                              "note": f"portal login fetch failed "
+                                      f"({reason}); deferred to human"})
+
     for url in urls[:_DEFAULT_MAX_LINKS]:
         if url in seen:
             continue
@@ -166,8 +221,8 @@ def retrieve_link_docs(body: str,
             content, content_type = fetch(url)
         except Exception as exc:  # noqa: BLE001 - one bad link never kills the run
             if getattr(exc, "code", None) in (401, 403):
-                # Login wall — a human must open this in the carrier portal.
-                portal_links.append(url)
+                # Login wall — try the portal login fetch, else defer.
+                _attempt_portal(url)
             else:
                 doc_texts.append({"source_url": url, "text": None,
                                   "note": f"fetch failed: {type(exc).__name__}"})
@@ -184,12 +239,12 @@ def retrieve_link_docs(body: str,
                                                      errors="replace")})
         elif "html" in ctype:
             # A page, not a document — almost certainly a carrier portal
-            # or login wall. Never attempt a login here.
-            portal_links.append(url)
+            # or login wall. Try the portal login fetch, else defer.
+            _attempt_portal(url)
         elif any(code in ctype for code in ("msword", "officedocument")):
             doc_texts.append({"source_url": url, "text": None,
                               "note": "Word document — needs human"})
-            portal_links.append(url)
+            _attempt_portal(url)
         else:
             doc_texts.append({"source_url": url, "text": None,
                               "note": f"unhandled content type {ctype}"})
@@ -354,7 +409,8 @@ def match_hello(*, identity: dict, roster: list[dict] | None,
                 alias_store: dict | None = None,
                 policy_search=None,
                 doc_identities: list[dict] | None = None,
-                portal_links: list[str] | None = None) -> dict:
+                portal_links: list[str] | None = None,
+                portal_links_fetched: list[str] | None = None) -> dict:
     """Run the match ladder for one genuine hello@ message.
 
     identity: extract_hello_identity() output (sender_email,
@@ -427,6 +483,7 @@ def match_hello(*, identity: dict, roster: list[dict] | None,
             "evidence": evidence,
             "doc_conflicts": doc_conflicts,
             "portal_links": list(portal_links or []),
+            "portal_links_fetched": list(portal_links_fetched or []),
             "doc_identity": {"policy_numbers": doc_policies,
                              "insured_names": doc_insureds},
         }
@@ -443,6 +500,7 @@ def match_hello(*, identity: dict, roster: list[dict] | None,
             "evidence": evidence,
             "doc_conflicts": doc_conflicts,
             "portal_links": list(portal_links or []),
+            "portal_links_fetched": list(portal_links_fetched or []),
             "doc_identity": {"policy_numbers": doc_policies,
                              "insured_names": doc_insureds},
             "policy_candidates": policy_candidates,
@@ -595,10 +653,15 @@ def handle_match_result(result: dict, *, sender_email: str, subject: str,
     strategies = list(result.get("strategies_tried") or [])
     if result.get("portal_links"):
         strategies.append("portal_link_deferred")
+    if result.get("portal_links_fetched"):
+        strategies.append("portal_link_fetched")
     evidence = list(result.get("evidence") or [])
     for link in result.get("portal_links") or []:
         evidence.append(f"portal_link_needs_human: {link} "
                         "(carrier portal — a human must open it)")
+    for link in result.get("portal_links_fetched") or []:
+        evidence.append(f"portal_login_fetch: {link} "
+                        "(document fetched through carrier portal login)")
 
     doc_identity = result.get("doc_identity") or {}
     doc_insureds = doc_identity.get("insured_names") or []
