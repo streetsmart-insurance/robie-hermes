@@ -32,7 +32,7 @@ Entry point: `robie_job_engine/run_overdue_policy_change_reports.py`
 
 ## Schedule
 
-- Timer: `robie-4359-policy-change.timer` → `OnCalendar=Mon *-*-* 08:00:00 America/New_York`
+- Timer: `robie-4359-policy-change.timer` → `OnCalendar=Tue *-*-* 08:00:00 America/New_York` (every Tuesday 08:00 ET, per Carlo 2026-09-27)
 - Service: `robie-4359-policy-change.service` (oneshot)
 - Check: `systemctl list-timers robie-4359-policy-change.timer`
 - Logs: `journalctl -u robie-4359-policy-change.service --since "7 days ago"`
