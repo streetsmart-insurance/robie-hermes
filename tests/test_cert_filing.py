@@ -99,6 +99,52 @@ class FakeDocWriter:
         return {"document_id": "doc9", "read_back": True}
 
 
+class FakeDocSearcher:
+    """Read-only document search fake: pretends these names are in Documents."""
+
+    def __init__(self, names=()):
+        self.names = set(names)
+        self.calls = []
+
+    def __call__(self, applicant_id):
+        self.calls.append(applicant_id)
+        return {"results": [{"documentName": n} for n in self.names]}
+
+
+class ExplodingSearcher:
+    """Simulates a read-back that can never complete."""
+
+    def __call__(self, applicant_id):
+        raise RuntimeError("search transport failed")
+
+
+class NamedFlakyDocWriter(FakeDocWriter):
+    """Fails the POST once for the named documents, then behaves.
+
+    Simulates the classic failure: the server processed the upload but the
+    transport dropped the response.
+    """
+
+    def __init__(self, fail_names=()):
+        super().__init__()
+        self.fail_names = set(fail_names)
+        self.failed = set()
+
+    def __call__(self, applicant_id, document_name, file_bytes, **kw):
+        self.calls.append((applicant_id, document_name, kw))
+        if document_name in self.fail_names \
+                and document_name not in self.failed:
+            self.failed.add(document_name)
+            raise RuntimeError("transport failed")
+        return {"document_id": "doc9", "read_back": True}
+
+
+class AlwaysFailDocWriter(FakeDocWriter):
+    def __call__(self, applicant_id, document_name, file_bytes, **kw):
+        self.calls.append((applicant_id, document_name, kw))
+        raise RuntimeError("transport failed")
+
+
 class FakeZapier:
     def __init__(self, state="unknown"):
         self.state = state
@@ -128,6 +174,7 @@ def make_deps(tmp, **kw):
         verifier=FakeVerifier(discussions=rows),
         note_writer=FakeNoteWriter(),
         doc_writer=FakeDocWriter(),
+        doc_searcher=FakeDocSearcher(),
         zapier=FakeZapier(),
         registry=registry,
         store=store,
@@ -301,8 +348,96 @@ def test_file_record_uploads_pdf_attachments(tmp_path):
     deps = make_deps(str(tmp_path))
     res = file_record(make_record(attachments=[att]), make_verified(), deps)
     assert res.status == FILED, res.hold_reasons
-    assert res.document_ids == ["doc9"]
-    assert deps.doc_writer.calls[0][1].endswith(".pdf")
+    # email PDF first, then the attachment
+    assert res.document_ids == ["doc9", "doc9"]
+    assert deps.doc_writer.calls[0][1].startswith("COI request email - ")
+    assert deps.doc_writer.calls[1][1] == "COI email attachment - request.pdf"
+
+
+def test_file_record_uploads_email_pdf_first_and_all_attachment_types(tmp_path):
+    """Defect 2+3: the email PDF is filed first and non-PDF attachments are
+    no longer silently dropped."""
+    jpg = SimpleNamespace(filename="photo.jpg", content=b"\xff\xd8 fake-jpg")
+    pdf = SimpleNamespace(filename="request.pdf", content=b"%PDF-1.4 fake")
+    deps = make_deps(str(tmp_path))
+    res = file_record(make_record(attachments=[jpg, pdf]), make_verified(),
+                      deps)
+    assert res.status == FILED, res.hold_reasons
+    names = [c[1] for c in deps.doc_writer.calls]
+    assert names[0].startswith("COI request email - ")
+    assert names[0].endswith(".pdf")
+    assert names[1] == "COI email attachment - photo.jpg"
+    assert names[2] == "COI email attachment - request.pdf"
+    ctypes = [c[2]["content_type"] for c in deps.doc_writer.calls]
+    assert ctypes[0] == "application/pdf"
+    assert ctypes[1] == "image/jpeg"
+    assert ctypes[2] == "application/pdf"
+    assert res.document_ids == ["doc9", "doc9", "doc9"]
+
+
+def test_file_record_note_names_filed_documents(tmp_path):
+    jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
+    deps = make_deps(str(tmp_path))
+    res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
+    assert res.status == FILED, res.hold_reasons
+    note_text = deps.note_writer.calls[0][1]
+    assert "2 attachment(s) saved to the file" in note_text
+
+
+def test_file_record_uncertain_upload_recovered_via_readback(tmp_path):
+    """Defect 1: POST raised but the file landed. Read-back by name finds
+    it — the code must NOT re-send."""
+    att_name = "COI email attachment - photo.jpg"
+    writer = NamedFlakyDocWriter(fail_names={att_name})
+    searcher = FakeDocSearcher(names={att_name})
+    deps = make_deps(str(tmp_path), doc_writer=writer, doc_searcher=searcher)
+    jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
+    res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
+    assert res.status == FILED, res.hold_reasons
+    assert len(writer.calls) == 2  # email PDF + one attachment attempt only
+    assert any("not re-sending" in e for e in res.evidence)
+
+
+def test_file_record_uncertain_upload_absent_gets_one_resend(tmp_path):
+    """Defect 1: POST raised and the file is verifiably absent — exactly one
+    re-send is safe."""
+    att_name = "COI email attachment - photo.jpg"
+    writer = NamedFlakyDocWriter(fail_names={att_name})
+    searcher = FakeDocSearcher(names=set())
+    deps = make_deps(str(tmp_path), doc_writer=writer, doc_searcher=searcher)
+    jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
+    res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
+    assert res.status == FILED, res.hold_reasons
+    assert len(writer.calls) == 3  # email PDF + failed attempt + one re-send
+    assert any("re-send" in e for e in res.evidence)
+
+
+def test_file_record_uncertain_upload_unsearchable_is_unverified(tmp_path):
+    """Defect 1: POST raised and the read-back itself fails — fail closed as
+    UNVERIFIED. No blind re-send, no task, email stays unread."""
+    att_name = "COI email attachment - photo.jpg"
+    writer = NamedFlakyDocWriter(fail_names={att_name})
+    deps = make_deps(str(tmp_path), doc_writer=writer,
+                     doc_searcher=ExplodingSearcher())
+    jpg = SimpleNamespace(filename="photo.jpg", content=b"fake")
+    res = file_record(make_record(attachments=[jpg]), make_verified(), deps)
+    assert res.status == "ERROR"
+    assert any("UNVERIFIED" in h for h in res.hold_reasons)
+    assert len(writer.calls) == 2  # email PDF + one attempt — never retried
+    assert not deps.zapier.created  # no task on an unverified filing
+
+
+def test_file_record_repeated_upload_failure_is_unverified(tmp_path):
+    """Defect 1: the re-send also fails — UNVERIFIED, not an infinite loop."""
+    writer = AlwaysFailDocWriter()
+    deps = make_deps(str(tmp_path), doc_writer=writer,
+                     doc_searcher=FakeDocSearcher(names=set()))
+    res = file_record(make_record(), make_verified(), deps)
+    assert res.status == "ERROR"
+    assert any("UNVERIFIED" in h for h in res.hold_reasons)
+    # email PDF: first attempt + exactly one re-send, then stop
+    assert len(writer.calls) == 2
+    assert not deps.zapier.created
 
 
 def test_file_record_uncertain_note_outcome_reads_back_first(tmp_path):
