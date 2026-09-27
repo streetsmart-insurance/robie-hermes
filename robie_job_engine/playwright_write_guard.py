@@ -14,6 +14,12 @@ A Playwright TimeoutError on fill / click / select_option / type, or a
 target that is hidden / aria-hidden / not visible / combobox-hidden, is
 the same PLAYWRIGHT_BLOCKED class. Do not invent the value or retry-loop;
 ask Gemini then HITL Carlo.
+
+On Test (``ROBIE_ENV=TEST``), a missing or ambiguous control, or a
+locator-wait timeout, asks ``gemini_ui_rescue`` once (secret
+``gemini-api-key``) and retries that unique locator once. Production
+keeps the Vertex path above. Notes, documents, and destructive clicks
+are refused before either Gemini path.
 """
 
 from __future__ import annotations
@@ -657,6 +663,78 @@ def _gemini_then_write_or_hitl(
     return result
 
 
+_UI_RESCUE_SKIPPED = object()
+
+
+def _test_ui_rescue_control(
+    *,
+    reason: str,
+    owner: Any,
+    page_level: bool,
+    locator_originals: dict[str, Callable[..., Any]],
+    method: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Test-only API-key locator rescue. Production and positional refusals skip.
+
+    A skipped call returns ``_UI_RESCUE_SKIPPED`` so the existing Vertex
+    unique-write path stays in place. Notes, documents, and destructive
+    clicks are refused before this helper runs.
+    """
+    from robie_job_engine.gemini_ui_rescue import (
+        is_shared_rescue_failure,
+        rescue_enabled,
+        retry_failed_locator_action,
+    )
+
+    if not rescue_enabled():
+        return _UI_RESCUE_SKIPPED
+    failure = RuntimeError(reason)
+    if not is_shared_rescue_failure(failure):
+        return _UI_RESCUE_SKIPPED
+    page = _page_from_target(owner, page_level=page_level) or owner
+    method_name = getattr(method, "__name__", "write")
+    selector = args[0] if page_level and args else None
+    label = str(selector or locator_selector_text(owner) or method_name)[:160]
+
+    def retry(locator: Any) -> Any:
+        original = locator_originals.get(method_name, method)
+        write_args = args[1:] if page_level else args
+        return original(locator, *write_args, **kwargs)
+
+    return retry_failed_locator_action(page, label, failure, retry)
+
+
+def _wrap_locator_wait(original: Callable[..., Any]) -> Callable[..., Any]:
+    """One Test rescue when a coded locator wait times out."""
+
+    def wrapped(self, *args, **kwargs):
+        try:
+            return original(self, *args, **kwargs)
+        except Exception as exc:
+            if not _is_timeout_error(exc) or locator_is_positional_guess(self):
+                raise
+            from robie_job_engine.gemini_ui_rescue import (
+                rescue_enabled,
+                retry_failed_locator_action,
+            )
+
+            if not rescue_enabled():
+                raise
+            page = _page_from_target(self, page_level=False) or self
+            label = locator_selector_text(self) or "locator"
+
+            def retry(locator: Any) -> Any:
+                return original(locator, *args, **kwargs)
+
+            return retry_failed_locator_action(page, label, exc, retry)
+
+    wrapped.__name__ = "wait_for"
+    wrapped.__qualname__ = getattr(original, "__qualname__", "wait_for")
+    return wrapped
+
+
 def _wrap_write(
     method: Callable[..., Any],
     *,
@@ -712,6 +790,17 @@ def _wrap_write(
             else:
                 raise
         if reason:
+            rescued = _test_ui_rescue_control(
+                reason=reason,
+                owner=self,
+                page_level=page_level,
+                locator_originals=locator_originals,
+                method=method,
+                args=args,
+                kwargs=kwargs,
+            )
+            if rescued is not _UI_RESCUE_SKIPPED:
+                return rescued
             return _gemini_then_write_or_hitl(
                 reason=reason,
                 owner=self,
@@ -726,10 +815,22 @@ def _wrap_write(
             result = method(self, *args, **kwargs)
         except Exception as exc:
             if _is_timeout_error(exc) and method_name in CONTROL_ACTION_METHODS:
+                timeout_reason = action_timeout_block_reason(
+                    self, method_name, selector=selector, exc=exc
+                )
+                rescued = _test_ui_rescue_control(
+                    reason=timeout_reason,
+                    owner=self,
+                    page_level=page_level,
+                    locator_originals=locator_originals,
+                    method=method,
+                    args=args,
+                    kwargs=kwargs,
+                )
+                if rescued is not _UI_RESCUE_SKIPPED:
+                    return rescued
                 return _gemini_then_write_or_hitl(
-                    reason=action_timeout_block_reason(
-                        self, method_name, selector=selector, exc=exc
-                    ),
+                    reason=timeout_reason,
                     owner=self,
                     page_level=page_level,
                     scope=scope,
@@ -813,6 +914,11 @@ def install_playwright_write_guards(scope: dict[str, Any]) -> dict[str, Any]:
                 ),
             )
             patched[f"{name}.{method_name}"] = True
+        if name == "Locator":
+            original_wait = getattr(cls, "wait_for", None)
+            if callable(original_wait):
+                setattr(cls, "wait_for", _wrap_locator_wait(original_wait))
+                patched["Locator.wait_for"] = True
     # Cardinal no-delete coverage for key presses. Wrapped separately from
     # WRAP_METHODS so unique-write / scope behavior for press() is unchanged.
     for name in ("Locator", "Page"):

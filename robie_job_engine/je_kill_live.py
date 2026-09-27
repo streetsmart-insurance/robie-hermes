@@ -357,6 +357,42 @@ class PersistentChromeEzlynxPort:
                 raise PersistentChromeEzlynxPort._blocked_count(name, last_count)
             time.sleep(min(UNIQUE_LOCATOR_POLL_INTERVAL_S, deadline - now))
 
+    def _rescue_visible(
+        self,
+        locator: Any,
+        label: str,
+        timeout_ms: int,
+        *,
+        scope: Any | None = None,
+        before_wait: Callable[[], Any] | None = None,
+        wait: bool = True,
+    ) -> Any:
+        """Wait for one visible control. On Test, a miss may ask Gemini once."""
+        try:
+            if before_wait is not None:
+                located = before_wait()
+                if located is not None:
+                    locator = located
+            if wait:
+                locator.wait_for(state="visible", timeout=timeout_ms)
+            return locator
+        except Exception as exc:
+            from .gemini_ui_rescue import (
+                is_shared_rescue_failure,
+                rescue_enabled,
+                retry_failed_locator_action,
+            )
+
+            if not rescue_enabled() or not is_shared_rescue_failure(exc):
+                raise
+            page = scope or self._page
+
+            def retry(found: Any) -> Any:
+                found.wait_for(state="visible", timeout=timeout_ms)
+                return found
+
+            return retry_failed_locator_action(page, label, exc, retry)
+
     def _wait_label_control(self) -> Any:
         return self._wait_unique(
             self._locator(self.scenario.label_control),
@@ -484,18 +520,27 @@ class PersistentChromeEzlynxPort:
         if stable_id != self.scenario.label_id or exact_text != self.scenario.label:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: option is outside approved Test fixture")
         locator = self._locator(self.scenario.label_option, scope=scope)
-        locator.wait_for(state="visible", timeout=10_000)
+        locator = self._rescue_visible(
+            locator, "label option", 10_000, scope=scope
+        )
         return self._require_one(locator, "label option")
 
     @_on_playwright_thread
     def click(self, target: Any) -> None:
         locator = self._locator(target) if isinstance(target, dict) else target
         if isinstance(target, dict) and target == self.scenario.label_control:
-            self._wait_unique(
-                locator, "click target", LABEL_CONTROL_SETTLE_TIMEOUT_MS
-            ).click()
+            ready = self._rescue_visible(
+                locator,
+                "click target",
+                LABEL_CONTROL_SETTLE_TIMEOUT_MS,
+                wait=False,
+                before_wait=lambda: self._wait_unique(
+                    locator, "click target", LABEL_CONTROL_SETTLE_TIMEOUT_MS
+                ),
+            )
+            ready.click()
             return
-        locator.wait_for(state="visible", timeout=15_000)
+        locator = self._rescue_visible(locator, "click target", 15_000)
         self._require_one(locator, "click target").click()
 
     @_on_playwright_thread
@@ -509,8 +554,13 @@ class PersistentChromeEzlynxPort:
         else:
             raise RuntimeError("PLAYWRIGHT_BLOCKED: control is outside approved Test fixture")
         locator = self._locator(spec, scope=scope)
-        self._wait_unique(locator, name, timeout_ms)
-        locator.wait_for(state="visible", timeout=timeout_ms)
+        locator = self._rescue_visible(
+            locator,
+            name,
+            timeout_ms,
+            scope=scope,
+            before_wait=lambda: self._wait_unique(locator, name, timeout_ms),
+        )
         self._require_one(locator, name)
         if not locator.is_enabled():
             raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {name} is disabled")

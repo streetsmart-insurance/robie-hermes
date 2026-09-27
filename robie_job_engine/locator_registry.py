@@ -120,7 +120,32 @@ class LocatorRegistry:
         loc = self.get_locator(portal, page_name, field_name)
         if not loc:
             raise KeyError(f"No locator registered for {portal}:{page_name}.{field_name}")
+        try:
+            return self._resolve_registered(page_obj, loc, portal, page_name, field_name)
+        except Exception as exc:
+            from .gemini_ui_rescue import (
+                is_shared_rescue_failure,
+                rescue_enabled,
+                retry_failed_locator_action,
+            )
 
+            if not rescue_enabled() or not is_shared_rescue_failure(exc):
+                raise
+            label = f"{portal}:{page_name}.{field_name}"
+
+            def retry(found: Any) -> Any:
+                return found
+
+            return retry_failed_locator_action(page_obj, label, exc, retry)
+
+    def _resolve_registered(
+        self,
+        page_obj: Any,
+        loc: FieldLocator,
+        portal: str,
+        page_name: str,
+        field_name: str,
+    ) -> Any:
         target = self._build_locator(page_obj, loc.primary_strategy, loc.primary_selector, loc.exact)
         count_fn = getattr(target, "count", None)
         count = count_fn() if callable(count_fn) else 1
