@@ -300,3 +300,26 @@ def test_conflict_shaped_canned_reply_is_automated_hold():
     assert res.requested_action == ACTION_AUTOREPLY
     assert res.status == HOLD
     assert "automated" in (res.hold_reasons[0] if res.hold_reasons else "")
+
+
+def test_automatic_reply_subject_is_automated_hold():
+    # "Automatic reply: ..." subjects are never requests — even when the
+    # tail quotes a certificate subject. (2026-09-27: one such record
+    # VERIFIED in v5; it must hold as automated.)
+    assert classify_requested_action(
+        "Automatic reply: Certificate of Insurance KM Freight LLC", "",
+        sender="someone@example.com") == ACTION_AUTOREPLY
+    facts = _facts(insured_name="KM Freight LLC",
+                   requester_email="someone@example.com")
+    res = verify_record(
+        _record("Automatic reply: Certificate of Insurance KM Freight LLC",
+                facts),
+        index=None, verifier=None)
+    assert res.requested_action == ACTION_AUTOREPLY
+    assert res.status == HOLD
+    assert "automated" in (res.hold_reasons[0] if res.hold_reasons else "")
+
+
+def test_leading_bullet_stripped_from_name():
+    assert _clean_name("* M&M Heavy Hauls LLC") == "M&M Heavy Hauls LLC"
+    assert _clean_name("> Acme LLC") == "Acme LLC"

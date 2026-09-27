@@ -523,6 +523,9 @@ def _truncate_sentence_runoff(name: str) -> str:
 
 def _clean_name(value: str) -> str:
     value = re.sub(r"\s+", " ", (value or "").strip())
+    # Leading bullet/quote markers ("* M&M Heavy Hauls LLC", "> Acme") from
+    # message bodies are formatting, not part of the name.
+    value = re.sub(r"^[*>\-•·]+\s+", "", value)
     # Instruction tails pasted into subjects ("Certificate of Insurance LA
     # Burger LLC to Anderson Market & Metrovation *WORDING LOCATED ON PAGE
     # 2*") are never part of a name — strip every *...* segment.

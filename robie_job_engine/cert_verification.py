@@ -162,6 +162,13 @@ _BOUNCE_SUBJECT_RE = re.compile(
     r"failure)|failure notice|returned mail|mail delivery (failed|failure))"
 )
 
+# Auto-reply subjects: "Automatic reply: ..." / "Auto reply: ..." is an
+# out-of-office or canned response, never a new request — even when the
+# tail quotes the original certificate subject.
+_AUTOREPLY_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(automatic reply|auto reply|out of office)\b"
+)
+
 # The subject is shaped like a certificate request when it names the
 # insured in one of the known request shapes ("Certificate of Insurance
 # LA Burger LLC to Anderson Market", "Renewal Certificate Request-
@@ -308,6 +315,10 @@ def classify_requested_action(subject: str, body: str,
     # A bounce quoting the original subject is definitive: it never issues
     # a genuine request, even when the quoted tail names a certificate.
     if _BOUNCE_SUBJECT_RE.search(subject or ""):
+        return ACTION_AUTOREPLY
+    # An auto-reply subject ("Automatic reply: ...") is definitive: it never
+    # issues a genuine request, even when the tail quotes the original.
+    if _AUTOREPLY_SUBJECT_RE.search(subject or ""):
         return ACTION_AUTOREPLY
     # A known autoresponder address is definitive: it never issues a
     # genuine request, even when it quotes the original subject.
@@ -627,11 +638,14 @@ def verify_record(record: Any, index: Any,
         record.facts.pdf_texts.extend(ocr_texts)
         res.evidence.append("OCR recovered text from scanned PDF")
 
-    # Automated senders and bounce-shaped subjects are never certificate
+    # Automated senders and bounce/auto-reply subjects are never certificate
     # requests: bucket them BEFORE identity/conflict work so a canned
-    # auto-reply cannot land in the conflict or no-applicant buckets.
-    if _BOUNCE_SUBJECT_RE.search(record.subject or "") or _sender_is_autoresponder(
-            getattr(record.facts, "requester_email", None)):
+    # auto-reply cannot land in the conflict, no-applicant, unknown, or
+    # verified buckets.
+    if (_BOUNCE_SUBJECT_RE.search(record.subject or "")
+            or _AUTOREPLY_SUBJECT_RE.search(record.subject or "")
+            or _sender_is_autoresponder(
+                getattr(record.facts, "requester_email", None))):
         res.requested_action = ACTION_AUTOREPLY
         res.evidence.append(
             "automated sender/subject identified before identity checks — "
