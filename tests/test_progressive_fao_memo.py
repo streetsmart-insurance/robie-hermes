@@ -59,6 +59,7 @@ from robie_job_engine.progressive_fao_memo import (
     collect_memo_observation,
     extract_memo_grid,
     main,
+    more_pages,
     memo_document_id,
     memo_filename,
     PROCESSED_DATE_RESULTS_HOLD,
@@ -758,7 +759,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("header-drawer__content--show", drawer.primary_selector)
         self.assertIn("Policy Activity", drawer.description)
         self.assertIn("Agency Admin", drawer.description)
-        self.assertEqual(page.version, "1.11")
+        self.assertEqual(page.version, "1.12")
         view = page.get_field("view_activity_by")
         self.assertIn("#606", view.description)
         self.assertIn("does not ask Gemini", view.description)
@@ -824,6 +825,16 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("tables matched", memo_table.description)
         self.assertIn("underwritinglegacy", memo_table.description)
         self.assertIn("0 memo rows and 0 PDFs", memo_table.description)
+        nxt = page.get_field("communications_next")
+        self.assertEqual(nxt.primary_strategy, "role")
+        self.assertEqual(nxt.primary_selector, "button:Next")
+        self.assertEqual(nxt.fallback_strategy, "role")
+        self.assertEqual(nxt.fallback_selector, "link:Next")
+        self.assertEqual(nxt.accessible_name, "Next")
+        self.assertIn("does not ask Gemini", nxt.description)
+        self.assertIn("duplicate visible Next", nxt.description)
+        self.assertIn("not click targets", nxt.description)
+        self.assertIn("userinfo removed", nxt.description)
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
         self.assertIsNone(MANAGE_POLICIES_NAME.search("Menu Manage Policies"))
@@ -862,6 +873,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("View Activity By does not ask Gemini", text)
         self.assertIn("Communications does not ask Gemini", text)
         self.assertIn("The memo table does not ask Gemini", text)
+        self.assertIn("Next pagination does not ask Gemini", text)
         self.assertIn("does not call Jev", text)
         self.assertIn("gemini-api-key", text)
         self.assertIn("TypeSafe System One", text)
@@ -1326,6 +1338,16 @@ class NavPage:
             self.next_nodes.extend([
                 FakeNode("button", "Next", disabled=False),
                 FakeNode("link", "Next", disabled=False),
+            ])
+        elif self.next_mode == "disabled-pair":
+            self.next_nodes.extend([
+                FakeNode("button", "Next", attrs={"aria-disabled": "true"}, disabled=True),
+                FakeNode("button", "Next", attrs={"aria-disabled": "true"}, disabled=True),
+            ])
+        elif self.next_mode == "mixed":
+            self.next_nodes.extend([
+                FakeNode("button", "Next", attrs={"aria-disabled": "true"}, disabled=True),
+                FakeNode("link", "Next", attrs={"aria-disabled": "false"}, disabled=False),
             ])
 
     def _layout_table(self, label):
@@ -2442,11 +2464,20 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(pdf_bytes_from_observation(browser.capture_memo(memo.document_id)).startswith(b"%PDF"))
 
         enabled = NavPage(next_mode="enabled")
-        with self.assertRaisesRegex(IntakeHold, "incomplete or ambiguous"):
+        with self.assertRaises(IntakeHold) as caught:
             FaoCommunicationsMemoPortal(
                 PlaywrightFaoMemoBrowser(enabled),
                 LocalDeliveryLedger(Path(tempfile.mkdtemp()) / "out"),
             ).list_documents(scope="fao_communications", start=PROVE_DAY, end=PROVE_DAY)
+        message = str(caught.exception)
+        self.assertIn("incomplete or ambiguous", message)
+        self.assertIn("Next controls 1", message)
+        self.assertIn("visible 1", message)
+        self.assertIn("disabled 0", message)
+        self.assertIn("enabled 1", message)
+        self.assertIn("unreadable 0", message)
+        self.assertIn(enabled.communications_url, message)
+        self.assertNotIn("gemini:", message)
 
     def test_same_tab_pdf_restores_the_list_or_holds(self):
         page = NavPage(open_mode="same", next_mode="none")
@@ -2822,11 +2853,82 @@ class NavigationTests(unittest.TestCase):
 
     def test_ambiguous_next_holds(self):
         page = NavPage(next_mode="ambiguous")
-        with self.assertRaisesRegex(IntakeHold, "incomplete or ambiguous"):
+        with self.assertRaises(IntakeHold) as caught:
             FaoCommunicationsMemoPortal(
                 PlaywrightFaoMemoBrowser(page),
                 LocalDeliveryLedger(Path(tempfile.mkdtemp()) / "out"),
             ).list_documents(scope="fao_communications", start=PROVE_DAY, end=PROVE_DAY)
+        message = str(caught.exception)
+        self.assertIn("incomplete or ambiguous", message)
+        self.assertIn("Next controls 2", message)
+        self.assertIn("visible 2", message)
+        self.assertIn("disabled 0", message)
+        self.assertIn("enabled 2", message)
+        self.assertIn("unreadable 0", message)
+        self.assertNotIn("gemini:", message)
+        self.assertEqual(page.memo_opens, [])
+        self.assertNotIn("Search", page.clicks)
+        self.assertEqual(page.screenshot_calls, 0)
+
+    def test_duplicate_disabled_next_lets_an_empty_list_finish(self):
+        page = NavPage(
+            body="StreetSmart Risk Mgr CA33617\n0 Records Found\nNo records found",
+            memo_grid="absent",
+            chrome_table_count=3,
+            communications_section="underwritinglegacy",
+            next_mode="disabled-pair",
+        )
+        out = Path(tempfile.mkdtemp()) / "qa"
+        portal = FaoCommunicationsMemoPortal(
+            PlaywrightFaoMemoBrowser(page),
+            LocalDeliveryLedger(out),
+        )
+        worker = ProgressiveRetrieval(SimpleNamespace(writes=0), SourceArchive(out / "sources"))
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            items = worker.pull_fao_communications(portal, start=PROVE_DAY, end=PROVE_DAY)
+        rescued.assert_not_called()
+        self.assertIs(more_pages(page), False)
+        self.assertEqual(page.get_by_role("button", name="Next", exact=True).count(), 2)
+        self.assertEqual(page.get_by_role("link", name="Next", exact=True).count(), 0)
+        self.assertEqual(items, ())
+        self.assertEqual(page.memo_opens, [])
+        self.assertNotIn("Memo", page.clicks)
+        self.assertNotIn("Next", page.clicks)
+        self.assertNotIn("Search", page.clicks)
+        self.assertEqual(portal.verification["by_date"], [{
+            "processed_date": "2026-09-25", "memo_rows": 0, "pdfs": 0,
+        }])
+        day = out / "2026-09-25"
+        self.assertEqual((day / "fao-communications-memo-2026-09-25.png").read_bytes(), LIST_PNG)
+        manifest = json.loads((day / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "PULLED")
+        self.assertEqual(manifest["memo_rows"], 0)
+        self.assertEqual(manifest["pdfs"], 0)
+
+    def test_mixed_next_holds_with_counts(self):
+        page = NavPage(next_mode="mixed")
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            with self.assertRaises(IntakeHold) as caught:
+                FaoCommunicationsMemoPortal(
+                    PlaywrightFaoMemoBrowser(page),
+                    LocalDeliveryLedger(Path(tempfile.mkdtemp()) / "out"),
+                ).list_documents(scope="fao_communications", start=PROVE_DAY, end=PROVE_DAY)
+        rescued.assert_not_called()
+        message = str(caught.exception)
+        self.assertIn("incomplete or ambiguous", message)
+        self.assertIn("Next controls 2", message)
+        self.assertIn("visible 2", message)
+        self.assertIn("hidden 0", message)
+        self.assertIn("disabled 1", message)
+        self.assertIn("enabled 1", message)
+        self.assertIn("unreadable 0", message)
+        self.assertIn(page.communications_url, message)
+        self.assertNotIn("?", message)
+        self.assertNotIn("gemini:", message)
+        self.assertEqual(page.screenshot_calls, 0)
+        self.assertEqual(page.memo_opens, [])
+        self.assertNotIn("Search", page.clicks)
+        self.assertNotIn("Next", page.clicks)
 
 
     def test_three_tables_and_zero_records_found_writes_a_zero_pack(self):
@@ -2975,6 +3077,11 @@ class MemoTableIdentityTests(unittest.TestCase):
             "_memo_table_hold",
             "_memo_table_signal",
             "_row_kind",
+            "more_pages",
+            "_read_next_pagination",
+            "_classify_next_control",
+            "_decide_more_pages",
+            "_pagination_hold",
         ):
             source = inspect.getsource(getattr(memo, name))
             self.assertNotIn(".first", source, name)
@@ -3117,6 +3224,171 @@ class MemoTableIdentityTests(unittest.TestCase):
         self.assertEqual(rows, ())
         self.assertEqual(controls, ())
         self.assertEqual(locators, ())
+
+
+class _NextProbePage:
+    def __init__(self, nodes, url=_UNDERWRITING_LEGACY):
+        self.url = url
+        self._nodes = list(nodes)
+
+    def get_by_role(self, role, name=None, exact=True):
+        found = []
+        for node in self._nodes:
+            found.extend(node.find_role(role, name, exact))
+        return NodeLocator(found, self)
+
+
+def _next_control(role, *, aria=None, disabled=False, visible=True):
+    attrs = {} if aria is None else {"aria-disabled": aria}
+    return FakeNode(role, "Next", attrs=attrs, disabled=disabled, visible=visible)
+
+
+class _ListedLocator:
+    def __init__(self, matches, count=None):
+        self._matches = list(matches)
+        self._count = len(self._matches) if count is None else count
+
+    def count(self):
+        return self._count
+
+    def all(self):
+        return list(self._matches)
+
+
+class _RoleMapPage:
+    def __init__(self, mapping, url):
+        self.url = url
+        self._mapping = mapping
+
+    def get_by_role(self, role, name=None, exact=True):
+        return self._mapping.get((role, name), _ListedLocator([]))
+
+
+class _ObservedNext(NodeLocator):
+    def __init__(self, node, boom=None):
+        super().__init__([node], None)
+        self._boom = boom
+
+    def is_visible(self, timeout=None):
+        if self._boom == "is_visible":
+            raise TimeoutError("visibility failed")
+        return super().is_visible(timeout)
+
+    def get_attribute(self, name):
+        if self._boom == "get_attribute":
+            raise TimeoutError("attribute failed")
+        return super().get_attribute(name)
+
+    def is_disabled(self):
+        if self._boom == "is_disabled":
+            raise TimeoutError("disabled failed")
+        return super().is_disabled()
+
+
+class _PaginationBrowser:
+    def __init__(self, page, decision):
+        self.page = page
+        self.decision = decision
+
+    def load_communications(self, *, start, end, agent_code):
+        return MemoGrid(_UNDERWRITING_LEGACY, (), (), (), self.decision)
+
+
+class NextPaginationTests(unittest.TestCase):
+    def test_more_pages_reads_every_visible_next(self):
+        disabled = dict(aria="true", disabled=True)
+        enabled = dict(aria="false", disabled=False)
+        cases = (
+            ("none", [], False),
+            ("one disabled aria", [_next_control("button", **disabled)], False),
+            ("disabled property only", [_next_control("button", disabled=True)], False),
+            ("aria false and disabled property", [_next_control("button", aria="false", disabled=True)], False),
+            ("one enabled", [_next_control("button", **enabled)], True),
+            ("enabled with no aria", [_next_control("link", disabled=False)], True),
+            ("two disabled buttons", [
+                _next_control("button", **disabled),
+                _next_control("button", **disabled),
+            ], False),
+            ("disabled button and link", [
+                _next_control("button", **disabled),
+                _next_control("link", **disabled),
+            ], False),
+            ("visible and hidden disabled", [
+                _next_control("button", visible=True, **disabled),
+                _next_control("button", visible=False, **disabled),
+            ], False),
+            ("enabled then disabled", [
+                _next_control("button", **enabled),
+                _next_control("button", **disabled),
+            ], None),
+            ("disabled then enabled", [
+                _next_control("button", **disabled),
+                _next_control("button", **enabled),
+            ], None),
+            ("two enabled", [
+                _next_control("button", **enabled),
+                _next_control("link", **enabled),
+            ], None),
+            ("hidden enabled beside visible disabled", [
+                _next_control("button", visible=True, **disabled),
+                _next_control("button", visible=False, **enabled),
+            ], None),
+            ("hidden disabled only", [_next_control("button", visible=False, **disabled)], None),
+            ("hidden enabled only", [_next_control("button", visible=False, **enabled)], None),
+            ("unknown aria", [_next_control("button", aria="yes", disabled=False)], None),
+            ("not named Next", [FakeNode("button", "Next page", attrs={"aria-disabled": "true"}, disabled=True)], False),
+        )
+        for label, nodes, expected in cases:
+            with self.subTest(label):
+                self.assertIs(more_pages(_NextProbePage(nodes)), expected)
+
+    def test_unreadable_next_and_count_disagreement_hold_with_a_scrubbed_url(self):
+        dirty = (
+            "https://user:secret@www.foragentsonly.com/managepolicies/policyactivity/"
+            "processeddateresults/underwritinglegacy/?token=abc#frag"
+        )
+        mixed = _NextProbePage([
+            _next_control("button", aria="true", disabled=True),
+            _next_control("button", aria="false", disabled=False),
+        ], url=dirty)
+        self.assertIsNone(more_pages(mixed))
+        self._assert_hold(mixed, None, ("Next controls 2", "disabled 1", "enabled 1", "unreadable 0"))
+
+        node = _next_control("button", aria="true", disabled=True)
+        unreadable = _RoleMapPage(
+            {("button", "Next"): _ListedLocator([_ObservedNext(node, boom="get_attribute")])},
+            dirty,
+        )
+        self.assertIsNone(more_pages(unreadable))
+        self._assert_hold(unreadable, None, ("Next controls 1", "visible 1", "unreadable 1", "enabled 0"))
+
+        disagreed = _RoleMapPage(
+            {("button", "Next"): _ListedLocator([NodeLocator([node], None)], count=2)},
+            dirty,
+        )
+        self.assertIsNone(more_pages(disagreed))
+        self._assert_hold(
+            disagreed,
+            None,
+            ("Next controls unknown", "signal count disagreed with the Next list", "page " + _UNDERWRITING_LEGACY),
+        )
+
+    def _assert_hold(self, page, decision, fragments):
+        with self.assertRaises(IntakeHold) as caught:
+            FaoCommunicationsMemoPortal(
+                _PaginationBrowser(page, decision),
+                LocalDeliveryLedger(Path(tempfile.mkdtemp()) / "out"),
+            ).list_documents(scope="fao_communications", start=PROVE_DAY, end=PROVE_DAY)
+        message = str(caught.exception)
+        self.assertIn("incomplete or ambiguous", message)
+        self.assertIn(_UNDERWRITING_LEGACY, message)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("user:secret", message)
+        self.assertNotIn("token", message)
+        self.assertNotIn("#frag", message)
+        self.assertNotIn("gemini:", message)
+        for fragment in fragments:
+            self.assertIn(fragment, message)
 
 
 class WorkerRowTests(unittest.TestCase):

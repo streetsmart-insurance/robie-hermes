@@ -52,7 +52,10 @@ Memo rows are read from the one table whose headers are the Communications
 columns, or from the one of those tables that contains the Memo control.
 Any other count holds with the table count, that signal, and the page URL
 with query, fragment, and userinfo removed. ``.first`` and ``.nth`` are
-not used for that choice. The Gemini helper is shared with the other Playwright
+not used for that choice. Next pagination does not ask Gemini. Every
+disabled Next control, including duplicate visible Next controls, is no
+further page. Mixed, unreadable, or non-unique enabled Next controls hold
+with the Next counts and that same safe page URL. The Gemini helper is shared with the other Playwright
 sites; FAO is one caller. Production skips that rescue. The success path
 does not call Gemini. This module does not call Jev. The document-retrieval
 filing kill switch is unchanged.
@@ -1698,27 +1701,151 @@ def extract_memo_grid(page: Any) -> tuple[tuple[str, ...], tuple[tuple[str, ...]
     raise _memo_table_hold(page, table_count=table_count, signal=signal)
 
 
-def more_pages(page: Any) -> bool | None:
-    found = []
-    for role in ("link", "button"):
-        locator = page.get_by_role(role, name="Next", exact=True)
-        if locator.count():
-            found.append(locator)
-    if not found:
-        return False
-    if len(found) != 1 or found[0].count() != 1:
-        return None
-    locator = found[0]
+@dataclass(frozen=True)
+class _NextPagination:
+    """One read of every Next link and button. Counts are not click targets."""
+
+    decision: bool | None
+    total: int
+    visible: int
+    hidden: int
+    disabled: int
+    enabled: int
+    unreadable: int
+    signal: str = ""
+
+    @staticmethod
+    def failed(signal: str) -> _NextPagination:
+        return _NextPagination(None, -1, -1, -1, -1, -1, -1, signal)
+
+
+def _shown_count(value: int) -> str:
+    return "unknown" if value < 0 else str(value)
+
+
+def _classify_next_control(locator: Any) -> tuple[str, str]:
+    """Return ``(visibility, ability)`` for one Next control.
+
+    Visibility is ``visible``, ``hidden``, or ``unreadable``. Ability is
+    ``disabled``, ``enabled``, or ``unreadable``. A control is disabled when
+    ``aria-disabled`` is ``true`` or ``is_disabled()`` is true. It is enabled
+    only when that aria value is absent or ``false`` and the control is not
+    disabled. Any other aria value is unreadable.
+    """
+    try:
+        visible = locator.is_visible()
+    except Exception:
+        return ("unreadable", "unreadable")
+    if not isinstance(visible, bool):
+        return ("unreadable", "unreadable")
+    visibility = "visible" if visible else "hidden"
     try:
         aria = locator.get_attribute("aria-disabled")
         disabled = locator.is_disabled()
     except Exception:
-        return None
-    if aria not in {None, "true", "false"}:
-        return None
-    if aria == "true" or disabled is True:
+        return (visibility, "unreadable")
+    if aria not in {None, "true", "false"} or not isinstance(disabled, bool):
+        return (visibility, "unreadable")
+    ability = "disabled" if aria == "true" or disabled else "enabled"
+    return (visibility, ability)
+
+
+def _decide_more_pages(states: tuple[tuple[str, str], ...]) -> bool | None:
+    """False when every Next is disabled and at least one is visible.
+
+    True only for exactly one visible enabled Next when no other Next
+    disagrees. Mixed enabled/disabled, an unreadable control, a hidden or
+    duplicated enabled Next, or a pager that is only hidden stays None.
+    """
+    if not states:
         return False
-    return True
+    if any(visibility == "unreadable" or ability == "unreadable" for visibility, ability in states):
+        return None
+    enabled = [item for item in states if item[1] == "enabled"]
+    disabled = [item for item in states if item[1] == "disabled"]
+    if enabled and disabled:
+        return None
+    if not enabled and any(item[0] == "visible" for item in disabled):
+        return False
+    if len(enabled) == 1 and enabled[0][0] == "visible":
+        return True
+    return None
+
+
+def _read_next_pagination(page: Any) -> _NextPagination:
+    """Enumerate Next by role. ``locator.all()`` is the only split.
+
+    A count that disagrees with that list, or a match that is not one
+    element, fails closed. Positional locators are not used.
+    """
+    controls: list[Any] = []
+    for role in ("link", "button"):
+        try:
+            locator = page.get_by_role(role, name="Next", exact=True)
+            count = int(locator.count())
+            matches = list(locator.all())
+        except Exception:
+            return _NextPagination.failed("lookup failed")
+        if count != len(matches):
+            return _NextPagination.failed("count disagreed with the Next list")
+        for match in matches:
+            try:
+                if int(match.count()) != 1:
+                    return _NextPagination.failed("a Next locator was not one element")
+            except Exception:
+                return _NextPagination.failed("lookup failed")
+            controls.append(match)
+    states = tuple(_classify_next_control(control) for control in controls)
+    visible = sum(1 for visibility, _ability in states if visibility == "visible")
+    hidden = sum(1 for visibility, _ability in states if visibility == "hidden")
+    disabled = sum(1 for _visibility, ability in states if ability == "disabled")
+    enabled = sum(1 for _visibility, ability in states if ability == "enabled")
+    unreadable = sum(
+        1
+        for visibility, ability in states
+        if visibility == "unreadable" or ability == "unreadable"
+    )
+    return _NextPagination(
+        decision=_decide_more_pages(states),
+        total=len(states),
+        visible=visible,
+        hidden=hidden,
+        disabled=disabled,
+        enabled=enabled,
+        unreadable=unreadable,
+    )
+
+
+def _pagination_hold(page: Any) -> IntakeHold:
+    """Fail closed. The Next counts and the URL are not click targets."""
+    reading = _read_next_pagination(page)
+    url = _safe_page_url(str(getattr(page, "url", "") or "")) or "(url withheld)"
+    signal = f" signal {reading.signal};" if reading.signal else ""
+    return IntakeHold(
+        "Communications memo list is incomplete or ambiguous; "
+        f"Next controls {_shown_count(reading.total)}; "
+        f"visible {_shown_count(reading.visible)}; "
+        f"hidden {_shown_count(reading.hidden)}; "
+        f"disabled {_shown_count(reading.disabled)}; "
+        f"enabled {_shown_count(reading.enabled)}; "
+        f"unreadable {_shown_count(reading.unreadable)};"
+        f"{signal} "
+        f"page {url}"
+    )
+
+
+def more_pages(page: Any) -> bool | None:
+    """Whether another Communications page is available.
+
+    False when no Next link or button is present. False when every Next
+    control is disabled, including duplicate visible Next controls, and at
+    least one of them is visible. True when exactly one visible Next is
+    enabled and every Next agrees. None when states are mixed, aria is
+    unreadable, an enabled Next is hidden or duplicated, only hidden Next
+    controls are present, or the locators cannot be read. Next pagination
+    does not ask Gemini.
+    """
+    return _read_next_pagination(page).decision
 
 
 class PlaywrightFaoMemoBrowser:
@@ -2031,7 +2158,10 @@ class FaoCommunicationsMemoPortal:
         grid = self.browser.load_communications(start=start, end=end, agent_code=self.agent_code)
         memos = parse_memo_grid(grid, agent_code=self.agent_code)
         if grid.more_pages is not False:
-            raise IntakeHold("Communications memo list is incomplete or ambiguous")
+            page = getattr(self.browser, "page", None)
+            if page is None:
+                raise IntakeHold("Communications memo list is incomplete or ambiguous")
+            raise _pagination_hold(page)
         self._list_png = require_png(self.browser.screenshot_communications())
         rows = []
         found: dict[str, MemoRow] = {}

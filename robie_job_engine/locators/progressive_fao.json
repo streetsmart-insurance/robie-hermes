@@ -1,11 +1,11 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.11",
+  "version": "1.12",
   "gemini_ui_rescue": {
     "environment": "TEST",
     "secret_id": "gemini-api-key",
-    "note": "Shared Test-only helper robie_job_engine.gemini_ui_rescue. Registered selectors stay the primary path. On ROBIE_ENV=TEST, one missing or ambiguous named control, a coded locator that does not resolve to one element, or a Playwright timeout on that wait may ask Gemini once for a single unique locator. view_activity_by is an exception: the existing #606 selector is resolved directly, and zero matches, multiple matches, or a page that is not the Policy Activity form hold without asking Gemini. communications_link is the same kind of exception: a[data-at=\"policy-activity-tab-communications\"], or one link named Communications when that element is absent, is resolved directly on processed-date results. A unique pair that both queries already agree on is clicked; inner text and the label helper are not a second veto. Zero matches, multiple matches, a hidden match, queries that hit different elements, a data-at-only or named-only match with a different name, or a page that is not processed-date results holds with both counts and the safe page URL, without asking Gemini. communications_memo_table is the same kind of exception: empty-list text and the memo table are resolved directly and do not ask Gemini. The same helper is wired for EZLynx, Ascend, this FAO page, and the Playwright write guard (Geico and other portals that run through playwright_exec). Production skips the rescue. Positional .first/.nth answers are refused. This does not file EZLynx documents or notes."
+    "note": "Shared Test-only helper robie_job_engine.gemini_ui_rescue. Registered selectors stay the primary path. On ROBIE_ENV=TEST, one missing or ambiguous named control, a coded locator that does not resolve to one element, or a Playwright timeout on that wait may ask Gemini once for a single unique locator. view_activity_by is an exception: the existing #606 selector is resolved directly, and zero matches, multiple matches, or a page that is not the Policy Activity form hold without asking Gemini. communications_link is the same kind of exception: a[data-at=\"policy-activity-tab-communications\"], or one link named Communications when that element is absent, is resolved directly on processed-date results. A unique pair that both queries already agree on is clicked; inner text and the label helper are not a second veto. Zero matches, multiple matches, a hidden match, queries that hit different elements, a data-at-only or named-only match with a different name, or a page that is not processed-date results holds with both counts and the safe page URL, without asking Gemini. communications_memo_table is the same kind of exception: empty-list text and the memo table are resolved directly and do not ask Gemini. communications_next is the same kind of exception: Next pagination is read directly from every link or button named Next and does not ask Gemini. The same helper is wired for EZLynx, Ascend, this FAO page, and the Playwright write guard (Geico and other portals that run through playwright_exec). Production skips the rescue. Positional .first/.nth answers are refused. This does not file EZLynx documents or notes."
   },
   "fields": {
     "manage_policies": {
@@ -117,6 +117,17 @@
       "fallback_selector": "No records found",
       "exact": true,
       "description": "Communications list after the section link, including processeddateresults/underwritinglegacy/. Prove5 on tip 19f0caaf showed three tables and this empty-list text, with pdf_count 0. Either phrase, with no memo-like row, is an empty memo grid (0 memo rows and 0 PDFs). The phrases are not clicked. When memo rows exist, the one table whose headers are the Communications columns is used. If several tables have those headers, the one that also contains the Memo control is used, and only when every memo-like row is in that table. Any other count holds. The hold says tables matched, then the signal (empty-list present or absent, memo-header tables, memo-control tables, memo-like rows), and the page URL with query, fragment, and userinfo removed. Those counts are not click targets. This field does not ask Gemini. Positional .first/.nth is not used. No PDF is opened for the empty list.",
+      "last_updated": "2026-09-27"
+    },
+    "communications_next": {
+      "name": "communications_next",
+      "primary_strategy": "role",
+      "primary_selector": "button:Next",
+      "fallback_strategy": "role",
+      "fallback_selector": "link:Next",
+      "exact": true,
+      "accessible_name": "Next",
+      "description": "Communications list pagination. Both button:Next and link:Next are always read together. The fallback is not a second click and it is not a way to ignore a control whose state disagrees. Enumeration uses locator.all(). Every Next control disabled, including duplicate visible Next controls, means no further page when at least one Next is visible. Exactly one visible enabled Next, with every Next in that same state, means another page and the list holds. Mixed enabled and disabled, an aria-disabled value other than true, false, or absent, a hidden or duplicated enabled Next, only hidden Next controls, or a count that disagrees with the Next list holds. The hold names Next controls, visible, hidden, disabled, enabled, and unreadable, and the page URL with query, fragment, and userinfo removed. Those counts are not click targets. This field does not ask Gemini. Positional .first/.nth is not used. Next is not clicked.",
       "last_updated": "2026-09-27"
     }
   }
