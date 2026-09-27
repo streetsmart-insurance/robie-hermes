@@ -34,6 +34,7 @@ from robie_job_engine.progressive_fao_memo import (
     MANAGE_POLICIES_CSS,
     MANAGE_POLICIES_NAME,
     POLICY_ACTIVITY_NAMES,
+    CUSTOM_DATE_RANGE_LABEL,
     PROCESSED_DATE_OPTION_CSS,
     PROCESSED_DATE_OPTION_LABEL,
     PROCESSED_DATE_OPTION_VALUE,
@@ -69,6 +70,11 @@ LIST_PNG = bytes.fromhex(
     "49454e44ae426082"
 )
 PROVE_DAY = date(2026, 9, 25)
+# Stand-ins for the live preset values. Production reads the value from the
+# Select Date Range option; these numbers are not that contract.
+FIXTURE_PRESET_YESTERDAY = "1"
+FIXTURE_PRESET_LAST_30 = "2"
+FIXTURE_CUSTOM_RANGE_VALUE = "4"
 PROVE_ROWS = (
     ("860521214", "3JR Contracting LLC", "General", "Memo", "09/25/2026"),
     ("879512352", "ALTI TRANSPORT LLC", "Policy Verific.", "Memo", "09/25/2026"),
@@ -746,6 +752,10 @@ class LocatorContractTests(unittest.TestCase):
             self.assertEqual(field.primary_selector, selector)
             self.assertEqual(field.accessible_name, accessible)
             self.assertFalse(field.fallback_selector)
+        date_range = page.get_field("processed_date_range")
+        self.assertEqual(CUSTOM_DATE_RANGE_LABEL, "Select Date Range")
+        self.assertIn(CUSTOM_DATE_RANGE_LABEL, date_range.description)
+        self.assertIn("select#PDDateRange", date_range.primary_selector)
         self.assertIn(PROCESSED_DATE_OPTION_VALUE, page.get_field("processed_date_option").primary_selector)
         self.assertEqual(page.get_field("search").primary_selector, "button:Search")
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
@@ -912,7 +922,10 @@ class NodeLocator:
         self.page.on_click(node)
 
     def fill(self, value):
-        self.nodes[0].value = value
+        node = self.nodes[0]
+        if not node.visible:
+            self.page.filled_while_hidden.append(node)
+        node.value = value
 
     def input_value(self):
         node = self.nodes[0]
@@ -929,6 +942,10 @@ class NodeLocator:
 
     def is_visible(self, timeout=None):
         return len(self.nodes) == 1 and bool(self.nodes[0].visible)
+
+    def wait_for(self, state="visible", timeout=None):
+        if state != "visible" or len(self.nodes) != 1 or not self.nodes[0].visible:
+            raise TimeoutError("visible control did not appear")
 
     def nth(self, index):
         return NodeLocator([self.nodes[index]], self.page)
@@ -1028,6 +1045,7 @@ class NavPage:
         self.button_mode = button_mode
         self.legacy_dates = legacy_dates
         self.clicks = []
+        self.filled_while_hidden = []
         self.memo_opens = []
         self.screenshot_calls = 0
         self.closed = False
@@ -1084,33 +1102,40 @@ class NavPage:
             self.start_date.input_override = self.date_override
         self.end_date = self._date_input(
             END_DATE_LABEL if self.end_mode != "unlabeled" else "",
-            "",
+            "js-datepicker__date-end",
             "datatable-daterangepicker-enddate",
         )
         self.get_activity = self._activity_button("Get Policy Activity" if self.button_mode != "misnamed" else "Apply")
-        range_children = []
+        self.date_range = self._preset_select()
+        self.preset_selects = []
+        if self.range_mode != "missing":
+            self.preset_selects.append(self.date_range)
+            if self.range_mode == "duplicate":
+                self.preset_selects.append(self._preset_select())
+        self.page_dates = []
         if self.start_mode != "missing":
-            range_children.append(self.start_date)
+            self.page_dates.append(self.start_date)
             if self.start_mode == "duplicate":
-                range_children.append(self._date_input(
+                self.page_dates.append(self._date_input(
                     START_DATE_LABEL, "js-datepicker__date-start", "datatable-daterangepicker-startdate",
                 ))
-        if self.end_mode != "missing":
-            range_children.append(self.end_date)
-            if self.end_mode == "duplicate":
-                range_children.append(self._date_input(END_DATE_LABEL, "", "datatable-daterangepicker-enddate"))
-        if self.button_mode != "missing":
-            range_children.append(self.get_activity)
-            if self.button_mode == "duplicate":
-                range_children.append(self._activity_button("Get Policy Activity"))
-        self.date_range = FakeNode("div", attrs={"id": "PDDateRange"}, children=range_children)
-        self.date_range_visible = False
-        self.search_button = FakeNode("button", "Search")
-        self.activity_extras = []
         if self.start_mode == "outside":
-            self.activity_extras.append(self._date_input(
+            self.page_dates.append(self._date_input(
                 START_DATE_LABEL, "js-datepicker__date-start", "datatable-daterangepicker-startdate",
             ))
+        if self.end_mode != "missing":
+            self.page_dates.append(self.end_date)
+            if self.end_mode == "duplicate":
+                self.page_dates.append(self._date_input(
+                    END_DATE_LABEL, "js-datepicker__date-end", "datatable-daterangepicker-enddate",
+                ))
+        self.page_buttons = []
+        if self.button_mode != "missing":
+            self.page_buttons.append(self.get_activity)
+            if self.button_mode == "duplicate":
+                self.page_buttons.append(self._activity_button("Get Policy Activity"))
+        self.search_button = FakeNode("button", "Search")
+        self.activity_extras = []
         if self.legacy_dates:
             self.legacy_from = FakeNode("textbox", "Processed date from", label="Processed date from")
             self.legacy_to = FakeNode("textbox", "Processed date to", label="Processed date to")
@@ -1183,10 +1208,14 @@ class NavPage:
         return NodeLocator(found, self)
 
     def _activity_roots(self):
-        nodes = [*self.view_nodes, self.search_button, *self.activity_extras]
-        if self.date_range_visible:
-            nodes.append(self.date_range)
-        return nodes
+        return [
+            *self.view_nodes,
+            self.search_button,
+            *self.activity_extras,
+            *self.preset_selects,
+            *self.page_dates,
+            *self.page_buttons,
+        ]
 
     def _view_nodes(self):
         if self.view_mode == "missing":
@@ -1233,7 +1262,29 @@ class NavPage:
         attrs = {"type": "date", "data-at": data_at}
         if element_id:
             attrs["id"] = element_id
-        return FakeNode("input", label or "date", label=label, attrs=attrs)
+        return FakeNode("input", label or "date", label=label, attrs=attrs, visible=False)
+
+    def _preset_options(self):
+        options = [
+            FakeNode("option", "Yesterday", text="Yesterday", attrs={"value": FIXTURE_PRESET_YESTERDAY}),
+            FakeNode("option", "Last 30 Days", text="Last 30 Days", attrs={"value": FIXTURE_PRESET_LAST_30}),
+        ]
+        if self.range_mode == "missing-custom":
+            return options
+        value = "" if self.range_mode == "blank-custom" else FIXTURE_CUSTOM_RANGE_VALUE
+        options.append(FakeNode(
+            "option", CUSTOM_DATE_RANGE_LABEL, text=CUSTOM_DATE_RANGE_LABEL, attrs={"value": value},
+        ))
+        if self.range_mode == "duplicate-custom":
+            options.append(FakeNode(
+                "option", CUSTOM_DATE_RANGE_LABEL, text=CUSTOM_DATE_RANGE_LABEL, attrs={"value": "5"},
+            ))
+        if self.range_mode == "duplicate-value":
+            options.append(FakeNode("option", "Custom", text="Custom", attrs={"value": value}))
+        return options
+
+    def _preset_select(self):
+        return FakeNode("select", "PDDateRange", attrs={"id": "PDDateRange"}, children=self._preset_options())
 
     def _activity_button(self, value):
         return FakeNode(
@@ -1290,8 +1341,13 @@ class NavPage:
 
     def on_select(self, node, option):
         self.clicks.append(option.text)
-        if option.attrs.get("value") == PROCESSED_DATE_OPTION_VALUE and self.range_mode != "stuck":
-            self.date_range_visible = True
+        if (
+            node is self.date_range
+            and option.text == CUSTOM_DATE_RANGE_LABEL
+            and self.range_mode != "stuck"
+        ):
+            for item in self.page_dates:
+                item.visible = True
 
 
 class NavContext:
@@ -1427,10 +1483,20 @@ class NavigationTests(unittest.TestCase):
         observation = browser.capture_memo(memos[1].document_id)
         self.assertEqual(pdf_bytes_from_observation(observation), pdf_bytes(b"879512352"))
         self.assertEqual(page.memo_opens, ["879512352"])
+        self.assertEqual(page.date_range.role, "select")
+        self.assertEqual(page.date_range.value, FIXTURE_CUSTOM_RANGE_VALUE)
+        self.assertNotEqual(page.date_range.value, FIXTURE_PRESET_YESTERDAY)
+        self.assertNotIn(page.start_date, page.date_range.children)
+        self.assertNotIn(page.end_date, page.date_range.children)
+        self.assertNotIn(page.get_activity, page.date_range.children)
+        self.assertTrue(page.start_date.visible)
+        self.assertTrue(page.end_date.visible)
+        self.assertEqual(page.filled_while_hidden, [])
         self.assertEqual(page.clicks, [
             "Manage Policies",
             "Policy Activity",
             "Processed Date",
+            CUSTOM_DATE_RANGE_LABEL,
             "Get Policy Activity",
             "Search",
             "Communications",
@@ -1597,7 +1663,9 @@ class NavigationTests(unittest.TestCase):
             PlaywrightFaoMemoBrowser(page).load_communications(
                 start=PROVE_DAY, end=PROVE_DAY, agent_code=DEFAULT_AGENT_CODE,
             )
-        self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity", "Processed Date"])
+        self.assertEqual(page.clicks, [
+            "Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL,
+        ])
         self.assertEqual(page.end_date.value, "")
         self.assertNotIn("Get Policy Activity", page.clicks)
         self.assertNotIn("Search", page.clicks)
@@ -1609,9 +1677,22 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(page.get_by_label("Processed date to", exact=True).count(), 0)
         self.assertEqual(page.locator(VIEW_ACTIVITY_BY_CSS).count(), 1)
         self.assertEqual(page.get_by_label(VIEW_ACTIVITY_BY_LABEL, exact=True).count(), 1)
-        self.assertEqual(page.locator(PROCESSED_DATE_RANGE_CSS).count(), 0)
-        page.date_range_visible = True
-        self.assertEqual(page.locator(PROCESSED_DATE_RANGE_CSS).count(), 1)
+        preset = page.locator(PROCESSED_DATE_RANGE_CSS)
+        self.assertEqual(preset.count(), 1)
+        self.assertTrue(preset.is_visible())
+        option_text = [item.inner_text() for item in preset.locator("option").all()]
+        self.assertEqual(option_text, ["Yesterday", "Last 30 Days", CUSTOM_DATE_RANGE_LABEL])
+        self.assertEqual(
+            preset.locator("option").nth(2).get_attribute("value"),
+            FIXTURE_CUSTOM_RANGE_VALUE,
+        )
+        self.assertEqual(preset.locator(START_DATE_CSS).count(), 0)
+        self.assertEqual(preset.locator(END_DATE_CSS).count(), 0)
+        self.assertEqual(preset.locator(GET_POLICY_ACTIVITY_CSS).count(), 0)
+        self.assertEqual(page.locator(START_DATE_CSS).count(), 1)
+        self.assertFalse(page.locator(START_DATE_CSS).is_visible())
+        self.assertEqual(page.locator(END_DATE_CSS).count(), 1)
+        self.assertFalse(page.locator(END_DATE_CSS).is_visible())
         self.assertEqual(
             page.get_by_label(START_DATE_LABEL, exact=True).and_(page.locator(START_DATE_CSS)).count(),
             1,
@@ -1620,6 +1701,7 @@ class NavigationTests(unittest.TestCase):
             page.get_by_label(END_DATE_LABEL, exact=True).and_(page.locator(END_DATE_CSS)).count(),
             1,
         )
+        self.assertTrue(page.locator(GET_POLICY_ACTIVITY_CSS).is_visible())
         self.assertEqual(page.locator(GET_POLICY_ACTIVITY_CSS).get_attribute("value"), GET_POLICY_ACTIVITY_LABEL)
         self.assertEqual(page.locator(PROCESSED_DATE_OPTION_CSS).count(), 1)
 
@@ -1669,64 +1751,100 @@ class NavigationTests(unittest.TestCase):
                 ["Manage Policies", "Policy Activity"],
             ),
             (
-                "range does not appear",
-                dict(range_mode="stuck"),
+                "range select missing",
+                dict(range_mode="missing"),
                 "Processed date range",
                 ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "duplicate range select",
+                dict(range_mode="duplicate"),
+                "Processed date range",
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "custom range option missing",
+                dict(range_mode="missing-custom"),
+                CUSTOM_DATE_RANGE_LABEL,
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "duplicate custom range option",
+                dict(range_mode="duplicate-custom"),
+                CUSTOM_DATE_RANGE_LABEL,
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "custom range option has no value",
+                dict(range_mode="blank-custom"),
+                CUSTOM_DATE_RANGE_LABEL,
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "custom range value is shared",
+                dict(range_mode="duplicate-value"),
+                CUSTOM_DATE_RANGE_LABEL,
+                ["Manage Policies", "Policy Activity", "Processed Date"],
+            ),
+            (
+                "custom range does not reveal dates",
+                dict(range_mode="stuck"),
+                "Start Date",
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "missing start",
                 dict(start_mode="missing"),
                 "Start Date",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "duplicate start",
                 dict(start_mode="duplicate"),
                 "Start Date",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "mistitled start",
                 dict(start_mode="mistitled"),
                 "Start Date",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
-                "start outside the range",
+                "second page-level start",
                 dict(start_mode="outside"),
                 "Start Date",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "missing end",
                 dict(end_mode="missing"),
                 "End Date",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "duplicate end",
                 dict(end_mode="duplicate"),
                 "End Date",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "missing submit",
                 dict(button_mode="missing"),
                 "Get Policy Activity",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "duplicate submit",
                 dict(button_mode="duplicate"),
                 "Get Policy Activity",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
             (
                 "misnamed submit",
                 dict(button_mode="misnamed"),
                 "Get Policy Activity",
-                ["Manage Policies", "Policy Activity", "Processed Date"],
+                ["Manage Policies", "Policy Activity", "Processed Date", CUSTOM_DATE_RANGE_LABEL],
             ),
         )
         for label, kwargs, hold, clicks in cases:
@@ -1737,6 +1855,16 @@ class NavigationTests(unittest.TestCase):
                 self.assertEqual(page.clicks, clicks)
                 self.assertNotIn("Get Policy Activity", page.clicks)
                 self.assertNotIn("Search", page.clicks)
+                self.assertEqual(page.filled_while_hidden, [])
+                if kwargs.get("range_mode") == "stuck":
+                    self.assertEqual(page.date_range.value, FIXTURE_CUSTOM_RANGE_VALUE)
+                    self.assertFalse(page.start_date.visible)
+                    self.assertEqual(page.start_date.value, "")
+                if kwargs.get("range_mode") in {
+                    "missing-custom", "duplicate-custom", "blank-custom", "duplicate-value", "duplicate",
+                }:
+                    self.assertEqual(page.date_range.value, "")
+                    self.assertFalse(page.start_date.visible)
                 if kwargs.get("start_mode") in {"duplicate", "missing", "mistitled", "outside"}:
                     self.assertEqual(page.start_date.value, "")
                 if kwargs.get("end_mode") == "duplicate":

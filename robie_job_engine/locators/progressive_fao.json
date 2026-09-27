@@ -1,7 +1,7 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.1",
+  "version": "1.2",
   "fields": {
     "manage_policies": {
       "name": "manage_policies",
@@ -45,10 +45,10 @@
     "processed_date_range": {
       "name": "processed_date_range",
       "primary_strategy": "css",
-      "primary_selector": "#PDDateRange",
+      "primary_selector": "select#PDDateRange",
       "exact": true,
-      "description": "Date range shown after Processed Date is selected. Start, end, and Get Policy Activity are resolved inside this one element and must also be unique on the page.",
-      "last_updated": "2026-09-26"
+      "description": "Preset select on Policy Activity, present with View Activity By. Options include Yesterday, Last 30 Days, and Select Date Range. Choose the single option whose visible text is Select Date Range; its value is read from that option and is not hardcoded. That choice reveals page-level Start Date and End Date. Those inputs are not descendants of this select. A missing select, a second select, a missing or second Select Date Range option, or a missing or shared option value holds.",
+      "last_updated": "2026-09-27"
     },
     "processed_date_from": {
       "name": "processed_date_from",
@@ -56,8 +56,8 @@
       "primary_selector": "input[type=\"date\"]#js-datepicker__date-start[data-at=\"datatable-daterangepicker-startdate\"]",
       "exact": true,
       "accessible_name": "Start Date",
-      "description": "Inclusive processed-date start inside #PDDateRange. HTML date input, filled YYYY-MM-DD and read back. The accessible name Start Date must be this same element. The old label Processed date from is not on this page.",
-      "last_updated": "2026-09-26"
+      "description": "Inclusive processed-date start. Page-level HTML date input. It can be in the DOM while hidden until Select Date Range is chosen on select#PDDateRange. The run waits until this one element is visible, fills YYYY-MM-DD, and reads it back. The accessible name Start Date must be this same element. The old label Processed date from is not on this page.",
+      "last_updated": "2026-09-27"
     },
     "processed_date_to": {
       "name": "processed_date_to",
@@ -65,8 +65,8 @@
       "primary_selector": "input[type=\"date\"][data-at=\"datatable-daterangepicker-enddate\"]",
       "exact": true,
       "accessible_name": "End Date",
-      "description": "Inclusive processed-date end inside #PDDateRange. HTML date input, filled YYYY-MM-DD and read back. The accessible name End Date must be this same element.",
-      "last_updated": "2026-09-26"
+      "description": "Inclusive processed-date end. Page-level HTML date input. It can be in the DOM while hidden until Select Date Range is chosen on select#PDDateRange. The run waits until this one element is visible, fills YYYY-MM-DD, and reads it back. The accessible name End Date must be this same element.",
+      "last_updated": "2026-09-27"
     },
     "get_policy_activity": {
       "name": "get_policy_activity",
@@ -74,8 +74,8 @@
       "primary_selector": "[data-at=\"ProcessedDateButton\"]",
       "exact": true,
       "accessible_name": "Get Policy Activity",
-      "description": "Submits the processed-date window. Live control value is Get Policy Activity. Resolved inside #PDDateRange and unique on the page. Search is the next step and is unchanged.",
-      "last_updated": "2026-09-26"
+      "description": "Submits the processed-date window. Live control value is Get Policy Activity. Unique and visible on the page. It is not inside select#PDDateRange. Search is the next step and is unchanged.",
+      "last_updated": "2026-09-27"
     },
     "search": {
       "name": "search",
