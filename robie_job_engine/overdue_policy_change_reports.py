@@ -670,22 +670,35 @@ def default_queue_reader(payload: Mapping[str, Any]) -> list[dict[str, str]]:
 class _OAuthClientCredentials:
     """Minimal client-credentials token fetch (urllib, stdlib only)."""
 
-    def __init__(self, *, token_endpoint: str, client_id: str, client_secret: str, scope: str) -> None:
+    def __init__(self, *, token_endpoint: str, client_id: str, client_secret: str, scope: str,
+                 username: str = "", integration_group_id: str = "",
+                 grant_type: str = "vendor_data_access") -> None:
         self.token_endpoint = token_endpoint
         self.client_id = client_id
         self.client_secret = client_secret
         self.scope = scope
+        self.username = username
+        self.integration_group_id = integration_group_id
+        self.grant_type = grant_type
         self._token: str | None = None
 
     def get_token(self) -> str:
         if self._token:
             return self._token
-        body = parse.urlencode({
-            "grant_type": "client_credentials",
+        form = {
+            "grant_type": self.grant_type,
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "scope": self.scope,
-        }).encode("ascii")
+        }
+        # EZLynx requires the agency username + integration group on the token
+        # form (same as the deployed EzlynxApiClient); without them the token
+        # endpoint returns HTTP 400.
+        if self.username:
+            form["username"] = self.username
+        if self.integration_group_id:
+            form["integration_group_id"] = self.integration_group_id
+        body = parse.urlencode(form).encode("ascii")
         request = urlrequest.Request(
             self.token_endpoint, data=body,
             headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
@@ -711,7 +724,10 @@ class PolicyApiSearchClient:
     """
 
     def __init__(self, *, base_url: str = POLICY_API_BASE_URL,
-                 token_endpoint: str, client_id: str, client_secret: str) -> None:
+                 token_endpoint: str, client_id: str, client_secret: str,
+                 username: str = "", integration_group_id: str = "",
+                 scope: str = "PolicyApi openid",
+                 grant_type: str = "vendor_data_access") -> None:
         missing = [name for name, value in (
             ("token_endpoint", token_endpoint), ("client_id", client_id),
             ("client_secret", client_secret),
@@ -723,7 +739,9 @@ class PolicyApiSearchClient:
         self._base = base_url.rstrip("/") + "/"
         self._auth = _OAuthClientCredentials(
             token_endpoint=token_endpoint, client_id=client_id,
-            client_secret=client_secret, scope="PolicyApi openid",
+            client_secret=client_secret, scope=scope, grant_type=grant_type,
+            username=username,
+            integration_group_id=integration_group_id,
         )
 
     def search_by_number(self, policy_number: str) -> list[dict[str, Any]]:
@@ -741,8 +759,15 @@ class PolicyApiSearchClient:
                 parsed = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             raise PolicyChangeReportContractError(f"PolicyApi search transport failed: {exc}") from exc
-        data = parsed.get("data") if isinstance(parsed, dict) else None
-        results = (data or {}).get("results") if isinstance(data, dict) else None
+        # The search endpoint returns a flat page object
+        # {pageIndex, pageSize, results, totalSize}; tolerate a wrapped
+        # {"data": {...}} shape too (same tolerance as the deployed client).
+        if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict):
+            results = parsed["data"].get("results")
+        elif isinstance(parsed, dict):
+            results = parsed.get("results")
+        else:
+            results = None
         if not isinstance(results, list):
             raise PolicyChangeReportContractError("PolicyApi search returned an unexpected shape")
         return [dict(row) for row in results if isinstance(row, dict)]
@@ -753,6 +778,9 @@ def default_policy_search(policy_number: str) -> list[dict[str, Any]]:
         token_endpoint=os.environ.get("EZLYNX_POLICY_API_TOKEN_ENDPOINT", ""),
         client_id=os.environ.get("EZLYNX_POLICY_API_CLIENT_ID", ""),
         client_secret=os.environ.get("EZLYNX_POLICY_API_CLIENT_SECRET", ""),
+        username=os.environ.get("EZLYNX_POLICY_API_USERNAME", ""),
+        integration_group_id=os.environ.get("EZLYNX_POLICY_API_INTEGRATION_GROUP_ID", ""),
+        scope=os.environ.get("EZLYNX_POLICY_API_SCOPE", "PolicyApi openid"),
     )
     return client.search_by_number(policy_number)
 
