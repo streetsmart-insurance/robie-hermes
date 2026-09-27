@@ -199,6 +199,49 @@ def test_request_for_coi_does_not_make_junk_insured():
     assert extract_subject_insured("Request for COI") is None
 
 
+def test_for_tail_rejects_dot_numbers():
+    # Full Convoy subject: a DOT number is an identifier, never an
+    # insured. Regression: the first for-tail cut captured "DOT2923646
+    # on" and manufactured an insured conflict that held a genuine Ella
+    # Transport request (v6 extracted nothing here and verified it).
+    assert extract_subject_insured(
+        "Re: [Convoy Platform] Re: Re: [REQUESTED ACTION]: Insurance "
+        "Expiring for DOT2923646 on 09/15/2026") is None
+    assert extract_subject_insured(
+        "Compliance update for MC1121844 expiring soon") is None
+
+
+def test_for_tail_keeps_mc_suffixed_names():
+    # The DOT/MC guard only blocks captures that START with the number:
+    # "Xkillswitch LLC MC1178031" still resolves (MC tail stripped).
+    assert extract_subject_insured(
+        "COI request for Xkillswitch LLC MC1178031") == "Xkillswitch LLC"
+
+
+def test_subject_only_patterns_never_run_on_pdf_text():
+    # verify_record() reuses _SUBJECT_PATTERNS to hunt insured names in
+    # PDF text. The loose for-tail and the Certificial expiry shape must
+    # not run there: they matched "for ..." fragments inside a Sunbelt
+    # rental contract and a Word XML dump and manufactured conflicts.
+    from robie_job_engine.cert_intake import (  # noqa: E402
+        _SUBJECT_ONLY_PATTERNS,
+        _SUBJECT_PATTERNS,
+    )
+    only_srcs = [p.pattern for p in _SUBJECT_ONLY_PATTERNS]
+    shared_srcs = [p.pattern for p in _SUBJECT_PATTERNS]
+    assert len(only_srcs) == 2
+    for src in only_srcs:
+        assert src not in shared_srcs
+    pdf_junk = ("insurance expiring for DOT2923646 on 09/15/2026 ... "
+                "Ekmg Logistics LLC's policy has expired ... "
+                "request for all force construction from the fania company")
+    for pat in _SUBJECT_PATTERNS:
+        m = pat.search(pdf_junk)
+        if m:
+            raise AssertionError(
+                f"shared pattern would fire on pdf text: {pat.pattern!r}")
+
+
 def test_existing_patterns_still_win():
     # The generic "for" tail is last: specific patterns take precedence.
     assert extract_subject_insured(

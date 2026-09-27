@@ -437,19 +437,29 @@ _SUBJECT_PATTERNS = [
     # Highway: "Renewal COI Request: COI for ECMANAGEMENT GROUP ... Expires Tomorrow"
     re.compile(r"\bcoi\s+for\s+(.+?)(?:\s+expires?\b.*|\s+expiring\b.*)?$",
                re.IGNORECASE),
+]
+
+
+# Subject-line-only patterns: shapes that only make sense in a subject
+# line. verify_record() reuses _SUBJECT_PATTERNS to hunt insured names
+# inside PDF text; these two must never run there.
+_SUBJECT_ONLY_PATTERNS = [
     # Certificial: "Ekmg Logistics LLC's Policy has Expired" — the insured
     # owns the expiring policy. Only the possessive + expiry shape; never
     # a bare "policy" mention.
     re.compile(r"^(.+?)'s\s+policy\s+has\s+expired\b", re.IGNORECASE),
     # TrustLayer/compliance-platform tail: "... for MALAS BROTHERS PAINTING"
     # or "Document request for All Force Construction from The Fania
-    # Company, Inc." LAST in the list — the specific patterns above win
-    # first; this only catches leftovers. The lookahead keeps bare
-    # request-words ("Request for COI") from becoming a junk insured.
+    # Company, Inc." LAST — the specific patterns above win first; this
+    # only catches leftovers. Guards:
+    #  - bare request-words ("Request for COI") never become an insured;
+    #  - DOT/MC/USDOT numbers ("Insurance Expiring for DOT2923646 on
+    #    09/15/2026") are identifiers, never insured names.
     # Fail-closed: the extracted name still needs an exact report match
     # to verify anything.
-    re.compile(r"\bfor\s+(?!(?:coi|certificate|cert)\b)(.+?)(?:\s+from\s+|\s*$)",
-               re.IGNORECASE),
+    re.compile(r"\bfor\s+(?!(?:coi|certificate|cert)\b)"
+               r"(?!(?:DOT|MC|USDOT)\s*#?\d)(.+?)"
+               r"(?:\s+from\s+|\s*$)", re.IGNORECASE),
 ]
 
 _NAME_LIKE = re.compile(r"[A-Za-z]{2,}")
@@ -477,6 +487,14 @@ def extract_subject_insured(subject: str) -> str | None:
     """
     clean = _strip_subject_prefixes(subject)
     for pat in _SUBJECT_PATTERNS:
+        m = pat.search(clean)
+        if m:
+            name = _MC_SUFFIX.sub("", m.group(1))
+            name = _POLICY_NUM_TAIL.sub("", name).strip(" -:,")
+            if _NAME_LIKE.search(name):
+                return name
+    # Subject-only shapes (never run against PDF text — see above).
+    for pat in _SUBJECT_ONLY_PATTERNS:
         m = pat.search(clean)
         if m:
             name = _MC_SUFFIX.sub("", m.group(1))
