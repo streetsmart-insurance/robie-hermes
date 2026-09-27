@@ -39,10 +39,13 @@ visible match selects ``PROCESSEDDATE``. Zero matches, more than one
 match, a hidden match, or a different accessible name holds before any
 option is selected. Communications uses the registered section link
 ``a[data-at="policy-activity-tab-communications"]``, or one link named
-Communications when that element is absent. One visible match on
-processed-date results is clicked. Zero matches, more than one match, a
-hidden match, a different page, or a different accessible name holds
-before that click. The Gemini helper is shared with the other Playwright
+Communications when that element is absent. When both queries are the
+same one visible element on processed-date results, that pair is clicked.
+Inner text and the label helper are not a second veto of that pair. A
+data-at-only or named-only match still requires visible text of
+Communications or no readable name. Zero matches, more than one match, a
+hidden match, a different page, or two queries that are different
+elements holds before that click. The Gemini helper is shared with the other Playwright
 sites; FAO is one caller. Production skips that rescue. The success path
 does not call Gemini. This module does not call Jev. The document-retrieval
 filing kill switch is unchanged.
@@ -1282,10 +1285,38 @@ def _resolve_communications_locator(page: Any) -> Any | None:
     return None
 
 
+def _registered_communications_pair(page: Any, located: Any) -> bool:
+    """True when data-at and ``link:Communications`` are this one element.
+
+    Playwright already accepted the accessible name with
+    ``get_by_role("link", name="Communications", exact=True)``. That pair
+    is the identity. It is not a new selector. Any other count, or an
+    intersection that is not this element, is not this pair.
+    """
+    css, named, css_count, named_count = _communications_queries(page)
+    if css_count != 1 or named_count != 1:
+        return False
+    try:
+        return int(located.and_(css).and_(named).count()) == 1
+    except Exception:
+        return False
+
+
 def _accept_communications_link(page: Any, located: Any) -> Any:
-    """The locator is the Communications link, or a hold. No click yet."""
+    """The locator is the Communications link, or a hold. No click yet.
+
+    When the registered data-at element and ``link:Communications`` are
+    the same one visible element, that agreement is the click. Inner text
+    and ``_require_expected_label`` are stricter than the role match: inner
+    text can include an icon or other text the accessible name ignores,
+    and ``get_by_label`` can name a different element. Those probes must
+    not reject the pair. A data-at-only or named-only match still requires
+    visible text of Communications or no readable name.
+    """
     if int(located.count()) != 1 or not _is_visible(located):
         raise _communications_hold(page, detail="but it was not visible;")
+    if _registered_communications_pair(page, located):
+        return located
     try:
         text = _norm(str(located.inner_text() or ""))
     except Exception as exc:
@@ -1313,8 +1344,9 @@ def _unique_communications_link(page: Any) -> Any:
     not clicked. The page must be processed-date results (the cancels
     landing, or a sibling section). A different URL holds before a click.
     More than one match holds immediately. Zero matches wait once for the
-    data-at selector. A hidden match or a different accessible name holds
-    before Communications is clicked.
+    data-at selector. A hidden match holds. A data-at-only or named-only
+    match with different visible text or a different readable name holds.
+    The one element both queries already agreed on is clicked.
     """
     if not _on_processed_date_results(page):
         raise _communications_hold(page, detail="page is not processed-date results;")

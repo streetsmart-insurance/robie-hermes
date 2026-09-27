@@ -241,20 +241,24 @@ Search. The next control is the Communications section link
 on main from #614 and #616. This change does not add a replacement
 selector. Those two queries must be the same element when both match.
 `role=tab` and `aria-selected` are not required and are not clicked.
-The page must be processed-date results. One visible match is clicked and
-the pull does not ask Gemini. After the click the URL must stay under
-`processeddateresults` with section `communications` or `underwriting`
-(optional legacy suffix: `underwriting`, `underwritinglegacy`,
-`underwriting-legacy`, `underwriting_legacy`). Zero matches, more than one
-match, a hidden match, a page that is not processed-date results, or a
-different accessible name holds before Communications is clicked. The hold
-names the data-at count, the `link:Communications` count, and the page URL
-with query, fragment, and userinfo removed. Those counts are not clicked.
-The hold does not ask Gemini and does not contain `gemini:`. Search is not
-clicked. Staying on `cancels` after a click, or any other section, holds.
-Memo stays the same exact name. A unique `data-at` match is used when that
-element has no accessible name; a different accessible name, or the expected
-name on another element, holds.
+The page must be processed-date results. When both queries are that same
+visible element, the pair is clicked. Inner text and the label helper are
+not a second veto: an icon or other text inside the link, or a
+Communications label on a different element, does not hold the pair.
+`get_by_role(link, name=Communications, exact=True)` is the accessible-name
+check. A data-at-only or named-only match still holds when visible text or
+a readable name is not Communications. The pull does not ask Gemini. After
+the click the URL must stay under `processeddateresults` with section
+`communications` or `underwriting` (optional legacy suffix: `underwriting`,
+`underwritinglegacy`, `underwriting-legacy`, `underwriting_legacy`). Zero
+matches, more than one match, a hidden match, a page that is not
+processed-date results, or two queries that hit different elements holds
+before Communications is clicked. The hold names the data-at count, the
+`link:Communications` count, and the page URL with query, fragment, and
+userinfo removed. Those counts are not clicked. The hold does not ask
+Gemini and does not contain `gemini:`. Search is not clicked. Staying on
+`cancels` after a click, or any other section, holds. Memo stays the same
+exact name.
 A Memo open accepts one PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
 URL, or embed), or a same-tab PDF that can be returned to the list. HTML is
 not printed into a fake PDF. Two different PDFs hold.
@@ -360,6 +364,25 @@ not upload or write a note.
   this link and a match count means the live control was not that one
   element on that page. Clearing the live hold remains UNVERIFIED until
   Document Downloads records the prove.
+- Communications identity. Tip `e1023d5` (#635 squash-merge) on
+  hermes-test-01, `--pull-only` prove4, cleared View Activity By and then
+  held on Communications with no `gemini:`. Document Downloads reported
+  the live shape: 1 × `a[data-at="policy-activity-tab-communications"]`
+  and 1 × `link:Communications`, on
+  `processeddateresults/cancels/`, hold detail
+  `it is not the registered link; Communications was not clicked`.
+  View Activity By stayed clear. 0 PDFs. The log
+  `/tmp/progressive-fao-pull-only-20260927-e1023d5f-prove4.log` was not
+  readable from this builder. #635 already required both queries to be the
+  same element, then rejected that element when inner text or
+  `_require_expected_label` disagreed with the role match. This change
+  clicks that unique agreed pair. It does not add a selector and does not
+  restore Gemini for Communications. Zero matches, more than one match, a
+  hidden match, a wrong page, different elements, and a data-at-only or
+  named-only name mismatch still hold. Search is not clicked. The counts
+  in the hold are not click targets. This commit is not installed on
+  `hermes-test-01`. Live clear remains UNVERIFIED until Document Downloads
+  re-proves after merge and a Test zip.
 - Manage Policies and Policy Activity names below were read off the
   authenticated FAO Home session that held on release `3f774852151c`. This
   commit is not that release and has not been installed on `hermes-test-01`.
