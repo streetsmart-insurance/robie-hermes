@@ -1,0 +1,57 @@
+{
+  "portal": "geico_gateway",
+  "page_name": "pending_cancellations",
+  "version": "1.0",
+  "fields": {
+    "client_alerts": {
+      "name": "client_alerts",
+      "primary_strategy": "role",
+      "primary_selector": "link:Client Alerts",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Client Alerts",
+      "exact": true,
+      "description": "Gateway shell link or button. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    },
+    "pending_cancellations": {
+      "name": "pending_cancellations",
+      "primary_strategy": "role",
+      "primary_selector": "option:Pending Cancellations",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Pending Cancellations",
+      "exact": true,
+      "description": "Client Alerts filter. The run holds unless the combobox or tab shows Pending Cancellations. Live control is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "documents": {
+      "name": "documents",
+      "primary_strategy": "role",
+      "primary_selector": "link:Documents",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Documents",
+      "exact": true,
+      "description": "Personal-lines policy documents entry. Absent with a single Billing control is the commercial hold path, not a download.",
+      "last_updated": "2026-09-26"
+    },
+    "billing": {
+      "name": "billing",
+      "primary_strategy": "role",
+      "primary_selector": "link:Billing",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Billing",
+      "exact": true,
+      "description": "Billing folder under Documents, or the only folder on a commercial policy that has no Documents route.",
+      "last_updated": "2026-09-26"
+    },
+    "pending_cancellation_notice": {
+      "name": "pending_cancellation_notice",
+      "primary_strategy": "role",
+      "primary_selector": "link:Pending Cancellation Notice",
+      "fallback_strategy": "role",
+      "fallback_selector": "link:CANCELLATION NOTICE",
+      "exact": true,
+      "description": "Exactly one of these notice names is downloaded for personal lines. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    }
+  }
+}
