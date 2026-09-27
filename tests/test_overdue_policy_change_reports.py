@@ -20,6 +20,8 @@ from robie_job_engine.overdue_policy_change_reports import (
     deconcatenated_variants,
     discussion_context_line,
     load_exclusions,
+    load_producer_fallbacks,
+    default_producer_fallbacks_path,
     parse_4359_csv,
     qualify_rows,
     resolve_nag_targets,
@@ -183,18 +185,50 @@ def disc(title, count, last):
     return {"title": title, "noteCount": count, "lastModified": last, "mostRecentNoteId": "1"}
 
 
-def test_select_discussion_prefers_policy_digits():
+def test_select_discussion_prefers_pcr_title_over_digit_match():
+    # Carlo 2026-09-27: a true PCR thread beats an unrelated thread that
+    # merely mentions the policy number.
     discussions = [
-        disc("Commercial Auto Policy Change Request - CHANGE ME", 3, "2026-09-20"),
         disc("Re: S 2391821 endorsement", 8, "2026-09-25"),
+        disc("Commercial Auto Policy Change Request - CHANGE ME", 3, "2026-09-20"),
     ]
     picked = select_change_discussion(discussions, "S 2391821")
-    assert picked["noteCount"] == 8
+    assert picked["noteCount"] == 3
+
+
+def test_select_discussion_prefers_pcr_title_with_digits():
+    discussions = [
+        disc("Workers Compensation Policy Change Request - general", 2, "2026-09-26"),
+        disc("Workers Compensation Policy Change Request - 13WECAT1F8T", 6, "2026-09-14"),
+    ]
+    picked = select_change_discussion(discussions, "13WECAT1F8T")
+    assert picked["noteCount"] == 6
 
 
 def test_select_discussion_falls_back_to_pcr_title():
     discussions = [disc("Commercial Auto Policy Change Request - CHANGE ME", 3, "2026-09-20")]
     assert select_change_discussion(discussions, "999999")["noteCount"] == 3
+
+
+def test_select_discussion_rejects_renewal_thread_with_digits():
+    # ISCA 2026-09-27: "Renewal Request for: BDG-312624001" is a renewal
+    # thread, not the change request — never present it as one.
+    discussions = [disc("Renewal Request for: BDG-312624001", 1, "2026-06-22")]
+    assert select_change_discussion(discussions, "BDG-312624001", date(2026, 8, 21)) is None
+
+
+def test_select_discussion_rejects_stale_digit_thread():
+    # Guarini 2026-09-27: "04283052-0" last active 1,735 days ago cannot be
+    # the thread for a request opened 2026-08-31.
+    discussions = [disc("04283052-0", 1, "2021-12-27")]
+    assert select_change_discussion(discussions, "04283052", date(2026, 8, 31)) is None
+
+
+def test_select_discussion_keeps_fresh_digit_fallback():
+    # A fresh, non-renewal digit match is still usable context.
+    discussions = [disc("Re: S 2391821 endorsement", 8, "2026-09-25")]
+    picked = select_change_discussion(discussions, "S 2391821", date(2026, 8, 17))
+    assert picked["noteCount"] == 8
 
 
 def test_select_discussion_none_when_no_match():
@@ -290,6 +324,44 @@ def test_resolve_targets_unknown_producer_does_not_block():
     assert target["email"] == "eimy@streetsmart.insurance"
     assert target["producer_emails"] == []
     assert target["unresolved_producers"] == ["Nobody Here"]
+
+
+def test_resolve_targets_uses_producer_fallback():
+    # Andrea Illanes is not in the AppSheet roster; the checked-in fallback
+    # resolves her so she is CC'd and reported, not silently dropped.
+    reg = registry()
+    reg["employees"]["Lenin Perdomo"] = {
+        "role": "Commercial Lines Account Technician",
+        "email": "lenin@streetsmart.insurance",
+        "department": "Commercial Lines", "manager": "", "status": "Active"}
+    items = [{"CSR": "Lenin Perdomo", "Policy Number": "13WECAT1F8T",
+              "Assigned Producer": "Andrea Illanes"}]
+    fallbacks = load_producer_fallbacks(default_producer_fallbacks_path())
+    assert fallbacks.get("andrea illanes") == "andrea@streetsmart.insurance"
+    targets = resolve_nag_targets(items, build_roster_maps(reg), fallbacks)
+    target = targets["Lenin Perdomo"]
+    assert target["producer_emails"] == ["andrea@streetsmart.insurance"]
+    assert target["producer_names"] == ["Andrea Illanes"]
+    assert target["producer_fallback_used"] == ["Andrea Illanes"]
+    assert target["unresolved_producers"] == []
+
+
+def test_load_producer_fallbacks_missing_file_returns_empty(tmp_path):
+    assert load_producer_fallbacks(tmp_path / "nope.json") == {}
+
+
+def test_load_producer_fallbacks_corrupt_file_fails_closed(tmp_path):
+    bad = tmp_path / "fallbacks.json"
+    bad.write_text("{not json")
+    with pytest.raises(PolicyChangeReportContractError, match="not valid JSON"):
+        load_producer_fallbacks(bad)
+
+
+def test_load_producer_fallbacks_rejects_non_agency_email(tmp_path):
+    bad = tmp_path / "fallbacks.json"
+    bad.write_text('{"fallbacks": [{"name": "X", "email": "x@gmail.com"}]}')
+    with pytest.raises(PolicyChangeReportContractError, match="not an agency email"):
+        load_producer_fallbacks(bad)
 
 
 # -- dedupe -----------------------------------------------------------------------

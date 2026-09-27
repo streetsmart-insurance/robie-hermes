@@ -95,6 +95,7 @@ REQUIRED_COLUMNS = [
 DEAD_POLICY_STATUSES = {"cancelled", "canceled", "deleted", "expired", "inactive"}
 
 EXCLUSIONS_FILENAME = "policy_change_exclusions.json"
+PRODUCER_FALLBACKS_FILENAME = "producer_email_fallbacks.json"
 
 
 def _exclusion_key(policy_number: Any, created_date: Any) -> tuple[str, str]:
@@ -141,6 +142,51 @@ def apply_exclusions(
         key = _exclusion_key(row.get("Policy Number"), row.get("created_date"))
         (excluded if key in exclusions else kept).append(row)
     return kept, excluded
+
+
+def default_producer_fallbacks_path() -> str:
+    return str(Path(__file__).with_name(PRODUCER_FALLBACKS_FILENAME))
+
+
+def load_producer_fallbacks(path: str | Path) -> dict[str, str]:
+    """Load producer work-email fallbacks (name key -> email).
+
+    Covers producers missing from the approved AppSheet-backed roster — e.g.
+    Andrea Illanes, who is not in the 'Street Smart Employees' sheet as of
+    2026-09-27. Missing file = no fallbacks. A corrupt file fails closed:
+    the run stops rather than CC'ing a wrong or stale address.
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PolicyChangeReportContractError(
+            f"producer fallbacks file {path} is not valid JSON: {exc}"
+        ) from exc
+    entries = data.get("fallbacks") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise PolicyChangeReportContractError(
+            f"producer fallbacks file {path} must contain a 'fallbacks' list"
+        )
+    fallbacks: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        email = str(entry.get("email") or "").strip()
+        if not name or not email:
+            raise PolicyChangeReportContractError(
+                f"producer fallbacks file {path} has an entry missing name/email: {entry!r}"
+            )
+        if not email.casefold().endswith(AGENCY_EMAIL_SUFFIX):
+            raise PolicyChangeReportContractError(
+                f"producer fallback for {name} is not an agency email: {email}"
+            )
+        fallbacks[_name_key(name)] = email
+    return fallbacks
 
 
 class PolicyChangeReportContractError(RuntimeError):
@@ -362,14 +408,48 @@ def classify_policy_liveness(
 
 PCR_TITLE_HINT = "policy change request"
 
+# Thread types that are never the change-request discussion, even when the
+# policy number appears in the title (Carlo 2026-09-27: the ISCA "Renewal
+# Request for: BDG-312624001" thread was presented as the change request,
+# and Guarini matched a 1,735-day-old bare-digits thread).
+NON_PCR_TITLE_HINTS = (
+    "renewal",
+    "quote",
+    "billing",
+    "invoice",
+    "claim",
+    "cancellation",
+    "audit",
+)
+
+
+def _discussion_last_date(discussion: Mapping[str, Any]) -> date | None:
+    raw = str(discussion.get("lastModified") or discussion.get("last_modified") or "").strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:19] if "T" in fmt else raw[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
 
 def select_change_discussion(
-    discussions: list[dict[str, Any]], policy_number: str
+    discussions: list[dict[str, Any]],
+    policy_number: str,
+    request_created: date | None = None,
 ) -> dict[str, Any] | None:
-    """Pick the discussion most likely to be the change request thread.
+    """Pick the discussion that IS the change-request thread.
 
-    Matches the policy-number digits in the title, else the first
-    "Policy Change Request" discussion; most recently active wins.
+    Ranking (Carlo 2026-09-27 -- never present an unrelated thread as the
+    change request):
+      1. "policy change request" in the title AND the policy digits.
+      2. "policy change request" in the title (no digits).
+      3. Policy digits in the title, but NOT a renewal/quote/billing/claim
+         thread, and last activity on/after the request was created (a
+         thread that went quiet before this request opened cannot be about
+         this request).
+    Otherwise None -- the email then says so honestly instead of showing a
+    misleading thread.
     """
     digits = re.sub(r"\D", "", str(policy_number or ""))
 
@@ -382,18 +462,36 @@ def select_change_discussion(
     def by_recency(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(pool, key=last_modified_of, reverse=True)
 
-    if digits:
-        digit_hits = [
-            disc for disc in discussions
-            if digits and digits in re.sub(r"\D", "", title_of(disc))
-        ]
-        if digit_hits:
-            return by_recency(digit_hits)[0]
-    pcr_hits = [
-        disc for disc in discussions if PCR_TITLE_HINT in title_of(disc).casefold()
+    def has_digits(disc: Mapping[str, Any]) -> bool:
+        return bool(digits) and digits in re.sub(r"\D", "", title_of(disc))
+
+    def is_pcr(disc: Mapping[str, Any]) -> bool:
+        return PCR_TITLE_HINT in title_of(disc).casefold()
+
+    def is_non_pcr_thread(disc: Mapping[str, Any]) -> bool:
+        lowered = title_of(disc).casefold()
+        return any(hint in lowered for hint in NON_PCR_TITLE_HINTS)
+
+    def fresh_enough(disc: Mapping[str, Any]) -> bool:
+        if request_created is None:
+            return True
+        last = _discussion_last_date(disc)
+        if last is None:
+            return True
+        return last >= request_created
+
+    pcr_with_digits = [d for d in discussions if is_pcr(d) and has_digits(d)]
+    if pcr_with_digits:
+        return by_recency(pcr_with_digits)[0]
+    pcr_only = [d for d in discussions if is_pcr(d)]
+    if pcr_only:
+        return by_recency(pcr_only)[0]
+    digit_fallback = [
+        d for d in discussions
+        if has_digits(d) and not is_non_pcr_thread(d) and fresh_enough(d)
     ]
-    if pcr_hits:
-        return by_recency(pcr_hits)[0]
+    if digit_fallback:
+        return by_recency(digit_fallback)[0]
     return None
 
 
@@ -537,13 +635,19 @@ def load_approved_csr_directory(manifest_path: str) -> dict[str, dict[str, str]]
 
 
 def resolve_nag_targets(
-    items: list[dict[str, Any]], roster: Mapping[str, Mapping[str, str]]
+    items: list[dict[str, Any]], roster: Mapping[str, Mapping[str, str]],
+    producer_fallbacks: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Group items by CSR; resolve CSR mailbox + department manager.
 
     Fail-closed: blank CSR, unresolvable CSR mailbox, or no department
     manager for the CSR's department raises the contract error and nothing
     is emailed.
+
+    Producers are informational CC only: a producer missing from the roster
+    falls back to the checked-in producer_email_fallbacks.json (reported in
+    the summary as producer_fallback_used), else is reported unresolved —
+    never a reason to block the CSR's email.
     """
     directory = dict(roster.get("directory") or {})
     departments = dict(roster.get("departments") or {})
@@ -572,12 +676,16 @@ def resolve_nag_targets(
             {"email": email, "manager_name": manager["name"],
              "manager_email": manager["email"], "items": [],
              "producer_emails": [], "producer_names": [],
-             "unresolved_producers": []},
+             "producer_fallback_used": [], "unresolved_producers": []},
         )
         entry["items"].append(item)
         producer = str(item.get("Assigned Producer") or "").strip()
         if producer and producer not in entry["producer_names"]:
             producer_email = directory.get(_name_key(producer), "")
+            if not producer_email and producer_fallbacks:
+                producer_email = producer_fallbacks.get(_name_key(producer), "")
+                if producer_email:
+                    entry["producer_fallback_used"].append(producer)
             if producer_email and producer_email not in entry["producer_emails"]:
                 entry["producer_emails"].append(producer_email)
                 entry["producer_names"].append(producer)
@@ -1022,7 +1130,15 @@ class OverduePolicyChangeReportWorker:
                 item["discussion"] = None
                 item["discussion_unverified"] = "unexpected discussion list shape"
                 continue
-            item["discussion"] = select_change_discussion(discussions, str(item.get("Policy Number") or ""))
+            try:
+                request_created = row_created_date(item)
+            except PolicyChangeReportContractError:
+                request_created = None
+            item["discussion"] = select_change_discussion(
+                discussions,
+                str(item.get("Policy Number") or ""),
+                request_created=request_created,
+            )
 
     def perform(self, job: dict[str, Any], *, idempotency_key: str) -> WorkerResult:
         action = str(job.get("action_type") or "")
@@ -1091,7 +1207,10 @@ class OverduePolicyChangeReportWorker:
                     retryable=False,
                 )
             roster = self.directory_loader(manifest_path)
-            targets = resolve_nag_targets(due_items, roster)
+            producer_fallbacks = load_producer_fallbacks(
+                payload.get("producer_fallbacks_path") or default_producer_fallbacks_path()
+            )
+            targets = resolve_nag_targets(due_items, roster, producer_fallbacks)
             receipts: list[dict[str, Any]] = []
             for csr in sorted(targets):
                 target = targets[csr]
@@ -1128,6 +1247,11 @@ class OverduePolicyChangeReportWorker:
         return WorkerResult(
             True, JOB_TYPE,
             {**summary, "delivery_receipts": receipts, "csr_count": len(targets),
+             "producer_fallback_used": sorted({
+                 producer
+                 for target in targets.values()
+                 for producer in target.get("producer_fallback_used", [])
+             }),
              "unresolved_producers": sorted({
                  producer
                  for target in targets.values()
