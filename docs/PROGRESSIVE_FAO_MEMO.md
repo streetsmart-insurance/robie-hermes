@@ -157,10 +157,16 @@ done from the PR):
    ```
 
    A receipt that already has a unique control must not need Gemini. View
-   Activity By does not ask Gemini. If that registered select is not exactly
-   one visible element, the reason names the match count and the date
-   filter is not changed. If a later named control holds, the reason
-   contains `gemini: not_configured` (no key), `gemini: unsure` /
+   Activity By does not ask Gemini. Communications does not ask Gemini.
+   If that registered select is not exactly one visible element, the
+   reason names the match count and the date filter is not changed. If
+   the Communications section link is not exactly one visible element on
+   processed-date results, the reason names the
+   `a[data-at="policy-activity-tab-communications"]` count, the
+   `link:Communications` count, and the page URL with query, fragment, and
+   userinfo removed. Communications is not clicked. If a later named
+   control other than those two holds, the reason contains
+   `gemini: not_configured` (no key), `gemini: unsure` /
    `gemini: ambiguous` (no single visible locator), or the step continues
    once when Gemini names one visible locator. A later failure stays
    `HELD` and does not ask Gemini again. That receipt is not Job Engine
@@ -231,16 +237,24 @@ Results – Cancels, Lapses, Reinstates). Sibling sections are the same page
 family. There is no Search button on that page. The worker does not click
 Search. The next control is the Communications section link
 `a[data-at="policy-activity-tab-communications"]`, or one link named
-`Communications` when that element is absent. Those two queries must be the
-same element when both match. `role=tab` and `aria-selected` are not
-required and are not clicked. After the click the URL must stay under
+`Communications` when that element is absent. Those selectors are already
+on main from #614 and #616. This change does not add a replacement
+selector. Those two queries must be the same element when both match.
+`role=tab` and `aria-selected` are not required and are not clicked.
+The page must be processed-date results. One visible match is clicked and
+the pull does not ask Gemini. After the click the URL must stay under
 `processeddateresults` with section `communications` or `underwriting`
 (optional legacy suffix: `underwriting`, `underwritinglegacy`,
-`underwriting-legacy`, `underwriting_legacy`). Staying on `cancels`, a
-second link, or any other section holds. Memo stays
-the same exact name. A missing or second match holds. A unique
-`data-at` or id match is used when that element has no accessible name; a
-different accessible name, or the expected name on another element, holds.
+`underwriting-legacy`, `underwriting_legacy`). Zero matches, more than one
+match, a hidden match, a page that is not processed-date results, or a
+different accessible name holds before Communications is clicked. The hold
+names the data-at count, the `link:Communications` count, and the page URL
+with query, fragment, and userinfo removed. Those counts are not clicked.
+The hold does not ask Gemini and does not contain `gemini:`. Search is not
+clicked. Staying on `cancels` after a click, or any other section, holds.
+Memo stays the same exact name. A unique `data-at` match is used when that
+element has no accessible name; a different accessible name, or the expected
+name on another element, holds.
 A Memo open accepts one PDF from a download event, a new tab (blob, Progressive/foragentsonly PDF
 URL, or embed), or a same-tab PDF that can be returned to the list. HTML is
 not printed into a fake PDF. Two different PDFs hold.
@@ -319,12 +333,33 @@ not upload or write a note.
   `select#PDDateType` count, the `select[name="DateType"]` count, and the
   safe page URL so the next Test receipt can show whether the id, the
   name, or the page missed. Those counts are not click targets. The hold
-  does not ask Gemini and does not contain `gemini:`. This commit is not
-  installed on `hermes-test-01`. After merge and a Test zip, re-run
-  `--pull-only` there. A receipt that still names this selector and a
-  match count means the live control was not that one element on that
-  page; do not treat that as a Communications success. That prove remains
-  UNVERIFIED until Document Downloads records it.
+  does not ask Gemini and does not contain `gemini:`. Tip `53bd948` (#634)
+  on hermes-test-01 cleared that View Activity By hold. The prove log
+  `/tmp/progressive-fao-pull-only-20260927-53bd948-prove3.log` was not
+  readable from this builder (no `gcloud`, no SSH key, and the file is not
+  in the repository). The reported next hold is Communications, below.
+- Communications. The same `--pull-only` on tip `53bd948`, after View
+  Activity By cleared, held with
+  `Progressive control 'Communications' is missing or ambiguous` and
+  Gemini UI rescue returned `gemini: unsure`. 0 PDFs. That message is the
+  generic control hold: the registered section link did not resolve to one
+  element, and Gemini was not a usable answer. The unread log does not
+  show whether the cancels page lacked
+  `a[data-at="policy-activity-tab-communications"]`, had more than one
+  Communications link, hid the link, or carried a different accessible
+  name. This change does not pick one of those shapes and does not add a
+  selector. #614 and #616 stay the contract. A unique visible match on
+  processed-date results clicks that one link and does not ask Gemini.
+  Zero matches, more than one match, a hidden match, a different accessible
+  name, or a page that is not processed-date results holds before the
+  click. The hold reports the data-at count, the `link:Communications`
+  count, and the safe page URL. Those counts are not click targets. Search
+  is not clicked. The hold does not ask Gemini and does not contain
+  `gemini:`. This commit is not installed on `hermes-test-01`. After merge
+  and a Test zip, re-run `--pull-only` there. A receipt that still names
+  this link and a match count means the live control was not that one
+  element on that page. Clearing the live hold remains UNVERIFIED until
+  Document Downloads records the prove.
 - Manage Policies and Policy Activity names below were read off the
   authenticated FAO Home session that held on release `3f774852151c`. This
   commit is not that release and has not been installed on `hermes-test-01`.
@@ -373,7 +408,8 @@ not upload or write a note.
   click.
 - Ambiguous date UI after View Activity By stays fail-closed unless the
   Test-only Gemini rescue above names one unique visible locator. View
-  Activity By itself does not use that rescue. The rescue reads secret id
+  Activity By and the Communications section link do not use that rescue.
+  The rescue reads secret id
   `gemini-api-key` and has not been proven on `hermes-test-01`. Jev
   (TypeSafe System One) is still not called. No Jev client or Jev secret
   is added. A Gemini answer that is unsure, positional, or not unique
