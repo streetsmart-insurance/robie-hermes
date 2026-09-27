@@ -112,7 +112,16 @@ of this commit is installed on `hermes-test-01` (not done here):
    password field is visible.
 4. Leave **one** `foragentsonly.com` application tab. Extra FAO tabs hold.
    The GL window is opened by the pull.
-5. The shell must show agent code `CA33617` and no second `CA#####` code.
+5. The shell must show StreetSmart agency `CA33617` and no second agency.
+   Live FAO Home may omit the `CA` prefix and show `(33617)`, bare `33617`,
+   and/or login id `33617c`; those are the same agent. A missing code, or a
+   second `CA#####`, `(#####)`, or `#####c` login, holds the pull. If the
+   only FAO tab is not FAO Home / Manage Policies Home — including
+   Communications / `underwritinglegacy` — the pull clicks the existing
+   header control `a[data-at="header-nav__parent-link--manage-policies"]`
+   (accessible name `Manage Policies Home`) before that check. A hidden
+   control expands Main Navigation once. That step does not ask Gemini. A
+   missing or ambiguous Home control holds and names the scrubbed page URL.
    Override only with `--agent-code` / `PROGRESSIVE_FAO_AGENT_CODE` when the
    Test session is actually that code.
 6. The output root and the date folder must be private (mode `0700`). The
@@ -135,6 +144,14 @@ is a failed pull, not a partial success. This code has not been run on
 
 ## UNVERIFIED until that Test run
 
+- Agent context on a non-home tab. The pull treats `/`, `/home`, and
+  `/managepolicies` (optional `/home`) on `foragentsonly.com` as FAO Home /
+  Manage Policies Home and does not click. Any other FAO URL, including
+  `processeddateresults/underwritinglegacy/`, must open that landing through
+  the existing Manage Policies Home header control before the agent check.
+  The live URL after that click is UNVERIFIED. A click that stays off those
+  paths holds. This step does not ask Gemini. It does not change the later
+  `Manage Policies` → Businessowner/Contractor GL clicks.
 - Live accessible names: `Manage Policies`, `Businessowner/Contractor GL`,
   `View Reports`, `Pending Cancel for Nonpayment`, the shell policy search,
   `Documents`, and the `Policy` document tab. A mismatch holds; do not widen
