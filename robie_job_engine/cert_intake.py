@@ -410,6 +410,21 @@ _REQUESTER_RE = re.compile(r"(?i)(?:requested by|requester)\s*[:\-]\s*(.+?)(?:\n
 # Request- Abg Transportation MC1121844").
 # ---------------------------------------------------------------------------
 
+# Bare request-words that must NEVER be returned as an insured name, no
+# matter which extraction fallback produced them ("COI REQUEST" and
+# "CERTIFICATE REQUEST" both leaked through the policy-tail fallback as
+# "COI"/"CERTIFICATE" — "COI" was a v4 false-verification insured).
+_JUNK_INSURED = re.compile(
+    r"^(?:coi|cert|certs|certificate|certificates|request|requests|"
+    r"coi\s+request|cert\s+request|certificate\s+request|"
+    r"request\s+for\s+coi|insurance\s+request|new\s+request)$",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_insured(name: str | None) -> bool:
+    return bool(name) and bool(_JUNK_INSURED.match(name.strip(" -:,")))
+
 _SUBJECT_PREFIXES = re.compile(r"^(?:\s*(?:re|fwd?)\s*:\s*)+", re.IGNORECASE)
 _MC_SUFFIX = re.compile(r"\s+(?:MC|DOT|USDOT)\s*\d+\s*$", re.IGNORECASE)
 _POLICY_TAIL = re.compile(r"\s+[A-Z0-9][A-Z0-9/\-]{3,}\s*$")
@@ -491,7 +506,7 @@ def extract_subject_insured(subject: str) -> str | None:
         if m:
             name = _MC_SUFFIX.sub("", m.group(1))
             name = _POLICY_NUM_TAIL.sub("", name).strip(" -:,")
-            if _NAME_LIKE.search(name):
+            if _NAME_LIKE.search(name) and not _is_junk_insured(name):
                 return name
     # Subject-only shapes (never run against PDF text — see above).
     for pat in _SUBJECT_ONLY_PATTERNS:
@@ -499,13 +514,14 @@ def extract_subject_insured(subject: str) -> str | None:
         if m:
             name = _MC_SUFFIX.sub("", m.group(1))
             name = _POLICY_NUM_TAIL.sub("", name).strip(" -:,")
-            if _NAME_LIKE.search(name):
+            if _NAME_LIKE.search(name) and not _is_junk_insured(name):
                 return name
     # "Haris Uddin 008265/15/00": leading name before a policy-like tail.
     m = _POLICY_TAIL.search(clean)
     if m:
         name = _MC_SUFFIX.sub("", clean[: m.start()]).strip(" -:,")
-        if _NAME_LIKE.search(name) and len(name.split()) <= 6:
+        if (_NAME_LIKE.search(name) and len(name.split()) <= 6
+                and not _is_junk_insured(name)):
             return name
     return None
 

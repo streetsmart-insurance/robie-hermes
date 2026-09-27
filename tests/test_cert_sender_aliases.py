@@ -226,6 +226,16 @@ def test_request_for_coi_does_not_make_junk_insured():
     assert extract_subject_insured("Request for COI") is None
 
 
+def test_bare_request_words_never_become_insured():
+    # Final junk-insured guard: regardless of which fallback produced
+    # the candidate, bare request-words are never an insured. Both of
+    # these leaked through the policy-tail fallback ("REQUEST" read as
+    # a policy number, leaving "COI"/"CERTIFICATE").
+    for subject in ["COI REQUEST", "CERTIFICATE REQUEST", "CERT REQUEST",
+                    "Re: COI", "COI", "New Request"]:
+        assert extract_subject_insured(subject) is None, subject
+
+
 def test_for_tail_rejects_dot_numbers():
     # Full Convoy subject: a DOT number is an identifier, never an
     # insured. Regression: the first for-tail cut captured "DOT2923646
