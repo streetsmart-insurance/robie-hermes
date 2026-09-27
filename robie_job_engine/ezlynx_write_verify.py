@@ -2,12 +2,10 @@
 
 A write is permitted only when ALL of the following pass, in order:
 
-Check 1 -- authorization: the target applicant id is write-allowed by
-    ``ezlynx_write_scope`` (``ROBIE_EZLYNX_WRITE_APPLICANT_IDS`` unset/empty
-    = agency-wide; comma list = restricted; a bound Production Chat job
-    still fail-closes to that applicant). Proves the account is eligible
-    for an already-permitted write. Says nothing about whether this
-    particular job's data belongs to it.
+Check 1 -- authorization: the target applicant id is on the compiled
+    ``EZLYNX_WRITE_APPLICANT_IDS`` allowlist (see ``ezlynx_write_scope``).
+    Proves somebody authorized this account. Says nothing about whether
+    this particular job's data belongs to it.
 
 Check 2 -- policy cross-reference: search EZLynx by the policy number the
     job was given (e.g. ``PAC00001215485``). The applicant id on the
