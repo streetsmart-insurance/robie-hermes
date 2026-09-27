@@ -1,0 +1,11 @@
+{
+  "exclusions": [
+    {
+      "account_name": "American Innovative Technologies Corporation",
+      "added": "2026-09-27",
+      "created_date": "2025-12-11",
+      "policy_number": "13SBANY5114",
+      "reason": "Stale 4359 queue row: browser audit 2026-09-27 found no open PCR for this policy, but the report row is still Open (290 days). Excluded per Carlo 2026-09-27 so staff are not nagged about it."
+    }
+  ]
+}
