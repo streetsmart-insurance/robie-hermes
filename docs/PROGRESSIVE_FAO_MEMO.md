@@ -156,14 +156,16 @@ done from the PR):
      --end 2026-09-25
    ```
 
-   A receipt that already has a unique control must not need Gemini. If a
-   named control holds, the reason contains `gemini: not_configured` (no
-   key), `gemini: unsure` / `gemini: ambiguous` (no single visible locator),
-   or the step continues once when Gemini names one visible locator. A
-   later failure stays `HELD` and does not ask Gemini again. That receipt
-   is not Job Engine `COMPLETE`. With the key present, a rescued step is
-   proven only when the receipt shows the pull moved past the control that
-   used to hold.
+   A receipt that already has a unique control must not need Gemini. View
+   Activity By does not ask Gemini. If that registered select is not exactly
+   one visible element, the reason names the match count and the date
+   filter is not changed. If a later named control holds, the reason
+   contains `gemini: not_configured` (no key), `gemini: unsure` /
+   `gemini: ambiguous` (no single visible locator), or the step continues
+   once when Gemini names one visible locator. A later failure stays
+   `HELD` and does not ask Gemini again. That receipt is not Job Engine
+   `COMPLETE`. With the key present, a rescued step is proven only when
+   the receipt shows the pull moved past the control that used to hold.
 
 ## Drive
 
@@ -194,8 +196,15 @@ The click waits until `header-drawer__content--show` is gone. If the drawer
 stays open, the pull holds and Policy Activity is not clicked. Zero
 matches, two visible matches, or two Manage Policies elements hold. There
 is no positional click. Agency Admin is not a dismiss target. Policy Activity then selects View Activity By
-`Processed Date` (`select#PDDateType[name="DateType"]`, option value
-`PROCESSEDDATE`). `select#PDDateRange` is a preset list (Yesterday, Last 30
+`Processed Date` only when `select#PDDateType[name="DateType"]` is the one
+visible control. The accessible name `View Activity By` must be that same
+element, or the select is unlabeled. That match chooses option value
+`PROCESSEDDATE` and continues to the date range, Get Policy Activity, and
+Communications. Zero matches, more than one match, a hidden match, or a
+different accessible name holds before any option is selected. The reason
+names the match count. This step does not ask Gemini and does not use
+`.first` or `.nth`. A second `select[name="DateType"]` that is not this
+element is not a candidate. `select#PDDateRange` is a preset list (Yesterday, Last 30
 Days, Select Date Range, and others), not a wrapper around the date fields.
 The run chooses the single option whose visible text is `Select Date Range`.
 The option value is read from that option. It then waits until the page-level
@@ -280,12 +289,25 @@ not upload or write a note.
 ## UNVERIFIED until that Test run
 
 - Main Nav drawer. A `--pull-only` hold left Policy Activity blocked by
-  `header-drawer__content--show` (Agency Admin). This commit closes that
-  drawer before the Policy Activity click and holds if the class remains.
-  It has not been installed on `hermes-test-01`. After merge and a Test
-  zip, re-run `--pull-only` and confirm the pull is not held on that class.
-  If it still holds, the drawer did not close; do not treat that as a
-  Communications success.
+  `header-drawer__content--show` (Agency Admin). #630 closes that drawer
+  before the Policy Activity click and holds if the class remains. Tip
+  `22fe67e` on hermes-test-01 got past that drawer and reached Policy
+  Activity. Communications and Memo were still not opened (0 PDFs) because
+  the next hold was View Activity By.
+- View Activity By. That same `--pull-only` held with
+  `Progressive control 'View Activity By' is missing or ambiguous` and
+  Gemini UI rescue returned `gemini: unsure`. This commit does not ask
+  Gemini for that control. The registered selector stays
+  `select#PDDateType[name="DateType"]`. No DOM captured in this repository
+  shows a renamed id or name, so a renamed select is not adopted. A second
+  `select[name="DateType"]` that is not `#PDDateType` is not clicked. One
+  visible match selects `PROCESSEDDATE` and continues. Zero matches, more
+  than one match, a hidden match, or a label on a different element holds
+  before any option is selected. The hold names the match count and does
+  not contain `gemini:`. This commit is not installed on `hermes-test-01`.
+  After merge and a Test zip, re-run `--pull-only` there. A receipt that
+  still names this selector and a match count means the live control was
+  not that one element; do not treat that as a Communications success.
 - Manage Policies and Policy Activity names below were read off the
   authenticated FAO Home session that held on release `3f774852151c`. This
   commit is not that release and has not been installed on `hermes-test-01`.
@@ -332,8 +354,9 @@ not upload or write a note.
   Test zip, re-run `--pull-only` on `hermes-test-01` and confirm the page
   leaves `cancels` for `underwriting` or `communications` without a Search
   click.
-- Ambiguous date UI stays fail-closed unless the Test-only Gemini rescue
-  above names one unique visible locator. That rescue reads secret id
+- Ambiguous date UI after View Activity By stays fail-closed unless the
+  Test-only Gemini rescue above names one unique visible locator. View
+  Activity By itself does not use that rescue. The rescue reads secret id
   `gemini-api-key` and has not been proven on `hermes-test-01`. Jev
   (TypeSafe System One) is still not called. No Jev client or Jev secret
   is added. A Gemini answer that is unsure, positional, or not unique

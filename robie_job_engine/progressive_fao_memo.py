@@ -32,10 +32,15 @@ task, or label in EZLynx.
 
 On ``ROBIE_ENV=TEST``, one missing or ambiguous named control — or a
 Playwright timeout on that UI step — may ask Gemini once for a single
-unique locator (secret id ``gemini-api-key``). That helper is shared with
-the other Playwright sites; FAO is one caller. Production skips that
-rescue. The success path does not call Gemini. This module does not call
-Jev. The document-retrieval filing kill switch is unchanged.
+unique locator (secret id ``gemini-api-key``). View Activity By does not ask Gemini.
+That step uses the registered selector
+``select#PDDateType[name="DateType"]`` only. One visible match selects
+``PROCESSEDDATE``. Zero matches, more than one match, a hidden match, or a
+different accessible name holds before any option is selected. The Gemini
+helper is shared with the other Playwright sites; FAO is one caller.
+Production skips that rescue. The success path does not call Gemini. This
+module does not call Jev. The document-retrieval filing kill switch is
+unchanged.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
@@ -840,14 +845,6 @@ def _require_expected_label(page: Any, located: Any, label: str) -> None:
         raise _control_hold(label)
 
 
-def _unique_labeled(page: Any, css: str, label: str) -> Any:
-    located = page.locator(css)
-    if int(located.count()) != 1:
-        raise _control_hold(label)
-    _require_expected_label(page, located, label)
-    return located
-
-
 def _option_text(option: Any, label: str) -> str:
     try:
         return _norm(str(option.inner_text()))
@@ -908,17 +905,79 @@ def _apply_processed_date_view(view: Any) -> None:
         raise _control_hold(PROCESSED_DATE_OPTION_LABEL)
 
 
+def _view_activity_by_count_hold(matched: int) -> IntakeHold:
+    noun = "element" if matched == 1 else "elements"
+    return IntakeHold(
+        "Progressive control 'View Activity By' matched "
+        f"{matched} {noun} ({VIEW_ACTIVITY_BY_CSS}); "
+        "Policy Activity date filter was not changed"
+    )
+
+
+def _view_activity_by_hidden_hold() -> IntakeHold:
+    return IntakeHold(
+        "Progressive control 'View Activity By' matched 1 element "
+        f"({VIEW_ACTIVITY_BY_CSS}) but it was not visible; "
+        "Policy Activity date filter was not changed"
+    )
+
+
+def _view_activity_by_label_hold() -> IntakeHold:
+    return IntakeHold(
+        "Progressive control 'View Activity By' is not the registered select "
+        f"({VIEW_ACTIVITY_BY_CSS}); "
+        "Policy Activity date filter was not changed"
+    )
+
+
+def _wait_view_activity_by_visible(located: Any) -> None:
+    """Wait for the registered select. A timeout is a miss, not a guess."""
+    wait = getattr(located, "wait_for", None)
+    if not callable(wait):
+        return
+    try:
+        wait(state="visible", timeout=DATE_CONTROL_TIMEOUT_MS)
+    except IntakeHold:
+        raise
+    except Exception:
+        return
+
+
+def _unique_view_activity_by(page: Any) -> Any:
+    """The one registered View Activity By select, or a hold. No Gemini.
+
+    The selector is ``select#PDDateType[name="DateType"]``. A renamed id or
+    name is not adopted here: this tree has no live DOM that proves a new
+    one, and a second ``select[name="DateType"]`` that is not this element
+    is not a candidate. Zero matches or more than one match hold before any
+    option is selected. The accessible name must be this element or empty.
+    """
+    located = page.locator(VIEW_ACTIVITY_BY_CSS)
+    matched = int(located.count())
+    if matched != 1 or not _is_visible(located):
+        if matched > 1:
+            raise _view_activity_by_count_hold(matched)
+        _wait_view_activity_by_visible(located)
+        matched = int(located.count())
+        if matched != 1:
+            raise _view_activity_by_count_hold(matched)
+        if not _is_visible(located):
+            raise _view_activity_by_hidden_hold()
+    try:
+        _require_expected_label(page, located, VIEW_ACTIVITY_BY_LABEL)
+    except IntakeHold as exc:
+        raise _view_activity_by_label_hold() from exc
+    if int(located.count()) != 1:
+        raise _view_activity_by_count_hold(int(located.count()))
+    return located
+
+
 def _select_processed_date_view(page: Any) -> None:
-    def primary() -> None:
-        _apply_processed_date_view(
-            _unique_labeled(page, VIEW_ACTIVITY_BY_CSS, VIEW_ACTIVITY_BY_LABEL)
-        )
+    """Choose PROCESSEDDATE on the one View Activity By select.
 
-    def retry(view: Any) -> None:
-        _require_expected_label(page, view, VIEW_ACTIVITY_BY_LABEL)
-        _apply_processed_date_view(view)
-
-    run_named_control_step(page, VIEW_ACTIVITY_BY_LABEL, primary, retry)
+    This step does not call Gemini and does not use a positional locator.
+    """
+    _apply_processed_date_view(_unique_view_activity_by(page))
 
 
 def _apply_custom_date_range(ranged: Any) -> None:
@@ -1031,10 +1090,12 @@ def apply_processed_date_window(page: Any, start: date, end: date) -> None:
     future HITL ladder may ask Gemini what the open page is showing, then
     Jev (TypeSafe System One) for a typed judgment (boolean, choice, or
     score, plus confidence) — for example whether this is the processed-date
-    filter we expect, or quote-only versus complete. On Test, a missing or
-    ambiguous named control, or a Playwright timeout on that control, may
-    ask Gemini once for one unique locator. Production skips that rescue.
-    The success path does not call Gemini. This function does not call Jev.
+    filter we expect, or quote-only versus complete. View Activity By does
+    not ask Gemini. It selects PROCESSEDDATE only on the one visible
+    registered select. On Test, a later missing or ambiguous named control,
+    or a Playwright timeout on that control, may ask Gemini once for one
+    unique locator. Production skips that rescue. The success path does not
+    call Gemini. This function does not call Jev.
     """
     _select_processed_date_view(page)
     _select_custom_date_range(page)

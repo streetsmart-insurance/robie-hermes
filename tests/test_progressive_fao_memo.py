@@ -755,6 +755,11 @@ class LocatorContractTests(unittest.TestCase):
         self.assertIn("header-drawer__content--show", drawer.primary_selector)
         self.assertIn("Policy Activity", drawer.description)
         self.assertIn("Agency Admin", drawer.description)
+        self.assertEqual(page.version, "1.7")
+        view = page.get_field("view_activity_by")
+        self.assertIn("does not ask Gemini", view.description)
+        self.assertIn("Zero matches", view.description)
+        self.assertIn("PROCESSEDDATE", view.description)
         self.assertEqual(activity.primary_selector, "link:" + POLICY_ACTIVITY_NAMES[0])
         self.assertEqual(activity.fallback_selector, "link:" + POLICY_ACTIVITY_NAMES[1])
         self.assertTrue(activity.exact)
@@ -833,6 +838,7 @@ class LocatorContractTests(unittest.TestCase):
         ):
             self.assertNotIn(banned, text)
         self.assertIn("success path does not call Gemini", text)
+        self.assertIn("View Activity By does not ask Gemini", text)
         self.assertIn("does not call Jev", text)
         self.assertIn("gemini-api-key", text)
         self.assertIn("TypeSafe System One", text)
@@ -999,6 +1005,14 @@ class NodeLocator:
         return len(self.nodes) == 1 and bool(self.nodes[0].visible)
 
     def wait_for(self, state="visible", timeout=None):
+        if (
+            state == "visible"
+            and len(self.nodes) == 1
+            and not self.nodes[0].visible
+            and getattr(self.nodes[0], "reveal_on_wait", False)
+        ):
+            self.nodes[0].visible = True
+            return None
         if state != "visible" or len(self.nodes) != 1 or not self.nodes[0].visible:
             raise TimeoutError("visible control did not appear")
 
@@ -1201,9 +1215,14 @@ class NavPage:
             )
         self.view_nodes = self._view_nodes()
         start_label = {"unlabeled": "", "mistitled": "From Date"}.get(self.start_mode, START_DATE_LABEL)
+        start_id = (
+            "js-datepicker__date-start-alt"
+            if self.start_mode == "alt"
+            else "js-datepicker__date-start"
+        )
         self.start_date = self._date_input(
             start_label,
-            "js-datepicker__date-start",
+            start_id,
             "datatable-daterangepicker-startdate",
         )
         if self.date_override is not None:
@@ -1422,6 +1441,11 @@ class NavPage:
             label = "Activity By"
         attrs = {"id": "PDDateType", "name": "DateKind" if self.view_mode == "renamed" else "DateType"}
         nodes = [self._view_select(label, attrs)]
+        if self.view_mode == "hidden":
+            nodes[0].visible = False
+        if self.view_mode == "late":
+            nodes[0].visible = False
+            nodes[0].reveal_on_wait = True
         if self.view_mode == "duplicate":
             nodes.append(self._view_select(label, dict(attrs)))
         return nodes
@@ -2041,6 +2065,58 @@ class NavigationTests(unittest.TestCase):
                 self.assertIn("Communications", page.clicks)
                 self.assertNotIn("Search", page.clicks)
 
+    def test_view_activity_by_unique_match_continues_without_gemini(self):
+        for mode in ("ok", "unlabeled", "late"):
+            with self.subTest(mode=mode):
+                page = NavPage(view_mode=mode)
+                with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                    grid = self._load(page)
+                rescued.assert_not_called()
+                self.assertEqual(len(grid.rows), 2)
+                self.assertIn("Processed Date", page.clicks)
+                self.assertIn(CUSTOM_DATE_RANGE_LABEL, page.clicks)
+                self.assertIn("Get Policy Activity", page.clicks)
+                self.assertIn("Communications", page.clicks)
+                self.assertNotIn("Search", page.clicks)
+                self.assertEqual(page.view_nodes[0].value, PROCESSED_DATE_OPTION_VALUE)
+
+    def test_view_activity_by_zero_or_multiple_holds_without_gemini(self):
+        cases = (
+            ("missing", "missing", "matched 0 elements"),
+            ("renamed id or name", "renamed", "matched 0 elements"),
+            ("duplicate", "duplicate", "matched 2 elements"),
+            ("hidden", "hidden", "was not visible"),
+            ("mistitled", "mistitled", "is not the registered select"),
+            ("split label", "split-label", "is not the registered select"),
+        )
+        for label, mode, reason in cases:
+            with self.subTest(label):
+                page = NavPage(view_mode=mode)
+                client = _RescueClient(json.dumps({
+                    "decision": "unique",
+                    "locator": 'select#PDDateType[name="DateType"] >> nth=0',
+                }))
+                with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+                    with patch(
+                        "robie_job_engine.gemini_ui_rescue.build_default_client",
+                        return_value=client,
+                    ):
+                        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+                            with self.assertRaises(IntakeHold) as caught:
+                                self._load(page)
+                            rescued.assert_not_called()
+                self.assertFalse(is_rescuable_control_failure(caught.exception))
+                self.assertIn("View Activity By", str(caught.exception))
+                self.assertIn(reason, str(caught.exception))
+                self.assertIn("date filter was not changed", str(caught.exception))
+                self.assertNotIn("gemini:", str(caught.exception))
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity"])
+                self.assertNotIn("Processed Date", page.clicks)
+                self.assertNotIn("Get Policy Activity", page.clicks)
+                self.assertNotIn("Communications", page.clicks)
+                self.assertNotIn("Search", page.clicks)
+
     def test_date_filter_fails_closed_when_controls_are_missing_or_ambiguous(self):
         cases = (
             ("missing view", dict(view_mode="missing"), "View Activity By", ["Manage Policies", "Policy Activity"]),
@@ -2048,6 +2124,7 @@ class NavigationTests(unittest.TestCase):
             ("mistitled view", dict(view_mode="mistitled"), "View Activity By", ["Manage Policies", "Policy Activity"]),
             ("split label", dict(view_mode="split-label"), "View Activity By", ["Manage Policies", "Policy Activity"]),
             ("renamed select", dict(view_mode="renamed"), "View Activity By", ["Manage Policies", "Policy Activity"]),
+            ("hidden view", dict(view_mode="hidden"), "View Activity By", ["Manage Policies", "Policy Activity"]),
             ("missing option", dict(option_mode="missing"), "Processed Date", ["Manage Policies", "Policy Activity"]),
             ("duplicate option", dict(option_mode="duplicate"), "Processed Date", ["Manage Policies", "Policy Activity"]),
             ("mistyped option", dict(option_mode="mistyped"), "Processed Date", ["Manage Policies", "Policy Activity"]),
@@ -2459,7 +2536,7 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
         self.assertIn("Communications", page.clicks)
 
     def test_production_skips_rescue_even_if_the_test_flag_is_set(self):
-        page = NavPage(view_mode="missing")
+        page = NavPage(start_mode="missing")
 
         def forbid_client():
             raise AssertionError("Production called Gemini")
@@ -2475,12 +2552,13 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
             ):
                 with self.assertRaises(IntakeHold) as caught:
                     self._load(page)
-        self.assertIn("View Activity By", str(caught.exception))
+        self.assertIn("Start Date", str(caught.exception))
         self.assertNotIn("gemini:", str(caught.exception))
-        self.assertEqual(page.clicks, ["Manage Policies", "Policy Activity"])
+        self.assertIn("Processed Date", page.clicks)
+        self.assertNotIn("Get Policy Activity", page.clicks)
 
     def test_missing_key_holds_not_configured(self):
-        page = NavPage(view_mode="missing")
+        page = NavPage(start_mode="missing")
         with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
             with patch(
                 "robie_job_engine.gemini_ui_rescue.load_gemini_api_key",
@@ -2488,16 +2566,20 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(IntakeHold, "gemini: not_configured") as caught:
                     self._load(page)
-        self.assertIn("View Activity By", str(caught.exception))
-        self.assertNotIn("Processed Date", page.clicks)
+        self.assertIn("Start Date", str(caught.exception))
+        self.assertIn("Processed Date", page.clicks)
+        self.assertNotIn("Get Policy Activity", page.clicks)
         self.assertNotIn("Search", page.clicks)
 
-    def test_unique_locator_retries_the_renamed_view_once(self):
-        page = NavPage(view_mode="renamed")
+    def test_unique_locator_retries_a_later_control_once(self):
+        page = NavPage(start_mode="alt")
         page.url = "https://user:secretpass@www.foragentsonly.com/managepolicies/policyactivity?token=sekret"
         client = _RescueClient(json.dumps({
             "decision": "unique",
-            "locator": 'select#PDDateType[name="DateKind"]',
+            "locator": (
+                'input[type="date"]#js-datepicker__date-start-alt'
+                '[data-at="datatable-daterangepicker-startdate"]'
+            ),
         }))
         with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
             with patch(
@@ -2513,10 +2595,11 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
         self.assertNotIn("secretpass", client.prompts[0])
         self.assertNotIn("860521214", client.prompts[0])
         self.assertIn("www.foragentsonly.com", client.prompts[0])
-        self.assertIn("View Activity By", client.prompts[0])
+        self.assertIn("Start Date", client.prompts[0])
+        self.assertNotIn("View Activity By", client.prompts[0])
 
     def test_unsure_and_ambiguous_locators_hold(self):
-        unsure = NavPage(view_mode="missing")
+        unsure = NavPage(start_mode="missing")
         unsure_client = _RescueClient(json.dumps({
             "decision": "unsure",
             "reason": "two controls",
@@ -2529,12 +2612,13 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
                 with self.assertRaisesRegex(IntakeHold, "gemini: unsure"):
                     self._load(unsure)
         self.assertEqual(unsure_client.calls, 1)
-        self.assertNotIn("Processed Date", unsure.clicks)
+        self.assertIn("Processed Date", unsure.clicks)
+        self.assertNotIn("Get Policy Activity", unsure.clicks)
 
-        ambiguous = NavPage(view_mode="duplicate")
+        ambiguous = NavPage(start_mode="duplicate")
         ambiguous_client = _RescueClient(json.dumps({
             "decision": "unique",
-            "locator": 'select#PDDateType[name="DateType"]',
+            "locator": START_DATE_CSS,
         }))
         with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
             with patch(
@@ -2544,12 +2628,12 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
                 with self.assertRaisesRegex(IntakeHold, "gemini: ambiguous"):
                     self._load(ambiguous)
         self.assertEqual(ambiguous_client.calls, 1)
-        self.assertNotIn("Processed Date", ambiguous.clicks)
+        self.assertNotIn("Get Policy Activity", ambiguous.clicks)
 
-        positional = NavPage(view_mode="duplicate")
+        positional = NavPage(start_mode="duplicate")
         positional_client = _RescueClient(json.dumps({
             "decision": "unique",
-            "locator": 'select#PDDateType[name="DateType"] >> nth=0',
+            "locator": START_DATE_CSS + " >> nth=0",
         }))
         with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
             with patch(
@@ -2558,14 +2642,17 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(IntakeHold, "gemini: ambiguous"):
                     self._load(positional)
-        self.assertNotIn("Processed Date", positional.clicks)
+        self.assertNotIn("Get Policy Activity", positional.clicks)
         self.assertIn("nth=", positional_client.prompts[0])
 
     def test_second_failure_does_not_call_gemini_again(self):
-        page = NavPage(view_mode="renamed", start_mode="missing")
+        page = NavPage(start_mode="alt", end_mode="missing")
         client = _RescueClient(json.dumps({
             "decision": "unique",
-            "locator": 'select#PDDateType[name="DateKind"]',
+            "locator": (
+                'input[type="date"]#js-datepicker__date-start-alt'
+                '[data-at="datatable-daterangepicker-startdate"]'
+            ),
         }))
         with patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
             with patch(
@@ -2575,7 +2662,7 @@ class GeminiUiRescueWiringTests(unittest.TestCase):
                 with self.assertRaises(IntakeHold) as caught:
                     self._load(page)
         self.assertEqual(client.calls, 1)
-        self.assertIn("Start Date", str(caught.exception))
+        self.assertIn("End Date", str(caught.exception))
         self.assertNotIn("gemini:", str(caught.exception))
         self.assertNotIn("Get Policy Activity", page.clicks)
 
