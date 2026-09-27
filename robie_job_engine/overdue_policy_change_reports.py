@@ -61,7 +61,27 @@ RENAG_DAYS = 7
 AGENCY_EMAIL_SUFFIX = "@streetsmart.insurance"
 CC_CARLO = "carlo@streetsmart.insurance"
 SENDER = "robie@streetsmart.insurance"
-SUBJECT = "Action needed: policy change requests waiting on your update"
+SUBJECT = "Overdue policy change requests need an update"
+# Carlo 2026-09-27: every weekly CSR nag CCs these three in addition to the
+# department manager, Carlo, and the assigned producer. Verified addresses
+# from the manually-sent 2026-09-27 nag emails (robie@streetsmart.insurance).
+FIXED_CCS: tuple[tuple[str, str], ...] = (
+    ("Jake Ferrara", "jake@streetsmart.insurance"),
+    ("Gabriela Chutin", "gabrielac@streetsmart.insurance"),
+    ("Sandy Santana", "sandy@streetsmart.insurance"),
+)
+# Abbreviated policy-change SOP closure gate (Carlo 2026-09-27). Every nag
+# email carries this so CSRs know exactly what "done" means. The full SOP
+# lives at
+# .agents/skills/ezlynx-policy-change-confirmation/SKILL.md.
+SOP_CLOSURE_GATE = (
+    "A change request isn't closed until all four of these are true:\n"
+    "1. The carrier's endorsement or revised declarations page is received and filed.\n"
+    "2. The original request, the carrier-issued change, and the EZLynx record are "
+    "compared field by field \u2014 they must match.\n"
+    "3. Any premium or billing impact is recorded, or confirmed as not applicable.\n"
+    "4. Marking a task complete does not close the change request itself."
+)
 # HOST-ONLY DiscussionApi base. Never derive this from document_base_url —
 # that produces .../DocumentApi/DiscussionApi/ and 404s every call.
 DISCUSSION_BASE_URL = "https://app.ezlynx.com/DiscussionApi/"
@@ -344,6 +364,17 @@ def classify_policy_liveness(
         return str(row.get("policyStatus") or row.get("status") or "").strip().casefold() == "active"
 
     def summarize(row: Mapping[str, Any], via: str) -> dict[str, Any]:
+        # Best-effort live insured name: the PolicyApi row shape is not
+        # contractual, so probe the known candidate keys. Used only to
+        # surface a name mismatch in the CSR email (e.g. ISCA vs ICSA) —
+        # never for matching (matching is policy-number + applicant-ID).
+        live_name = ""
+        for key in ("insuredName", "accountName", "namedInsured",
+                    "insured_name", "account_name"):
+            candidate = str(row.get(key) or "").strip()
+            if candidate:
+                live_name = candidate
+                break
         return {
             "verdict": "LIVE",
             "reason": via,
@@ -351,6 +382,7 @@ def classify_policy_liveness(
             "policy_status": str(row.get("policyStatus") or row.get("status") or "").strip(),
             "expiration_date": _policy_expiration(row),
             "premium": row.get("premium"),
+            "live_account_name": live_name,
         }
 
     exact_search_rows = policy_search(number)
@@ -783,6 +815,43 @@ class NotificationStore:
 # -- email ---------------------------------------------------------------------
 
 
+def _normalized_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+
+def liveness_identity_note(item: Mapping[str, Any]) -> str:
+    """Plain-English identity flags for the CSR email.
+
+    Surfaces exactly which live policy the nag matched (critical for
+    de-concatenated queue numbers like BDG-312624001 -> BDG-3126240-02) and
+    flags an insured-name mismatch between the queue row and the live
+    policy record (the ISCA Contracting INC vs ICSA Construction Inc case).
+    Matching itself is always policy-number + applicant-ID; the name is
+    display-only, compared on normalized alphanumeric characters so
+    "ISCA Contracting INC" vs "ISCA Contracting Inc." does not false-flag.
+    """
+    liveness = item.get("liveness")
+    if not isinstance(liveness, dict):
+        return ""
+    notes: list[str] = []
+    queue_number = normalize_policy_number(item.get("Policy Number"))
+    matched = normalize_policy_number(liveness.get("matched_policy_number"))
+    if matched and matched != queue_number:
+        notes.append(
+            f"Live policy on file: {matched} ({liveness.get('reason') or 'matched live record'})."
+        )
+    queue_name = str(item.get("Account Name") or "").strip()
+    live_name = str(liveness.get("live_account_name") or "").strip()
+    if (queue_name and live_name
+            and _normalized_name(queue_name) != _normalized_name(live_name)):
+        notes.append(
+            f'Name check: the queue shows "{queue_name}" but the live policy '
+            f'reads "{live_name}" — please confirm the correct legal name '
+            f"with the carrier."
+        )
+    return " ".join(notes)
+
+
 def _item_bullets(items: list[Mapping[str, Any]], today: date) -> list[str]:
     bullets = []
     for item in sorted(items, key=lambda row: int(row.get("age_days") or 0), reverse=True):
@@ -797,6 +866,9 @@ def _item_bullets(items: list[Mapping[str, Any]], today: date) -> list[str]:
         if detail:
             head += f" ({detail})"
         head += f". Request opened {created} ({age} days ago)."
+        identity_note = liveness_identity_note(item)
+        if identity_note:
+            head += f" {identity_note}"
         bullets.append(head + " " + change_request_context(item, today))
     return bullets
 
@@ -827,6 +899,8 @@ def build_csr_report(
         "",
         "Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.",
         "",
+        SOP_CLOSURE_GATE,
+        "",
         cc_line,
         "",
         "-Robie",
@@ -851,12 +925,16 @@ def build_csr_report_html(
     else:
         cc_line = "Looping in the team so everyone's in the loop."
     bullets = "".join(f"<li>{html.escape(bullet)}</li>" for bullet in _item_bullets(items, today))
+    sop_paragraphs = "".join(
+        f"<p>{html.escape(line)}</p>" for line in SOP_CLOSURE_GATE.split("\n")
+    )
     return "\n".join([
         "<div>",
         f"<p>Hi {html.escape(' '.join(str(csr).split()).split(' ')[0])},</p>",
         "<p>The following policy change requests are still open and waiting on an update:</p>",
         f"<ul>{bullets}</ul>",
         "<p>Please reply with a quick status update on each one — what's done, what's blocked, and what it needs next.</p>",
+        sop_paragraphs,
         f"<p>{html.escape(cc_line)}</p>",
         "<p>-Robie</p>",
         "</div>",
@@ -1245,11 +1323,16 @@ class OverduePolicyChangeReportWorker:
             receipts: list[dict[str, Any]] = []
             for csr in sorted(targets):
                 target = targets[csr]
-                cc_names = [target["manager_name"], *target["producer_names"]]
+                fixed_names = [name for name, _ in FIXED_CCS
+                               if name != target["manager_name"]]
+                cc_names = [target["manager_name"], *fixed_names,
+                            *target["producer_names"]]
                 body = build_csr_report(csr, target["items"], target["manager_name"], today, cc_names=cc_names)
                 html_body = build_csr_report_html(csr, target["items"], target["manager_name"], today, cc_names=cc_names)
                 cc: list[str] = []
-                for addr in [target["manager_email"], CC_CARLO, *target["producer_emails"]]:
+                for addr in [target["manager_email"], CC_CARLO,
+                             *[email for _, email in FIXED_CCS],
+                             *target["producer_emails"]]:
                     if addr and addr not in cc:
                         cc.append(addr)
                 receipts.append(
