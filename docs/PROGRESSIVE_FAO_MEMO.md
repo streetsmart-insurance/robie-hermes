@@ -99,13 +99,26 @@ is not a target.
 
 ## Test-only Gemini UI rescue
 
+`robie_job_engine.gemini_ui_rescue` is the shared helper for coded
+Playwright locators. Progressive FAO is one caller. The same module is
+used by the locator registry (EZLynx, Ascend, FAO), the Playwright write
+guard (`Locator.wait_for` and a blocked click/fill/type/select — this is
+the Geico and other carrier path, because those portals run through
+`playwright_exec`), Ascend program/create waits, EZLynx policy-setup
+visible waits, the submission-audit control lookup, and the JE-KILL
+interactable wait. There is no separate Geico module. Notes and documents
+stay API-only and are not sent to this rescue. A positional
+`.first` / `.nth` refusal is not rescued.
+
 When `ROBIE_ENV=TEST` and a named control is missing or ambiguous
-(`Progressive control '…' is missing or ambiguous`), or a Playwright
-timeout hits that UI step, the pull asks Gemini **once** for one locator.
+(`Progressive control '…' is missing or ambiguous`, or `Control '…'`),
+a coded locator does not resolve to one element, or a Playwright timeout
+hits that locator wait, the step asks Gemini **once** for one locator.
 The step retries only when that locator matches one visible control.
 Production (`ROBIE_ENV=PRODUCTION`, `PROD`, or `LIVE`) skips the rescue
-even if `ROBIE_FAO_GEMINI_UI_RESCUE=1`. Set
-`ROBIE_FAO_GEMINI_UI_RESCUE=0` to skip it on Test as well.
+even if `ROBIE_GEMINI_UI_RESCUE=1` or `ROBIE_FAO_GEMINI_UI_RESCUE=1`. Set
+either flag to `0` to skip it on Test as well. Unset `ROBIE_ENV` does
+not turn the rescue on.
 
 The API key is the existing Secret Manager secret id **`gemini-api-key`**
 (`projects/<project>/secrets/gemini-api-key/versions/latest`, or

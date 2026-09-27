@@ -1,4 +1,4 @@
-"""Unit tests for the Test-only Progressive FAO Gemini UI rescue."""
+"""Unit tests for the Test-only Gemini UI rescue on Playwright sites."""
 from __future__ import annotations
 
 import json
@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from robie_job_engine.gemini_ui_rescue import (
     GEMINI_API_KEY_SECRET_ID,
+    _PAGE_BUDGETS,
     _SAFE_CONTEXT_JS,
     ApiKeyGeminiClient,
     RescueBudget,
@@ -19,9 +20,13 @@ from robie_job_engine.gemini_ui_rescue import (
     gemini_ui_rescue_budget,
     load_gemini_api_key,
     locator_is_refused,
+    retry_failed_locator_action,
     run_named_control_step,
     safe_page_reference,
+    wait_visible_or_rescue,
 )
+from robie_job_engine.locator_registry import FieldLocator, LocatorRegistry, PageLocators
+from robie_job_engine.playwright_write_guard import _wrap_write
 from robie_job_engine.intake_core import IntakeHold
 from robie_job_engine.staff_jobs_common import DEFAULT_GEMINI_KEY_SECRET
 
@@ -49,6 +54,10 @@ class _Locator:
         if self._count != 1:
             raise AssertionError("refusing a positional click")
         self.clicked = True
+
+    def wait_for(self, **kwargs: object) -> None:
+        if self._count != 1:
+            raise AssertionError("refusing a positional wait")
 
     def get_attribute(self, name: str) -> str:
         if name == "type":
@@ -321,6 +330,227 @@ class GeminiUiRescueTests(unittest.TestCase):
             "create_task_once",
         ):
             self.assertNotIn(banned, text)
+
+
+class SharedPlaywrightRescueTests(unittest.TestCase):
+    """Registry, write guard, and page budget. No FAO ContextVar scope."""
+
+    def setUp(self) -> None:
+        self.env = patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        _PAGE_BUDGETS.clear()
+        self.addCleanup(_PAGE_BUDGETS.clear)
+
+    def test_call_sites_use_the_shared_helper(self) -> None:
+        root = Path("robie_job_engine")
+        expectations = {
+            "locator_registry.py": "retry_failed_locator_action",
+            "playwright_write_guard.py": "retry_failed_locator_action",
+            "ascend_locator_audit_runner.py": "wait_visible_or_rescue",
+            "ezlynx_policy_setup.py": "wait_visible_or_rescue_async",
+            "submission_audit_runner.py": "retry_failed_locator_action",
+            "je_kill_live.py": "retry_failed_locator_action",
+            "progressive_fao_memo.py": "run_named_control_step",
+        }
+        for name, needle in expectations.items():
+            with self.subTest(name=name):
+                self.assertIn(needle, (root / name).read_text(encoding="utf-8"))
+        guard = (root / "playwright_write_guard.py").read_text(encoding="utf-8")
+        deploy = Path("deploy/hermes/tools/playwright_write_guard.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(guard, deploy)
+        wrapped = guard.split("def _wrap_write", 1)[1].split(
+            "def _wrap_destructive_press_only", 1
+        )[0]
+        self.assertLess(
+            wrapped.index("playwright_note_doc_block_reason"),
+            wrapped.index("_test_ui_rescue_control"),
+        )
+        self.assertLess(
+            wrapped.index("destructive_action_block_reason"),
+            wrapped.index("_test_ui_rescue_control"),
+        )
+        self.assertIn("add_discussion_note", (root / "ezlynx_policy_setup.py").read_text(encoding="utf-8"))
+        self.assertIn(
+            "refuse_playwright_note_or_doc",
+            (root / "ezlynx_policy_setup.py").read_text(encoding="utf-8"),
+        )
+
+    def _registry(self) -> LocatorRegistry:
+        registry = LocatorRegistry(registry_dir=Path("/tmp/robie-no-locator-json"))
+        page = PageLocators(portal="ezlynx", page_name="document_library")
+        page.add_field(
+            FieldLocator(
+                name="apply_button",
+                primary_strategy="css",
+                primary_selector="#apply",
+            )
+        )
+        registry.register_page(page)
+        return registry
+
+    def test_registry_unique_control_does_not_call_gemini(self) -> None:
+        page = _Page()
+        page.nodes["#apply"] = _Locator(1)
+
+        def forbid() -> None:
+            raise AssertionError("Gemini was called for a unique registry locator")
+
+        with patch("robie_job_engine.gemini_ui_rescue.build_default_client", forbid):
+            found = self._registry().resolve_element(
+                page, "ezlynx", "document_library", "apply_button"
+            )
+        self.assertIs(found, page.nodes["#apply"])
+
+    def test_registry_miss_retries_one_unique_locator(self) -> None:
+        page = _Page()
+        page.nodes["#apply"] = _Locator(0)
+        rescued = _Locator(1)
+        page.nodes["#rescued"] = rescued
+        client = _Client(json.dumps({"decision": "unique", "locator": "#rescued"}))
+        with patch(
+            "robie_job_engine.gemini_ui_rescue.build_default_client",
+            return_value=client,
+        ):
+            found = self._registry().resolve_element(
+                page, "ezlynx", "document_library", "apply_button"
+            )
+        self.assertIs(found, rescued)
+        self.assertEqual(len(client.prompts), 1)
+
+    def test_registry_production_keeps_the_blocked_message(self) -> None:
+        page = _Page()
+        page.nodes["#apply"] = _Locator(0)
+        client = _Client(json.dumps({"decision": "unique", "locator": "#rescued"}))
+        with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                return_value=client,
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    self._registry().resolve_element(
+                        page, "ezlynx", "document_library", "apply_button"
+                    )
+        self.assertIn("resolved to 0 elements", str(caught.exception))
+        self.assertNotIn("gemini:", str(caught.exception))
+        self.assertEqual(client.prompts, [])
+
+    def test_registry_missing_key_is_playwright_blocked_not_configured(self) -> None:
+        page = _Page()
+        page.nodes["#apply"] = _Locator(0)
+        with patch(
+            "robie_job_engine.gemini_ui_rescue.build_default_client",
+            return_value=None,
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self._registry().resolve_element(
+                    page, "ezlynx", "document_library", "apply_button"
+                )
+        message = str(caught.exception)
+        self.assertIn("PLAYWRIGHT_BLOCKED", message)
+        self.assertIn("gemini: not_configured", message)
+        self.assertNotIsInstance(caught.exception, IntakeHold)
+
+    def test_page_budget_asks_once_without_a_scope(self) -> None:
+        page = _Page()
+        page.nodes["a.rescued"] = _Locator(1)
+        client = _Client(json.dumps({"decision": "unique", "locator": "a.rescued"}))
+        failure = TimeoutError("locator wait timed out")
+        with patch(
+            "robie_job_engine.gemini_ui_rescue.build_default_client",
+            return_value=client,
+        ):
+            retry_failed_locator_action(page, "Apply", failure, lambda locator: locator)
+            with self.assertRaises(TimeoutError):
+                retry_failed_locator_action(
+                    page, "Apply", failure, lambda locator: locator
+                )
+        self.assertEqual(len(client.prompts), 1)
+
+    def test_visible_wait_retries_once_on_test(self) -> None:
+        page = _Page()
+        rescued = _Locator(1)
+        page.nodes["button.ready"] = rescued
+        client = _Client(json.dumps({"decision": "unique", "locator": "button.ready"}))
+        waits = {"n": 0}
+
+        class _Waiting:
+            def wait_for(self, **kwargs: object) -> None:
+                waits["n"] += 1
+                raise TimeoutError("timed out")
+
+        with patch(
+            "robie_job_engine.gemini_ui_rescue.build_default_client",
+            return_value=client,
+        ):
+            found = wait_visible_or_rescue(page, _Waiting(), "New program", 1000)
+        self.assertIs(found, rescued)
+        self.assertEqual(waits["n"], 1)
+        self.assertEqual(len(client.prompts), 1)
+
+    def test_write_guard_on_test_retries_the_rescued_locator(self) -> None:
+        page = _Page()
+        rescued = _Locator(1)
+        page.nodes["#go"] = rescued
+        client = _Client(json.dumps({"decision": "unique", "locator": "#go"}))
+        seen: list[object] = []
+
+        class _Owner:
+            def __init__(self) -> None:
+                self.page = page
+
+            def count(self) -> int:
+                return 0
+
+        def original(target: object, *args: object, **kwargs: object) -> str:
+            seen.append(target)
+            return "wrote"
+
+        wrapped = _wrap_write(
+            original,
+            page_level=False,
+            scope={},
+            locator_originals={"original": original},
+        )
+        with patch(
+            "robie_job_engine.gemini_ui_rescue.build_default_client",
+            return_value=client,
+        ):
+            self.assertEqual(wrapped(_Owner()), "wrote")
+        self.assertEqual(seen, [rescued])
+        self.assertEqual(len(client.prompts), 1)
+
+    def test_write_guard_production_keeps_the_vertex_path(self) -> None:
+        page = _Page()
+
+        class _Owner:
+            def __init__(self) -> None:
+                self.page = page
+
+            def count(self) -> int:
+                return 0
+
+        def original(target: object, *args: object, **kwargs: object) -> str:
+            raise AssertionError("original write ran")
+
+        wrapped = _wrap_write(
+            original,
+            page_level=False,
+            scope={},
+            locator_originals={},
+        )
+        with patch.dict(os.environ, {"ROBIE_ENV": "PRODUCTION"}, clear=False):
+            with patch(
+                "robie_job_engine.gemini_ui_rescue.build_default_client",
+                side_effect=AssertionError("Test rescue ran on Production"),
+            ):
+                with patch(
+                    "robie_job_engine.playwright_write_guard._gemini_then_write_or_hitl",
+                    return_value="vertex-hitl",
+                ):
+                    self.assertEqual(wrapped(_Owner()), "vertex-hitl")
 
 
 if __name__ == "__main__":

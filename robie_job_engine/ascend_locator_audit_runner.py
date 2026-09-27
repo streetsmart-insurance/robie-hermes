@@ -117,7 +117,11 @@ def wait_programs_ready(
     started = time.monotonic()
     button = _new_program_target(page)
     try:
-        button.wait_for(state="visible", timeout=timeout_ms)
+        from .gemini_ui_rescue import wait_visible_or_rescue
+
+        button = wait_visible_or_rescue(
+            page, button, "New program", timeout_ms
+        )
     except Exception as exc:  # noqa: BLE001
         seconds = spinner_seconds(started, time.monotonic())
         raise RuntimeError(
@@ -186,7 +190,11 @@ def wait_create_form_ready(
     started = time.monotonic()
     button = _import_document_target(page)
     try:
-        button.wait_for(state="visible", timeout=timeout_ms)
+        from .gemini_ui_rescue import wait_visible_or_rescue
+
+        button = wait_visible_or_rescue(
+            page, button, "Import document", timeout_ms
+        )
     except Exception as exc:  # noqa: BLE001
         seconds = spinner_seconds(started, time.monotonic())
         raise RuntimeError(

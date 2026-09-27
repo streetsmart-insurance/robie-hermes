@@ -29,7 +29,8 @@ task, or label in EZLynx.
 
 On ``ROBIE_ENV=TEST``, one missing or ambiguous named control — or a
 Playwright timeout on that UI step — may ask Gemini once for a single
-unique locator (secret id ``gemini-api-key``). Production skips that
+unique locator (secret id ``gemini-api-key``). That helper is shared with
+the other Playwright sites; FAO is one caller. Production skips that
 rescue. The success path does not call Gemini. This module does not call
 Jev. The document-retrieval filing kill switch is unchanged.
 

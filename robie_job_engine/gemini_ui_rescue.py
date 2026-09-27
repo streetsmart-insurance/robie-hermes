@@ -1,18 +1,23 @@
-"""Test-only Gemini rescue for one missing Progressive FAO UI control.
+"""Test-only Gemini rescue for one missing Playwright control.
 
-Production skips this module. A pull may ask Gemini once, after a named
-control is missing or ambiguous or a Playwright timeout hits that step.
-Gemini may name one locator. The step retries only when that locator is
-unique and visible. Positional ``.first`` / ``.nth`` answers are refused.
-A missing API key holds with ``gemini: not_configured``.
+Every coded locator path (EZLynx, Ascend, Progressive FAO, Geico through
+the shared Playwright guard, and the locator registry) calls this module.
+Production skips it. A step may ask Gemini once after a named control is
+missing or ambiguous, a coded locator does not resolve to one element, or
+a Playwright timeout hits that locator wait. Gemini may name one locator.
+The step retries only when that locator is unique and visible. Positional
+``.first`` / ``.nth`` answers are refused. A missing API key holds with
+``gemini: not_configured``.
 
-The key is Secret Manager secret id ``gemini-api-key`` (the same resource
-``staff_jobs_common`` already uses). This module does not file EZLynx
-documents or notes and does not read the document-retrieval kill switch.
+The key is Secret Manager secret id ``gemini-api-key`` (project
+``streetsmart-hermes-poc``, the same resource ``staff_jobs_common`` already
+uses). This module does not file EZLynx documents or notes and does not
+read the document-retrieval kill switch.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -36,7 +41,8 @@ GEMINI_UNSURE = "gemini: unsure"
 GEMINI_AMBIGUOUS = "gemini: ambiguous"
 GEMINI_REQUEST_FAILED = "gemini: request_failed"
 GEMINI_RETRY_FAILED = "gemini: retry_failed"
-RESCUE_FLAG = "ROBIE_FAO_GEMINI_UI_RESCUE"
+RESCUE_FLAG = "ROBIE_GEMINI_UI_RESCUE"
+RESCUE_FLAG_ALIASES = (RESCUE_FLAG, "ROBIE_FAO_GEMINI_UI_RESCUE")
 MEMO_OPEN_HOLD = "Memo open control is missing or ambiguous"
 _PASSWORD_SELECTOR = "input[type='password']"
 _MAX_LABELS = 40
@@ -46,8 +52,9 @@ _ROLE_LOCATOR = re.compile(
     r"^(link|button|textbox|searchbox|combobox|option):([^\r\n]+)$"
 )
 _CONTROL_HOLD = re.compile(
-    r"^Progressive control '(?P<label>[^']*)' is missing or ambiguous"
+    r"^(?:Progressive control|Control) '(?P<label>[^']*)' is missing or ambiguous"
 )
+_RESOLUTION_FAILURE = "resolved to"
 _POSITIONAL = (
     ".first",
     ".nth",
@@ -95,16 +102,17 @@ _SAFE_CONTEXT_JS = """() => {
 
 
 class RescueBudget:
-    """One Gemini question per Progressive FAO pull."""
+    """One Gemini question for an open scope, or for one page object."""
 
     def __init__(self) -> None:
         self.used = False
 
 
 _BUDGET: ContextVar[RescueBudget | None] = ContextVar(
-    "robie_fao_gemini_ui_rescue",
+    "robie_gemini_ui_rescue",
     default=None,
 )
+_PAGE_BUDGETS: dict[int, RescueBudget] = {}
 
 
 @contextmanager
@@ -118,17 +126,23 @@ def gemini_ui_rescue_budget(budget: RescueBudget | None = None) -> Iterator[Resc
         _BUDGET.reset(token)
 
 
+def _rescue_flags() -> tuple[str, ...]:
+    return tuple(
+        os.environ.get(name, "").strip().lower() for name in RESCUE_FLAG_ALIASES
+    )
+
+
 def rescue_enabled() -> bool:
     """True only on Test (or an explicit Test flag) and never in Production."""
     env = current_robie_env()
     if env in PRODUCTION_ENV_NAMES:
         return False
-    flag = os.environ.get(RESCUE_FLAG, "").strip().lower()
-    if flag in {"0", "false", "no", "off"}:
+    flags = _rescue_flags()
+    if any(flag in {"0", "false", "no", "off"} for flag in flags):
         return False
     if env == TEST_ENV_NAME:
         return True
-    return flag in {"1", "true", "yes", "on"}
+    return any(flag in {"1", "true", "yes", "on"} for flag in flags)
 
 
 def load_gemini_api_key() -> str:
@@ -310,7 +324,7 @@ def build_rescue_prompt(*, label: str, context: dict[str, Any], reason: str) -> 
     why = redact_text(str(reason or ""))[:500]
     listed = "\n".join(f"- {item}" for item in labels) or "- (none)"
     return (
-        "A Progressive For Agents Only UI step is fail-closed. "
+        "A Playwright UI step is fail-closed on this carrier or portal page. "
         f"Name one unique locator for the control {wanted!r}. "
         "Do not guess. Do not use .first, .nth(), .last, nth=, or :nth-child. "
         "Do not invent a second control. Documents and notes are out of scope.\n\n"
@@ -363,6 +377,14 @@ def is_rescuable_control_failure(exc: BaseException) -> bool:
     return _CONTROL_HOLD.match(text) is not None
 
 
+def is_locator_resolution_failure(exc: BaseException) -> bool:
+    """Coded registry miss: not one element. Positional refusals stay refused."""
+    text = str(exc)
+    if "chosen by position" in text or ".first" in text or ".nth" in text:
+        return False
+    return "PLAYWRIGHT_BLOCKED" in text and _RESOLUTION_FAILURE in text
+
+
 def asked_label(failure: BaseException, fallback: str) -> str:
     text = str(failure).split("; gemini:", 1)[0]
     if text == MEMO_OPEN_HOLD:
@@ -373,10 +395,38 @@ def asked_label(failure: BaseException, fallback: str) -> str:
     return fallback
 
 
+def is_shared_rescue_failure(exc: BaseException) -> bool:
+    """Missing/ambiguous control, coded locator miss, or a locator-wait timeout."""
+    if isinstance(exc, IntakeHold):
+        return is_rescuable_control_failure(exc)
+    if is_ui_timeout(exc):
+        return True
+    text = str(exc)
+    if "chosen by position" in text or ".first" in text or ".nth" in text:
+        return False
+    if "PLAYWRIGHT_BLOCKED" not in text:
+        return False
+    if _RESOLUTION_FAILURE in text:
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "control not found",
+            "not found",
+            "refuse to guess",
+            "timed out",
+            "visibility probe timed out",
+        )
+    )
+
+
 def _failure_text(failure: BaseException, label: str) -> str:
     if is_rescuable_control_failure(failure):
         return str(failure).split("; gemini:", 1)[0]
-    return f"Progressive control {label!r} is missing or ambiguous"
+    text = str(failure).split("; gemini:", 1)[0].strip()
+    if text:
+        return text
+    return f"Control {label!r} is missing or ambiguous"
 
 
 def _hold(failure: BaseException, label: str, code: str) -> IntakeHold:
@@ -464,12 +514,26 @@ def _active_client() -> Any | None:
         return None
 
 
+def _budget_for(target: Any) -> RescueBudget:
+    """One question per open scope, otherwise one question per page object."""
+    active = _BUDGET.get()
+    if active is not None:
+        return active
+    page = getattr(target, "page", None) or target
+    key = id(page)
+    budget = _PAGE_BUDGETS.get(key)
+    if budget is None:
+        budget = RescueBudget()
+        _PAGE_BUDGETS[key] = budget
+    return budget
+
+
 def rescued_locator(target: Any, label: str, failure: BaseException) -> Any:
     """One Gemini locator, or an IntakeHold. Production re-raises ``failure``."""
     if not rescue_enabled():
         raise failure
-    budget = _BUDGET.get()
-    if budget is None or budget.used:
+    budget = _budget_for(target)
+    if budget.used:
         raise failure
     budget.used = True
     if _password_present(target):
@@ -505,6 +569,257 @@ def rescued_locator(target: Any, label: str, failure: BaseException) -> Any:
     if located is None:
         raise _hold(failure, label, GEMINI_AMBIGUOUS)
     return located
+
+
+def _as_blocked(exc: BaseException) -> RuntimeError:
+    text = str(exc)
+    if text.startswith("PLAYWRIGHT_BLOCKED"):
+        return RuntimeError(text)
+    return RuntimeError(f"PLAYWRIGHT_BLOCKED: {text}")
+
+
+def _reraise_after_retry(failure: BaseException, label: str, exc: BaseException) -> None:
+    """Keep IntakeHold for FAO. Other sites stay PLAYWRIGHT_BLOCKED."""
+    if isinstance(failure, IntakeHold):
+        if isinstance(exc, IntakeHold):
+            raise exc
+        raise IntakeHold(
+            f"{_failure_text(failure, label)}; {GEMINI_RETRY_FAILED}"
+        ) from exc
+    if isinstance(exc, IntakeHold):
+        raise _as_blocked(exc) from exc
+    detail = str(exc)
+    if "gemini:" not in detail:
+        detail = f"{detail}; {GEMINI_RETRY_FAILED}" if detail else GEMINI_RETRY_FAILED
+    if detail.startswith("PLAYWRIGHT_BLOCKED"):
+        raise RuntimeError(detail) from exc
+    raise RuntimeError(f"PLAYWRIGHT_BLOCKED: {detail}") from exc
+
+
+def retry_failed_locator_action(
+    target: Any,
+    label: str,
+    failure: BaseException,
+    retry: Callable[[Any], Any],
+) -> Any:
+    """One Gemini locator, then ``retry`` once. Production re-raises ``failure``."""
+    if not rescue_enabled() or not is_shared_rescue_failure(failure):
+        raise failure
+    try:
+        locator = rescued_locator(target, label, failure)
+    except IntakeHold as exc:
+        if isinstance(failure, IntakeHold):
+            raise
+        raise _as_blocked(exc) from exc
+    try:
+        return retry(locator)
+    except Exception as exc:
+        _reraise_after_retry(failure, label, exc)
+
+
+async def _await_result(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _password_present_async(target: Any) -> bool:
+    page = getattr(target, "page", None) or target
+    for candidate in (page, target):
+        locate = getattr(candidate, "locator", None)
+        if not callable(locate):
+            continue
+        try:
+            found = locate(_PASSWORD_SELECTOR)
+            count = await _await_result(found.count())
+            if int(count) > 0:
+                return True
+        except Exception:
+            return True
+    return False
+
+
+async def capture_safe_page_context_async(target: Any) -> dict[str, Any]:
+    """Async page context. Same redaction as :func:`capture_safe_page_context`."""
+    page = getattr(target, "page", None) or target
+    host, url = safe_page_reference(str(getattr(page, "url", "") or ""))
+    title = ""
+    labels: list[str] = []
+    title_fn = getattr(page, "title", None)
+    if callable(title_fn):
+        try:
+            raw_title = await _await_result(title_fn())
+            title = sanitize_visible_label(str(raw_title or "")) or ""
+        except Exception:
+            title = ""
+    elif isinstance(title_fn, str):
+        title = sanitize_visible_label(title_fn) or ""
+    evaluate = getattr(page, "evaluate", None)
+    if callable(evaluate):
+        try:
+            raw = await _await_result(evaluate(_SAFE_CONTEXT_JS))
+        except Exception:
+            raw = None
+        if isinstance(raw, dict):
+            if not title:
+                title = sanitize_visible_label(str(raw.get("title") or "")) or ""
+            labels = sanitize_visible_labels(raw.get("labels"))
+    return {"host": host, "url": url, "title": title, "labels": labels}
+
+
+async def resolve_unique_visible_async(target: Any, selector: str) -> Any | None:
+    """Async twin of :func:`resolve_unique_visible`."""
+    if locator_is_refused(selector):
+        return None
+    role = _ROLE_LOCATOR.fullmatch(selector.strip())
+    located = None
+    if role:
+        get_by_role = getattr(target, "get_by_role", None)
+        if not callable(get_by_role):
+            return None
+        try:
+            located = get_by_role(role.group(1), name=role.group(2).strip(), exact=True)
+        except Exception:
+            return None
+    else:
+        locate = getattr(target, "locator", None)
+        if not callable(locate):
+            return None
+        try:
+            located = locate(selector.strip())
+        except Exception:
+            return None
+    if located is None:
+        return None
+    try:
+        count = int(await _await_result(located.count()))
+    except Exception:
+        return None
+    if count != 1:
+        return None
+    get_attribute = getattr(located, "get_attribute", None)
+    if callable(get_attribute):
+        try:
+            control_type = str(await _await_result(get_attribute("type")) or "")
+        except Exception:
+            return None
+        if control_type.casefold() in {"password", "hidden"}:
+            return None
+    visible = getattr(located, "is_visible", None)
+    if not callable(visible):
+        return None
+    try:
+        if not bool(await _await_result(visible())):
+            return None
+    except Exception:
+        return None
+    return located
+
+
+async def rescued_locator_async(target: Any, label: str, failure: BaseException) -> Any:
+    """Async pages (EZLynx policy setup). Production re-raises ``failure``."""
+    if not rescue_enabled():
+        raise failure
+    budget = _budget_for(target)
+    if budget.used:
+        raise failure
+    budget.used = True
+    if await _password_present_async(target):
+        raise failure
+    client = _active_client()
+    if client is None:
+        raise _hold(failure, label, GEMINI_NOT_CONFIGURED) from failure
+    context = await capture_safe_page_context_async(target)
+    prompt = build_rescue_prompt(
+        label=asked_label(failure, label),
+        context=context,
+        reason=_failure_text(failure, label),
+    )
+    try:
+        raw = client.generate_unique_locator(prompt)
+    except Exception:
+        raise _hold(failure, label, GEMINI_REQUEST_FAILED) from None
+    payload = _parse_payload(str(raw or ""))
+    if not payload:
+        raise _hold(failure, label, GEMINI_UNSURE)
+    decision = str(payload.get("decision") or "").strip().casefold()
+    if decision in {"unsure", "hitl", "unknown", "ambiguous", ""}:
+        raise _hold(failure, label, GEMINI_UNSURE)
+    if decision != "unique":
+        raise _hold(failure, label, GEMINI_AMBIGUOUS)
+    extras = payload.get("locators") or payload.get("alternates") or payload.get("selectors")
+    if extras:
+        raise _hold(failure, label, GEMINI_AMBIGUOUS)
+    selector = str(payload.get("locator") or "").strip()
+    if locator_is_refused(selector):
+        raise _hold(failure, label, GEMINI_AMBIGUOUS)
+    located = await resolve_unique_visible_async(target, selector)
+    if located is None:
+        raise _hold(failure, label, GEMINI_AMBIGUOUS)
+    return located
+
+
+async def retry_failed_locator_action_async(
+    target: Any,
+    label: str,
+    failure: BaseException,
+    retry: Callable[[Any], Any],
+) -> Any:
+    """Async twin of :func:`retry_failed_locator_action`."""
+    if not rescue_enabled() or not is_shared_rescue_failure(failure):
+        raise failure
+    try:
+        locator = await rescued_locator_async(target, label, failure)
+    except IntakeHold as exc:
+        if isinstance(failure, IntakeHold):
+            raise
+        raise _as_blocked(exc) from exc
+    try:
+        return await _await_result(retry(locator))
+    except Exception as exc:
+        _reraise_after_retry(failure, label, exc)
+
+
+def wait_visible_or_rescue(
+    page: Any,
+    locator: Any,
+    label: str,
+    timeout_ms: int,
+) -> Any:
+    """Wait until ``locator`` is visible. On Test, one timeout may rescue once."""
+    try:
+        locator.wait_for(state="visible", timeout=timeout_ms)
+        return locator
+    except Exception as exc:
+        if not rescue_enabled() or not is_ui_timeout(exc):
+            raise
+
+        def retry(found: Any) -> Any:
+            found.wait_for(state="visible", timeout=timeout_ms)
+            return found
+
+        return retry_failed_locator_action(page, label, exc, retry)
+
+
+async def wait_visible_or_rescue_async(
+    page: Any,
+    locator: Any,
+    label: str,
+    timeout_ms: int,
+) -> Any:
+    """Async twin of :func:`wait_visible_or_rescue`."""
+    try:
+        await _await_result(locator.wait_for(state="visible", timeout=timeout_ms))
+        return locator
+    except Exception as exc:
+        if not rescue_enabled() or not is_ui_timeout(exc):
+            raise
+
+        async def retry(found: Any) -> Any:
+            await _await_result(found.wait_for(state="visible", timeout=timeout_ms))
+            return found
+
+        return await retry_failed_locator_action_async(page, label, exc, retry)
 
 
 def run_named_control_step(
