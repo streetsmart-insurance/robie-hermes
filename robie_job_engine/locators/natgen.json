@@ -1,0 +1,67 @@
+{
+  "portal": "natgen",
+  "page_name": "pending_cancellations",
+  "version": "1.0",
+  "fields": {
+    "agent_dashboard": {
+      "name": "agent_dashboard",
+      "primary_strategy": "role",
+      "primary_selector": "link:Agent Dashboard",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Agent Dashboard",
+      "exact": true,
+      "description": "NatGen shell link or button. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    },
+    "your_notifications": {
+      "name": "your_notifications",
+      "primary_strategy": "role",
+      "primary_selector": "link:Your Notifications",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Your Notifications",
+      "exact": true,
+      "description": "Notifications entry from the playbook. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "policy_to_dos": {
+      "name": "policy_to_dos",
+      "primary_strategy": "role",
+      "primary_selector": "link:Policy To Dos",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Policy To Dos",
+      "exact": true,
+      "description": "Policy To Dos entry. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "pending_cancellations": {
+      "name": "pending_cancellations",
+      "primary_strategy": "role",
+      "primary_selector": "link:Pending Cancellations",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Pending Cancellations",
+      "exact": true,
+      "description": "Pending Cancellations list. The list is not day-filtered. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "policy_history": {
+      "name": "policy_history",
+      "primary_strategy": "role",
+      "primary_selector": "link:Policy History",
+      "fallback_strategy": "role",
+      "fallback_selector": "tab:Policy History",
+      "exact": true,
+      "description": "Policy History after the policy number is opened. Live accessible name is UNVERIFIED until a hermes-test-01 run.",
+      "last_updated": "2026-09-26"
+    },
+    "forms_view": {
+      "name": "forms_view",
+      "primary_strategy": "role",
+      "primary_selector": "link:Forms View",
+      "fallback_strategy": "role",
+      "fallback_selector": "button:Forms View",
+      "exact": true,
+      "description": "Forms View PDF control. Live accessible name is UNVERIFIED until a hermes-test-01 run. Zero or multiple matches hold.",
+      "last_updated": "2026-09-26"
+    }
+  }
+}
