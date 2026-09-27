@@ -109,6 +109,23 @@ class ApplicantIndex:
             "built_at": self.built_at,
         }
 
+    def all_applicant_ids(self) -> list[int]:
+        """Every applicant ID present in the index.
+
+        Used by the certificate sweep to register the index as its write
+        allowlist: any client in the directory is a legitimate filing
+        destination. Collects from every lookup map so rows missing a name,
+        email, or phone are still covered.
+        """
+        ids: set[int] = set()
+        for bucket in self.by_name.values():
+            ids.update(bucket)
+        for bucket in self.by_dba_run.values():
+            ids.update(bucket)
+        ids.update(self.by_email.values())
+        ids.update(self.by_phone.values())
+        return sorted(ids)
+
 
 def _name_tokens(name: str | None) -> list[str]:
     """Lowercase word tokens; punctuation becomes a separator (spaces kept).

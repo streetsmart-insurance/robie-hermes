@@ -126,3 +126,22 @@ def test_bad_rows_skipped_not_fatal():
     ])
     assert index.row_count == 1
     assert normalize_email("  Office@Example.COM ") == "office@example.com"
+
+
+def test_all_applicant_ids_covers_every_row():
+    """all_applicant_ids returns every ID in the index (the sweep's allowlist).
+
+    Rows missing a name, email, or phone must still contribute their ID —
+    a client is a client even when the directory row is sparse.
+    """
+    index = build_index([
+        {"account_name": "Named Co", "applicant_id": 11,
+         "email_primary": "", "phones": []},
+        {"account_name": "", "applicant_id": 22,
+         "email_primary": "noname@example.com", "phones": []},
+        {"account_name": "", "applicant_id": 33,
+         "email_primary": "", "phones": ["+1 (555) 000-0033"]},
+        {"account_name": "Bad Row", "applicant_id": "nonsense",
+         "email_primary": "", "phones": []},
+    ])
+    assert index.all_applicant_ids() == [11, 22, 33]
