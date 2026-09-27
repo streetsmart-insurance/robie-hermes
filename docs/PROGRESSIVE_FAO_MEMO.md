@@ -82,7 +82,7 @@ the requested window:
 
 **Memo rows on the Communications list for that date = PDFs saved for that date.**
 
-The list screenshot is taken while the Communications tab is selected,
+The list screenshot is taken while the Communications section URL is open,
 before any Memo is opened. The QA pack, including that PNG, is written for
 every date in an accepted window. A count mismatch still writes the pack
 with `"status": "HELD"` and the hold reason, then the command exits `HELD`.
@@ -139,9 +139,15 @@ URL (`/managepolicies/policyactivity/processeddateresults/<section>/`).
 The live landing is section `cancels` (title Policy Activity Processed Date
 Results – Cancels, Lapses, Reinstates). Sibling sections are the same page
 family. There is no Search button on that page. The worker does not click
-Search. The next control is the Communications tab (exact name, then
-`aria-selected`). A link named Communications is not that control. A missing
-results URL, or a missing or second Communications tab, holds. Memo stays
+Search. The next control is the Communications section link
+`a[data-at="policy-activity-tab-communications"]`, or one link named
+`Communications` when that element is absent. Those two queries must be the
+same element when both match. `role=tab` and `aria-selected` are not
+required and are not clicked. After the click the URL must stay under
+`processeddateresults` with section `communications` or `underwriting`
+(optional legacy suffix: `underwriting`, `underwritinglegacy`,
+`underwriting-legacy`, `underwriting_legacy`). Staying on `cancels`, a
+second link, or any other section holds. Memo stays
 the same exact name. A missing or second match holds. A unique
 `data-at` or id match is used when that element has no accessible name; a
 different accessible name, or the expected name on another element, holds.
@@ -229,12 +235,23 @@ not upload or write a note.
   The next line clicked a Search button. The receipt was
   `Progressive control 'Search' is missing or ambiguous` (`ezlynx: not_run`,
   `status: HELD`). Communications and Memo were not reached (0 PDFs).
-  Search is not on that results page. This commit stops that click, requires
-  the processed-date results URL (cancels or a sibling section), then opens
-  the Communications tab. It has not been installed, and a completed pull
-  is still UNVERIFIED. After merge and a Test zip, re-run `--pull-only` on
-  `hermes-test-01` to prove the run gets past the results page into
-  Communications and Memo.
+  Search is not on that results page. Release `6eb4750874c6` (#614) stopped
+  that click and required a Communications `role=tab` with
+  `aria-selected=true`. On the same authenticated FAO session the live
+  control is a link, `a[data-at="policy-activity-tab-communications"]`,
+  whose target is a `processeddateresults` underwriting path (underwriting,
+  or that slug with a legacy suffix). A manual click loaded Communications.
+  The Saturday–Sunday window showed 0 Records Found. That empty list is
+  data; this commit does not invent Memo rows or PDF clicks for it. A
+  missing memo table still holds after the section opens. Official
+  `--pull-only` can still time out re-entering Policy Activity from Manage
+  Policies (about 30 seconds on the Playwright click). That flake is
+  unchanged. This commit clicks the unique Communications section link and
+  requires the Communications/underwriting results URL. It has not been
+  installed, and a completed pull is still UNVERIFIED. After merge and a
+  Test zip, re-run `--pull-only` on `hermes-test-01` and confirm the page
+  leaves `cancels` for `underwriting` or `communications` without a Search
+  click.
 - Ambiguous date UI stays fail-closed in this commit. The StreetSmart HITL
   ladder for a later change is Gemini for an open-ended read (“what am I
   looking at / which control”), then **Jev** (TypeSafe System One) as the
@@ -242,12 +259,12 @@ not upload or write a note.
   example “does this look like the processed-date filter we expect?” or
   “quote-only vs complete.” No Jev client, network call, or secret is added
   here. Keys are not configured.
-- Still exact, and still UNVERIFIED on a completed pull: the Communications
-  tab (`aria-selected`) on the cancels results page, and a Memo link or
-  button on each row. A mismatch holds. The results page was observed only
-  far enough to show that Search is absent. If Communications is a link, a
-  different name, or already showing Memo rows with no tab, this commit
-  holds on that control and does not guess a click.
+- Still exact, and still UNVERIFIED on a completed pull: a Memo link or
+  button on each row. A mismatch holds. The Communications page observed
+  after the section link showed 0 Records Found. Memo and PDF controls were
+  not in that DOM, so this commit does not add a click for them. If that
+  empty page has no single memo table, the pull holds after the section
+  URL matches. Do not treat that hold as a zero-row success.
 - Whether the communications grid uses a Type column, and whether a disabled
   `Next` control is present. An enabled `Next` holds so a partial page is
   not treated as the full day.

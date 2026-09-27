@@ -28,7 +28,9 @@ from robie_job_engine.progressive_fao_memo import (
     PagePdfView,
     END_DATE_CSS,
     END_DATE_LABEL,
-    COMMUNICATIONS_TAB_LABEL,
+    COMMUNICATIONS_LINK_CSS,
+    COMMUNICATIONS_LINK_LABEL,
+    COMMUNICATIONS_SECTION_HOLD,
     GET_POLICY_ACTIVITY_CSS,
     GET_POLICY_ACTIVITY_LABEL,
     MAIN_NAVIGATION_NAME,
@@ -55,6 +57,7 @@ from robie_job_engine.progressive_fao_memo import (
     memo_filename,
     PROCESSED_DATE_RESULTS_HOLD,
     parse_memo_grid,
+    require_communications_section,
     pdf_bytes_from_observation,
     require_processed_date_results,
     read_playwright_pdf_view,
@@ -70,6 +73,10 @@ LIST_URL = "https://www.foragentsonly.com/managepolicies/policyactivity"
 RESULTS_CANCELS_URL = (
     "https://www.foragentsonly.com/managepolicies/policyactivity/"
     "processeddateresults/cancels/"
+)
+RESULTS_UNDERWRITING_URL = (
+    "https://www.foragentsonly.com/managepolicies/policyactivity/"
+    "processeddateresults/underwriting/"
 )
 LIST_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
@@ -741,7 +748,7 @@ class LocatorContractTests(unittest.TestCase):
         self.assertEqual(activity.primary_selector, "link:" + POLICY_ACTIVITY_NAMES[0])
         self.assertEqual(activity.fallback_selector, "link:" + POLICY_ACTIVITY_NAMES[1])
         self.assertTrue(activity.exact)
-        self.assertIn("tab:Communications", selectors)
+        self.assertNotIn("tab:Communications", selectors)
         self.assertNotIn("Processed date from", selectors)
         self.assertNotIn("Processed date to", selectors)
         expected = {
@@ -770,11 +777,17 @@ class LocatorContractTests(unittest.TestCase):
         self.assertEqual(results.primary_selector, "Policy Activity Processed Date Results")
         self.assertIn("processeddateresults/cancels/", results.description)
         self.assertIn("does not click Search", results.description)
-        communications = page.get_field("communications_tab")
-        self.assertEqual(communications.primary_selector, "tab:" + COMMUNICATIONS_TAB_LABEL)
-        self.assertEqual(communications.accessible_name, COMMUNICATIONS_TAB_LABEL)
-        self.assertIn("aria-selected", communications.description)
-        self.assertIn("cancels", communications.description)
+        self.assertIsNone(page.get_field("communications_tab"))
+        communications = page.get_field("communications_link")
+        self.assertEqual(communications.primary_strategy, "css")
+        self.assertEqual(communications.primary_selector, COMMUNICATIONS_LINK_CSS)
+        self.assertEqual(communications.fallback_selector, "link:" + COMMUNICATIONS_LINK_LABEL)
+        self.assertEqual(communications.accessible_name, COMMUNICATIONS_LINK_LABEL)
+        self.assertIn("does not read aria-selected", communications.description)
+        self.assertIn("policy-activity-tab-communications", communications.description)
+        self.assertIn("underwriting", communications.description)
+        self.assertIn("does not require role=tab", communications.description)
+        self.assertIn("link:" + COMMUNICATIONS_LINK_LABEL, selectors)
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies"))
         self.assertIsNotNone(MANAGE_POLICIES_NAME.search("Manage Policies Home"))
         self.assertIsNone(MANAGE_POLICIES_NAME.search("Menu Manage Policies"))
@@ -852,7 +865,7 @@ def _css_match(node, selector):
         raise KeyError(selector)
     if tag is None and element_id is None and not attrs:
         raise KeyError(selector)
-    if tag is not None and node.role != tag:
+    if tag is not None and node.role != tag and not (tag == "a" and node.role == "link"):
         return False
     if element_id is not None and node.attrs.get("id") != element_id:
         return False
@@ -1033,7 +1046,8 @@ class NavPage:
                  view_mode="ok", option_mode="ok", range_mode="reveal",
                  start_mode="ok", end_mode="ok", button_mode="ok",
                  legacy_dates=False, results_section="cancels", results_url=None,
-                 results_mode="navigate", comms_mode="ok", search_on_results=False):
+                 results_mode="navigate", comms_mode="ok", search_on_results=False,
+                 communications_section="underwriting"):
         self.url = url
         self.list_url = url
         self.body_text = body
@@ -1066,6 +1080,7 @@ class NavPage:
         self.results_mode = results_mode
         self.comms_mode = comms_mode
         self.search_on_results = search_on_results
+        self.communications_section = communications_section
         self.results_url = results_url or (
             "https://www.foragentsonly.com/managepolicies/policyactivity/"
             f"processeddateresults/{results_section}/"
@@ -1168,7 +1183,7 @@ class NavPage:
             self.activity_extras.extend([self.legacy_from, self.legacy_to])
         if self.view_mode == "split-label":
             self.activity_extras.append(FakeNode("div", VIEW_ACTIVITY_BY_LABEL, label=VIEW_ACTIVITY_BY_LABEL))
-        self.tab = FakeNode("tab", "Communications", attrs={"aria-selected": "false"})
+        self.communications_nodes = self._communications_nodes()
         self.rows = []
         body_rows = []
         for policy, insured, reason, memo_type, processed in PROVE_ROWS[:2]:
@@ -1243,14 +1258,57 @@ class NavPage:
             *self.page_buttons,
         ]
 
+    def _communications_attrs(self):
+        return {"data-at": "policy-activity-tab-communications"}
+
+    def _communications_nodes(self):
+        attrs = self._communications_attrs()
+        mode = self.comms_mode
+        if mode == "missing":
+            return []
+        if mode == "tab":
+            return [FakeNode("tab", "Communications", attrs={"aria-selected": "false"})]
+        if mode == "named":
+            return [FakeNode("link", "Communications")]
+        if mode == "unlabeled":
+            return [FakeNode("link", "", text="", attrs=dict(attrs))]
+        if mode == "mistitled":
+            return [FakeNode("link", "Alerts", text="Alerts", attrs=dict(attrs))]
+        if mode == "mislabeled":
+            return [FakeNode("link", "Communications", attrs={**attrs, "aria-label": "Notices"})]
+        if mode == "hidden":
+            return [FakeNode("link", "Communications", attrs=dict(attrs), visible=False)]
+        if mode == "duplicate":
+            return [
+                FakeNode("link", "Communications", attrs=dict(attrs)),
+                FakeNode("link", "Communications", attrs=dict(attrs)),
+            ]
+        if mode == "split":
+            return [
+                FakeNode("link", "Communications", attrs=dict(attrs)),
+                FakeNode("link", "Communications"),
+            ]
+        if mode == "foreign-label":
+            return [
+                FakeNode("link", "Communications", attrs=dict(attrs)),
+                FakeNode("span", "Elsewhere", label=COMMUNICATIONS_LINK_LABEL),
+            ]
+        if mode == "tab-and-link":
+            return [
+                FakeNode("tab", "Communications", attrs={"aria-selected": "false"}),
+                FakeNode("link", "Communications", attrs=dict(attrs)),
+            ]
+        return [FakeNode("link", "Communications", attrs=dict(attrs))]
+
+    @property
+    def communications_url(self):
+        return (
+            "https://www.foragentsonly.com/managepolicies/policyactivity/"
+            f"processeddateresults/{self.communications_section}/"
+        )
+
     def _results_roots(self):
-        nodes = []
-        if self.comms_mode == "link":
-            nodes.append(FakeNode("link", "Communications"))
-        elif self.comms_mode != "missing":
-            nodes.append(self.tab)
-            if self.comms_mode == "duplicate":
-                nodes.append(FakeNode("tab", "Communications", attrs={"aria-selected": "false"}))
+        nodes = list(self.communications_nodes)
         if self.search_on_results:
             nodes.append(self.search_button)
         return nodes
@@ -1366,11 +1424,16 @@ class NavPage:
             self.state = "results"
             self.url = self.results_url
             self.list_url = self.results_url
-        elif node.role == "tab" and node.name == "Communications" and self.state == "results":
-            if self.comms_mode != "unselected":
-                node.attrs["aria-selected"] = "true"
+        elif (
+            node.role == "link"
+            and node in self.communications_nodes
+            and self.state == "results"
+            and self.comms_mode != "stay"
+        ):
             self.state = "comms"
             self.table_visible = True
+            self.url = self.communications_url
+            self.list_url = self.communications_url
         elif node.name == "Memo":
             policy = node.attrs["policy"]
             self.memo_opens.append(policy)
@@ -1552,7 +1615,7 @@ class NavigationTests(unittest.TestCase):
             "Memo",
         ])
         self.assertNotIn("Search", page.clicks)
-        self.assertEqual(page.url, RESULTS_CANCELS_URL)
+        self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
         self.assertNotIn(MAIN_NAVIGATION_NAME, page.clicks)
         self.assertFalse(page.closed)
 
@@ -1563,7 +1626,7 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(len(grid.rows), 2)
         self.assertNotIn("Search", page.clicks)
         self.assertIn("Communications", page.clicks)
-        self.assertEqual(page.url, RESULTS_CANCELS_URL)
+        self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
 
     def _load(self, page):
         return PlaywrightFaoMemoBrowser(page).load_communications(
@@ -1949,7 +2012,7 @@ class NavigationTests(unittest.TestCase):
         memo = parse_memo_grid(grid, agent_code=DEFAULT_AGENT_CODE)[0]
         blob = pdf_bytes_from_observation(browser.capture_memo(memo.document_id))
         self.assertEqual(blob, pdf_bytes(b"860521214"))
-        self.assertEqual(page.url, RESULTS_CANCELS_URL)
+        self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
 
         stuck = NavPage(open_mode="same-stuck", next_mode="none")
         browser = PlaywrightFaoMemoBrowser(stuck)
@@ -1961,50 +2024,114 @@ class NavigationTests(unittest.TestCase):
     def test_cancels_results_open_communications_without_search(self):
         page = NavPage(search_on_results=True)
         grid = self._load(page)
-        self.assertEqual(page.url, RESULTS_CANCELS_URL)
+        self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
         self.assertEqual(len(grid.rows), 2)
         self.assertNotIn("Search", page.clicks)
-        self.assertIn("Communications", page.clicks)
+        self.assertEqual(page.clicks.count("Communications"), 1)
         self.assertEqual(page.get_by_role("button", name="Search", exact=True).count(), 1)
-        self.assertEqual(page.tab.attrs["aria-selected"], "true")
+        self.assertEqual(page.get_by_role("tab", name="Communications", exact=True).count(), 0)
+        self.assertEqual(page.locator(COMMUNICATIONS_LINK_CSS).count(), 1)
 
     def test_sibling_processed_date_results_also_open_communications(self):
         page = NavPage(results_section="renewals")
         grid = self._load(page)
-        self.assertEqual(
-            page.url,
-            "https://www.foragentsonly.com/managepolicies/policyactivity/"
-            "processeddateresults/renewals/",
-        )
+        self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
         self.assertEqual(len(grid.rows), 2)
         self.assertNotIn("Search", page.clicks)
         self.assertEqual(page.clicks[-1], "Communications")
+
+    def test_communications_section_link_opens_without_a_tab(self):
+        for mode in ("named", "unlabeled", "tab-and-link"):
+            with self.subTest(mode=mode):
+                page = NavPage(comms_mode=mode, search_on_results=True)
+                grid = self._load(page)
+                self.assertEqual(len(grid.rows), 2)
+                self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
+                self.assertNotIn("Search", page.clicks)
+                self.assertEqual(page.memo_opens, [])
+        both = NavPage(comms_mode="tab-and-link")
+        self._load(both)
+        tab = next(node for node in both.communications_nodes if node.role == "tab")
+        self.assertEqual(tab.attrs["aria-selected"], "false")
+        self.assertEqual(both.clicks.count("Communications"), 1)
+
+    def test_communications_section_family_is_accepted(self):
+        for section in (
+            "underwriting",
+            "underwriting-legacy",
+            "underwriting_legacy",
+            "underwritinglegacy",
+            "communications",
+            "Underwriting",
+        ):
+            with self.subTest(section=section):
+                page = NavPage(communications_section=section)
+                self._load(page)
+                self.assertEqual(page.url, page.communications_url)
+                self.assertNotIn("Search", page.clicks)
+                self.assertIn("Communications", page.clicks)
 
     def test_results_page_holds_closed_without_clicking_search(self):
         cases = (
             ("stays on the form", dict(results_mode="stay"), PROCESSED_DATE_RESULTS_HOLD, "Get Policy Activity"),
             (
-                "communications tab missing",
+                "communications link missing",
                 dict(comms_mode="missing"),
                 "Communications",
                 "Get Policy Activity",
             ),
             (
-                "communications tab duplicated",
+                "communications link duplicated",
                 dict(comms_mode="duplicate"),
                 "Communications",
                 "Get Policy Activity",
             ),
             (
-                "communications is a link",
-                dict(comms_mode="link"),
+                "data-at and a second named link",
+                dict(comms_mode="split"),
                 "Communications",
                 "Get Policy Activity",
             ),
             (
-                "communications tab does not select",
-                dict(comms_mode="unselected"),
-                "did not become selected",
+                "communications is only a tab",
+                dict(comms_mode="tab"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "section link text is not Communications",
+                dict(comms_mode="mistitled"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "section link accessible name differs",
+                dict(comms_mode="mislabeled"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "Communications label is on another element",
+                dict(comms_mode="foreign-label"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "communications link is hidden",
+                dict(comms_mode="hidden"),
+                "Communications",
+                "Get Policy Activity",
+            ),
+            (
+                "click stays on cancels",
+                dict(comms_mode="stay"),
+                COMMUNICATIONS_SECTION_HOLD,
+                "Communications",
+            ),
+            (
+                "click lands outside the communications family",
+                dict(communications_section="renewals"),
+                COMMUNICATIONS_SECTION_HOLD,
                 "Communications",
             ),
         )
@@ -2048,6 +2175,41 @@ class NavigationTests(unittest.TestCase):
             with self.subTest(url=url):
                 with self.assertRaisesRegex(IntakeHold, PROCESSED_DATE_RESULTS_HOLD):
                     require_processed_date_results(UrlPage(url))
+
+    def test_communications_section_url_fails_closed(self):
+        class UrlPage:
+            def __init__(self, url):
+                self.url = url
+
+            def wait_for_url(self, pattern, timeout=None):
+                if not pattern.search(self.url):
+                    raise TimeoutError("communications section did not appear")
+
+        accepted = (
+            RESULTS_UNDERWRITING_URL,
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/underwriting-legacy/",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/underwriting_legacy",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/underwritinglegacy/",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/communications/",
+            "https://foragentsonly.com/managepolicies/policyactivity/processeddateresults/Underwriting/",
+        )
+        for url in accepted:
+            with self.subTest(url=url):
+                self.assertTrue(require_communications_section(UrlPage(url)))
+        rejected = (
+            RESULTS_CANCELS_URL,
+            RESULTS_UNDERWRITING_URL + "?day=2026-09-25",
+            RESULTS_UNDERWRITING_URL + "#memo",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/renewals/",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/underwriting/extra/",
+            "https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/communications-legacy/",
+            "http://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/underwriting/",
+            "https://evil.example/managepolicies/policyactivity/processeddateresults/underwriting/",
+        )
+        for url in rejected:
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(IntakeHold, COMMUNICATIONS_SECTION_HOLD):
+                    require_communications_section(UrlPage(url))
 
     def test_ambiguous_next_holds(self):
         page = NavPage(next_mode="ambiguous")

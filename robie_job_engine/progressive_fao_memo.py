@@ -19,10 +19,13 @@ children of the preset select; they stay hidden until it is chosen.
 Get Policy Activity navigates to Policy Activity processed-date results.
 The live landing is ``.../processeddateresults/cancels/`` (Cancels, Lapses,
 Reinstates). Sibling sections share that prefix. There is no Search button
-on that page. The next control is the Communications tab. A missing results
-URL, or a missing or ambiguous Communications tab, raises IntakeHold. This
-module does not log in and does not submit OTP. Portal code does not upload,
-note, task, or label in EZLynx.
+on that page. Communications is the section link
+``a[data-at="policy-activity-tab-communications"]``, not ``role=tab``.
+After that click the URL must be a processed-date results section in the
+Communications/underwriting family. A missing results URL, a missing or
+ambiguous link, or any other section raises IntakeHold. This module does
+not log in and does not submit OTP. Portal code does not upload, note,
+task, or label in EZLynx.
 
 ``--pull-only`` stops after the local QA pack. The default path calls
 :func:`robie_job_engine.document_retrieval_filing.file_progressive_memos`
@@ -115,9 +118,13 @@ END_DATE_LABEL = "End Date"
 END_DATE_CSS = 'input[type="date"][data-at="datatable-daterangepicker-enddate"]'
 GET_POLICY_ACTIVITY_LABEL = "Get Policy Activity"
 GET_POLICY_ACTIVITY_CSS = '[data-at="ProcessedDateButton"]'
-COMMUNICATIONS_TAB_LABEL = "Communications"
+COMMUNICATIONS_LINK_LABEL = "Communications"
+COMMUNICATIONS_LINK_CSS = 'a[data-at="policy-activity-tab-communications"]'
 PROCESSED_DATE_RESULTS_HOLD = (
     "Policy Activity processed-date results page is missing or ambiguous"
+)
+COMMUNICATIONS_SECTION_HOLD = (
+    "Communications processed-date results page is missing or ambiguous"
 )
 # Live landing after Get Policy Activity (hermes-test-01, release 00a0ae294ec0):
 # https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/
@@ -126,6 +133,21 @@ PROCESSED_DATE_RESULTS_HOLD = (
 _PROCESSED_DATE_RESULTS_URL = re.compile(
     r"^https://(?:[a-z0-9-]+\.)*foragentsonly\.com"
     r"/managepolicies/policyactivity/processeddateresults/([a-z0-9_-]+)/?$",
+    re.IGNORECASE,
+)
+# Communications section after the results-page link (hermes-test-01 after
+# #614 / 6eb4750874c6). The control is a link, not role=tab. Its target is a
+# processeddateresults sibling: communications, or underwriting with an
+# optional legacy suffix (underwriting, underwritinglegacy, underwriting-legacy,
+# underwriting_legacy). cancels is the Get Policy Activity landing and is not
+# this page. The two patterns must accept the same slugs.
+_COMMUNICATIONS_SECTION_SLUG = r"(?:communications|underwriting(?:[-_]?legacy)?)"
+_COMMUNICATIONS_SECTION = re.compile(rf"^{_COMMUNICATIONS_SECTION_SLUG}$")
+_COMMUNICATIONS_RESULTS_URL = re.compile(
+    r"^https://(?:[a-z0-9-]+\.)*foragentsonly\.com"
+    r"/managepolicies/policyactivity/processeddateresults/"
+    + _COMMUNICATIONS_SECTION_SLUG
+    + r"/?$",
     re.IGNORECASE,
 )
 _SHELL_NAV_ROLES = ("link", "button")
@@ -452,18 +474,6 @@ def assert_agent_context(page: Any, agent_code: str) -> None:
     found = agent_codes_in_text(str(body or ""))
     if found != {require_agent_code(agent_code)}:
         raise IntakeHold("Progressive FAO agent context is missing or ambiguous")
-
-
-def click_named(page: Any, name: str, *, roles: tuple[str, ...]) -> None:
-    matches = []
-    for role in roles:
-        locator = page.get_by_role(role, name=name, exact=True)
-        count = locator.count()
-        if count:
-            matches.append((count, locator))
-    if len(matches) != 1 or matches[0][0] != 1:
-        raise IntakeHold(f"Progressive control {name!r} is missing or ambiguous")
-    matches[0][1].click()
 
 
 def _control_hold(label: str) -> IntakeHold:
@@ -798,7 +808,7 @@ def require_processed_date_results(page: Any) -> str:
     that button is not on the results page. Cancels is the default section.
     Any other single section under ``processeddateresults`` is the same page
     family. A missing URL, a query, or an extra path segment holds. The
-    Communications tab is the next control.
+    Communications section link is the next control.
     """
     wait = getattr(page, "wait_for_url", None)
     if callable(wait):
@@ -811,17 +821,84 @@ def require_processed_date_results(page: Any) -> str:
     return _processed_date_results_section(str(getattr(page, "url", "") or ""))
 
 
-def open_communications_tab(page: Any) -> None:
-    """Open the Communications tab on the processed-date results page.
+def _communications_link(page: Any) -> Any:
+    """The one Communications section link. A tab is not this control.
 
-    Exact role ``tab``. A link with the same name is not this control and
-    is not clicked. Zero tabs, or two tabs, hold. The tab must report
-    ``aria-selected=true`` after the click.
+    Live DOM on the processed-date results page is
+    ``a[data-at="policy-activity-tab-communications"]``. A unique link named
+    Communications is that control when the data-at element is absent. When
+    both queries match they must be the same element. Zero links, two links,
+    a hidden link, visible text other than Communications, or a different
+    accessible name holds. ``role=tab`` is not required and is not clicked.
     """
-    click_named(page, COMMUNICATIONS_TAB_LABEL, roles=("tab",))
-    locator = page.get_by_role("tab", name=COMMUNICATIONS_TAB_LABEL, exact=True)
-    if locator.count() != 1 or locator.get_attribute("aria-selected") != "true":
-        raise IntakeHold("Communications tab did not become selected")
+    css = page.locator(COMMUNICATIONS_LINK_CSS)
+    named = page.get_by_role("link", name=COMMUNICATIONS_LINK_LABEL, exact=True)
+    css_count = int(css.count())
+    named_count = int(named.count())
+    if css_count > 1 or named_count > 1:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
+    if css_count == 1 and named_count == 1 and int(css.and_(named).count()) != 1:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
+    if css_count == 1:
+        located = css
+    elif named_count == 1:
+        located = named
+    else:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
+    visible, total = _survey(located)
+    if total != 1 or len(visible) != 1:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
+    link = visible[0]
+    try:
+        text = _norm(str(link.inner_text() or ""))
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
+    if text and text != COMMUNICATIONS_LINK_LABEL:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL)
+    _require_expected_label(page, link, COMMUNICATIONS_LINK_LABEL)
+    return link
+
+
+def require_communications_section(page: Any) -> str:
+    """Return the Communications/underwriting section after the section link.
+
+    Get Policy Activity lands on ``cancels``. The Communications link moves
+    to a sibling under ``processeddateresults`` whose slug is
+    ``communications`` or ``underwriting`` (optional ``legacy`` suffix,
+    joined directly or with ``-`` or ``_``). Staying on cancels, a query, or
+    any other slug holds. ``aria-selected`` is not this proof.
+    """
+    wait = getattr(page, "wait_for_url", None)
+    if callable(wait):
+        try:
+            wait(_COMMUNICATIONS_RESULTS_URL, timeout=DATE_CONTROL_TIMEOUT_MS)
+        except IntakeHold:
+            raise
+        except Exception as exc:
+            raise IntakeHold(COMMUNICATIONS_SECTION_HOLD) from exc
+    section = _processed_date_results_section(str(getattr(page, "url", "") or ""))
+    if _COMMUNICATIONS_SECTION.fullmatch(section) is None:
+        raise IntakeHold(COMMUNICATIONS_SECTION_HOLD)
+    return section
+
+
+def open_communications_section(page: Any) -> str:
+    """Open Communications from processed-date results via the section link.
+
+    Does not click Search and does not require ``role=tab``. After the click
+    the URL must be in the Communications/underwriting section family. Memo
+    and PDF controls are not clicked here.
+    """
+    link = _communications_link(page)
+    try:
+        link.click()
+    except IntakeHold:
+        raise
+    except Exception as exc:
+        raise _control_hold(COMMUNICATIONS_LINK_LABEL) from exc
+    return require_communications_section(page)
 
 
 def memo_control_count(row: Any) -> int:
@@ -913,7 +990,7 @@ class PlaywrightFaoMemoBrowser:
         )
         apply_processed_date_window(self.page, start, end)
         require_processed_date_results(self.page)
-        open_communications_tab(self.page)
+        open_communications_section(self.page)
         assert_authenticated(self.page)
         assert_agent_context(self.page, self.agent_code)
         headers, rows, controls, locators = extract_memo_grid(self.page)
@@ -957,13 +1034,14 @@ class PlaywrightFaoMemoBrowser:
         return observation
 
     def screenshot_communications(self) -> bytes:
-        """Full-page PNG of the Communications list while that tab is selected."""
+        """Full-page PNG of the Communications list on that results section."""
         if self._grid is None or str(getattr(self.page, "url", "") or "") != self._list_url:
             raise IntakeHold("Communications list screenshot is missing or not a PNG")
+        try:
+            require_communications_section(self.page)
+        except IntakeHold as exc:
+            raise IntakeHold("Communications list screenshot is missing or not a PNG") from exc
         if self.page.locator("table").count() != 1:
-            raise IntakeHold("Communications list screenshot is missing or not a PNG")
-        tab = self.page.get_by_role("tab", name="Communications", exact=True)
-        if tab.count() != 1 or tab.get_attribute("aria-selected") != "true":
             raise IntakeHold("Communications list screenshot is missing or not a PNG")
         data = self.page.screenshot(full_page=True, type="png")
         return require_png(data)

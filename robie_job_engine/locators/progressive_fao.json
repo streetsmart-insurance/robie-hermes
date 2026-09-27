@@ -1,7 +1,7 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.3",
+  "version": "1.4",
   "fields": {
     "manage_policies": {
       "name": "manage_policies",
@@ -85,13 +85,15 @@
       "description": "Page reached by Get Policy Activity. Live prove on hermes-test-01 release 00a0ae294ec0 landed on https://www.foragentsonly.com/managepolicies/policyactivity/processeddateresults/cancels/ with title Policy Activity Processed Date Results – Cancels, Lapses, Reinstates. Sibling sections are the same prefix with one other slug. The worker matches that URL. It does not click this title and it does not click Search. A missing URL, a query, or an extra path segment holds.",
       "last_updated": "2026-09-27"
     },
-    "communications_tab": {
-      "name": "communications_tab",
-      "primary_strategy": "role",
-      "primary_selector": "tab:Communications",
+    "communications_link": {
+      "name": "communications_link",
+      "primary_strategy": "css",
+      "primary_selector": "a[data-at=\"policy-activity-tab-communications\"]",
+      "fallback_strategy": "role",
+      "fallback_selector": "link:Communications",
       "exact": true,
       "accessible_name": "Communications",
-      "description": "Exact tab on the processed-date results page, including the cancels landing and sibling sections. Clicked after the results URL matches. A link named Communications is not this control. The run holds unless this one tab exists and aria-selected becomes true.",
+      "description": "Section link on processed-date results, including the cancels landing. Live control after 6eb4750874c6 is a[data-at=\"policy-activity-tab-communications\"], not role=tab. Click this one link, or one link named Communications when that data-at element is absent. Both queries must be the same element when both match. The run does not require role=tab and does not read aria-selected. After the click the URL must be processeddateresults with section communications or underwriting (optional legacy suffix: underwriting, underwritinglegacy, underwriting-legacy, underwriting_legacy). A missing link, a second link, a hidden link, or any other section, including cancels, holds. Search is not clicked. Memo and PDF controls were not observed on the empty Communications page and are not part of this click.",
       "last_updated": "2026-09-27"
     }
   }
