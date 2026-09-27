@@ -1,7 +1,7 @@
 {
   "portal": "progressive_fao",
   "page_name": "communications_memo",
-  "version": "1.5",
+  "version": "1.6",
   "gemini_ui_rescue": {
     "environment": "TEST",
     "secret_id": "gemini-api-key",
@@ -18,6 +18,14 @@
       "name_pattern": "^Manage Policies",
       "description": "FAO header parent link. Live accessible name is Manage Policies Home because aria-label wins over the visible text Manage Policies. The click accepts this data-at selector or one link/button whose accessible name matches ^Manage Policies. Hidden until Main Navigation is expanded once. Zero matches or more than one element holds.",
       "last_updated": "2026-09-26"
+    },
+    "main_nav_drawer": {
+      "name": "main_nav_drawer",
+      "primary_strategy": "css",
+      "primary_selector": ".header-drawer__content--show",
+      "exact": true,
+      "description": "Open FAO Main Nav drawer. The held pull blocked Policy Activity with this class; the panel content was Agency Admin. Before Policy Activity, close it with Escape, one overlay, or one close control, then wait until this class is gone. If it stays, hold and do not click Policy Activity. Do not click Agency Admin. A closed drawer has no match and is left alone.",
+      "last_updated": "2026-09-27"
     },
     "policy_activity": {
       "name": "policy_activity",

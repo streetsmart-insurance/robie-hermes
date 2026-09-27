@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from robie_job_engine.gemini_ui_rescue import is_rescuable_control_failure
 from robie_job_engine.intake_core import IntakeHold, ReadResult, SourceArchive
 from robie_job_engine.locator_registry import LocatorRegistry
 from robie_job_engine.playwright_write_guard import locator_is_positional_guess
@@ -33,6 +34,9 @@ from robie_job_engine.progressive_fao_memo import (
     COMMUNICATIONS_SECTION_HOLD,
     GET_POLICY_ACTIVITY_CSS,
     GET_POLICY_ACTIVITY_LABEL,
+    AGENCY_ADMIN_NAME,
+    HEADER_DRAWER_OPEN_CSS,
+    MAIN_NAV_DRAWER_HOLD,
     MAIN_NAVIGATION_NAME,
     MANAGE_POLICIES_CSS,
     MANAGE_POLICIES_NAME,
@@ -745,6 +749,12 @@ class LocatorContractTests(unittest.TestCase):
         self.assertEqual(manage.fallback_selector, "link:Manage Policies Home")
         self.assertEqual(manage.name_pattern, MANAGE_POLICIES_NAME.pattern)
         self.assertTrue(manage.exact)
+        drawer = page.get_field("main_nav_drawer")
+        self.assertEqual(drawer.primary_strategy, "css")
+        self.assertEqual(drawer.primary_selector, HEADER_DRAWER_OPEN_CSS)
+        self.assertIn("header-drawer__content--show", drawer.primary_selector)
+        self.assertIn("Policy Activity", drawer.description)
+        self.assertIn("Agency Admin", drawer.description)
         self.assertEqual(activity.primary_selector, "link:" + POLICY_ACTIVITY_NAMES[0])
         self.assertEqual(activity.fallback_selector, "link:" + POLICY_ACTIVITY_NAMES[1])
         self.assertTrue(activity.exact)
@@ -833,6 +843,7 @@ class LocatorContractTests(unittest.TestCase):
 _CSS_ATTR = re.compile(r'\[([A-Za-z_][\w-]*)="([^"]*)"\]')
 _CSS_ID = re.compile(r"#([A-Za-z_][\w-]*)")
 _CSS_TAG = re.compile(r"[A-Za-z][\w-]*")
+_CSS_CLASS = re.compile(r"\.([A-Za-z_][\w-]*)")
 
 
 def _css_match(node, selector):
@@ -846,6 +857,7 @@ def _css_match(node, selector):
         body = body[tag_match.end():]
     element_id = None
     attrs = {}
+    classes = []
     while body:
         if body.startswith("#") and element_id is None:
             id_match = _CSS_ID.match(body)
@@ -853,6 +865,13 @@ def _css_match(node, selector):
                 raise KeyError(selector)
             element_id = id_match.group(1)
             body = body[id_match.end():]
+            continue
+        if body.startswith("."):
+            class_match = _CSS_CLASS.match(body)
+            if class_match is None:
+                raise KeyError(selector)
+            classes.append(class_match.group(1))
+            body = body[class_match.end():]
             continue
         if body.startswith("["):
             attr_match = _CSS_ATTR.match(body)
@@ -865,12 +884,16 @@ def _css_match(node, selector):
             body = body[attr_match.end():]
             continue
         raise KeyError(selector)
-    if tag is None and element_id is None and not attrs:
+    if tag is None and element_id is None and not attrs and not classes:
         raise KeyError(selector)
     if tag is not None and node.role != tag and not (tag == "a" and node.role == "link"):
         return False
     if element_id is not None and node.attrs.get("id") != element_id:
         return False
+    if classes:
+        node_classes = set(str(node.attrs.get("class") or "").split())
+        if any(token not in node_classes for token in classes):
+            return False
     return all(node.attrs.get(key) == value for key, value in attrs.items())
 
 
@@ -1045,6 +1068,7 @@ class NavPage:
                  extra_manage=None, policy_name="Policy Activity", policy_role="link",
                  policy_visible=True, policy_items=None, include_main_nav=True,
                  duplicate_main_nav=False, main_nav_visible=True,
+                 drawer_mode=None, drawer_open=False, drawer_on_main_nav=False,
                  view_mode="ok", option_mode="ok", range_mode="reveal",
                  start_mode="ok", end_mode="ok", button_mode="ok",
                  legacy_dates=False, results_section="cancels", results_url=None,
@@ -1071,6 +1095,9 @@ class NavPage:
         self.include_main_nav = include_main_nav
         self.duplicate_main_nav = duplicate_main_nav
         self.main_nav_visible = main_nav_visible
+        self.drawer_mode = drawer_mode
+        self.drawer_open = drawer_open
+        self.drawer_on_main_nav = drawer_on_main_nav
         self.view_mode = view_mode
         self.option_mode = option_mode
         self.range_mode = range_mode
@@ -1088,6 +1115,8 @@ class NavPage:
             f"processeddateresults/{results_section}/"
         )
         self.clicks = []
+        self.escape_presses = []
+        self.keyboard = _NavKeyboard(self)
         self.filled_while_hidden = []
         self.memo_opens = []
         self.screenshot_calls = 0
@@ -1127,13 +1156,49 @@ class NavPage:
             ]
         self.main_nav_nodes = []
         if self.include_main_nav:
+            nav_attrs = {"aria-expanded": "true"} if self.drawer_mode == "toggle" else {}
             self.main_nav_nodes.append(
-                FakeNode("button", MAIN_NAVIGATION_NAME, visible=self.main_nav_visible)
+                FakeNode(
+                    "button",
+                    MAIN_NAVIGATION_NAME,
+                    visible=self.main_nav_visible,
+                    attrs=nav_attrs,
+                )
             )
             if self.duplicate_main_nav:
                 self.main_nav_nodes.append(
                     FakeNode("button", MAIN_NAVIGATION_NAME, visible=self.main_nav_visible)
                 )
+        self.drawer = None
+        self.drawer_close = None
+        self.drawer_overlay = None
+        self.agency_admin = None
+        if self.drawer_mode:
+            close_attrs = {"aria-label": "Close"}
+            if self.drawer_mode != "panel-close":
+                close_attrs = {
+                    "class": "header-drawer__close",
+                    "aria-label": "Close",
+                    "data-at": "header-drawer-close",
+                }
+            self.drawer_close = FakeNode("button", "Close", attrs=close_attrs)
+            self.drawer_overlay = FakeNode(
+                "div",
+                "Drawer overlay",
+                attrs={
+                    "class": "header-drawer__overlay",
+                    "data-at": "header-drawer-overlay",
+                },
+            )
+            self.agency_admin = FakeNode("link", AGENCY_ADMIN_NAME)
+            shown = " header-drawer__content--show" if self.drawer_open else ""
+            self.drawer = FakeNode(
+                "div",
+                AGENCY_ADMIN_NAME,
+                text=AGENCY_ADMIN_NAME,
+                attrs={"class": "header-drawer__content" + shown},
+                children=[self.agency_admin, self.drawer_close, self.drawer_overlay],
+            )
         self.view_nodes = self._view_nodes()
         start_label = {"unlabeled": "", "mistitled": "From Date"}.get(self.start_mode, START_DATE_LABEL)
         self.start_date = self._date_input(
@@ -1217,8 +1282,34 @@ class NavPage:
                 FakeNode("link", "Next", disabled=False),
             ])
 
+    def drawer_is_shown(self):
+        if self.drawer is None:
+            return False
+        return "header-drawer__content--show" in str(self.drawer.attrs.get("class") or "").split()
+
+    def close_drawer(self):
+        if self.drawer is None or self.drawer_mode == "stuck":
+            return
+        classes = [
+            token for token in str(self.drawer.attrs.get("class") or "").split()
+            if token != "header-drawer__content--show"
+        ]
+        self.drawer.attrs["class"] = " ".join(classes)
+        self.drawer.visible = False
+
+    def open_drawer(self):
+        if self.drawer is None:
+            return
+        classes = set(str(self.drawer.attrs.get("class") or "").split())
+        classes.add("header-drawer__content")
+        classes.add("header-drawer__content--show")
+        self.drawer.attrs["class"] = " ".join(sorted(classes))
+        self.drawer.visible = True
+
     def roots(self):
         nodes = [self.body, *self.main_nav_nodes]
+        if self.drawer_is_shown():
+            nodes.append(self.drawer)
         if self.password:
             nodes.append(self.password_node)
         nodes.extend({
@@ -1414,9 +1505,25 @@ class NavPage:
             self.url = self.list_url
 
     def on_click(self, node):
+        if (
+            self.drawer is not None
+            and node is self.drawer_close
+            and self.drawer_mode in {"close", "panel-close"}
+        ):
+            self.close_drawer()
+            return
+        if self.drawer is not None and node is self.drawer_overlay and self.drawer_mode == "overlay":
+            self.close_drawer()
+            return
+        if self.drawer is not None and node in (self.drawer_close, self.drawer_overlay, self.agency_admin):
+            return
         if node in self.main_nav_nodes:
             for item in (*self.home, *self.policies):
                 item.visible = True
+            if self.drawer_on_main_nav:
+                self.open_drawer()
+            if self.drawer_mode == "toggle":
+                self.close_drawer()
             return
         if node in self.home and self.state == "home":
             self.state = "policies"
@@ -1486,6 +1593,16 @@ class NavContext:
 
     def _get(self, url, timeout):
         return SimpleNamespace(ok=True, body=lambda: self.request_body)
+
+
+class _NavKeyboard:
+    def __init__(self, page):
+        self.page = page
+
+    def press(self, key):
+        self.page.escape_presses.append(key)
+        if key == "Escape" and self.page.drawer_mode == "escape":
+            self.page.close_drawer()
 
 
 class _NavExpect:
@@ -1619,6 +1736,7 @@ class NavigationTests(unittest.TestCase):
         self.assertNotIn("Search", page.clicks)
         self.assertEqual(page.url, RESULTS_UNDERWRITING_URL)
         self.assertNotIn(MAIN_NAVIGATION_NAME, page.clicks)
+        self.assertEqual(page.escape_presses, [])
         self.assertFalse(page.closed)
 
     def test_live_home_agency_display_without_ca_prefix_reaches_communications(self):
@@ -1758,6 +1876,76 @@ class NavigationTests(unittest.TestCase):
             self._load(ambiguous)
         self.assertEqual(ambiguous.clicks, ["Manage Policies"])
         self.assertNotIn("Search", ambiguous.clicks)
+
+    def test_open_main_nav_drawer_is_cleared_before_policy_activity(self):
+        cases = (
+            ("escape", "Escape"),
+            ("close", "Close"),
+            ("panel-close", "Close"),
+            ("overlay", "Drawer overlay"),
+            ("toggle", MAIN_NAVIGATION_NAME),
+        )
+        for mode, marker in cases:
+            with self.subTest(mode):
+                page = NavPage(drawer_mode=mode, drawer_open=True)
+                self._load(page)
+                self.assertEqual(page.escape_presses, ["Escape"])
+                self.assertNotIn(AGENCY_ADMIN_NAME, page.clicks)
+                self.assertIn("Policy Activity", page.clicks)
+                self.assertIn("Communications", page.clicks)
+                self.assertFalse(page.drawer_is_shown())
+                if mode == "escape":
+                    self.assertNotIn("Close", page.clicks)
+                    self.assertNotIn("Drawer overlay", page.clicks)
+                else:
+                    self.assertLess(page.clicks.index(marker), page.clicks.index("Policy Activity"))
+
+    def test_stuck_main_nav_drawer_does_not_click_policy_activity(self):
+        page = NavPage(drawer_mode="stuck", drawer_open=True)
+        self.assertFalse(is_rescuable_control_failure(IntakeHold(MAIN_NAV_DRAWER_HOLD)))
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            with self.assertRaisesRegex(IntakeHold, "Policy Activity was not clicked"):
+                self._load(page)
+            rescued.assert_not_called()
+        self.assertIn("Manage Policies", page.clicks)
+        self.assertNotIn("Policy Activity", page.clicks)
+        self.assertNotIn("Communications", page.clicks)
+        self.assertNotIn("Memo", page.clicks)
+        self.assertNotIn("Get Policy Activity", page.clicks)
+        self.assertNotIn(AGENCY_ADMIN_NAME, page.clicks)
+        self.assertTrue(page.drawer_is_shown())
+        self.assertIn("header-drawer__content--show", str(page.drawer.attrs.get("class")))
+
+    def test_drawer_opened_with_main_navigation_closes_before_policy_activity(self):
+        page = NavPage(
+            policy_visible=False,
+            drawer_mode="escape",
+            drawer_on_main_nav=True,
+        )
+        self._load(page)
+        self.assertEqual(
+            page.clicks[:3],
+            ["Manage Policies", MAIN_NAVIGATION_NAME, "Policy Activity"],
+        )
+        self.assertEqual(page.escape_presses, ["Escape"])
+        self.assertNotIn(AGENCY_ADMIN_NAME, page.clicks)
+        self.assertFalse(page.drawer_is_shown())
+        self.assertIn("Communications", page.clicks)
+
+    def test_drawer_left_open_by_main_navigation_blocks_policy_activity(self):
+        page = NavPage(
+            policy_visible=False,
+            drawer_mode="stuck",
+            drawer_on_main_nav=True,
+        )
+        with patch("robie_job_engine.gemini_ui_rescue.rescued_locator") as rescued:
+            with self.assertRaisesRegex(IntakeHold, "header-drawer__content--show"):
+                self._load(page)
+            rescued.assert_not_called()
+        self.assertIn(MAIN_NAVIGATION_NAME, page.clicks)
+        self.assertNotIn("Policy Activity", page.clicks)
+        self.assertNotIn("Communications", page.clicks)
+        self.assertTrue(page.drawer_is_shown())
 
     def test_login_password_wrong_agent_and_ambiguous_controls_do_not_search(self):
         cases = (

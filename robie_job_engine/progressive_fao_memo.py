@@ -8,8 +8,11 @@ Communications, then each Memo row saved as
 On the authenticated FAO header the Manage Policies control's accessible
 name is ``Manage Policies Home`` (``aria-label`` wins over the visible text)
 and it is hidden until Main Navigation is expanded once. The same link is
-``a[data-at="header-nav__parent-link--manage-policies"]``. Policy Activity is
-either that header name or the landing link ``View policy activity reports``.
+``a[data-at="header-nav__parent-link--manage-policies"]``. That expand can
+leave the Main Nav drawer open (``header-drawer__content--show``, the
+Agency Admin panel). Policy Activity is not clicked through that drawer.
+Policy Activity is either that header name or the landing link
+``View policy activity reports``.
 Policy Activity then requires View Activity By ``Processed Date``
 (``select#PDDateType``, option ``PROCESSEDDATE``), the preset
 ``select#PDDateRange`` option ``Select Date Range`` (its value is read from
@@ -107,6 +110,40 @@ MANAGE_POLICIES_NAME = re.compile(r"^Manage Policies")
 POLICY_ACTIVITY_LABEL = "Policy Activity"
 POLICY_ACTIVITY_NAMES = ("Policy Activity", "View policy activity reports")
 MAIN_NAVIGATION_NAME = "Main Navigation"
+# Open FAO Main Nav drawer. The held --pull-only run blocked the Policy
+# Activity click on this panel; its visible content was Agency Admin.
+HEADER_DRAWER_OPEN_CSS = ".header-drawer__content--show"
+AGENCY_ADMIN_NAME = "Agency Admin"
+HEADER_DRAWER_DISMISS_TIMEOUT_MS = 2000
+MAIN_NAV_DRAWER_HOLD = (
+    "Progressive Main Nav drawer stayed open (header-drawer__content--show); "
+    "Policy Activity was not clicked"
+)
+_HEADER_DRAWER_OVERLAY_SELECTORS = (
+    ".header-drawer__overlay",
+    "[data-at=\"header-drawer-overlay\"]",
+    ".header-drawer__backdrop",
+)
+_HEADER_DRAWER_CLOSE_SELECTORS = (
+    ".header-drawer__close",
+    "[data-at=\"header-drawer-close\"]",
+)
+# A generic Close control is only safe inside the open drawer panel.
+_HEADER_DRAWER_PANEL_CLOSE_SELECTORS = (
+    "[aria-label=\"Close\"]",
+    "button[aria-label=\"Close\"]",
+)
+_DRAWER_CLICK_REFUSED = frozenset({
+    "agency admin",
+    "policy activity",
+    "view policy activity reports",
+    "manage policies",
+    "manage policies home",
+    "communications",
+    "memo",
+    "get policy activity",
+    "search",
+})
 # Policy Activity date filter. Release 65740660 (includes #606) cleared the
 # old "Processed date from" hold, then held on Start Date: #PDDateRange is a
 # preset <select>, not a wrapper, and the date inputs stay hidden until the
@@ -553,6 +590,147 @@ def _expand_main_navigation(page: Any) -> None:
     run_named_control_step(page, MAIN_NAVIGATION_NAME, primary, retry)
 
 
+def main_nav_drawer_open(page: Any) -> bool:
+    """True when the FAO Main Nav drawer is open.
+
+    The open panel carries ``header-drawer__content--show``. On the held
+    pull that panel showed Agency Admin. The class still being in the DOM
+    counts as open, including a hidden leftover. Policy Activity stays
+    unclicked until that class is gone. A visible Agency Admin control
+    inside this panel is the same drawer and is never clicked.
+    """
+    return int(page.locator(HEADER_DRAWER_OPEN_CSS).count()) > 0
+
+
+def dismiss_open_main_nav_drawer(page: Any) -> None:
+    """Close an open Main Nav drawer. A closed drawer is left alone.
+
+    Escape, then one overlay, then one close control, then the Main
+    Navigation button when it is expanded. Each attempt waits until
+    ``header-drawer__content--show`` is gone. If the drawer stays open,
+    raise and do not click Policy Activity. This is not a Gemini rescue.
+    """
+    if not main_nav_drawer_open(page):
+        return
+    for attempt in (
+        _press_escape,
+        _click_header_drawer_overlay,
+        _click_header_drawer_close,
+        _click_expanded_main_navigation,
+    ):
+        if not main_nav_drawer_open(page):
+            return
+        try:
+            attempt(page)
+        except IntakeHold:
+            raise
+        except Exception:
+            pass
+        if _wait_main_nav_drawer_closed(page):
+            return
+    raise IntakeHold(MAIN_NAV_DRAWER_HOLD)
+
+
+def _wait_main_nav_drawer_closed(page: Any) -> bool:
+    if not main_nav_drawer_open(page):
+        return True
+    locator = page.locator(HEADER_DRAWER_OPEN_CSS)
+    wait = getattr(locator, "wait_for", None)
+    if callable(wait):
+        try:
+            wait(state="hidden", timeout=HEADER_DRAWER_DISMISS_TIMEOUT_MS)
+        except Exception:
+            pass
+    return not main_nav_drawer_open(page)
+
+
+def _press_escape(page: Any) -> None:
+    keyboard = getattr(page, "keyboard", None)
+    press = getattr(keyboard, "press", None) if keyboard is not None else None
+    if callable(press):
+        press("Escape")
+
+
+def _dismiss_control_name(locator: Any) -> str:
+    for read in (
+        lambda: locator.get_attribute("aria-label"),
+        lambda: locator.inner_text(),
+    ):
+        try:
+            text = _norm(str(read() or ""))
+        except Exception:
+            continue
+        if text:
+            return text.casefold()
+    return ""
+
+
+def _click_one_dismiss_target(page: Any, selectors: tuple[str, ...]) -> bool:
+    """Click one visible dismiss target. Zero or several matches do not click."""
+    for css in selectors:
+        try:
+            visible, _total = _survey(page.locator(css))
+        except Exception:
+            continue
+        if len(visible) != 1:
+            continue
+        if _dismiss_control_name(visible[0]) in _DRAWER_CLICK_REFUSED:
+            continue
+        visible[0].click()
+        return True
+    return False
+
+
+def _click_header_drawer_overlay(page: Any) -> None:
+    _click_one_dismiss_target(page, _HEADER_DRAWER_OVERLAY_SELECTORS)
+
+
+def _click_header_drawer_close(page: Any) -> None:
+    if _click_one_dismiss_target(page, _HEADER_DRAWER_CLOSE_SELECTORS):
+        return
+    try:
+        panel = page.locator(HEADER_DRAWER_OPEN_CSS)
+    except Exception:
+        return
+    for css in _HEADER_DRAWER_PANEL_CLOSE_SELECTORS:
+        try:
+            visible, _total = _survey(panel.locator(css))
+        except Exception:
+            continue
+        if len(visible) != 1:
+            continue
+        if _dismiss_control_name(visible[0]) in _DRAWER_CLICK_REFUSED:
+            continue
+        visible[0].click()
+        return
+
+
+def _click_expanded_main_navigation(page: Any) -> None:
+    """Close via the same Main Navigation control that opens the drawer.
+
+    Only when that one control is visible and ``aria-expanded`` is true.
+    """
+    visible, total = _survey(_role_locator(page, MAIN_NAVIGATION_NAME, exact=True))
+    if len(visible) != 1 or total != 1:
+        return
+    button = visible[0]
+    try:
+        expanded = _norm(str(button.get_attribute("aria-expanded") or ""))
+    except Exception:
+        return
+    if expanded != "true":
+        return
+    if _dismiss_control_name(button) in _DRAWER_CLICK_REFUSED:
+        return
+    button.click()
+
+
+def _click_resolved_shell_control(page: Any, label: str, target: Any) -> None:
+    if label == POLICY_ACTIVITY_LABEL:
+        dismiss_open_main_nav_drawer(page)
+    target.click()
+
+
 def click_shell_nav(
     page: Any,
     locator_factory: Callable[[], Any],
@@ -569,13 +747,15 @@ def click_shell_nav(
     a second hidden match does not hold. Two visible matches, or two hidden
     matches, hold. A hidden or absent match expands Main Navigation once,
     then the same rule runs again. The hidden control is never clicked.
-    A Test-only Gemini rescue may retry this click once. The success path
-    does not call Gemini.
+    Policy Activity first closes an open Main Nav drawer. If that drawer
+    stays open, the click is refused. A Test-only Gemini rescue may retry
+    a missing control once. The success path does not call Gemini, and the
+    drawer hold is not a Gemini rescue.
     """
     def primary() -> None:
         visible, total = _survey(locator_factory())
         if _shell_ready(visible, total, unique_element=unique_element):
-            visible[0].click()
+            _click_resolved_shell_control(page, label, visible[0])
             return
         if _shell_ambiguous(visible, total, unique_element=unique_element):
             raise _control_hold(label)
@@ -583,10 +763,10 @@ def click_shell_nav(
         visible, total = _survey(locator_factory())
         if not _shell_ready(visible, total, unique_element=unique_element):
             raise _control_hold(label)
-        visible[0].click()
+        _click_resolved_shell_control(page, label, visible[0])
 
     def retry(locator: Any) -> None:
-        locator.click()
+        _click_resolved_shell_control(page, label, locator)
 
     run_named_control_step(page, label, primary, retry)
 
@@ -1079,6 +1259,7 @@ class PlaywrightFaoMemoBrowser:
             label=MANAGE_POLICIES_LABEL,
             unique_element=True,
         )
+        dismiss_open_main_nav_drawer(self.page)
         click_shell_nav(
             self.page,
             lambda: _policy_activity_locator(self.page),
