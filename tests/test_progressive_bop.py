@@ -383,8 +383,9 @@ class ProgressiveBopTests(unittest.TestCase):
         self.assertIs(opened, report)
         self.assertEqual(
             shell.clicked,
-            [("link", "Manage Policies"), ("link", "Businessowner/Contractor GL")],
+            [("link", "Businessowner/Contractor GL")],
         )
+        self.assertNotIn(("link", "Manage Policies"), shell.clicked)
         self.assertEqual(
             report.clicked,
             [("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")],
@@ -771,8 +772,10 @@ class AgentContextAndHomeTests(unittest.TestCase):
                 self.assertIs(opened, report)
                 self.assertEqual(
                     page.clicked,
-                    [("link", "Manage Policies"), ("link", "Businessowner/Contractor GL")],
+                    [("link", "Businessowner/Contractor GL")],
                 )
+                self.assertNotIn(("link", "Manage Policies"), page.clicked)
+                self.assertNotIn(("home", "Manage Policies Home"), page.clicked)
 
     def test_communications_tab_opens_home_before_the_agent_assert(self):
         page = _AttachedShell(COMMUNICATIONS_URL, body="Streetsmart Risk Mgr (33617) 33617c")
@@ -838,6 +841,68 @@ class AgentContextAndHomeTests(unittest.TestCase):
                 self.assertNotIn(("link", "Manage Policies"), page.clicked)
                 self.assertNotIn(("link", "Businessowner/Contractor GL"), page.clicked)
                 self.assertNotIn("gemini", str(page.clicked).lower())
+
+    def test_shell_home_opens_the_go_to_entry_without_manage_policies(self):
+        report = FakePage(
+            {("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")},
+            url="https://www.foragentsonly.com/bop",
+        )
+        page = _HomeGuard(
+            {("link", "Go to Businessowner/Contractor GL policy search"), ("link", "Manage Policies")},
+            body="Streetsmart Risk Mgr (33617)",
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=report,
+        )
+        opened = navigate_to_pending_cancel(page, "CA33617")
+        self.assertIs(opened, report)
+        self.assertEqual(
+            page.clicked,
+            [("link", "Go to Businessowner/Contractor GL policy search")],
+        )
+        self.assertEqual(
+            report.clicked,
+            [("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")],
+        )
+        button = _HomeGuard(
+            {("button", "Go to Businessowner/Contractor GL policy search")},
+            body="Streetsmart Risk Mgr (33617)",
+            url="https://www.foragentsonly.com/landingpages/managepolicies/home",
+            popup=report,
+        )
+        navigate_to_pending_cancel(button, "CA33617")
+        self.assertEqual(
+            button.clicked,
+            [("button", "Go to Businessowner/Contractor GL policy search")],
+        )
+
+    def test_shell_home_holds_when_gl_entry_is_missing_or_ambiguous(self):
+        report = FakePage(
+            {("link", "View Reports"), ("button", "Pending Cancel for Nonpayment")},
+            url="https://www.foragentsonly.com/bop",
+        )
+        go_to = "Go to Businessowner/Contractor GL policy search"
+        cases = (
+            set(),
+            {("link", "Manage Policies")},
+            {("link", "Businessowner/Contractor GL"), ("link", go_to)},
+            {("link", "Businessowner/Contractor GL"), ("button", "Businessowner/Contractor GL")},
+            {("link", go_to), ("button", go_to)},
+        )
+        for roles in cases:
+            with self.subTest(roles=sorted(roles)):
+                page = _HomeGuard(
+                    roles,
+                    body="Streetsmart Risk Mgr (33617)",
+                    url="https://www.foragentsonly.com/landingpages/managepolicies/",
+                    popup=report,
+                )
+                with self.assertRaisesRegex(
+                    IntakeHold,
+                    "Progressive control 'Businessowner/Contractor GL' is missing or ambiguous",
+                ) as caught:
+                    navigate_to_pending_cancel(page, "CA33617")
+                self.assertEqual(page.clicked, [])
+                self.assertNotIn("gemini", str(caught.exception).lower())
 
     def test_hidden_home_expands_main_navigation_once_without_gemini(self):
         page = _AttachedShell(COMMUNICATIONS_URL, home="hidden")

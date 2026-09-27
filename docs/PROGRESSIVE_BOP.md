@@ -18,7 +18,12 @@ positional click.
 `python -m robie_job_engine.progressive_bop` attaches to one already-open FAO
 tab and writes one QA pack for `--report-date`:
 
-1. Manage Policies → Businessowner/Contractor GL (one new window).
+1. Businessowner/Contractor GL (one new window). When the shell is already
+   on FAO Home / Manage Policies Home, Manage Policies is not clicked again.
+   The opener is one exact link or button named `Businessowner/Contractor GL`
+   or `Go to Businessowner/Contractor GL policy search`. Zero or two matches
+   hold. A Communications / underwritinglegacy tab still opens Home first,
+   then clicks Manage Policies and then `Businessowner/Contractor GL`.
 2. View Reports → Pending Cancel for Nonpayment.
 3. Full-page PNG of that report, then read policies from the on-screen policy
    table, or from one Excel export, or from one PDF export.
@@ -152,12 +157,17 @@ is a failed pull, not a partial success. This code has not been run on
   that landing through the existing Manage Policies Home header control
   before the agent check. A click that lands on `/landingpages/managepolicies/`
   is Home. A click that stays off those paths holds. This step does not ask
-  Gemini. It does not change the later `Manage Policies` →
-  Businessowner/Contractor GL clicks.
+  Gemini. When the tab was already on that Home, the next step skips
+  `Manage Policies` and opens one exact `Businessowner/Contractor GL` or
+  `Go to Businessowner/Contractor GL policy search` control in a new window.
+  Zero or several of those names hold. A tab that was not already on Home
+  still clicks `Manage Policies`, then exact `Businessowner/Contractor GL`,
+  after Home opens. That opener does not ask Gemini.
 - Live accessible names: `Manage Policies`, `Businessowner/Contractor GL`,
-  `View Reports`, `Pending Cancel for Nonpayment`, the shell policy search,
-  `Documents`, and the `Policy` document tab. A mismatch holds; do not widen
-  these from Production.
+  `Go to Businessowner/Contractor GL policy search` (shell Home only, one
+  exact link or button), `View Reports`, `Pending Cancel for Nonpayment`,
+  the shell policy search, `Documents`, and the `Policy` document tab. A
+  mismatch holds; do not widen these from Production.
 - Whether Businessowner/Contractor GL opens exactly one new window.
 - Whether the report is an HTML policy table, an Excel control, or a PDF
   control. An empty scan with no policy table, no export, and no no-records

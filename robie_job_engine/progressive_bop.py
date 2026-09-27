@@ -19,8 +19,17 @@ holds. If the attached tab is not FAO Home / Manage Policies Home —
 (optional ``/home``, optional trailing slash) — for example Communications
 / underwritinglegacy, the pull clicks the existing Manage Policies Home
 header control before that assert. Already on one of those URLs does not
-click. That step does not ask Gemini. A missing or ambiguous Home control
-holds.
+click that Home control. That step does not ask Gemini. A missing or
+ambiguous Home control holds.
+
+When the shell was already on that Home, the later Manage Policies click is
+skipped. The hidden header control's accessible name is ``Manage Policies
+Home``, and exact ``Manage Policies`` is not on the landing. The pull then
+opens one new window from the one exact link or button named
+``Businessowner/Contractor GL`` or ``Go to Businessowner/Contractor GL
+policy search``. Zero or several of those names hold. A tab that was not
+already on Home still clicks Manage Policies, then exact
+``Businessowner/Contractor GL``, after Home opens.
 
 Accessible names are the playbook, not a certified live DOM. Zero or multiple
 matches hold. Live FAO on hermes-test-01 is UNVERIFIED.
@@ -1252,6 +1261,31 @@ def click_named(page: Any, name: str, *, roles: tuple[str, ...], error: type[Int
     matches[0][1].click()
 
 
+# Landing text read on prove4 while the shell was already on
+# /landingpages/managepolicies/. Exact playbook name stays the other candidate.
+# One match clicks. Zero or several hold. This is not a Gemini rescue.
+_SHELL_HOME_GL_NAMES = (
+    "Businessowner/Contractor GL",
+    "Go to Businessowner/Contractor GL policy search",
+)
+
+
+def _click_shell_home_gl(page: Any) -> None:
+    """One Businessowner/Contractor GL opener on FAO shell Home."""
+    matches = []
+    for name in _SHELL_HOME_GL_NAMES:
+        for role in ("link", "button"):
+            locator = page.get_by_role(role, name=name, exact=True)
+            count = locator.count()
+            if count:
+                matches.append((count, locator))
+    if len(matches) != 1 or matches[0][0] != 1:
+        raise IntakeHold(
+            "Progressive control 'Businessowner/Contractor GL' is missing or ambiguous"
+        )
+    matches[0][1].click()
+
+
 def fill_policy_search(page: Any, policy_number: str) -> None:
     policy = str(policy_number or "").strip()
     if not _POLICY_NUMBER.fullmatch(policy):
@@ -1271,11 +1305,28 @@ def fill_policy_search(page: Any, policy_number: str) -> None:
         raise IntakeHold("FAO policy search did not stick")
 
 
-def open_businessowner_window(page: Any) -> Any:
-    click_named(page, "Manage Policies", roles=("link", "button"))
+def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -> Any:
+    """Open Businessowner/Contractor GL in one new window.
+
+    ``on_shell_home`` is the URL gate from before ``ensure_fao_shell_home``.
+    A Communications tab that lands on Home still needs Manage Policies, then
+    the exact playbook name. Re-reading the URL here would skip that click
+    after the landing. When the caller omits the flag, the current URL is
+    the gate.
+
+    Already on shell Home skips Manage Policies. The header control is hidden
+    there and exact ``Manage Policies`` does not match. The popup click is
+    the one shell-Home GL name.
+    """
+    on_home = _on_fao_shell_home(page) if on_shell_home is None else on_shell_home
+    if not on_home:
+        click_named(page, "Manage Policies", roles=("link", "button"))
     try:
         with page.expect_popup(timeout=DOWNLOAD_TIMEOUT_MS) as popup:
-            click_named(page, "Businessowner/Contractor GL", roles=("link", "button"))
+            if on_home:
+                _click_shell_home_gl(page)
+            else:
+                click_named(page, "Businessowner/Contractor GL", roles=("link", "button"))
         opened = popup.value
     except IntakeHold:
         raise
@@ -1294,9 +1345,10 @@ def open_pending_cancel_report(report_page: Any) -> None:
 def navigate_to_pending_cancel(page: Any, agent_code: str) -> Any:
     """Shell FAO tab → Businessowner/Contractor GL window → pending-cancel report."""
     assert_authenticated(page)
+    started_on_shell_home = _on_fao_shell_home(page)
     ensure_fao_shell_home(page)
     assert_agent_context(page, agent_code)
-    report_page = open_businessowner_window(page)
+    report_page = open_businessowner_window(page, on_shell_home=started_on_shell_home)
     open_pending_cancel_report(report_page)
     assert_authenticated(report_page)
     return report_page
