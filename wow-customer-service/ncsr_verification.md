@@ -80,5 +80,43 @@
 - Flagged: 3 (Deleted x1, Inactive old-term x2)
 - Still need review (no policy number found): ~19
 
+## Rows Without Policy Numbers — Note Screening (2026-09-27)
+
+The PolicyApi has no applicant-name search (`search_policy_by_number` only), so these 18 rows were screened on note content alone.
+
+### RED FLAGS — app sent / shell / bind request, not issued (7)
+1. **Murray King** (Jazmin Molina) — "I sent in the app for signature." App sent, not issued.
+2. **Marvin Calderon** (Jazmin Molina) — "I went with Progressive... We took the full 6 month payment of $1671. Waiting for the signature." Payment taken, app unsigned.
+3. **J Swat Contracting LLC** (Zeus Quezada) — "sent app, set up policy shell in ez... just need to wait for esign to be completed to upload it to the natgen's site." Shell only, not bound.
+4. **John & Lisa Sabo** (Karla Brown) — "I set up signatures through Cabrillo. Please watch for the app to be signed... Watch for download." Not signed, not downloaded.
+5. **DREAMS BUILT - BY DESIGN LLC** (Mike Sosa) — "coverage bound through BiBerk putting the app together send to the client for e-signatures." Claims bound but app not yet signed — contradictory.
+6. **Xerion Architectural Services PC** (Taylor Cimei) — "I sent bind request to Novate. Please follow up for binder and key in new policy." Bind request sent, not bound.
+7. **NASH RESIDENTIAL SERVICES LLC DBA HOGANS' TRANSFER** (Mike Sosa) — "Payment details provided... Working on binding coverage through RLIG." Working on binding, not bound.
+
+### MISLABELED — coverage added to existing policy, not new business (2)
+8-9. **Sarah & Nicholas Lupano** x2 (Karla Brown) — "The umbrella was approved and added on to the policy" / "Added Umbrella to their home policy $170.55 premium." Existing client, added coverage — not a new customer.
+
+### WEAK / THIN — no issuance evidence (4)
+10. **GREGORY JOHNSON** (Jazmin Molina) — "I sent out the proof of insurance for his parents, and the insured signed everything." Signed, but no carrier or policy details.
+11. **Clara Perez Cuautle & Ignacio Peralta** (Jazmin Molina) — "Finalized. I'll keep an eye on the payment, and the app." Says finalized while payment and app are still pending — contradictory.
+12. **Daniel Chando** (Jazmin Molina) — "Sold the policy." Two words, no details.
+13. **MENDIETA O. CONSTRUCTION LLC** (Mike Sosa) — "they were ready to move forward with the quote... took payment info." Payment info taken, no bind or issue mentioned — reads like a quote, not a sale.
+
+### SUPPORTS CREDIT — bound/issued per notes (4)
+14. **Raghavender & Archana Gangwar** auto (Karla Brown) — "Sold Progressive auto $2158-12 months Paid in full... I shared his receipt, ID card, and Dec page." Dec page + ID cards shared = issued.
+15. **1812 Marketing Corp** CNA/Amtrust (Taylor Cimei) — "issued CNA GL & Umbrella + Amtrust WC. Insured asked to pay in full." Says issued; no numbers to API-check.
+16. **JOSE EFRAIN FLORES QUINONES DBA F & Q TRANSPORT** (Mike Sosa) — "coverage bound through Geico waiting on the download." Bound, pending EZLynx download.
+17. **1812 Marketing Corp** cyber (Taylor Cimei) — "recieved professional/cyber policy, sent bind request, keyed in new pol. Insured made payment in full. Please follow up for binder and invoice." Contradictory (policy received vs bind request sent); payment made. AMBIGUOUS.
+
+## Final NCSR Tally (43 rows)
+- Confirmed Active in EZLynx: 15
+- Sold, not yet effective: 6
+- Notes support credit: 4
+- Red flags: 7 (+ 3 API flags = 10)
+- Mislabeled (not new business): 2
+- Weak/thin: 4
+- Ambiguous: 1
+- API-flagged old-term/deleted: 3 (Huntley Deleted, Korkowski renewal, Jaguar Tree old policy)
+
 ## Total: 43 rows
 ## By employee: Karla 19, Jazmin 7, Ashley 5, Zeus 4, Taylor 4, Mike 4
