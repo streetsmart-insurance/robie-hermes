@@ -24,12 +24,14 @@ tab and writes one QA pack for `--report-date`:
    or `Go to Businessowner/Contractor GL policy search`. Zero or two matches
    hold. A Communications / underwritinglegacy tab still opens Home first,
    then clicks Manage Policies and then `Businessowner/Contractor GL`.
-2. View Reports → Pending Cancel for Nonpayment. `VIEW REPORTS` is the
-   same control. If the new window is only HPLanding (`Close this window`),
-   the pull attaches to the one `bop.americanstrategic.com` page, or to that
-   application's frame, and closes the landing page when the application is
-   a different page. A failed close does not hold. HPLanding alone holds
-   before View Reports is clicked.
+2. View Reports → Pending Cancel for Nonpayment. The live control is the
+   button `VIEW REPORTS`. `expect_popup` returns
+   `sbr*.foragentsonly.com/.../HPLanding.aspx` (`Close this window`) as soon
+   as that window opens. The pull then waits up to 20s for
+   `https://bop.americanstrategic.com/` (or that application's frame) and
+   does not click View Reports on the landing page. It closes the landing
+   page when the application is a different page. A failed close does not
+   hold. HPLanding alone, after that wait, holds.
 3. Full-page PNG of that report, then read policies from the on-screen policy
    table, or from one Excel export, or from one PDF export.
 4. For each policy, on the original FAO shell: search the policy → Documents →

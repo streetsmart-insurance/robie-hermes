@@ -75,6 +75,9 @@ from .progressive_retrieval import SCOPES
 BOP_SCOPE = "bop_pending_cancel_nonpayment"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 DOWNLOAD_TIMEOUT_MS = 8000
+# expect_popup returns the HPLanding window as soon as it opens. The BOP
+# application at https://bop.americanstrategic.com/ shows up after that.
+BOP_APP_ATTACH_TIMEOUT_MS = 20000
 LEDGER_NAME = "bop-noc-ledger.json"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 DEFAULT_OUTPUT_ROOT = Path(
@@ -1451,27 +1454,87 @@ def _close_if_possible(target: Any) -> None:
         return
 
 
-def _await_bop_surface(shell: Any, popup: Any) -> tuple[list[Any], list[tuple[Any, Any]]]:
-    pages = _bop_pages(shell, popup)
-    frames = _bop_frames(popup)
-    if pages or frames or popup is None or not _is_hplanding_target(popup):
-        return pages, frames
-    wait = getattr(shell, "wait_for_timeout", None)
-    if not callable(wait):
-        return pages, frames
-    waited = 0
-    step = 250
-    while waited < DOWNLOAD_TIMEOUT_MS:
+def _listen_for_pages(owners: tuple[Any, ...], opened: list[Any]) -> list[tuple[Any, Any]]:
+    """Record pages that open while HPLanding is on screen. CDP context.pages can lag."""
+    subscriptions: list[tuple[Any, Any]] = []
+    seen_contexts: set[int] = set()
+
+    def handler(new_page: Any) -> None:
+        opened.append(new_page)
+
+    for owner in owners:
+        context = getattr(owner, "context", None) if owner is not None else None
+        if context is None or id(context) in seen_contexts:
+            continue
+        seen_contexts.add(id(context))
+        subscribe = getattr(context, "on", None)
+        if not callable(subscribe):
+            continue
         try:
-            wait(step)
+            subscribe("page", handler)
         except Exception:
-            break
-        waited += step
-        pages = _bop_pages(shell, popup)
-        frames = _bop_frames(popup)
-        if pages or frames:
-            return pages, frames
+            continue
+        subscriptions.append((context, handler))
+    return subscriptions
+
+
+def _forget_pages(subscriptions: list[tuple[Any, Any]]) -> None:
+    for context, handler in subscriptions:
+        remover = getattr(context, "remove_listener", None)
+        if not callable(remover):
+            continue
+        try:
+            remover("page", handler)
+        except Exception:
+            continue
+
+
+def _collect_bop(shell: Any, popup: Any, opened: list[Any]) -> tuple[list[Any], list[tuple[Any, Any]]]:
+    pages = _bop_pages(shell, popup)
+    seen = {id(page) for page in pages}
+    for item in opened:
+        if id(item) in seen or not _is_bop_app_url(_target_url(item)):
+            continue
+        seen.add(id(item))
+        pages.append(item)
+    frames = _bop_frames(popup)
+    for item in opened:
+        frames.extend(_bop_frames(item))
     return pages, frames
+
+
+def _await_bop_surface(shell: Any, popup: Any) -> tuple[list[Any], list[tuple[Any, Any]]]:
+    """Wait until https://bop.americanstrategic.com/ exists. Do not keep HPLanding.
+
+    ``expect_popup`` resolves on the first window, which is
+    ``sbr*.foragentsonly.com/.../HPLanding.aspx`` ("Close this window").
+    The VIEW REPORTS application is a later page on ``bop.americanstrategic.com``.
+    """
+    opened: list[Any] = []
+    subscriptions = _listen_for_pages((shell, popup), opened)
+    try:
+        pages, frames = _collect_bop(shell, popup, opened)
+        if pages or frames or popup is None or not _is_hplanding_target(popup):
+            return pages, frames
+        wait = getattr(shell, "wait_for_timeout", None)
+        if not callable(wait):
+            wait = getattr(popup, "wait_for_timeout", None)
+        if not callable(wait):
+            return pages, frames
+        waited = 0
+        step = 250
+        while waited < BOP_APP_ATTACH_TIMEOUT_MS:
+            try:
+                wait(step)
+            except Exception:
+                break
+            waited += step
+            pages, frames = _collect_bop(shell, popup, opened)
+            if pages or frames:
+                return pages, frames
+        return pages, frames
+    finally:
+        _forget_pages(subscriptions)
 
 
 def _attach_bop_application(shell: Any, popup: Any) -> Any:

@@ -498,6 +498,56 @@ class ProgressiveBopTests(unittest.TestCase):
             [("link", "VIEW REPORTS"), ("button", "Pending Cancel for Nonpayment")],
         )
 
+    def test_hplanding_waits_for_bop_americanstrategic_before_view_reports(self):
+        app = FakePage(
+            {("button", "VIEW REPORTS"), ("link", "Pending Cancel for Nonpayment")},
+            url="https://bop.americanstrategic.com/",
+        )
+        landing = FakePage(
+            {("button", "Close this window")},
+            url="https://sbr1.foragentsonly.com/portal/HPLanding.aspx",
+            body="Close this window",
+        )
+        shell = FakePage(
+            {("link", "Businessowner/Contractor GL")},
+            url="https://www.foragentsonly.com/landingpages/managepolicies/",
+            popup=landing,
+        )
+
+        class _Ctx:
+            def __init__(self):
+                self.pages = [shell, landing]
+                self.listeners = []
+
+            def on(self, event, fn):
+                if event == "page":
+                    self.listeners.append(fn)
+
+            def remove_listener(self, event, fn):
+                if fn in self.listeners:
+                    self.listeners.remove(fn)
+
+        ctx = _Ctx()
+        shell.context = ctx
+        landing.context = ctx
+
+        def wait(_ms):
+            if app not in ctx.pages:
+                ctx.pages.append(app)
+                for fn in list(ctx.listeners):
+                    fn(app)
+
+        shell.wait_for_timeout = wait
+        opened = navigate_to_pending_cancel(shell, "CA33617")
+        self.assertIs(opened, app)
+        self.assertTrue(landing.closed)
+        self.assertEqual(landing.clicked, [])
+        self.assertEqual(
+            app.clicked,
+            [("button", "VIEW REPORTS"), ("link", "Pending Cancel for Nonpayment")],
+        )
+        self.assertNotIn(("link", "Manage Policies"), shell.clicked)
+
     def test_hplanding_without_the_bop_app_holds_before_view_reports(self):
         landing = FakePage(
             {("button", "Close this window"), ("link", "View Reports")},

@@ -712,6 +712,26 @@ class LocatorContractTests(unittest.TestCase):
             "Pending Cancellations",
         ])
 
+    def test_agency_activity_reports_r5_skips_nav(self):
+        page = RolePage(
+            {},
+            url="https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5",
+            table_count=1,
+            row_count=2,
+            body="Pending Cancel for Non Payment",
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
+    def test_other_agency_activity_report_id_is_not_this_list(self):
+        page = RolePage(
+            {},
+            url="https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=9",
+        )
+        with self.assertRaisesRegex(IntakeHold, "report was not found"):
+            open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
     def test_encoded_pending_url_skips_agent_dashboard(self):
         page = RolePage(
             {("link", "Agent Dashboard"): 1},

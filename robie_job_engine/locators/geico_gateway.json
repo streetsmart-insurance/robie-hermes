@@ -20,7 +20,7 @@
       "fallback_strategy": "role",
       "fallback_selector": "radio:Pending Cancellations",
       "exact": false,
-      "description": "Modern Gateway filter chip on client-alerts. The accessible name may include a count, for example Pending Cancellations (3). aria-pressed, aria-selected, or aria-checked true means the view is selected. A bare chip with the alerts table is the selected filter. Client Alerts is not clicked when this chip is present.",
+      "description": "Modern Gateway filter button. Live name is Pending Cancellations (3), beside All Alerts (50). No combobox and no tab. aria-pressed true means already selected. Client Alerts is not clicked when this button is present. A menuitem with empty text is not Client Alerts.",
       "last_updated": "2026-09-28"
     },
     "pending_cancellations": {

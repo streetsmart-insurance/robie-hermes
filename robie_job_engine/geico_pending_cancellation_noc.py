@@ -393,8 +393,16 @@ _PENDING_CHIP_NAME = re.compile(
     r"^pending cancellations(?:\s*\(\s*\d+\s*\))?$",
     re.IGNORECASE,
 )
+_ALL_ALERTS_CHIP_NAME = re.compile(
+    r"^all alerts(?:\s*\(\s*\d+\s*\))?$",
+    re.IGNORECASE,
+)
 _CHIP_ROLES = ("button", "radio", "link")
 _TOGGLE_TRUE = frozenset({"true", "page", "step"})
+# Pages whose Pending Cancellations chip was clicked in this process.
+# Live Gateway leaves both "Pending Cancellations (3)" and "All Alerts (50)"
+# on screen, and the pending button may not expose aria-pressed.
+_PENDING_CHIP_CLICKED: set[int] = set()
 
 
 def _locator_count(locator: Any) -> int:
@@ -462,11 +470,22 @@ def _alerts_table_count(page: Any) -> int:
         return -1
 
 
+def _filter_chip_count(page: Any, name: re.Pattern) -> int:
+    total = 0
+    for role in _CHIP_ROLES:
+        count = _locator_count(page.get_by_role(role, name=name, exact=False))
+        if count < 0:
+            return -1
+        total += count
+    return total
+
+
 def _click_pending_chip(page: Any) -> None:
     matches = _pending_chip_matches(page)
     if len(matches) != 1 or matches[0][0] != 1:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
     matches[0][1].click()
+    _PENDING_CHIP_CLICKED.add(id(page))
 
 
 def pending_view_selected(page: Any) -> bool:
@@ -486,9 +505,17 @@ def pending_view_selected(page: Any) -> bool:
         raise IntakeHold("Pending Cancellations view is missing or ambiguous")
     if chip == "selected":
         return True
-    # A chip with no toggle state is the selected filter when the alerts
-    # table is already the only table on client-alerts.
-    if chip == "bare" and _alerts_table_count(page) == 1:
+    # The prove page shows button "Pending Cancellations (3)" beside
+    # "All Alerts (50)". That pending button is not selected just because
+    # a table is visible. A click of the one pending button is the selection
+    # when the control does not expose aria-pressed.
+    if id(page) in _PENDING_CHIP_CLICKED and chip in {"bare", "unselected", "selected"}:
+        return True
+    if (
+        chip == "bare"
+        and _alerts_table_count(page) == 1
+        and _filter_chip_count(page, _ALL_ALERTS_CHIP_NAME) == 0
+    ):
         return True
     return False
 

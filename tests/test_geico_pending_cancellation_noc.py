@@ -823,6 +823,8 @@ class NavPage:
             nodes.append(FakeNode("button", "Pending Cancellations (3)", attrs=attrs))
             if self.chip_mode == "duplicate":
                 nodes.append(FakeNode("link", "Pending Cancellations (3)", attrs=dict(attrs)))
+            if self.chip_mode == "among":
+                nodes.append(FakeNode("button", "All Alerts (50)"))
             if self.table_visible:
                 nodes.append(self.table)
             return nodes
@@ -1006,6 +1008,17 @@ class NavigationTests(unittest.TestCase):
         browser = PlaywrightGeicoNocBrowser(page)
         grid = browser.load_pending_cancellations()
         self.assertEqual(len(parse_alert_grid(grid)), 3)
+        self.assertEqual(page.clicks, ["Pending Cancellations (3)"])
+        self.assertNotIn("Client Alerts", page.clicks)
+
+    def test_pending_chip_among_all_alerts_is_clicked_without_client_alerts(self):
+        page = NavPage(chip_mode="among")
+        browser = PlaywrightGeicoNocBrowser(page)
+        grid = browser.load_pending_cancellations()
+        self.assertEqual(
+            [alert.policy_number for alert in parse_alert_grid(grid)],
+            [COMMERCIAL, GUEVARA, PANELLA],
+        )
         self.assertEqual(page.clicks, ["Pending Cancellations (3)"])
         self.assertNotIn("Client Alerts", page.clicks)
 

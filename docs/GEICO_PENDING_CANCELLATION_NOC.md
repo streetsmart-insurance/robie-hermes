@@ -36,13 +36,15 @@ Cancellations, and reads visible High rows (policy number, insured, due
 date, severity as status, product). It does not type a password or a
 one-time passcode. A login host or a password field holds.
 
-On the current Gateway UI the Pending Cancellations control is a filter
-chip, often named `Pending Cancellations (3)`. A selected chip
-(`aria-pressed`, `aria-selected`, or `aria-checked`) is the view. A chip
-with no toggle attribute is the view when the alerts table is already the
-only table. Client Alerts is not required on that path. The older Client
-Alerts link, then the Pending Cancellations option, remains the path when
-no chip is present.
+On the current Gateway UI the Pending Cancellations control is the button
+`Pending Cancellations (3)`, shown next to `All Alerts (50)`. There is no
+combobox and no tab. Exact `Client Alerts` link or button is absent (a
+menuitem with empty text is not that control and is not clicked). The pull
+clicks the one Pending Cancellations chip. `aria-pressed`, `aria-selected`,
+or `aria-checked` true means it was already selected. A chip with no toggle
+attribute is the view only when it is the only filter and the alerts table
+is already on screen. The older Client Alerts link, then the Pending
+Cancellations option, remains the path when no chip is present.
 
 Personal lines (`Private Passenger Auto`) are targeted only when Documents
 → Billing → Pending Cancellation Notice (or CANCELLATION NOTICE) is a

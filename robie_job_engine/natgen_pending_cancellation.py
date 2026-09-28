@@ -457,7 +457,10 @@ def click_named(page: Any, name: str, *, roles: tuple[str, ...]) -> None:
 
 _PENDING_REPORT_URL = re.compile(r"pending[-_\s]?cancellat", re.IGNORECASE)
 _AGENCY_ACTIVITY_URL = re.compile(r"agency[-_\s]?activity", re.IGNORECASE)
+_AGENCY_ACTIVITY_REPORTS = re.compile(r"agencyactivityreports\.aspx", re.IGNORECASE)
 _PENDING_HEADING = re.compile(r"pending cancellations", re.IGNORECASE)
+# 2026-09-28 hermes-test prove: Pending Cancellations is this report id.
+_PENDING_ACTIVITY_REPORT_ID = "5"
 
 
 def _natgen_host(url: str) -> bool:
@@ -545,19 +548,44 @@ def _mentions_pending(page: Any) -> bool:
     return _PENDING_HEADING.search(_safe_body(page)) is not None
 
 
+def _activity_report_ids(url: str) -> list[str]:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    if not _AGENCY_ACTIVITY_REPORTS.search(parsed.path or ""):
+        return []
+    found: list[str] = []
+    for name, values in urllib.parse.parse_qs(parsed.query).items():
+        if name.casefold() != "r":
+            continue
+        found.extend(str(value) for value in values)
+    return found
+
+
+def _is_pending_activity_report_url(url: str) -> bool:
+    """AgencyActivityReports.aspx?r=5 is the Pending Cancellations list.
+
+    Other ``r`` values are different Agency Activity reports and are not this list.
+    """
+    if not _natgen_host(url):
+        return False
+    return _PENDING_ACTIVITY_REPORT_ID in _activity_report_ids(url)
+
+
 def _already_on_pending_report(page: Any) -> bool:
     """True when this tab is already the Pending Cancellations report.
 
-    A pending-cancellations URL is enough, including ``+`` and percent-encoded
-    spaces. An Agency Activity URL qualifies when the page names Pending
-    Cancellations and has one table. Any other NatGen page qualifies when it
-    names that report and has one table with rows, and Agent Dashboard is not
-    on the page. A dashboard that still shows Agent Dashboard keeps the
-    playbook clicks.
+    ``/Reports/AgencyActivityReports.aspx?r=5`` is that list even when the
+    page has no Agent Dashboard control and does not use the words "Pending
+    Cancellations" as a heading. A pending-cancellations URL is also enough.
+    An Agency Activity URL qualifies when the page names Pending Cancellations
+    and has one table. Any other NatGen page qualifies when it names that
+    report and has one table with rows, and Agent Dashboard is not on the
+    page. A dashboard that still shows Agent Dashboard keeps the playbook clicks.
     """
     url = str(getattr(page, "url", "") or "")
     if not _natgen_host(url):
         return False
+    if _is_pending_activity_report_url(url):
+        return True
     blob = _url_blob(url)
     if _PENDING_REPORT_URL.search(blob):
         return True

@@ -10,7 +10,7 @@
       "fallback_strategy": "role",
       "fallback_selector": "button:Agent Dashboard",
       "exact": true,
-      "description": "NatGen shell link or button. Skipped when the tab is already the Pending Cancellations report, including an Agency Activity report page with that heading and table. A missing control does not hold by itself. Zero or multiple matches still hold when the report is not already open.",
+      "description": "NatGen shell link or button. Skipped when the tab is already Pending Cancellations, including https://natgenagency.com/Reports/AgencyActivityReports.aspx?r=5. A different r value is not this list. A missing control does not hold by itself. Zero or multiple matches still hold when the report is not already open.",
       "last_updated": "2026-09-28"
     },
     "your_notifications": {
