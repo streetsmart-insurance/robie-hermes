@@ -374,14 +374,12 @@ def select_discussion_for_note(
 
     Untitled cards are never selected. A discussion is never created.
 
-    - Exactly one titled discussion -> it wins.
-    - Several titled discussions + a ``title_hint`` matching exactly one -> it wins.
-    - Several titled discussions + a ``title_hint`` matching none -> the most
-      recently active titled discussion wins (08b decision 2026-09-27: Jake;
-      a no-pattern-match notice files into the most recent thread rather
-      than failing closed).
-    - Anything else -> :class:`DiscussionSelectionError`. The caller must not
-      fall back to creating a discussion.
+    - A supplied ``title_hint`` must match exactly one titled discussion.
+      Zero or multiple matches hold for human review; recency never overrides
+      an absent or ambiguous title-pattern match.
+    - Without a title hint, an applicant's sole titled discussion may be
+      selected. Multiple discussions without a hint hold for review.
+    - A discussion is never created as a fallback.
     """
     raw_rows = [row for row in (discussions or []) if isinstance(row, dict)]
     rows = [row for row in raw_rows if not is_untitled_discussion(row)]
@@ -397,22 +395,24 @@ def select_discussion_for_note(
             "applicant has no discussions; refusing to create one (untitled "
             "discussions are forbidden)",
         )
-    if len(rows) == 1:
-        return rows[0]
     hint = str(title_hint or "").strip().lower()
     if hint:
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:
             return matched[0]
         if not matched:
-            # 08b: zero title-pattern matches -> most recently active titled
-            # thread, not fail-closed. Applies to all notice types.
-            return most_recently_active_discussion(rows)
+            raise DiscussionSelectionError(
+                AMBIGUOUS_DISCUSSIONS,
+                f"title hint {title_hint!r} matched none of {len(rows)} "
+                "discussions; holding for human review",
+            )
         raise DiscussionSelectionError(
             AMBIGUOUS_DISCUSSIONS,
             f"title hint {title_hint!r} matched {len(matched)} of {len(rows)} "
             "discussions; refusing to guess",
         )
+    if len(rows) == 1:
+        return rows[0]
     raise DiscussionSelectionError(
         AMBIGUOUS_DISCUSSIONS,
         f"applicant has {len(rows)} discussions and no title hint was given; "
