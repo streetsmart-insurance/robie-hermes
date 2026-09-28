@@ -35,7 +35,7 @@ Full row-by-row ledger: `ncsr_final_ledger.md`.
 - **PENDING: 4 rows** — Puma (browser batch 2), 1812 cyber row 38 (Alejandro), Mendieta (Alejandro), Jaguar (browser batch 3 prior-client check). 1812 row 41's policy is verified; only the row-38 sameness question is pending.
 - **Confirmed range: 28 credits minimum** (27 verified + 1 Lupano), up to 35 at Carlo's discretion (3 Oct-effective + 4 pending).
 
-## 4. Cross Sell (13 rows) — IN PROGRESS
+## 4. Cross Sell (13 rows) — BATCHES 1+2 VERIFIED, BATCH 3 RUNNING
 
 Browser-verified batch 1 (2026-09-27 ~21:55 EDT):
 - **MCM Home Services** — CLEAN. Progressive commercial auto 880297566, Active, $3,005, eff 9/22/26–9/22/27. Existing client since 2024.
@@ -46,7 +46,14 @@ Browser-verified batch 1 (2026-09-27 ~21:55 EDT):
 - **J Swat** — confirmed cross-sell (National General commercial auto 2037678234, Active, $5,135.46, eff 9/8/26–9/8/27).
 - **Jaguar** — new WC WC533SB27T34016 verified issued ($2,848, eff 9/3/26–9/3/27); prior-client determination in batch 3 decides cross-sell vs new customer.
 
-PENDING: batch 2 (Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh — running), batch 3 (Top Notch Tree Service — note says renewal BOR, likely not a cross-sell; Jaguar prior-client).
+Browser-verified batch 2 (2026-09-27 ~22:00 EDT) — all five issued, active, existing clients:
+- **Top Notch Lawn** — CLEAN. Hartford WC 13WECCF3B49, Active, $2,018, term 9/1/26–9/1/27, New Business, pay-as-you-go.
+- **EG Smart Home** — CLEAN. Next Insurance commercial pkg NXTWRTLWHW-00-GL, Active, $2,277.16 (GL $1,870 + Umbrella-Comm $362.16), term 9/8/26–9/8/27, New Business.
+- **Puma** — cross-sell CONFIRMED, NCSR label rejected. Tapco pkg BACTA-X, Active, $2,686, term 9/6/26–9/6/27, New Business, Lloyd's of London, Ascend. Caution: binder dates (9/3/26–6/3/27) differ from entered term; named-insured question (Puma vs Piotr Konefal) unresolved in Accounting tasks.
+- **SK Direct** — CLEAN. Hartford WC 13WECCE5FJ6, Active, $1,170, term 9/15/26–9/15/27. Named-insured endorsement (dropping "Koudello Inc.") has an open change request.
+- **Mansukh** — CLEAN. Amwins/StarStone commercial pkg CBG01476426P-00, Active, $2,825, term 9/3/26–9/3/27, New Business. Correction: NOT workers comp — Garage & Dealers + Commercial Property. (Row also carries AutoPay Setup — "set up on auto pay" per note; verification pending.)
+
+PENDING: batch 3 (Top Notch Tree Service — note says renewal BOR, likely not a cross-sell; Jaguar prior-client) — running ~22:25 EDT.
 
 ## 5. Coverage Enhancement (5 rows)
 

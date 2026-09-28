@@ -53,3 +53,17 @@ Top Notch Lawn & Landscaping LLC, EG Smart Home LLC, Puma Enterprise LLC, SK Dir
 ## Browser Verification — Batch 3 (queued)
 
 Top Notch Tree Service LLC; Jaguar Tree Service LLC prior-client determination (new WC WC533SB27T34016 verified issued 9/3/26 — cross-sell if existing client, new customer if not).
+
+## Browser Verification — Batch 2 (2026-09-27 ~22:00 EDT, read-only, signed in as Carlo Ferrara)
+
+All five verified as ISSUED and ACTIVE; every account is an existing client.
+
+- **Top Notch Lawn & Landscaping LLC** — EXISTING (GL with Coterie since Nov 2025). New Hartford workers comp 13WECCF3B49 (Active, $2,018, term 9/1/26–9/1/27, New Business, Transaction Date 9/1/26, pay-as-you-go, owner excluded). Clean cross-sell. "New Policy Added" automation sent 9/2/26. Agent: Taylor Cimei.
+- **EG Smart Home LLC** — EXISTING (Pie WC, Liberty Mutual bond, Utica BOP). New Next Insurance commercial package NXTWRTLWHW-00-GL (Active, $2,277.16 = GL $1,870 + Umbrella-Comm $362.16, term 9/8/26–9/8/27, New Business, Transaction Date 9/8/26). The umbrella cross-sell in Zeus's 8/24 note is confirmed as the $362.16 Umbrella-Comm line. Clean cross-sell. "New Policy Added" automation sent 9/9/26. Agent: Zeus Quezada.
+- **Puma Enterprise, LLC** — EXISTING (since 2024, acquired from AW Warta Agency). New Tapco commercial package BACTA-X (Active, $2,686, term 9/6/26–9/6/27, New Business, Transaction Date 9/9/26, Lloyd's of London, Ascend billing). The "New Customer CSR" label on this row is a confirmed mislabel — existing client, so this is a cross-sell. CAUTION: two Accounting tasks from 9/9/26 unresolved — binder dates (9/3/26–6/3/27) differ from the entered policy term (9/6/26–9/6/27), and the named-insured question (Puma Enterprise, LLC vs Piotr Konefal) is unanswered. Agent: Zeus Quezada.
+- **SK Direct LLC / Mrs. K's Motel & Restaurant** — EXISTING (since 2015). New Hartford workers comp 13WECCE5FJ6 (Active, $1,170, term 9/15/26–9/15/27, Transaction Date 9/23/26, Transaction Type "Policy Change"). The requested named-insured endorsement (dropping "Koudello Inc.") has an OPEN change request effective 9/15/26 — account title still shows the old name. Clean cross-sell; endorsement pending. Agent: Taylor Cimei.
+- **Mansukh Auto Repair Inc** — EXISTING (Utica BOP prior). New Amwins/StarStone commercial package CBG01476426P-00 (Active, $2,825, term 9/3/26–9/3/27, New Business, Transaction Date 9/4/26, 10% commission, Ascend). CORRECTION to the task brief: this is NOT workers comp — it is Garage & Dealers + Commercial Property package. Clean cross-sell. "New Policy Added" automation sent 9/8/26. Agent: Taylor Cimei. (Note: this row also carries AutoPay Setup — "set up on auto pay" per note; autopay verification still pending.)
+
+## Browser Verification — Batch 3 (running 2026-09-27 ~22:25 EDT)
+
+Top Notch Tree Service LLC (BOR renewal — genuine cross-sell or not?); Jaguar Tree Service LLC prior-client determination (cross-sell vs new customer).
