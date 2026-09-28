@@ -181,11 +181,41 @@ def test_select_hint_matching_two_raises():
     assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
 
 
-def test_select_hint_matching_none_raises():
-    rows = [{"id": "d1", "title": "PCR"}, {"id": "d2", "title": "COI"}]
-    with pytest.raises(disc.DiscussionSelectionError) as excinfo:
-        disc.select_discussion_for_note(rows, title_hint="billing")
-    assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
+def test_select_hint_matching_none_files_most_recently_active():
+    # 08b decision (Jake 2026-09-27): zero title-pattern matches files into
+    # the applicant's most recently active titled discussion, not fail-closed.
+    rows = [
+        {"id": "d1", "title": "PCR", "lastModified": "2026-09-20T10:00:00"},
+        {"id": "d2", "title": "COI", "lastModified": "2026-09-25T10:00:00"},
+    ]
+    assert disc.select_discussion_for_note(rows, title_hint="billing")["id"] == "d2"
+
+
+def test_select_hint_matching_none_prefers_last_modified_over_created():
+    # lastModified beats created *within* a record: d1 was created later but
+    # last active earlier, so d2 (last active 09-25) wins over d1 (09-20).
+    rows = [
+        {"id": "d1", "title": "PCR",
+         "lastModified": "2026-09-20T10:00:00", "created": "2026-09-26T10:00:00"},
+        {"id": "d2", "title": "COI", "lastModified": "2026-09-25T10:00:00"},
+    ]
+    assert disc.select_discussion_for_note(rows, title_hint="billing")["id"] == "d2"
+
+
+def test_select_hint_matching_none_tie_breaks_by_order():
+    rows = [
+        {"id": "d1", "title": "PCR"},
+        {"id": "d2", "title": "COI"},
+    ]
+    assert disc.select_discussion_for_note(rows, title_hint="billing")["id"] == "d1"
+
+
+def test_select_hint_matching_none_ignores_untitled():
+    rows = [
+        {"id": "d0", "title": "Untitled", "lastModified": "2026-09-27T10:00:00"},
+        {"id": "d1", "title": "PCR", "lastModified": "2026-09-20T10:00:00"},
+    ]
+    assert disc.select_discussion_for_note(rows, title_hint="billing")["id"] == "d1"
 
 
 def test_select_untitled_only_is_refused():

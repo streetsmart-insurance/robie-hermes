@@ -302,6 +302,84 @@ def extract_notice_fields(
 
 
 # ---------------------------------------------------------------------------
+# 08b decision 2 (Jake 2026-09-27, per Carlo's handoff): carrier multi-policy
+# notifications that are only portal links with no real document are NOT
+# filed — they are flagged. A real document behind the link gets pulled and
+# filed (Phase 2 work); unsure cases go to Carlo.
+# ---------------------------------------------------------------------------
+
+_PORTAL_LINK_RE = re.compile(
+    r"view (?:your |the )?(?:documents?|polic\w*|notices?) (?:in|on|through|via) "
+    r"(?:the |our )?portal|"
+    r"(?:log|sign)\s?in to (?:the |our )?(?:portal|view|access)|"
+    r"click here to (?:view|access|log)|"
+    r"access (?:the |our )?portal",
+    re.IGNORECASE,
+)
+
+_MULTI_POLICY_RE = re.compile(
+    r"multiple polic|several polic|policies (?:listed|attached|below)|policy list",
+    re.IGNORECASE,
+)
+
+_DOCUMENT_CUE_RE = re.compile(
+    r"\battach(?:ed|ment)?\b|\.pdf\b|declarations? page|dec page|schedule of",
+    re.IGNORECASE,
+)
+
+# Bare long numbers (policy numbers listed without a "Pol#" label, as in
+# multi-policy tables). Phone-like and money-like values are excluded by the
+# digit-run shape; this is a counting heuristic, not an extractor.
+_BARE_NUMBER_RE = re.compile(r"(?<![$\d.,])\b\d{6,12}\b(?![\d.,])")
+
+
+def assess_notice_document(
+    meta: dict[str, Any], body: str | None
+) -> tuple[str, str]:
+    """Return (verdict, reason) for 08b rule 2.
+
+    Verdicts:
+    - ``file`` — real document content present; existing filing path.
+    - ``portal_link_only`` — multi-policy notice is only portal links with no
+      retrievable document; flag, do not file.
+    - ``pull_behind_link`` — a real document sits behind the link; Phase 2
+      pulls it before filing (dry run marks it pending).
+    - ``unsure`` — cannot tell whether a real document exists; needs Carlo.
+    """
+    text = f"{meta.get('subject') or ''}\n{body or ''}"
+    policy_hits = {m.group(1) for m in _POLICY_RE.finditer(text) if m.group(1)}
+    bare_hits = set(_BARE_NUMBER_RE.findall(text))
+    is_multi = (
+        bool(_MULTI_POLICY_RE.search(text))
+        or len(policy_hits) > 1
+        or len(bare_hits) > 1
+    )
+    portal = bool(_PORTAL_LINK_RE.search(text))
+    doc_cue = bool(_DOCUMENT_CUE_RE.search(text))
+    if not is_multi:
+        return "file", "single-policy notice — existing filing path"
+    if portal and not doc_cue:
+        return (
+            "portal_link_only",
+            "multi-policy notice is only portal links with no retrievable "
+            "document — flagged, not filed",
+        )
+    if portal and doc_cue:
+        return (
+            "pull_behind_link",
+            "multi-policy notice links a real document — queued for Phase 2 "
+            "pull before filing",
+        )
+    if not portal and not doc_cue:
+        return (
+            "unsure",
+            "cannot tell whether a real document exists behind this "
+            "multi-policy notice — needs Carlo",
+        )
+    return "file", "multi-policy notice carries document cues"
+
+
+# ---------------------------------------------------------------------------
 # Applicant resolution (fail closed)
 # ---------------------------------------------------------------------------
 
@@ -494,6 +572,15 @@ class HelloTriage:
             policy_number=fields["policy_number"],
             notice_type=fields["notice_type"],
         )
+        # 08b rule 2: portal-link-only multi-policy notices are flagged, not
+        # filed. Runs before applicant resolution — no point resolving an
+        # applicant for a notice we will not file.
+        doc_verdict, doc_reason = assess_notice_document(meta, body)
+        item["document_verdict"] = doc_verdict
+        if doc_verdict != "file":
+            item["skip_reason"] = doc_reason
+            item["flags"].append(doc_verdict)
+            return item
         applicant_id, skip = resolve_applicant_id(self._policy_search, fields["policy_number"])
         if skip:
             item["skip_reason"] = skip

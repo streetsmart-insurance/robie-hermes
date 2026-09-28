@@ -32,6 +32,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib import error, parse, request
 
@@ -316,6 +317,56 @@ def is_untitled_discussion(record: dict[str, Any]) -> bool:
     return (not title) or title.casefold() == "untitled"
 
 
+def discussion_last_active_of(record: dict[str, Any]) -> str:
+    """Best-effort last-activity timestamp of a discussion record.
+
+    Prefers ``lastModified``, falls back to ``created``. Returns the raw
+    string (or "" when neither is present); callers parse defensively.
+    """
+    for key in ("lastModified", "LastModified", "last_modified",
+                "mostRecentNoteDate", "created", "Created", "createdDate"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _parse_activity_ts(value: str) -> float:
+    """Parse an activity timestamp to epoch seconds; unparseable -> 0.0."""
+    text = (value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        # fromisoformat handles "2026-09-27T20:00:00" and offsets; normalize
+        # the trailing-Z form first.
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:  # noqa: BLE001 - any unparsable stamp sorts oldest
+        return 0.0
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:  # noqa: BLE001 - defensive; unparsable sorts oldest
+        return 0.0
+
+
+def most_recently_active_discussion(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the titled discussion with the latest activity stamp.
+
+    Ties (including all-unparsable stamps) break by original order, so the
+    choice is deterministic. Callers must only pass titled rows.
+    """
+    return max(
+        rows,
+        key=lambda row: (
+            _parse_activity_ts(discussion_last_active_of(row)),
+            -rows.index(row),
+        ),
+    )
+
+
 def select_discussion_for_note(
     discussions: list[dict[str, Any]] | None, *, title_hint: str | None = None
 ) -> dict[str, Any]:
@@ -325,6 +376,10 @@ def select_discussion_for_note(
 
     - Exactly one titled discussion -> it wins.
     - Several titled discussions + a ``title_hint`` matching exactly one -> it wins.
+    - Several titled discussions + a ``title_hint`` matching none -> the most
+      recently active titled discussion wins (08b decision 2026-09-27: Jake;
+      a no-pattern-match notice files into the most recent thread rather
+      than failing closed).
     - Anything else -> :class:`DiscussionSelectionError`. The caller must not
       fall back to creating a discussion.
     """
@@ -349,6 +404,10 @@ def select_discussion_for_note(
         matched = [row for row in rows if hint in discussion_title_of(row).lower()]
         if len(matched) == 1:
             return matched[0]
+        if not matched:
+            # 08b: zero title-pattern matches -> most recently active titled
+            # thread, not fail-closed. Applies to all notice types.
+            return most_recently_active_discussion(rows)
         raise DiscussionSelectionError(
             AMBIGUOUS_DISCUSSIONS,
             f"title hint {title_hint!r} matched {len(matched)} of {len(rows)} "

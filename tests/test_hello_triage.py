@@ -7,6 +7,7 @@ from robie_job_engine.hello_triage import (
     SURVEY,
     VENDOR,
     HelloTriage,
+    assess_notice_document,
     classify_message,
     draft_note,
     extract_notice_fields,
@@ -233,10 +234,17 @@ def test_name_discussion_hint_disambiguates():
     assert did == "d2" and skip is None
 
 
-def test_name_discussion_ambiguous_skips():
-    dl = FakeDiscussions({"182": [disc("d1", "General"), disc("d2", "Other")]})
+def test_name_discussion_no_match_files_most_recent():
+    # 08b decision (Jake 2026-09-27): zero title-pattern matches files into
+    # the most recently active titled discussion, not fail-closed.
+    dl = FakeDiscussions({"182": [
+        disc("d1", "General"),
+        {"discussionId": "d2", "discussionTitle": "Other", "title": "Other",
+         "noteCount": 3, "mostRecentNoteId": "9",
+         "lastModified": "2026-09-26T10:00:00Z"},
+    ]})
     did, title, skip = name_discussion(dl, "182", "cancellation")
-    assert did is None and skip is not None
+    assert did == "d2" and skip is None
 
 
 def test_name_discussion_no_applicant():
@@ -326,3 +334,63 @@ def test_run_respects_max_items():
     gm = FakeGmail([meta(id=f"m{i}", subject="x") for i in range(10)])
     pack = HelloTriage(gm).run(max_items=3)
     assert pack["n"] == 3
+
+
+# --- 08b rule 2: portal-link-only multi-policy notices ----------------------
+
+def test_assess_single_policy_notice_files():
+    m = meta(subject="Cancellation notice policy DPN-12345")
+    verdict, _ = assess_notice_document(m, "Your policy DPN-12345 is cancelled.")
+    assert verdict == "file"
+
+
+def test_assess_multi_policy_portal_only_flagged():
+    m = meta(subject="Multiple policies updated")
+    body = ("Several policies have been updated. "
+            "Please log in to view your documents in the portal: "
+            "https://portal.carrier.example.com/docs")
+    verdict, reason = assess_notice_document(m, body)
+    assert verdict == "portal_link_only"
+    assert "not filed" in reason
+
+
+def test_assess_multi_policy_two_numbers_portal_only():
+    m = meta(subject="Policy updates")
+    body = ("Policies 12345678 and 87654321 have new documents. "
+            "Click here to access the portal and view them.")
+    verdict, _ = assess_notice_document(m, body)
+    assert verdict == "portal_link_only"
+
+
+def test_assess_multi_policy_document_behind_link_pulls():
+    m = meta(subject="Multiple policies renewed")
+    body = ("Several policies renewed. Log in to the portal to download "
+            "the attached dec pages: https://portal.carrier.example.com/docs")
+    verdict, _ = assess_notice_document(m, body)
+    assert verdict == "pull_behind_link"
+
+
+def test_assess_multi_policy_unsure_goes_to_carlo():
+    m = meta(subject="Policy notification")
+    body = "Policies 12345678 and 87654321 were processed on Monday."
+    verdict, reason = assess_notice_document(m, body)
+    assert verdict == "unsure"
+    assert "Carlo" in reason
+
+
+def test_triage_portal_only_notice_not_filed():
+    body = ("Multiple policies have been renewed. "
+            "Log in to view your documents in the portal.")
+    gm = FakeGmail(
+        [meta(id="p1", from_="notices@rpsins.com",
+              subject="Renewal: multiple policies updated")],
+        bodies={"p1": body},
+    )
+    pack = HelloTriage(gm, FakePolicySearch(), FakeDiscussions()).run()
+    item = pack["items"][0]
+    assert item["classification"] == CARRIER_NOTICE
+    assert item["document_verdict"] == "portal_link_only"
+    assert item["skip_reason"] is not None
+    assert "portal_link_only" in item["flags"]
+    assert item["applicant_id"] is None
+    assert item["discussion_id"] is None
