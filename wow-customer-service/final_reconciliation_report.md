@@ -63,13 +63,11 @@ PENDING: nothing — all 13 Cross Sell rows resolved.
 
 ## Pending as of this draft
 
-1. Cross Sell browser batch 2 (5 accounts, running).
-2. Cross Sell browser batch 3 (Top Notch Tree Service, Jaguar prior-client).
-3. Alejandro's reply (Mendieta policy status; 1812 cyber one-or-two). Emailed 2026-09-27 ~21:56 EDT.
-4. Plymouth Rock portal results (2 autopay rows).
-5. Travelers portal via Dusty/box (5 autopay rows), Bristol West credentials, Liberty Mutual credentials.
-6. Magellan/All Star Call data from Alejandro.
-7. Carlo's calls: October-effective credits (NCSR rows 3, 5, 11; Kelso timing; Murray King cross-sell timing), Slavin/Bruder cross-sell classifications.
+1. Alejandro's reply #1 (Mendieta policy status; 1812 cyber one-or-two). Emailed 2026-09-27 ~21:56 EDT.
+2. Alejandro's reply #2 (coverage three-enhancement rule; September Magellan data + All Star Call quality criteria). Emailed 2026-09-28 ~07:45 EDT (msg 1a0e7d369002e7ed).
+3. Plymouth Rock portal results (2 autopay rows).
+4. Travelers portal via Dusty/box (5 autopay rows), Bristol West credentials, Liberty Mutual credentials.
+5. Carlo's calls: October-effective New Customer credits (Cabrera home 619315196-633-1, Cabrera auto 619315117-206-1, Gangwar home NJA198092; Kelso HONJ052827 timing flag), Murray King cross-sell (moved to October).
 
 ## Blockers / notes
 
