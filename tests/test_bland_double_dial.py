@@ -413,3 +413,69 @@ def test_ten_second_redial_delay_honored_within_180s_window():
     clock.advance(5)  # delay now honored, still inside 180s window
     redial = worker.maybe_redial(target=TARGET, task="t")
     assert redial.attempt_seq == 2 and len(port.dispatched) == 2
+
+
+# --- attempt-1 concurrency (racing workers) --------------------------------
+
+def test_concurrent_attempt_1_dispatch_places_exactly_one_call():
+    """Two racing workers must not both place the first call."""
+    import threading
+    db = os.path.join(tempfile.mkdtemp(prefix="doubledial-race-", dir="/home/sandbox"), "dd.db")
+    port_a, port_b = FakePort(), FakePort()
+    clock = FakeClock()
+    worker_a = DoubleDialWorker(db_path=db, port=port_a, clock=clock)
+    worker_b = DoubleDialWorker(db_path=db, port=port_b, clock=clock)
+    barrier = threading.Barrier(2)
+    results = []
+
+    def race(worker):
+        barrier.wait()
+        results.append(worker.start_campaign(
+            target=TARGET, task="t", number_source="carrier_directory"))
+
+    t1 = threading.Thread(target=race, args=(worker_a,))
+    t2 = threading.Thread(target=race, args=(worker_b,))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    total_dispatches = len(port_a.dispatched) + len(port_b.dispatched)
+    assert total_dispatches == 1  # exactly one call placed, whoever won
+    # Both workers converge on the single attempt record; the loser never
+    # dispatched.
+    call_ids = {r.call_id for r in results if r and r.call_id}
+    assert len(call_ids) == 1
+    winner = port_a if port_a.dispatched else port_b
+    assert winner.dispatched[0]["call_id"] in call_ids
+    assert len(worker_a.attempts_for(TARGET)) == 1
+
+
+def test_sequential_duplicate_trigger_never_redispatches():
+    """A repeated trigger after the first returns the existing attempt."""
+    port, clock = FakePort(), FakeClock()
+    worker = make_worker(port, clock)
+    first = worker.start_campaign(target=TARGET, task="t",
+                                  number_source="carrier_directory")
+    second = worker.start_campaign(target=TARGET, task="t",
+                                   number_source="carrier_directory")
+    assert second.call_id == first.call_id
+    assert len(port.dispatched) == 1
+
+
+def test_claim_without_call_id_is_never_blindly_redispatched():
+    """Owner crashed between claim and dispatch: surface, never redispatch."""
+    port, clock = FakePort(), FakeClock()
+    worker = make_worker(port, clock)
+
+    class CrashingPort(FakePort):
+        def dispatch_call(self, **kwargs):
+            raise RuntimeError("synthetic crash before receipt")
+
+    crashed = DoubleDialWorker(db_path=worker.db_path, port=CrashingPort(),
+                               clock=clock)
+    with pytest.raises(RuntimeError):
+        crashed.start_campaign(target=TARGET, task="t",
+                               number_source="carrier_directory")
+    # The claim row is committed with call_id NULL; a later trigger must not
+    # place the call again.
+    retry = worker.start_campaign(target=TARGET, task="t",
+                                  number_source="carrier_directory")
+    assert retry.call_id is None and "investigate" in retry.reason
+    assert len(port.dispatched) == 0
