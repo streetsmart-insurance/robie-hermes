@@ -773,6 +773,12 @@ class NotificationStore:
     """Persists sent-notification dates so reruns don't re-nag.
 
     Re-nag only when the change is still open after RENAG_DAYS.
+
+    Phase 2 extension (backward compatible): values may be a plain date
+    string (legacy, e.g. the 2026-09-27 seed) or a dict
+    {"date", "message_id", "thread_id"} recording the Gmail send. The
+    thread map lets the daily follow-up worker match CSR replies to the
+    nag that prompted them.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -781,7 +787,16 @@ class NotificationStore:
             data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
         except (ValueError, OSError):
             data = {}
-        self._sent: dict[str, str] = dict(data or {})
+        self._sent: dict[str, Any] = dict(data or {})
+
+    def _sent_date(self, key: str) -> str | None:
+        entry = self._sent.get(key)
+        if isinstance(entry, str):
+            return entry
+        if isinstance(entry, dict):
+            value = entry.get("date")
+            return str(value) if value else None
+        return None
 
     def is_due(self, item: Mapping[str, Any], today: date) -> bool:
         key = notification_key(
@@ -789,7 +804,7 @@ class NotificationStore:
             str(item.get("Policy Number") or ""),
             str(item.get("created_date") or ""),
         )
-        last = self._sent.get(key)
+        last = self._sent_date(key)
         if not last:
             return True
         try:
@@ -803,7 +818,50 @@ class NotificationStore:
             str(item.get("Policy Number") or ""),
             str(item.get("created_date") or ""),
         )
-        self._sent[key] = today.isoformat()
+        entry = self._sent.get(key)
+        if isinstance(entry, dict):
+            entry["date"] = today.isoformat()
+        else:
+            self._sent[key] = {"date": today.isoformat()}
+
+    def record_thread(self, item: Mapping[str, Any],
+                      message_id: str | None, thread_id: str | None) -> None:
+        """Attach the Gmail send's message/thread IDs to the sent record."""
+        key = notification_key(
+            str(item.get("CSR") or ""),
+            str(item.get("Policy Number") or ""),
+            str(item.get("created_date") or ""),
+        )
+        entry = self._sent.get(key)
+        if isinstance(entry, str):
+            entry = {"date": entry}
+            self._sent[key] = entry
+        elif not isinstance(entry, dict):
+            entry = {"date": ""}
+            self._sent[key] = entry
+        if message_id:
+            entry["message_id"] = str(message_id)
+        if thread_id:
+            entry["thread_id"] = str(thread_id)
+
+    def thread_to_key(self) -> dict[str, str]:
+        """Gmail thread ID -> notification key, for reply attribution."""
+        mapping: dict[str, str] = {}
+        for key, entry in self._sent.items():
+            if isinstance(entry, dict):
+                thread_id = str(entry.get("thread_id") or "").strip()
+                if thread_id:
+                    mapping[thread_id] = key
+        return mapping
+
+    def first_sent_date(self, key: str) -> date | None:
+        raw = self._sent_date(key)
+        if not raw:
+            return None
+        try:
+            return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1204,6 +1262,8 @@ def default_mailer(*, to: list[str], cc: list[str], subject: str,
         "destination": list(to),
         "cc": list(cc),
         "message_id": sent.get("id"),
+        # Phase 2 reply tracking matches CSR replies by thread.
+        "thread_id": sent.get("threadId"),
         "sender": SENDER,
     }
 
@@ -1228,6 +1288,11 @@ class OverduePolicyChangeReportWorker:
         directory_loader: Callable[[str], dict[str, dict[str, str]]] = load_approved_csr_directory,
         mailer: Callable[..., dict[str, Any]] | None = None,
         sent_store: NotificationStore | None = None,
+        # Phase 2: an object with active_keys() -> set of notification keys
+        # whose CSR is engaged (in_progress / blocked / docs_claimed).
+        # Those changes are suppressed from nags. None = no suppression
+        # (backward compatible; the follow-up worker owns the store).
+        followup_store: Any | None = None,
     ) -> None:
         self.queue_reader = queue_reader or default_queue_reader
         self.policy_search = policy_search or default_policy_search
@@ -1235,6 +1300,7 @@ class OverduePolicyChangeReportWorker:
         self.directory_loader = directory_loader
         self.mailer = mailer or default_mailer
         self.sent_store = sent_store
+        self.followup_store = followup_store
 
     def _enrich_with_discussions(
         self, items: list[dict[str, Any]], today: date
@@ -1329,6 +1395,33 @@ class OverduePolicyChangeReportWorker:
                 "on_hold": len(held),
                 "due_for_nag": len(due_items),
             }
+            # Phase 2: a CSR reply saying "working on it" / "blocked" /
+            # "endorsement received" suppresses further nags for that change.
+            suppressed_by_followup = 0
+            active_keys: set[str] = set()
+            if self.followup_store is not None and hasattr(self.followup_store, "active_keys"):
+                try:
+                    active_keys = set(self.followup_store.active_keys())
+                except Exception as exc:  # noqa: BLE001
+                    # A broken follow-up store must never block the weekly
+                    # nag: log and continue without suppression.
+                    logger.warning("follow-up store unreadable, nagging anyway: %s", exc)
+                    active_keys = set()
+            if active_keys:
+                kept: list[dict[str, Any]] = []
+                for item in due_items:
+                    key = notification_key(
+                        str(item.get("CSR") or ""),
+                        str(item.get("Policy Number") or ""),
+                        str(item.get("created_date") or ""),
+                    )
+                    if key in active_keys:
+                        suppressed_by_followup += 1
+                    else:
+                        kept.append(item)
+                due_items = kept
+                summary["suppressed_by_followup"] = suppressed_by_followup
+                summary["due_for_nag"] = len(due_items)
             if not due_items:
                 return WorkerResult(
                     True, JOB_TYPE,
@@ -1359,17 +1452,21 @@ class OverduePolicyChangeReportWorker:
                              *target["producer_emails"]]:
                     if addr and addr not in cc:
                         cc.append(addr)
-                receipts.append(
-                    self.mailer(
-                        to=[target["email"]],
-                        cc=cc,
-                        subject=SUBJECT,
-                        text_body=body,
-                        html_body=html_body,
-                    )
+                receipt = self.mailer(
+                    to=[target["email"]],
+                    cc=cc,
+                    subject=SUBJECT,
+                    text_body=body,
+                    html_body=html_body,
                 )
+                receipts.append(receipt)
                 for item in target["items"]:
                     store.mark_sent(item, today)
+                    # Phase 2 reply tracking: attach the Gmail thread so the
+                    # daily worker can match the CSR's reply to this nag.
+                    store.record_thread(
+                        item, receipt.get("message_id"), receipt.get("thread_id")
+                    )
             store.save()
         except PolicyChangeReportContractError as exc:
             return WorkerResult(

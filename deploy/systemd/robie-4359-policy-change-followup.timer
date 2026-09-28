@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ROBIE daily 4359 policy-change follow-up every morning 07:30 ET
+
+[Timer]
+OnCalendar=*-*-* 07:30:00 America/New_York
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=robie-4359-policy-change-followup.service
+
+[Install]
+WantedBy=timers.target

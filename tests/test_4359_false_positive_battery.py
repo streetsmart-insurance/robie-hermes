@@ -280,10 +280,12 @@ def test_renag_boundary_worker_level(tmp_path):
     search_map = {"P6": [policy_row("P6", account="6")],
                   "P7": [policy_row("P7", account="7")]}
     store = NotificationStore(tmp_path / "sent.json")
+    # Relative to the real today (perform uses date.today()): P6 was nagged
+    # 6 days ago (not due), P7 7 days ago (due for re-nag).
     store.mark_sent({"CSR": "Eimy Ramos", "Policy Number": "P6",
-                     "created_date": "2026-08-01"}, TODAY - timedelta(days=6))
+                     "created_date": "2026-08-01"}, date.today() - timedelta(days=6))
     store.mark_sent({"CSR": "Eimy Ramos", "Policy Number": "P7",
-                     "created_date": "2026-08-01"}, TODAY - timedelta(days=7))
+                     "created_date": "2026-08-01"}, date.today() - timedelta(days=7))
     store.save()
     worker, sent = make_worker(tmp_path, rows, search_map, live_discussions(),
                                 sent_store=NotificationStore(tmp_path / "sent.json"))
@@ -321,7 +323,7 @@ def test_arellano_open_pcr_still_nags_despite_complete_task(tmp_path):
     # Andrea Nicole Illanes — the right mailbox, not a wrong CC.
     assert "andrea@streetsmart.insurance" in sent[0]["cc"]
     assert "13WECAT1F8T" in sent[0]["text_body"]
-    assert "23 days ago" in sent[0]["text_body"]
+    assert f"{(date.today() - date(2026, 9, 4)).days} days ago" in sent[0]["text_body"]
 
 
 def test_guarini_email_carries_discussion_context(tmp_path):
@@ -337,7 +339,8 @@ def test_guarini_email_carries_discussion_context(tmp_path):
     worker, sent = make_worker(tmp_path, rows, search_map, discussions)
     result = worker.perform(job(), idempotency_key="k1")
     assert result.succeeded
-    assert "5 notes, last activity 12 days ago" in sent[0]["text_body"]
+    last_activity_days = (date.today() - date(2026, 9, 15)).days
+    assert f"5 notes, last activity {last_activity_days} days ago" in sent[0]["text_body"]
 
 
 # -- policy-number variants ----------------------------------------------------
