@@ -234,9 +234,7 @@ def test_name_discussion_hint_disambiguates():
     assert did == "d2" and skip is None
 
 
-def test_name_discussion_no_match_files_most_recent():
-    # 08b decision (Jake 2026-09-27): zero title-pattern matches files into
-    # the most recently active titled discussion, not fail-closed.
+def test_name_discussion_no_match_holds_for_review():
     dl = FakeDiscussions({"182": [
         disc("d1", "General"),
         {"discussionId": "d2", "discussionTitle": "Other", "title": "Other",
@@ -244,7 +242,8 @@ def test_name_discussion_no_match_files_most_recent():
          "lastModified": "2026-09-26T10:00:00Z"},
     ]})
     did, title, skip = name_discussion(dl, "182", "cancellation")
-    assert did == "d2" and skip is None
+    assert did is None and title is None
+    assert "matched none" in skip
 
 
 def test_name_discussion_no_applicant():
