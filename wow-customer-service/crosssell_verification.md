@@ -102,3 +102,16 @@ Consequences:
 - Top Notch Tree Service counts: the agency did not control the WC line before; the September BOR brought it in.
 - A straight renewal of a line the agency already controlled is NOT a cross-sell (this is what keeps Bruder questionable unless liability was added).
 - A pending replacement that has not issued earns nothing yet (Slavin), but when it issues it would qualify under this principle as a newly controlled line.
+
+## Slavin + Bruder — Coverage Questions Resolved (2026-09-28 ~06:35 EDT, read-only)
+
+**Slavin (account 51402216):** Nationwide umbrella 51291U000067 — CANCELLATION DATE 8/1/2026 (effective 8/1/26, expiration 8/1/27, Transaction Type "Cancel Confirmation", Transaction Date 8/27/26, $152.50, Direct bill, Harleysville writing company). Cancelled at inception; no cancellation reason shown. REPLACEMENT: none in the system. The eSignature umbrella application is STILL PENDING (sent 9/25/26 3:19 PM to Elizabeth Slavin, Received blank). No policy number, carrier, or effective date for a replacement. Verdict: the umbrella line is currently uninsured; under Carlo's principle the replacement would qualify when it issues, but there is nothing to credit in September.
+
+**Bruder (account 21587364):** The new policy did NOT add coverage. BOTH policies are classified "Genl Liability" (label "Vacant General Liability") — the old VEP0386394 was not property-only. Old: VEP0386394, Vacant Express MGA / Diamond State, $361.08, term 8/12/25–8/12/26, inactive. New: VEP0440216, Vacant Express MGA / United National-Diamond State Group, $433.30, term 9/4/26–9/4/27, active, Transaction Date 9/8/26. Same line renewed; the agency already controlled the GL line. Per Carlo's principle (newly controlled line = cross-sell; renewal of an already-controlled line = not), the Cross Sell label is REJECTED. Supporting: Steffany Canales's 9/8/26 pinned note — "Master COI was renewed for the 26-27 term."
+
+## Cross Sell — FINAL TALLY (all resolved 2026-09-28)
+
+- CLEAN (10): MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar, Top Notch Tree Service (BOR — newly controlled WC line per Carlo).
+- OCTOBER (1): Murray King — Foremost dwelling fire eff 10/2/26; October credit.
+- QUESTIONABLE (1): Slavin — replacement umbrella not yet issued (eSignature pending); qualifies when it issues.
+- REJECTED (1): Bruder — same GL line renewed; agency already controlled it.

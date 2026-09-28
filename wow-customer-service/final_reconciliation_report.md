@@ -39,9 +39,10 @@ Full row-by-row ledger: `ncsr_final_ledger.md`.
 
 - **CLEAN (10):** MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar — all issued, active, existing clients. **Top Notch Tree Service** — September BOR transfer of existing WC (renewal term 11/7/26–11/7/27); counts per Carlo ("even though it is a BOR, that's how we got it"). (Puma: binder-date vs term mismatch and named-insured question flagged for accounting. Mansukh: garage/dealers + property package, not WC. SK Direct: named-insured endorsement open.)
 - **OCTOBER (1):** Murray King — Foremost dwelling fire $3,316, PENDING, eff 10/2/26. October credit per Carlo.
-- **QUESTIONABLE (2):** Slavin (replacement umbrella for cancelled Nationwide line, nothing issued — Nationwide cancel date pending), Bruder (same-line renewal vs added liability — coverage comparison pending).
+- **QUESTIONABLE (1):** Slavin — Nationwide umbrella cancelled 8/1/26; replacement not yet issued (eSignature pending since 9/25). Qualifies when it issues.
+- **REJECTED (1):** Bruder — same GL line renewed (VEP0386394 → VEP0440216); the agency already controlled the line, and the new policy added no coverage.
 
-PENDING: none outstanding beyond the two coverage questions above.
+PENDING: nothing — all 13 Cross Sell rows resolved.
 
 ## 5. Coverage Enhancement (5 rows)
 
