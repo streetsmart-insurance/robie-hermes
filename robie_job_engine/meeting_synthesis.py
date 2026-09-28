@@ -47,6 +47,8 @@ TITLE_TS_RE = re.compile(
     r"^(?P<title>.*?)\s*-\s*(?P<ts>\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}\s+[A-Z]{2,5})\s*-\s*notes by gemini\s*$",
     re.IGNORECASE,
 )
+# Smart Rewards = the agency's internal employee recognition program.
+SMART_REWARD_RE = re.compile(r"smart rewards?", re.IGNORECASE)
 
 
 def strip_suffix(name: str) -> str:
@@ -170,7 +172,30 @@ def draft_social_posts(wins_text: str, n: int = 3) -> str:
     return common.gemini_generate(SOCIAL_PROMPT.format(n=n, wins=wins_text[:6000]))
 
 
-def build_email_body(week_label: str, sections: dict[str, str], social_drafts: str) -> str:
+SPOTLIGHT_PROMPT = """You are writing employee-spotlight social media post drafts for StreetSmart, an insurance agency.
+Based on the Smart Rewards mentions below (the agency's internal employee recognition program), draft {n} short social media post drafts (each under 280 characters).
+Rules:
+- Plain English, warm, human. No insurance jargon.
+- Celebrate the person by first name only; say what they did to earn the recognition.
+- Only use facts from the mentions. Never invent facts, names, or numbers.
+- Skip anything that is clearly personal or sensitive (health, HR issues).
+- Number each draft. Do not add hashtags unless one fits naturally.
+
+SMART REWARDS MENTIONS:
+{mentions}
+"""
+
+
+def draft_spotlight_posts(mentions_text: str, n: int = 3) -> str:
+    return common.gemini_generate(SPOTLIGHT_PROMPT.format(n=n, mentions=mentions_text[:6000]))
+
+
+def build_email_body(
+    week_label: str,
+    sections: dict[str, str],
+    social_drafts: str,
+    spotlights: str | None = None,
+) -> str:
     lines = [
         f"StreetSmart weekly meeting synthesis — {week_label}",
         "",
@@ -182,6 +207,11 @@ def build_email_body(week_label: str, sections: dict[str, str], social_drafts: s
         "These are saved in the 'StreetSmart social drafts' Google Doc for your approval. Nothing was posted.",
         "",
         social_drafts,
+        "",
+        "=== Smart Rewards spotlights ===",
+        "Drafts highlighting staff who earned a Smart Reward this week. Also saved in the social drafts Doc under 'Smart Rewards spotlights'.",
+        "",
+        spotlights if spotlights is not None else "No Smart Rewards mentions this week.",
         "",
         "— Robie (StreetSmart automation)",
     ]
@@ -231,6 +261,7 @@ class MeetingSynthesisWorker:
 
         notes = fetch_notes_last_7_days()
         by_dept: dict[str, list[str]] = {}
+        smart_reward_notes: list[str] = []
         skipped_empty = 0
         for note in notes:
             name = str(note.get("name", ""))
@@ -239,7 +270,10 @@ class MeetingSynthesisWorker:
                 skipped_empty += 1
                 continue
             dept = classify_department(name)
-            by_dept.setdefault(dept, []).append(f"--- {strip_suffix(name)} ---\n{body[:4000]}")
+            section = f"--- {strip_suffix(name)} ---\n{body[:4000]}"
+            by_dept.setdefault(dept, []).append(section)
+            if SMART_REWARD_RE.search(body):
+                smart_reward_notes.append(section)
 
         sections: dict[str, str] = {}
         all_wins: list[str] = []
@@ -249,7 +283,11 @@ class MeetingSynthesisWorker:
             all_wins.append(f"[{dept}]\n{sections[dept]}")
 
         social_drafts = draft_social_posts("\n\n".join(all_wins)) if all_wins else "No wins found this week."
-        email_body = build_email_body(week_label, sections, social_drafts)
+        if smart_reward_notes:
+            spotlights = draft_spotlight_posts("\n\n".join(smart_reward_notes))
+        else:
+            spotlights = "No Smart Rewards mentions this week."
+        email_body = build_email_body(week_label, sections, social_drafts, spotlights)
         subject = f"Weekly meeting synthesis — {week_label}"
         message_id = common.send_gmail(
             sender=SENDER, to=[RECIPIENT], subject=subject, body=email_body
@@ -258,7 +296,7 @@ class MeetingSynthesisWorker:
         doc_id = find_or_create_social_doc()
         append_to_doc(
             doc_id,
-            f"\n\n===== {week_label} =====\n{social_drafts}\n",
+            f"\n\n===== {week_label} =====\n{social_drafts}\n\n--- Smart Rewards spotlights ---\n{spotlights}\n",
         )
 
         return WorkerResult(
@@ -270,6 +308,7 @@ class MeetingSynthesisWorker:
                 "notes_skipped_empty": skipped_empty,
                 "departments": sorted(sections),
                 "subject": subject,
+                "smart_reward_mentions": len(smart_reward_notes),
             },
             retryable=True,
         )
