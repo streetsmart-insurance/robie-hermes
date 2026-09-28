@@ -157,9 +157,6 @@ class DoubleDialWorker:
             number_source=number_source,
             client_phones=client_phones,
         )
-        existing = self._get_attempt(number, 1)
-        if existing is not None:
-            return existing
         meta = dict(metadata or {})
         meta.update(
             {"policy_version": self.config.policy_version, "attempt_seq": 1,
@@ -168,6 +165,11 @@ class DoubleDialWorker:
              # hang up, NO message.
              "voicemail_action": "no_message"}
         )
+        # Atomic claim: the INSERT itself decides who dispatches. The row is
+        # committed BEFORE dispatch, so two racing workers can never both
+        # place the first call - the loser sees the committed row and stands
+        # down. A row left with call_id NULL means the owner crashed between
+        # claim and dispatch: never redispatch blindly; surface it instead.
         with self._connect() as conn:
             try:
                 conn.execute(
@@ -178,11 +180,18 @@ class DoubleDialWorker:
                         self.config.caller_id, self._now().isoformat(),
                     ),
                 )
+                claimed = True
             except sqlite3.IntegrityError:
-                pass  # another trigger won the race; re-read below
-        raced = self._get_attempt(number, 1)
-        if raced is not None and raced.call_id:
-            return raced
+                claimed = False
+        if not claimed:
+            existing = self._get_attempt(number, 1)
+            if existing is not None and existing.call_id is None:
+                return AttemptRecord(
+                    1, None, existing.outcome, existing.conclusive,
+                    "attempt 1 claimed but has no call_id - owner may have "
+                    "crashed before dispatch; investigate, do not redispatch",
+                )
+            return existing
         receipt = self.port.dispatch_call(
             target=number, task=task,
             caller_id=self.config.caller_id, metadata=meta,
