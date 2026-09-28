@@ -6,8 +6,9 @@ Dates in that Doc are smart-chip spans. The Docs API text payload drops them
 table) and fails closed when the schedule table cannot be parsed.
 
 Live email and Chat stay off unless Carlo sets the send flags. The default
-run only plans alerts. A send ledger in the job database stops a second send
-for the same (event_date, status_kind).
+run only plans alerts. Each event can send twice: a heads-up while it is
+inside the T-14 window, then a shorter out-of-office nudge inside the T-3
+window. The send ledger key is (event_date, status_kind, phase).
 """
 
 from __future__ import annotations
@@ -31,9 +32,13 @@ TASK_NAME = "StreetSmart holiday office alerts"
 WORKER_NAME = "staff-holiday-alert"
 TIMEZONE = "America/New_York"
 
-# Calendar days ahead of an event that still count as the alert window.
-# 0 means the morning of the event (America/New_York). Past dates are skipped.
-ALERT_LEAD_DAYS = 7
+# First alert: from T-14 through the day before the nudge window.
+# Nudge: from T-3 through the morning of the event (America/New_York).
+# Past dates are skipped. A weekday run inside each window sends that phase once.
+LEAD_DAYS_HEADS_UP = 14
+LEAD_DAYS_NUDGE = 3
+PHASE_HEADS_UP = "heads_up"
+PHASE_NUDGE = "nudge"
 
 HOLIDAY_DOC_ID = "1_sE6cCkyu0SuqucWU6z-FOnKqGBQkTTe02HtoeFv784"
 DOC_URL = f"https://docs.google.com/document/d/{HOLIDAY_DOC_ID}/edit"
@@ -45,7 +50,8 @@ EMAIL_TO = "StreetSmart@streetsmart.insurance"
 SEND_ENV = "ROBIE_HOLIDAY_ALERT_SEND"
 EMAIL_ENV = "ROBIE_HOLIDAY_ALERT_EMAIL"
 CHAT_ENV = "ROBIE_HOLIDAY_ALERT_CHAT"
-LEAD_ENV = "ROBIE_HOLIDAY_ALERT_LEAD_DAYS"
+HEADS_UP_ENV = "ROBIE_HOLIDAY_ALERT_LEAD_DAYS_HEADS_UP"
+NUDGE_ENV = "ROBIE_HOLIDAY_ALERT_LEAD_DAYS_NUDGE"
 FIXTURE_ENV = "ROBIE_HOLIDAY_ALERT_ALLOW_FIXTURE"
 
 _MONTHS = {
@@ -78,9 +84,24 @@ class HolidayAlert:
     status_kind: str  # "closed" | "early_close"
     close_time: str | None = None
     source: str = "explicit"  # "explicit" | "observed"
+    phase: str = ""  # "heads_up" | "nudge" once the alert is due
+
+    def with_phase(self, phase: str) -> HolidayAlert:
+        if phase not in {PHASE_HEADS_UP, PHASE_NUDGE}:
+            raise HolidayScheduleError(f"unknown holiday alert phase: {phase!r}")
+        return HolidayAlert(
+            self.holiday,
+            self.event_date,
+            self.status_kind,
+            self.close_time,
+            self.source,
+            phase,
+        )
 
     def ledger_key(self) -> str:
-        return f"{self.event_date.isoformat()}|{self.status_kind}"
+        if self.phase not in {PHASE_HEADS_UP, PHASE_NUDGE}:
+            raise HolidayScheduleError("ledger key requires phase heads_up or nudge")
+        return f"{self.event_date.isoformat()}|{self.status_kind}|{self.phase}"
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -89,7 +110,8 @@ class HolidayAlert:
             "status_kind": self.status_kind,
             "close_time": self.close_time or "",
             "source": self.source,
-            "ledger_key": self.ledger_key(),
+            "phase": self.phase,
+            "ledger_key": self.ledger_key() if self.phase else "",
         }
 
 
@@ -409,19 +431,57 @@ def load_schedule_alerts(document: str) -> tuple[list[tuple[str, str, str]], lis
     return rows, deduped
 
 
-def alert_is_due(event_date: date, today: date, *, lead_days: int = ALERT_LEAD_DAYS) -> bool:
-    delta = (event_date - today).days
-    return 0 <= delta <= lead_days
+def _check_leads(heads_up_days: int, nudge_days: int) -> None:
+    if nudge_days < 0 or heads_up_days <= nudge_days or heads_up_days > 60:
+        raise HolidayScheduleError(
+            f"lead windows must satisfy 0 <= nudge < heads_up <= 60, "
+            f"got heads_up={heads_up_days} nudge={nudge_days}"
+        )
+
+
+def phase_for_delta(
+    delta_days: int,
+    *,
+    heads_up_days: int = LEAD_DAYS_HEADS_UP,
+    nudge_days: int = LEAD_DAYS_NUDGE,
+) -> str | None:
+    """Return the phase whose window contains this many days before the event."""
+    _check_leads(heads_up_days, nudge_days)
+    if delta_days < 0:
+        return None
+    if delta_days <= nudge_days:
+        return PHASE_NUDGE
+    if delta_days <= heads_up_days:
+        return PHASE_HEADS_UP
+    return None
 
 
 def select_due(
     alerts: list[HolidayAlert],
     today: date,
     *,
-    lead_days: int = ALERT_LEAD_DAYS,
+    heads_up_days: int = LEAD_DAYS_HEADS_UP,
+    nudge_days: int = LEAD_DAYS_NUDGE,
 ) -> list[HolidayAlert]:
-    due = [alert for alert in alerts if alert_is_due(alert.event_date, today, lead_days=lead_days)]
-    return sorted(due, key=lambda alert: (alert.event_date, alert.status_kind, alert.holiday))
+    """Attach heads_up or nudge. Each event is in at most one phase per morning."""
+    due: list[HolidayAlert] = []
+    for alert in alerts:
+        phase = phase_for_delta(
+            (alert.event_date - today).days,
+            heads_up_days=heads_up_days,
+            nudge_days=nudge_days,
+        )
+        if phase:
+            due.append(alert.with_phase(phase))
+    return sorted(
+        due,
+        key=lambda alert: (
+            alert.event_date,
+            0 if alert.phase == PHASE_HEADS_UP else 1,
+            alert.status_kind,
+            alert.holiday,
+        ),
+    )
 
 
 def _long_date(event_date: date) -> str:
@@ -432,32 +492,47 @@ def _short_date(event_date: date) -> str:
     return event_date.strftime("%A, %B %-d")
 
 
+def _hours_sentence(alert: HolidayAlert) -> str:
+    when = _long_date(alert.event_date)
+    if alert.status_kind == "closed":
+        return f"the office will be CLOSED on {when} for {alert.holiday}."
+    return (
+        f"the office will CLOSE EARLY at {alert.close_time} on {when} "
+        f"for {alert.holiday}."
+    )
+
+
 def email_subject(alert: HolidayAlert) -> str:
     when = _short_date(alert.event_date)
+    if alert.phase == PHASE_NUDGE:
+        if alert.status_kind == "closed":
+            return f"Reminder: set out-of-office — office closed {when}"
+        return f"Reminder: set out-of-office — early close {when} at {alert.close_time}"
     if alert.status_kind == "closed":
         return f"Office closed {when} — {alert.holiday}"
     return f"Office closes early {when} at {alert.close_time} — {alert.holiday}"
 
 
 def email_body(alert: HolidayAlert) -> str:
-    when = _long_date(alert.event_date)
-    if alert.status_kind == "closed":
-        lead = f"the office will be CLOSED on {when} for {alert.holiday}."
-    else:
-        lead = (
-            f"the office will CLOSE EARLY at {alert.close_time} on {when} "
-            f"for {alert.holiday}."
+    hours = _hours_sentence(alert)
+    if alert.phase == PHASE_NUDGE:
+        return (
+            "Hi team,\n\n"
+            f"3-day reminder: {hours}\n\n"
+            "Please set up your out-of-office today:\n"
+            "- Turn on your Gmail vacation responder. Use the template in the holiday schedule Doc.\n"
+            "- Block the day in Google Calendar and update your availability.\n"
+            "- Set RingCentral to forward all calls to your line-of-business queue "
+            "(Personal Lines, Commercial, or Trucking), as the Doc describes.\n\n"
+            f"Holiday schedule: {DOC_URL}\n\n"
+            "— Robie (StreetSmart automation)"
         )
     return (
         "Hi team,\n\n"
-        f"Heads up: {lead}\n\n"
-        "Please plan ahead so clients are not surprised:\n"
-        "- Tell clients about the hours change. Claims still go to the carrier.\n"
-        "- Turn on your Gmail vacation reply (Create a vacation reply).\n"
-        "- Block the time in Google Calendar and update your availability.\n"
-        "- If you will be out, set RingCentral to forward calls to your line of "
-        "business (Personal Lines, Commercial, or Trucking).\n\n"
-        f"Holiday schedule and out-of-office steps: {DOC_URL}\n\n"
+        f"Heads up: {hours}\n\n"
+        "Please plan ahead and make sure clients know about the hours change. "
+        "Claims still go to the carrier.\n\n"
+        f"Holiday schedule: {DOC_URL}\n\n"
         "— Robie (StreetSmart automation)"
     )
 
@@ -472,11 +547,19 @@ def chat_text(alert: HolidayAlert) -> str:
         detail = (
             f"We will CLOSE EARLY at {alert.close_time} on {_long_date(alert.event_date)}."
         )
+    if alert.phase == PHASE_NUDGE:
+        return (
+            f"{headline}\n\n"
+            f"{detail} Please set up out-of-office today:\n"
+            "• Gmail vacation responder — use the Doc template\n"
+            "• Block the day in Google Calendar\n"
+            "• RingCentral: forward all calls to your queue\n\n"
+            f"Holiday schedule: {DOC_URL}"
+        )
     return (
         f"{headline}\n\n"
         f"{detail}\n\n"
-        "Please plan ahead and let clients know. Turn on your Gmail out-of-office, "
-        "block the time on Google Calendar, and set RingCentral if you will be out.\n\n"
+        "Please plan ahead and let clients know.\n\n"
         f"Holiday schedule: {DOC_URL}"
     )
 
@@ -504,20 +587,24 @@ def resolve_channels(payload: dict[str, Any] | None) -> dict[str, Any]:
     return {"dry_run": dry_run, "email": email, "chat": chat, "reason": reason}
 
 
-def resolve_lead_days(payload: dict[str, Any] | None) -> int:
-    payload = dict(payload or {})
-    raw = payload.get("lead_days")
+def _read_lead(payload: dict[str, Any], key: str, env_name: str, default: int) -> int:
+    raw = payload.get(key)
     if raw is None or str(raw).strip() == "":
-        raw = os.environ.get(LEAD_ENV, "")
+        raw = os.environ.get(env_name, "")
     if raw is None or str(raw).strip() == "":
-        return ALERT_LEAD_DAYS
+        return default
     try:
-        value = int(raw)
+        return int(raw)
     except (TypeError, ValueError) as exc:
-        raise HolidayScheduleError(f"lead days must be an integer: {raw!r}") from exc
-    if value < 0 or value > 60:
-        raise HolidayScheduleError(f"lead days out of range: {value}")
-    return value
+        raise HolidayScheduleError(f"{key} must be an integer: {raw!r}") from exc
+
+
+def resolve_leads(payload: dict[str, Any] | None) -> tuple[int, int]:
+    payload = dict(payload or {})
+    heads_up_days = _read_lead(payload, "heads_up_days", HEADS_UP_ENV, LEAD_DAYS_HEADS_UP)
+    nudge_days = _read_lead(payload, "nudge_days", NUDGE_ENV, LEAD_DAYS_NUDGE)
+    _check_leads(heads_up_days, nudge_days)
+    return heads_up_days, nudge_days
 
 
 def resolve_today(payload: dict[str, Any] | None) -> date:
@@ -545,7 +632,7 @@ def fetch_holiday_doc_html(*, drive: Any = None, doc_id: str = HOLIDAY_DOC_ID) -
 
 
 class HolidaySendLedger:
-    """Send ledger in the job database. One row per (event_date, status_kind)."""
+    """Send ledger in the job database. One row per (event_date, status_kind, phase)."""
 
     def __init__(self, db_path: str) -> None:
         self.path = str(assert_durable_path(db_path))
@@ -566,45 +653,54 @@ class HolidaySendLedger:
                 CREATE TABLE IF NOT EXISTS holiday_alert_sends (
                     event_date TEXT NOT NULL,
                     status_kind TEXT NOT NULL,
+                    phase TEXT NOT NULL,
                     holiday TEXT NOT NULL,
                     close_time TEXT,
                     email_message_id TEXT,
                     chat_posted INTEGER NOT NULL DEFAULT 0,
                     state TEXT NOT NULL,
                     sent_at TEXT NOT NULL,
-                    PRIMARY KEY (event_date, status_kind)
+                    PRIMARY KEY (event_date, status_kind, phase)
                 )
                 """
             )
 
+    def _key(self, alert: HolidayAlert) -> tuple[str, str, str]:
+        if alert.phase not in {PHASE_HEADS_UP, PHASE_NUDGE}:
+            raise HolidayScheduleError("ledger row requires phase heads_up or nudge")
+        return (alert.event_date.isoformat(), alert.status_kind, alert.phase)
+
     def get(self, alert: HolidayAlert) -> dict[str, Any] | None:
+        event_date, status_kind, phase = self._key(alert)
         with self._connect() as conn:
             row = conn.execute(
                 """SELECT * FROM holiday_alert_sends
-                   WHERE event_date=? AND status_kind=?""",
-                (alert.event_date.isoformat(), alert.status_kind),
+                   WHERE event_date=? AND status_kind=? AND phase=?""",
+                (event_date, status_kind, phase),
             ).fetchone()
         return dict(row) if row else None
 
     def claim(self, alert: HolidayAlert) -> str:
         """Return claimed, sent, or pending. pending means do not send again."""
+        event_date, status_kind, phase = self._key(alert)
         stamp = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """SELECT state FROM holiday_alert_sends
-                   WHERE event_date=? AND status_kind=?""",
-                (alert.event_date.isoformat(), alert.status_kind),
+                   WHERE event_date=? AND status_kind=? AND phase=?""",
+                (event_date, status_kind, phase),
             ).fetchone()
             if row is None:
                 conn.execute(
                     """INSERT INTO holiday_alert_sends
-                       (event_date, status_kind, holiday, close_time,
+                       (event_date, status_kind, phase, holiday, close_time,
                         email_message_id, chat_posted, state, sent_at)
-                       VALUES (?,?,?,?, '', 0, 'pending', ?)""",
+                       VALUES (?,?,?,?,?, '', 0, 'pending', ?)""",
                     (
-                        alert.event_date.isoformat(),
-                        alert.status_kind,
+                        event_date,
+                        status_kind,
+                        phase,
                         alert.holiday,
                         alert.close_time,
                         stamp,
@@ -616,40 +712,45 @@ class HolidaySendLedger:
             return "sent" if row["state"] == "sent" else "pending"
 
     def note_email(self, alert: HolidayAlert, message_id: str) -> None:
+        event_date, status_kind, phase = self._key(alert)
         with self._connect() as conn:
             conn.execute(
                 """UPDATE holiday_alert_sends SET email_message_id=?, sent_at=?
-                   WHERE event_date=? AND status_kind=?""",
+                   WHERE event_date=? AND status_kind=? AND phase=?""",
                 (
                     message_id,
                     datetime.now(timezone.utc).isoformat(),
-                    alert.event_date.isoformat(),
-                    alert.status_kind,
+                    event_date,
+                    status_kind,
+                    phase,
                 ),
             )
 
     def complete(self, alert: HolidayAlert, *, email_message_id: str, chat_posted: bool) -> None:
+        event_date, status_kind, phase = self._key(alert)
         with self._connect() as conn:
             conn.execute(
                 """UPDATE holiday_alert_sends
                    SET state='sent', email_message_id=?, chat_posted=?, sent_at=?
-                   WHERE event_date=? AND status_kind=?""",
+                   WHERE event_date=? AND status_kind=? AND phase=?""",
                 (
                     email_message_id,
                     1 if chat_posted else 0,
                     datetime.now(timezone.utc).isoformat(),
-                    alert.event_date.isoformat(),
-                    alert.status_kind,
+                    event_date,
+                    status_kind,
+                    phase,
                 ),
             )
 
     def release(self, alert: HolidayAlert) -> None:
+        event_date, status_kind, phase = self._key(alert)
         with self._connect() as conn:
             conn.execute(
                 """DELETE FROM holiday_alert_sends
-                   WHERE event_date=? AND status_kind=? AND state='pending'
+                   WHERE event_date=? AND status_kind=? AND phase=? AND state='pending'
                      AND COALESCE(email_message_id, '')='' AND chat_posted=0""",
-                (alert.event_date.isoformat(), alert.status_kind),
+                (event_date, status_kind, phase),
             )
 
 
@@ -721,17 +822,18 @@ class HolidayAlertWorker:
     def _perform(self, payload: dict[str, Any]) -> WorkerResult:
         channels = resolve_channels(payload)
         today = resolve_today(payload)
-        lead_days = resolve_lead_days(payload)
+        heads_up_days, nudge_days = resolve_leads(payload)
         document = _load_document(payload, channels)
         rows, alerts = load_schedule_alerts(document)
-        due = select_due(alerts, today, lead_days=lead_days)
+        due = select_due(alerts, today, heads_up_days=heads_up_days, nudge_days=nudge_days)
         destination: dict[str, Any] = {
             "dry_run": channels["dry_run"],
             "dry_run_reason": channels["reason"],
             "parsed_row_count": len(rows),
             "parsed_event_count": len(alerts),
             "today": today.isoformat(),
-            "lead_days": lead_days,
+            "heads_up_days": heads_up_days,
+            "nudge_days": nudge_days,
             "email_enabled": channels["email"],
             "chat_enabled": channels["chat"],
             "email_to": EMAIL_TO,

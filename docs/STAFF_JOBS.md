@@ -43,14 +43,23 @@ engine runs them through a Worker + Verifier pair.
   drops them (`Monday, ` with no date), so the job uses the HTML export
   (markdown tables are also accepted). If the heading or table cannot be
   parsed, the job **fails closed** and sends nothing.
-- **Window:** `ALERT_LEAD_DAYS = 7` in `robie_job_engine/staff_holiday_alert.py`
-  (override with `ROBIE_HOLIDAY_ALERT_LEAD_DAYS`). An event is due when it is
-  today or up to that many calendar days ahead in America/New_York. Past
-  dates are skipped. While the send flags are on, the first due run sends
-  and later runs dedup. While the flags are off, every run only prints the plan.
-- **Copy:** deterministic templates (no Gemini). CLOSED vs close-early time,
-  plan-ahead, client awareness, Gmail vacation reply, Google Calendar, and
-  RingCentral, plus the Doc link. Chat copy may include emoji.
+- **Windows** (America/New_York), named constants in
+  `robie_job_engine/staff_holiday_alert.py`:
+  - `LEAD_DAYS_HEADS_UP = 14` — first alert. Due from T-14 until the day
+    before the nudge window. Upcoming CLOSED / early-close, plan ahead,
+    clients aware, link to the Doc.
+  - `LEAD_DAYS_NUDGE = 3` — second alert. Due from T-3 through the morning
+    of the event. Shorter and urgent. It tells staff to turn on the Gmail
+    vacation responder (Doc template), block the day in Google Calendar,
+    and set RingCentral forward-all / queue per the Doc, and it links the
+    Doc again.
+  Past dates are skipped. The weekday run inside each window sends that
+  phase once. Overrides: `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_HEADS_UP` and
+  `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_NUDGE`. While the send flags are off, every
+  run only prints both phases.
+- **Copy:** deterministic templates (no Gemini), one for each phase. Chat
+  copy may include emoji. The nudge is the message that carries the
+  out-of-office checklist.
 - **Row shapes:** a multi-day “and” date becomes one alert per day. A
   combined status such as Memorial Day (`Closed; close early Friday …`)
   emits both the closed day and the early-close day. `Observed Friday, Jul 3`
@@ -58,15 +67,16 @@ engine runs them through a Worker + Verifier pair.
   close), so one day does not get two emails. Black Friday on the Doc is a
   normal closed-day row and is not special-cased.
 - **Dedup:** the job database table `holiday_alert_sends` records
-  `(event_date, status_kind)`. A second run will not send that pair again.
+  `(event_date, status_kind, phase)` with phase `heads_up` or `nudge`.
+  Each phase sends once. A heads-up does not block the later nudge.
   Dry-run does not write the ledger. A pending row with no receipt is held
   and not resent (fail closed against a duplicate). Clear a stuck pending
   row only after checking that the email was not already sent:
 
   ```sql
   DELETE FROM holiday_alert_sends
-  WHERE event_date='YYYY-MM-DD' AND status_kind='closed' AND state='pending'
-    AND COALESCE(email_message_id, '')='';
+  WHERE event_date='YYYY-MM-DD' AND status_kind='closed' AND phase='heads_up'
+    AND state='pending' AND COALESCE(email_message_id, '')='';
   ```
 - **Channels, default OFF:**
   - Email to `StreetSmart@streetsmart.insurance` from
@@ -110,7 +120,8 @@ Capability Map row is added here.
 | `ROBIE_HOLIDAY_ALERT_SEND` | unset (off) | Master switch for holiday live send |
 | `ROBIE_HOLIDAY_ALERT_EMAIL` | unset (off) | Holiday email channel |
 | `ROBIE_HOLIDAY_ALERT_CHAT` | unset (off) | Holiday Chat channel |
-| `ROBIE_HOLIDAY_ALERT_LEAD_DAYS` | `7` | Holiday alert window in calendar days |
+| `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_HEADS_UP` | `14` | T-14 heads-up window |
+| `ROBIE_HOLIDAY_ALERT_LEAD_DAYS_NUDGE` | `3` | T-3 out-of-office nudge window |
 
 No systemd unit changes are needed: every secret name has a working default
 and the Drive token env var is already set on `robie-scheduler.service`.

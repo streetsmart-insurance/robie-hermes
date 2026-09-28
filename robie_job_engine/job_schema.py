@@ -279,8 +279,8 @@ EXECUTABLE_SKILL_CONTRACTS: dict[str, ExecutableSkillContract] = {
     "staff.holiday.alert": ExecutableSkillContract(
         expected_destination_result=(
             "due holiday office alerts are planned from the live Holiday Schedule "
-            "Doc; live email or Chat is sent only when the send flags are on, "
-            "and each (event date, status) is sent at most once"
+            "Doc; a T-14 heads-up and a T-3 out-of-office nudge can each send "
+            "once, and live email or Chat is sent only when the send flags are on"
         ),
         recording_policy="EXEMPT",
         independent_verifier="HolidayAlertVerifier",

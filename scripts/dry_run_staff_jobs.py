@@ -145,26 +145,51 @@ def dry_holiday(fixture: str, today_text: str) -> None:
         if today_text
         else datetime.now(ZoneInfo(holiday.TIMEZONE)).date()
     )
-    due = holiday.select_due(alerts, today, lead_days=holiday.ALERT_LEAD_DAYS)
+    heads_up_days = holiday.LEAD_DAYS_HEADS_UP
+    nudge_days = holiday.LEAD_DAYS_NUDGE
+    due = holiday.select_due(alerts, today, heads_up_days=heads_up_days, nudge_days=nudge_days)
+    due_by_key = {alert.ledger_key(): alert for alert in due}
     print(f"doc: {holiday.DOC_TITLE}")
     print(f"source: {holiday.DOC_URL}")
     print(f"parsed rows: {len(rows)}  events: {len(alerts)}")
-    print(f"today: {today.isoformat()} {holiday.TIMEZONE}  lead_days: {holiday.ALERT_LEAD_DAYS}")
-    print("\n=== all events (past dates are not alerted) ===")
+    print(
+        f"today: {today.isoformat()} {holiday.TIMEZONE}  "
+        f"heads_up=T-{heads_up_days}  nudge=T-{nudge_days}"
+    )
+    print("\n=== both phases (past dates are not alerted) ===")
     for alert in alerts:
         delta = (alert.event_date - today).days
-        mark = "DUE" if alert in due else ("past" if delta < 0 else "later")
         when = alert.close_time or alert.status_kind
-        print(f"  {mark:5} {alert.event_date.isoformat()} {alert.status_kind:11} {when:8} {alert.holiday}")
-    print(f"\n=== WOULD SEND ({len(due)}) ===")
-    if not due:
-        print("(none — nothing in the lead window)")
-    for alert in due:
-        print(f"\n--- {alert.ledger_key()} ---")
-        print(f"Subject: {holiday.email_subject(alert)}")
-        print(holiday.email_body(alert))
-        print("\nChat:")
-        print(holiday.chat_text(alert))
+        heads_day = alert.event_date - timedelta(days=heads_up_days)
+        nudge_day = alert.event_date - timedelta(days=nudge_days)
+        print(
+            f"  {alert.event_date.isoformat()} {alert.status_kind:11} {when:8} {alert.holiday}"
+        )
+        for phase, opens in (
+            (holiday.PHASE_HEADS_UP, heads_day),
+            (holiday.PHASE_NUDGE, nudge_day),
+        ):
+            phased = alert.with_phase(phase)
+            if phased.ledger_key() in due_by_key:
+                mark = "WOULD SEND"
+            elif delta < 0:
+                mark = "past"
+            elif phase == holiday.PHASE_HEADS_UP and delta <= nudge_days:
+                mark = "window closed"
+            else:
+                mark = "later"
+            print(f"      {phase:8} opens {opens.isoformat()}  {mark}")
+    for phase in (holiday.PHASE_HEADS_UP, holiday.PHASE_NUDGE):
+        phase_due = [alert for alert in due if alert.phase == phase]
+        print(f"\n=== WOULD SEND {phase} ({len(phase_due)}) ===")
+        if not phase_due:
+            print("(none)")
+        for alert in phase_due:
+            print(f"\n--- {alert.ledger_key()} ---")
+            print(f"Subject: {holiday.email_subject(alert)}")
+            print(holiday.email_body(alert))
+            print("\nChat:")
+            print(holiday.chat_text(alert))
     print("\nDRY-RUN OK: no email sent, no chat posted, ledger unchanged.")
 
 
