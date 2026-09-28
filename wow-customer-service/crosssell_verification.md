@@ -67,3 +67,15 @@ All five verified as ISSUED and ACTIVE; every account is an existing client.
 ## Browser Verification — Batch 3 (running 2026-09-27 ~22:25 EDT)
 
 Top Notch Tree Service LLC (BOR renewal — genuine cross-sell or not?); Jaguar Tree Service LLC prior-client determination (cross-sell vs new customer).
+
+## Browser Verification — Batch 3 (2026-09-27 ~22:25 EDT, read-only, signed in as Carlo Ferrara)
+
+- **Top Notch Tree Service LLC** — NOT a genuine cross-sell. Existing client since Oct 2025 (GL NPP1674285 Tapco $4,635, term 10/28/25–10/28/26, renewal due 10/28/26; Progressive commercial auto 988537063 $13,129, term 4/24/26–10/24/26, renewal quoted). The September WC entry (6S61UB-A424589-8-26, NJCRIB/Continental Assigned Risk, $4,508, term 11/7/26–11/7/27, entered 9/18/26 as "New Business") is a BROKER-OF-RECORD transfer — the e-signature "Agent/Broker of Record Change" was sent ~Sep 4 and ~Sep 9, matching the note "sent updated BOR for renewal." Existing WC coverage moved to StreetSmart for the renewal term; no new coverage sold. The "Cross Sell" label is incorrect. (Open task: Taylor to get a copy of the renewal and close out, due Oct 7.)
+- **Jaguar Tree Service LLC** — CROSS-SELL CONFIRMED. Existing client since 2021 (pinned note by Carlo Ferrara, Sep 24, 2021). Most decisively: active GL CPS4120548 (Tapco/Scottsdale, $2,872) renewed 7/17/2026 — one month before the September WC sale. The September WC WC533SB27T34016 (NJCRIB/Liberty Mutual, $2,848, term 9/3/26–9/3/27, New Business, Transaction Date 9/3/26) is NEW coverage on an EXISTING client. "Cross Sell" label CORRECT; "New Customer CSR" label WRONG. Completed task confirms: "Sold WC with NJCRIB, assigned risk went with LM Insurance Corporation under Application ID 283718." Agent: Zeus Quezada.
+
+## Cross Sell — FINAL TALLY (13 rows, all browser-verified 2026-09-27)
+
+- CLEAN (genuine cross-sells, existing clients): MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar — 9.
+- TIMING ISSUE (October-effective, not yet active): Murray King — 1.
+- QUESTIONABLE (replacement/renewal of same line, not new coverage): Slavin (nothing issued), Bruder (same GL line renewed) — 2.
+- REJECTED (not a cross-sell): Top Notch Tree Service (BOR transfer) — 1.

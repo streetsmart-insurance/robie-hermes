@@ -1,5 +1,5 @@
 # WOW Customer Service — September 2026 Final Reconciliation Report
-# Status: WORKING DRAFT 2026-09-27 (overnight build) — pending: Cross Sell batches 2–3, Alejandro's reply
+# Status: 2026-09-27 (overnight build) — Cross Sell complete; pending only Alejandro's reply (rows 38, 39)
 
 Carlo's standing rules applied throughout: payroll is unavailable, so findings are credits to add/reconcile, not proof of missed payments. Labels and notes are claims; every disposition below is verified against EZLynx (browser, PolicyApi, or Discussion/Document APIs) unless marked PENDING/WEAK. Labels pay separately, but contradictory labels cannot both earn credit ("we can't contradict ourselves"). A rewrite earns no new-business credit; AutoPay, All Star Call, or Google Review credit can still be earned on a rewrite row only if independently supported.
 
@@ -35,25 +35,14 @@ Full row-by-row ledger: `ncsr_final_ledger.md`.
 - **PENDING: 4 rows** — Puma (browser batch 2), 1812 cyber row 38 (Alejandro), Mendieta (Alejandro), Jaguar (browser batch 3 prior-client check). 1812 row 41's policy is verified; only the row-38 sameness question is pending.
 - **Confirmed range: 28 credits minimum** (27 verified + 1 Lupano), up to 35 at Carlo's discretion (3 Oct-effective + 4 pending).
 
-## 4. Cross Sell (13 rows) — BATCHES 1+2 VERIFIED, BATCH 3 RUNNING
+## 4. Cross Sell (13 rows) — ALL BROWSER-VERIFIED, FINAL
 
-Browser-verified batch 1 (2026-09-27 ~21:55 EDT):
-- **MCM Home Services** — CLEAN. Progressive commercial auto 880297566, Active, $3,005, eff 9/22/26–9/22/27. Existing client since 2024.
-- **Caruso** — CLEAN. Markel event liability 3DS5477, Active, $106 (note said $111). Existing client.
-- **Murray King** — label correct, TIMING issue. Foremost dwelling fire 502754335100, $3,316, PENDING, eff 10/2/26. Existing client since 2021/22.
-- **Slavin** — QUESTIONABLE. Replacement umbrella for cancelled Nationwide line; eSignature still pending 9/27, nothing issued.
-- **Bruder** — QUESTIONABLE. VEP0440216 Active ($433.30, eff 9/4/26) replaces VEP0386394 — same GL line renewed, not a new coverage.
-- **J Swat** — confirmed cross-sell (National General commercial auto 2037678234, Active, $5,135.46, eff 9/8/26–9/8/27).
-- **Jaguar** — new WC WC533SB27T34016 verified issued ($2,848, eff 9/3/26–9/3/27); prior-client determination in batch 3 decides cross-sell vs new customer.
+- **CLEAN (9):** MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar — all issued, active, existing clients. (Puma: binder-date vs term mismatch and named-insured question flagged for accounting. Mansukh: garage/dealers + property package, not WC. SK Direct: named-insured endorsement open.)
+- **TIMING ISSUE (1):** Murray King — Foremost dwelling fire $3,316, PENDING, eff 10/2/26. Label correct; credit timing is Carlo's call.
+- **QUESTIONABLE (2):** Slavin (replacement umbrella, nothing issued, eSignature pending), Bruder (same GL line renewed — VEP0440216 replaces VEP0386394).
+- **REJECTED (1):** Top Notch Tree Service — September activity was a BOR transfer of existing WC coverage (renewal term 11/7/26–11/7/27), not a new sale.
 
-Browser-verified batch 2 (2026-09-27 ~22:00 EDT) — all five issued, active, existing clients:
-- **Top Notch Lawn** — CLEAN. Hartford WC 13WECCF3B49, Active, $2,018, term 9/1/26–9/1/27, New Business, pay-as-you-go.
-- **EG Smart Home** — CLEAN. Next Insurance commercial pkg NXTWRTLWHW-00-GL, Active, $2,277.16 (GL $1,870 + Umbrella-Comm $362.16), term 9/8/26–9/8/27, New Business.
-- **Puma** — cross-sell CONFIRMED, NCSR label rejected. Tapco pkg BACTA-X, Active, $2,686, term 9/6/26–9/6/27, New Business, Lloyd's of London, Ascend. Caution: binder dates (9/3/26–6/3/27) differ from entered term; named-insured question (Puma vs Piotr Konefal) unresolved in Accounting tasks.
-- **SK Direct** — CLEAN. Hartford WC 13WECCE5FJ6, Active, $1,170, term 9/15/26–9/15/27. Named-insured endorsement (dropping "Koudello Inc.") has an open change request.
-- **Mansukh** — CLEAN. Amwins/StarStone commercial pkg CBG01476426P-00, Active, $2,825, term 9/3/26–9/3/27, New Business. Correction: NOT workers comp — Garage & Dealers + Commercial Property. (Row also carries AutoPay Setup — "set up on auto pay" per note; verification pending.)
-
-PENDING: batch 3 (Top Notch Tree Service — note says renewal BOR, likely not a cross-sell; Jaguar prior-client) — running ~22:25 EDT.
+PENDING: none — all 13 resolved.
 
 ## 5. Coverage Enhancement (5 rows)
 
