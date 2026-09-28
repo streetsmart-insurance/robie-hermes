@@ -1,4 +1,4 @@
-"""Shared helpers for the staff automation jobs (meeting synthesis, staff fun).
+"""Shared helpers for the staff automation jobs (meeting synthesis, staff fun, holiday alerts).
 
 Conventions (mirror the existing job engine):
 - Secrets are read at runtime from GCP Secret Manager via ADC. Only secret

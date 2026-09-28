@@ -52,8 +52,10 @@ def test_october_is_costume_contest():
 def test_routing_registered():
     assert WORKER_FOR_ACTION["meeting.synthesis.weekly"] == "meeting-synthesis"
     assert WORKER_FOR_ACTION["staff.fun.monthly"] == "staff-fun"
+    assert WORKER_FOR_ACTION["staff.holiday.alert"] == "staff-holiday-alert"
     assert "meeting.synthesis.weekly" in BOUNDED_ENGINE_ACTIONS
     assert "staff.fun.monthly" in BOUNDED_ENGINE_ACTIONS
+    assert "staff.holiday.alert" in BOUNDED_ENGINE_ACTIONS
 
 
 def test_schedule_specs():
@@ -61,6 +63,7 @@ def test_schedule_specs():
     specs = {action: cron for _, action, cron in DEFAULT_SCHEDULES}
     assert specs["meeting.synthesis.weekly"] == "0 8 * * 1"
     assert specs["staff.fun.monthly"] == "0 9 1 * *"
+    assert specs["staff.holiday.alert"] == "0 9 * * 1-5"
 
 
 def test_email_body_marks_social_drafts_unposted():

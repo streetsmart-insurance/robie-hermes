@@ -1,4 +1,4 @@
-"""Install the weekly meeting-synthesis and monthly staff-fun schedules."""
+"""Install meeting-synthesis, staff-fun, and holiday-alert schedules."""
 
 from __future__ import annotations
 
@@ -9,8 +9,11 @@ from .chat_admin import next_cron_time
 from .meeting_synthesis import ACTION_TYPE as SYNTH_ACTION
 from .meeting_synthesis import TASK_NAME as SYNTH_TASK
 from .operations import OperationsStore
+from .request_routing import WORKER_FOR_ACTION
 from .staff_fun import ACTION_TYPE as FUN_ACTION
 from .staff_fun import TASK_NAME as FUN_TASK
+from .staff_holiday_alert import ACTION_TYPE as HOLIDAY_ACTION
+from .staff_holiday_alert import TASK_NAME as HOLIDAY_TASK
 
 
 DEFAULT_SCHEDULES = (
@@ -18,6 +21,8 @@ DEFAULT_SCHEDULES = (
     (SYNTH_TASK, SYNTH_ACTION, "0 8 * * 1"),
     # 1st of each month ~9:00 AM America/New_York
     (FUN_TASK, FUN_ACTION, "0 9 1 * *"),
+    # Weekday mornings ~9:00 AM America/New_York
+    (HOLIDAY_TASK, HOLIDAY_ACTION, "0 9 * * 1-5"),
 )
 
 
@@ -30,7 +35,7 @@ def install_staff_jobs_schedules(
     ops = OperationsStore(db_path)
     installed: list[dict[str, Any]] = []
     for task_name, action_type, cron_spec in DEFAULT_SCHEDULES:
-        payload = {"worker": "meeting-synthesis" if "synthesis" in action_type else "staff-fun"}
+        payload = {"worker": WORKER_FOR_ACTION[action_type]}
         expected_next = next_cron_time(cron_spec, timezone_name, now=now)
         item = ops.ensure_recurring_job(
             task_name,
