@@ -31,6 +31,15 @@ policy search``. Zero or several of those names hold. A tab that was not
 already on Home still clicks Manage Policies, then exact
 ``Businessowner/Contractor GL``, after Home opens.
 
+The window that click opens is often a dead For Agents Only HPLanding page
+whose only control is ``Close this window``. The Businessowner application
+itself is ``https://bop.americanstrategic.com`` and its report control is
+``View Reports`` or ``VIEW REPORTS``. The pull attaches to that application
+page, or to the one frame on that host inside the landing window. It closes
+the landing page when the application is a different page. A failed close
+does not hold. HPLanding with no BOP application holds, and View Reports is
+not clicked there. This module never files to EZLynx.
+
 Accessible names are the playbook, not a certified live DOM. Zero or multiple
 matches hold. Live FAO on hermes-test-01 is UNVERIFIED.
 """
@@ -1305,6 +1314,216 @@ def fill_policy_search(page: Any, policy_number: str) -> None:
         raise IntakeHold("FAO policy search did not stick")
 
 
+_BOP_APP_HOST = "bop.americanstrategic.com"
+_VIEW_REPORTS_NAMES = ("View Reports", "VIEW REPORTS")
+_CLOSE_THIS_WINDOW = re.compile(r"^close this window$", re.IGNORECASE)
+_HP_LANDING_URL = re.compile(r"hplanding", re.IGNORECASE)
+_CLOSE_THIS_WINDOW_TEXT = re.compile(r"close this window", re.IGNORECASE)
+
+
+class _BopFrameSurface:
+    """Page-shaped view of the BOP application frame inside HPLanding.
+
+    Locators stay on the frame. Screenshot, download, and context stay on the
+    owning page so a frame can still feed the report reader.
+    """
+
+    def __init__(self, frame: Any, owner: Any):
+        self._frame = frame
+        self._owner = owner
+        self.url = str(getattr(frame, "url", "") or "")
+
+    def get_by_role(self, *args: Any, **kwargs: Any) -> Any:
+        return self._frame.get_by_role(*args, **kwargs)
+
+    def locator(self, *args: Any, **kwargs: Any) -> Any:
+        return self._frame.locator(*args, **kwargs)
+
+    def screenshot(self, **kwargs: Any) -> Any:
+        shot = getattr(self._frame, "screenshot", None)
+        if callable(shot):
+            return shot(**kwargs)
+        return self._owner.screenshot(**kwargs)
+
+    @property
+    def context(self) -> Any:
+        return getattr(self._owner, "context", None)
+
+    def expect_download(self, *args: Any, **kwargs: Any) -> Any:
+        return self._owner.expect_download(*args, **kwargs)
+
+
+def _is_bop_app_url(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    return host == _BOP_APP_HOST or host.endswith("." + _BOP_APP_HOST)
+
+
+def _target_url(target: Any) -> str:
+    return str(getattr(target, "url", "") or "")
+
+
+def _is_hplanding_target(target: Any) -> bool:
+    """Dead FAO landing. The BOP application is not this page."""
+    if _HP_LANDING_URL.search(_target_url(target)):
+        return True
+    for role in ("button", "link"):
+        try:
+            locator = target.get_by_role(role, name=_CLOSE_THIS_WINDOW)
+            if int(locator.count()) >= 1:
+                return True
+        except Exception:
+            continue
+    try:
+        body = str(target.locator("body").inner_text() or "")
+    except Exception:
+        body = ""
+    return _CLOSE_THIS_WINDOW_TEXT.search(body) is not None
+
+
+def _context_pages(*owners: Any) -> list[Any]:
+    found: list[Any] = []
+    seen: set[int] = set()
+    for owner in owners:
+        if owner is None:
+            continue
+        context = getattr(owner, "context", None)
+        pages = getattr(context, "pages", None) if context is not None else None
+        if pages is None:
+            continue
+        try:
+            items = list(pages)
+        except Exception:
+            continue
+        for item in items:
+            marker = id(item)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            found.append(item)
+    return found
+
+
+def _child_frames(page: Any) -> list[Any]:
+    raw = getattr(page, "frames", None)
+    if not raw:
+        return []
+    try:
+        frames = list(raw)
+    except Exception:
+        return []
+    owner_url = _target_url(page)
+    found = []
+    for frame in frames:
+        if frame is page:
+            continue
+        frame_url = _target_url(frame)
+        if frame_url and frame_url == owner_url:
+            continue
+        found.append(frame)
+    return found
+
+
+def _bop_pages(shell: Any, popup: Any) -> list[Any]:
+    return [page for page in _context_pages(shell, popup) if _is_bop_app_url(_target_url(page))]
+
+
+def _bop_frames(popup: Any) -> list[tuple[Any, Any]]:
+    if popup is None:
+        return []
+    return [
+        (popup, frame)
+        for frame in _child_frames(popup)
+        if _is_bop_app_url(_target_url(frame))
+    ]
+
+
+def _close_if_possible(target: Any) -> None:
+    """HPLanding close is best-effort. A failed close still leaves the BOP app attached."""
+    closer = getattr(target, "close", None)
+    if not callable(closer):
+        return
+    try:
+        closer()
+    except Exception:
+        return
+
+
+def _await_bop_surface(shell: Any, popup: Any) -> tuple[list[Any], list[tuple[Any, Any]]]:
+    pages = _bop_pages(shell, popup)
+    frames = _bop_frames(popup)
+    if pages or frames or popup is None or not _is_hplanding_target(popup):
+        return pages, frames
+    wait = getattr(shell, "wait_for_timeout", None)
+    if not callable(wait):
+        return pages, frames
+    waited = 0
+    step = 250
+    while waited < DOWNLOAD_TIMEOUT_MS:
+        try:
+            wait(step)
+        except Exception:
+            break
+        waited += step
+        pages = _bop_pages(shell, popup)
+        frames = _bop_frames(popup)
+        if pages or frames:
+            return pages, frames
+    return pages, frames
+
+
+def _attach_bop_application(shell: Any, popup: Any) -> Any:
+    """Use the BOP application, not the dead HPLanding popup.
+
+    A popup that is already the application is returned as-is. A non-landing
+    popup stays the report window so an older in-window GL path still works.
+    HPLanding attaches to the one ``bop.americanstrategic.com`` page or frame.
+    """
+    if popup is not None and _is_bop_app_url(_target_url(popup)):
+        return popup
+    if popup is None or not _is_hplanding_target(popup):
+        if popup is None:
+            raise IntakeHold("Businessowner/Contractor GL did not open a single new window")
+        return popup
+    pages, frames = _await_bop_surface(shell, popup)
+    if len(pages) + len(frames) > 1:
+        raise IntakeHold("Businessowner/Contractor GL opened more than one BOP window")
+    if len(pages) == 1:
+        _close_if_possible(popup)
+        return pages[0]
+    if len(frames) == 1:
+        _owner, frame = frames[0]
+        return _BopFrameSurface(frame, _owner)
+    raise IntakeHold(
+        "Businessowner/Contractor GL opened HPLanding instead of the BOP application"
+    )
+
+
+def _click_first_exact(
+    page: Any,
+    names: tuple[str, ...],
+    roles: tuple[str, ...],
+    label: str,
+) -> None:
+    """Click the first name that is one control. A later casing is only a fallback."""
+    for name in names:
+        matches = []
+        for role in roles:
+            locator = page.get_by_role(role, name=name, exact=True)
+            count = locator.count()
+            if count:
+                matches.append((count, locator))
+        if not matches:
+            continue
+        if len(matches) != 1 or matches[0][0] != 1:
+            raise IntakeHold(f"Progressive control {label!r} is missing or ambiguous")
+        matches[0][1].click()
+        return
+    raise IntakeHold(f"Progressive control {label!r} is missing or ambiguous")
+
+
 def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -> Any:
     """Open Businessowner/Contractor GL in one new window.
 
@@ -1334,11 +1553,11 @@ def open_businessowner_window(page: Any, *, on_shell_home: bool | None = None) -
         raise IntakeHold("Businessowner/Contractor GL did not open a single new window") from exc
     if opened is None:
         raise IntakeHold("Businessowner/Contractor GL did not open a single new window")
-    return opened
+    return _attach_bop_application(page, opened)
 
 
 def open_pending_cancel_report(report_page: Any) -> None:
-    click_named(report_page, "View Reports", roles=("link", "button"))
+    _click_first_exact(report_page, _VIEW_REPORTS_NAMES, ("link", "button"), "View Reports")
     click_named(report_page, "Pending Cancel for Nonpayment", roles=("link", "button"))
 
 
@@ -1839,8 +2058,10 @@ def _allowed_pdf_url(url: str) -> bool:
     return (
         host == "foragentsonly.com"
         or host.endswith(".foragentsonly.com")
-        or host == "progressive.com"
+        or         host == "progressive.com"
         or host.endswith(".progressive.com")
+        or host == _BOP_APP_HOST
+        or host.endswith("." + _BOP_APP_HOST)
     )
 
 

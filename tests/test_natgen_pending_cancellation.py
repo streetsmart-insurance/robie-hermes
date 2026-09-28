@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import re
 import unittest
 import zlib
 from datetime import date
@@ -644,7 +645,7 @@ class LocatorContractTests(unittest.TestCase):
             ("link", "Your Notifications"): 1,
             ("link", "Policy To Dos"): 1,
             ("link", "Pending Cancellations"): 1,
-        })
+        }, url="https://www.natgenagency.com/dashboard")
         open_pending_cancellations(page)
         self.assertEqual(page.clicks, [
             "Agent Dashboard",
@@ -662,9 +663,89 @@ class LocatorContractTests(unittest.TestCase):
         ambiguous = RolePage({
             ("link", "Agent Dashboard"): 1,
             ("button", "Agent Dashboard"): 1,
-        })
+        }, url="https://www.natgenagency.com/dashboard")
         with self.assertRaisesRegex(IntakeHold, "ambiguous"):
             open_pending_cancellations(ambiguous)
+        self.assertEqual(ambiguous.clicks, [])
+
+    def test_pending_report_url_skips_agent_dashboard(self):
+        page = RolePage(
+            {("link", "Agent Dashboard"): 1},
+            url="https://www.natgenagency.com/reports/agency-activity/pending-cancellations",
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
+    def test_agency_activity_page_with_rows_skips_agent_dashboard(self):
+        page = RolePage(
+            {
+                ("link", "Agent Dashboard"): 1,
+                ("heading", "Pending Cancellations Agency Activity"): 1,
+            },
+            url="https://www.natgenagency.com/reports/agency-activity",
+            table_count=1,
+            row_count=2,
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
+    def test_heading_and_rows_skip_dashboard_when_the_url_is_opaque(self):
+        page = RolePage(
+            {("heading", "Pending Cancellations"): 1},
+            url="https://www.natgenagency.com/portal/default.aspx",
+            table_count=1,
+            row_count=2,
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
+    def test_missing_agent_dashboard_still_walks_the_later_steps(self):
+        page = RolePage({
+            ("link", "Your Notifications"): 1,
+            ("link", "Policy To Dos"): 1,
+            ("link", "Pending Cancellations"): 1,
+        }, url="https://www.natgenagency.com/dashboard")
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [
+            "Your Notifications",
+            "Policy To Dos",
+            "Pending Cancellations",
+        ])
+
+    def test_encoded_pending_url_skips_agent_dashboard(self):
+        page = RolePage(
+            {("link", "Agent Dashboard"): 1},
+            url="https://www.natgenagency.com/reports?name=Pending+Cancellations",
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
+    def test_report_text_and_rows_skip_dashboard_when_it_is_absent(self):
+        page = RolePage(
+            {},
+            url="https://www.natgenagency.com/portal/default.aspx",
+            table_count=1,
+            row_count=2,
+            body="Pending Cancellations\nAgency Activity\nPolicy 1\nPolicy 2",
+        )
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
+
+    def test_dashboard_with_a_pending_link_and_rows_still_uses_the_playbook(self):
+        page = RolePage({
+            ("link", "Agent Dashboard"): 1,
+            ("link", "Your Notifications"): 1,
+            ("link", "Policy To Dos"): 1,
+            ("link", "Pending Cancellations"): 1,
+        }, url="https://www.natgenagency.com/dashboard", table_count=1, row_count=2, body="Pending Cancellations")
+        open_pending_cancellations(page)
+        self.assertEqual(page.clicks[0], "Agent Dashboard")
+
+    def test_report_not_found_holds_when_dashboard_is_absent(self):
+        page = RolePage({}, url="https://www.natgenagency.com/dashboard")
+        with self.assertRaisesRegex(IntakeHold, "report was not found"):
+            open_pending_cancellations(page)
+        self.assertEqual(page.clicks, [])
 
         forms = RolePage({
             ("link", "Forms View"): 1,
@@ -675,16 +756,26 @@ class LocatorContractTests(unittest.TestCase):
 
 
 class RolePage:
-    def __init__(self, roles, *, password_count=0, url=LIST_URL):
+    def __init__(self, roles, *, password_count=0, url=LIST_URL, table_count=0, row_count=0, body=""):
         self.roles = roles
         self.password_count = password_count
         self.url = url
+        self.table_count = table_count
+        self.row_count = row_count
+        self.body = body
         self.clicks = []
         self.label_calls = []
 
     def get_by_role(self, role, name, exact=True):
         del exact
-        count = self.roles.get((role, name), 0)
+        if isinstance(name, re.Pattern):
+            count = sum(
+                item_count
+                for (item_role, item_name), item_count in self.roles.items()
+                if item_role == role and name.search(str(item_name))
+            )
+        else:
+            count = self.roles.get((role, name), 0)
         page = self
 
         class Locator:
@@ -702,8 +793,29 @@ class RolePage:
         raise AssertionError("Pending Cancellations list is not day-filtered")
 
     def locator(self, selector):
-        count = self.password_count if selector == "input[type='password']" else 0
-        return SimpleNamespace(count=lambda: count)
+        if selector == "input[type='password']":
+            count = self.password_count
+        elif selector == "table":
+            count = self.table_count
+        elif selector == "tbody tr":
+            count = self.row_count if self.table_count == 1 else 0
+        elif selector == "body":
+            count = 1
+        else:
+            count = 0
+        page = self
+
+        class Locator:
+            def count(self):
+                return count
+
+            def inner_text(self):
+                return page.body if selector == "body" else ""
+
+            def locator(self, child):
+                return page.locator(child)
+
+        return Locator()
 
 
 def tempfile_dir():

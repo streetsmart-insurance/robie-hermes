@@ -36,6 +36,14 @@ Cancellations, and reads visible High rows (policy number, insured, due
 date, severity as status, product). It does not type a password or a
 one-time passcode. A login host or a password field holds.
 
+On the current Gateway UI the Pending Cancellations control is a filter
+chip, often named `Pending Cancellations (3)`. A selected chip
+(`aria-pressed`, `aria-selected`, or `aria-checked`) is the view. A chip
+with no toggle attribute is the view when the alerts table is already the
+only table. Client Alerts is not required on that path. The older Client
+Alerts link, then the Pending Cancellations option, remains the path when
+no chip is present.
+
 Personal lines (`Private Passenger Auto`) are targeted only when Documents
 → Billing → Pending Cancellation Notice (or CANCELLATION NOTICE) is a
 single control. The PDF is saved as `[PolicyNumber] NOC Geico.pdf`.
@@ -106,9 +114,18 @@ of this commit is installed on `hermes-test-01` (not done here):
 6. Do not pass `--upload-drive`. Folder upload is not implemented. The flag
    writes the local pack, then exits `HELD` and does not call Google.
 
+CLEAR pull-only re-run on hermes-test-01. This command does not file to
+EZLynx. Do not pass `--upload-drive`. Tunnel CDP, leave the authenticated
+`gateway2.geico.com/client-alerts` tab, and run:
+
+```bash
+gcloud compute ssh hermes-test-01 -N -L 9222:127.0.0.1:9222
+```
+
 ```bash
 cd /opt/streetsmart-hermes-test/releases/current
-ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.geico_pending_cancellation_noc \
+ROBIE_ENV=TEST PYTHONPATH=. /opt/streetsmart-hermes-test/venv/bin/python \
+  -m robie_job_engine.geico_pending_cancellation_noc \
   --as-of 2026-09-26
 ```
 

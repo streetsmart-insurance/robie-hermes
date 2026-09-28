@@ -30,8 +30,8 @@
       "fallback_strategy": "role",
       "fallback_selector": "button:View Reports",
       "exact": true,
-      "description": "View Reports on the GL window. Live accessible name is UNVERIFIED.",
-      "last_updated": "2026-09-26"
+      "description": "View Reports on the BOP application. Live 2026-09-28 label is VIEW REPORTS on bop.americanstrategic.com. The FAO HPLanding popup that only says Close this window is not this page. Zero or several matches hold.",
+      "last_updated": "2026-09-28"
     },
     "pending_cancel_nonpayment": {
       "name": "pending_cancel_nonpayment",

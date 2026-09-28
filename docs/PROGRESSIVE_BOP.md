@@ -24,7 +24,12 @@ tab and writes one QA pack for `--report-date`:
    or `Go to Businessowner/Contractor GL policy search`. Zero or two matches
    hold. A Communications / underwritinglegacy tab still opens Home first,
    then clicks Manage Policies and then `Businessowner/Contractor GL`.
-2. View Reports → Pending Cancel for Nonpayment.
+2. View Reports → Pending Cancel for Nonpayment. `VIEW REPORTS` is the
+   same control. If the new window is only HPLanding (`Close this window`),
+   the pull attaches to the one `bop.americanstrategic.com` page, or to that
+   application's frame, and closes the landing page when the application is
+   a different page. A failed close does not hold. HPLanding alone holds
+   before View Reports is clicked.
 3. Full-page PNG of that report, then read policies from the on-screen policy
    table, or from one Excel export, or from one PDF export.
 4. For each policy, on the original FAO shell: search the policy → Documents →
@@ -136,6 +141,22 @@ of this commit is installed on `hermes-test-01` (not done here):
 ```bash
 cd /opt/streetsmart-hermes-test/releases/current
 ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.progressive_bop \
+  --report-date 2026-09-26
+```
+
+CLEAR pull-only re-run on hermes-test-01 (no EZLynx, no `--upload-drive`,
+no Production). This module has no `--pull-only` flag because it never
+files to EZLynx. Tunnel CDP from a workstation, leave one authenticated FAO
+tab, and run on the Test host with the Test virtualenv:
+
+```bash
+gcloud compute ssh hermes-test-01 -N -L 9222:127.0.0.1:9222
+```
+
+```bash
+cd /opt/streetsmart-hermes-test/releases/current
+ROBIE_ENV=TEST PYTHONPATH=. /opt/streetsmart-hermes-test/venv/bin/python \
+  -m robie_job_engine.progressive_bop \
   --report-date 2026-09-26
 ```
 

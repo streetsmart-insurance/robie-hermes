@@ -12,6 +12,14 @@ Playbook path (live DOM is **UNVERIFIED** until a hermes-test-01 run):
 
 1. natgenagency.com, already signed in. This pull does not type the password.
 2. Agent Dashboard → Your Notifications → Policy To Dos → Pending Cancellations.
+   If the tab is already that report, Agent Dashboard is not clicked. Already
+   there means a pending-cancellations URL (`+` and `%20` count), an Agency
+   Activity URL whose page names Pending Cancellations and has one table, or
+   any other NatGen page that names that report and has one table with rows
+   when Agent Dashboard is not on the page. A dashboard that still shows
+   Agent Dashboard keeps the playbook clicks. A missing Agent Dashboard does
+   not hold. Ambiguous controls hold. If the report is never reached, the
+   pull holds before scrape.
 3. Open the policy number → Policy History → the most recent Pending
    Cancellation or NOC → Forms View PDF.
 
@@ -146,9 +154,18 @@ of this commit is installed on `hermes-test-01` (not done here):
    left in place and the pull holds. Do not pass `--upload-drive` until
    folder upload exists; it fails closed.
 
+CLEAR pull-only re-run on hermes-test-01. This command does not file to
+EZLynx. Do not pass `--upload-drive`. Tunnel CDP, leave the authenticated
+NatGen tab on the Pending Cancellations report, and run:
+
+```bash
+gcloud compute ssh hermes-test-01 -N -L 9222:127.0.0.1:9222
+```
+
 ```bash
 cd /opt/streetsmart-hermes-test/releases/current
-ROBIE_ENV=TEST PYTHONPATH=. python3 -m robie_job_engine.natgen_pending_cancellation \
+ROBIE_ENV=TEST PYTHONPATH=. /opt/streetsmart-hermes-test/venv/bin/python \
+  -m robie_job_engine.natgen_pending_cancellation \
   --start 2026-09-28 \
   --end 2026-09-28
 ```
