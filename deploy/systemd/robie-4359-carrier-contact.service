@@ -1,0 +1,42 @@
+[Unit]
+Description=ROBIE phase-2 4359 carrier-contact worker (endorsement check + carrier email)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=streetsmart-hermes
+Group=streetsmart-hermes
+UMask=0077
+# Pinned via the /opt/streetsmart-hermes/4359-weekly symlink so the main
+# production pointer (/opt/streetsmart-hermes/current) is never flipped for
+# this worker. Re-pin the symlink on each 4359 release (see RUNBOOK.md).
+WorkingDirectory=/opt/streetsmart-hermes/4359-weekly
+Environment=PYTHONPATH=/opt/streetsmart-hermes/4359-weekly
+Environment=ROBIE_ENV=PRODUCTION
+# DRY-RUN PINNED: flip to live only after Carlo reviews the dry-run proof.
+Environment=ROBIE_4359_CARRIER_MODE=dry-run
+Environment=ROBIE_4359_SENT_STORE=/opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/sent.json
+Environment=ROBIE_4359_CARRIER_STORE=/opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/carrier_contact.json
+# Optional overrides (report mailbox, freshness bar, routing table path).
+# Values in this file win over the Environment= defaults above.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-4359.env
+# EZLynx API client credentials for the DocumentApi endorsement-landed check
+# (names only; values live in Secret Manager / this env file on the box).
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+# Keyless-delegated Gmail service account used to READ the daily 4359 CSV
+# and (in live mode) SEND the carrier chase emails.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-accountability.env
+# Ensure the state directory exists and is service-owned
+# (ProtectSystem=strict keeps /opt read-only otherwise).
+ExecStartPre=+/usr/bin/install -d -o streetsmart-hermes -g streetsmart-hermes -m 0750 /opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.run_policy_change_carrier_contact --evidence-out /opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/evidence-carrier-contact-latest.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target
