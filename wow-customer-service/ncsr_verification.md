@@ -57,22 +57,27 @@
 7. **PAA80002251414** (Karla Brown | Jennifer & Brian Olenick, Plymouth Rock Auto) — Active, eff 2026-09-03, AUTOP
 8. **NJH00002220171** (Karla Brown | Jennifer & Brian Olenick, Plymouth Rock Home) — Active, eff 2026-09-08, HOME
 
-### SOLD, NOT YET EFFECTIVE (5) — Inactive status, future effective date; sold in September, takes effect later
+### SOLD, NOT YET EFFECTIVE (6) — Inactive status, future effective date; sold in September, takes effect later
 9. **619315196-633-1** (Karla Brown | Paul & Maryann Cabrera, Travelers Home) — Inactive, eff 2026-10-04, created 2026-09-25
 10. **619315117-206-1** (Karla Brown | Paul & Maryann Cabrera, Travelers Auto) — Inactive, eff 2026-10-04, created 2026-09-25
 11. **NJA198092** (Karla Brown | Raghavender & Archana Gangwar, Progressive Home) — Inactive, eff 2026-10-03, created 2026-09-22
 12. **DPNJ2026090016-26** (Karla Brown | Michael Swartz, Hyundai) — Inactive, eff 2026-09-30, created 2026-09-24
 13. **DPNJ2026090015-26** (Karla Brown | Michael Swartz, Hyundai) — Inactive, eff 2026-09-30, created 2026-09-24
+14. **6192983786331** (Karla Brown | Richard & Lindsay Guarini, Travelers Home) — Inactive, eff 2026-09-28, created 2026-09-22. (Note wrote it with dashes as 619298378-633-1; EZLynx stores it without dashes.)
 
-### FLAGGED (3)
-14. **K4547767** (Karla Brown | Rebecca Gallman, LM) — **Deleted**, eff 2026-09-17. (Referral itself confirmed in Nicole's report; policy deleted from EZLynx.)
-15. **619238025-206-1** (Karla Brown | Lauren Pender, Travelers Auto) — **NO RESULTS** in EZLynx. Policy number not found.
-16. **619298378-633-1** (Karla Brown | Richard & Lindsay Guarini, Travelers) — **NO RESULTS** in EZLynx. Policy number not found.
+### CORRECTIONS (2026-09-27 — earlier flags were wrong, dash formatting in search)
+- **K4547767** (Karla Brown | Rebecca Gallman, LM) — was flagged Deleted; recheck found the live record **Active**, eff 2026-09-17. (A duplicate K4547767_83811082 is Deleted; the real policy is Active.) CONFIRMED, not flagged.
+- **6192380252061** (Karla Brown | Lauren Pender, Travelers Auto) — was flagged not-found; recheck without dashes found it **Active**, eff 2026-09-13. CONFIRMED, not flagged.
 
-## NCSR Scorecard (EZLynx PolicyApi evidence)
-- Confirmed Active: 13 (5 from Policy Number column + 8 from notes)
-- Sold, not yet effective: 5
-- Flagged: 6 (Deleted x2, Inactive old-term x2, not found x2)
+### FLAGGED (3, verified)
+15. **13579_83445947** (Ashley Huntley | Ashley & Troy Huntley, Flood) — **Deleted** (only record; no active variant found).
+16. **CDNJ004781** (Jazmin Molina | Dennis Korkowski) — **Inactive**, DFIRE, term 2025-05-01 to 2026-05-01. Last year's policy; September notes describe a renewal, not new business.
+17. **R2WC555848** (Zeus Quezada | Jaguar Tree Service LLC) — **Inactive**, WORK, eff 2024-02-24, cancelled 2024-04-29. Wrong/old policy number in a September note.
+
+## NCSR Scorecard (EZLynx PolicyApi evidence, corrected 2026-09-27)
+- Confirmed Active: 15 (5 from Policy Number column + 10 from notes, incl. Gallman K4547767 and Pender 6192380252061 corrections)
+- Sold, not yet effective: 6
+- Flagged: 3 (Deleted x1, Inactive old-term x2)
 - Still need review (no policy number found): ~19
 
 ## Total: 43 rows
