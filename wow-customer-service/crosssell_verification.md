@@ -37,3 +37,19 @@
 
 ## Total: 13 rows
 ## By employee: Zeus 6, Taylor 5, Jazmin 2
+
+## Browser Verification — Batch 1 (2026-09-27 ~21:55 EDT, read-only, signed in as Carlo Ferrara)
+
+- **Murray King** — EXISTING client (since 2021/22). New Foremost dwelling fire 502754335100 ($3,316, placed 9/26/26, PENDING, eff 10/2/26–10/2/27). October-effective, not yet active. Cross-sell label correct; New Customer labels wrong. Agent: Jazmin Molina.
+- **Elizabeth & Timothy Slavin** — EXISTING (since 2018). New umbrella to REPLACE cancelled Nationwide umbrella 51291U000067; eSignature still PENDING as of 9/27 — NOT issued, no policy number/carrier/effective date in system. Cross-sell label questionable (replacement of a cancelled line, not new coverage). Agent: Jazmin Molina.
+- **MCM Home Services LLC** — EXISTING (since 2024). Progressive commercial auto 880297566 (Active, $3,005, eff 9/22/26–9/22/27). Clean cross-sell; New Customer CSR label wrong. Agent: Zeus Quezada.
+- **Michael Caruso & Rosemarie Fratta-Caruso** — EXISTING (since ~2023). Markel event liability 3DS5477 (Active, $106 — note said $111 — eff 2/1/26–2/1/27). Clean cross-sell. Agent: Zeus Quezada.
+- **Jeffrey & Theresa Bruder** — EXISTING (since ~2023). Old VEP0386394 (Inactive, 8/12/25–8/12/26) replaced by NEW VEP0440216 (Vacant Express, Active, $433.30, eff 9/4/26–9/4/27, Transaction Date 9/8/26). Issued and active — but it is the same GL line renewed, so the Cross Sell label is questionable. Agent: Taylor Cimei.
+
+## Browser Verification — Batch 2 (running 2026-09-27 ~22:00 EDT)
+
+Top Notch Lawn & Landscaping LLC, EG Smart Home LLC, Puma Enterprise LLC, SK Direct LLC / Mrs. K's Motel & Restaurant, Mansukh Auto Repair Inc.
+
+## Browser Verification — Batch 3 (queued)
+
+Top Notch Tree Service LLC; Jaguar Tree Service LLC prior-client determination (new WC WC533SB27T34016 verified issued 9/3/26 — cross-sell if existing client, new customer if not).

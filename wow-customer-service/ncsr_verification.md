@@ -151,3 +151,30 @@ Used DiscussionApi `get_discussion` → applicant ID → DocumentApi `search_app
 
 ## Total: 43 rows
 ## By employee: Karla 19, Jazmin 7, Ashley 5, Zeus 4, Taylor 4, Mike 4
+
+## Carlo's Rulings (2026-09-27 ~evening) + Browser Resolutions
+
+These rulings supersede the screening notes above where they conflict.
+
+1. **Lupano (rows 19+37)** — COUNTS. Carlo: "technically, it is a new policy because this carrier just endorsed it." The $170.55 umbrella endorsement onto FMI home 4245319 is new-policy credit. The two WOW rows describe ONE activity — one credit, not two.
+2. **J Swat (row 13)** — CROSS-SELL, not new customer. Existing client (Selective S 2472738 since Mar 2026); National General commercial auto 2037678234 (Active, $5,135.46, eff 9/8/26–9/8/27). New Customer CSR label rejected; cross-sell credit stands.
+3. **Huntley (row 17)** — EXCLUDED entirely. The 13579 shell was created and deleted on 9/3/26; no Travelers auto exists. No credit under any label.
+4. **Korkowski (rows 33+34)** — REWRITE, no new-business credit. New FMI dwelling fire 4247502 replaced inactive Farmers Mutual CDNJ004781. Rows carry no AutoPay/call/review labels, so no other-label credit arises.
+5. **Labels pay separately, but "we can't contradict ourselves"** — a row carrying both New Customer CSR and Cross Sell can only earn one; the verified classification wins.
+
+## Mike Sosa's Four Accounts — Browser-Verified (2026-09-27 ~21:55 EDT)
+
+The "no document access" flags are resolved:
+- **DREAMS BUILT - BY DESIGN LLC** — VERIFIED. BiBerk GL N8BP859046, $316, term 9/19/26–9/19/27, New Business.
+- **F & Q Transport** — VERIFIED. Geico commercial auto 9300374229, $10,479, term 9/15/26–9/15/27, New Business.
+- **NASH Residential/Hogans' Transfer** — VERIFIED. Rocklake commercial auto MTC26-300072, $3,458.51, term 9/24/26–9/24/27, New Business.
+- **Mendieta O. Construction LLC** — PENDING. October-effective (10/4/26), zero policies in EZLynx; Alejandro emailed 2026-09-27.
+
+## Final Ledger
+
+See `ncsr_final_ledger.md` — one disposition per source row (43 rows):
+- VERIFIED: 27 rows (incl. Kelso timing flag and 1812-cyber sameness flag)
+- COUNTS (Carlo ruling): rows 19+37 = 1 credit
+- OCT-EFFECTIVE (Carlo's call): rows 3, 5, 11
+- REJECTED: 7 rows (1, 9, 13, 17, 24, 33, 34)
+- PENDING: 4 rows (22 Puma — browser batch 2; 38/39 — Alejandro; 42 Jaguar — browser batch 3)
