@@ -79,3 +79,17 @@ Top Notch Tree Service LLC (BOR renewal — genuine cross-sell or not?); Jaguar 
 - TIMING ISSUE (October-effective, not yet active): Murray King — 1.
 - QUESTIONABLE (replacement/renewal of same line, not new coverage): Slavin (nothing issued), Bruder (same GL line renewed) — 2.
 - REJECTED (not a cross-sell): Top Notch Tree Service (BOR transfer) — 1.
+
+## Carlo's Rulings (2026-09-28 ~06:30 EDT)
+
+1. **Murray King** — moves to OCTOBER. The Foremost dwelling fire (eff 10/2/26) earns October credit, not September.
+2. **Top Notch Tree Service** — COUNTS as a cross-sell. Carlo: "even though it is a BOR, that's how we got it." The WC coverage came to the agency via the September BOR, so the cross-sell credit stands despite it being a transfer rather than a new sale.
+3. **Slavin** — pending: when did the Nationwide umbrella (51291U000067) cancel? (Browser check running.)
+4. **Bruder** — pending: did the new VEP0440216 add liability coverage the old VEP0386394 lacked (property-only → property + liability)? (Browser check running.)
+
+## Cross Sell — FINAL TALLY (revised per Carlo 2026-09-28)
+
+- CLEAN (10): MCM Home Services, Caruso, J Swat, Top Notch Lawn, EG Smart Home, Puma, SK Direct, Mansukh, Jaguar, Top Notch Tree Service (per Carlo's BOR ruling).
+- OCTOBER (1): Murray King — Foremost dwelling fire eff 10/2/26; October credit per Carlo.
+- QUESTIONABLE (2): Slavin (replacement umbrella, nothing issued — cancel date pending), Bruder (same-line renewal vs added liability — coverage comparison pending).
+- REJECTED (0).
