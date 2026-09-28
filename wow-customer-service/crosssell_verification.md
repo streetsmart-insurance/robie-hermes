@@ -93,3 +93,12 @@ Top Notch Tree Service LLC (BOR renewal — genuine cross-sell or not?); Jaguar 
 - OCTOBER (1): Murray King — Foremost dwelling fire eff 10/2/26; October credit per Carlo.
 - QUESTIONABLE (2): Slavin (replacement umbrella, nothing issued — cancel date pending), Bruder (same-line renewal vs added liability — coverage comparison pending).
 - REJECTED (0).
+
+## Cross-Sell Definition — Carlo's Principle (2026-09-28 ~06:35 EDT)
+
+A cross-sell earns credit when the agency NEWLY CONTROLS a line of business it did not control before — whether that arrives as a fresh sale or through a broker-of-record transfer. "Sometimes the only way to get it is through a BOR."
+
+Consequences:
+- Top Notch Tree Service counts: the agency did not control the WC line before; the September BOR brought it in.
+- A straight renewal of a line the agency already controlled is NOT a cross-sell (this is what keeps Bruder questionable unless liability was added).
+- A pending replacement that has not issued earns nothing yet (Slavin), but when it issues it would qualify under this principle as a newly controlled line.
