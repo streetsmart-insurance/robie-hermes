@@ -11,11 +11,15 @@ For open policy changes the CSR hasn't progressed, this worker:
      awaiting-directory queue: reported, never emailed, never guessed.
   3. Emails the carrier's policy-change address (email-first). Portal and
      phone-only routes cannot be emailed -> manual-action queue for an
-     agent. Voice (Bland AI) is DESIGNED, not built: see "Voice step" below.
+     agent. Portal routes are captured as PortalAction records (carrier,
+     portal URL, action needed) — the defined contract for the future
+     portal worker that will work carrier websites directly.
 
 Eligibility (documented thresholds):
-  GRACE_DAYS = 7: the CSR must have been nagged at least 7 days ago with
-      no progress before the carrier is contacted.
+  GRACE_DAYS = 5: the CSR must have been nagged at least 5 days ago with
+      no progress before the carrier is contacted. Carlo approved 5 days
+      (was 7) on 2026-09-27: phase-3 reply tracking suppresses engaged
+      CSRs, so the shorter window only ever bites on fully-silent CSRs.
   RECONTACT_DAYS = 14: the same carrier is never emailed twice about the
       same change inside 14 days.
   A change whose CSR is actively engaged (phase-3 status in_progress) gets
@@ -38,6 +42,25 @@ Not implemented: no tested call script, no call-outcome ingestion, no
 deduplication against the email path. Build it only with a tested script
 and Carlo's explicit approval.
 
+Portal step (designed, not built — Carlo 2026-09-27: "we would be going
+on carrier websites as well"): a future portal worker consumes the
+PortalAction records this worker queues (see build_portal_action):
+per-carrier browser flows on the ROBIE browser runtime (hermes-poc-01)
+that sign in, navigate to the policy-change / endorsement inquiry, and
+either submit the chase or read back the change status. Design notes:
+  - One tested flow per carrier; start with the carriers that hold the
+    most open changes. Reuse the phase-1/2 reliability battery pattern:
+    wrong-policy submits, duplicate submits, and session-expiry mid-flow
+    must all fail closed.
+  - Credentials live in Secret Manager and are read at runtime by the
+    box's service identity; never in code, notes, or the routing table.
+  - Known constraint: some carrier portals bot-block the box's egress
+    (documented exceptions live in the runbook). A blocked portal stays
+    in the human manual-action queue with the URL attached — never
+    retried blindly.
+  - Portal outcomes feed back into the shared follow-up store as history
+    events only; confirmation stays phase 3's job.
+
 Dry-run default: nothing sent, nothing persisted.
 """
 
@@ -59,12 +82,6 @@ from .carrier_policy_change_routes import (
     manual_routes,
     resolve_carrier,
 )
-from .policy_change_mailbox_search import (
-    SENDER as MAILBOX_SENDER,
-    PolicyChangeMailboxSearcher,
-    build_default_mailbox_searcher,
-    resolve_change_mailboxes,
-)
 from .overdue_policy_change_reports import (
     JOB_TYPE as PHASE1_JOB_TYPE,
     REPORT_KEY,
@@ -83,7 +100,9 @@ SENDER = "robie@streetsmart.insurance"
 
 # -- documented thresholds -----------------------------------------------------
 #: Days after the CSR nag with no progress before the carrier is contacted.
-GRACE_DAYS = 7
+#: Carlo approved 5 (was 7) on 2026-09-27: reply tracking suppresses
+#: engaged CSRs, so the shorter window only affects fully-silent CSRs.
+GRACE_DAYS = 5
 #: Minimum days between two carrier emails about the same change.
 RECONTACT_DAYS = 14
 
@@ -96,6 +115,47 @@ PHASE3_OWNED_STATUSES = frozenset(
 )
 #: Phase-3 status meaning the CSR is engaged: endorsement check only.
 CSR_ENGAGED_STATUS = "in_progress"
+
+
+# -- portal-action stub (future: Robie works carrier websites directly) ----------
+# Carlo 2026-09-27: "we would be going on carrier websites as well." Portal
+# automation is DESIGNED, not built. This record type is the contract the
+# future portal worker will consume: everything it needs to open the
+# carrier's site and chase the change is captured here at queue time.
+
+def build_portal_action(item: Mapping[str, Any], carrier: Mapping[str, Any],
+                        route: Mapping[str, Any]) -> dict[str, Any]:
+    """One portal action a human (later: the portal worker) must take.
+
+    `route` is a portal-type route from the routing table; the portal URL
+    comes straight from the directory data (may be None when the directory
+    names a portal without a URL — the human fills it in).
+    """
+    return {
+        "type": "portal_action",
+        "carrier": carrier.get("name"),
+        "carrier_record_id": carrier.get("record_id"),
+        "portal_url": route.get("url"),
+        "route_label": route.get("label"),
+        "route_notes": route.get("notes"),
+        "policy_number": str(item.get("Policy Number") or ""),
+        "account_name": str(item.get("Account Name") or ""),
+        "action_needed": (
+            "Sign in to the carrier portal, open the policy-change / "
+            "endorsement inquiry for this policy, and chase the outstanding "
+            "change (or confirm its status). Credentials live in "
+            "Secret Manager; never in code or notes."
+        ),
+        "status": "queued_for_agent",
+    }
+
+
+def portal_actions_for(item: Mapping[str, Any],
+                       carrier: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """All portal-type routes for a carrier as PortalAction records."""
+    return [build_portal_action(item, carrier, r)
+            for r in manual_routes(carrier)
+            if r.get("type") == "portal"]
 
 # -- endorsement-name hints (mirrors phase 3 PR #646; consolidate on merge) ---
 ENDORSEMENT_NAME_HINTS = (
@@ -397,9 +457,6 @@ class PolicyChangeCarrierContactWorker:
         routing_table_path: str | None = None,
         cc_resolver: Callable[[Mapping[str, Any]], list[str]] | None = None,
         discussion_lookup: Callable[[str], dict[str, Any] | None] | None = None,
-        mailbox_searcher: PolicyChangeMailboxSearcher | None = None,
-        roster_maps: Mapping[str, Any] | None = None,
-        producer_fallbacks: Mapping[str, str] | None = None,
     ) -> None:
         self.queue_reader = queue_reader or default_queue_reader
         self.document_search = document_search or default_document_search
@@ -407,13 +464,6 @@ class PolicyChangeCarrierContactWorker:
         self.routing_table = routing_table or load_routing_table(routing_table_path)
         self.cc_resolver = cc_resolver or (lambda item: [])
         self.discussion_lookup = discussion_lookup
-        # Cross-mailbox Gmail search (Carlo-authorized domain-wide
-        # delegation, read-only). None here means "resolve from the
-        # environment at perform() time"; an explicit searcher (tests)
-        # always wins.
-        self.mailbox_searcher = mailbox_searcher
-        self.roster_maps = roster_maps
-        self.producer_fallbacks = producer_fallbacks or {}
 
     def _cross_post(self, followup_store: Any, key: str,
                     event: str, detail: str, today: date) -> None:
@@ -453,36 +503,6 @@ class PolicyChangeCarrierContactWorker:
             # the injected follow-up store's in-memory state.
             live = not dry_run
 
-            # Cross-mailbox Gmail search (read-only, domain-wide delegation).
-            # Explicit searcher wins; otherwise resolve from the environment.
-            # None = unconfigured -> the run continues without it, logged.
-            searcher = self.mailbox_searcher
-            if searcher is None:
-                try:
-                    searcher = build_default_mailbox_searcher()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("mailbox search unavailable: %s", exc)
-                    searcher = None
-            roster_maps = self.roster_maps
-            if roster_maps is None:
-                raw_roster = payload.get("roster_maps")
-                roster_maps = raw_roster if isinstance(raw_roster, Mapping) else None
-            producer_fallbacks = self.producer_fallbacks
-            if not producer_fallbacks:
-                raw_fb = payload.get("producer_fallbacks")
-                if isinstance(raw_fb, Mapping):
-                    producer_fallbacks = {
-                        str(k): str(v) for k, v in raw_fb.items()
-                    }
-            mailbox_evidence: dict[str, Any] = {
-                "enabled": bool(searcher and searcher.configured),
-                "reason": (
-                    None if (searcher and searcher.configured)
-                    else "unconfigured: delegation env var or roster unavailable"
-                ),
-                "searches": [],
-            }
-
             rows = self.queue_reader(payload)
             open_rows = [
                 r for r in rows
@@ -515,13 +535,10 @@ class PolicyChangeCarrierContactWorker:
             summary = {
                 "open_queue_rows": len(items),
                 "endorsement_found": 0,
-                "endorsement_found_via_mailbox": 0,
                 "emailed": 0,
                 "send_errors": 0,
                 "check_only": 0,
                 "skipped": 0,
-                "carrier_reply_recent": 0,
-                "manual_queue_cleared": 0,
                 "awaiting_directory": [],
                 "manual_action": [],
                 "held": [],
@@ -559,81 +576,6 @@ class PolicyChangeCarrierContactWorker:
                         self._cross_post(followup_store, key, "endorsement_found",
                                          f"carrier worker found: {doc_name}", today)
                     continue
-
-                # 1b) Cross-mailbox Gmail search (read-only delegation):
-                # the CSR's or producer's inbox may already hold the
-                # endorsement or a carrier reply. An endorsement found
-                # here counts exactly like a DocumentApi hit; a carrier
-                # reply is logged and clears the manual-action queue.
-                # Every mailbox searched is logged in the evidence.
-                if searcher is not None and searcher.configured:
-                    mailboxes = resolve_change_mailboxes(
-                        item, roster_maps, producer_fallbacks)
-                    mb = searcher.search_change(item, mailboxes, today)
-                    mb["change_key"] = key
-                    mailbox_evidence["searches"].append(mb)
-                    endorsement_hit = mb.get("endorsement")
-                    if endorsement_hit:
-                        summary["endorsement_found"] += 1
-                        summary["endorsement_found_via_mailbox"] += 1
-                        doc_name = (
-                            f"gmail:{endorsement_hit.get('mailbox')}:"
-                            f"{endorsement_hit.get('filename')}"
-                        )
-                        if live:
-                            store.record_endorsement_found(key, doc_name, today)
-                            self._cross_post(
-                                followup_store, key, "endorsement_found",
-                                f"mailbox search found: {doc_name}", today)
-                        continue
-                    reply_hit = mb.get("carrier_reply")
-                    if reply_hit:
-                        reply_detail = (
-                            f"from {reply_hit.get('from')} "
-                            f"in {reply_hit.get('mailbox')}: "
-                            f"{reply_hit.get('subject')}"
-                        )
-                        if live:
-                            store.record_event(key, "carrier_reply_found",
-                                               reply_detail, today)
-                            self._cross_post(followup_store, key,
-                                             "carrier_reply_found",
-                                             reply_detail, today)
-                        reply_date = reply_hit.get("date")
-                        recent = (
-                            isinstance(reply_date, date)
-                            and (today - reply_date).days < RECONTACT_DAYS
-                        )
-                        if elig["action"] == "email":
-                            # Resolve the route now: a manual route with a
-                            # live carrier reply is cleared from the queue —
-                            # an agent doesn't need to chase a carrier that
-                            # already answered.
-                            carrier = resolve_carrier(
-                                item.get("Master Company"), self.routing_table)
-                            route_status = (carrier or {}).get("route_status") or ""
-                            emails = emailable_routes(carrier) if carrier else []
-                            is_manual = carrier is not None and (
-                                route_status == "manual" or not emails)
-                            if is_manual:
-                                summary["manual_queue_cleared"] += 1
-                                if live:
-                                    store.record_event(
-                                        key, "manual_queue_cleared",
-                                        f"carrier replied; {reply_detail}", today)
-                                continue
-                            if recent:
-                                # The carrier already replied recently: no
-                                # duplicate outreach.
-                                summary["carrier_reply_recent"] += 1
-                                if live:
-                                    store.record_event(
-                                        key, "carrier_reply_recent",
-                                        "carrier replied recently; email skipped",
-                                        today)
-                                continue
-                            # Older reply on an emailable route: logged
-                            # above; the chase email still goes out below.
 
                 if elig["action"] == "check_only":
                     summary["check_only"] += 1
@@ -675,6 +617,9 @@ class PolicyChangeCarrierContactWorker:
                         "policy": str(item.get("Policy Number") or ""),
                         "carrier": carrier.get("name"),
                         "routes": manual_routes(carrier),
+                        # Portal URLs surfaced explicitly: the human agent —
+                        # and the future portal worker — starts from these.
+                        "portal_actions": portal_actions_for(item, carrier),
                         "reason": ("route needs an agent (portal/phone/fax-only "
                                    "or ambiguous); never emailed"),
                     })
@@ -722,7 +667,6 @@ class PolicyChangeCarrierContactWorker:
 
             evidence["summary"] = summary
             evidence["receipts"] = receipts
-            evidence["mailbox_search"] = mailbox_evidence
             if not dry_run:
                 store.save()
             evidence["succeeded"] = True

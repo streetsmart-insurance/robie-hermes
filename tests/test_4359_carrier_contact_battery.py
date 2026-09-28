@@ -300,6 +300,63 @@ def test_contact_after_grace_period(tmp_path):
     assert mails[0]["to"] == ["MidlanticOffice@Merchantsgroup.com"]
 
 
+def test_grace_boundary_exactly_5_days_is_eligible(tmp_path):
+    # Carlo approved 5 days on 2026-09-27: nagged exactly 5 days ago
+    # with no CSR progress -> the carrier may be contacted.
+    assert GRACE_DAYS == 5
+    worker, payload, mails, _ = make_worker(tmp_path, nag_days_ago=5)
+    evidence = run_worker(worker, payload)
+    assert evidence["summary"]["emailed"] == 1
+    assert mails[0]["to"] == ["MidlanticOffice@Merchantsgroup.com"]
+
+
+def test_grace_blocks_at_4_days(tmp_path):
+    worker, payload, mails, _ = make_worker(tmp_path, nag_days_ago=4)
+    evidence = run_worker(worker, payload)
+    assert evidence["summary"]["emailed"] == 0
+    assert evidence["summary"]["skipped"] == 1
+    assert mails == []
+
+
+def test_portal_actions_carry_url_in_manual_queue(tmp_path):
+    # Portal routes surface their URL in the manual-action queue as
+    # PortalAction records: the human (later the portal worker) starts
+    # from the URL.
+    from robie_job_engine.policy_change_carrier_contact import (
+        build_portal_action,
+        portal_actions_for,
+    )
+    carrier = {
+        "name": "Kingstone Insurance",
+        "record_id": "110",
+        "route_status": "manual",
+        "routes": [
+            {"label": "Policy Changes", "type": "portal",
+             "email": "pldocs@kingstoneic.com", "url": "https://goo.gl/woUNvK",
+             "notes": "directory: 'Done Online via System'; email as fallback"},
+        ],
+    }
+    item = {"Policy Number": "KX123", "Account Name": "Test LLC"}
+    actions = portal_actions_for(item, carrier)
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["type"] == "portal_action"
+    assert action["carrier"] == "Kingstone Insurance"
+    assert action["portal_url"] == "https://goo.gl/woUNvK"
+    assert action["policy_number"] == "KX123"
+    assert "action_needed" in action and action["action_needed"]
+    # build_portal_action tolerates a route with no URL (directory names
+    # a portal without one): the URL field is None, the human fills it in.
+    no_url = dict(carrier["routes"][0]); no_url["url"] = None
+    action2 = build_portal_action(item, carrier, no_url)
+    assert action2["portal_url"] is None
+    # phone/fax routes never produce portal actions.
+    phone_only = dict(carrier); phone_only["routes"] = [
+        {"label": "Policy Changes", "type": "phone", "phone": "(800) 555-0100",
+         "url": None, "email": None, "notes": ""}]
+    assert portal_actions_for(item, phone_only) == []
+
+
 def test_no_recontact_inside_window(tmp_path):
     worker, payload, mails, _ = make_worker(tmp_path)
     store = CarrierContactStore(payload["carrier_store_path"])

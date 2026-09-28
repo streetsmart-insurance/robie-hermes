@@ -1,10 +1,14 @@
 # RUNBOOK — 4359 Phase 2: carrier-contact worker
 
 Phase 2 of the 4359 program. For open policy changes the CSR hasn't
-progressed 7+ days after the phase-1 nag, this worker checks EZLynx for an
+progressed 5+ days after the phase-1 nag, this worker checks EZLynx for an
 already-downloaded endorsement FIRST, then emails the carrier's
 policy-change address (email-first), or queues the change for manual action
 / directory fill-in.
+
+**Grace period: 5 days** (`GRACE_DAYS`). Carlo approved 5 (was 7) on
+2026-09-27: phase-3 reply tracking suppresses engaged CSRs, so the
+shorter window only ever bites on fully-silent CSRs.
 
 **Status: code + tests + PR only. NOT merged, NOT deployed. Dry-run only
 until Carlo reviews the dry-run proof and approves go-live.**
@@ -12,7 +16,7 @@ until Carlo reviews the dry-run proof and approves go-live.**
 ## What it does per run
 
 1. Reads the phase-1 sent store (`sent.json`) for nag dates — only changes
-   nagged 7+ days ago (`GRACE_DAYS`) with no CSR progress are eligible.
+   nagged 5+ days ago (`GRACE_DAYS`) with no CSR progress are eligible.
 2. Skips anything phase 3 owns (`docs_claimed`, `confirmed`, `discrepancy`,
    `needs_human` — not even the DocumentApi check runs for those).
 3. If the CSR is engaged (`in_progress`), runs the endorsement check only
@@ -21,29 +25,6 @@ until Carlo reviews the dry-run proof and approves go-live.**
    contact.** If an endorsement naming the policy is already in EZLynx, the
    change is recorded as `endorsement_found` and handed to phase 3 — the
    carrier is never bothered.
-4b. **Cross-mailbox read-only search (domain-wide delegation).** If the
-   DocumentApi finds nothing, the worker searches — read-only, via the
-   same keyless-delegated service account the accountability mailer uses
-   (`ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT`) — the Gmail of the
-   people involved in that change ONLY: `robie@streetsmart.insurance`,
-   the assigned CSR, and the assigned producer, resolved from the same
-   approved roster phase 1 uses (`ROBIE_4359_MANIFEST`), plus optional
-   producer fallbacks (`ROBIE_4359_PRODUCER_FALLBACKS`). Nobody
-   uninvolved is ever impersonated. Each mailbox is queried for the
-   policy number + insured name (60-day lookback, 25-message cap); an
-   endorsement PDF (by filename hints) or a carrier reply (external
-   sender) classifies as a hit. A delegation failure on one mailbox is
-   logged in evidence and that mailbox is skipped — the run continues.
-   Every mailbox, query, and hit/miss/error is logged in
-   `evidence["mailbox_search"]`. The search module has NO send path and
-   requests only the `gmail.readonly` scope; all outbound mail stays in
-   `default_carrier_mailer`, which hardcodes
-   `From: robie@streetsmart.insurance`. An endorsement found this way
-   counts as `endorsement_found` (never `confirmed` — confirmation is
-   phase 3's job); a recent carrier reply suppresses a duplicate chase
-   email. Without delegation configured, or without a trustworthy
-   roster, the search degrades to `robie@`-only or off — never guessing
-   employee mailboxes.
 5. Resolves `Master Company` against the curated routing table
    (`robie_job_engine/data/carrier_policy_change_routes.json`):
    - `ok` → email the policy-change address from
@@ -130,3 +111,41 @@ checking stays phase 3's job.
 Approved conceptually for carrier calls (never clients). DESIGNED only —
 not built, not tested. A future `voice` route type would slot into the
 manual-action queue path.
+
+## Portal path — Robie works carrier websites directly (DESIGNED, not built)
+
+Carlo 2026-09-27: "we would be going on carrier websites as well." The
+9 `manual`-route carriers include portal-only routes (e.g. Kingstone:
+"Done Online via System"). Today those go to the human manual-action
+queue; the defined next build is a portal worker that works them
+directly.
+
+**Contract (already in code):** `build_portal_action()` in
+`robie_job_engine/policy_change_carrier_contact.py` produces a
+`PortalAction` record per portal route — carrier, carrier record ID,
+portal URL straight from the routing table, route label/notes, policy +
+account, and the action needed. Every `manual_action` queue entry now
+carries `portal_actions`, so the portal URL is in the evidence a human —
+or the future worker — starts from. A route whose directory entry names
+a portal without a URL ships with `portal_url: null`; the human fills it
+in, and it flows back into the routing table via the refresh pipeline.
+
+**Build plan for the portal worker:**
+1. Runs on the ROBIE browser runtime on hermes-poc-01 (same anti-
+   detection + residential proxy as the EZLynx browser work). One tested
+   Playwright flow per carrier: sign in → navigate to the policy-change /
+   endorsement inquiry → submit the chase OR read back the change status.
+2. Start with the carriers holding the most open changes. Each flow gets
+   the reliability-battery treatment: wrong-policy submit, duplicate
+   submit, session expiry mid-flow, and unexpected navigation must all
+   fail closed (no write, queue entry kept, evidence logged).
+3. Credentials: Secret Manager only, read at runtime by the box service
+   identity. Never in code, notes, or the routing table.
+4. Portal outcomes cross-post to phase 3's FollowupStore as history
+   events only; confirmation stays phase 3's job.
+5. **Known constraint — bot-blocked portals:** some carrier portals
+   bot-block the box's egress (documented exceptions: Hartford EBC is
+   unreachable from the box entirely; Selective's agent portal 403s the
+   box — see the workspace AGENTS.md). A blocked portal stays in the
+   human manual-action queue with its URL attached; it is never retried
+   blindly. Test reachability per carrier before building its flow.
