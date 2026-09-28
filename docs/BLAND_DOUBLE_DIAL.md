@@ -68,7 +68,7 @@ superseded. Config flags remain so future changes stay easy.
   call_id; the redial is an INSERT-once row committed BEFORE dispatch;
   events deduped by content fingerprint. A future webhook receiver feeds
   the same record_outcome/maybe_redial interface.
-- `tests/test_bland_double_dial.py` - 18 tests, all fixtures synthetic.
+- `tests/test_bland_double_dial.py` - 21 tests, all fixtures synthetic.
 
 ## Carlo's remaining separate decisions
 
