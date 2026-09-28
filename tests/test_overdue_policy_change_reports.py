@@ -509,7 +509,7 @@ def test_worker_sends_one_email_per_csr(tmp_path):
                            "gabrielac@streetsmart.insurance"]
     assert "SAPP Construction Corp" in email["text_body"]
     assert "S 2391821" in email["text_body"]
-    assert "41 days ago" in email["text_body"]
+    assert f"{(date.today() - date(2026, 8, 17)).days} days ago" in email["text_body"]
     assert "8 notes" in email["text_body"]
 
 

@@ -56,6 +56,11 @@ from .overdue_policy_change_reports import (
     PolicyChangeReportContractError,
     default_mailer,
 )
+from .policy_change_followup import (
+    DryRunFollowupStore,
+    FollowupStore,
+    default_followup_store_path,
+)
 
 logger = logging.getLogger("run_overdue_policy_change_reports")
 
@@ -86,6 +91,9 @@ def dry_run_mailer_factory(captured: list[dict[str, Any]]):
             "text_body": text_body,
             "html_body": html_body,
             "message_id": f"dry-run-{len(captured)}",
+            # Phase 2 reply tracking needs a thread per nag even in dry-run
+            # so the evidence shows what the follow-up worker would match.
+            "thread_id": f"dry-run-thread-{len(captured)}",
             "sender": "robie@streetsmart.insurance",
         }
         captured.append(record)
@@ -128,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--evidence-out", default="",
         help="Write the run evidence JSON here (default: stdout only).")
+    parser.add_argument(
+        "--followup-store", default=os.environ.get("ROBIE_4359_FOLLOWUP_STORE", ""),
+        help="Path to the phase-2 follow-up store JSON. When present, "
+             "changes with an engaged CSR (in_progress/blocked/docs_claimed) "
+             "are suppressed from nags. Empty = no suppression.")
     parser.add_argument(
         "--seed-file", default="",
         help="Seed the sent store from this JSON file and exit (no emails).")
@@ -195,16 +208,20 @@ def run(args: argparse.Namespace, *, verifier_factory=None) -> tuple[int, dict[s
 
     captured: list[dict[str, Any]] = []
     dry_run = args.mode != "live"
+    followup_path = str(args.followup_store or "").strip() or default_followup_store_path()
     if dry_run:
         store: NotificationStore = DryRunNotificationStore(args.sent_store)
+        followup: Any = DryRunFollowupStore(followup_path)
         worker = OverduePolicyChangeReportWorker(
             mailer=dry_run_mailer_factory(captured),
             sent_store=store,
+            followup_store=followup,
         )
     else:
         worker = OverduePolicyChangeReportWorker(
             mailer=default_mailer,
             sent_store=NotificationStore(args.sent_store),
+            followup_store=FollowupStore(followup_path),
         )
 
     try:

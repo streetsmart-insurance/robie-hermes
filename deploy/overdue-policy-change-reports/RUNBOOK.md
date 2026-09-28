@@ -2,7 +2,7 @@
 
 ## What it does
 
-Every Monday at 08:00 ET, the runner pulls the live EZLynx **4359 Policy
+Every Tuesday at 08:00 ET, the runner pulls the live EZLynx **4359 Policy
 Change Request Confirmation Queue** (from the daily `ROBIE daily CSV - 4359
 Policy Change` email in `robie@streetsmart.insurance`), qualifies open
 requests older than 14 days, gates each policy through the PolicyApi
