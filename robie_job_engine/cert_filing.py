@@ -67,6 +67,11 @@ class FilingDeps:
                                      # Proves a certificate-review task exists in EZLynx and is
                                      # assigned to SCanales. Read-only. When None (not yet
                                      # implemented), task creation fails closed as UNVERIFIED.
+    callback_store: Any = None       # CallbackStore (cert_callback): pending
+                                     # Zap fires + validated callbacks. Gates
+                                     # _task_step: a proven callback completes
+                                     # without re-firing; a pending fire
+                                     # HOLDs instead of risking a duplicate.
 
 
 @dataclass
@@ -1156,6 +1161,42 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
     action = decide_task_action(verified.requested_action, entry, live_state)
     res.task_action = action
 
+    # Nonce-guarded callback gate (cert_callback): the Zap's validated
+    # callback is the only task proof (no Task API exists). Applies to
+    # CREATE only, and runs BEFORE any fire, so a re-drive never re-fires
+    # the Zap while a callback is in flight (a second fire would create a
+    # duplicate EZLynx task).
+    cb_store = getattr(deps, "callback_store", None)
+    if action == CREATE and cb_store is not None:
+        proof = cb_store.get_proof(applicant_id, policy_key, holder_key)
+        if proof is not None:
+            # Callback arrived and validated: complete without firing again.
+            res.task_id = proof.task_id
+            res.evidence.append(
+                f"task {proof.task_id} proven via Zap callback "
+                f"(filing {proof.filing_id[:8]}…), assigned to "
+                f"{proof.assignee}")
+            new_entry = entry or TaskEntry(
+                applicant_id=applicant_id, policy_key=policy_key,
+                holder_key=holder_key, task_status=TASK_OPEN)
+            new_entry.discussion_id = res.discussion_id
+            new_entry.task_id = proof.task_id
+            new_entry.task_status = TASK_OPEN
+            deps.registry.put(new_entry)
+            return res
+        pending = cb_store.find_pending(applicant_id, policy_key,
+                                        holder_key)
+        if pending is not None:
+            # A fire is already in flight: HOLD for its callback, never
+            # re-fire.
+            res.hold_reasons.append(
+                "UNVERIFIED: task Zap already fired "
+                f"(filing {pending.filing_id[:8]}…), awaiting its callback; "
+                "holding instead of risking a duplicate task; email left "
+                "unread for a later sweep")
+            res.status = ERROR
+            return res
+
     if action == NONE:
         res.evidence.append("acknowledgement — task state left alone")
     elif action == REUSE:
@@ -1174,11 +1215,37 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
             res.hold_reasons.append(f"task creation failed: {exc}")
             res.status = PARTIAL if res.status == FILED else res.status
             return res
-        # Carlo's rule: Zapier HTTP 200 is not proof. The task must be read
-        # back from EZLynx proving it exists and is assigned to SCanales.
-        # Without a task prover, fail closed as UNVERIFIED — never mark
-        # FILED on an unproven task.
-        if deps.task_prover is None:
+        # Record the fire against its nonce BEFORE any proof attempt: a
+        # later sweep's re-drive must HOLD on this pending fire, never
+        # re-fire (duplicate EZLynx task). Never let bookkeeping break
+        # the filing.
+        if getattr(zap, "fired", False) and cb_store is not None:
+            try:
+                filing_id = getattr(zap, "filing_id", "") or ""
+                if filing_id:
+                    cb_store.record_fire(
+                        filing_id=filing_id, applicant_id=applicant_id,
+                        policy_key=policy_key, holder_key=holder_key,
+                        title=title,
+                        assignee=getattr(deps.zapier, "assignee",
+                                        "SCanales"))
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                res.evidence.append(
+                    f"callback fire bookkeeping failed ({exc}); filing "
+                    "continues UNVERIFIED")
+        # Carlo's rule: Zapier HTTP 200 is not proof. Proof is the Zap's
+        # validated callback echoing THIS fire's filing_id (no Task API
+        # exists). A title match from an older fire is never proof, so when
+        # the callback store is present there is no fallback to the
+        # title-based prover seam.
+        proof = None
+        if cb_store is not None:
+            cb_proof = cb_store.get_proof_by_filing(
+                getattr(zap, "filing_id", "") or "")
+            if cb_proof is not None:
+                proof = {"task_id": cb_proof.task_id,
+                         "assignee": cb_proof.assignee}
+        elif deps.task_prover is None:
             res.hold_reasons.append(
                 "UNVERIFIED: certificate-review task Zap fired but no task "
                 "prover is configured — cannot prove the task exists in "
@@ -1186,26 +1253,40 @@ def _task_step(record: Any, verified: Any, deps: FilingDeps,
                 "review")
             res.status = ERROR
             return res
-        try:
-            proof = deps.task_prover(applicant_id, title)
-        except Exception as exc:
+        else:
+            try:
+                proof = deps.task_prover(applicant_id, title)
+            except Exception as exc:
+                res.hold_reasons.append(
+                    f"UNVERIFIED: task proof failed ({exc}); email left unread "
+                    "for human review")
+                res.status = ERROR
+                return res
+        if not proof:
             res.hold_reasons.append(
-                f"UNVERIFIED: task proof failed ({exc}); email left unread "
-                "for human review")
+                "UNVERIFIED: certificate-review task Zap fired but its "
+                "callback has not arrived/validated yet — cannot prove the "
+                "task exists in EZLynx assigned to SCanales; email left "
+                "unread for a later sweep")
             res.status = ERROR
             return res
         task_id = (proof or {}).get("task_id")
         assignee = (proof or {}).get("assignee")
-        if not task_id or assignee != "SCanales":
+        # NOTE 2026-09-27: task_id is opportunistic, not required. The
+        # Zap's EZLynx step is "Create Note" with no mappable ID output;
+        # the validated callback itself (filing nonce + applicant +
+        # assignee) is the proof that the Zap's EZLynx step succeeded.
+        if assignee != "SCanales":
             res.hold_reasons.append(
                 f"UNVERIFIED: task proof did not confirm assignment to "
                 f"SCanales (task_id={task_id!r}, assignee={assignee!r}); "
                 "email left unread for human review")
             res.status = ERROR
             return res
-        res.task_id = str(task_id)
+        res.task_id = str(task_id or "")
         res.evidence.append(
-            f"task {task_id} proven in EZLynx assigned to SCanales")
+            "callback proven in EZLynx assigned to SCanales"
+            + (f" (task {task_id})" if task_id else ""))
         new_entry = entry or TaskEntry(
             applicant_id=applicant_id, policy_key=policy_key,
             holder_key=holder_key, task_status=TASK_OPEN)
