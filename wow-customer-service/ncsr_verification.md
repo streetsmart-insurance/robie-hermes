@@ -108,15 +108,46 @@ The PolicyApi has no applicant-name search (`search_policy_by_number` only), so 
 16. **JOSE EFRAIN FLORES QUINONES DBA F & Q TRANSPORT** (Mike Sosa) — "coverage bound through Geico waiting on the download." Bound, pending EZLynx download.
 17. **1812 Marketing Corp** cyber (Taylor Cimei) — "recieved professional/cyber policy, sent bind request, keyed in new pol. Insured made payment in full. Please follow up for binder and invoice." Contradictory (policy received vs bind request sent); payment made. AMBIGUOUS.
 
-## Final NCSR Tally (43 rows)
-- Confirmed Active in EZLynx: 15
+## Drill-Down: Document Evidence (2026-09-27)
+
+Used DiscussionApi `get_discussion` → applicant ID → DocumentApi `search_applicant_documents`. Document records carry no date field; recency inferred from document ID sequence (820M-823M = September 2026) plus September "New Business - Won" discussion titles. Where a dec names an effective date, that is quoted literally.
+
+### RESOLVED — red/weak flags with issuance documents on file (7)
+1. **Murray King** (was: app sent, not issued) — "502202728900 - Declaration page.pdf" + "MURRAY KING DEC.pdf" + "Please Sign-E" on file. Dec page exists.
+2. **Marvin Calderon** (was: waiting for signature) — "Completed eSignatures" + "ID Cards Marvin.pdf" + "Proof of Insurance (Binders/Evidence of Insurance)". Signature completed, ID cards issued.
+3. **GREGORY JOHNSON** (was: weak) — "DECLARATIONS EFFECTIVE 09232026 114 PM". Dec effective 9/23/2026 — definitive September issuance.
+4. **Daniel Chando** (was: weak, "Sold the policy.") — "Chando Sign.pdf" + "Proof of Insurance (Binders/Evidence of Insurance)". Signed + proof of insurance.
+5. **Clara Perez Cuautle & Ignacio Peralta** (was: weak) — "CLARA PEREZ POLICY.pdf" + "New Business Package". Policy doc exists.
+6. **John & Lisa Sabo** (was: app not signed) — "Sabo Signed Cabrillo App.pdf" + "39 Linda Rd Cabrillo Home Declarations.pdf" + "NJH1031418 - Cabrillo Requirements Met Notice". App signed, dec issued.
+7. **Xerion Architectural Services PC** (was: bind request, not bound) — "Travelers Binder 2026-2027.pdf" + "Travelers - Professional Liab Binder 2026-2027.pdf" + "Completed eSignatures". Bound (with Travelers, not Novatae).
+
+### CONFIRMED STRONG — supporting notes now backed by documents (2 accounts)
+8. **Raghavender & Archana Gangwar** — "Gangwar Progressive Auto Declarations.pdf" + "Gangwar Progressive Auto Application.pdf" + "Raghavender Progressive Auto Receipt.pdf" + "Raghavender ID cards.pdf" + "14 Carlisle Ct Progressive Home Declarations.pdf" + "14 Carlisle Ct Progressive Home Receipt.pdf". Both auto and home issued.
+9. **1812 Marketing Corp** — "CFC - POLICY ESP0440988661.pdf" (cyber, API-confirmed Active) + "Apogee - Comm pkg 2026-2027 Binder.pdf" + "Amtrust WC Policy 26-27.pdf" + "Certificate of Liability Insurance 26-27". Three policies documented. (This also resolves the "ambiguous" cyber row — same applicant.)
+
+### STILL FLAGGED (4)
+10. **Ashley & Troy Huntley** — flood policy 13579_83445947 is Deleted. Note describes a Travelers AUTO policy but the Policy Number column holds the deleted flood number; the real Travelers auto number is unknown. Applicant docs show Progressive auto (pol871740154) and Safeco renters only — no Travelers auto. Need the real policy number.
+11. **Dennis Korkowski** — "New Business Package" / "New Business Korkowski" docs exist, but cited policy CDNJ004781 is last year's (2025-2026 term). Rewrite vs renewal unclear. Discussion titled "Dwelling Fire Download Renewal / Mortgage Verification."
+12. **Jaguar Tree Service LLC** — R2WC555848 cancelled 2024. No discussion ID in CSV; cannot check docs.
+13. **J Swat Contracting LLC** (borderline) — "2024 FORD F350 SUPER DUTY DEC PAGE 2026.pdf" + "Dec Pages.pdf" + "Master Certificate of Liability Insurance 26-27" exist, but cannot tie definitively to the September NatGen note vs an existing policy. Likely converted, not conclusive.
+
+### CONFIRMED MISLABELED (1 account, 2 rows)
+14. **Sarah & Nicholas Lupano** x2 — "Lupano_FMI_Dec_page_with_Umbrella.pdf" + "Lupano FMI Umbrella Full policy.pdf" on existing Plymouth Rock policy PAA80002251092. Umbrella added to existing client — not new business. (Discussion titled "Umbrella added to FMI".)
+
+### NO DOCUMENT ACCESS — no discussion ID in CSV (4)
+15. **DREAMS BUILT - BY DESIGN LLC** (Mike Sosa) — red flag stands on note alone.
+16. **MENDIETA O. CONSTRUCTION LLC** (Mike Sosa) — weak stands on note alone.
+17. **JOSE EFRAIN FLORES QUINONES DBA F & Q TRANSPORT** (Mike Sosa) — note says bound via Geico, waiting on download; no docs to confirm.
+18. **NASH RESIDENTIAL SERVICES LLC DBA HOGANS' TRANSFER** (Mike Sosa) — red flag stands on note alone.
+
+## Revised NCSR Tally (43 rows, after document drill-down)
+- Confirmed Active in EZLynx (PolicyApi): 15
 - Sold, not yet effective: 6
-- Notes support credit: 4
-- Red flags: 7 (+ 3 API flags = 10)
-- Mislabeled (not new business): 2
-- Weak/thin: 4
-- Ambiguous: 1
-- API-flagged old-term/deleted: 3 (Huntley Deleted, Korkowski renewal, Jaguar Tree old policy)
+- Resolved by document evidence: 7
+- Strongly confirmed by documents: 2 accounts (Gangwar, 1812 Marketing)
+- Still flagged: 4 (Huntley, Korkowski, Jaguar Tree, J Swat borderline)
+- Confirmed mislabeled: 1 account (Lupano x2)
+- No document access: 4 (all Mike Sosa rows)
 
 ## Total: 43 rows
 ## By employee: Karla 19, Jazmin 7, Ashley 5, Zeus 4, Taylor 4, Mike 4
