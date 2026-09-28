@@ -1,9 +1,10 @@
-# Bland double-dial policy - local draft (NOT pushed, NOT deployed)
+# Bland double-dial policy - draft PR #652 (review only)
 
-Status: local-only working branch. Nothing here is merged, deployed, or
-authorized to place calls. The owner has NOT ruled on target audience,
-retry scope, repo privacy, or live testing. All fixtures are synthetic;
-never commit real numbers, recordings, transcripts, or logs.
+Status: pushed as draft PR #652 on the private robie-hermes repo, for
+review only. Nothing here is merged, deployed, or authorized to place
+calls. The repo was flipped private on 2026-09-28 (verified). All
+fixtures are synthetic; never commit real numbers, recordings,
+transcripts, or logs.
 
 ## Policy `double-dial-v1`
 
@@ -69,7 +70,7 @@ superseded. Config flags remain so future changes stay easy.
   the same record_outcome/maybe_redial interface.
 - `tests/test_bland_double_dial.py` - 18 tests, all fixtures synthetic.
 
-## Still blocked on Carlo's separate approvals
+## Carlo's remaining separate decisions
 
 1. Target audience (carriers only vs anything else).
 2. Test-scoped Bland secret name on hermes-test-01 (never the Production
@@ -77,5 +78,8 @@ superseded. Config flags remain so future changes stay easy.
 3. First live test (recipient, count/window, retention; Jake's consent
    for his number).
 4. Merge, deploy, and any production config change.
-Repo privacy was resolved 2026-09-28 (repo flipped private; verified).
-The draft-PR push and review-only scope were approved the same day.
+Resolved 2026-09-28: repo privacy (flipped private, verified), the
+draft-PR push (#652, review-only), and the voice-settings lane
+(voice/persona, script, voicemail behavior, retry timing) delegated to
+Jake - the voice settings above are his configured, tested choices, not
+open questions.
