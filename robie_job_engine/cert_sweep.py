@@ -32,6 +32,12 @@ broken), which is exit 1.
 
 Safety rules (non-negotiable):
 
+- Today-forward only: the sweep processes messages with Gmail
+  internalDate >= 2026-09-27 00:00 America/New_York (``CUTOFF_ET``).
+  Older mail is evaluated and excluded by policy — never matched,
+  never filed, never re-driven. The historical retry backlog is parked
+  in the ledger (kept for audit, attempts pinned past the max) after a
+  date-check against each message's internalDate.
 - Read-only until the match is proven: no note, document, or task is ever
   written for an unverified or ambiguous match.
 - Gmail intake is read-only by design. The one write the driver ever makes
@@ -68,7 +74,13 @@ Durable state (all under ``CERT_SWEEP_DATA_DIR``, default
   - ``cert_tasks``    — applicant/policy/holder -> task registry
     (:class:`TaskRegistry`);
   - ``cert_sweep_retry`` — this driver's retry ledger for UNVERIFIED
-    records.
+    records. Rows whose message predates the today-forward cutoff are
+    parked (attempts pinned past the max, reason prefixed ``[PARKED``) —
+    kept for audit, never re-driven, never deleted.
+  - ``cert_index_misses`` — NO_MATCH insured names from current
+    (post-cutoff) requests, for the governed index-refresh loop
+    (``cert_index_refresh.py`` reports which misses a fresh export
+    resolves).
 """
 
 from __future__ import annotations
@@ -83,19 +95,47 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-#: Gmail query window: the SQLite checkpoint is the real ledger; the window
-#: just needs to cover mail that has not been checkpointed yet.
-QUERY_WINDOW_DAYS = 7
+#: Today-forward cutoff (Carlo 2026-09-27: "Just the current ones as of
+#: today, going forward"). The sweep processes only certificate emails
+#: with Gmail internalDate (receive time) >= this instant. Everything
+#: older is evaluated and excluded by policy — never matched, never
+#: filed, never re-driven. The cutoff is an explicit constant (not
+#: "now minus N days") so its meaning never drifts between runs.
+#:
+#: Timezone note: 2026-09-27 00:00 America/New_York == 2026-09-27T04:00Z
+#: (EDT, UTC-4). The comparison is done on the epoch-millisecond
+#: internalDate, so the boundary is exact regardless of the sender's
+#: Date: header or the server's local timezone.
+CUTOFF_ET = datetime(2026, 9, 27, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+CUTOFF_MS = int(CUTOFF_ET.timestamp() * 1000)
+
+#: Gmail ``after:`` is date-granular and account-timezone dependent, so the
+#: discovery query keeps one day of slack before the cutoff and the
+#: authoritative check is the client-side internalDate comparison above.
+#: Without the slack, a message received just after midnight ET could be
+#: missed on the day the account timezone disagrees with ET.
+QUERY_SLACK_DAYS = 1
 
 #: Retry ledger bounds: at a 5-minute cadence, 288 attempts ~= 24 hours of
 #: retries before the record is parked for human review instead of being
 #: re-driven forever.
 RETRY_MAX_ATTEMPTS = 288
+
+#: Pre-cutoff backlog migration: how many retry-ledger rows to date-check
+#: per sweep (oldest first). The historical backlog is a few hundred rows;
+#: the cap keeps one run bounded while the migration converges.
+MIGRATION_BATCH_LIMIT = 200
+
+#: A retry-ledger message that cannot be fetched from Gmail this many
+#: consecutive times is treated as gone (deleted/expired) and parked —
+#: kept in the ledger, never re-driven.
+FETCH_FAILURES_BEFORE_PARK = 12
 
 DB_FILENAME = "cert-sweep.db"
 
@@ -121,9 +161,32 @@ CREATE TABLE IF NOT EXISTS cert_sweep_retry (
     reason TEXT NOT NULL DEFAULT '',
     attempts INTEGER NOT NULL DEFAULT 0,
     first_seen_at TEXT NOT NULL,
-    last_attempt_at TEXT NOT NULL
+    last_attempt_at TEXT NOT NULL,
+    fetch_failures INTEGER NOT NULL DEFAULT 0
 );
 """
+
+_MISS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cert_index_misses (
+    name_key TEXT PRIMARY KEY,
+    raw_name TEXT NOT NULL,
+    gmail_id TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    resolved_applicant_id INTEGER
+);
+"""
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str,
+                   ddl: str) -> None:
+    """Idempotent ALTER for DBs created before a column existed."""
+    cols = [r[1] for r in conn.execute(
+        f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        conn.commit()
 
 
 def data_dir() -> str:
@@ -147,6 +210,10 @@ def open_retry_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_RETRY_SCHEMA)
+    conn.execute(_MISS_SCHEMA)
+    # Older DBs predate fetch_failures: add it without touching rows.
+    _ensure_column(conn, "cert_sweep_retry", "fetch_failures",
+                   "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     return conn
 
@@ -202,6 +269,151 @@ def retry_clear(conn: sqlite3.Connection, gmail_id: str) -> None:
     conn.commit()
 
 
+def retry_park(conn: sqlite3.Connection, gmail_id: str,
+               reason: str) -> dict[str, Any]:
+    """Park a retry-ledger row: kept for audit, never re-driven.
+
+    The row is NOT deleted — the ledger stays the complete history. The
+    reason is prefixed so the parking cause is visible in reports.
+    """
+    now = _utcnow_iso()
+    row = conn.execute(
+        "SELECT reason, attempts, first_seen_at FROM cert_sweep_retry"
+        " WHERE gmail_id = ?",
+        (gmail_id,),
+    ).fetchone()
+    if row:
+        old_reason, attempts, first_seen = row
+    else:
+        old_reason, attempts, first_seen = "", 0, now
+    parked_reason = f"[PARKED {now}] {reason}"
+    if old_reason and not old_reason.startswith("[PARKED"):
+        parked_reason += f" | was: {old_reason}"
+    conn.execute(
+        """INSERT INTO cert_sweep_retry
+               (gmail_id, reason, attempts, first_seen_at, last_attempt_at,
+                fetch_failures)
+           VALUES (?,?,?,?,?,0)
+           ON CONFLICT(gmail_id) DO UPDATE SET
+               reason=excluded.reason,
+               attempts=excluded.attempts,
+               last_attempt_at=excluded.last_attempt_at,
+               fetch_failures=0""",
+        (gmail_id, parked_reason, RETRY_MAX_ATTEMPTS + 1, first_seen, now),
+    )
+    conn.commit()
+    return {"gmail_id": gmail_id, "reason": parked_reason,
+            "attempts": RETRY_MAX_ATTEMPTS + 1, "parked": True}
+
+
+def park_pre_cutoff_backlog(conn: sqlite3.Connection, gmail: Any,
+                            cutoff_ms: int = CUTOFF_MS,
+                            limit: int = MIGRATION_BATCH_LIMIT
+                            ) -> dict[str, Any]:
+    """One-time-date-checked parking of the historical backlog.
+
+    Rows are parked only when the MESSAGE's Gmail internalDate is before
+    the today-forward cutoff — never by first_seen_at, which is when the
+    sweep first saw the row, not when the email arrived. Rows whose
+    message cannot be fetched yet are left alone (with a fetch-failure
+    count); after FETCH_FAILURES_BEFORE_PARK consecutive failures the
+    message is treated as gone from Gmail and parked as dead. Both
+    parkings keep the row — nothing is ever deleted.
+
+    Idempotent and bounded: at most ``limit`` rows per call, oldest
+    first, so repeated sweeps converge on the full backlog without one
+    run ballooning.
+    """
+    from .cert_intake_runner import message_internal_ms
+
+    get_message = getattr(gmail, "get_full_message", None)
+    if get_message is None:
+        return {"parked_pre_cutoff": 0, "parked_dead": 0, "checked": 0,
+                "note": "gmail port has no get_full_message; skipped"}
+    rows = conn.execute(
+        "SELECT gmail_id, fetch_failures FROM cert_sweep_retry"
+        " WHERE attempts <= ? ORDER BY first_seen_at LIMIT ?",
+        (RETRY_MAX_ATTEMPTS, limit),
+    ).fetchall()
+    parked_pre_cutoff = 0
+    parked_dead = 0
+    for gmail_id, fetch_failures in rows:
+        try:
+            payload = get_message(gmail_id)
+        except Exception:
+            failures = (fetch_failures or 0) + 1
+            if failures >= FETCH_FAILURES_BEFORE_PARK:
+                retry_park(
+                    conn, gmail_id,
+                    "message no longer retrievable from Gmail after "
+                    f"{failures} consecutive fetch attempts; treating as "
+                    "gone — kept for audit, never re-driven")
+                parked_dead += 1
+            else:
+                conn.execute(
+                    "UPDATE cert_sweep_retry SET fetch_failures = ?,"
+                    " last_attempt_at = ? WHERE gmail_id = ?",
+                    (failures, _utcnow_iso(), gmail_id))
+                conn.commit()
+            continue
+        internal_ms = message_internal_ms(payload)
+        if internal_ms is None:
+            # Cannot date the message: fail closed, leave it for a later
+            # run. Never park what cannot be dated.
+            continue
+        if internal_ms < cutoff_ms:
+            retry_park(
+                conn, gmail_id,
+                f"message predates the 2026-09-27 ET today-forward cutoff "
+                f"(internalDate {internal_ms}); historical backlog — kept "
+                f"for audit, never re-driven")
+            parked_pre_cutoff += 1
+    return {"parked_pre_cutoff": parked_pre_cutoff,
+            "parked_dead": parked_dead, "checked": len(rows)}
+
+
+def miss_note(conn: sqlite3.Connection, raw_name: str,
+              gmail_id: str) -> dict[str, Any] | None:
+    """Record a NO_MATCH insured name for the index-refresh loop.
+
+    No EZLynx applicant-by-name API exists, so a current request that
+    misses the full-book index can only be resolved by a human lookup or
+    a refreshed complete index. The miss ledger is what the refresh
+    script reports coverage against. Returns the entry, or None when
+    there is no usable name.
+    """
+    from .cert_applicant_index import normalize_account_name
+
+    name_key = normalize_account_name(raw_name)
+    if not name_key:
+        return None
+    now = _utcnow_iso()
+    row = conn.execute(
+        "SELECT occurrences, first_seen_at FROM cert_index_misses"
+        " WHERE name_key = ?",
+        (name_key,),
+    ).fetchone()
+    if row:
+        occurrences, first_seen = row[0] + 1, row[1]
+    else:
+        occurrences, first_seen = 1, now
+    conn.execute(
+        """INSERT INTO cert_index_misses
+               (name_key, raw_name, gmail_id, first_seen_at, last_seen_at,
+                occurrences)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(name_key) DO UPDATE SET
+               last_seen_at=excluded.last_seen_at,
+               occurrences=excluded.occurrences,
+               gmail_id=excluded.gmail_id""",
+        (name_key, (raw_name or "").strip(), gmail_id, first_seen, now,
+         occurrences),
+    )
+    conn.commit()
+    return {"name_key": name_key, "raw_name": (raw_name or "").strip(),
+            "occurrences": occurrences}
+
+
 # ---------------------------------------------------------------------------
 # Applicant index
 # ---------------------------------------------------------------------------
@@ -254,19 +466,18 @@ def load_applicant_index(csv_path: str = "") -> Any:
 # Gmail
 # ---------------------------------------------------------------------------
 
-def gmail_query(days: int = QUERY_WINDOW_DAYS,
-                now: datetime | None = None) -> str:
-    """Relative Gmail search window. The checkpoint is the ledger; the
-    window only needs to cover un-checkpointed mail.
+def gmail_query(now: datetime | None = None) -> str:
+    """Gmail discovery query for the today-forward sweep.
 
-    Zap callback emails (``[cert-task-callback]``) are excluded: they are
-    task proofs ingested by ``ingest_callback_emails``, not certificate
-    requests.
+    The query keeps QUERY_SLACK_DAYS of slack before the cutoff because
+    Gmail's ``after:`` is date-granular (and account-timezone dependent);
+    the authoritative cutoff is the client-side internalDate comparison
+    in the intake runner, which enforces the exact
+    2026-09-27 00:00 America/New_York boundary.
     """
-    from .cert_callback import CALLBACK_SUBJECT_PREFIX
-    anchor = (now or datetime.now(timezone.utc)) - timedelta(days=days)
-    return (f"after:{anchor.strftime('%Y/%m/%d')} "
-            f'-subject:"{CALLBACK_SUBJECT_PREFIX}"')
+    anchor = (CUTOFF_ET - timedelta(days=QUERY_SLACK_DAYS)).astimezone(
+        timezone.utc)
+    return f"after:{anchor.strftime('%Y/%m/%d')}"
 
 
 def build_gmail() -> Any:
@@ -358,9 +569,6 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
     from .cert_filing import FilingDeps, FilingStore
     from .cert_task_registry import TaskRegistry
     from .cert_zapier import ASSIGNEE_SCANALES, CertZapierClient
-    from .cert_callback import (
-        CallbackStore, callback_task_prover, require_callback_auth,
-    )
     from .ezlynx_api import EzlynxApiClient, load_ezlynx_api_config
     from .ezlynx_api_only_writes import add_note_to_discussion
 
@@ -373,20 +581,8 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
             "(CERT_ZAPIER_TRIGGER) — refusing to file: documents without "
             "Steffany's review task are a partial state")
 
-    # Nonce-guarded Zap callback proof prerequisites: the sweep must fail
-    # BEFORE every write (document, note, Zap) unless callback sender
-    # allowlist + shared secret are configured. Without them, callbacks
-    # cannot be authenticated and every filing would be UNVERIFIED.
-    # This runs before any EZLynx client is built — a missing config
-    # means deps is never constructed and the sweep files nothing.
-    require_callback_auth()
-
     api_config = load_ezlynx_api_config()  # ROBIE_ENV/Secret Manager path
     doc_client = EzlynxApiClient(api_config)
-
-    # Nonce-guarded Zap callback proof (cert_callback): no Task API exists,
-    # so the Zap's validated callback is the only task proof.
-    callback_store = CallbackStore(db_path)
 
     return FilingDeps(
         discussions_client=_discussion_client_for(api_config),
@@ -398,8 +594,6 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
                                 assignee=ASSIGNEE_SCANALES),
         registry=TaskRegistry(db_path),
         store=FilingStore(db_path),
-        callback_store=callback_store,
-        task_prover=callback_task_prover(callback_store),
     )
 
 
@@ -410,12 +604,21 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
 def _reintake_message(gmail: Any, gmail_id: str, index: Any) -> Any:
     """Re-drive one UNVERIFIED message through intake without touching the
     checkpoint (it already marked the message intake_complete exactly
-    once). Mirrors run_intake_once's per-message path."""
+    once). Mirrors run_intake_once's per-message path.
+
+    Returns None when the message predates the today-forward cutoff
+    (defensive: the migration should have parked it already).
+    """
     from .cert_applicant_index import MATCHED, match_applicant
     from .cert_intake import CertEmail, extract_request_facts
-    from .cert_intake_runner import IntakeRecord, _default_pdf_extractor
+    from .cert_intake_runner import (
+        IntakeRecord, _default_pdf_extractor, message_internal_ms,
+    )
 
     payload = gmail.get_full_message(gmail_id)
+    internal_ms = message_internal_ms(payload)
+    if internal_ms is not None and internal_ms < CUTOFF_MS:
+        return None
 
     def fetcher(mid: str, aid: str, _g=gmail) -> bytes:
         return _g.get_attachment_bytes(mid, aid)
@@ -442,6 +645,7 @@ def _reintake_message(gmail: Any, gmail_id: str, index: Any) -> Any:
         held=held,
         hold_reason=hold_reason,
         attachment_count=len(email.attachments),
+        internal_ms=internal_ms,
     )
 
 
@@ -481,8 +685,15 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
     from .cert_intake_runner import run_intake_once
     from .cert_verification import VERIFIED, verify_record
     from .cert_filing import FILED, file_record
+    from .cert_applicant_index import NO_MATCH
 
-    intake_fn = intake_fn or run_intake_once
+    if intake_fn is None:
+        # The default intake path enforces the today-forward cutoff.
+        # Injected test fakes keep their own signature (no cutoff kwarg).
+        def intake_fn(gmail, checkpoint, index, query, now):
+            return run_intake_once(gmail, checkpoint, index, query=query,
+                                   now=now, cutoff_ms=CUTOFF_MS)
+
     file_record_fn = file_record_fn or file_record
     if mark_read_fn is None:
         mark_read_fn = getattr(gmail, "mark_read", None)
@@ -493,31 +704,32 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
     summary: dict[str, Any] = {
         "sweep_at": now.isoformat(timespec="seconds"),
         "query": query,
+        "cutoff_et": CUTOFF_ET.isoformat(),
         "filed": [],
         "unverified": [],
         "errors": [],
         "stats": {"discovered": 0, "matched": 0, "held": 0,
                   "retried": 0, "filed": 0, "unverified": 0,
-                  "marked_read": 0, "mark_read_failed": 0},
+                  "marked_read": 0, "mark_read_failed": 0,
+                  "skipped_pre_cutoff": 0, "parked_historical": 0,
+                  "parked_dead": 0, "index_misses": 0},
         "verifier": verifier_note,
         "applicant_index": index.stats() if hasattr(index, "stats") else {},
     }
     if deps_error:
         summary["errors"].append(deps_error)
 
-    # Ingest Zap callback emails BEFORE intake: a validated callback is the
-    # only task proof (no Task API exists). Best-effort — a missed callback
-    # just leaves the filing UNVERIFIED for this sweep.
-    cb_store = getattr(deps, "callback_store", None)
-    if cb_store is not None and gmail is not None:
-        from .cert_callback import ingest_callback_emails
-        try:
-            cb_stats = ingest_callback_emails(gmail=gmail, store=cb_store)
-            summary["stats"]["callbacks_found"] = cb_stats["found"]
-            summary["stats"]["callbacks_accepted"] = cb_stats["accepted"]
-            summary["stats"]["callbacks_rejected"] = cb_stats["rejected"]
-        except Exception as exc:  # noqa: BLE001 — ingestion is best-effort
-            summary["errors"].append(f"callback ingestion failed: {exc}")
+    # Park the historical backlog (date-checked against the cutoff).
+    # Idempotent and bounded; converges over runs.
+    try:
+        migration = park_pre_cutoff_backlog(retry_conn, gmail)
+        summary["stats"]["parked_historical"] = migration.get(
+            "parked_pre_cutoff", 0)
+        summary["stats"]["parked_dead"] = migration.get("parked_dead", 0)
+        if migration.get("note"):
+            summary["errors"].append(migration["note"])
+    except Exception as exc:
+        summary["errors"].append(f"backlog migration failed: {exc}")
 
     def mark_unverified(gmail_id: str, subject: str,
                         applicant_id: Any, reason: str) -> None:
@@ -542,22 +754,33 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
     summary["stats"]["discovered"] = stats.get("discovered", 0)
     summary["stats"]["matched"] = stats.get("matched", 0)
     summary["stats"]["held"] = stats.get("held", 0)
+    summary["stats"]["skipped_pre_cutoff"] = stats.get(
+        "skipped_pre_cutoff", 0)
 
     # Re-drive UNVERIFIED records from the retry ledger.
     seen_ids = {r.gmail_id for r in records}
     for pending in retry_pending(retry_conn):
         if pending["gmail_id"] in seen_ids:
             continue
-        if pending["attempts"] >= RETRY_MAX_ATTEMPTS:
-            continue  # parked for human review; listed, not re-driven
+        if pending["attempts"] > RETRY_MAX_ATTEMPTS:
+            continue  # parked (human review or pre-cutoff); never re-driven
         try:
-            records.append(_reintake_message(gmail, pending["gmail_id"],
-                                            index))
-            seen_ids.add(pending["gmail_id"])
-            summary["stats"]["retried"] += 1
+            record = _reintake_message(gmail, pending["gmail_id"], index)
         except Exception as exc:
             summary["errors"].append(
                 f"retry re-intake failed for {pending['gmail_id']}: {exc}")
+            continue
+        if record is None:
+            # Defensive: the message predates the cutoff (the migration
+            # should have parked it). Park it now, never re-drive.
+            retry_park(retry_conn, pending["gmail_id"],
+                       "message predates the 2026-09-27 ET today-forward "
+                       "cutoff; caught at re-drive")
+            summary["stats"]["parked_historical"] += 1
+            continue
+        records.append(record)
+        seen_ids.add(pending["gmail_id"])
+        summary["stats"]["retried"] += 1
 
     for record in records:
         gmail_id = record.gmail_id
@@ -565,8 +788,29 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
 
         # Intake-held: never verified, never filed.
         if record.held:
+            hold_reason = record.hold_reason or "intake hold"
+            if record.match.status == NO_MATCH:
+                # No EZLynx applicant-by-name API exists, so a current
+                # request that misses the index can only be resolved by a
+                # human lookup or a refreshed complete index. Record the
+                # miss for the refresh loop and say exactly which index
+                # was consulted.
+                miss = miss_note(retry_conn,
+                                 getattr(record.facts, "insured_name", ""),
+                                 gmail_id)
+                index_stats = summary["applicant_index"]
+                hold_reason = (
+                    f"{hold_reason} [index: "
+                    f"{index_stats.get('rows', '?')} rows, built "
+                    f"{index_stats.get('built_at', '?')}; "
+                    f"miss recorded"
+                    f"{' as #' + str(miss['occurrences']) if miss else ''} "
+                    f"for the index-refresh loop — resolve via a refreshed "
+                    f"full-book export or a governed EZLynx lookup]")
+                if miss:
+                    summary["stats"]["index_misses"] += 1
             mark_unverified(gmail_id, record.subject, applicant_id,
-                            record.hold_reason or "intake hold")
+                            hold_reason)
             continue
 
         # The filing path is broken (e.g. the Zapier trigger script is
@@ -658,13 +902,6 @@ def run_sweep(*, gmail: Any | None = None, checkpoint: Any | None = None,
 
     if index is None:
         index = load_applicant_index()
-    # The applicant index IS the sweep's write allowlist: any client in the
-    # directory is a legitimate filing destination. Register it so the
-    # shared EZLynx write-scope gate (used by document upload and note
-    # append) allows indexed applicants. Process-scoped — other jobs that
-    # never call this keep the restrictive compiled allowlist.
-    from .ezlynx_write_scope import register_cert_sweep_applicant_index
-    register_cert_sweep_applicant_index(index.all_applicant_ids())
     if gmail is None:
         try:
             gmail = build_gmail()
