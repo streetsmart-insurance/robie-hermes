@@ -59,6 +59,12 @@ from .carrier_policy_change_routes import (
     manual_routes,
     resolve_carrier,
 )
+from .policy_change_mailbox_search import (
+    SENDER as MAILBOX_SENDER,
+    PolicyChangeMailboxSearcher,
+    build_default_mailbox_searcher,
+    resolve_change_mailboxes,
+)
 from .overdue_policy_change_reports import (
     JOB_TYPE as PHASE1_JOB_TYPE,
     REPORT_KEY,
@@ -391,6 +397,9 @@ class PolicyChangeCarrierContactWorker:
         routing_table_path: str | None = None,
         cc_resolver: Callable[[Mapping[str, Any]], list[str]] | None = None,
         discussion_lookup: Callable[[str], dict[str, Any] | None] | None = None,
+        mailbox_searcher: PolicyChangeMailboxSearcher | None = None,
+        roster_maps: Mapping[str, Any] | None = None,
+        producer_fallbacks: Mapping[str, str] | None = None,
     ) -> None:
         self.queue_reader = queue_reader or default_queue_reader
         self.document_search = document_search or default_document_search
@@ -398,6 +407,13 @@ class PolicyChangeCarrierContactWorker:
         self.routing_table = routing_table or load_routing_table(routing_table_path)
         self.cc_resolver = cc_resolver or (lambda item: [])
         self.discussion_lookup = discussion_lookup
+        # Cross-mailbox Gmail search (Carlo-authorized domain-wide
+        # delegation, read-only). None here means "resolve from the
+        # environment at perform() time"; an explicit searcher (tests)
+        # always wins.
+        self.mailbox_searcher = mailbox_searcher
+        self.roster_maps = roster_maps
+        self.producer_fallbacks = producer_fallbacks or {}
 
     def _cross_post(self, followup_store: Any, key: str,
                     event: str, detail: str, today: date) -> None:
@@ -437,6 +453,36 @@ class PolicyChangeCarrierContactWorker:
             # the injected follow-up store's in-memory state.
             live = not dry_run
 
+            # Cross-mailbox Gmail search (read-only, domain-wide delegation).
+            # Explicit searcher wins; otherwise resolve from the environment.
+            # None = unconfigured -> the run continues without it, logged.
+            searcher = self.mailbox_searcher
+            if searcher is None:
+                try:
+                    searcher = build_default_mailbox_searcher()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("mailbox search unavailable: %s", exc)
+                    searcher = None
+            roster_maps = self.roster_maps
+            if roster_maps is None:
+                raw_roster = payload.get("roster_maps")
+                roster_maps = raw_roster if isinstance(raw_roster, Mapping) else None
+            producer_fallbacks = self.producer_fallbacks
+            if not producer_fallbacks:
+                raw_fb = payload.get("producer_fallbacks")
+                if isinstance(raw_fb, Mapping):
+                    producer_fallbacks = {
+                        str(k): str(v) for k, v in raw_fb.items()
+                    }
+            mailbox_evidence: dict[str, Any] = {
+                "enabled": bool(searcher and searcher.configured),
+                "reason": (
+                    None if (searcher and searcher.configured)
+                    else "unconfigured: delegation env var or roster unavailable"
+                ),
+                "searches": [],
+            }
+
             rows = self.queue_reader(payload)
             open_rows = [
                 r for r in rows
@@ -469,10 +515,13 @@ class PolicyChangeCarrierContactWorker:
             summary = {
                 "open_queue_rows": len(items),
                 "endorsement_found": 0,
+                "endorsement_found_via_mailbox": 0,
                 "emailed": 0,
                 "send_errors": 0,
                 "check_only": 0,
                 "skipped": 0,
+                "carrier_reply_recent": 0,
+                "manual_queue_cleared": 0,
                 "awaiting_directory": [],
                 "manual_action": [],
                 "held": [],
@@ -510,6 +559,81 @@ class PolicyChangeCarrierContactWorker:
                         self._cross_post(followup_store, key, "endorsement_found",
                                          f"carrier worker found: {doc_name}", today)
                     continue
+
+                # 1b) Cross-mailbox Gmail search (read-only delegation):
+                # the CSR's or producer's inbox may already hold the
+                # endorsement or a carrier reply. An endorsement found
+                # here counts exactly like a DocumentApi hit; a carrier
+                # reply is logged and clears the manual-action queue.
+                # Every mailbox searched is logged in the evidence.
+                if searcher is not None and searcher.configured:
+                    mailboxes = resolve_change_mailboxes(
+                        item, roster_maps, producer_fallbacks)
+                    mb = searcher.search_change(item, mailboxes, today)
+                    mb["change_key"] = key
+                    mailbox_evidence["searches"].append(mb)
+                    endorsement_hit = mb.get("endorsement")
+                    if endorsement_hit:
+                        summary["endorsement_found"] += 1
+                        summary["endorsement_found_via_mailbox"] += 1
+                        doc_name = (
+                            f"gmail:{endorsement_hit.get('mailbox')}:"
+                            f"{endorsement_hit.get('filename')}"
+                        )
+                        if live:
+                            store.record_endorsement_found(key, doc_name, today)
+                            self._cross_post(
+                                followup_store, key, "endorsement_found",
+                                f"mailbox search found: {doc_name}", today)
+                        continue
+                    reply_hit = mb.get("carrier_reply")
+                    if reply_hit:
+                        reply_detail = (
+                            f"from {reply_hit.get('from')} "
+                            f"in {reply_hit.get('mailbox')}: "
+                            f"{reply_hit.get('subject')}"
+                        )
+                        if live:
+                            store.record_event(key, "carrier_reply_found",
+                                               reply_detail, today)
+                            self._cross_post(followup_store, key,
+                                             "carrier_reply_found",
+                                             reply_detail, today)
+                        reply_date = reply_hit.get("date")
+                        recent = (
+                            isinstance(reply_date, date)
+                            and (today - reply_date).days < RECONTACT_DAYS
+                        )
+                        if elig["action"] == "email":
+                            # Resolve the route now: a manual route with a
+                            # live carrier reply is cleared from the queue —
+                            # an agent doesn't need to chase a carrier that
+                            # already answered.
+                            carrier = resolve_carrier(
+                                item.get("Master Company"), self.routing_table)
+                            route_status = (carrier or {}).get("route_status") or ""
+                            emails = emailable_routes(carrier) if carrier else []
+                            is_manual = carrier is not None and (
+                                route_status == "manual" or not emails)
+                            if is_manual:
+                                summary["manual_queue_cleared"] += 1
+                                if live:
+                                    store.record_event(
+                                        key, "manual_queue_cleared",
+                                        f"carrier replied; {reply_detail}", today)
+                                continue
+                            if recent:
+                                # The carrier already replied recently: no
+                                # duplicate outreach.
+                                summary["carrier_reply_recent"] += 1
+                                if live:
+                                    store.record_event(
+                                        key, "carrier_reply_recent",
+                                        "carrier replied recently; email skipped",
+                                        today)
+                                continue
+                            # Older reply on an emailable route: logged
+                            # above; the chase email still goes out below.
 
                 if elig["action"] == "check_only":
                     summary["check_only"] += 1
@@ -598,6 +722,7 @@ class PolicyChangeCarrierContactWorker:
 
             evidence["summary"] = summary
             evidence["receipts"] = receipts
+            evidence["mailbox_search"] = mailbox_evidence
             if not dry_run:
                 store.save()
             evidence["succeeded"] = True

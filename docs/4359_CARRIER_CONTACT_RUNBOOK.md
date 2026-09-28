@@ -21,6 +21,29 @@ until Carlo reviews the dry-run proof and approves go-live.**
    contact.** If an endorsement naming the policy is already in EZLynx, the
    change is recorded as `endorsement_found` and handed to phase 3 — the
    carrier is never bothered.
+4b. **Cross-mailbox read-only search (domain-wide delegation).** If the
+   DocumentApi finds nothing, the worker searches — read-only, via the
+   same keyless-delegated service account the accountability mailer uses
+   (`ACCOUNTABILITY_GMAIL_DELEGATED_SERVICE_ACCOUNT`) — the Gmail of the
+   people involved in that change ONLY: `robie@streetsmart.insurance`,
+   the assigned CSR, and the assigned producer, resolved from the same
+   approved roster phase 1 uses (`ROBIE_4359_MANIFEST`), plus optional
+   producer fallbacks (`ROBIE_4359_PRODUCER_FALLBACKS`). Nobody
+   uninvolved is ever impersonated. Each mailbox is queried for the
+   policy number + insured name (60-day lookback, 25-message cap); an
+   endorsement PDF (by filename hints) or a carrier reply (external
+   sender) classifies as a hit. A delegation failure on one mailbox is
+   logged in evidence and that mailbox is skipped — the run continues.
+   Every mailbox, query, and hit/miss/error is logged in
+   `evidence["mailbox_search"]`. The search module has NO send path and
+   requests only the `gmail.readonly` scope; all outbound mail stays in
+   `default_carrier_mailer`, which hardcodes
+   `From: robie@streetsmart.insurance`. An endorsement found this way
+   counts as `endorsement_found` (never `confirmed` — confirmation is
+   phase 3's job); a recent carrier reply suppresses a duplicate chase
+   email. Without delegation configured, or without a trustworthy
+   roster, the search degrades to `robie@`-only or off — never guessing
+   employee mailboxes.
 5. Resolves `Master Company` against the curated routing table
    (`robie_job_engine/data/carrier_policy_change_routes.json`):
    - `ok` → email the policy-change address from

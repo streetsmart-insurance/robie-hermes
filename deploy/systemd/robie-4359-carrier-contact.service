@@ -18,6 +18,15 @@ Environment=ROBIE_ENV=PRODUCTION
 Environment=ROBIE_4359_CARRIER_MODE=dry-run
 Environment=ROBIE_4359_SENT_STORE=/opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/sent.json
 Environment=ROBIE_4359_CARRIER_STORE=/opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/carrier_contact.json
+# Approved employee roster (same manifest phase 1 uses). The worker resolves
+# the assigned CSR / producer from this roster and searches ONLY those
+# mailboxes (plus robie@) via read-only domain-wide delegation. If the
+# manifest is missing/unreadable, the worker degrades to robie@-only search
+# rather than guessing employee mailboxes.
+Environment=ROBIE_4359_MANIFEST=/etc/streetsmart-hermes/robie-4359-manifest.json
+# Optional: ROBIE_4359_PRODUCER_FALLBACKS=<path> adds producer work-email
+# fallbacks for producers missing from the approved roster (same convention
+# as phase 1). Unset = none; a missing file is not an error.
 # Optional overrides (report mailbox, freshness bar, routing table path).
 # Values in this file win over the Environment= defaults above.
 EnvironmentFile=-/etc/streetsmart-hermes/robie-4359.env

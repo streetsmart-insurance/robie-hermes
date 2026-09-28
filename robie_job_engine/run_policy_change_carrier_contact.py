@@ -7,6 +7,13 @@ this worker:
   1. Checks EZLynx documents via the read-only DocumentApi FIRST — an
      endorsement that already landed hands the change to phase 3 instead
      of bothering the carrier.
+  1b. Cross-mailbox Gmail search (read-only domain-wide delegation):
+     for each open change, searches robie@ + the assigned CSR's + the
+     assigned producer's mailboxes for endorsement attachments or
+     carrier replies. An endorsement found in mail counts like a
+     DocumentApi hit; a carrier reply is logged and clears the
+     manual-action queue. Nobody uninvolved is ever impersonated, and
+     nothing is ever sent from an impersonated account.
   2. Resolves the carrier against the curated routing table and emails
      the carrier's policy-change address (email-first).
   3. Queues (never emails): unresolved carriers / missing directory
@@ -39,7 +46,11 @@ from pathlib import Path
 from typing import Any
 
 from .carrier_policy_change_routes import default_routing_table_path
-from .overdue_policy_change_reports import PolicyChangeReportContractError
+from .overdue_policy_change_reports import (
+    PolicyChangeReportContractError,
+    load_approved_csr_directory,
+    load_producer_fallbacks,
+)
 from .policy_change_carrier_contact import (
     JOB_TYPE,
     PolicyChangeCarrierContactWorker,
@@ -83,6 +94,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--evidence-out", default="",
         help="Write the run evidence JSON here (default: stdout only).")
+    parser.add_argument(
+        "--manifest", default=os.environ.get("ROBIE_4359_MANIFEST", ""),
+        help="Path to the approved roster manifest JSON. When absent or "
+             "unreadable the cross-mailbox search degrades to robie@-only "
+             "(fail closed: no unverified impersonation).")
+    parser.add_argument(
+        "--producer-fallbacks",
+        default=os.environ.get("ROBIE_4359_PRODUCER_FALLBACKS", ""),
+        help="Path to producer work-email fallbacks JSON (optional).")
     return parser
 
 
@@ -104,6 +124,25 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
     job = {"action_type": "contact_carriers", "payload": payload}
     logger.info("idempotency key: 4359-carrier-contact-%s", today.isoformat())
+
+    # Approved roster for cross-mailbox search (CSR/producer -> mailbox).
+    # Fail closed: without the roster the worker impersonates nobody
+    # unverified and the mailbox search degrades to robie@-only.
+    manifest = str(args.manifest or "").strip()
+    if manifest:
+        try:
+            payload["roster_maps"] = load_approved_csr_directory(manifest)
+        except PolicyChangeReportContractError as exc:
+            logger.warning("roster unavailable (%s): mailbox search "
+                           "degrades to robie@-only", exc)
+    fallbacks_path = str(args.producer_fallbacks or "").strip()
+    if fallbacks_path:
+        try:
+            payload["producer_fallbacks"] = load_producer_fallbacks(
+                fallbacks_path)
+        except PolicyChangeReportContractError as exc:
+            logger.warning("producer fallbacks unavailable (%s): ignored",
+                           exc)
 
     dry_run = args.mode != "live"
     worker = PolicyChangeCarrierContactWorker(
