@@ -155,7 +155,7 @@ def test_registry_hit_is_deterministic():
     entry = SimpleNamespace(discussion_id="999")
     discs = [_d("999", "Certificate of Insurance Request - RMIS",
                 "2026-09-15T17:19:14+00:00")]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(entry), FakeDiscussions(discs))
     assert did == "999"
     assert "registry" in how
@@ -168,7 +168,7 @@ def test_single_holder_discussion_resolves_strong():
         _d("2", "Certificate of Insurance Request - Manasquan PBA",
            "2026-05-19T19:44:32+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["Anderson Market"], FakeRegistry(),
         FakeDiscussions(discs),
         email_date="Fri, 25 Sep 2026 21:06:08 +0000")
@@ -184,7 +184,7 @@ def test_policy_digits_narrow_multiple_candidates():
         _d("2", "Certificate of Insurance Request - RMIS policy 998877",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(policies=["998877"]), ["RMIS"], FakeRegistry(),
         FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000")
@@ -202,7 +202,7 @@ def test_stale_same_holder_threads_hold_with_dates():
         _d("3", "Certificate of Insurance Request - RMIS",
            "2025-10-27T15:04:53+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=False)
     assert did is None
@@ -217,7 +217,7 @@ def test_fresh_discussion_for_new_request_resolves_medium():
         _d("2", "Certificate of Insurance Request - RMIS",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=False)
     assert did == "1"
@@ -231,7 +231,7 @@ def test_fresh_discussion_does_not_resolve_a_followup():
         _d("2", "Certificate of Insurance Request - RMIS",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=True)
     assert did is None  # a reply may belong to the older thread
@@ -240,7 +240,7 @@ def test_fresh_discussion_does_not_resolve_a_followup():
 def test_no_candidates_holds():
     discs = [_d("1", "General Inquiry - billing question",
                 "2026-09-01T10:00:00+00:00")]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs))
     assert did is None
     assert "no certificates discussion" in how
@@ -253,7 +253,7 @@ def test_no_holder_extracted_holds_when_many():
         _d("2", "Certificate of Insurance Request - RXO",
            "2026-05-14T13:57:23+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), [], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000")
     assert did is None
@@ -268,7 +268,7 @@ def test_recency_alone_never_resolves():
         _d("2", "Certificate of Insurance Request - RMIS",
            "2026-09-02T15:50:34+00:00"),
     ]
-    did, title, how = resolve_discussion(
+    did, title, how, code = resolve_discussion(
         _verified(), ["RMIS"], FakeRegistry(), FakeDiscussions(discs),
         email_date="Sat, 26 Sep 2026 12:27:49 +0000", is_followup=False)
     assert did == "2"  # the single RMIS-anchored one, not the fresh RXO one

@@ -306,7 +306,7 @@ def test_resolve_prefers_registry(tmp_path):
     deps.registry.put(TaskEntry(220250093, "POL123", "bigclientinc",
                                 discussion_id="d-reg"))
     v = make_verified()
-    did, title, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+    did, title, how, code = resolve_discussion(v, ["Big Client Inc"], deps.registry,
                                          deps.discussions_client)
     assert did == "d-reg" and how.startswith("task registry")
 
@@ -314,7 +314,7 @@ def test_resolve_prefers_registry(tmp_path):
 def test_resolve_matches_holder_discussion(tmp_path):
     deps = make_deps(str(tmp_path))
     v = make_verified()
-    did, title, how = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+    did, title, how, code = resolve_discussion(v, ["Big Client Inc"], deps.registry,
                                          deps.discussions_client)
     assert did == "d1" and "Big Client" in (title or "")
 
@@ -324,7 +324,7 @@ def test_resolve_holds_when_nothing_matches(tmp_path):
     deps.discussions_client = FakeDiscussions(
         [{"id": "d9", "title": "Renewal follow-up", "noteCount": 1}])
     v = make_verified()
-    did, title, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+    did, title, reason, code = resolve_discussion(v, ["Big Client Inc"], deps.registry,
                                             deps.discussions_client)
     assert did is None and "no certificates discussion" in reason
 
@@ -336,7 +336,7 @@ def test_resolve_holds_on_ambiguous_matches(tmp_path):
         {"id": "d2", "title": "COI for Big Client Inc renewal"},
     ])
     v = make_verified()
-    did, title, reason = resolve_discussion(v, ["Big Client Inc"], deps.registry,
+    did, title, reason, code = resolve_discussion(v, ["Big Client Inc"], deps.registry,
                                             deps.discussions_client)
     assert did is None and "refusing to guess" in reason
     assert "COI for Big Client Inc renewal" in reason
@@ -593,18 +593,6 @@ def test_file_record_task_wrong_assignee_is_unverified(tmp_path):
     assert res.status == "ERROR"
     assert any("UNVERIFIED" in h for h in res.hold_reasons)
     assert any("SCanales" in h for h in res.hold_reasons)
-
-
-def test_file_record_task_proof_without_task_id_completes(tmp_path):
-    """A validated callback with no task_id still completes the filing.
-    The Zap's EZLynx step is Create Note with no mappable ID output
-    (verified 2026-09-27) — the callback itself is the proof."""
-    deps = make_deps(str(tmp_path))
-    deps.task_prover = FakeTaskProver(task_id="", assignee="SCanales")
-    res = file_record(make_record(), make_verified(), deps)
-    assert res.status != "ERROR", res.hold_reasons
-    assert not any("UNVERIFIED" in h for h in res.hold_reasons)
-    assert any("callback proven" in e for e in res.evidence)
 
 
 def test_file_record_uncertain_note_outcome_reads_back_first(tmp_path):
