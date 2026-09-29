@@ -115,12 +115,17 @@ def _email_verification_lines(email_data: Optional[Dict[str, Any]]) -> List[str]
     ]
     for mailbox, facts in sorted(by_employee.items()):
         rate = facts.get("reply_rate")
-        rate_display = "NOT EVALUABLE" if rate is None else f"{rate * 100:.0f}%"
-        partial = " ⚠️ partial (scan caps hit)" if facts.get("partial") else ""
+        if rate is None:
+            rate_display = "NOT EVALUABLE"
+        elif facts.get("partial"):
+            # Sampled scan: never let a capped window read as a complete rate.
+            rate_display = f"{rate * 100:.0f}% ⚠️ SAMPLED ONLY (scan caps hit, not a complete rate)"
+        else:
+            rate_display = f"{rate * 100:.0f}%"
         lines.append(
             f"| {mailbox} | {facts.get('handled_via_reply', 0)} | {facts.get('handled_via_forward', 0)} | "
             f"{facts.get('unhandled_action', 0)} | {facts.get('unhandled_unknown', 0)} | "
-            f"{facts.get('unhandled_fyi', 0)} | {rate_display}{partial} |"
+            f"{facts.get('unhandled_fyi', 0)} | {rate_display} |"
         )
     unhandled_items = [
         (mailbox, item)
@@ -136,7 +141,12 @@ def _email_verification_lines(email_data: Optional[Dict[str, Any]]) -> List[str]
         for mailbox, item in unhandled_items[:20]:
             subject = str(item.get("subject") or "(no subject)").replace("|", "/")
             summary = str(item.get("summary") or "(no summary)").replace("|", "/")
-            lines.append(f"• {mailbox} — {subject} — {summary} | action: {item.get('action_needed', 'unknown')}")
+            possible = ""
+            if str(item.get("detail") or "").startswith("possible related send"):
+                possible = " | ⚠️ possible related send (unverified, not counted as handled)"
+            lines.append(
+                f"• {mailbox} — {subject} — {summary} | action: {item.get('action_needed', 'unknown')}{possible}"
+            )
     return lines
 
 class ReportingSuite:
