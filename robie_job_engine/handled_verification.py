@@ -206,9 +206,9 @@ def is_related_send(
     inbound_subject: str,
     inbound_msgid: str,
     inbound_from: str = "",
-) -> str | None:
+) -> tuple[str, bool] | None:
     """Pure matching logic: is this sent message a forward / related send
-    of the inbound? Returns a detail string or None. Unit-testable.
+    of the inbound? Returns (detail, verified) or None. Unit-testable.
 
     Identity, per review: a bare subject match is NOT enough (any sent item
     in the window could collide), and even subject + client-recipient is not
