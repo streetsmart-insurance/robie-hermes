@@ -153,7 +153,9 @@ def test_norm_subject_strips_reply_and_forward_prefixes():
 
 def test_is_related_send_matches_reference_header():
     sent = {"subject": "Fwd: Proof of garaging", "references": "<a@x> <in1@mail.example.com>"}
-    assert is_related_send(sent, "Proof of garaging", "<in1@mail.example.com>")
+    detail, verified = is_related_send(sent, "Proof of garaging", "<in1@mail.example.com>")
+    assert verified is True
+    assert "references original message" in detail
 
 
 def test_is_related_send_subject_alone_never_matches():
@@ -163,13 +165,15 @@ def test_is_related_send_subject_alone_never_matches():
                            "Client Person <client@example.com>") is None
 
 
-def test_is_related_send_matches_subject_plus_client_recipient():
-    assert is_related_send(
+def test_is_related_send_subject_plus_client_is_possible_not_verified():
+    detail, verified = is_related_send(
         {"subject": "Fwd: Proof of garaging", "references": "", "to": "client@example.com"},
         "Proof of garaging", "<zzz@mail.example.com>", "Client Person <client@example.com>")
-    assert is_related_send(
+    assert verified is False
+    detail2, verified2 = is_related_send(
         {"subject": "Re: Proof of garaging request", "references": "", "cc": "Client <client@example.com>"},
         "Proof of garaging request", "<zzz@mail.example.com>", "client@example.com")
+    assert verified2 is False
 
 
 def test_is_related_send_rejects_unrelated_and_tiny_subjects():
@@ -246,7 +250,7 @@ def test_verify_finds_forward_by_reference_in_employee_sent():
     assert EMPLOYEE in result["detail"]
 
 
-def test_verify_finds_forward_by_subject_in_shared_mailbox():
+def test_verify_subject_plus_client_send_is_possible_not_handled():
     inbound = _inbound()
     fwd = _msg("m-fwd", "t2", SHARED, WHEN_LATER, "Fwd: Proof of garaging",
                to_addr="Client Person <client@example.com>")
@@ -257,7 +261,8 @@ def test_verify_finds_forward_by_subject_in_shared_mailbox():
         services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE, SHARED],
         after="2026/09/22", before="2026/09/30",
     )
-    assert result["handled_via"] == "forward"
+    assert result["handled_via"] == "unhandled"
+    assert result["detail"].startswith("possible related send")
     assert SHARED in result["detail"]
 
 
@@ -573,3 +578,84 @@ def test_errored_check_makes_rate_unevaluable():
     assert result["check_failed"] == 1
     assert result["reply_rate"] is None
     assert result["rate_status"].startswith("unevaluable")
+
+
+
+# --------------------------------------------- re-review regression tests (round 2)
+
+def test_later_unrelated_send_same_client_same_subject_not_verified():
+    """Re-review 1: a later, unrelated send to the same client under the same
+    recurring subject must NOT count as verified handled without Message-ID
+    linkage; it is labeled a possible related send for human judgment."""
+    inbound = _inbound()
+    unrelated = _msg("m-unrel", "t9", EMPLOYEE, WHEN_LATER, "Fwd: Proof of garaging",
+                     to_addr="client@example.com")
+    unrelated["labelIds"] = ["SENT"]
+    threads = {"t1": {"messages": [inbound]}}
+    services = _services([inbound, unrelated], threads=threads)
+    result = verify_mailbox_handled(
+        EMPLOYEE, services, sent_mailboxes=[EMPLOYEE],
+        after="2026/09/22", before="2026/09/30",
+    )
+    assert result["handled_via_forward"] == 0
+    assert result["items"][0]["handled_via"] == "unhandled"
+    assert result["items"][0]["detail"].startswith("possible related send")
+
+
+def test_forged_display_name_with_employee_address_is_not_internal_reply():
+    """Re-review 2: a From header whose display name contains the employee
+    address but whose actual address is external is not an internal reply."""
+    inbound = _inbound()
+    forged = _msg("m-forged", "t1", f'"{EMPLOYEE}" <attacker@evil.example.com>', WHEN_LATER)
+    threads = {"t1": {"messages": [inbound, forged]}}
+    services = _services([inbound], threads=threads)
+    result, _ = verify_inbound_message(
+        services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE],
+        after="2026/09/22", before="2026/09/30",
+    )
+    assert result["handled_via"] == "unhandled"
+
+
+def test_exact_employee_sender_still_counts_as_reply():
+    inbound = _inbound()
+    reply = _msg("m-reply", "t1", f"Rep A <{EMPLOYEE}>", WHEN_LATER)
+    threads = {"t1": {"messages": [inbound, reply]}}
+    services = _services([inbound], threads=threads)
+    result, _ = verify_inbound_message(
+        services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE],
+        after="2026/09/22", before="2026/09/30",
+    )
+    assert result["handled_via"] == "reply"
+
+
+def test_partial_mailbox_rate_renders_as_sampled_not_complete():
+    """Re-review 3: a capped window must never render as a bare rate."""
+    from robie_job_engine.reporting_suite import _email_verification_lines
+    lines = _email_verification_lines({"handled_verification": {
+        "source_status": "available",
+        "by_employee": {"rep-a@streetsmart.insurance": {
+            "received": 5, "handled_via_reply": 2, "handled_via_forward": 1,
+            "unhandled_action": 1, "unhandled_unknown": 1, "unhandled_fyi": 0,
+            "check_failed": 0, "reply_rate": 0.6, "rate_status": "ok", "partial": True,
+            "items": []}},
+    }})
+    table_row = [line for line in lines if line.startswith("| rep-a")][0]
+    assert "SAMPLED ONLY" in table_row
+    assert "not a complete rate" in table_row
+
+
+def test_unverified_possible_send_labeled_in_unhandled_bullets():
+    from robie_job_engine.reporting_suite import _email_verification_lines
+    lines = _email_verification_lines({"handled_verification": {
+        "source_status": "available",
+        "by_employee": {"rep-a@streetsmart.insurance": {
+            "received": 1, "handled_via_reply": 0, "handled_via_forward": 0,
+            "unhandled_action": 1, "unhandled_unknown": 0, "unhandled_fyi": 0,
+            "check_failed": 0, "reply_rate": 0.0, "rate_status": "ok", "partial": False,
+            "items": [{"handled_via": "unhandled", "subject": "Proof of garaging",
+                       "summary": "Client asks for garaging proof.",
+                       "action_needed": "likely yes",
+                       "detail": "possible related send (unverified, not counted as handled): rep-a sent matching subject"}]}},
+    }})
+    bullet = [line for line in lines if line.startswith("•")][0]
+    assert "possible related send (unverified, not counted as handled)" in bullet
