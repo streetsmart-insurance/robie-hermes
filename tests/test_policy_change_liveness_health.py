@@ -82,6 +82,35 @@ def test_alias_check_search_error_fails_closed():
     assert "could not be checked" in findings[0]
 
 
+def test_alias_check_matching_anchor_is_silent():
+    anchors = {"275768": "48641902", "WC 104180 01": "88789196"}
+    assert check_alias_targets(healthy_search(), ALIASES, TODAY, anchors) == []
+
+
+def test_alias_check_wrong_account_target_is_a_finding():
+    # The target resolves to a live policy, but on a different account than
+    # the recorded applicant: the number was reissued — a finding, in plain
+    # English, naming both accounts.
+    moved = search_for({
+        "WC5-33S-B276B9-026": [live_row("WC5-33S-B276B9-026", account="00000000")],
+    })
+    findings = check_alias_targets(
+        moved, {"275768": "WC5-33S-B276B9-026"}, TODAY, {"275768": "48641902"})
+    assert len(findings) == 1
+    assert "275768" in findings[0] and "WC5-33S-B276B9-026" in findings[0]
+    assert "00000000" in findings[0] and "48641902" in findings[0]
+    assert "not the verified account" in findings[0]
+
+
+def test_alias_check_anchor_absent_keeps_legacy_behavior():
+    # Without anchors the check behaves exactly as before: a live row on any
+    # account is healthy.
+    moved = search_for({
+        "WC5-33S-B276B9-026": [live_row("WC5-33S-B276B9-026", account="00000000")],
+    })
+    assert check_alias_targets(moved, {"275768": "WC5-33S-B276B9-026"}, TODAY) == []
+
+
 # -- held-row checks -----------------------------------------------------------
 
 
@@ -100,6 +129,21 @@ def test_held_row_missing_ids_is_a_finding():
     findings = check_held_rows(healthy_search(), [{"account_name": "X"}], {}, TODAY)
     assert len(findings) == 1
     assert "cannot be re-checked" in findings[0]
+
+
+def test_held_row_with_anchored_alias_now_live_is_a_finding():
+    # Anchors pass through to the worker's classification: the held alias
+    # row now resolves LIVE on the verified account.
+    now_live = search_for({
+        "WC5-33S-B276B9-026": [live_row("WC5-33S-B276B9-026")],
+    })
+    held = [{"account_name": "Shoreline Builders LLC", "applicant_id": "48641902",
+             "policy_number": "275768", "reason": "held"}]
+    findings = check_held_rows(now_live, held,
+                               {"275768": "WC5-33S-B276B9-026"}, TODAY,
+                               {"275768": "48641902"})
+    assert len(findings) == 1
+    assert "LIVE" in findings[0] and "275768" in findings[0]
 
 
 # -- evidence loading ----------------------------------------------------------

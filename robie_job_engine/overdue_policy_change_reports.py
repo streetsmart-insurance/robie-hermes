@@ -380,16 +380,8 @@ def default_policy_aliases_path() -> str:
     return str(Path(__file__).with_name(POLICY_ALIASES_FILENAME))
 
 
-def load_policy_aliases(path: str | Path | None = None) -> dict[str, str]:
-    """Queue policy number -> verified live policy number.
-
-    For change requests whose report number is stale (renewal changed the
-    number, or the report mis-keyed it), a hand-verified alias lets the
-    worker check liveness against the real policy instead of holding
-    forever. Keys are matched on the whitespace-collapsed queue number.
-    Missing file = no aliases. A corrupt file fails closed: the run stops
-    rather than nagging against a wrong number.
-    """
+def _load_policy_alias_payload(path: str | Path | None) -> dict[str, Any]:
+    """Raw alias-file payload; fail-closed on unreadable or corrupt content."""
     resolved = Path(path) if path else Path(default_policy_aliases_path())
     if not resolved.exists():
         return {}
@@ -403,23 +395,87 @@ def load_policy_aliases(path: str | Path | None = None) -> dict[str, str]:
         raise PolicyChangeReportContractError(
             f"policy alias file {resolved} must be a JSON object"
         )
+    return payload
+
+
+def _parse_alias_entry(
+    resolved: Path, key: Any, value: Any
+) -> tuple[str, str, str]:
+    """Return (queue_number, live_target, applicant_anchor) for one alias entry.
+
+    Values may be a plain live-number string (legacy) or an object
+    ``{"target": ..., "applicant_id": ...}`` where ``applicant_id`` is the
+    hand-verified EZLynx applicant the target must belong to. Fail-closed on
+    blank keys or targets.
+    """
+    queue_number = normalize_policy_number(key)
+    applicant_anchor = ""
+    if isinstance(value, dict):
+        live_number = str(value.get("target") or "").strip()
+        applicant_anchor = str(value.get("applicant_id") or "").strip()
+    else:
+        live_number = str(value or "").strip()
+    if not queue_number or not live_number:
+        raise PolicyChangeReportContractError(
+            f"policy alias file {resolved} has a blank key or target"
+        )
+    return queue_number, live_number, applicant_anchor
+
+
+def load_policy_aliases(path: str | Path | None = None) -> dict[str, str]:
+    """Queue policy number -> verified live policy number.
+
+    For change requests whose report number is stale (renewal changed the
+    number, or the report mis-keyed it), a hand-verified alias lets the
+    worker check liveness against the real policy instead of holding
+    forever. Keys are matched on the whitespace-collapsed queue number.
+    Values may be a plain string or an object with ``target`` plus the
+    hand-verified ``applicant_id`` anchor (see
+    :func:`load_policy_alias_applicants`).
+    Missing file = no aliases. A corrupt file fails closed: the run stops
+    rather than nagging against a wrong number.
+    """
+    payload = _load_policy_alias_payload(path)
+    resolved = Path(path) if path else Path(default_policy_aliases_path())
     aliases: dict[str, str] = {}
     for key, value in payload.items():
         if str(key).startswith("_"):
             continue
-        queue_number = normalize_policy_number(key)
-        live_number = str(value or "").strip()
-        if not queue_number or not live_number:
-            raise PolicyChangeReportContractError(
-                f"policy alias file {resolved} has a blank key or value"
-            )
+        queue_number, live_number, _ = _parse_alias_entry(resolved, key, value)
         aliases[queue_number] = live_number
     return aliases
+
+
+def load_policy_alias_applicants(path: str | Path | None = None) -> dict[str, str]:
+    """Queue policy number -> hand-verified applicant ID for object-form aliases.
+
+    Only entries written as ``{"target": ..., "applicant_id": ...}`` appear
+    here; plain-string entries carry no anchor and are skipped. The worker
+    fails closed when a queue row's applicant disagrees with the anchor, and
+    the outcome health check verifies the alias target still belongs to the
+    recorded applicant — so a reissued number landing on another account is
+    caught instead of silently trusted.
+    """
+    payload = _load_policy_alias_payload(path)
+    resolved = Path(path) if path else Path(default_policy_aliases_path())
+    anchors: dict[str, str] = {}
+    for key, value in payload.items():
+        if str(key).startswith("_"):
+            continue
+        queue_number, _, applicant_anchor = _parse_alias_entry(resolved, key, value)
+        if applicant_anchor:
+            anchors[queue_number] = applicant_anchor
+    return anchors
 
 
 @lru_cache(maxsize=1)
 def _default_policy_aliases() -> dict[str, str]:
     return load_policy_aliases()
+
+
+@lru_cache(maxsize=1)
+def _default_policy_alias_applicants() -> dict[str, str]:
+    return load_policy_alias_applicants()
 
 
 def _apply_policy_alias(
@@ -457,6 +513,7 @@ def classify_policy_liveness(
     applicant_id: str,
     today: date,
     policy_aliases: Mapping[str, str] | None = None,
+    policy_alias_applicants: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """LIVE / DEAD / HOLD verdict for one queue row.
 
@@ -470,7 +527,9 @@ def classify_policy_liveness(
 
     When the queue number is a known-stale alias (renewal changed the
     number), liveness is checked against the verified live number and the
-    verdict records it. Zero corresponding results or ambiguity -> HOLD
+    verdict records it. When the alias file records a hand-verified
+    applicant anchor, the queue row's applicant must match it — a mismatch
+    is HOLD, never trusted. Zero corresponding results or ambiguity -> HOLD
     (flagged, never emailed, never auto-closed).
     """
     raw_number = str(policy_number or "").strip()
@@ -481,8 +540,28 @@ def classify_policy_liveness(
         return {"verdict": "HOLD", "reason": "blank applicant id"}
 
     aliases = policy_aliases if policy_aliases is not None else _default_policy_aliases()
+    alias_anchors = (
+        policy_alias_applicants
+        if policy_alias_applicants is not None
+        else _default_policy_alias_applicants()
+    )
     number, alias_target = _apply_policy_alias(raw_number, aliases)
     alias_note = f" (queue number {raw_number!r} aliased to verified live number)" if alias_target else ""
+    if alias_target:
+        anchor = alias_anchors.get(normalize_policy_number(raw_number), "")
+        if anchor and anchor != applicant:
+            # The alias was hand-verified against a specific EZLynx applicant.
+            # If the queue row now carries a different applicant, the alias
+            # must not be trusted — hold instead of nagging against a number
+            # that may belong to someone else's policy.
+            return {
+                "verdict": "HOLD",
+                "reason": (
+                    f"alias applicant anchor mismatch: queue applicant {applicant} "
+                    f"does not match the verified applicant {anchor} for alias "
+                    f"target {alias_target!r}"
+                ) + alias_note,
+            }
 
     def account_ok(row: Mapping[str, Any]) -> bool:
         return str(row.get("accountId") or row.get("account_id") or "").strip() == applicant

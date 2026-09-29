@@ -23,6 +23,7 @@ from robie_job_engine.overdue_policy_change_reports import (
     deconcatenated_variants,
     discussion_context_line,
     load_exclusions,
+    load_policy_alias_applicants,
     load_policy_aliases,
     load_producer_fallbacks,
     default_producer_fallbacks_path,
@@ -334,6 +335,81 @@ def test_load_policy_aliases_corrupt_fails_closed():
             load_policy_aliases(path)
     finally:
         os.unlink(path)
+
+
+def test_load_policy_aliases_accepts_object_entries_with_applicant_anchor():
+    # New object form: {"target": ..., "applicant_id": ...} — targets load
+    # the same as legacy plain-string entries.
+    import tempfile, os
+    payload = ('{"_comment": "x", '
+               '"275768": {"target": "WC5-33S-B276B9-026", "applicant_id": "48641902"}, '
+               '"WC 104180 01": "WC PI 2739418-001"}')
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(payload)
+        path = fh.name
+    try:
+        assert load_policy_aliases(path) == {
+            "275768": "WC5-33S-B276B9-026",
+            "WC 104180 01": "WC PI 2739418-001",
+        }
+    finally:
+        os.unlink(path)
+
+
+def test_load_policy_alias_applicants_reads_declared_anchors_only():
+    import tempfile, os
+    payload = ('{"275768": {"target": "WC5-33S-B276B9-026", "applicant_id": "48641902"}, '
+               '"WC 104180 01": "WC PI 2739418-001"}')
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(payload)
+        path = fh.name
+    try:
+        assert load_policy_alias_applicants(path) == {"275768": "48641902"}
+    finally:
+        os.unlink(path)
+
+
+def test_load_policy_aliases_object_missing_target_fails_closed():
+    import tempfile, os
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write('{"275768": {"applicant_id": "48641902"}}')
+        path = fh.name
+    try:
+        with pytest.raises(PolicyChangeReportContractError):
+            load_policy_aliases(path)
+        with pytest.raises(PolicyChangeReportContractError):
+            load_policy_alias_applicants(path)
+    finally:
+        os.unlink(path)
+
+
+def test_liveness_alias_anchor_match_still_live():
+    # Anchor matches the queue row's applicant: LIVE, same as before.
+    search = fake_search({
+        "WC5-33S-B276B9-026": [policy_row("WC5-33S-B276B9-026", account="48641902",
+                                          status="Active", expiration="2027-01-28")],
+    })
+    verdict = classify_policy_liveness(
+        search, "275768", "48641902", TODAY,
+        policy_aliases={"275768": "WC5-33S-B276B9-026"},
+        policy_alias_applicants={"275768": "48641902"})
+    assert verdict["verdict"] == "LIVE"
+
+
+def test_liveness_alias_anchor_mismatch_with_queue_applicant_is_hold():
+    # The alias was verified against applicant 48641902, but the queue row
+    # now carries a different applicant: HOLD, never trusted — even though
+    # the target row is live on the queue row's account.
+    search = fake_search({
+        "WC5-33S-B276B9-026": [policy_row("WC5-33S-B276B9-026", account="99999999",
+                                          status="Active", expiration="2027-01-28")],
+    })
+    verdict = classify_policy_liveness(
+        search, "275768", "99999999", TODAY,
+        policy_aliases={"275768": "WC5-33S-B276B9-026"},
+        policy_alias_applicants={"275768": "48641902"})
+    assert verdict["verdict"] == "HOLD"
+    assert "anchor" in verdict["reason"]
 
 
 # -- discussion context ----------------------------------------------------------
