@@ -97,19 +97,36 @@ ACTION_WORDS = re.compile(
     r"urgent|asap|deadline|by (today|tomorrow|friday|monday)|follow up|"
     r"let me know|confirm|sign|attach|forward me)\b", re.I)
 
+# Positive FYI signals ONLY - ambiguous or no-keyword mail is "unknown" and
+# stays in the reply-rate denominator so real action items can't hide.
+FYI_WORDS = re.compile(
+    r"\b(unsubscribe|newsletter|digest|mailing list|do[- ]?not[- ]?reply|"
+    r"this is an automated|auto-generated|no action (is )?required|for your "
+    r"information only)\b", re.I)
 
-FYI_ACTION_FLAG = "no clear action (looks FYI)"
+FYI_ACTION_FLAG = "no clear action (positive FYI signal)"
+UNKNOWN_ACTION_FLAG = "unknown"
 
 
-def summarize(text: str) -> dict[str, str]:
-    """Extractive summary: first substantive sentences + action heuristic."""
+def summarize(text: str, from_header: str = "") -> dict[str, str]:
+    """Extractive summary: first substantive sentences + action heuristic.
+
+    action_needed is "likely yes" on request language, the FYI flag only on
+    positive FYI signals (bulk/auto mail patterns or a no-reply sender), and
+    "unknown" otherwise - unknown items remain accountable."""
     text = clean_body(text)
     if not text:
-        return {"summary": "(no readable body)", "action_needed": "unknown"}
+        return {"summary": "(no readable body)", "action_needed": UNKNOWN_ACTION_FLAG}
     sentences = re.split(r"(?<=[.!?])\s+", text.replace("\n", " "))
     sentences = [s.strip() for s in sentences if len(s.strip()) > 15]
     summary = " ".join(sentences[:2])[:280]
-    action_needed = "likely yes" if ACTION_WORDS.search(text) else FYI_ACTION_FLAG
+    sender = _address_of(from_header)
+    if ACTION_WORDS.search(text):
+        action_needed = "likely yes"
+    elif FYI_WORDS.search(text) or sender.startswith(("no-reply@", "noreply@", "donotreply@")):
+        action_needed = FYI_ACTION_FLAG
+    else:
+        action_needed = UNKNOWN_ACTION_FLAG
     return {"summary": summary or text[:280], "action_needed": action_needed}
 
 
@@ -122,9 +139,25 @@ def headers_of(msg: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _address_of(header: str) -> str:
+    text = str(header or "").strip().lower()
+    if "<" in text and ">" in text:
+        text = text.rsplit("<", 1)[-1].split(">", 1)[0]
+    return text.strip()
+
+
+def _addresses_of(header: str) -> list[str]:
+    return [_address_of(part) for part in str(header or "").split(",") if _address_of(part)]
+
+
 def is_internal(addr: str) -> bool:
-    addr = (addr or "").lower()
-    return any(dom in addr for dom in INTERNAL_DOMAINS)
+    """Exact-domain match on the parsed address - lookalike domains
+    (notstreetsmart.insurance.evil.com) must NOT count as internal."""
+    address = _address_of(addr)
+    if "@" not in address:
+        return False
+    domain = address.rsplit("@", 1)[-1]
+    return any(domain == dom for dom in INTERNAL_DOMAINS)
 
 
 def norm_subject(subj: str) -> str:
@@ -167,10 +200,18 @@ def thread_has_internal_reply(
 
 
 def is_related_send(
-    sent_headers: Mapping[str, str], inbound_subject: str, inbound_msgid: str
+    sent_headers: Mapping[str, str],
+    inbound_subject: str,
+    inbound_msgid: str,
+    inbound_from: str = "",
 ) -> str | None:
     """Pure matching logic: is this sent message a forward / related send
-    of the inbound? Returns a detail string or None. Unit-testable."""
+    of the inbound? Returns a detail string or None. Unit-testable.
+
+    Identity, per review: a bare subject match is NOT enough (any sent item
+    in the window could collide). Require either a References/In-Reply-To
+    hit on the inbound Message-ID, or a normalized-subject match PLUS the
+    inbound client appearing among the send's To/Cc recipients."""
     refs = (sent_headers.get("references", "") + " " +
             sent_headers.get("in-reply-to", ""))
     if inbound_msgid and inbound_msgid in refs:
@@ -179,20 +220,34 @@ def is_related_send(
     target_subj = norm_subject(inbound_subject)
     sent_subj = norm_subject(sent_headers.get("subject", ""))
     if target_subj and len(target_subj) > 8 and target_subj in sent_subj:
-        return f"matching subject ({sent_headers.get('subject', '')[:60]})"
+        client = _address_of(inbound_from)
+        recipients = set(
+            _addresses_of(sent_headers.get("to", ""))
+            + _addresses_of(sent_headers.get("cc", ""))
+        )
+        if client and client in recipients:
+            return (f"matching subject and client recipient "
+                    f"({sent_headers.get('subject', '')[:60]})")
     return None
 
 
 # ---------------------------------------------------------------- Gmail I/O
 
-def _list_messages(service: Any, query: str, max_results: int = 100) -> list[dict[str, Any]]:
+def _list_messages(
+    service: Any, query: str, max_results: int = 100
+) -> tuple[list[dict[str, Any]], bool]:
+    """Returns (messages, capped). capped=True means the result MAY be
+    truncated at max_results (another page existed), so callers must flag
+    the output as partial instead of silently truncating."""
+    # Fetch one extra so "capped" is unambiguous: only a (max_results + 1)-th
+    # hit proves the window overflowed the cap.
     found: list[dict[str, Any]] = []
     token = None
-    while len(found) < max_results:
+    while len(found) < max_results + 1:
         params: dict[str, Any] = {
             "userId": "me",
             "q": query,
-            "maxResults": min(100, max_results - len(found)),
+            "maxResults": min(100, max_results + 1 - len(found)),
         }
         if token:
             params["pageToken"] = token
@@ -201,7 +256,7 @@ def _list_messages(service: Any, query: str, max_results: int = 100) -> list[dic
         token = response.get("nextPageToken")
         if not token:
             break
-    return found
+    return found[:max_results], len(found) > max_results
 
 
 def _get_message(
@@ -240,8 +295,9 @@ def find_inbound_client_messages(
     never graded as client work."""
     query = (f"to:{employee} -from:{employee} -in:sent "
              f"after:{after} before:{before}")
+    stubs, capped = _list_messages(service, query, max_results=max_results)
     messages: list[dict[str, Any]] = []
-    for stub in _list_messages(service, query, max_results=max_results):
+    for stub in stubs:
         msg = _get_message(
             service,
             stub["id"],
@@ -252,7 +308,7 @@ def find_inbound_client_messages(
         if is_internal(headers.get("from", "")):
             continue
         messages.append(msg)
-    return messages
+    return messages, capped
 
 
 def find_forward(
@@ -260,28 +316,40 @@ def find_forward(
     sent_mailboxes: Iterable[str],
     inbound_subject: str,
     inbound_msgid: str,
+    inbound_from: str,
+    inbound_ts: int,
     *,
     after: str,
     before: str,
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str] | None, bool]:
     """Search each Sent mailbox (with its own delegated service) for a
-    forward / related send of the inbound message."""
+    forward / related send of the inbound message. Only sends dated AFTER
+    the inbound qualify. Returns (match, sent_scan_capped)."""
+    sent_capped = False
     for box in sent_mailboxes:
         service = services_by_mailbox.get(str(box).casefold())
         if service is None:
             continue
         query = f"in:sent after:{after} before:{before}"
-        for stub in _list_messages(service, query, max_results=100):
+        stubs, capped = _list_messages(service, query, max_results=100)
+        sent_capped = sent_capped or capped
+        for stub in stubs:
             sent = _get_message(
                 service,
                 stub["id"],
                 fmt="metadata",
-                metadata_headers=["Subject", "References", "In-Reply-To", "From", "Date"],
+                metadata_headers=["Subject", "References", "In-Reply-To", "From", "To", "Cc", "Date"],
             )
-            match = is_related_send(headers_of(sent), inbound_subject, inbound_msgid)
+            # Date anchor: a send that predates the inbound can never be
+            # its forward, however similar the subject.
+            if int(sent.get("internalDate", "0") or "0") <= inbound_ts:
+                continue
+            match = is_related_send(
+                headers_of(sent), inbound_subject, inbound_msgid, inbound_from
+            )
             if match:
-                return {"via": "forward", "detail": f"{box} sent {match}"}
-    return None
+                return {"via": "forward", "detail": f"{box} sent {match}"}, sent_capped
+    return None, sent_capped
 
 
 def verify_inbound_message(
@@ -311,35 +379,39 @@ def verify_inbound_message(
         "action_needed": "",
     }
 
+    inbound_ts = int(message.get("internalDate", "0") or "0")
+
     # 1. in-thread reply, date-anchored?
     thread = _get_thread_metadata(service, result["thread_id"])
     hit = thread_has_internal_reply(thread, employee, result["message_id"])
     if hit:
         result.update(handled_via=hit["via"], detail=hit["detail"])
-        return result
+        return result, False
 
     # 2. forward / related send from the employee or a shared mailbox?
-    hit = find_forward(
+    hit, sent_capped = find_forward(
         services_by_mailbox,
         sent_mailboxes,
         headers.get("subject", ""),
         headers.get("message-id", ""),
+        headers.get("from", ""),
+        inbound_ts,
         after=after,
         before=before,
     )
     if hit:
         result.update(handled_via=hit["via"], detail=hit["detail"])
-        return result
+        return result, sent_capped
 
     # 3. genuinely untouched: summarize the body for human judgment.
     full = _get_message(service, result["message_id"], fmt="full")
-    summary = summarize(body_text(full))
+    summary = summarize(body_text(full), headers.get("from", ""))
     result.update(
         summary=summary["summary"],
         action_needed=summary["action_needed"],
         detail="no reply in thread, no forward/send found",
     )
-    return result
+    return result, sent_capped
 
 
 def verify_mailbox_handled(
@@ -354,23 +426,24 @@ def verify_mailbox_handled(
     """Verify every inbound client message in one mailbox's window."""
     employee = employee.casefold().strip()
     service = services_by_mailbox[employee]
-    inbound = find_inbound_client_messages(
+    inbound, inbound_capped = find_inbound_client_messages(
         service, employee, after=after, before=before, max_results=max_messages
     )
     items: list[dict[str, Any]] = []
+    sent_capped = False
     for message in inbound:
         try:
-            items.append(
-                verify_inbound_message(
-                    service,
-                    services_by_mailbox,
-                    employee,
-                    message,
-                    sent_mailboxes,
-                    after=after,
-                    before=before,
-                )
+            item, item_sent_capped = verify_inbound_message(
+                service,
+                services_by_mailbox,
+                employee,
+                message,
+                sent_mailboxes,
+                after=after,
+                before=before,
             )
+            sent_capped = sent_capped or item_sent_capped
+            items.append(item)
         except Exception as exc:  # noqa: BLE001 - keep going, report the error
             items.append({
                 "message_id": str(message.get("id") or ""),
@@ -382,14 +455,34 @@ def verify_mailbox_handled(
     received = len(items)
     via_reply = sum(item["handled_via"] == "reply" for item in items)
     via_forward = sum(item["handled_via"] == "forward" for item in items)
-    fyi = sum(item["action_needed"] == FYI_ACTION_FLAG for item in items)
+    fyi = sum(
+        item["handled_via"] == "unhandled" and item["action_needed"] == FYI_ACTION_FLAG
+        for item in items
+    )
     unhandled_action = sum(
-        item["handled_via"] == "unhandled" and item["action_needed"] != FYI_ACTION_FLAG
+        item["handled_via"] == "unhandled" and item["action_needed"] == "likely yes"
+        for item in items
+    )
+    unhandled_unknown = sum(
+        item["handled_via"] == "unhandled"
+        and item["action_needed"] not in (FYI_ACTION_FLAG, "likely yes")
         for item in items
     )
     check_failed = sum(item["handled_via"] == "check-failed" for item in items)
-    denominator = received - fyi
-    reply_rate = round((via_reply + via_forward) / denominator, 3) if denominator > 0 else None
+    # Unknown/FYI bucketing: only positive-FYI items leave the denominator.
+    # Any failed check makes the mailbox's rate unevaluable - never grade
+    # a mailbox on a partially-verified population.
+    denominator = received - fyi - check_failed
+    if check_failed:
+        reply_rate = None
+        rate_status = "unevaluable: check-failed item(s) present"
+    elif denominator > 0:
+        reply_rate = round((via_reply + via_forward) / denominator, 3)
+        rate_status = "ok"
+    else:
+        reply_rate = None
+        rate_status = "no accountable mail in window"
+    partial = inbound_capped or sent_capped
     return {
         "mailbox": employee,
         "window": {"after": after, "before": before},
@@ -397,9 +490,14 @@ def verify_mailbox_handled(
         "handled_via_reply": via_reply,
         "handled_via_forward": via_forward,
         "unhandled_action": unhandled_action,
+        "unhandled_unknown": unhandled_unknown,
         "unhandled_fyi": fyi,
         "check_failed": check_failed,
         "reply_rate": reply_rate,
+        "rate_status": rate_status,
+        "partial": partial,
+        "inbound_capped": inbound_capped,
+        "sent_scan_capped": sent_capped,
         "items": items,
     }
 
@@ -468,10 +566,11 @@ def collect_handled_verification(
         "handled_via_reply": sum(item["handled_via_reply"] for item in by_employee.values()),
         "handled_via_forward": sum(item["handled_via_forward"] for item in by_employee.values()),
         "unhandled_action": sum(item["unhandled_action"] for item in by_employee.values()),
+        "unhandled_unknown": sum(item["unhandled_unknown"] for item in by_employee.values()),
         "unhandled_fyi": sum(item["unhandled_fyi"] for item in by_employee.values()),
         "check_failed": sum(item["check_failed"] for item in by_employee.values()),
     }
-    denominator = totals["received"] - totals["unhandled_fyi"]
+    denominator = totals["received"] - totals["unhandled_fyi"] - totals["check_failed"]
     return {
         "source_status": "available",
         "scope": GMAIL_READONLY_SCOPE,
@@ -479,11 +578,17 @@ def collect_handled_verification(
         "window": {"after": after, "before": before},
         "lookback_days": max(1, int(lookback_days)),
         "mailboxes": len(by_employee),
+        "partial": any(item["partial"] for item in by_employee.values()),
         **totals,
         "reply_rate": (
             round((totals["handled_via_reply"] + totals["handled_via_forward"]) / denominator, 3)
-            if denominator > 0
+            if denominator > 0 and not totals["check_failed"]
             else None
         ),
+        "rate_status": (
+            "unevaluable: check-failed item(s) present"
+            if totals["check_failed"]
+            else ("ok" if denominator > 0 else "no accountable mail in window")
+        ),
         "by_employee": by_employee,
-    }
+                             }
