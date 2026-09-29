@@ -45,6 +45,7 @@ import urllib.request as urlrequest
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -319,6 +320,175 @@ def deconcatenated_variants(policy_number: str) -> list[str]:
     return [variant for variant in variants if variant != number]
 
 
+def _search_candidates(policy_number: str) -> list[str]:
+    """Ordered, deduplicated PolicyApi search strings for one queue number.
+
+    The PolicyApi ``PolicyNumber`` parameter is matched literally
+    (substring) against stored numbers, so whitespace/dash differences
+    between the 4359 report and EZLynx storage hide real policies.
+    Proven 2026-09-29: queue "S  2391821" (double space, Active) was
+    invisible to the whitespace-collapsed "S 2391821" search, and queue
+    "WC 104180 01" could only be found via the spaceless "WC10418001".
+    Every candidate is searched; correspondence (below) decides which
+    returned rows actually count, so broader candidates cannot cause a
+    wrong match.
+    """
+    raw = str(policy_number or "").strip()
+    if not raw:
+        return []
+    collapsed = normalize_policy_number(raw)
+    no_spaces = re.sub(r"\s+", "", raw)
+    no_dashes = raw.replace("-", "")
+    no_spaces_dashes = re.sub(r"\s+", "", no_dashes)
+    digits = re.sub(r"\D", "", raw)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for candidate in (raw, collapsed, no_spaces, no_dashes, no_spaces_dashes, digits):
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def canonical_policy_number(value: Any) -> str:
+    """Correspondence key for policy numbers.
+
+    Uppercase, no whitespace or dashes, with a trailing ``_<digits>``
+    EZLynx history suffix stripped: the stored "WC10418001 _47900279"
+    (deleted history row) corresponds to queue "WC 104180 01".
+    """
+    key = re.sub(r"[\s\-]", "", str(value or "")).upper()
+    key = re.sub(r"_\d+$", "", key)
+    return key
+
+
+def policy_numbers_correspond(a: Any, b: Any) -> bool:
+    """True when two policy numbers name the same policy despite
+    formatting differences. Never fuzzy: the full alphanumeric content
+    must match, so "UJH 6139546 01 29" does NOT correspond to
+    "UJH 6139546 03 29".
+    """
+    key_a = canonical_policy_number(a)
+    key_b = canonical_policy_number(b)
+    return bool(key_a) and key_a == key_b
+
+
+POLICY_ALIASES_FILENAME = "policy_number_aliases.json"
+
+
+def default_policy_aliases_path() -> str:
+    return str(Path(__file__).with_name(POLICY_ALIASES_FILENAME))
+
+
+def _load_policy_alias_payload(path: str | Path | None) -> dict[str, Any]:
+    """Raw alias-file payload; fail-closed on unreadable or corrupt content."""
+    resolved = Path(path) if path else Path(default_policy_aliases_path())
+    if not resolved.exists():
+        return {}
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PolicyChangeReportContractError(
+            f"policy alias file {resolved} is not readable JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise PolicyChangeReportContractError(
+            f"policy alias file {resolved} must be a JSON object"
+        )
+    return payload
+
+
+def _parse_alias_entry(
+    resolved: Path, key: Any, value: Any
+) -> tuple[str, str, str]:
+    """Return (queue_number, live_target, applicant_anchor) for one alias entry.
+
+    Values may be a plain live-number string (legacy) or an object
+    ``{"target": ..., "applicant_id": ...}`` where ``applicant_id`` is the
+    hand-verified EZLynx applicant the target must belong to. Fail-closed on
+    blank keys or targets.
+    """
+    queue_number = normalize_policy_number(key)
+    applicant_anchor = ""
+    if isinstance(value, dict):
+        live_number = str(value.get("target") or "").strip()
+        applicant_anchor = str(value.get("applicant_id") or "").strip()
+    else:
+        live_number = str(value or "").strip()
+    if not queue_number or not live_number:
+        raise PolicyChangeReportContractError(
+            f"policy alias file {resolved} has a blank key or target"
+        )
+    return queue_number, live_number, applicant_anchor
+
+
+def load_policy_aliases(path: str | Path | None = None) -> dict[str, str]:
+    """Queue policy number -> verified live policy number.
+
+    For change requests whose report number is stale (renewal changed the
+    number, or the report mis-keyed it), a hand-verified alias lets the
+    worker check liveness against the real policy instead of holding
+    forever. Keys are matched on the whitespace-collapsed queue number.
+    Values may be a plain string or an object with ``target`` plus the
+    hand-verified ``applicant_id`` anchor (see
+    :func:`load_policy_alias_applicants`).
+    Missing file = no aliases. A corrupt file fails closed: the run stops
+    rather than nagging against a wrong number.
+    """
+    payload = _load_policy_alias_payload(path)
+    resolved = Path(path) if path else Path(default_policy_aliases_path())
+    aliases: dict[str, str] = {}
+    for key, value in payload.items():
+        if str(key).startswith("_"):
+            continue
+        queue_number, live_number, _ = _parse_alias_entry(resolved, key, value)
+        aliases[queue_number] = live_number
+    return aliases
+
+
+def load_policy_alias_applicants(path: str | Path | None = None) -> dict[str, str]:
+    """Queue policy number -> hand-verified applicant ID for object-form aliases.
+
+    Only entries written as ``{"target": ..., "applicant_id": ...}`` appear
+    here; plain-string entries carry no anchor and are skipped. The worker
+    fails closed when a queue row's applicant disagrees with the anchor, and
+    the outcome health check verifies the alias target still belongs to the
+    recorded applicant — so a reissued number landing on another account is
+    caught instead of silently trusted.
+    """
+    payload = _load_policy_alias_payload(path)
+    resolved = Path(path) if path else Path(default_policy_aliases_path())
+    anchors: dict[str, str] = {}
+    for key, value in payload.items():
+        if str(key).startswith("_"):
+            continue
+        queue_number, _, applicant_anchor = _parse_alias_entry(resolved, key, value)
+        if applicant_anchor:
+            anchors[queue_number] = applicant_anchor
+    return anchors
+
+
+@lru_cache(maxsize=1)
+def _default_policy_aliases() -> dict[str, str]:
+    return load_policy_aliases()
+
+
+@lru_cache(maxsize=1)
+def _default_policy_alias_applicants() -> dict[str, str]:
+    return load_policy_alias_applicants()
+
+
+def _apply_policy_alias(
+    policy_number: str, aliases: Mapping[str, str]
+) -> tuple[str, str | None]:
+    """Return (effective_number, alias_target_or_None)."""
+    key = normalize_policy_number(policy_number)
+    target = aliases.get(key)
+    if target:
+        return target, target
+    return str(policy_number or "").strip(), None
+
+
 def _policy_expiration(row: Mapping[str, Any]) -> str:
     return str(row.get("expirationDate") or row.get("expiration_date") or "")[:10]
 
@@ -342,26 +512,65 @@ def classify_policy_liveness(
     policy_number: str,
     applicant_id: str,
     today: date,
+    policy_aliases: Mapping[str, str] | None = None,
+    policy_alias_applicants: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """LIVE / DEAD / HOLD verdict for one queue row.
 
-    Exact policy-number match first, anchored to the queue's Applicant ID.
-    De-concatenated variants only when no exact live result. Never
-    fuzzy-matches deleted suffixed variants. Zero results or ambiguity ->
-    HOLD (flagged, never emailed, never auto-closed).
+    Search strategy: the PolicyApi matches ``PolicyNumber`` literally, so
+    the queue number is searched in every plausible stored shape (raw,
+    whitespace-collapsed, spaceless, dashless, digits-only). Returned rows
+    only count when they *correspond* to the queue number
+    (``policy_numbers_correspond``) — broader searches cannot create a
+    wrong match. A live verdict still requires Active status, the
+    applicant-account anchor, and a non-dead row.
+
+    When the queue number is a known-stale alias (renewal changed the
+    number), liveness is checked against the verified live number and the
+    verdict records it. When the alias file records a hand-verified
+    applicant anchor, the queue row's applicant must match it — a mismatch
+    is HOLD, never trusted. Zero corresponding results or ambiguity -> HOLD
+    (flagged, never emailed, never auto-closed).
     """
-    number = normalize_policy_number(policy_number)
+    raw_number = str(policy_number or "").strip()
     applicant = str(applicant_id or "").strip()
-    if not number:
+    if not raw_number:
         return {"verdict": "HOLD", "reason": "blank policy number"}
     if not applicant:
         return {"verdict": "HOLD", "reason": "blank applicant id"}
+
+    aliases = policy_aliases if policy_aliases is not None else _default_policy_aliases()
+    alias_anchors = (
+        policy_alias_applicants
+        if policy_alias_applicants is not None
+        else _default_policy_alias_applicants()
+    )
+    number, alias_target = _apply_policy_alias(raw_number, aliases)
+    alias_note = f" (queue number {raw_number!r} aliased to verified live number)" if alias_target else ""
+    if alias_target:
+        anchor = alias_anchors.get(normalize_policy_number(raw_number), "")
+        if anchor and anchor != applicant:
+            # The alias was hand-verified against a specific EZLynx applicant.
+            # If the queue row now carries a different applicant, the alias
+            # must not be trusted — hold instead of nagging against a number
+            # that may belong to someone else's policy.
+            return {
+                "verdict": "HOLD",
+                "reason": (
+                    f"alias applicant anchor mismatch: queue applicant {applicant} "
+                    f"does not match the verified applicant {anchor} for alias "
+                    f"target {alias_target!r}"
+                ) + alias_note,
+            }
 
     def account_ok(row: Mapping[str, Any]) -> bool:
         return str(row.get("accountId") or row.get("account_id") or "").strip() == applicant
 
     def is_active(row: Mapping[str, Any]) -> bool:
         return str(row.get("policyStatus") or row.get("status") or "").strip().casefold() == "active"
+
+    def row_number(row: Mapping[str, Any]) -> str:
+        return str(row.get("policyNumber") or row.get("policy_number") or "")
 
     def summarize(row: Mapping[str, Any], via: str) -> dict[str, Any]:
         # Best-effort live insured name: the PolicyApi row shape is not
@@ -375,21 +584,23 @@ def classify_policy_liveness(
             if candidate:
                 live_name = candidate
                 break
-        return {
+        result = {
             "verdict": "LIVE",
-            "reason": via,
-            "matched_policy_number": normalize_policy_number(row.get("policyNumber") or row.get("policy_number")),
+            "reason": via + alias_note,
+            "matched_policy_number": row_number(row).strip(),
             "policy_status": str(row.get("policyStatus") or row.get("status") or "").strip(),
             "expiration_date": _policy_expiration(row),
             "premium": row.get("premium"),
             "live_account_name": live_name,
         }
+        if alias_target:
+            result["alias_applied"] = {"queue_number": raw_number, "live_number": alias_target}
+        return result
 
-    exact_search_rows = policy_search(number)
-    exact = [
-        row for row in exact_search_rows
-        if normalize_policy_number(row.get("policyNumber") or row.get("policy_number")) == number
-    ]
+    all_rows: list[dict[str, Any]] = []
+    for candidate in _search_candidates(number):
+        all_rows.extend(policy_search(candidate))
+    exact = [row for row in all_rows if policy_numbers_correspond(row_number(row), number)]
     # A live verdict requires Active status, applicant-account anchor, and
     # not dead by status or expiration. (An "Active" row past its
     # expiration date is stale API data, not a live policy.)
@@ -398,7 +609,7 @@ def classify_policy_liveness(
         if is_active(row) and account_ok(row) and not _is_dead_policy(row, today)
     ]
     if live_exact:
-        return summarize(live_exact[0], "exact policy-number match, applicant account confirmed")
+        return summarize(live_exact[0], "policy-number match, applicant account confirmed")
 
     variant_numbers = {normalize_policy_number(variant) for variant in deconcatenated_variants(number)}
     variant_search_rows: list[dict[str, Any]] = []
@@ -407,7 +618,7 @@ def classify_policy_liveness(
     live_variant = [
         row for row in variant_search_rows
         if is_active(row) and account_ok(row) and not _is_dead_policy(row, today)
-        and normalize_policy_number(row.get("policyNumber") or row.get("policy_number")) in variant_numbers
+        and normalize_policy_number(row_number(row)) in variant_numbers
     ]
     if live_variant:
         return summarize(live_variant[0], "live policy found via de-concatenated variant")
@@ -415,25 +626,28 @@ def classify_policy_liveness(
     if exact and all(_is_dead_policy(row, today) for row in exact):
         return {
             "verdict": "DEAD",
-            "reason": "exact policy-number match is dead ("
+            "reason": "policy-number match is dead ("
             + ", ".join(sorted({str(row.get("policyStatus") or row.get("status") or "?") for row in exact}))
-            + ")",
+            + ")" + alias_note,
         }
-    all_rows = exact_search_rows + variant_search_rows
-    if all_rows and all(_is_dead_policy(row, today) for row in all_rows):
-        # Only deleted history variants (e.g. "CX132093_15195201") came
-        # back and no live policy was found under the exact number or any
-        # de-concatenated variant. This matches the manual trial's "proven
-        # dead" verdict. Consequence here is only exclusion from CSR nags
-        # plus a cleanup-candidate count — this worker never closes
-        # anything, so a wrong DEAD here costs a human review, not data.
+    # Dead pool: corresponding rows plus de-concatenated variant rows.
+    # Non-corresponding substring noise from the broader candidates is
+    # ignored here — e.g. "UJH 6139546 03 29" must not mark the queue
+    # number "UJH 6139546 01 29" dead.
+    dead_pool = exact + variant_search_rows
+    if dead_pool and all(_is_dead_policy(row, today) for row in dead_pool):
+        # Only dead rows came back and no live policy was found under any
+        # search shape. This matches the manual trial's "proven dead"
+        # verdict. Consequence here is only exclusion from CSR nags plus a
+        # cleanup-candidate count — this worker never closes anything, so
+        # a wrong DEAD here costs a human review, not data.
         return {
             "verdict": "DEAD",
-            "reason": "only deleted history variants returned; no live policy found",
+            "reason": "only dead policy records returned for this policy number" + alias_note,
         }
     if not all_rows:
-        return {"verdict": "HOLD", "reason": "PolicyApi returned no results for this policy number"}
-    return {"verdict": "HOLD", "reason": "policy identity is ambiguous (account mismatch or no live match)"}
+        return {"verdict": "HOLD", "reason": "PolicyApi returned no results for this policy number" + alias_note}
+    return {"verdict": "HOLD", "reason": "policy identity is ambiguous (account mismatch or no live match)" + alias_note}
 
 
 # -- DiscussionApi context ---------------------------------------------------
@@ -1059,8 +1273,14 @@ class PolicyApiSearchClient:
         )
 
     def search_by_number(self, policy_number: str) -> list[dict[str, Any]]:
+        # The PolicyApi matches PolicyNumber literally (substring) against
+        # stored numbers: only strip surrounding whitespace. Collapsing
+        # internal whitespace here hid real policies (proven 2026-09-29:
+        # "S  2391821" with a double space is Active, but the collapsed
+        # "S 2391821" search returned zero rows). Callers that need
+        # format variants pass each candidate explicitly.
         url = self._base + "policy/v1/search?" + parse.urlencode(
-            {"PolicyNumber": normalize_policy_number(policy_number)}
+            {"PolicyNumber": str(policy_number or "").strip()}
         )
         request = urlrequest.Request(
             url, headers={
@@ -1315,6 +1535,7 @@ class OverduePolicyChangeReportWorker:
                 else:
                     held.append({
                         "account_name": row.get("Account Name"),
+                        "applicant_id": str(row.get("Applicant ID") or ""),
                         "policy_number": row.get("Policy Number"),
                         "reason": verdict.get("reason"),
                     })
