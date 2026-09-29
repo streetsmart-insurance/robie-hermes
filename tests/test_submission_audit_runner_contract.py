@@ -88,6 +88,8 @@ class SubmissionAuditRunnerContractTests(unittest.TestCase):
         )[0]
         self.assertIn('activate_mdc_combobox(selector.first, "page-size control")', page_size_block)
         self.assertIn('activate_mdc_combobox(option, "100 page-size option")', page_size_block)
+        self.assertIn("page.wait_for_timeout(500)", page_size_block)
+        self.assertIn('pick_exact_labeled_option(', page_size_block)
         self.assertNotIn('selector.first.press("Enter")', page_size_block)
         self.assertNotIn("selector.first.click()", page_size_block)
         self.assertIn(".mat-mdc-select-value-text", page_size_block)

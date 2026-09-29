@@ -88,6 +88,67 @@ class TaskAgingAuditor:
         return incidents
 
 
+
+
+def _email_verification_lines(email_data: Optional[Dict[str, Any]]) -> List[str]:
+    """Render opt-in handled-verification results (reply/forward/summary).
+
+    Counts stay per authorized mailbox; genuinely unhandled client mail is
+    listed with an extractive summary and action flag. FYI / no-clear-action
+    items are excluded from reply-rate denominators upstream and labeled here.
+    """
+    verification = dict((email_data or {}).get("handled_verification") or {})
+    if not verification:
+        return []
+    if str(verification.get("source_status") or "") != "available":
+        return [
+            "",
+            "✉️ *EMAIL HANDLED VERIFICATION*",
+            f"   ⚠️ UNVERIFIED — {verification.get('source_status', 'source unavailable')}.",
+        ]
+    by_employee = dict(verification.get("by_employee") or {})
+    lines = [
+        "",
+        "✉️ *EMAIL HANDLED VERIFICATION (REPLY/FORWARD EVIDENCE)*",
+        "| Authorized mailbox | Handled via reply | Handled via forward | Unhandled (action) | Unhandled (unknown) | FYI (excluded) | Reply rate |",
+        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for mailbox, facts in sorted(by_employee.items()):
+        rate = facts.get("reply_rate")
+        if rate is None:
+            rate_display = "NOT EVALUABLE"
+        elif facts.get("partial"):
+            # Sampled scan: never let a capped window read as a complete rate.
+            rate_display = f"{rate * 100:.0f}% ⚠️ SAMPLED ONLY (scan caps hit, not a complete rate)"
+        else:
+            rate_display = f"{rate * 100:.0f}%"
+        lines.append(
+            f"| {mailbox} | {facts.get('handled_via_reply', 0)} | {facts.get('handled_via_forward', 0)} | "
+            f"{facts.get('unhandled_action', 0)} | {facts.get('unhandled_unknown', 0)} | "
+            f"{facts.get('unhandled_fyi', 0)} | {rate_display} |"
+        )
+    unhandled_items = [
+        (mailbox, item)
+        for mailbox, facts in sorted(by_employee.items())
+        for item in (facts.get("items") or [])
+        if item.get("handled_via") == "unhandled"
+    ]
+    if unhandled_items:
+        lines.extend([
+            "",
+            "*Unhandled client mail (summary + action flag; FYI items do not count against reply rates)*",
+        ])
+        for mailbox, item in unhandled_items[:20]:
+            subject = str(item.get("subject") or "(no subject)").replace("|", "/")
+            summary = str(item.get("summary") or "(no summary)").replace("|", "/")
+            possible = ""
+            if str(item.get("detail") or "").startswith("possible related send"):
+                possible = " | ⚠️ possible related send (unverified, not counted as handled)"
+            lines.append(
+                f"• {mailbox} — {subject} — {summary} | action: {item.get('action_needed', 'unknown')}{possible}"
+            )
+    return lines
+
 class ReportingSuite:
     """Generates Daily, Weekly, and Monthly executive reports."""
 
@@ -202,6 +263,8 @@ class ReportingSuite:
                     f"{facts.get('stalled_threads', 'UNVERIFIED')} | {facts.get('awaiting_customer', 'UNVERIFIED')} |"
                 )
 
+        lines.extend(_email_verification_lines(email_data))
+
         lines.extend([
             "",
             "📊 *DAILY REP PHONE ANSWER RATES & TASK BACKLOGS*",
@@ -273,6 +336,7 @@ class ReportingSuite:
             for row in role_rows:
                 lines.append(f"*{row['employee']} — {row['role']}*")
                 lines.extend(f"• {fact}" for fact in row.get("facts", []))
+        lines.extend(_email_verification_lines(email_data))
         warnings = [
             warning
             for warning in (

@@ -21,6 +21,8 @@ from robie_job_engine.overdue_submission_reports import (
     RESOURCE_ID,
     SOP_URL,
     SUBJECT,
+    UNRESOLVED_ALERT_SUBJECT,
+    UNRESOLVED_ALERT_TO,
     OverdueSubmissionReportVerifier,
     OverdueSubmissionReportWorker,
     SubmissionReportContractError,
@@ -28,6 +30,7 @@ from robie_job_engine.overdue_submission_reports import (
     build_producer_report,
     build_producer_report_html,
     load_approved_producer_directory,
+    match_producer_email,
     resolve_recipients,
     validate_submission_observation,
 )
@@ -407,9 +410,390 @@ def test_schedule_cannot_be_installed_in_production_without_grandfather_or_promo
 
 
 def test_recipient_resolution_is_exact_casefolded_name_match():
-    assert resolve_recipients([_record("Producer One")], {"producer one": "one@streetsmart.insurance"}) == {
-        "Producer One": "one@streetsmart.insurance"
+    resolved, skipped = resolve_recipients(
+        [_record("Producer One")], {"producer one": "one@streetsmart.insurance"}
+    )
+    assert resolved == {"Producer One": "one@streetsmart.insurance"}
+    assert skipped == ()
+
+
+def test_fuzzy_name_match_accepts_middle_name_initial_and_case():
+    directory = {"andrea nicole illanes": "andrea@streetsmart.insurance"}
+    assert match_producer_email("Andrea Illanes", directory) == "andrea@streetsmart.insurance"
+    assert match_producer_email("Andrea N. Illanes", directory) == "andrea@streetsmart.insurance"
+    assert match_producer_email("andrea n illanes", directory) == "andrea@streetsmart.insurance"
+    assert match_producer_email("ANDREA NICOLE ILLANES", directory) == "andrea@streetsmart.insurance"
+    exact_wins = {
+        "andrea illanes": "exact@streetsmart.insurance",
+        "andrea nicole illanes": "nicole@streetsmart.insurance",
     }
+    assert match_producer_email("Andrea Illanes", exact_wins) == "exact@streetsmart.insurance"
+    resolved, skipped = resolve_recipients(
+        [_record("Andrea Illanes", "andrea")], directory
+    )
+    assert resolved == {"Andrea Illanes": "andrea@streetsmart.insurance"}
+    assert skipped == ()
+
+
+def test_fuzzy_name_match_rejects_ambiguous_first_and_last():
+    directory = {
+        "andrea nicole illanes": "nicole@streetsmart.insurance",
+        "andrea marie illanes": "marie@streetsmart.insurance",
+    }
+    assert match_producer_email("Andrea Illanes", directory) == ""
+    assert match_producer_email("Andrea N Illanes", directory) == ""
+    try:
+        resolve_recipients([_record("Andrea Illanes")], directory)
+    except SubmissionReportContractError as exc:
+        assert "Andrea Illanes" in str(exc)
+    else:
+        raise AssertionError("ambiguous first+last match was accepted")
+
+
+def test_fuzzy_name_match_rejects_zero_matches():
+    directory = {"jazmin molina": "jazmin@streetsmart.insurance"}
+    assert match_producer_email("Andrea Illanes", directory) == ""
+    try:
+        resolve_recipients([_record("Andrea Illanes")], directory)
+    except SubmissionReportContractError as exc:
+        assert "producer work email could not be resolved for: Andrea Illanes" in str(exc)
+    else:
+        raise AssertionError("zero-match producer was resolved")
+
+
+def _capturing_mailer(sent: list):
+    def mailer(**kwargs):
+        sent.append(kwargs)
+        return {
+            "kind": "gmail",
+            "message_id": f"m-{len(sent)}",
+            "sender": "robie@streetsmart.insurance",
+        }
+
+    return mailer
+
+
+def test_fuzzy_match_sends_one_producer_email():
+    sent = []
+    record = _record("Andrea Illanes", "andrea")
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation([record]),
+        directory_loader=lambda _path: {
+            "andrea nicole illanes": "andrea@streetsmart.insurance"
+        },
+        mailer=_capturing_mailer(sent),
+    )
+    result = worker.perform(_job(), idempotency_key="report-fuzzy-send")
+    assert result.succeeded is True
+    assert len(sent) == 1
+    assert sent[0]["to"] == ["andrea@streetsmart.insurance"]
+    assert sent[0]["subject"] == SUBJECT
+    assert sent[0]["cc"] == list(CC)
+    assert "Hi Andrea Illanes," in sent[0]["text_body"]
+    assert result.destination["skipped_producers"] == []
+    assert result.destination["producer_count"] == 1
+
+
+def test_partial_send_emails_resolved_producers_and_alerts_carlo_once():
+    sent = []
+    records = [
+        _record("Producer One", "one"),
+        _record("Unmatched Person", "missing-1"),
+        _record("Unmatched Person", "missing-2"),
+        _record("Producer Two", "two"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: {
+            "producer one": "one@streetsmart.insurance",
+            "producer two": "two@streetsmart.insurance",
+        },
+        mailer=_capturing_mailer(sent),
+    )
+    result = worker.perform(_job(), idempotency_key="report-partial")
+    assert result.succeeded is True
+    assert result.hold_status is None
+    producer_sends = [item for item in sent if item["subject"] == SUBJECT]
+    alerts = [item for item in sent if item["to"] == [UNRESOLVED_ALERT_TO]]
+    assert len(producer_sends) == 2
+    assert len(alerts) == 1
+    assert len(sent) == 3
+    assert alerts[0]["cc"] == []
+    assert alerts[0]["subject"] == UNRESOLVED_ALERT_SUBJECT
+    assert alerts[0]["plain_only"] is True
+    assert "Unmatched Person: 2 overdue" in alerts[0]["text_body"]
+    assert "Andrea" not in alerts[0]["text_body"]
+    assert all(item["cc"] == list(CC) for item in producer_sends)
+    assert {item["to"][0] for item in producer_sends} == {
+        "one@streetsmart.insurance",
+        "two@streetsmart.insurance",
+    }
+    assert result.destination["producer_count"] == 2
+    assert result.destination["qualifying_count"] == 4
+    assert result.destination["skipped_producers"] == [
+        {"name": "Unmatched Person", "overdue_count": 2}
+    ]
+    assert result.detail["skipped_producers"] == result.destination["skipped_producers"]
+    assert UNRESOLVED_ALERT_TO not in str(result.destination)
+    assert "one@streetsmart.insurance" not in str(result.destination)
+    verifier = OverdueSubmissionReportVerifier(
+        delivery_readback=lambda value: (
+            True,
+            [{"exists_in_sent_mailbox": True} for _ in value],
+        )
+    )
+    verified = verifier.verify(_job(), {"destination": result.destination})
+    assert verified.verified is True
+    assert verified.evidence.expected["gmail_receipt_count"] == 3
+    assert verified.evidence.expected["producer_count"] == 2
+    assert verified.evidence.expected["skipped_producers"] == result.destination["skipped_producers"]
+    require_complete_postcondition(
+        current=JobStatus.VERIFYING,
+        authority=VERIFIER_AUTHORITY,
+        verified=True,
+        authoritative=True,
+        expected=verified.evidence.expected,
+        observed=verified.evidence.observed,
+        captured_at=verified.evidence.captured_at,
+        evidence_ref="sha",
+        locator=RESOURCE_ID,
+        job_id="overdue-partial-1",
+        verifier_authority=VERIFIER_AUTHORITY,
+        intended=RESOURCE_ID,
+    )
+
+
+def test_ambiguous_producer_is_skipped_not_emailed():
+    sent = []
+    records = [
+        _record("Producer One", "one"),
+        _record("Andrea Illanes", "andrea"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: {
+            "producer one": "one@streetsmart.insurance",
+            "andrea nicole illanes": "nicole@streetsmart.insurance",
+            "andrea marie illanes": "marie@streetsmart.insurance",
+        },
+        mailer=_capturing_mailer(sent),
+    )
+    result = worker.perform(_job(), idempotency_key="report-ambiguous")
+    assert result.succeeded is True
+    assert len(sent) == 2
+    assert sent[0]["to"] == ["one@streetsmart.insurance"]
+    assert "nicole@streetsmart.insurance" not in str(sent)
+    assert "marie@streetsmart.insurance" not in str(sent)
+    assert "Andrea Illanes: 1 overdue" in sent[1]["text_body"]
+    assert result.destination["skipped_producers"] == [
+        {"name": "Andrea Illanes", "overdue_count": 1}
+    ]
+
+
+def test_all_unresolved_producers_fail_closed_with_no_email():
+    sent = []
+    records = [
+        _record("Andrea Illanes", "andrea"),
+        _record("Nobody Here", "nobody"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: {
+            "andrea nicole illanes": "nicole@streetsmart.insurance",
+            "andrea marie illanes": "marie@streetsmart.insurance",
+            "jazmin molina": "jazmin@streetsmart.insurance",
+        },
+        mailer=_capturing_mailer(sent),
+    )
+    result = worker.perform(_job(), idempotency_key="report-none")
+    assert result.succeeded is False
+    assert result.hold_status == JobStatus.NEEDS_CLARIFICATION
+    assert sent == []
+    assert "Andrea Illanes" in result.error
+    assert "Nobody Here" in result.error
+
+
+def test_same_idempotency_key_does_not_double_send():
+    sent = []
+    records = [
+        _record("Producer One", "one"),
+        _record("Unmatched Person", "missing"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+        mailer=_capturing_mailer(sent),
+    )
+    first = worker.perform(_job(), idempotency_key="report-once")
+    second = worker.perform(_job(), idempotency_key="report-once")
+    assert first.succeeded is True
+    assert second.succeeded is True
+    assert len(sent) == 2
+    assert second.destination["delivery_receipts"] == first.destination["delivery_receipts"]
+    worker.perform(_job(), idempotency_key="report-next-week")
+    assert len(sent) == 4
+
+
+def test_retry_after_alert_failure_does_not_resend_producer_email():
+    sent = []
+
+    def mailer(**kwargs):
+        sent.append(kwargs)
+        if kwargs["to"] == [UNRESOLVED_ALERT_TO] and len(sent) == 2:
+            raise RuntimeError("alert transport down")
+        return {
+            "kind": "gmail",
+            "message_id": f"m-{len(sent)}",
+            "sender": "robie@streetsmart.insurance",
+        }
+
+    records = [
+        _record("Producer One", "one"),
+        _record("Unmatched Person", "missing"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+        mailer=mailer,
+    )
+    first = worker.perform(_job(), idempotency_key="report-retry-alert")
+    assert first.succeeded is False
+    assert first.hold_status == JobStatus.AWAITING_HUMAN_INPUT
+    second = worker.perform(_job(), idempotency_key="report-retry-alert")
+    assert second.succeeded is True
+    assert [item["to"] for item in sent] == [
+        ["one@streetsmart.insurance"],
+        [UNRESOLVED_ALERT_TO],
+        [UNRESOLVED_ALERT_TO],
+    ]
+    assert second.destination["producer_count"] == 1
+    assert len(second.destination["delivery_receipts"]) == 2
+
+
+def test_test_sink_remaps_skip_alert_with_producer_mail():
+    sent = []
+    records = [
+        _record("Producer One", "one"),
+        _record("Unmatched Person", "missing"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+        mailer=_capturing_mailer(sent),
+    )
+    with patch.dict(
+        os.environ,
+        {"ROBIE_ENV": "TEST", "ROBIE_OVERDUE_SUBMISSION_TEST_RECIPIENT": "qa@streetsmart.insurance"},
+        clear=False,
+    ):
+        result = worker.perform(_job(), idempotency_key="report-partial-test-sink")
+    assert result.succeeded is True
+    assert len(sent) == 2
+    assert all(item["to"] == ["qa@streetsmart.insurance"] for item in sent)
+    assert all(item["cc"] == [] for item in sent)
+    assert UNRESOLVED_ALERT_TO not in str(sent)
+    assert sent[1]["subject"] == f"TEST ONLY - {UNRESOLVED_ALERT_SUBJECT}"
+    assert "Unmatched Person: 1 overdue" in sent[1]["text_body"]
+
+
+def test_same_week_rerun_does_not_resend_to_a_producer(tmp_path: Path):
+    sent = []
+    records = [
+        _record("Producer One", "one"),
+        _record("Unmatched Person", "missing"),
+    ]
+    job = _job()
+    job["payload"]["db_path"] = str(tmp_path / "jobs.db")
+
+    def run(key: str):
+        worker = OverdueSubmissionReportWorker(
+            audit_reader=lambda: _observation(records),
+            directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+            mailer=_capturing_mailer(sent),
+        )
+        return worker.perform(job, idempotency_key=key)
+
+    with patch(
+        "robie_job_engine.overdue_submission_reports.submission_report_week_key",
+        return_value="2026-W40",
+    ):
+        first = run("monday-run")
+        second = run("thursday-rerun")
+    assert first.succeeded is True
+    assert second.succeeded is True
+    assert len(sent) == 2
+    assert [item["to"] for item in sent] == [
+        ["one@streetsmart.insurance"],
+        [UNRESOLVED_ALERT_TO],
+    ]
+    assert second.destination["delivery_receipts"][0]["week_ledger"] is True
+    assert (
+        second.destination["delivery_receipts"][0]["message_id"]
+        == first.destination["delivery_receipts"][0]["message_id"]
+    )
+    assert second.destination["producer_count"] == 1
+
+
+def test_next_week_sends_the_producer_again(tmp_path: Path):
+    sent = []
+    records = [_record("Producer One", "one")]
+    job = _job()
+    job["payload"]["db_path"] = str(tmp_path / "jobs.db")
+    weeks = iter(["2026-W40", "2026-W41"])
+
+    def run(key: str):
+        worker = OverdueSubmissionReportWorker(
+            audit_reader=lambda: _observation(records),
+            directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+            mailer=_capturing_mailer(sent),
+        )
+        with patch(
+            "robie_job_engine.overdue_submission_reports.submission_report_week_key",
+            return_value=next(weeks),
+        ):
+            return worker.perform(job, idempotency_key=key)
+
+    assert run("week-40").succeeded is True
+    assert run("week-41").succeeded is True
+    assert len(sent) == 2
+    assert all(item["to"] == ["one@streetsmart.insurance"] for item in sent)
+
+
+def test_external_producer_skip_unchanged_alongside_resolved_producer():
+    sent = []
+    directory = agency_email_directory_from_registry(
+        {
+            "source_status": "available",
+            "employees": {
+                "Connie Dejesus": {
+                    "email": "conniesbusinesssolutionsllc@gmail.com",
+                    "role": "External Producer",
+                    "status": "Active",
+                },
+                "Jazmin Molina": {
+                    "email": "jazmin@streetsmart.insurance",
+                    "role": "Sales Producer",
+                    "status": "Active",
+                },
+            },
+        }
+    )
+    assert "connie dejesus" not in directory
+    records = [
+        _record("Jazmin Molina", "jazmin"),
+        _record("Connie Dejesus", "connie"),
+    ]
+    worker = OverdueSubmissionReportWorker(
+        audit_reader=lambda: _observation(records),
+        directory_loader=lambda _path: directory,
+        mailer=_capturing_mailer(sent),
+    )
+    result = worker.perform(_job(), idempotency_key="report-external-skip")
+    assert result.succeeded is True
+    assert sent[0]["to"] == ["jazmin@streetsmart.insurance"]
+    assert "gmail.com" not in str(sent)
+    assert "Connie Dejesus: 1 overdue" in sent[1]["text_body"]
+    assert sent[1]["to"] == [UNRESOLVED_ALERT_TO]
 
 
 def test_agency_directory_skips_active_gmail_external_producer(caplog):

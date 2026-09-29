@@ -185,7 +185,9 @@ def send_verification_email(
     # a Gmail hiccup never blocks legitimate worker mail — but an actual
     # duplicate in Sent refuses the send loudly instead of double-sending.
     for addr in recipients:
-        skip, _reason = should_skip_send(gmail, addr, subject_text)
+        skip, _reason = should_skip_send(
+            gmail, addr, subject_text, expected_mailbox=sender
+        )
         if skip:
             logger.warning("duplicate verification email refused: %s", context)
             raise ValueError(

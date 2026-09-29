@@ -341,7 +341,11 @@ class JobEngine:
             maybe_snapshot_and_bind(self.store.path, job_id, phase="start")
             if self._job_requires_browser(job):
                 from .session_preflight import check as check_session_preflight
-                from .session_recovery import attempt_session_recovery, recovery_summary
+                from .session_recovery import (
+                    attempt_session_recovery,
+                    confirm_session_after_recovery,
+                    recovery_summary,
+                )
 
                 session_check = check_session_preflight()
                 if session_check.get("blocking"):
@@ -354,7 +358,9 @@ class JobEngine:
                     recovery = attempt_session_recovery()
                     self.store.checkpoint(job_id, "session_recovery", recovery)
                     if recovery.get("recovered"):
-                        session_check = check_session_preflight()
+                        session_check = confirm_session_after_recovery(
+                            check_session_preflight
+                        )
                         self.store.checkpoint(
                             job_id, "session_preflight_recheck", session_check
                         )

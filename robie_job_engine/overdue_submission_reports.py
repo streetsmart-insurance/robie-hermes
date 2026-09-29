@@ -1,7 +1,10 @@
 """Verified producer email reports for overdue EZLynx submissions.
 
-The worker fails closed before any email when the live Submission Center read,
-approved employee roster, or producer-to-mailbox resolution is incomplete.
+The worker fails closed before any email when the live Submission Center read
+or approved employee roster is incomplete, and when no assigned producer
+resolves to a work email. A name that does not resolve to exactly one
+directory mailbox is skipped: everyone else is emailed, and one alert lists
+the skipped names.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import html
 import json
 import logging
 import os
+import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -39,6 +43,8 @@ ACTION = "send_producer_reports"
 RESOURCE_ID = "ezlynx:submission-center:overview:submissions"
 SUBJECT = "Action required: EZLynx submissions 31+ days overdue"
 CC = ("carlo@streetsmart.insurance", "jake@streetsmart.insurance")
+UNRESOLVED_ALERT_TO = "carlo@streetsmart.insurance"
+UNRESOLVED_ALERT_SUBJECT = "Skipped EZLynx producers: submissions 31+ days overdue"
 SOP_URL = "https://docs.google.com/document/d/1nggrFQY-q9PEDOjGcje04qYKUTx-qTGTx3Wv-4qD80M/edit"
 CLOSED = {"Closed - Not Sold", "Closed - Bound"}
 EXPECTED_RED = "rgb(211, 47, 47)"
@@ -52,6 +58,75 @@ class SubmissionReportContractError(RuntimeError):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def submission_report_week_key(now: datetime | None = None) -> str:
+    """ISO week in America/New_York. Monday's run and a same-week re-run share it."""
+    from zoneinfo import ZoneInfo
+
+    current = now or datetime.now(ZoneInfo("America/New_York"))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        current = current.astimezone(ZoneInfo("America/New_York"))
+    year, week, _weekday = current.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _jobs_db_path(job: Mapping[str, Any]) -> str:
+    payload = dict(job.get("payload") or {})
+    return str(payload.get("db_path") or os.environ.get("ROBIE_JOB_DB") or "").strip()
+
+
+class WeeklyProducerSendLedger:
+    """One send per producer (and per skip-alert) per Eastern week, in jobs.db.
+
+    The Gmail Sent search 403s under the metadata scope and used to fail open.
+    This ledger is the local guarantee a same-week re-run does not email a
+    producer again.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = str(db_path or "").strip()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS submission_report_sends (
+                week_key TEXT NOT NULL,
+                send_key TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY (week_key, send_key)
+            )"""
+        )
+        return conn
+
+    def get(self, week_key: str, send_key: str) -> dict[str, Any] | None:
+        if not self.db_path:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT message_id, sent_at FROM submission_report_sends
+                   WHERE week_key=? AND send_key=?""",
+                (week_key, send_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"message_id": str(row["message_id"]), "sent_at": str(row["sent_at"])}
+
+    def record(self, week_key: str, send_key: str, message_id: str) -> None:
+        if not self.db_path or not str(message_id or "").strip():
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO submission_report_sends
+                   (week_key, send_key, message_id, sent_at)
+                   VALUES (?, ?, ?, ?)""",
+                (week_key, send_key, str(message_id).strip(), _utc_now()),
+            )
 
 
 def _canonical_hash(value: Any) -> str:
@@ -210,21 +285,90 @@ def load_approved_producer_directory(manifest_path: str) -> dict[str, str]:
     return agency_email_directory_from_registry(registry)
 
 
-def resolve_recipients(records: list[Mapping[str, Any]], directory: Mapping[str, str]) -> dict[str, str]:
+def _exact_name_key(name: str) -> str:
+    """Case- and whitespace-insensitive directory key. Punctuation stays."""
+    return " ".join(str(name).casefold().split())
+
+
+def _first_last_key(name: str) -> str:
+    """First and last token, ignoring middle names and initials.
+
+    Periods are separators so ``N.`` is a middle initial, not part of the
+    last name. Fewer than two tokens cannot match.
+    """
+    tokens = [token for token in _exact_name_key(name).replace(".", " ").split() if token]
+    if len(tokens) < 2:
+        return ""
+    return f"{tokens[0]} {tokens[-1]}"
+
+
+def match_producer_email(producer: str, directory: Mapping[str, str]) -> str:
+    """Resolve one producer to a work email.
+
+    Exact case/space-insensitive match wins. Otherwise a first+last match
+    that ignores middle names and initials is accepted only when exactly one
+    directory person matches. Two or more matches, or none, are unresolved.
+    """
+    exact = str(directory.get(_exact_name_key(producer)) or "").strip()
+    if exact:
+        return exact
+    wanted = _first_last_key(producer)
+    if not wanted:
+        return ""
+    people = [str(name) for name in directory if _first_last_key(str(name)) == wanted]
+    if len(people) != 1:
+        return ""
+    return str(directory.get(people[0]) or "").strip()
+
+
+def resolve_recipients(
+    records: list[Mapping[str, Any]], directory: Mapping[str, str]
+) -> tuple[dict[str, str], tuple[dict[str, Any], ...]]:
+    """Map assigned producers to work emails.
+
+    Returns ``(resolved, skipped)``. ``skipped`` lists each unresolved name
+    and how many overdue submissions they have. When every producer is
+    unresolved, raises so the run still fails closed with no email.
+    """
+    counts: Counter[str] = Counter()
+    for record in records:
+        producer = str(record.get("assigned_producer") or "").strip() or "Unassigned"
+        counts[producer] += 1
     resolved: dict[str, str] = {}
     missing: list[str] = []
-    for record in records:
-        producer = str(record.get("assigned_producer") or "").strip()
-        email = str(directory.get(" ".join(producer.casefold().split())) or "").strip()
-        if not email:
-            missing.append(producer or "Unassigned")
-        else:
+    for producer in counts:
+        email = match_producer_email(producer, directory)
+        if email:
             resolved[producer] = email
-    if missing:
+        else:
+            missing.append(producer)
+    if missing and not resolved:
         raise SubmissionReportContractError(
             "producer work email could not be resolved for: " + ", ".join(sorted(set(missing)))
         )
-    return resolved
+    skipped = tuple(
+        {"name": name, "overdue_count": counts[name]}
+        for name in sorted(missing, key=str.casefold)
+    )
+    return resolved, skipped
+
+
+def build_unresolved_producer_alert(skipped: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...]) -> str:
+    """One plain-text alert listing each skipped producer and overdue count."""
+    lines = [
+        "The weekly EZLynx overdue submission report skipped these assigned producers.",
+        "Each name did not resolve to exactly one approved directory work email, so no producer email was sent for them:",
+        "",
+    ]
+    for item in skipped:
+        lines.append(f"{item['name']}: {item['overdue_count']} overdue")
+    lines.extend(
+        [
+            "",
+            "Resolved producers were emailed separately.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _sorted_report_records(records: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
@@ -323,6 +467,9 @@ class OverdueSubmissionReportWorker:
         self.audit_reader = audit_reader
         self.directory_loader = directory_loader
         self.mailer = mailer
+        # Same idempotency key must not send a producer email or the skip
+        # alert twice in this process. The weekly ledger covers a new process.
+        self._delivery_receipts: dict[str, dict[str, Any]] = {}
 
     def _read(self) -> dict[str, Any]:
         if self.audit_reader is not None:
@@ -351,10 +498,12 @@ class OverdueSubmissionReportWorker:
                     retryable=False,
                 )
             directory = self.directory_loader(manifest_path)
-            recipients = resolve_recipients(records, directory)
+            recipients, skipped = resolve_recipients(records, directory)
             grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
             for record in records:
-                grouped[str(record["assigned_producer"]).strip()].append(record)
+                producer = str(record["assigned_producer"]).strip()
+                if producer in recipients:
+                    grouped[producer].append(record)
             test_sink = ""
             if current_robie_env() == TEST_ENV_NAME:
                 test_sink = os.environ.get("ROBIE_OVERDUE_SUBMISSION_TEST_RECIPIENT", "").strip().casefold()
@@ -362,10 +511,13 @@ class OverdueSubmissionReportWorker:
                     raise SubmissionReportContractError(
                         "Test delivery requires an approved agency test recipient"
                     )
-            # Test remaps To: to the sink only after every producer resolved
-            # against the live roster. A Sheets/IAM miss is fail-closed — never
-            # invent producer emails or a producers→carlo@ map.
+            # Test remaps To: to the sink only after roster resolution.
+            # Unresolved names are not invented into mailboxes. A Sheets/IAM
+            # miss is fail-closed — never a producers→carlo@ map. Zero
+            # resolved producers already raised above, before any send.
             receipts: list[dict[str, Any]] = []
+            week_key = submission_report_week_key()
+            jobs_db = _jobs_db_path(job)
             for producer in sorted(grouped):
                 subject = SUBJECT
                 body = build_producer_report(producer, grouped[producer])
@@ -380,13 +532,41 @@ class OverdueSubmissionReportWorker:
                     to = [test_sink]
                     cc = []
                 receipts.append(
-                    self.mailer(
+                    self._send_once(
+                        idempotency_key,
+                        f"producer:{_exact_name_key(producer)}",
+                        week_key=week_key,
+                        db_path=jobs_db,
                         to=to,
                         cc=cc,
                         subject=subject,
                         text_body=body,
                         html_body=html_body,
                         plain_only=False,
+                    )
+                )
+            if skipped:
+                alert_to = [test_sink] if test_sink else [UNRESOLVED_ALERT_TO]
+                alert_subject = UNRESOLVED_ALERT_SUBJECT
+                alert_body = build_unresolved_producer_alert(skipped)
+                if test_sink:
+                    alert_subject = f"TEST ONLY - {UNRESOLVED_ALERT_SUBJECT}"
+                    alert_body = "TEST ONLY - no producer delivery\n\n" + alert_body
+                alert_key = "unresolved-alert:" + "|".join(
+                    _exact_name_key(str(item.get("name") or "")) for item in skipped
+                )
+                receipts.append(
+                    self._send_once(
+                        idempotency_key,
+                        alert_key,
+                        week_key=week_key,
+                        db_path=jobs_db,
+                        to=alert_to,
+                        cc=[],
+                        subject=alert_subject,
+                        text_body=alert_body,
+                        html_body=None,
+                        plain_only=True,
                     )
                 )
         except EzlynxSessionLockTimeout:
@@ -398,13 +578,59 @@ class OverdueSubmissionReportWorker:
             return WorkerResult(False, JOB_TYPE, {}, retryable=False, error=str(exc), hold_status=JobStatus.NEEDS_CLARIFICATION)
         except Exception as exc:
             return WorkerResult(False, JOB_TYPE, {}, retryable=False, error=f"producer report delivery failed: {type(exc).__name__}: {exc}", hold_status=JobStatus.AWAITING_HUMAN_INPUT)
+        skipped_outcome = [dict(item) for item in skipped]
         return WorkerResult(
             True,
             JOB_TYPE,
-            {"resource_id": RESOURCE_ID, "delivery_receipts": receipts, "producer_count": len(grouped), "qualifying_count": len(records)},
-            {"audit_summary": audit_summary, "idempotency_key": idempotency_key},
+            {
+                "resource_id": RESOURCE_ID,
+                "delivery_receipts": receipts,
+                "producer_count": len(grouped),
+                "qualifying_count": len(records),
+                "skipped_producers": skipped_outcome,
+            },
+            {
+                "audit_summary": audit_summary,
+                "idempotency_key": idempotency_key,
+                "skipped_producers": skipped_outcome,
+            },
             retryable=False,
         )
+
+    def _send_once(
+        self,
+        idempotency_key: str,
+        slot: str,
+        *,
+        week_key: str = "",
+        db_path: str = "",
+        **mail_kwargs: Any,
+    ) -> dict[str, Any]:
+        """Send at most once per job key and once per Eastern week for this slot."""
+        token = f"{idempotency_key}\n{slot}"
+        cached = self._delivery_receipts.get(token)
+        if cached is not None:
+            return cached
+        ledger = WeeklyProducerSendLedger(db_path)
+        if week_key:
+            prior = ledger.get(week_key, slot)
+            if prior and prior.get("message_id"):
+                receipt = {
+                    "kind": "gmail",
+                    "message_id": prior["message_id"],
+                    "sender": "robie@streetsmart.insurance",
+                    "week_ledger": True,
+                }
+                self._delivery_receipts[token] = receipt
+                return receipt
+        receipt = self.mailer(**mail_kwargs)
+        if not isinstance(receipt, dict):
+            raise SubmissionReportContractError("producer report mailer returned no receipt")
+        message_id = str(receipt.get("message_id") or "").strip()
+        if week_key and message_id:
+            ledger.record(week_key, slot, message_id)
+        self._delivery_receipts[token] = receipt
+        return receipt
 
 
 class OverdueSubmissionReportVerifier:
@@ -417,6 +643,10 @@ class OverdueSubmissionReportVerifier:
         receipts = list(destination.get("delivery_receipts") or [])
         expected_count = int(destination.get("producer_count") or 0)
         qualifying_count = int(destination.get("qualifying_count") or 0)
+        skipped = list(destination.get("skipped_producers") or [])
+        # One extra receipt when unresolved names were alerted. Zero resolved
+        # producers never reach here with an alert: that run fails closed.
+        message_count = expected_count + (1 if skipped else 0)
         try:
             if expected_count:
                 unique_ids = {str(item.get("message_id") or "") for item in receipts}
@@ -426,8 +656,8 @@ class OverdueSubmissionReportVerifier:
                     for item in observed_receipts
                 )
                 verified = (
-                    len(receipts) == expected_count
-                    and len(unique_ids) == expected_count
+                    len(receipts) == message_count
+                    and len(unique_ids) == message_count
                     and "" not in unique_ids
                     and delivery_ok
                     and mailbox_ok
@@ -435,7 +665,7 @@ class OverdueSubmissionReportVerifier:
                 expected = {
                     "resource_id": RESOURCE_ID,
                     "exists_in_sent_mailbox": True,
-                    "gmail_receipt_count": expected_count,
+                    "gmail_receipt_count": message_count,
                     "producer_count": expected_count,
                     "qualifying_count": qualifying_count,
                 }
@@ -448,6 +678,9 @@ class OverdueSubmissionReportVerifier:
                     "unique_message_ids": len(unique_ids),
                     "delivery": observed_receipts,
                 }
+                if skipped:
+                    expected["skipped_producers"] = skipped
+                    observed["skipped_producers"] = skipped
             else:
                 if self.audit_reader is None:
                     with exclusive_session():

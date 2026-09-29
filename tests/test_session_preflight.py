@@ -270,6 +270,50 @@ class TestEngineWiring(unittest.TestCase):
         self.assertEqual(recheck_cp["state"], SESSION_PRESENT)
         self.assertIsNone(self.store.get_checkpoint(job["id"], "email_response"))
 
+    @patch("robie_job_engine.session_recovery.time.sleep")
+    @patch("robie_job_engine.session_recovery.attempt_session_recovery")
+    @patch("robie_job_engine.session_preflight.check")
+    def test_post_relogin_recheck_retries_past_a_lingering_login_url(
+        self, mock_check, mock_recover, mock_sleep
+    ):
+        logged_out = {
+            "state": LOGGED_OUT,
+            "blocking": True,
+            "reason": "SESSION_LOGGED_OUT: browser is on /auth/account/login",
+        }
+        session_present = {
+            "state": SESSION_PRESENT,
+            "blocking": False,
+            "reason": "An EZLynx tab is not on the login page.",
+        }
+        mock_check.side_effect = [logged_out, logged_out, logged_out, session_present]
+        mock_recover.return_value = {
+            "recovered": True,
+            "state": "SIGNED_IN",
+            "marker": "SESSION_RECOVERED",
+        }
+        worker = DummyWorker()
+        engine = JobEngine(
+            self.store,
+            {"hermes-cua": worker},
+            {"ezlynx.reassign": DummyVerifier()},
+        )
+        job = self.store.create_job(
+            "ezlynx.reassign",
+            {"worker": "hermes-cua"},
+            max_attempts=3,
+        )
+
+        engine.run(job["id"])
+
+        self.assertTrue(worker.called)
+        self.assertGreaterEqual(mock_sleep.call_count, 2)
+        self.assertEqual(
+            self.store.get_checkpoint(job["id"], "session_preflight_recheck")["state"],
+            SESSION_PRESENT,
+        )
+        self.assertIsNone(self.store.get_checkpoint(job["id"], "email_response"))
+
     @patch("robie_job_engine.session_preflight.check")
     def test_non_browser_job_bypasses_preflight_and_proceeds(self, mock_check):
         mock_check.return_value = {

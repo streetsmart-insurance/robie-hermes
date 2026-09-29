@@ -355,6 +355,27 @@ class AccountabilityReportWorker:
                     environment=os.environ,
                     approved_users=approved_users,
                 )
+                verify_handled_config = dict(gmail_config.get("verify_handled") or {})
+                if gmail_config.get("enabled") and verify_handled_config.get("enabled"):
+                    from .handled_verification import (
+                        DEFAULT_SHARED_MAILBOXES,
+                        collect_handled_verification,
+                    )
+
+                    gmail_snapshot["handled_verification"] = collect_handled_verification(
+                        environment=os.environ,
+                        approved_users=approved_users,
+                        shared_mailboxes=tuple(
+                            str(item).strip()
+                            for item in (
+                                verify_handled_config.get("shared_mailboxes") or DEFAULT_SHARED_MAILBOXES
+                            )
+                            if str(item).strip()
+                        ),
+                        lookback_days=max(1, int(verify_handled_config.get("lookback_days") or 7)),
+                        max_messages=max(1, int(verify_handled_config.get("max_messages") or 30)),
+                        as_of=run_at,
+                    )
                 gmail_path = output_dir / f"gmail-{run_at:%Y%m%dT%H%M%SZ}.json"
                 gmail_path.write_text(json.dumps(gmail_snapshot, indent=2, default=str), encoding="utf-8")
                 arguments.extend(["--email-json", str(gmail_path)])
