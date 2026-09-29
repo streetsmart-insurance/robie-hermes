@@ -33,13 +33,14 @@ def _millis(value: datetime) -> str:
     return str(int(value.timestamp() * 1000))
 
 
-def _msg(mid, thread, sender, when, subject="Test subject line", extra_headers=None, body=None):
+def _msg(mid, thread, sender, when, subject="Test subject line", extra_headers=None, body=None,
+         to_addr=None):
     headers = [
         {"name": "From", "value": sender},
         {"name": "Subject", "value": subject},
         {"name": "Date", "value": when.strftime("%a, %d %b %Y %H:%M:%S +0000")},
         {"name": "Message-ID", "value": f"<{mid}@mail.example.com>"},
-        {"name": "To", "value": EMPLOYEE},
+        {"name": "To", "value": to_addr or EMPLOYEE},
     ]
     for name, value in (extra_headers or {}).items():
         headers.append({"name": name, "value": value})
@@ -155,11 +156,20 @@ def test_is_related_send_matches_reference_header():
     assert is_related_send(sent, "Proof of garaging", "<in1@mail.example.com>")
 
 
-def test_is_related_send_matches_normalized_subject_without_reference():
+def test_is_related_send_subject_alone_never_matches():
+    # Review blocker 1: a bare subject collision must not mark mail handled.
     assert is_related_send({"subject": "Fwd: Proof of garaging", "references": ""},
-                           "Proof of garaging", "<zzz@mail.example.com>")
-    assert is_related_send({"subject": "Re: Proof of garaging request", "references": ""},
-                           "Proof of garaging request", "<zzz@mail.example.com>")
+                           "Proof of garaging", "<zzz@mail.example.com>",
+                           "Client Person <client@example.com>") is None
+
+
+def test_is_related_send_matches_subject_plus_client_recipient():
+    assert is_related_send(
+        {"subject": "Fwd: Proof of garaging", "references": "", "to": "client@example.com"},
+        "Proof of garaging", "<zzz@mail.example.com>", "Client Person <client@example.com>")
+    assert is_related_send(
+        {"subject": "Re: Proof of garaging request", "references": "", "cc": "Client <client@example.com>"},
+        "Proof of garaging request", "<zzz@mail.example.com>", "client@example.com")
 
 
 def test_is_related_send_rejects_unrelated_and_tiny_subjects():
@@ -213,7 +223,7 @@ def test_verify_prefers_in_thread_reply():
     reply = _msg("m-reply", "t1", EMPLOYEE, WHEN_LATER)
     threads = {"t1": {"messages": [inbound, reply]}}
     services = _services([inbound], threads=threads)
-    result = verify_inbound_message(
+    result, _ = verify_inbound_message(
         services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE, SHARED],
         after="2026/09/22", before="2026/09/30",
     )
@@ -228,7 +238,7 @@ def test_verify_finds_forward_by_reference_in_employee_sent():
     fwd["labelIds"] = ["SENT"]
     threads = {"t1": {"messages": [inbound]}}
     services = _services([inbound, fwd], threads=threads)
-    result = verify_inbound_message(
+    result, _ = verify_inbound_message(
         services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE, SHARED],
         after="2026/09/22", before="2026/09/30",
     )
@@ -238,11 +248,12 @@ def test_verify_finds_forward_by_reference_in_employee_sent():
 
 def test_verify_finds_forward_by_subject_in_shared_mailbox():
     inbound = _inbound()
-    fwd = _msg("m-fwd", "t2", SHARED, WHEN_LATER, "Fwd: Proof of garaging")
+    fwd = _msg("m-fwd", "t2", SHARED, WHEN_LATER, "Fwd: Proof of garaging",
+               to_addr="Client Person <client@example.com>")
     fwd["labelIds"] = ["SENT"]
     threads = {"t1": {"messages": [inbound]}}
     services = _services([inbound], [fwd], threads)
-    result = verify_inbound_message(
+    result, _ = verify_inbound_message(
         services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE, SHARED],
         after="2026/09/22", before="2026/09/30",
     )
@@ -259,7 +270,7 @@ def test_verify_unhandled_gets_summary_and_action_flag():
     }
     threads = {"t1": {"messages": [inbound]}}
     services = _services([inbound], threads=threads)
-    result = verify_inbound_message(
+    result, _ = verify_inbound_message(
         services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE, SHARED],
         after="2026/09/22", before="2026/09/30",
     )
@@ -276,6 +287,8 @@ def test_verify_check_failed_is_reported_not_raised():
         after="2026/09/22", before="2026/09/30",
     )
     assert result["check_failed"] == 1
+    assert result["reply_rate"] is None
+    assert result["rate_status"].startswith("unevaluable")
 
 
 def test_internal_senders_are_never_graded_as_client_mail():
@@ -447,7 +460,7 @@ def test_daily_report_renders_verification_table_and_summaries():
     }
     report = ReportingSuite().build_daily_report({}, {}, email_data=email_data)
     assert "EMAIL HANDLED VERIFICATION" in report
-    assert "| rep-a@streetsmart.insurance | 1 | 1 | 1 | 0 | 67% |" in report
+    assert "| rep-a@streetsmart.insurance | 1 | 1 | 1 | 0 | 0 | 67% |" in report
     assert "Certificate question" in report
     assert "Client asks for an updated certificate." in report
 
@@ -462,3 +475,101 @@ def test_reports_render_nothing_without_verification_data():
                             "handled_verification": {"source_status": "missing delegated service account"}})
     assert "EMAIL HANDLED VERIFICATION" in flagged
     assert "UNVERIFIED" in flagged
+
+
+# ------------------------------------------------------ review regression tests
+
+def test_old_send_with_matching_subject_never_marks_newer_inbound_handled():
+    """Review blocker 1: a send that PREDATES the inbound is not its forward,
+    even with subject + client-recipient match (e.g. an old hello@ send)."""
+    inbound = _inbound()
+    old_send = _msg("m-old-send", "t2", SHARED, WHEN_OLD, "Fwd: Proof of garaging",
+                    to_addr="client@example.com")
+    old_send["labelIds"] = ["SENT"]
+    threads = {"t1": {"messages": [inbound]}}
+    services = _services([inbound], [old_send], threads)
+    result, _capped = verify_inbound_message(
+        services[EMPLOYEE], services, EMPLOYEE, inbound, [EMPLOYEE, SHARED],
+        after="2025/01/01", before="2026/09/30",
+    )
+    assert result["handled_via"] == "unhandled"
+
+
+def test_lookalike_domain_is_not_internal():
+    """Review blocker 2: exact-domain parsing, not substring."""
+    from robie_job_engine.handled_verification import is_internal
+    assert is_internal("Rep A <rep-a@streetsmart.insurance>")
+    assert not is_internal("Attacker <x@notstreetsmart.insurance.evil.com>")
+    assert not is_internal("Client Person <client@example.com>")
+    assert not is_internal("")
+
+
+def test_lookalike_domain_sender_is_graded_as_client_mail():
+    inbound = _msg("in1", "t1", "Spoofer <x@notstreetsmart.insurance.evil.com>", WHEN_IN)
+    threads = {"t1": {"messages": [inbound]}}
+    services = _services([inbound], threads=threads)
+    result = verify_mailbox_handled(
+        EMPLOYEE, services, sent_mailboxes=[EMPLOYEE],
+        after="2026/09/22", before="2026/09/30",
+    )
+    assert result["received"] == 1
+
+
+def test_no_keyword_unhandled_is_unknown_not_fyi_and_stays_in_denominator():
+    """Review blocker 3: ambiguous mail can no longer hide as FYI."""
+    inbound = _inbound()
+    inbound["payload"]["mimeType"] = "text/plain"
+    import base64
+    inbound["payload"]["body"] = {
+        "data": base64.urlsafe_b64encode(b"The garage address changed last month.").decode()
+    }
+    handled = _msg("in2", "t2", "Other Client <other@example.com>", WHEN_IN, "Second matter")
+    reply = _msg("m-reply", "t2", EMPLOYEE, WHEN_LATER)
+    threads = {"t1": {"messages": [inbound]}, "t2": {"messages": [handled, reply]}}
+    services = _services([inbound, handled], threads=threads)
+    result = verify_mailbox_handled(
+        EMPLOYEE, services, sent_mailboxes=[EMPLOYEE],
+        after="2026/09/22", before="2026/09/30",
+    )
+    assert result["unhandled_unknown"] == 1
+    assert result["unhandled_fyi"] == 0
+    assert result["received"] == 2
+    assert result["reply_rate"] == 0.5  # unknown item still counts against the rate
+
+
+def test_positive_fyi_signal_is_excluded_from_denominator():
+    summary = summarize("Here is your weekly digest. Unsubscribe anytime.", "news@example.com")
+    assert summary["action_needed"] == FYI_ACTION_FLAG
+    noreply = summarize("Your receipt is attached.", "no-reply@example.com")
+    assert noreply["action_needed"] == FYI_ACTION_FLAG
+
+
+def test_inbound_cap_flags_mailbox_partial():
+    """Review blocker 4: hitting the inbound cap marks output partial."""
+    msgs = [_msg(f"in{i}", f"t{i}", f"Client {i} <c{i}@example.com>", WHEN_IN) for i in range(3)]
+    threads = {f"t{i}": {"messages": [m]} for i, m in enumerate(msgs)}
+    services = _services(msgs, threads=threads)
+    result = verify_mailbox_handled(
+        EMPLOYEE, services, sent_mailboxes=[EMPLOYEE],
+        after="2026/09/22", before="2026/09/30", max_messages=2,
+    )
+    assert result["received"] == 2
+    assert result["inbound_capped"] is True
+    assert result["partial"] is True
+
+
+def test_errored_check_makes_rate_unevaluable():
+    """Review blocker 5: an errored item poisons the mailbox rate."""
+    good = _msg("in2", "t2", "Other Client <other@example.com>", WHEN_IN, "Second matter")
+    reply = _msg("m-reply", "t2", EMPLOYEE, WHEN_LATER)
+    bad = _inbound()  # thread t1 missing from the fake -> per-item error
+    threads = {"t2": {"messages": [good, reply]}}
+    services = _services([good, bad], threads=threads)
+    result = verify_mailbox_handled(
+        EMPLOYEE, services, sent_mailboxes=[EMPLOYEE],
+        after="2026/09/22", before="2026/09/30",
+    )
+    assert result["handled_via_reply"] == 1
+    assert result["check_failed"] == 1
+    assert result["reply_rate"] is None
+    assert result["rate_status"].startswith("unevaluable")
