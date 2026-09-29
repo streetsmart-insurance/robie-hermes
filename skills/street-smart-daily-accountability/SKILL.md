@@ -59,7 +59,7 @@ Within every agency and department tab, group the readable findings in this orde
 
 Sending is authorized only by the current user request or an active scheduled automation that names the exact recipients. Before every send, verify each mailbox against the approved active roster and Test Gmail profile. One inactive, missing, or unverified requested recipient blocks the send and produces a clear exception report.
 
-Do not read employee email bodies. Use Gmail metadata for approved employees and restrict Gmail readonly content access to the reporting mailbox. Google Chat delivery is approved only for the configured team-lead incoming webhook and only for the concise link-only digest defined in the webhook reference after the same release and recipient gates pass.
+Do not read employee email bodies except through the opt-in handled-verification path (`collection.gmail_accountability.verify_handled`), which uses gmail.readonly per approved employee mailbox solely for reply/forward detection and extractive summaries of genuinely unhandled client mail. Otherwise use Gmail metadata for approved employees and restrict Gmail readonly content access to the reporting mailbox. Google Chat delivery is approved only for the configured team-lead incoming webhook and only for the concise link-only digest defined in the webhook reference after the same release and recipient gates pass.
 
 Deliver the package by link after the all-recipient preflight passes. The email must link the pageless Google Doc, comprehensive Google Sheet/workbook, visual dashboard, runbook, and packaged skill. Ask Jake and the team leads to scrutinize the findings and return corrections or remarks.
 
