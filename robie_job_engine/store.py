@@ -144,6 +144,19 @@ class JobStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_playwright_exec_job
                     ON playwright_exec(job_id, id);
+                CREATE TABLE IF NOT EXISTS jev_evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    verdict TEXT NOT NULL,
+                    confidence INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    escalate INTEGER NOT NULL,
+                    request_json TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_jev_evaluations_job
+                    ON jev_evaluations(job_id, id);
                 """
             )
 
@@ -930,6 +943,55 @@ class JobStore:
                 values,
             ).fetchall()
         return [self._decode_job(row) for row in rows]
+
+    def add_jev_evaluation(
+        self,
+        job_id: str,
+        *,
+        verdict: str,
+        confidence: int,
+        reason: str,
+        escalate: bool,
+        request: dict[str, Any],
+        response: dict[str, Any],
+    ) -> int:
+        """Store one Jev score. The API key must already be absent."""
+        request = redact_mapping(dict(request or {}))
+        response = redact_mapping(dict(response or {}))
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """INSERT INTO jev_evaluations
+                   (job_id,verdict,confidence,reason,escalate,request_json,response_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    str(verdict or ""),
+                    int(confidence),
+                    redact_text(str(reason or "")),
+                    int(bool(escalate)),
+                    canonical_json(request),
+                    canonical_json(response),
+                    utc_now(),
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_jev_evaluations(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id,job_id,verdict,confidence,reason,escalate,
+                          request_json,response_json,created_at
+                   FROM jev_evaluations WHERE job_id=? ORDER BY id""",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["request"] = json.loads(item.pop("request_json") or "{}")
+            item["response"] = json.loads(item.pop("response_json") or "{}")
+            item["escalate"] = bool(item["escalate"])
+            result.append(item)
+        return result
 
     @staticmethod
     def _decode_job(row: sqlite3.Row) -> dict[str, Any]:

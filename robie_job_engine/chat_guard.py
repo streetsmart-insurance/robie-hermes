@@ -1633,6 +1633,16 @@ def _render_chat_terminal(
     every user gets the same shape. Internal codes are translated for
     display only -- detection on raw worker text is untouched.
     """
+    from .end_state_report import end_state_report_enabled, render_job_end_state
+
+    # Flag on: one end-state report scored by Jev. The old "Not verified"
+    # wording is display-only and is skipped here. Deterministic verifiers
+    # still ran before this render; a failed hard readback forces wrong.
+    if end_state_report_enabled():
+        return render_job_end_state(
+            store, job, content, recordings=recordings, channel="chat"
+        )
+
     from . import status_format
 
     job_id = job["id"]

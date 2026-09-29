@@ -267,6 +267,7 @@ def run_guarded_email_task(
         status=status,
         response=response,
         summary=str(summary or ""),
+        store=store,
     )
 
 
@@ -276,6 +277,7 @@ def _render_email_terminal(
     status: JobStatus,
     response: str,
     summary: str,
+    store: JobStore | None = None,
 ) -> str:
     """Render the email reply in the simple shared format.
 
@@ -283,7 +285,20 @@ def _render_email_terminal(
     Anything needed / Status, plain words first, job ref at the bottom),
     via the shared status_format module. Internal worker codes are
     translated for display only.
+
+    When ``ROBIE_END_STATE_REPORT`` is on, the reply is the end-state
+    report instead, in Test or in Production. The old
+    "Worker report (not proof)" line is display-only and is skipped.
+    Destination verifiers still run before this render.
     """
+    from .end_state_report import end_state_report_enabled, render_job_end_state
+
+    if end_state_report_enabled() and store is not None:
+        job = store.get_job(job_id)
+        return render_job_end_state(
+            store, job, response, channel="email"
+        )
+
     from . import status_format
 
     if status == JobStatus.COMPLETE:
