@@ -181,8 +181,28 @@ def test_select_hint_matching_two_raises():
     assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
 
 
-def test_select_hint_matching_none_raises():
-    rows = [{"id": "d1", "title": "PCR"}, {"id": "d2", "title": "COI"}]
+def test_select_hint_matching_none_holds_even_if_one_is_recent():
+    rows = [
+        {"id": "d1", "title": "PCR", "lastModified": "2026-09-20T10:00:00"},
+        {"id": "d2", "title": "COI", "lastModified": "2026-09-25T10:00:00"},
+    ]
+    with pytest.raises(disc.DiscussionSelectionError) as excinfo:
+        disc.select_discussion_for_note(rows, title_hint="billing")
+    assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
+    assert "matched none" in str(excinfo.value)
+
+
+def test_select_hint_matching_none_holds_even_for_single_titled_discussion():
+    with pytest.raises(disc.DiscussionSelectionError) as excinfo:
+        disc.select_discussion_for_note([{"id": "d1", "title": "COI"}], title_hint="renewal")
+    assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
+
+
+def test_select_hint_matching_none_does_not_choose_untitled_or_titled():
+    rows = [
+        {"id": "d0", "title": "Untitled", "lastModified": "2026-09-27T10:00:00"},
+        {"id": "d1", "title": "PCR", "lastModified": "2026-09-20T10:00:00"},
+    ]
     with pytest.raises(disc.DiscussionSelectionError) as excinfo:
         disc.select_discussion_for_note(rows, title_hint="billing")
     assert excinfo.value.code == disc.AMBIGUOUS_DISCUSSIONS
