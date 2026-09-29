@@ -12,6 +12,22 @@ from typing import Any, Protocol
 READ_ONLY_ACTIONS = frozenset({"portal_login", "portal_download", "api_read"})
 
 
+class TransientBrowserError(RuntimeError):
+    """A browser failure worth retrying: navigation/action timeout,
+    dropped connection, crashed target. Never a wrong-password or
+    not-found failure — those are permanent."""
+
+
+class SessionExpiredError(TransientBrowserError):
+    """The portal's session died mid-flow (login screen reappeared).
+
+    Adapters raise this when they observe the portal's login screen
+    after having logged in. Handled by the runner with exactly one
+    fresh-context re-login — never by blind retries on the dead
+    session, so it is excluded from run_with_retries' transient set.
+    """
+
+
 @dataclass(frozen=True)
 class PolicyRef:
     """One pilot policy handed to an adapter."""
@@ -54,6 +70,11 @@ class BrowserPort(Protocol):
     Read-only by shape: there is no form-submit-to-bind, no send, no
     upload. ``download`` captures the file the browser receives after the
     adapter clicks the portal's own download/export control.
+
+    Optional extensions (used by the runner when present, never
+    required): ``screenshot(dest_path)`` saves a PNG; ``reset_log()``
+    starts a fresh per-policy action log; ``action_log`` returns the
+    timestamped steps so far (selectors only — never filled values).
     """
 
     def goto(self, url: str) -> None: ...
@@ -69,14 +90,12 @@ class BrowserPort(Protocol):
 def new_browser(runtime: str) -> BrowserPort:
     """Production wiring point: return a Playwright-backed BrowserPort.
 
-    NOT implemented in this branch — the pilot runs only after Carlo
-    approves the pilot plan, and the browser wiring is built then.
-    Raising here (instead of returning None) fails closed.
+    Delegates to :mod:`robie_job_engine.phase1_browser` (lazy import so
+    importing this module never requires playwright to be installed).
     """
-    raise NotImplementedError(
-        f"no live browser wiring for runtime {runtime!r} in this branch; "
-        "the pilot must not run until the Playwright port is built and reviewed"
-    )
+    from ..phase1_browser import new_browser as _live_new_browser
+
+    return _live_new_browser(runtime)
 
 
 def record_only(*args: Any, **kwargs: Any) -> None:

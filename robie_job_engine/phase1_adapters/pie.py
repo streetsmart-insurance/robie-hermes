@@ -12,7 +12,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import AdapterSpec, BrowserPort, DownloadResult, PolicyRef
+from .base import (
+    AdapterSpec,
+    BrowserPort,
+    DownloadResult,
+    PolicyRef,
+    SessionExpiredError,
+    TransientBrowserError,
+)
 from ..phase1_credentials import load_portal_credentials
 
 ADAPTER = AdapterSpec(
@@ -62,6 +69,8 @@ def download(
         browser.wait_for_selector("#audit-documents")
         browser.click("#audit-documents")
         browser.download("#download-audit-papers", dest)
+    except (TransientBrowserError, SessionExpiredError):
+        raise  # runner retries transient / re-logins once on expiry
     except Exception as exc:  # noqa: BLE001 - record, never raise past the runner
         return DownloadResult(ok=False, detail=f"pie pull failed: {type(exc).__name__}")
     return DownloadResult(

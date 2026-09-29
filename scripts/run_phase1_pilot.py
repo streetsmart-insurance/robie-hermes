@@ -5,11 +5,15 @@ Reads a pilot JSON (see pilot/pilot-10.json), pulls each policy's
 document via its carrier adapter, and writes per-policy evidence JSON
 plus a summary into the run directory.
 
-The pilot does NOT run against live portals until the Playwright
-browser port is built and Carlo approves the pilot plan: without a
-``--browser`` wiring this CLI fails closed (no browser_factory means the
-run is refused before any adapter code executes). The hermetic smoke
-check is ``pytest tests/test_phase1_doc_pull.py``.
+The pilot does NOT run against live portals by default: without
+``--browser`` no browser_factory is wired and the run fails closed (no
+browser_factory means the run is refused before any adapter code
+executes). Pass ``--browser box`` (or ``sandbox``) ONLY after Carlo
+approves the pilot plan — that is what lets the worker touch live
+carrier portals (read-only: login + download only).
+
+The hermetic smoke check is ``pytest tests/test_phase1_doc_pull.py
+tests/test_phase1_browser.py``.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from robie_job_engine.phase1_browser import default_browser_factory
 from robie_job_engine.phase1_doc_pull import load_pilot, run_pilot
 
 
@@ -33,6 +38,15 @@ def main() -> int:
         default="",
         help="run directory (default: pilot/runs/<timestamp>)",
     )
+    ap.add_argument(
+        "--browser",
+        choices=("box", "sandbox"),
+        default=None,
+        help=(
+            "wire the live Playwright browser port (REQUIRES Carlo's pilot "
+            "approval). Without this flag the run fails closed."
+        ),
+    )
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -43,8 +57,13 @@ def main() -> int:
     )
     pilot = load_pilot(args.pilot)
     print(f"pilot: {len(pilot)} policies -> {run_dir}")
+    browser_factory = default_browser_factory() if args.browser else None
+    if browser_factory is not None:
+        print(f"live browser wiring ENABLED (runtime from each adapter's spec)")
+    else:
+        print("no --browser flag: live portals disabled, run will fail closed")
     try:
-        evidence = run_pilot(pilot, run_dir=run_dir)
+        evidence = run_pilot(pilot, run_dir=run_dir, browser_factory=browser_factory)
     except RuntimeError as exc:
         print(f"REFUSED: {exc}")
         return 2
@@ -53,7 +72,11 @@ def main() -> int:
         counts[ev.status] = counts.get(ev.status, 0) + 1
     print(json.dumps(counts, indent=2))
     print(f"evidence: {run_dir / 'evidence'}")
-    bad = counts.get("failed", 0) + counts.get("blocked", 0)
+    bad = (
+        counts.get("failed", 0)
+        + counts.get("blocked", 0)
+        + counts.get("needs_review", 0)
+    )
     if bad:
         print(f"{bad} polic(ies) did not produce a verified document — see evidence")
         return 1

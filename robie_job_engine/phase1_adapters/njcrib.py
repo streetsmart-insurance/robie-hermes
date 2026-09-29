@@ -20,7 +20,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import AdapterSpec, BrowserPort, DownloadResult, PolicyRef
+from .base import (
+    AdapterSpec,
+    BrowserPort,
+    DownloadResult,
+    PolicyRef,
+    SessionExpiredError,
+    TransientBrowserError,
+)
 from ..phase1_credentials import load_portal_credentials
 
 ADAPTER = AdapterSpec(
@@ -73,6 +80,8 @@ def download(
         browser.wait_for_selector("#policy-documents")
         browser.click("#policy-documents")
         browser.download("#download-document", dest)
+    except (TransientBrowserError, SessionExpiredError):
+        raise  # runner retries transient / re-logins once on expiry
     except Exception as exc:  # noqa: BLE001 - record, never raise past the runner
         return DownloadResult(ok=False, detail=f"njcrib pull failed: {type(exc).__name__}")
     return DownloadResult(
