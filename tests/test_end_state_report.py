@@ -377,21 +377,61 @@ class EndStateReportTests(unittest.TestCase):
         self.assertNotIn("Jev:", chat)
         self.assertTrue(chat.rstrip().endswith("Ref: job " + job["id"]))
 
-    def test_production_ignores_the_flag(self):
-        with mock.patch.dict(
-            os.environ,
-            {"ROBIE_END_STATE_REPORT": "1", "ROBIE_ENV": "PRODUCTION"},
-        ):
-            email = _render_email_terminal(
-                job_id=JOB_ID_NOTE,
-                status=JobStatus.UNVERIFIED,
-                response="The worker said it was done.",
-                summary="",
-                store=self.store,
-            )
-        self.assertTrue(email.startswith("Not verified."))
-        self.assertIn("Worker report (not proof)", email)
-        self.assertNotIn("Jev:", email)
+    def test_flag_off_on_production_matches_today(self):
+        kwargs = dict(
+            job_id=JOB_ID_NOTE,
+            status=JobStatus.UNVERIFIED,
+            response="The worker said it was done.",
+            summary="",
+            store=self.store,
+        )
+        with mock.patch.dict(os.environ, {"ROBIE_ENV": "TEST"}, clear=False):
+            os.environ.pop("ROBIE_END_STATE_REPORT", None)
+            baseline = _render_email_terminal(**kwargs)
+        for env_name in ("PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env_name=env_name):
+                with mock.patch.dict(os.environ, {"ROBIE_ENV": env_name}, clear=False):
+                    os.environ.pop("ROBIE_END_STATE_REPORT", None)
+                    prod = _render_email_terminal(**kwargs)
+                self.assertEqual(prod, baseline)
+                self.assertTrue(prod.startswith("Not verified."))
+                self.assertIn("Worker report (not proof)", prod)
+                self.assertNotIn("Jev:", prod)
+
+    def test_flag_on_works_on_production(self):
+        def opener(request, timeout=None):
+            return _HttpResponse(_jev_body(0.95, "completed", 0.92))
+
+        client = JevClient(SECRET, opener=opener, retry_sleep=0, timeout=1)
+        for env_name in ("PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env_name=env_name):
+                fresh = self._job("quote ACME LLC", idem=f"prod-on-{env_name}")
+                self._evidence(
+                    fresh["id"],
+                    verified=True,
+                    observed={
+                        "account_name": "ACME LLC",
+                        "applicant_id": "123",
+                        "premium": "$4,210",
+                        "carrier": "Hartford",
+                        "quote_created": True,
+                    },
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {"ROBIE_END_STATE_REPORT": "1", "ROBIE_ENV": env_name},
+                ):
+                    with mock.patch(
+                        "robie_job_engine.end_state_report.escalate_end_state",
+                        return_value={"posted": False},
+                    ):
+                        text = render_job_end_state(
+                            self.store, fresh, "created the quote", client=client
+                        )
+                self.assertIn("Jev: correct, 92% confidence.", text)
+                self.assertNotIn("UNVERIFIED", text)
+                self.assertNotIn("Worker report (not proof)", text)
+                self.assertTrue(text.rstrip().endswith("Ref: job " + fresh["id"]))
 
     def test_flag_on_chat_and_email_use_the_new_report(self):
         job = self._job("quote ACME LLC", idem="both-channels")

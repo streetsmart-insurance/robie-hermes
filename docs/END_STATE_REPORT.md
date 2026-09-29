@@ -1,6 +1,8 @@
 # End-state report (Jev)
 
-This is off until someone turns it on. Production does not change.
+This is off until someone turns it on. With the flag off, Production
+replies stay as they are today. Setting ``ROBIE_END_STATE_REPORT=1``
+turns the report on in that process, including Production.
 
 ## What Carlo sees
 
@@ -54,7 +56,7 @@ The drop-in sets `ROBIE_END_STATE_REPORT=1`. Optional: `ROBIE_END_STATE_CONFIDEN
 
 The Jev key is Secret Manager secret `jev-api-key` in project `streetsmart-hermes-poc`. The Test process reads it the same way it reads `gemini-api-key`. `JEV_API_KEY` overrides that if set. Do not put the key in the drop-in, in chat, or in logs.
 
-The code ignores the flag when `ROBIE_ENV` is `PRODUCTION`, `PROD`, or `LIVE`. Turning this on in Production later needs Carlo's GO and a follow-up change. Setting the variable on hermes-poc-01 does not change replies.
+The flag is off unless it is set. Setting `ROBIE_END_STATE_REPORT=1` turns the report on in that process, including when `ROBIE_ENV` is `PRODUCTION`, `PROD`, or `LIVE`. This document does not install the flag anywhere.
 
 ## What is stored
 

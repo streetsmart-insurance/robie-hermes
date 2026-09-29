@@ -286,8 +286,8 @@ def _render_email_terminal(
     via the shared status_format module. Internal worker codes are
     translated for display only.
 
-    When ``ROBIE_END_STATE_REPORT`` is on (and this process is not
-    Production), the reply is the end-state report instead. The old
+    When ``ROBIE_END_STATE_REPORT`` is on, the reply is the end-state
+    report instead, in Test or in Production. The old
     "Worker report (not proof)" line is display-only and is skipped.
     Destination verifiers still run before this render.
     """

@@ -1,8 +1,7 @@
 """Plain-English end-state report for one Robie job, scored by Jev.
 
-Turned on with ``ROBIE_END_STATE_REPORT=1``. Off by default. Ignored when
-``ROBIE_ENV`` is Production, so hermes-poc-01 keeps today's replies even
-if the flag is set there by mistake.
+Turned on with ``ROBIE_END_STATE_REPORT=1``. Off by default. When the
+flag is set, it turns on in that process, including Production.
 
 When the flag is on, Chat and email replies use this report instead of
 the "Not verified" / "Worker report (not proof)" wording. Deterministic
@@ -25,7 +24,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .jev_client import JevUnavailable, build_jev_client
-from .runtime_env import PRODUCTION_ENV_NAMES, current_robie_env
 from .secrets import redact_mapping, redact_text
 from . import status_format
 
@@ -34,7 +32,6 @@ logger = logging.getLogger("robie.end_state_report")
 FLAG = "ROBIE_END_STATE_REPORT"
 THRESHOLD_ENV = "ROBIE_END_STATE_CONFIDENCE_THRESHOLD"
 _ON = {"1", "true", "yes", "on"}
-_warned_production = False
 
 _HARD_MARKERS = (
     "EZLYNX_API",
@@ -83,18 +80,12 @@ class EndStateDecision:
 
 
 def end_state_report_enabled() -> bool:
-    """True when the flag is on and this process is not Production."""
-    global _warned_production
-    flag_on = os.environ.get(FLAG, "").strip().lower() in _ON
-    if flag_on and current_robie_env() in PRODUCTION_ENV_NAMES:
-        if not _warned_production:
-            logger.warning(
-                "%s is set but ignored because ROBIE_ENV is Production",
-                FLAG,
-            )
-            _warned_production = True
-        return False
-    return flag_on
+    """True only when ``ROBIE_END_STATE_REPORT`` is explicitly on.
+
+    Default is off, in Test and in Production. Setting the flag turns
+    the report on in whichever process has it, including Production.
+    """
+    return os.environ.get(FLAG, "").strip().lower() in _ON
 
 
 def confidence_threshold() -> int:
