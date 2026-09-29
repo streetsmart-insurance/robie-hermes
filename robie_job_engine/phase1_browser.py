@@ -71,6 +71,11 @@ class RuntimeConfig:
     proxy: str | None  # proxy server URL, None = direct egress
     headless: bool = True
     extra_args: tuple = ()
+    # Playwright browser channel (e.g. "chrome" for the system Google
+    # Chrome). Required on hermes-poc-01: the box has no
+    # ~/.cache/ms-playwright binaries, so a bare chromium.launch() fails
+    # with "Executable doesn't exist". Proven on the box 2026-09-28.
+    channel: str | None = None
 
 
 def _box_args() -> tuple:
@@ -86,6 +91,7 @@ RUNTIMES: dict[str, RuntimeConfig] = {
         proxy=BOX_PROXY,
         headless=True,
         extra_args=_box_args(),
+        channel="chrome",
     ),
     "sandbox": RuntimeConfig(
         name="sandbox",
@@ -341,6 +347,8 @@ def new_browser(runtime: str) -> BrowserPort:
             "headless": cfg.headless,
             "args": list(cfg.extra_args),
         }
+        if cfg.channel:
+            launch_kwargs["channel"] = cfg.channel
         if cfg.proxy:
             launch_kwargs["proxy"] = {"server": cfg.proxy}
         browser = pw.chromium.launch(**launch_kwargs)

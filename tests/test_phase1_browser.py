@@ -310,6 +310,24 @@ def test_new_browser_sandbox_has_no_proxy(monkeypatch):
     port.close()
 
 
+def test_new_browser_box_uses_system_chrome_channel(monkeypatch):
+    # Regression: hermes-poc-01 has no Playwright-bundled Chromium
+    # (~/.cache/ms-playwright is absent), so a bare chromium.launch()
+    # fails with "Executable doesn't exist". The box runtime must target
+    # the system Google Chrome. Proven on the box 2026-09-28.
+    launched = _stub_playwright(monkeypatch)
+    port = new_browser("box")
+    assert launched["channel"] == "chrome"
+    port.close()
+
+
+def test_new_browser_sandbox_has_no_channel(monkeypatch):
+    launched = _stub_playwright(monkeypatch)
+    port = new_browser("sandbox")
+    assert "channel" not in launched
+    port.close()
+
+
 def test_default_browser_factory_rejects_bad_runtime():
     factory = default_browser_factory()
     with pytest.raises(ValueError, match="unknown browser runtime"):
