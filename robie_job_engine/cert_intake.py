@@ -251,6 +251,16 @@ _POLICY_RE = re.compile(
 )
 
 _HOLDER_RE = re.compile(r"(?i)certificate holder\s*[:\-]\s*(.+?)(?:\n|$)")
+# "Certificate Holder Information" with the name on the following line(s)
+# (e.g. Descartes MyCarrierPortal requests). The name is captured from the
+# first non-empty line after the header. Handles markdown asterisks.
+_HOLDER_INFO_RE = re.compile(
+    r"(?i)\*?certificate holder(?: information)?\*?\s*\n+\s*(.+?)(?:\n|$)"
+)
+# "Additional insured:" — a holder-equivalent for certificate purposes.
+_ADDITIONAL_INSURED_RE = re.compile(
+    r"(?i)additional insured\s*[:\-]\s*(.+?)(?:\n|$)"
+)
 # Subject pattern "Certificate of Insurance {INSURED} to {HOLDER}" — the
 # holder is named in the subject but never labeled "certificate holder:".
 # Narrow on purpose: the subject must open with the certificate phrase and
@@ -637,6 +647,19 @@ def extract_request_facts(
         for m in _HOLDER_RE.finditer(text)
         if _clean_name(m.group(1))
     ]
+    # "Certificate Holder Information" with the name on the next line.
+    for m in _HOLDER_INFO_RE.finditer(text):
+        name = _clean_name(m.group(1))
+        if name and name not in facts.holder_names:
+            # Skip if this is just a repeat of the _HOLDER_RE match (the
+            # _HOLDER_INFO_RE is broader and would double-capture).
+            if not any(name in h or h in name for h in facts.holder_names):
+                facts.holder_names.append(name)
+    # "Additional insured:" is a holder-equivalent for certificate purposes.
+    for m in _ADDITIONAL_INSURED_RE.finditer(text):
+        name = _clean_name(m.group(1))
+        if name and name not in facts.holder_names:
+            facts.holder_names.append(name)
     # Holder named in the subject: "Certificate of Insurance {INSURED} to
     # {HOLDER}". Only accepted when the text before " to " resembles the
     # extracted insured name — otherwise "to" is just a preposition.

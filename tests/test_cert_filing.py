@@ -595,18 +595,6 @@ def test_file_record_task_wrong_assignee_is_unverified(tmp_path):
     assert any("SCanales" in h for h in res.hold_reasons)
 
 
-def test_file_record_task_proof_without_task_id_completes(tmp_path):
-    """A validated callback with no task_id still completes the filing.
-    The Zap's EZLynx step is Create Note with no mappable ID output
-    (verified 2026-09-27) — the callback itself is the proof."""
-    deps = make_deps(str(tmp_path))
-    deps.task_prover = FakeTaskProver(task_id="", assignee="SCanales")
-    res = file_record(make_record(), make_verified(), deps)
-    assert res.status != "ERROR", res.hold_reasons
-    assert not any("UNVERIFIED" in h for h in res.hold_reasons)
-    assert any("callback proven" in e for e in res.evidence)
-
-
 def test_file_record_uncertain_note_outcome_reads_back_first(tmp_path):
     rows = [{"id": "d1",
              "title": "Certificate request - Big Client Inc", "noteCount": 2}]

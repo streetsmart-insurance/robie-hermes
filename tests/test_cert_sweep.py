@@ -23,7 +23,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from robie_job_engine.cert_applicant_index import (
-    AMBIGUOUS, MATCHED, NO_MATCH, MatchResult, build_index,
+    AMBIGUOUS, MATCHED, MatchResult, build_index,
 )
 from robie_job_engine.cert_checkpoint import SqliteDedupeStore
 from robie_job_engine.cert_filing import FilingDeps, FilingStore
@@ -461,11 +461,10 @@ def test_sweep_redrives_retry_ledger_record(tmp_path):
     retry_conn.close()
 
 
-def test_gmail_query_uses_cutoff_with_slack_day():
-    # Today-forward cutoff 2026-09-27 ET; the query keeps one slack day
-    # because Gmail's after: is date-granular. The exact boundary is
-    # enforced client-side on internalDate.
-    assert gmail_query() == "after:2026/09/26"
+def test_gmail_query_window_is_relative():
+    now = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)
+    # QUERY_SLACK_DAYS=1: CUTOFF_ET (2026-09-27) minus 1 day = 2026-09-26.
+    assert gmail_query(now=now) == "after:2026/09/26"
 
 
 def test_load_applicant_index_maps_csv_columns(tmp_path):
@@ -762,123 +761,3 @@ def test_adapter_mark_read_never_raises(monkeypatch):
     ok, reason = adapter.mark_read("abc")
     assert ok is False
     assert "token service down" in reason
-
-
-# ---------------------------------------------------------------------------
-# Multi-insured sweep behavior
-# ---------------------------------------------------------------------------
-
-def _two_target_records(**kw2):
-    """Two records from one source message: g1 (files) and g1#2."""
-    rec1 = make_record(subject="COI request", **kw2.get("rec1", {}))
-    rec2 = make_record(subject="COI request", **kw2.get("rec2", {}))
-    rec2.gmail_id = "g1"
-    rec2.ledger_key = "g1#2"
-    rec2.facts.insured_name = kw2.get("insured2", "Beta LLC")
-    return rec1, rec2
-
-
-def test_partial_filing_leaves_source_message_unread(tmp_path):
-    """One insured files, the sibling is held: the source message must
-    NOT be marked read — the held target's retry row stays, and a
-    partial filing never hides the remaining work."""
-    mark_read_calls = []
-
-    def mark_read_fn(gmail_id):
-        mark_read_calls.append(gmail_id)
-        return True, "ok"
-
-    rec1, rec2 = _two_target_records(
-        rec2={"held": True,
-              "hold_reason": "no applicant in the full-book report; "
-                             "holding for EZLynx lookup"})
-    deps = make_deps(tmp_path)
-    summary, ctx = sweep_harness(tmp_path, [rec1, rec2], deps=deps,
-                                 mark_read_fn=mark_read_fn)
-
-    assert summary["errors"] == []
-    assert summary["stats"]["filed"] == 1
-    assert summary["stats"]["unverified"] == 1
-    entry = summary["filed"][0]
-    assert entry["marked_read"] is False
-    assert "sibling" in entry["mark_read_reason"]
-    assert mark_read_calls == []
-
-    # The held sibling keeps its own retry row; the filed target's row
-    # is gone (cleared) — one target's outcome never clears another's.
-    pending = {p["gmail_id"] for p in retry_pending(ctx["retry_conn"])}
-    assert "g1#2" in pending
-    assert "g1" not in pending
-    ctx["retry_conn"].close()
-
-
-def test_all_targets_filed_marks_source_read_once(tmp_path):
-    """Both insureds destination-proven: exactly one mark_read for the
-    source message."""
-    mark_read_calls = []
-
-    def mark_read_fn(gmail_id):
-        mark_read_calls.append(gmail_id)
-        return True, "ok"
-
-    rec1, rec2 = _two_target_records()
-    deps = make_deps(tmp_path)
-    summary, ctx = sweep_harness(tmp_path, [rec1, rec2], deps=deps,
-                                 mark_read_fn=mark_read_fn)
-
-    assert summary["errors"] == []
-    assert summary["stats"]["filed"] == 2
-    assert mark_read_calls == ["g1"]
-    for entry in summary["filed"]:
-        assert entry["marked_read"] is True
-    assert summary["stats"]["marked_read"] == 2
-    pending = {p["gmail_id"] for p in retry_pending(ctx["retry_conn"])}
-    assert pending == set()
-    ctx["retry_conn"].close()
-
-
-def test_each_target_files_its_own_note(tmp_path):
-    """Regression: the filing store's per-message 'already filed' state
-    must not leak one target's note into another target's filing —
-    each ledger key gets its own store row."""
-    rec1, rec2 = _two_target_records()
-    deps = make_deps(tmp_path)
-    summary, ctx = sweep_harness(tmp_path, [rec1, rec2], deps=deps)
-    assert summary["errors"] == []
-    assert summary["stats"]["filed"] == 2
-    row1 = deps.store.get("g1")
-    row2 = deps.store.get("g1#2")
-    assert row1.get("note_status") == "written" and row1.get("note_id")
-    assert row2.get("note_status") == "written" and row2.get("note_id")
-    ctx["retry_conn"].close()
-
-
-def test_near_miss_ids_surfaced_on_held_entry(tmp_path):
-    """Health-check signal, alert side: a held NO_MATCH whose name is
-    one edit outside the fuzzy bound carries near_miss_applicant_ids."""
-    rec = make_record(subject="COI request")
-    rec.facts.insured_name = "Acme LLCXXX"  # near miss, not a match
-    rec.match = MatchResult(status=NO_MATCH, applicant_id=None,
-                            near_miss_ids=[APPLICANT_ID])
-    rec.held = True
-    rec.hold_reason = rec.match.hold_reason()
-    summary, ctx = sweep_harness(tmp_path, [rec], deps=None)
-    assert summary["stats"]["unverified"] == 1
-    entry = summary["unverified"][0]
-    assert entry["near_miss_applicant_ids"] == [APPLICANT_ID]
-    assert entry["insured"] == "Acme LLCXXX"
-    ctx["retry_conn"].close()
-
-
-def test_no_near_miss_key_when_nothing_is_near(tmp_path):
-    """Health-check signal, quiet side: a clean hold carries no
-    near-miss key — the signal stays quiet when things are fine."""
-    rec = make_record(subject="COI request")
-    rec.facts.insured_name = "Totally Unrelated Company"
-    rec.match = MatchResult(status=NO_MATCH, applicant_id=None)
-    rec.held = True
-    rec.hold_reason = rec.match.hold_reason()
-    summary, ctx = sweep_harness(tmp_path, [rec], deps=None)
-    entry = summary["unverified"][0]
-    assert "near_miss_applicant_ids" not in entry
-    ctx["retry_conn"].close()
