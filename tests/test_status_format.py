@@ -51,7 +51,7 @@ class RenderSimpleStatusTests(unittest.TestCase):
                         lines.index("Anything needed: Check the saved results before retrying."))
         self.assertLess(lines.index("Anything needed: Check the saved results before retrying."),
                         lines.index("Status: Not verified — treat as incomplete until confirmed."))
-        self.assertEqual(lines[-1], "Ref: job 9d2098e1")
+        self.assertEqual(lines[-1], "Ref: job " + JOB_ID)
         self.assertIn("Details", lines)
 
     def test_no_details_section_when_empty_and_no_ref_without_job(self):
@@ -110,7 +110,7 @@ class EmailTerminalTests(unittest.TestCase):
         self.assertNotIn(JOB_ID, top)
         # Raw worker report is preserved for debugging, below the fold.
         self.assertIn("ROBIE_OUTCOME_UNKNOWN", text)
-        self.assertTrue(text.rstrip().endswith("Ref: job 9d2098e1"))
+        self.assertTrue(text.rstrip().endswith("Ref: job " + JOB_ID))
 
     def test_complete_says_nothing_needed(self):
         text = _render_email_terminal(
@@ -195,7 +195,7 @@ class ActionGateNoteTests(unittest.TestCase):
         self.assertIn("Anything needed:", text)
         self.assertIn("Status:", text)
         self.assertIn("No Ascend API request was sent.", text)
-        self.assertTrue(text.rstrip().endswith("Ref: job 9d2098e1"))
+        self.assertTrue(text.rstrip().endswith("Ref: job " + JOB_ID))
         self.assertNotIn("ROBIE Job", _top(text))
 
 
