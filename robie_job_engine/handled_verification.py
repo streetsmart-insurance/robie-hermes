@@ -571,7 +571,7 @@ def collect_handled_verification(
         "check_failed": sum(item["check_failed"] for item in by_employee.values()),
     }
     denominator = totals["received"] - totals["unhandled_fyi"] - totals["check_failed"]
-    return {
+    result = {
         "source_status": "available",
         "scope": GMAIL_READONLY_SCOPE,
         "body_access": True,
@@ -591,4 +591,5 @@ def collect_handled_verification(
             else ("ok" if denominator > 0 else "no accountable mail in window")
         ),
         "by_employee": by_employee,
-   }
+    }
+    return result
