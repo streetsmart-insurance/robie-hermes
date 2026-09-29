@@ -174,7 +174,8 @@ CREATE TABLE IF NOT EXISTS cert_index_misses (
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     occurrences INTEGER NOT NULL DEFAULT 1,
-    resolved_applicant_id INTEGER
+    resolved_applicant_id INTEGER,
+    policy_numbers TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -214,6 +215,10 @@ def open_retry_db(db_path: str) -> sqlite3.Connection:
     # Older DBs predate fetch_failures: add it without touching rows.
     _ensure_column(conn, "cert_sweep_retry", "fetch_failures",
                    "INTEGER NOT NULL DEFAULT 0")
+    # Older DBs predate the policy_numbers miss column (added with the
+    # 2026-09-29 EPHE policy-matcher fix): add it without touching rows.
+    _ensure_column(conn, "cert_index_misses", "policy_numbers",
+                   "TEXT NOT NULL DEFAULT ''")
     conn.commit()
     return conn
 
@@ -373,7 +378,8 @@ def park_pre_cutoff_backlog(conn: sqlite3.Connection, gmail: Any,
 
 
 def miss_note(conn: sqlite3.Connection, raw_name: str,
-              gmail_id: str) -> dict[str, Any] | None:
+              gmail_id: str,
+              policy_numbers: list[str] | None = None) -> dict[str, Any] | None:
     """Record a NO_MATCH insured name for the index-refresh loop.
 
     No EZLynx applicant-by-name API exists, so a current request that
@@ -381,12 +387,21 @@ def miss_note(conn: sqlite3.Connection, raw_name: str,
     a refreshed complete index. The miss ledger is what the refresh
     script reports coverage against. Returns the entry, or None when
     there is no usable name.
+
+    The request's extracted policy numbers are stored alongside the
+    name (normalized, pipe-joined): the miss-watch health check uses
+    them to detect the EPHE class of miss — a held request whose policy
+    number already exists in the applicant index.
     """
-    from .cert_applicant_index import normalize_account_name
+    from .cert_applicant_index import normalize_account_name, \
+        normalize_policy_number
 
     name_key = normalize_account_name(raw_name)
     if not name_key:
         return None
+    pol_keys = sorted({normalize_policy_number(p)
+                       for p in policy_numbers or [] if p})
+    pol_stored = "|".join(pol_keys)
     now = _utcnow_iso()
     row = conn.execute(
         "SELECT occurrences, first_seen_at FROM cert_index_misses"
@@ -400,14 +415,15 @@ def miss_note(conn: sqlite3.Connection, raw_name: str,
     conn.execute(
         """INSERT INTO cert_index_misses
                (name_key, raw_name, gmail_id, first_seen_at, last_seen_at,
-                occurrences)
-           VALUES (?,?,?,?,?,?)
+                occurrences, policy_numbers)
+           VALUES (?,?,?,?,?,?,?)
            ON CONFLICT(name_key) DO UPDATE SET
                last_seen_at=excluded.last_seen_at,
                occurrences=excluded.occurrences,
-               gmail_id=excluded.gmail_id""",
+               gmail_id=excluded.gmail_id,
+               policy_numbers=excluded.policy_numbers""",
         (name_key, (raw_name or "").strip(), gmail_id, first_seen, now,
-         occurrences),
+         occurrences, pol_stored),
     )
     conn.commit()
     return {"name_key": name_key, "raw_name": (raw_name or "").strip(),
@@ -423,8 +439,8 @@ def load_applicant_index(csv_path: str = "") -> Any:
 
     Maps the directory columns onto the row keys build_index needs:
     ``account_name``, ``applicant_id``, ``email_primary``, ``phones``
-    (list). Fail closed with a clear error when the CSV is missing,
-    unreadable, or empty.
+    (list), ``policy_numbers`` (semicolon-separated string). Fail closed
+    with a clear error when the CSV is missing, unreadable, or empty.
     """
     from .cert_applicant_index import build_index
 
@@ -450,6 +466,7 @@ def load_applicant_index(csv_path: str = "") -> Any:
                     "applicant_id": (raw.get("applicant_id") or "").strip(),
                     "email_primary": (raw.get("email_primary") or "").strip(),
                     "phones": phones,
+                    "policy_numbers": (raw.get("policy_numbers") or "").strip(),
                 })
     except OSError as exc:
         raise RuntimeError(
@@ -797,7 +814,9 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                 # was consulted.
                 miss = miss_note(retry_conn,
                                  getattr(record.facts, "insured_name", ""),
-                                 gmail_id)
+                                 gmail_id,
+                                 getattr(record.facts, "policy_numbers",
+                                         None))
                 index_stats = summary["applicant_index"]
                 hold_reason = (
                     f"{hold_reason} [index: "

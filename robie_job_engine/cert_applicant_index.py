@@ -63,6 +63,18 @@ def normalize_email(email: str | None) -> str:
     return (email or "").strip().lower()
 
 
+def normalize_policy_number(policy: str | None) -> str:
+    """Fold a policy number to a match key: uppercase, no whitespace.
+
+    Alpha prefixes and dashes are significant ("ADMP000656-02" is not
+    "00065602"); only case and whitespace are folded so the email's
+    "Policy #: 9300216995" meets the book's "9300216995".
+    """
+    if not policy:
+        return ""
+    return re.sub(r"\s+", "", policy.strip().upper())
+
+
 def normalize_phone(phone: str | None) -> str:
     """Digits only; also yields the last-10 form for US numbers."""
     digits = re.sub(r"\D", "", phone or "")
@@ -90,6 +102,10 @@ class ApplicantIndex:
     # also answers to "abg transportation" (contiguous token runs of the
     # DBA portion, length >= 2).
     by_dba_run: dict[str, list[int]] = field(default_factory=dict)
+    # Carrier policy numbers from the book's policy_numbers column
+    # (semicolon-separated): "9300216995" answers to the applicant that
+    # carries it. Normalized uppercase, whitespace stripped.
+    by_policy: dict[str, list[int]] = field(default_factory=dict)
     row_count: int = 0
     source_path: str = ""
     source_mtime: str = ""
@@ -102,6 +118,7 @@ class ApplicantIndex:
             "unique_names": len(self.by_name),
             "unique_emails": len(self.by_email),
             "unique_phones": len(self.by_phone),
+            "unique_policies": len(self.by_policy),
             "dba_runs": len(self.by_dba_run),
             "ambiguous_names": collisions,
             "source_path": self.source_path,
@@ -124,6 +141,8 @@ class ApplicantIndex:
             ids.update(bucket)
         ids.update(self.by_email.values())
         ids.update(self.by_phone.values())
+        for bucket in self.by_policy.values():
+            ids.update(bucket)
         return sorted(ids)
 
 
@@ -168,8 +187,9 @@ def build_index(rows: list[dict[str, Any]], source_path: str = "") -> ApplicantI
     """Build an index from row dicts.
 
     Row keys: ``account_name``, ``applicant_id``, ``email_primary``,
-    ``phones`` (list of raw phone strings). Malformed rows are skipped,
-    never fatal: a bad row must not take down the whole index.
+    ``phones`` (list of raw phone strings), ``policy_numbers`` (semicolon-
+    separated string or list of raw policy numbers). Malformed rows are
+    skipped, never fatal: a bad row must not take down the whole index.
     """
     index = ApplicantIndex(source_path=source_path)
     for row in rows:
@@ -192,6 +212,15 @@ def build_index(rows: list[dict[str, Any]], source_path: str = "") -> ApplicantI
         email_key = normalize_email(row.get("email_primary"))
         if email_key and "@" in email_key and email_key not in index.by_email:
             index.by_email[email_key] = applicant_id
+        raw_policies = row.get("policy_numbers") or []
+        if isinstance(raw_policies, str):
+            raw_policies = raw_policies.split(";")
+        for raw_pol in raw_policies:
+            pol_key = normalize_policy_number(raw_pol)
+            if pol_key:
+                bucket = index.by_policy.setdefault(pol_key, [])
+                if applicant_id not in bucket:
+                    bucket.append(applicant_id)
         for raw_phone in row.get("phones") or []:
             for key in phone_keys(raw_phone):
                 if key not in index.by_phone:
@@ -290,10 +319,14 @@ def match_applicant(
     1. ``insured_name`` — the certificate is FOR the insured; the insured is
        the client even when the sender is a third party (GC, holder, town).
     2. ``dba`` — same as the insured name.
-    3. ``requester_email`` — only when no insured/dba matched; covers the
-       common case of the client writing from their own address without
+    3. DBA-fragment — trade name from the book's legal name.
+    4. ``policy_numbers`` — the carrier policy the email names. Strong key,
+       but never overrides a name hit: name steps return first, so a
+       policy pointing elsewhere cannot reroute a name-matched filing.
+    5. ``requester_email`` — only when no insured/dba/policy matched; covers
+       the common case of the client writing from their own address without
        naming themselves.
-    4. phone numbers — optional extra signal.
+    6. phone numbers — optional extra signal.
 
     ``holder_names`` are NEVER match keys (holders are third parties).
     """
@@ -345,6 +378,30 @@ def match_applicant(
                                f"{label} DBA-fragment {raw_name!r}",
                                candidates=list(ids))
 
+    # Policy number: the email names the carrier policy the certificate
+    # evidences ("Policy #: 9300216995") and the book carries the same
+    # carrier data. A single hit routes; a policy shared by several rows
+    # holds as ambiguous — never guessing. Name steps above return first,
+    # so a policy number can never override an explicit name match.
+    policy_hits: list[int] = []
+    policy_evidence = ""
+    for raw_pol in getattr(facts, "policy_numbers", None) or []:
+        pol_key = normalize_policy_number(raw_pol)
+        if not pol_key:
+            continue
+        ids = index.by_policy.get(pol_key, [])
+        if ids and not policy_evidence:
+            policy_evidence = f"policy number {raw_pol.strip()!r}"
+        for pid in ids:
+            if pid not in policy_hits:
+                policy_hits.append(pid)
+    if len(policy_hits) == 1:
+        return _with_requester_flag(facts, index, MatchResult(
+            MATCHED, policy_hits[0], policy_evidence))
+    if len(policy_hits) > 1:
+        return MatchResult(AMBIGUOUS, None, policy_evidence,
+                           candidates=list(policy_hits))
+
     email_key = normalize_email(getattr(facts, "requester_email", None))
     if email_key and email_key in index.by_email:
         return MatchResult(MATCHED, index.by_email[email_key],
@@ -356,7 +413,7 @@ def match_applicant(
                 return MatchResult(MATCHED, index.by_phone[key],
                                    f"phone {raw}")
 
-    return MatchResult(NO_MATCH, None, "no name/email/phone hit in report")
+    return MatchResult(NO_MATCH, None, "no name/policy/email/phone hit in report")
 
 
 def _with_requester_flag(facts: Any, index: ApplicantIndex,

@@ -14,9 +14,14 @@ from robie_job_engine.cert_applicant_index import (  # noqa: E402
     match_applicant,
     normalize_account_name,
     normalize_email,
+    normalize_policy_number,
     phone_keys,
 )
-from robie_job_engine.cert_intake import RequestFacts  # noqa: E402
+from robie_job_engine.cert_intake import (  # noqa: E402
+    CertEmail,
+    RequestFacts,
+    extract_request_facts,
+)
 
 
 def make_index():
@@ -126,6 +131,123 @@ def test_bad_rows_skipped_not_fatal():
     ])
     assert index.row_count == 1
     assert normalize_email("  Office@Example.COM ") == "office@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Policy-number matching (regression: the 2026-09-29 EPHE LLC miss —
+# "COI for EPHE LLC" named a client whose policy number was in the book,
+# but policy numbers were never a match key).
+# ---------------------------------------------------------------------------
+
+HIGHWAY_SUBJECT = "Renewal COI Request: COI for EPHE LLC Expires Tomorrow"
+HIGHWAY_BODY = (
+    "Highway COI Request for EPHE LLC\n\nHi there,\n\n"
+    "The certificate of insurance (COI) we have on file for *EPHE LLC* "
+    "has a policy expiring tomorrow. Please provide a new COI for the "
+    "upcoming policy period so we can update our records.\n\n"
+    "Policy #: 9300216995\n"
+)
+
+
+def make_policy_index():
+    rows = [
+        {"account_name": "EPHE LLC", "applicant_id": 199205654,
+         "email_primary": "sinancanlv@yahoo.com", "phones": ["7025012909"],
+         "policy_numbers": "9300216995"},
+        {"account_name": "Other Corp", "applicant_id": 111,
+         "email_primary": "", "phones": [],
+         "policy_numbers": "ADMP000656-02; B01053720"},
+        # Two rows sharing one policy number: must hold, never guess.
+        {"account_name": "Shared Pol A", "applicant_id": 301,
+         "email_primary": "", "phones": [], "policy_numbers": "SHARED-1"},
+        {"account_name": "Shared Pol B", "applicant_id": 302,
+         "email_primary": "", "phones": [], "policy_numbers": "SHARED-1"},
+    ]
+    return build_index(rows, source_path="/tmp/fake-policies.csv")
+
+
+def _highway_email():
+    return CertEmail(
+        gmail_id="g-highway", thread_id="t1",
+        rfc_message_id="<highway@example.com>",
+        from_header="Highway <no-reply@highway.com>",
+        subject=HIGHWAY_SUBJECT, date="Mon, 28 Sep 2026 22:00:00 -0400",
+        body_text=HIGHWAY_BODY,
+    )
+
+
+def test_normalize_policy_number_folds_case_and_whitespace():
+    assert normalize_policy_number(" 9300216995 ") == "9300216995"
+    assert normalize_policy_number("admp000656-02") == "ADMP000656-02"
+    assert normalize_policy_number(None) == ""
+
+
+def test_policy_index_built_from_semicolon_list():
+    index = make_policy_index()
+    assert index.stats()["unique_policies"] == 4
+    assert index.by_policy["9300216995"] == [199205654]
+    assert index.by_policy["B01053720"] == [111]
+
+
+def test_highway_email_matches_ephe_end_to_end():
+    # (a) The real miss, replayed: Highway-shaped email extracts
+    # insured "EPHE LLC" + policy 9300216995 and matches the book row.
+    index = make_policy_index()
+    facts = extract_request_facts(_highway_email())
+    assert facts.insured_name == "EPHE LLC"
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 199205654
+
+
+def test_policy_number_match_without_name():
+    # (b) No extractable name at all: the policy number alone routes.
+    index = make_policy_index()
+    facts = RequestFacts(policy_numbers=["9300216995"],
+                         requester_email="no-reply@highway.com")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 199205654
+    assert "policy number" in res.evidence
+
+
+def test_name_match_beats_conflicting_policy():
+    # A name hit must never be overridden by a policy pointing elsewhere.
+    index = make_policy_index()
+    facts = RequestFacts(insured_name="Other Corp",
+                         policy_numbers=["9300216995"])
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 111
+
+
+def test_shared_policy_number_holds_ambiguous():
+    index = make_policy_index()
+    facts = RequestFacts(policy_numbers=["SHARED-1"])
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert set(res.candidates) == {301, 302}
+
+
+def test_unknown_coi_for_name_holds():
+    # (c) Extracted name not in the book + unknown policy: hold, never
+    # misroute to a different client.
+    index = make_policy_index()
+    facts = RequestFacts(insured_name="Nonexistent Company LLC",
+                         policy_numbers=["ZZZ999"])
+    res = match_applicant(facts, index)
+    assert res.status == NO_MATCH
+    assert "EZLynx lookup" in res.hold_reason()
+
+
+def test_holder_with_unmatched_policy_still_holds():
+    # (d) A holder that IS a client is never a match key — even when a
+    # policy number is present but matches nothing.
+    index = make_policy_index()
+    facts = RequestFacts(holder_names=["EPHE LLC"],
+                         policy_numbers=["ZZZ999"])
+    res = match_applicant(facts, index)
+    assert res.status == NO_MATCH
 
 
 def test_all_applicant_ids_covers_every_row():
