@@ -1,7 +1,10 @@
 """Verified producer email reports for overdue EZLynx submissions.
 
-The worker fails closed before any email when the live Submission Center read,
-approved employee roster, or producer-to-mailbox resolution is incomplete.
+The worker fails closed before any email when the live Submission Center read
+or approved employee roster is incomplete, and when no assigned producer
+resolves to a work email. A name that does not resolve to exactly one
+directory mailbox is skipped: everyone else is emailed, and one alert lists
+the skipped names.
 """
 
 from __future__ import annotations
@@ -39,6 +42,8 @@ ACTION = "send_producer_reports"
 RESOURCE_ID = "ezlynx:submission-center:overview:submissions"
 SUBJECT = "Action required: EZLynx submissions 31+ days overdue"
 CC = ("carlo@streetsmart.insurance", "jake@streetsmart.insurance")
+UNRESOLVED_ALERT_TO = "carlo@streetsmart.insurance"
+UNRESOLVED_ALERT_SUBJECT = "Skipped EZLynx producers: submissions 31+ days overdue"
 SOP_URL = "https://docs.google.com/document/d/1nggrFQY-q9PEDOjGcje04qYKUTx-qTGTx3Wv-4qD80M/edit"
 CLOSED = {"Closed - Not Sold", "Closed - Bound"}
 EXPECTED_RED = "rgb(211, 47, 47)"
@@ -210,21 +215,90 @@ def load_approved_producer_directory(manifest_path: str) -> dict[str, str]:
     return agency_email_directory_from_registry(registry)
 
 
-def resolve_recipients(records: list[Mapping[str, Any]], directory: Mapping[str, str]) -> dict[str, str]:
+def _exact_name_key(name: str) -> str:
+    """Case- and whitespace-insensitive directory key. Punctuation stays."""
+    return " ".join(str(name).casefold().split())
+
+
+def _first_last_key(name: str) -> str:
+    """First and last token, ignoring middle names and initials.
+
+    Periods are separators so ``N.`` is a middle initial, not part of the
+    last name. Fewer than two tokens cannot match.
+    """
+    tokens = [token for token in _exact_name_key(name).replace(".", " ").split() if token]
+    if len(tokens) < 2:
+        return ""
+    return f"{tokens[0]} {tokens[-1]}"
+
+
+def match_producer_email(producer: str, directory: Mapping[str, str]) -> str:
+    """Resolve one producer to a work email.
+
+    Exact case/space-insensitive match wins. Otherwise a first+last match
+    that ignores middle names and initials is accepted only when exactly one
+    directory person matches. Two or more matches, or none, are unresolved.
+    """
+    exact = str(directory.get(_exact_name_key(producer)) or "").strip()
+    if exact:
+        return exact
+    wanted = _first_last_key(producer)
+    if not wanted:
+        return ""
+    people = [str(name) for name in directory if _first_last_key(str(name)) == wanted]
+    if len(people) != 1:
+        return ""
+    return str(directory.get(people[0]) or "").strip()
+
+
+def resolve_recipients(
+    records: list[Mapping[str, Any]], directory: Mapping[str, str]
+) -> tuple[dict[str, str], tuple[dict[str, Any], ...]]:
+    """Map assigned producers to work emails.
+
+    Returns ``(resolved, skipped)``. ``skipped`` lists each unresolved name
+    and how many overdue submissions they have. When every producer is
+    unresolved, raises so the run still fails closed with no email.
+    """
+    counts: Counter[str] = Counter()
+    for record in records:
+        producer = str(record.get("assigned_producer") or "").strip() or "Unassigned"
+        counts[producer] += 1
     resolved: dict[str, str] = {}
     missing: list[str] = []
-    for record in records:
-        producer = str(record.get("assigned_producer") or "").strip()
-        email = str(directory.get(" ".join(producer.casefold().split())) or "").strip()
-        if not email:
-            missing.append(producer or "Unassigned")
-        else:
+    for producer in counts:
+        email = match_producer_email(producer, directory)
+        if email:
             resolved[producer] = email
-    if missing:
+        else:
+            missing.append(producer)
+    if missing and not resolved:
         raise SubmissionReportContractError(
             "producer work email could not be resolved for: " + ", ".join(sorted(set(missing)))
         )
-    return resolved
+    skipped = tuple(
+        {"name": name, "overdue_count": counts[name]}
+        for name in sorted(missing, key=str.casefold)
+    )
+    return resolved, skipped
+
+
+def build_unresolved_producer_alert(skipped: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...]) -> str:
+    """One plain-text alert listing each skipped producer and overdue count."""
+    lines = [
+        "The weekly EZLynx overdue submission report skipped these assigned producers.",
+        "Each name did not resolve to exactly one approved directory work email, so no producer email was sent for them:",
+        "",
+    ]
+    for item in skipped:
+        lines.append(f"{item['name']}: {item['overdue_count']} overdue")
+    lines.extend(
+        [
+            "",
+            "Resolved producers were emailed separately.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _sorted_report_records(records: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
@@ -323,6 +397,10 @@ class OverdueSubmissionReportWorker:
         self.audit_reader = audit_reader
         self.directory_loader = directory_loader
         self.mailer = mailer
+        # Same idempotency key must not send a producer email or the skip
+        # alert twice in this process. A new process still refuses duplicates
+        # already in Sent (verification mailer).
+        self._delivery_receipts: dict[str, dict[str, Any]] = {}
 
     def _read(self) -> dict[str, Any]:
         if self.audit_reader is not None:
@@ -351,10 +429,12 @@ class OverdueSubmissionReportWorker:
                     retryable=False,
                 )
             directory = self.directory_loader(manifest_path)
-            recipients = resolve_recipients(records, directory)
+            recipients, skipped = resolve_recipients(records, directory)
             grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
             for record in records:
-                grouped[str(record["assigned_producer"]).strip()].append(record)
+                producer = str(record["assigned_producer"]).strip()
+                if producer in recipients:
+                    grouped[producer].append(record)
             test_sink = ""
             if current_robie_env() == TEST_ENV_NAME:
                 test_sink = os.environ.get("ROBIE_OVERDUE_SUBMISSION_TEST_RECIPIENT", "").strip().casefold()
@@ -362,9 +442,10 @@ class OverdueSubmissionReportWorker:
                     raise SubmissionReportContractError(
                         "Test delivery requires an approved agency test recipient"
                     )
-            # Test remaps To: to the sink only after every producer resolved
-            # against the live roster. A Sheets/IAM miss is fail-closed — never
-            # invent producer emails or a producers→carlo@ map.
+            # Test remaps To: to the sink only after roster resolution.
+            # Unresolved names are not invented into mailboxes. A Sheets/IAM
+            # miss is fail-closed — never a producers→carlo@ map. Zero
+            # resolved producers already raised above, before any send.
             receipts: list[dict[str, Any]] = []
             for producer in sorted(grouped):
                 subject = SUBJECT
@@ -380,13 +461,34 @@ class OverdueSubmissionReportWorker:
                     to = [test_sink]
                     cc = []
                 receipts.append(
-                    self.mailer(
+                    self._send_once(
+                        idempotency_key,
+                        f"producer:{producer}",
                         to=to,
                         cc=cc,
                         subject=subject,
                         text_body=body,
                         html_body=html_body,
                         plain_only=False,
+                    )
+                )
+            if skipped:
+                alert_to = [test_sink] if test_sink else [UNRESOLVED_ALERT_TO]
+                alert_subject = UNRESOLVED_ALERT_SUBJECT
+                alert_body = build_unresolved_producer_alert(skipped)
+                if test_sink:
+                    alert_subject = f"TEST ONLY - {UNRESOLVED_ALERT_SUBJECT}"
+                    alert_body = "TEST ONLY - no producer delivery\n\n" + alert_body
+                receipts.append(
+                    self._send_once(
+                        idempotency_key,
+                        "unresolved-alert",
+                        to=alert_to,
+                        cc=[],
+                        subject=alert_subject,
+                        text_body=alert_body,
+                        html_body=None,
+                        plain_only=True,
                     )
                 )
         except EzlynxSessionLockTimeout:
@@ -398,13 +500,36 @@ class OverdueSubmissionReportWorker:
             return WorkerResult(False, JOB_TYPE, {}, retryable=False, error=str(exc), hold_status=JobStatus.NEEDS_CLARIFICATION)
         except Exception as exc:
             return WorkerResult(False, JOB_TYPE, {}, retryable=False, error=f"producer report delivery failed: {type(exc).__name__}: {exc}", hold_status=JobStatus.AWAITING_HUMAN_INPUT)
+        skipped_outcome = [dict(item) for item in skipped]
         return WorkerResult(
             True,
             JOB_TYPE,
-            {"resource_id": RESOURCE_ID, "delivery_receipts": receipts, "producer_count": len(grouped), "qualifying_count": len(records)},
-            {"audit_summary": audit_summary, "idempotency_key": idempotency_key},
+            {
+                "resource_id": RESOURCE_ID,
+                "delivery_receipts": receipts,
+                "producer_count": len(grouped),
+                "qualifying_count": len(records),
+                "skipped_producers": skipped_outcome,
+            },
+            {
+                "audit_summary": audit_summary,
+                "idempotency_key": idempotency_key,
+                "skipped_producers": skipped_outcome,
+            },
             retryable=False,
         )
+
+    def _send_once(self, idempotency_key: str, slot: str, **mail_kwargs: Any) -> dict[str, Any]:
+        """Send at most one message per job key and slot. Replay returns the receipt."""
+        token = f"{idempotency_key}\n{slot}"
+        cached = self._delivery_receipts.get(token)
+        if cached is not None:
+            return cached
+        receipt = self.mailer(**mail_kwargs)
+        if not isinstance(receipt, dict):
+            raise SubmissionReportContractError("producer report mailer returned no receipt")
+        self._delivery_receipts[token] = receipt
+        return receipt
 
 
 class OverdueSubmissionReportVerifier:
@@ -417,6 +542,10 @@ class OverdueSubmissionReportVerifier:
         receipts = list(destination.get("delivery_receipts") or [])
         expected_count = int(destination.get("producer_count") or 0)
         qualifying_count = int(destination.get("qualifying_count") or 0)
+        skipped = list(destination.get("skipped_producers") or [])
+        # One extra receipt when unresolved names were alerted. Zero resolved
+        # producers never reach here with an alert: that run fails closed.
+        message_count = expected_count + (1 if skipped else 0)
         try:
             if expected_count:
                 unique_ids = {str(item.get("message_id") or "") for item in receipts}
@@ -426,8 +555,8 @@ class OverdueSubmissionReportVerifier:
                     for item in observed_receipts
                 )
                 verified = (
-                    len(receipts) == expected_count
-                    and len(unique_ids) == expected_count
+                    len(receipts) == message_count
+                    and len(unique_ids) == message_count
                     and "" not in unique_ids
                     and delivery_ok
                     and mailbox_ok
@@ -435,7 +564,7 @@ class OverdueSubmissionReportVerifier:
                 expected = {
                     "resource_id": RESOURCE_ID,
                     "exists_in_sent_mailbox": True,
-                    "gmail_receipt_count": expected_count,
+                    "gmail_receipt_count": message_count,
                     "producer_count": expected_count,
                     "qualifying_count": qualifying_count,
                 }
@@ -448,6 +577,9 @@ class OverdueSubmissionReportVerifier:
                     "unique_message_ids": len(unique_ids),
                     "delivery": observed_receipts,
                 }
+                if skipped:
+                    expected["skipped_producers"] = skipped
+                    observed["skipped_producers"] = skipped
             else:
                 if self.audit_reader is None:
                     with exclusive_session():
