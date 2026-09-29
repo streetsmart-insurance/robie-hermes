@@ -162,3 +162,32 @@ def render_simple_status(
     if ref:
         parts += ["", ref]
     return "\n".join(parts).strip() + "\n"
+
+
+def render_end_state_report(
+    *,
+    summary: str,
+    end_state: str,
+    jev_line: str,
+    details: str = "",
+    job_id: str | None = None,
+) -> str:
+    """End-state layout used when ``ROBIE_END_STATE_REPORT`` is on.
+
+    Order is fixed: one-sentence summary, the end state, Jev's verdict,
+    the Details block, then the full job id on the last line. Replies
+    with the flag off keep ``render_simple_status``.
+    """
+    parts = [
+        summary.strip(),
+        "",
+        f"End state: {end_state.strip()}",
+        jev_line.strip(),
+    ]
+    details = str(details or "").strip()
+    if details:
+        parts += ["", "Details", details]
+    ref = short_job_ref(job_id)
+    if ref:
+        parts += ["", ref]
+    return "\n".join(parts).strip() + "\n"
