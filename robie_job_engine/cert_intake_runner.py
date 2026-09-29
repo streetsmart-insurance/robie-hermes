@@ -52,6 +52,9 @@ class IntakeRecord:
     held: bool = False
     hold_reason: str = ""
     attachment_count: int = 0
+    # Gmail internalDate (receive timestamp, ms since epoch). Used by the
+    # sweep driver to enforce the today-forward cutoff.
+    internal_ms: int | None = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -64,6 +67,21 @@ class IntakeRecord:
             "held": self.held,
             "hold_reason": self.hold_reason,
         }
+
+
+def message_internal_ms(payload: dict[str, Any] | None) -> int | None:
+    """Gmail ``internalDate`` (receive time, ms since epoch), or None.
+
+    This is the authoritative message timestamp for the today-forward
+    cutoff — the Date: header is sender-controlled and can lie.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:
+        ms = int(payload.get("internalDate") or 0)
+    except (TypeError, ValueError):
+        return None
+    return ms or None
 
 
 def _pdf_text_extractor(fetcher: Any, gmail_id: str):
@@ -104,17 +122,25 @@ def run_intake_once(
     query: str,
     pdf_text_extractor: Any = None,
     now: Any = None,
+    cutoff_ms: int | None = None,
 ) -> dict[str, Any]:
     """Run one intake sweep. Returns records, holds, and stats.
 
     ``gmail`` implements the intake port (``list_message_ids``,
     ``get_full_message``). ``store`` is the durable checkpoint
     (``seen``/``mark``). ``index`` is an ``ApplicantIndex``.
+
+    ``cutoff_ms`` is the today-forward cutoff (Gmail internalDate, ms):
+    messages received before it are skipped before intake — they are NOT
+    checkpointed, NOT matched, and NOT added to the retry ledger. They
+    count in ``stats["skipped_pre_cutoff"]``. ``None`` disables the
+    cutoff (legacy behavior).
     """
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     records: list[IntakeRecord] = []
     stats = {"discovered": 0, "processed": 0, "duplicates": 0,
-             "matched": 0, "held": 0, "errors": 0}
+             "matched": 0, "held": 0, "errors": 0,
+             "skipped_pre_cutoff": 0}
 
     try:
         ids = discover_messages(gmail, query)
@@ -129,6 +155,17 @@ def run_intake_once(
         except Exception as exc:
             stats["errors"] += 1
             continue
+
+        if cutoff_ms is not None:
+            internal_ms = message_internal_ms(payload)
+            if internal_ms is not None and internal_ms < cutoff_ms:
+                # Pre-cutoff: evaluated and excluded by policy. Not
+                # checkpointed (a cutoff change could revisit it), never
+                # ledgered.
+                stats["skipped_pre_cutoff"] += 1
+                continue
+        else:
+            internal_ms = message_internal_ms(payload)
 
         def fetcher(mid: str, aid: str, _g=gmail) -> bytes:
             return _g.get_attachment_bytes(mid, aid)
@@ -168,6 +205,7 @@ def run_intake_once(
             held=held,
             hold_reason=hold_reason,
             attachment_count=len(email.attachments),
+            internal_ms=internal_ms,
         )
         records.append(record)
         if held:

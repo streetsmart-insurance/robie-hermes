@@ -1,11 +1,20 @@
-"""EZLynx Discussion API v8 — append notes to EXISTING applicant discussions.
+"""EZLynx Discussion API v8 — applicant discussions and notes.
 
 Fail-closed contract (standing agency rules):
 
 - Look up an applicant's discussions, pick the single right existing one, and
   append the note to it.
-- NEVER create a discussion. There is deliberately no "create discussion"
-  call in this module, so an "Untitled" discussion cannot be produced.
+- Discussion CREATION is allowed ONLY through
+  :func:`create_discussion_with_note`, and only under Carlo's 2026-09-28
+  standing authorization for the certificate sweep: when a certificate
+  request matches an applicant but no existing discussion safely fits, the
+  sweep auto-creates a NAMED discussion (never "Untitled") with the filing
+  note as its first note. Ad-hoc creation anywhere else is still forbidden.
+- Every creation is fail-closed: the write-scope allowlist and the
+  no-phone-number note guard run before the POST, and a fresh GET read-back
+  must prove the returned discussion exists, carries the requested title,
+  and has noteCount >= 1. Any missing proof raises; the caller holds the
+  request UNVERIFIED.
 - The delete-discussion endpoints EZLynx documents are NOT implemented and
   are never called.
 - Writes are allowlist-gated through
@@ -22,6 +31,7 @@ Endpoints implemented (per the EZLynx Discussion API documentation):
 - ``GET {base}/v8/discussions/by-applicant?applicantId={id}``
 - ``GET {base}/v8/discussions/{discussionId}``
 - ``POST {base}/v8/discussions/{discussionId}/notes``
+- ``POST {base}/v8/discussions/with-note`` (named-discussion creation)
 
 ``urlopen`` is injectable for tests; production uses urllib directly.
 """
@@ -441,6 +451,159 @@ def file_note_to_existing_discussion(
         "applicant_id": applicant,
         "discussion_id": discussion_id,
         "discussion_title": discussion_title_of(record),
+        "note_id": note_id,
+        "read_back": True,
+        "response": created,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Named discussion creation (Carlo's 2026-09-28 standing authorization for the
+# certificate sweep only). POST v8/discussions/with-note.
+# ---------------------------------------------------------------------------
+
+WITH_NOTE_PATH = "v8/discussions/with-note"
+
+
+def build_with_note_payload(
+    applicant_id: str | int,
+    title: str,
+    note_body: str,
+    note_type: str = "Note",
+) -> dict[str, Any]:
+    """Pure builder for the ``POST v8/discussions/with-note`` body.
+
+    SHAPE UNVERIFIED (2026-09-28): the public Postman documentation names the
+    endpoint and says it creates a discussion with a note and returns a
+    DiscussionId, but does not show the request body. UAT probing was blocked
+    because no valid UAT applicant id is on file (220250093 is
+    Production-only). The shape below is the documented camelCase convention
+    used by the rest of the v8 Discussion API. If EZLynx rejects it, the
+    caller's 400 detail surfaces in the error and the filing holds
+    UNVERIFIED — never silently FILED.
+    """
+    applicant = str(applicant_id or "").strip()
+    heading = str(title or "").strip()
+    text = str(note_body or "").strip()
+    if not applicant:
+        raise DiscussionApiError(None, "applicant id is required")
+    if not heading or heading.casefold() == "untitled":
+        raise DiscussionApiError(
+            None, "a real discussion title is required; Untitled is forbidden"
+        )
+    if not text:
+        raise DiscussionApiError(None, "note body is required")
+    return {
+        "applicantId": applicant,
+        "title": heading,
+        "note": {"type": note_type, "body": text},
+    }
+
+
+def create_discussion_with_note(
+    client: DiscussionApiClient,
+    applicant_id: str | int,
+    title: str,
+    note_body: str,
+    *,
+    note_type: str = "Note",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Create a NAMED discussion with the note as its first note.
+
+    Fail-closed: the write-scope allowlist and the no-phone-number note guard
+    run before any HTTP. The response's DiscussionId is then proven by a
+    fresh ``GET v8/discussions/{id}`` that must show the returned discussion
+    exists, carries the requested title exactly, and has noteCount >= 1.
+    Anything else raises :class:`DiscussionApiError`; the caller must hold
+    the request UNVERIFIED.
+
+    Returns a result dict with ``status`` ``created`` / ``dry_run`` plus
+    ``applicant_id``, ``discussion_id``, ``discussion_title``, ``note_id``
+    (mostRecentNoteId from the read-back), ``read_back`` and ``response``.
+    """
+    applicant = require_allowed_ezlynx_write_applicant(applicant_id)
+    heading = str(title or "").strip()
+    text = reject_phone_numbers(note_body).strip()
+    if not heading or heading.casefold() == "untitled":
+        raise DiscussionApiError(
+            None, "a real discussion title is required; Untitled is forbidden"
+        )
+    if not text:
+        raise DiscussionApiError(None, "note body is required")
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "reason": "dry run: create payload validated, nothing written",
+            "applicant_id": applicant,
+            "discussion_id": None,
+            "discussion_title": heading,
+            "note_id": None,
+            "read_back": False,
+            "response": None,
+        }
+
+    payload = build_with_note_payload(applicant, heading, text,
+                                      note_type=note_type)
+    created = client._post(WITH_NOTE_PATH, payload)
+    discussion_id = ""
+    if isinstance(created, dict):
+        for key in ("discussionId", "DiscussionId", "id", "Id"):
+            value = str(created.get(key) or "").strip()
+            if value:
+                discussion_id = value
+                break
+    if not discussion_id:
+        raise DiscussionApiError(
+            None,
+            "DiscussionApi with-note returned no DiscussionId; "
+            "refusing success",
+        )
+
+    # Mandatory fresh GET read-back. This is the destination proof:
+    # the discussion must exist, carry the requested title exactly, and
+    # already contain at least one note.
+    record = client.get_discussion(discussion_id)
+    if not isinstance(record, dict) or not record:
+        raise DiscussionApiError(
+            None,
+            f"DiscussionApi read-back failed: discussion {discussion_id} "
+            "did not read back after creation",
+        )
+    seen_title = discussion_title_of(record)
+    if seen_title != heading:
+        raise DiscussionApiError(
+            None,
+            f"DiscussionApi read-back failed: created discussion "
+            f"{discussion_id} has title {seen_title!r}, expected "
+            f"{heading!r}",
+        )
+    note_count = 0
+    for key in ("noteCount", "NoteCount", "note_count"):
+        try:
+            note_count = int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        break
+    if note_count < 1:
+        raise DiscussionApiError(
+            None,
+            f"DiscussionApi read-back failed: discussion {discussion_id} "
+            f"shows noteCount={note_count}; the first note did not land",
+        )
+    note_id = ""
+    for key in ("mostRecentNoteId", "MostRecentNoteId"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            note_id = value
+            break
+    return {
+        "status": "created",
+        "reason": "named discussion created with the filing note",
+        "applicant_id": applicant,
+        "discussion_id": discussion_id,
+        "discussion_title": heading,
         "note_id": note_id,
         "read_back": True,
         "response": created,

@@ -1,0 +1,14 @@
+[Unit]
+Description=Check the certificate sweep buddy every 15 minutes
+
+[Timer]
+# Every 15 minutes (3x the 5-minute sweep cadence). If a probe is still
+# running when the timer fires, systemd skips the start — probes never
+# overlap. The probe alerts (deduped) only when the sweep is NOT Green.
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=60s
+Unit=robie-cert-sweep-health.service
+
+[Install]
+WantedBy=timers.target
