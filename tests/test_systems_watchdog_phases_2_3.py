@@ -367,22 +367,21 @@ class Tuesday4359ProofTest(unittest.TestCase):
             json.dump(payload, f)
         return p
 
-    def _last_tuesday_0900_et(self):
-        # Most recent Tuesday 09:00 ET as UTC.
+    def _recent_run_ran_at(self):
+        # Evidence timestamp for a run that just completed, derived from the
+        # probe's own _most_recent_tuesday() so the test is time-independent.
+        # The old helper used a fixed 9:05 ET threshold that disagreed with
+        # the probe's 8:00 threshold on Tuesday 8-9 AM ET (2026-09-29 CI
+        # failure). Deriving from the probe guarantees consistency no matter
+        # when the test runs.
         now = datetime.now(timezone.utc)
-        # ET is UTC-4 (EDT) in this window; use a fixed -4 offset.
-        et = now - timedelta(hours=4)
-        days_back = (et.weekday() - 1) % 7
-        tue_et = (et - timedelta(days=days_back)).replace(hour=9, minute=5,
-                                                          second=0, microsecond=0)
-        if days_back == 0 and et.hour < 9:
-            tue_et -= timedelta(days=7)
-        return (tue_et + timedelta(hours=4)).isoformat()
+        cutoff = h._most_recent_tuesday(now)
+        return (cutoff + timedelta(minutes=5)).isoformat()
 
     def test_sent_proof_ok(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._evidence(d, {
-                "ran_at": self._last_tuesday_0900_et(),
+                "ran_at": self._recent_run_ran_at(),
                 "succeeded": True,
                 "summary": {"sent": 3},
             })
@@ -394,7 +393,7 @@ class Tuesday4359ProofTest(unittest.TestCase):
     def test_zero_with_reason_ok(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._evidence(d, {
-                "ran_at": self._last_tuesday_0900_et(),
+                "ran_at": self._recent_run_ran_at(),
                 "succeeded": True,
                 "summary": {"sent": 0},
                 "hold_status": "all rows held: unverified liveness",
@@ -407,7 +406,7 @@ class Tuesday4359ProofTest(unittest.TestCase):
     def test_zero_without_reason_fails(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._evidence(d, {
-                "ran_at": self._last_tuesday_0900_et(),
+                "ran_at": self._recent_run_ran_at(),
                 "succeeded": True,
                 "summary": {"sent": 0},
             })
