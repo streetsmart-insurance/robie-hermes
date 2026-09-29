@@ -1,7 +1,8 @@
-"""Test playground: Chat answers, retry, and EZLynx task types.
+"""Chat playground: answers, retry, and EZLynx task types.
 
-The flag is ROBIE_PLAYGROUND=1. It does nothing when ROBIE_ENV is
-PRODUCTION, PROD, or LIVE. With the flag off, Chat text matches today.
+The flag is ROBIE_PLAYGROUND=1. It is off by default on Test and
+Production. With the flag off, Chat text matches today on both. With the
+flag on, the same loosening works on Production.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from robie_job_engine.engine import LEFTOVER_RETRY_REFUSED, leftover_retry_hold_
 from robie_job_engine.models import JobStatus, VerificationEvidence
 from robie_job_engine.recording import RecordingManager
 from robie_job_engine.request_routing import classify_request
+from robie_job_engine.runtime_env import playground_enabled
 from robie_job_engine.status_format import plain_reason
 from robie_job_engine.store import JobStore
 from robie_job_engine.worker_contract import classify_chat_close_without_checkpoint
@@ -58,6 +60,20 @@ def _open_and_stop(db: str, message_id: str, text: str, conversation_id: str) ->
     )
     stop_generic_chat_job_heartbeat(db, job_id)
     return job_id
+
+
+class PlaygroundFlagTests(unittest.TestCase):
+    def test_flag_off_on_test_and_production(self):
+        for env in ("", "TEST", "PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env=env):
+                with _clear_playground({"ROBIE_PLAYGROUND": "", "ROBIE_ENV": env}):
+                    self.assertFalse(playground_enabled())
+
+    def test_flag_on_works_on_test_and_production(self):
+        for env in ("TEST", "PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env=env):
+                with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": env}):
+                    self.assertTrue(playground_enabled())
 
 
 class PlainEnglishCodeTests(unittest.TestCase):
@@ -99,7 +115,7 @@ class PlaygroundAnswerTests(unittest.TestCase):
         job = store.get_job(created["id"])
         return store, job, db, content
 
-    def test_flag_off_and_production_match_and_drop_the_answer(self):
+    def test_flag_off_matches_on_test_and_production_and_drops_the_answer(self):
         store, job, db, content = self._job(
             JobStatus.UNVERIFIED,
             "no structured destination action checkpoint",
@@ -111,15 +127,26 @@ class PlaygroundAnswerTests(unittest.TestCase):
         self.assertTrue(baseline.startswith("Not verified."))
         self.assertNotIn(ANSWER, baseline)
         self.assertNotIn("Robie's answer:", baseline)
-        with _clear_playground({"ROBIE_PLAYGROUND": "0", "ROBIE_ENV": "TEST"}):
-            self.assertEqual(
-                _render_chat_terminal(store, job, content, recordings),
-                baseline,
-            )
-        for env in ("PRODUCTION", "PROD", "LIVE"):
-            with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": env}):
-                rendered = _render_chat_terminal(store, job, content, recordings)
-            self.assertEqual(rendered, baseline)
+        for env in ("TEST", "PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env=env):
+                with _clear_playground({"ROBIE_PLAYGROUND": "0", "ROBIE_ENV": env}):
+                    rendered = _render_chat_terminal(store, job, content, recordings)
+                self.assertEqual(rendered, baseline)
+
+    def test_flag_on_production_includes_the_same_answer_as_test(self):
+        store, job, db, content = self._job(
+            JobStatus.UNVERIFIED,
+            "no structured destination action checkpoint",
+            ANSWER,
+        )
+        recordings = RecordingManager(db)
+        with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": "TEST"}):
+            test_reply = _render_chat_terminal(store, job, content, recordings)
+        with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": "PRODUCTION"}):
+            prod_reply = _render_chat_terminal(store, job, content, recordings)
+        self.assertEqual(prod_reply, test_reply)
+        self.assertTrue(prod_reply.startswith("Answered."))
+        self.assertIn(ANSWER, prod_reply)
 
     def test_plain_question_on_test_is_an_answer(self):
         with durable_temporary_directory() as tmp:
@@ -254,24 +281,46 @@ class PlaygroundRetryTests(unittest.TestCase):
             self.assertEqual(JobStore(db).get_job(job_id)["status"], "FAILED")
             self.assertIn("more than 24 hours old", note)
 
-    def test_production_ignores_the_flag(self):
-        for env in ("PRODUCTION", "PROD", "LIVE"):
+    def test_flag_off_on_production_refuses_like_test(self):
+        for env in ("TEST", "PRODUCTION", "PROD", "LIVE"):
             with self.subTest(env=env):
                 with durable_temporary_directory() as tmp:
                     db = str(Path(tmp) / "jobs.db")
-                    job_id = self._failed(db, f"spaces/retry-{env}")
-                    with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": env}):
+                    job_id = self._failed(db, f"spaces/retry-off-{env}")
+                    with _clear_playground({"ROBIE_PLAYGROUND": "", "ROBIE_ENV": env}):
                         reason = leftover_retry_hold_reason(JobStore(db).get_job(job_id))
                         retried = open_chat_job(
                             db,
-                            f"spaces/retry-{env}/messages/retry",
+                            f"spaces/retry-off-{env}/messages/retry",
                             "retry",
-                            conversation_id=f"spaces/retry-{env}",
+                            conversation_id=f"spaces/retry-off-{env}",
                         )
                     self.assertIn(LEFTOVER_RETRY_REFUSED, reason or "")
                     self.assertIn("new @robie", (reason or "").casefold())
                     self.assertEqual(retried, job_id)
                     self.assertEqual(JobStore(db).get_job(job_id)["status"], "FAILED")
+
+    def test_flag_on_reruns_a_recent_failure_on_production(self):
+        for env in ("PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env=env):
+                with durable_temporary_directory() as tmp:
+                    db = str(Path(tmp) / "jobs.db")
+                    job_id = self._failed(db, f"spaces/retry-on-{env}")
+                    with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": env}):
+                        reason = leftover_retry_hold_reason(JobStore(db).get_job(job_id))
+                        retried = open_chat_job(
+                            db,
+                            f"spaces/retry-on-{env}/messages/retry",
+                            "retry",
+                            conversation_id=f"spaces/retry-on-{env}",
+                        )
+                    job = JobStore(db).get_job(job_id)
+                    self.assertIsNone(reason)
+                    self.assertEqual(retried, job_id)
+                    self.assertIn(
+                        job["status"],
+                        {JobStatus.PENDING.value, JobStatus.RUNNING.value},
+                    )
 
     def test_playground_finds_a_failed_job_after_the_link_is_cleared(self):
         with durable_temporary_directory() as tmp:
@@ -307,12 +356,24 @@ class PlaygroundRoutingTests(unittest.TestCase):
                 classify_request("Please issue a certificate of insurance for the landlord").action_type,
                 "hermes.plain_english",
             )
-        for env in ("PRODUCTION", "PROD", "LIVE"):
+        for env in ("TEST", "PRODUCTION", "PROD", "LIVE"):
+            with self.subTest(env=env):
+                with _clear_playground({"ROBIE_PLAYGROUND": "", "ROBIE_ENV": env}):
+                    self.assertEqual(
+                        classify_request("Please quote ROBIE Test LLC").action_type,
+                        "hermes.plain_english",
+                    )
+
+    def test_flag_on_production_routes_like_test(self):
+        texts = {
+            "Please quote ROBIE Test LLC": "ezlynx.quote",
+            "Please change the liability limit on this policy": "ezlynx.policy_change",
+            "Please issue a certificate of insurance for the landlord": "ezlynx.certificate",
+        }
+        for env in ("TEST", "PRODUCTION"):
             with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": env}):
-                self.assertEqual(
-                    classify_request("Please quote ROBIE Test LLC").action_type,
-                    "hermes.plain_english",
-                )
+                for text, action_type in texts.items():
+                    self.assertEqual(classify_request(text).action_type, action_type)
 
     def test_playground_routes_quote_policy_change_and_certificate(self):
         with _clear_playground({"ROBIE_PLAYGROUND": "1", "ROBIE_ENV": "TEST"}):

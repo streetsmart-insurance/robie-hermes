@@ -253,7 +253,7 @@ def classify_chat_close_without_checkpoint(
 
 
 def _playground_informational_close(*, action: Any, action_type: str) -> bool:
-    """Plain question with no destination action, Test playground only."""
+    """Plain question with no destination action, playground only."""
     from .runtime_env import playground_enabled
 
     if not playground_enabled() or action:

@@ -69,9 +69,9 @@ def leftover_retry_hold_reason(
     UNVERIFIED / leftover ids must not resume via RETRY. New @robie is
     the path. No auto-retry.
 
-    Playground (``ROBIE_PLAYGROUND=1`` and ``ROBIE_ENV`` not Production)
-    also allows FAILED / UNVERIFIED younger than 24 hours. Production
-    ignores that flag, so this refusal text stays the same there.
+    Playground (``ROBIE_PLAYGROUND=1``, including Production when that flag
+    is set) also allows FAILED / UNVERIFIED younger than 24 hours. With the
+    flag off, this refusal text stays the same on every environment.
     """
     from .runtime_env import playground_enabled
     from .tab_cleanup import LIVE_TAB_CLAIM_MAX_AGE, job_holds_live_tab_claim
@@ -112,8 +112,8 @@ def _playground_terminal_retry_reason(
 ) -> str | None:
     """Allow a recent failed or unverified retry only while playground is on.
 
-    The caller must already have checked ``playground_enabled()``. Production
-    never reaches here. Older than 24 hours stays refused.
+    The caller must already have checked ``playground_enabled()``. Older
+    than 24 hours stays refused on every environment.
     """
     from .tab_cleanup import job_claim_stamp
 

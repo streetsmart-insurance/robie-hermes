@@ -1010,7 +1010,7 @@ def _apply_explicit_retry(store: JobStore, job: dict[str, Any]) -> str | None:
 
     AWAITING_HUMAN_INPUT is left for the existing resume path. FAILED and
     UNVERIFIED are re-opened only when leftover_retry_hold_reason allows it
-    (Test playground, younger than 24 hours).
+    (playground on, younger than 24 hours).
     """
     from .engine import leftover_retry_hold_reason, resume_terminal_for_playground_retry
 
@@ -1712,7 +1712,7 @@ def _publish_terminal_job(
 
 
 def _playground_answer_detail(content: str) -> str:
-    """Robie's actual words, included on Test playground only."""
+    """Robie's actual words, included only while playground is on."""
     from .runtime_env import playground_enabled
 
     if not playground_enabled():
@@ -1728,7 +1728,7 @@ def _is_playground_informational_answer(
     job: dict[str, Any],
     content: str,
 ) -> bool:
-    """A plain question with no destination action, Test playground only.
+    """A plain question with no destination action, playground only.
 
     EZLynx quote / policy-change / certificate jobs stay on the normal
     status line. Their answer is still included via ``_playground_answer_detail``.

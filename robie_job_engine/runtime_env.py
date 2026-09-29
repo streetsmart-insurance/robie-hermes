@@ -39,15 +39,15 @@ def chat_routing_env() -> str | None:
 
 
 def playground_enabled() -> bool:
-    """Test-only loosening. Off by default. Ignored on Production.
+    """Chat loosening. Off by default on every environment, including Production.
 
-    Both must hold: ``ROBIE_PLAYGROUND`` is on, and ``ROBIE_ENV`` is not
-    PRODUCTION, PROD, or LIVE. An unset ``ROBIE_ENV`` is not Production.
+    ``ROBIE_PLAYGROUND=1`` (also true, yes, or on) turns it on wherever it is
+    set, including when ``ROBIE_ENV`` is PRODUCTION, PROD, or LIVE. Unset or
+    any other value stays off. This does not widen EZLynx writes, binding,
+    payments, or outbound client email.
     """
     flag = str(os.environ.get(PLAYGROUND_FLAG) or "").strip().lower()
-    if flag not in _PLAYGROUND_ON:
-        return False
-    return current_robie_env() not in PRODUCTION_ENV_NAMES
+    return flag in _PLAYGROUND_ON
 
 
 def chat_path_is_sandbox(*, conversation_id: str | None = None) -> bool:

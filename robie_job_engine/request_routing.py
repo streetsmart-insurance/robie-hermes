@@ -255,13 +255,13 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
 
 
 def _classify_playground_ezlynx(text: str) -> RequestClassification | None:
-    """Quote, policy-change, and certificate types for Test playground only.
+    """Quote, policy-change, and certificate types when playground is on.
 
-    Flag off, or ``ROBIE_ENV`` of PRODUCTION / PROD / LIVE, returns None
-    so classification stays exactly as it is today. Existing bounded
-    routes above this call still win. Where an EZLynx skill already
-    exists, the action type names it; otherwise the general agent gets
-    the task framing. Readback is evidence, not a gate.
+    Flag off returns None on Test and Production, so classification stays
+    exactly as it is today. Existing bounded routes above this call still
+    win. Where an EZLynx skill already exists, the action type names it;
+    otherwise the general agent gets the task framing. Readback is
+    evidence, not a gate.
     """
     from .runtime_env import playground_enabled
 
