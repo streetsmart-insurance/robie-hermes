@@ -231,8 +231,11 @@ from robie_job_engine.chat_guard import (
     chat_message_is_related_only,
     guard_chat_response,
     open_chat_job,
+    retry_refusal_reply,
+    retry_without_job_reply,
     start_generic_chat_job_heartbeat,
 )
+from robie_job_engine.engine import is_retry_text
 from robie_job_engine.chat_queue import (
     DurableChatEventQueue,
     is_stale_human_input_bind_error,
@@ -1413,6 +1416,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         ):
             return
         if await self._halt_action_gate_refuse(event, job_id):
+            return
+        if await self._halt_retry_refusal(event, job_id, text):
             return
         store = JobStore(ROBIE_JOB_DB)
         job = await asyncio.to_thread(store.get_job, job_id)
@@ -2856,6 +2861,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 return
             if job_id and await self._halt_action_gate_refuse(event, job_id):
                 return
+            if await self._halt_retry_refusal(event, job_id, text):
+                return
             if related_only:
                 # A corrective reply may safely retarget the exact active
                 # zero-attempt Job to a bounded destination action. Execute
@@ -3352,6 +3359,37 @@ class GoogleChatAdapter(BasePlatformAdapter):
             format_action_gate_chat_note(job),
             reply_to=None,
             metadata={"thread_id": getattr(event.source, "thread_id", None)},
+        )
+        return True
+
+    async def _halt_retry_refusal(
+        self, event: MessageEvent, job_id: Optional[str], text: str
+    ) -> bool:
+        """Reply in plain English when retry is refused, then stop.
+
+        A retry that is allowed returns False so the job can run. ``reply_to``
+        stays unset so send() does not rewrite this note into the generic
+        terminal template. The thread still comes from metadata.
+        """
+        if not is_retry_text(text):
+            return False
+        chat_id = getattr(event.source, "chat_id", None) if event.source else None
+        thread_id = getattr(event.source, "thread_id", None) if event.source else None
+        if job_id:
+            note = await asyncio.to_thread(
+                retry_refusal_reply, JobStore(ROBIE_JOB_DB), job_id
+            )
+            if not note:
+                return False
+        else:
+            note = retry_without_job_reply()
+        if not chat_id:
+            return True
+        await self.send(
+            chat_id,
+            note,
+            reply_to=None,
+            metadata={"thread_id": thread_id},
         )
         return True
 

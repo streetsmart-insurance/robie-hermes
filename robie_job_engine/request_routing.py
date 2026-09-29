@@ -27,6 +27,14 @@ WORKER_FOR_ACTION = {
     "hermes.google_chat_task": "hermes-cua",
     "hermes.needs_clarification": "hermes-cua",
     "hermes.unavailable": "hermes-cua",
+    # Playground Chat types. Not bounded: they run on the general agent.
+    # Production job-type gate is not bypassed because they are not in
+    # BOUNDED_ENGINE_ACTIONS; classification itself stays off unless playground.
+    "ezlynx.quote": "hermes-cua",
+    "ezlynx.commercial_auto": "hermes-cua",
+    "ezlynx.policy_change": "hermes-cua",
+    "ezlynx.policy_setup": "hermes-cua",
+    "ezlynx.certificate": "hermes-cua",
     "manual_renewal_verification": "manual-renewal",
     "audit_verification": "audit-verification",
     "mortgagee_verification": "mortgagee-verification",
@@ -118,6 +126,61 @@ class RequestClassification:
     hold_status: str | None = None
 
 
+# General-agent framing for playground Chat types. Existing EZLynx skills
+# are named where they exist. A missing readback must not block the reply.
+PLAYGROUND_TASK_FRAMING = {
+    "ezlynx.quote": (
+        "Task: quote request. Use the EZLynx quote flow. "
+        "Do not bind, take payment, or email the client. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx applicant, document, or note readback is available, "
+        "keep it as evidence. Do not wait on that readback to answer."
+    ),
+    "ezlynx.commercial_auto": (
+        "Task: commercial auto from an existing quote. Follow the "
+        "ezlynx-commercial-auto-from-quote skill. A policy shell is not done. "
+        "Do not bind, take payment, or email the client. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+    "ezlynx.policy_change": (
+        "Task: policy change. Use the EZLynx policy-change flow. "
+        "Do not bind, take payment, or email the client. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+    "ezlynx.policy_setup": (
+        "Task: homeowners policy setup on the EZLynx test account. "
+        "Call the ezlynx_policy_setup tool before any browser step. "
+        "Do not bind, take payment, or email the client. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+    "ezlynx.certificate": (
+        "Task: certificate request. Use the EZLynx certificate flow. "
+        "File notes and documents through the EZLynx API only. "
+        "Do not bind, take payment, or email the client. "
+        "Writes stay on the EZLynx test account only. "
+        "If an EZLynx readback is available, keep it as evidence. "
+        "Do not wait on that readback to answer."
+    ),
+}
+
+_QUOTE_RE = re.compile(
+    r"\b(?:quote request|get a quote|need a quote|new quote|request a quote|quotes?)\b"
+)
+_POLICY_CHANGE_RE = re.compile(
+    r"\b(?:policy change|change the policy|change this policy|endorsements?|endorse)\b"
+    r"|\b(?:change|update|endorse)\b.{0,48}\bpolic"
+    r"|\bpolic\w*\b.{0,48}\b(?:change|update|endorsement)\b"
+)
+_CERTIFICATE_RE = re.compile(
+    r"\b(?:certificate of insurance|certificate request|cert request|certificates?|coi)\b"
+)
+
+
 def _normalized(text: str) -> str:
     return " ".join(str(text or "").casefold().split())
 
@@ -181,11 +244,66 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
         return RequestClassification(
             "appsheet.qa_audit", WORKER_FOR_ACTION["appsheet.qa_audit"]
         )
+    playground_route = _classify_playground_ezlynx(normalized)
+    if playground_route is not None:
+        return playground_route
     if _is_plain_english(normalized, attachment_count):
         return RequestClassification("hermes.plain_english", WORKER_FOR_ACTION["hermes.plain_english"])
     return RequestClassification(
         "hermes.google_chat_task", WORKER_FOR_ACTION["hermes.google_chat_task"]
     )
+
+
+def _classify_playground_ezlynx(text: str) -> RequestClassification | None:
+    """Quote, policy-change, and certificate types for Test playground only.
+
+    Flag off, or ``ROBIE_ENV`` of PRODUCTION / PROD / LIVE, returns None
+    so classification stays exactly as it is today. Existing bounded
+    routes above this call still win. Where an EZLynx skill already
+    exists, the action type names it; otherwise the general agent gets
+    the task framing. Readback is evidence, not a gate.
+    """
+    from .runtime_env import playground_enabled
+
+    if not playground_enabled():
+        return None
+    if _is_commercial_auto_from_quote(text):
+        return RequestClassification(
+            "ezlynx.commercial_auto", WORKER_FOR_ACTION["ezlynx.commercial_auto"]
+        )
+    if _is_quote_request(text):
+        return RequestClassification("ezlynx.quote", WORKER_FOR_ACTION["ezlynx.quote"])
+    from .policy_setup_dispatch import detect_policy_setup_request
+
+    if detect_policy_setup_request(text):
+        return RequestClassification(
+            "ezlynx.policy_setup", WORKER_FOR_ACTION["ezlynx.policy_setup"]
+        )
+    if _is_policy_change_request(text):
+        return RequestClassification(
+            "ezlynx.policy_change", WORKER_FOR_ACTION["ezlynx.policy_change"]
+        )
+    if _is_certificate_request(text):
+        return RequestClassification(
+            "ezlynx.certificate", WORKER_FOR_ACTION["ezlynx.certificate"]
+        )
+    return None
+
+
+def _is_commercial_auto_from_quote(text: str) -> bool:
+    return "commercial auto" in text and "quote" in text
+
+
+def _is_quote_request(text: str) -> bool:
+    return _QUOTE_RE.search(text) is not None
+
+
+def _is_policy_change_request(text: str) -> bool:
+    return _POLICY_CHANGE_RE.search(text) is not None
+
+
+def _is_certificate_request(text: str) -> bool:
+    return _CERTIFICATE_RE.search(text) is not None
 
 
 def is_skill_sync_command(text: str) -> bool:

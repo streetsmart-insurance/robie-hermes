@@ -470,6 +470,76 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(attrs, {"ce-type": received})
         self.assertNotIn("robie_env", attrs)
 
+    def test_listed_space_messages_get_the_test_tag(self):
+        received = "google.workspace.chat.event.v1.received"
+        with patch.dict(
+            os.environ,
+            {"ROBIE_TEST_CHAT_SPACES": "spaces/TESTSPACE, other"},
+        ):
+            listed = self._publish_attrs(
+                {
+                    "type": "MESSAGE",
+                    "space": {"name": "spaces/TESTSPACE"},
+                    "message": {"name": "spaces/TESTSPACE/messages/9", "text": "hello"},
+                },
+                received,
+            )
+            bare = self._publish_attrs(
+                {
+                    "type": "MESSAGE",
+                    "message": {"name": "spaces/other/messages/2", "text": "hello"},
+                },
+                received,
+            )
+            outsider = self._publish_attrs(
+                {
+                    "type": "MESSAGE",
+                    "space": {"name": "spaces/PRODSPACE"},
+                    "message": {"name": "spaces/PRODSPACE/messages/3", "text": "hello"},
+                    "common": {"parameters": {"robie_env": "test"}},
+                },
+                received,
+            )
+        self.assertEqual(listed["robie_env"], "test")
+        self.assertEqual(bare["robie_env"], "test")
+        self.assertNotIn("robie_env", outsider)
+        self.assertEqual(outsider, {"ce-type": received})
+
+    def test_empty_space_list_leaves_messages_untagged(self):
+        received = "google.workspace.chat.event.v1.received"
+        with patch.dict(os.environ, {"ROBIE_TEST_CHAT_SPACES": "  ,  "}):
+            attrs = self._publish_attrs(
+                {
+                    "type": "MESSAGE",
+                    "space": {"name": "spaces/TESTSPACE"},
+                    "message": {"name": "spaces/TESTSPACE/messages/1", "text": "hello"},
+                },
+                received,
+            )
+        self.assertNotIn("robie_env", attrs)
+
+    def test_listed_space_does_not_override_card_click_routing(self):
+        clicked = "google.workspace.chat.card.v1.clicked"
+        with patch.dict(os.environ, {"ROBIE_TEST_CHAT_SPACES": "spaces/TESTSPACE"}):
+            untagged = self._publish_attrs(
+                {
+                    "type": "CARD_CLICKED",
+                    "space": {"name": "spaces/TESTSPACE"},
+                    "common": {"parameters": {"decision_token": "secret"}},
+                },
+                clicked,
+            )
+            prod = self._publish_attrs(
+                {
+                    "type": "CARD_CLICKED",
+                    "space": {"name": "spaces/TESTSPACE"},
+                    "common": {"parameters": {"robie_env": "prod"}},
+                },
+                clicked,
+            )
+        self.assertNotIn("robie_env", untagged)
+        self.assertEqual(prod["robie_env"], "prod")
+
     def test_forwarded_click_publishes_button_robie_env(self):
         payload = {
             "chat": {

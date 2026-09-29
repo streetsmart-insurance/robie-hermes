@@ -12,6 +12,8 @@ import os
 TEST_ENV_NAME = "TEST"
 PRODUCTION_ENV_NAMES = frozenset({"PRODUCTION", "PROD", "LIVE"})
 SANDBOX_ENV_FLAG = "ROBIE_CHAT_SANDBOX"
+PLAYGROUND_FLAG = "ROBIE_PLAYGROUND"
+_PLAYGROUND_ON = frozenset({"1", "true", "yes", "on"})
 
 
 class ProductionGuardError(RuntimeError):
@@ -34,6 +36,18 @@ def chat_routing_env() -> str | None:
     if current in PRODUCTION_ENV_NAMES:
         return "prod"
     return None
+
+
+def playground_enabled() -> bool:
+    """Test-only loosening. Off by default. Ignored on Production.
+
+    Both must hold: ``ROBIE_PLAYGROUND`` is on, and ``ROBIE_ENV`` is not
+    PRODUCTION, PROD, or LIVE. An unset ``ROBIE_ENV`` is not Production.
+    """
+    flag = str(os.environ.get(PLAYGROUND_FLAG) or "").strip().lower()
+    if flag not in _PLAYGROUND_ON:
+        return False
+    return current_robie_env() not in PRODUCTION_ENV_NAMES
 
 
 def chat_path_is_sandbox(*, conversation_id: str | None = None) -> bool:

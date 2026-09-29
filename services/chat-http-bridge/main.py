@@ -26,12 +26,18 @@ Required environment variables (fail closed when either is unset):
 Card clicks may carry a button parameter ``robie_env`` of ``test`` or
 ``prod``. This bridge copies that exact value to the Pub/Sub attribute
 ``robie_env`` and only on card clicks. Any other value is omitted.
-Ordinary Chat messages are published with ``ce-type`` only, so a
-subscription filter can keep them on Prod. This module does not create
-topics, subscriptions, or IAM bindings.
 
-Redeploy of this service is a separate human GO. This module does not
-deploy Cloud Run, Test, or Production.
+``ROBIE_TEST_CHAT_SPACES`` is an optional comma-separated list of Chat
+space ids (``spaces/AAA`` or the bare id). Messages in a listed space are
+published with ``robie_env=test``. The list is empty by default, and an
+empty list publishes messages exactly as before (no ``robie_env``). A
+space that is not on the list is never tagged ``test``. Card clicks are
+unchanged: only the button parameter sets ``robie_env``.
+
+This file runs on the shared Chat bridge. Deploying it is a Production
+infrastructure change and needs Carlo's GO. This module does not create
+topics, subscriptions, or IAM bindings, and it does not deploy Cloud Run,
+Test, or Production.
 """
 
 from __future__ import annotations
@@ -477,20 +483,76 @@ def _is_card_click(event: dict[str, Any], event_type: str) -> bool:
     return str(event.get("type") or "").strip() == "CARD_CLICKED"
 
 
+def _canonical_space_name(value: str) -> str:
+    """Return ``spaces/<id>`` or an empty string when the value is not a space."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/messages/" in text:
+        text = text.split("/messages/", 1)[0]
+    if "/threads/" in text:
+        text = text.split("/threads/", 1)[0]
+    if text.startswith("spaces/"):
+        rest = text[len("spaces/"):].strip().strip("/")
+        if not rest or "/" in rest:
+            return ""
+        return f"spaces/{rest}"
+    if "/" in text or " " in text:
+        return ""
+    return f"spaces/{text}"
+
+
+def _configured_test_chat_spaces() -> frozenset[str]:
+    """Space ids whose ordinary messages are tagged for Test.
+
+    Empty by default. Read on each event so a config change does not
+    require a code edit. Never treats an unlisted space as Test.
+    """
+    raw = os.environ.get("ROBIE_TEST_CHAT_SPACES", "")
+    found: set[str] = set()
+    for part in raw.replace(";", ",").replace("\n", ",").split(","):
+        name = _canonical_space_name(part)
+        if name:
+            found.add(name)
+    return frozenset(found)
+
+
+def _event_space_name(event: dict[str, Any]) -> str:
+    space = event.get("space")
+    if isinstance(space, dict):
+        name = _canonical_space_name(str(space.get("name") or ""))
+        if name:
+            return name
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    name = _canonical_space_name(str(message.get("name") or ""))
+    if name:
+        return name
+    thread = message.get("thread") if isinstance(message.get("thread"), dict) else {}
+    return _canonical_space_name(str(thread.get("name") or ""))
+
+
 def _routing_attributes(event: dict[str, Any], event_type: str) -> dict[str, str]:
     """Pub/Sub attributes for one forwarded event.
 
-    ``robie_env`` is set only for a card click whose button parameter is
-    exactly ``test`` or ``prod``. Messages, and clicks without that
-    parameter, stay untagged so they match a Prod filter of
+    ``robie_env`` is set for a card click whose button parameter is
+    exactly ``test`` or ``prod``. Clicks without that parameter stay
+    untagged.
+
+    Ordinary messages stay untagged unless the Chat space is listed in
+    ``ROBIE_TEST_CHAT_SPACES``. A space that is not listed is never
+    tagged ``test``, even if the message carries a ``robie_env``
+    parameter. The default empty list matches a Prod filter of
     ``attributes.robie_env = "prod" OR NOT attributes:robie_env``.
     """
     attrs = {"ce-type": event_type}
-    if not _is_card_click(event, event_type):
+    if _is_card_click(event, event_type):
+        env = _parameter_map(event).get("robie_env", "").strip()
+        if env in _ROUTING_ENVS:
+            attrs["robie_env"] = env
         return attrs
-    env = _parameter_map(event).get("robie_env", "").strip()
-    if env in _ROUTING_ENVS:
-        attrs["robie_env"] = env
+    space = _event_space_name(event)
+    if space and space in _configured_test_chat_spaces():
+        attrs["robie_env"] = "test"
     return attrs
 
 
