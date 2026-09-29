@@ -16,9 +16,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .ezlynx_session_lock import EzlynxSessionLockTimeout, exclusive_session
 from .models import JobStatus, VerificationEvidence, VerificationResult, WorkerResult
@@ -161,6 +162,35 @@ class SessionVerificationFailed(RuntimeError):
     pass
 
 
+# After credential submit the login URL can linger. One immediate state()
+# read (about the old 4s load) false-fails SESSION_LOGGED_OUT.
+POST_LOGIN_STATE_ATTEMPTS = 10
+POST_LOGIN_STATE_DELAY_SECONDS = 3.0
+
+
+def wait_for_post_login_state(
+    read_state: Callable[[], SessionState],
+    *,
+    attempts: int = POST_LOGIN_STATE_ATTEMPTS,
+    delay_seconds: float = POST_LOGIN_STATE_DELAY_SECONDS,
+    sleeper: Callable[[float], None] | None = None,
+) -> SessionState:
+    """Poll until the page leaves the login URL, or the attempt budget ends.
+
+    MFA and other non-login states return immediately. Only LOGIN_REQUIRED
+    is retried, because that URL is what the preflight treats as logged out.
+    """
+    pause = sleeper or time.sleep
+    state = read_state()
+    total = max(1, int(attempts))
+    for index in range(total - 1):
+        if state is not SessionState.LOGIN_REQUIRED:
+            return state
+        pause(delay_seconds)
+        state = read_state()
+    return state
+
+
 def authenticated_app_evidence(
     url: str,
     *,
@@ -225,7 +255,7 @@ class PlaywrightEzlynxSession:
             self._page.wait_for_load_state("domcontentloaded", timeout=20_000)
         except Exception as exc:
             raise RuntimeError("EZLynx login interaction failed") from exc
-        return self.state()
+        return wait_for_post_login_state(self.state)
 
 
 def ensure_ezlynx_session(

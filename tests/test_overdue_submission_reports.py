@@ -696,6 +696,69 @@ def test_test_sink_remaps_skip_alert_with_producer_mail():
     assert "Unmatched Person: 1 overdue" in sent[1]["text_body"]
 
 
+def test_same_week_rerun_does_not_resend_to_a_producer(tmp_path: Path):
+    sent = []
+    records = [
+        _record("Producer One", "one"),
+        _record("Unmatched Person", "missing"),
+    ]
+    job = _job()
+    job["payload"]["db_path"] = str(tmp_path / "jobs.db")
+
+    def run(key: str):
+        worker = OverdueSubmissionReportWorker(
+            audit_reader=lambda: _observation(records),
+            directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+            mailer=_capturing_mailer(sent),
+        )
+        return worker.perform(job, idempotency_key=key)
+
+    with patch(
+        "robie_job_engine.overdue_submission_reports.submission_report_week_key",
+        return_value="2026-W40",
+    ):
+        first = run("monday-run")
+        second = run("thursday-rerun")
+    assert first.succeeded is True
+    assert second.succeeded is True
+    assert len(sent) == 2
+    assert [item["to"] for item in sent] == [
+        ["one@streetsmart.insurance"],
+        [UNRESOLVED_ALERT_TO],
+    ]
+    assert second.destination["delivery_receipts"][0]["week_ledger"] is True
+    assert (
+        second.destination["delivery_receipts"][0]["message_id"]
+        == first.destination["delivery_receipts"][0]["message_id"]
+    )
+    assert second.destination["producer_count"] == 1
+
+
+def test_next_week_sends_the_producer_again(tmp_path: Path):
+    sent = []
+    records = [_record("Producer One", "one")]
+    job = _job()
+    job["payload"]["db_path"] = str(tmp_path / "jobs.db")
+    weeks = iter(["2026-W40", "2026-W41"])
+
+    def run(key: str):
+        worker = OverdueSubmissionReportWorker(
+            audit_reader=lambda: _observation(records),
+            directory_loader=lambda _path: {"producer one": "one@streetsmart.insurance"},
+            mailer=_capturing_mailer(sent),
+        )
+        with patch(
+            "robie_job_engine.overdue_submission_reports.submission_report_week_key",
+            return_value=next(weeks),
+        ):
+            return worker.perform(job, idempotency_key=key)
+
+    assert run("week-40").succeeded is True
+    assert run("week-41").succeeded is True
+    assert len(sent) == 2
+    assert all(item["to"] == ["one@streetsmart.insurance"] for item in sent)
+
+
 def test_external_producer_skip_unchanged_alongside_resolved_producer():
     sent = []
     directory = agency_email_directory_from_registry(

@@ -13,6 +13,7 @@ from robie_job_engine.submission_center_controls import (
     activate_mdc_combobox,
     activate_sort_header,
     force_click,
+    pick_exact_labeled_option,
 )
 
 
@@ -104,11 +105,12 @@ def test_sort_header_force_clicks_container_when_enter_is_noop():
         children={MDC_SORT_HEADER_CONTAINER: container},
     )
     activate_sort_header(header, "Status sort header")
-    assert header.presses == ["Enter"]
+    assert header.presses == []
     assert container.clicks == [{"force": True, "timeout": 5000}]
 
 
-def test_sort_header_keeps_enter_when_it_changes_aria_sort():
+def test_sort_header_force_clicks_container_even_when_enter_would_work():
+    """Live Status sort ignores Enter. The one-off launcher force-clicks first."""
     container = FakeLocator()
     header = FakeLocator(
         aria_sort="none",
@@ -116,9 +118,41 @@ def test_sort_header_keeps_enter_when_it_changes_aria_sort():
         children={MDC_SORT_HEADER_CONTAINER: container},
     )
     activate_sort_header(header, "Status sort header")
+    assert header.presses == []
+    assert container.clicks == [{"force": True, "timeout": 5000}]
+
+
+def test_sort_header_uses_enter_when_mdc_container_is_absent():
+    header = FakeLocator(aria_sort="none", press_noop=False)
+    activate_sort_header(header, "Status sort header")
     assert header.presses == ["Enter"]
-    assert container.clicks == []
     assert header.get_attribute("aria-sort") == "ascending"
+
+
+class _Option:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def inner_text(self) -> str:
+        return self._text
+
+
+class _Options:
+    def __init__(self, texts: list[str]) -> None:
+        self._items = [_Option(text) for text in texts]
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, index: int) -> _Option:
+        return self._items[index]
+
+
+def test_page_size_option_scan_accepts_exact_100_only():
+    chosen = pick_exact_labeled_option(_Options(["10", " 100 ", "1000"]), "100")
+    assert chosen is not None
+    assert chosen.inner_text() == " 100 "
+    assert pick_exact_labeled_option(_Options(["10", "25"]), "100") is None
 
 
 def test_force_click_stays_playwright_blocked_when_verify_target_fails():

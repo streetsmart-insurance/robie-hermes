@@ -14,6 +14,7 @@ import html
 import json
 import logging
 import os
+import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -57,6 +58,75 @@ class SubmissionReportContractError(RuntimeError):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def submission_report_week_key(now: datetime | None = None) -> str:
+    """ISO week in America/New_York. Monday's run and a same-week re-run share it."""
+    from zoneinfo import ZoneInfo
+
+    current = now or datetime.now(ZoneInfo("America/New_York"))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        current = current.astimezone(ZoneInfo("America/New_York"))
+    year, week, _weekday = current.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _jobs_db_path(job: Mapping[str, Any]) -> str:
+    payload = dict(job.get("payload") or {})
+    return str(payload.get("db_path") or os.environ.get("ROBIE_JOB_DB") or "").strip()
+
+
+class WeeklyProducerSendLedger:
+    """One send per producer (and per skip-alert) per Eastern week, in jobs.db.
+
+    The Gmail Sent search 403s under the metadata scope and used to fail open.
+    This ledger is the local guarantee a same-week re-run does not email a
+    producer again.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = str(db_path or "").strip()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS submission_report_sends (
+                week_key TEXT NOT NULL,
+                send_key TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY (week_key, send_key)
+            )"""
+        )
+        return conn
+
+    def get(self, week_key: str, send_key: str) -> dict[str, Any] | None:
+        if not self.db_path:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT message_id, sent_at FROM submission_report_sends
+                   WHERE week_key=? AND send_key=?""",
+                (week_key, send_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"message_id": str(row["message_id"]), "sent_at": str(row["sent_at"])}
+
+    def record(self, week_key: str, send_key: str, message_id: str) -> None:
+        if not self.db_path or not str(message_id or "").strip():
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO submission_report_sends
+                   (week_key, send_key, message_id, sent_at)
+                   VALUES (?, ?, ?, ?)""",
+                (week_key, send_key, str(message_id).strip(), _utc_now()),
+            )
 
 
 def _canonical_hash(value: Any) -> str:
@@ -398,8 +468,7 @@ class OverdueSubmissionReportWorker:
         self.directory_loader = directory_loader
         self.mailer = mailer
         # Same idempotency key must not send a producer email or the skip
-        # alert twice in this process. A new process still refuses duplicates
-        # already in Sent (verification mailer).
+        # alert twice in this process. The weekly ledger covers a new process.
         self._delivery_receipts: dict[str, dict[str, Any]] = {}
 
     def _read(self) -> dict[str, Any]:
@@ -447,6 +516,8 @@ class OverdueSubmissionReportWorker:
             # miss is fail-closed — never a producers→carlo@ map. Zero
             # resolved producers already raised above, before any send.
             receipts: list[dict[str, Any]] = []
+            week_key = submission_report_week_key()
+            jobs_db = _jobs_db_path(job)
             for producer in sorted(grouped):
                 subject = SUBJECT
                 body = build_producer_report(producer, grouped[producer])
@@ -463,7 +534,9 @@ class OverdueSubmissionReportWorker:
                 receipts.append(
                     self._send_once(
                         idempotency_key,
-                        f"producer:{producer}",
+                        f"producer:{_exact_name_key(producer)}",
+                        week_key=week_key,
+                        db_path=jobs_db,
                         to=to,
                         cc=cc,
                         subject=subject,
@@ -479,10 +552,15 @@ class OverdueSubmissionReportWorker:
                 if test_sink:
                     alert_subject = f"TEST ONLY - {UNRESOLVED_ALERT_SUBJECT}"
                     alert_body = "TEST ONLY - no producer delivery\n\n" + alert_body
+                alert_key = "unresolved-alert:" + "|".join(
+                    _exact_name_key(str(item.get("name") or "")) for item in skipped
+                )
                 receipts.append(
                     self._send_once(
                         idempotency_key,
-                        "unresolved-alert",
+                        alert_key,
+                        week_key=week_key,
+                        db_path=jobs_db,
                         to=alert_to,
                         cc=[],
                         subject=alert_subject,
@@ -519,15 +597,38 @@ class OverdueSubmissionReportWorker:
             retryable=False,
         )
 
-    def _send_once(self, idempotency_key: str, slot: str, **mail_kwargs: Any) -> dict[str, Any]:
-        """Send at most one message per job key and slot. Replay returns the receipt."""
+    def _send_once(
+        self,
+        idempotency_key: str,
+        slot: str,
+        *,
+        week_key: str = "",
+        db_path: str = "",
+        **mail_kwargs: Any,
+    ) -> dict[str, Any]:
+        """Send at most once per job key and once per Eastern week for this slot."""
         token = f"{idempotency_key}\n{slot}"
         cached = self._delivery_receipts.get(token)
         if cached is not None:
             return cached
+        ledger = WeeklyProducerSendLedger(db_path)
+        if week_key:
+            prior = ledger.get(week_key, slot)
+            if prior and prior.get("message_id"):
+                receipt = {
+                    "kind": "gmail",
+                    "message_id": prior["message_id"],
+                    "sender": "robie@streetsmart.insurance",
+                    "week_ledger": True,
+                }
+                self._delivery_receipts[token] = receipt
+                return receipt
         receipt = self.mailer(**mail_kwargs)
         if not isinstance(receipt, dict):
             raise SubmissionReportContractError("producer report mailer returned no receipt")
+        message_id = str(receipt.get("message_id") or "").strip()
+        if week_key and message_id:
+            ledger.record(week_key, slot, message_id)
         self._delivery_receipts[token] = receipt
         return receipt
 
