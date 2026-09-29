@@ -426,7 +426,7 @@ class ChatGuardTests(unittest.TestCase):
             )
             self.assertEqual(len(posted), 1)
             self.assertEqual(posted[0][0], "spaces/silent-orphan")
-            self.assertIn("FAILED", posted[0][1])
+            self.assertIn("Couldn't finish.", posted[0][1])
             self.assertIn(
                 "the generic Google Chat Job was not claimed within 300 seconds",
                 posted[0][1],
@@ -461,7 +461,7 @@ class ChatGuardTests(unittest.TestCase):
             )
             self.assertTrue(result["posted"])
             self.assertEqual(posted[0][0], "spaces/notify-fail")
-            self.assertIn("FAILED", posted[0][1])
+            self.assertIn("Couldn't finish.", posted[0][1])
             self.assertIn("not claimed within 300 seconds", posted[0][1])
 
     def test_free_form_blocker_prose_does_not_solicit_human_input(self):
@@ -473,7 +473,7 @@ class ChatGuardTests(unittest.TestCase):
                 job_id,
                 "I might be blocked and may need a field.",
             )
-            self.assertIn("UNVERIFIED", response)
+            self.assertIn("Not verified.", response)
             self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
 
     def test_execution_contract_is_added_without_attachments(self):
@@ -507,8 +507,8 @@ class ChatGuardTests(unittest.TestCase):
             db = str(Path(tmp) / "jobs.db")
             job_id = open_chat_job(db, "spaces/s/messages/m1", "move it")
             response = guard_chat_response(db, job_id, "Done")
-            self.assertIn("UNVERIFIED", response)
-            self.assertIn("Reason:", response)
+            self.assertIn("Not verified.", response)
+            self.assertIn("What happened:", response)
             self.assertIn("no structured destination action checkpoint", response)
             self.assertEqual(JobStore(db).get_job(job_id)["status"], "UNVERIFIED")
 
@@ -529,7 +529,7 @@ class ChatGuardTests(unittest.TestCase):
                 drive_file_id="test-recording",
             )
             response = guard_chat_response(db, job_id, "Done")
-            self.assertIn("UNVERIFIED", response)
+            self.assertIn("Not verified.", response)
             self.assertIn("Review this job recording", response)
             self.assertIn("https://drive.google.com/file/d/test-recording/view", response)
             self.assertIn("Reply in this thread", response)

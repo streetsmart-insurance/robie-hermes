@@ -476,14 +476,22 @@ def refuse_playwright_start(
 
 
 def format_action_gate_chat_note(job: dict[str, Any] | None) -> str:
+    from . import status_format
+
     job = dict(job or {})
     job_id = str(job.get("id") or "")
     error = str(job.get("last_error") or CHAT_REFUSE_NOTE)
-    return (
-        f"ROBIE Job {job_id} — FAILED\n\n"
-        f"{error}\n\n"
-        "No Ascend API request was sent. "
-        "A recorded clean Test API creation and fresh-readback PASS for this exact action is required."
+    return status_format.render_simple_status(
+        headline="Couldn't finish.",
+        what_happened=status_format.plain_reason(error),
+        anything_needed="Needs a human to review before this action can run.",
+        status_line="Blocked \u2014 the action was refused before it started.",
+        details=(
+            "No Ascend API request was sent. A recorded clean Test API creation "
+            "and fresh-readback PASS for this exact action is required."
+            f"\n\nTechnical detail: {error}"
+        ),
+        job_id=job_id,
     )
 
 

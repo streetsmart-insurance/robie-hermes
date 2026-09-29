@@ -40,7 +40,11 @@ class MessageOutcomeTests(unittest.TestCase):
     def test_email_reports_checked_policy_and_documents_without_overstating_coverage(self):
         result, store, job_id = self.run_email(FakePort(policies=[real_policy_row()], documents=[{'id': '818921949', 'name': 'Bond.pdf'}]))
         self.assertEqual(store.get_job(job_id)['status'], 'UNVERIFIED')
-        self.assertIn(f'ROBIE Job {job_id} — UNVERIFIED', result)
+        self.assertTrue(result.startswith("Not verified."))
+        self.assertIn("What happened:", result)
+        self.assertIn("Anything needed:", result)
+        self.assertIn("Status:", result)
+        self.assertIn(f"Ref: job {job_id[:8]}", result)
         self.assertIn('Checked: documents found: Bond.pdf', result)
         self.assertFalse(store.list_evidence(job_id)[-1]['verified'])
 
