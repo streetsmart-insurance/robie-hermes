@@ -13,17 +13,21 @@ from robie_job_engine.overdue_policy_change_reports import (
     OverduePolicyChangeReportVerifier,
     OverduePolicyChangeReportWorker,
     PolicyChangeReportContractError,
+    _search_candidates,
     apply_exclusions,
     build_csr_report,
     build_csr_report_html,
     build_roster_maps,
+    canonical_policy_number,
     classify_policy_liveness,
     deconcatenated_variants,
     discussion_context_line,
     load_exclusions,
+    load_policy_aliases,
     load_producer_fallbacks,
     default_producer_fallbacks_path,
     parse_4359_csv,
+    policy_numbers_correspond,
     qualify_rows,
     resolve_nag_targets,
     select_change_discussion,
@@ -121,15 +125,24 @@ def policy_row(number, account="41055091", status="Active", expiration="2026-12-
             "expirationDate": expiration, "premium": 28936.0}
 
 
+def classify(search, number, account, today):
+    # Isolate unit tests from the shipped alias file.
+    return classify_policy_liveness(search, number, account, today, policy_aliases={})
+
+
 def test_liveness_exact_active_account_match():
-    search = fake_search({"S 2391821": [policy_row("S 2391821")]})
-    verdict = classify_policy_liveness(search, "S  2391821", "41055091", TODAY)
+    # Real PolicyApi behavior (proven 2026-09-29): the stored number has a
+    # DOUBLE space ("S  2391821") and the API matches literally, so only the
+    # raw double-space search returns the row.
+    search = fake_search({"S  2391821": [policy_row("S  2391821")]})
+    verdict = classify(search, "S  2391821", "41055091", TODAY)
     assert verdict["verdict"] == "LIVE"
+    assert verdict["matched_policy_number"] == "S  2391821"
 
 
 def test_liveness_exact_deleted_is_dead():
     search = fake_search({"OLD123": [policy_row("OLD123", status="Deleted")]})
-    verdict = classify_policy_liveness(search, "OLD123", "41055091", TODAY)
+    verdict = classify(search, "OLD123", "41055091", TODAY)
     assert verdict["verdict"] == "DEAD"
 
 
@@ -140,25 +153,25 @@ def test_liveness_only_deleted_history_variants_is_dead():
             policy_row("CX132093_14083034", status="Deleted"),
         ]
     })
-    verdict = classify_policy_liveness(search, "CX132093", "41055091", TODAY)
+    verdict = classify(search, "CX132093", "41055091", TODAY)
     assert verdict["verdict"] == "DEAD"
 
 
 def test_liveness_expired_is_dead():
     search = fake_search({"OLD123": [policy_row("OLD123", expiration="2020-01-01")]})
-    verdict = classify_policy_liveness(search, "OLD123", "41055091", TODAY)
+    verdict = classify(search, "OLD123", "41055091", TODAY)
     assert verdict["verdict"] == "DEAD"
 
 
 def test_liveness_no_results_is_hold():
-    verdict = classify_policy_liveness(fake_search({}), "275768", "999", TODAY)
+    verdict = classify(fake_search({}), "275768", "999", TODAY)
     assert verdict["verdict"] == "HOLD"
     assert "no results" in verdict["reason"]
 
 
 def test_liveness_account_mismatch_is_hold_not_live():
     search = fake_search({"S 2391821": [policy_row("S 2391821", account="DIFFERENT")]})
-    verdict = classify_policy_liveness(search, "S 2391821", "41055091", TODAY)
+    verdict = classify(search, "S 2391821", "41055091", TODAY)
     assert verdict["verdict"] == "HOLD"
 
 
@@ -168,7 +181,7 @@ def test_liveness_variant_fallback_finds_live_policy():
         "BDG-3126240-01": [],
         "BDG-3126240-02": [policy_row("BDG-3126240-02", account="82861889")],
     })
-    verdict = classify_policy_liveness(search, "BDG-312624001", "82861889", TODAY)
+    verdict = classify(search, "BDG-312624001", "82861889", TODAY)
     assert verdict["verdict"] == "LIVE"
     assert verdict["matched_policy_number"] == "BDG-3126240-02"
 
@@ -177,6 +190,150 @@ def test_deconcatenated_variants():
     assert deconcatenated_variants("BDG-312624001") == ["BDG-3126240-01", "BDG-3126240-02"]
     assert deconcatenated_variants("04283052") == []
     assert deconcatenated_variants("13WECAT1F8T") == []
+
+
+# -- 2026-09-29 held-row regressions -------------------------------------------
+# Real shapes from the first live 4359 run's six held rows.
+
+
+def test_search_candidates_cover_real_stored_shapes():
+    cands = _search_candidates("S  2391821")
+    assert "S  2391821" in cands  # raw double space: the only form the API matches
+    assert "2391821" in cands
+    cands = _search_candidates("WC 104180 01")
+    assert "WC10418001" in cands  # spaceless: the only form the API matches
+    cands = _search_candidates("ART5120306-00")
+    assert "ART512030600" in cands
+    cands = _search_candidates("SPD-0000132")
+    assert "SPD0000132" in cands
+
+
+def test_canonical_policy_number():
+    assert canonical_policy_number("WC10418001 _47900279") == "WC10418001"
+    assert canonical_policy_number("S  2391821") == "S2391821"
+    assert canonical_policy_number("ART5120306-00") == "ART512030600"
+    assert canonical_policy_number("WC5-33S-B276B9-026") == "WC533SB276B9026"
+
+
+def test_policy_numbers_correspond():
+    assert policy_numbers_correspond("S  2391821", "S  2391821")
+    assert policy_numbers_correspond("WC 104180 01", "WC10418001 _47900279")
+    assert policy_numbers_correspond("ART5120306-00", "ART512030600_18911205")
+    # Suffix mismatch is a different policy, not a formatting difference.
+    assert not policy_numbers_correspond("UJH 6139546 01 29", "UJH 6139546 03 29_20864423")
+    assert not policy_numbers_correspond("SPD-0000132", "NJAP0000013255")
+    assert not policy_numbers_correspond("275768", "WC5-33S-B276B9-026")
+    assert not policy_numbers_correspond("", "WC123")
+
+
+def test_liveness_traveler_dead_history_is_dead():
+    # Traveler Transportation LLC: queue "WC 104180 01"; the only records
+    # are a deleted history row and an inactive term. No live WC under the
+    # old number (the live policy moved to "WC PI 2739418-001").
+    search = fake_search({
+        "WC10418001": [policy_row("WC10418001 _47900279", account="88789196",
+                                  status="Deleted", expiration="2024-08-03")],
+        "10418001": [policy_row("WC10418001 _47900279", account="88789196",
+                                status="Deleted", expiration="2024-08-03")],
+    })
+    verdict = classify(search, "WC 104180 01", "88789196", TODAY)
+    assert verdict["verdict"] == "DEAD"
+
+
+def test_liveness_kayson_all_dead_is_dead():
+    # Kayson Heating And Cooling LLC: queue "ART5120306-00"; six rows, all
+    # dead, expired 2019-09-25.
+    search = fake_search({
+        "ART512030600": [
+            policy_row("ART512030600", account="21587960", status="Inactive", expiration="2019-09-25"),
+            policy_row("ART512030600_18911205", account="21587960", status="Deleted", expiration="2019-09-25"),
+        ],
+    })
+    verdict = classify(search, "ART5120306-00", "21587960", TODAY)
+    assert verdict["verdict"] == "DEAD"
+
+
+def test_liveness_darlin_suffix_mismatch_is_hold_not_dead():
+    # Darlin Fernandez: queue "UJH 6139546 01 29"; a similarly-shaped but
+    # different policy ("03 29") must not mark the queue number dead.
+    search = fake_search({
+        "61395460129": [policy_row("UJH 6139546 03 29_20864423", account="33729805",
+                                   status="Deleted", expiration="2022-12-22")],
+    })
+    verdict = classify(search, "UJH 6139546 01 29", "33729805", TODAY)
+    assert verdict["verdict"] == "HOLD"
+    assert "ambiguous" in verdict["reason"]
+
+
+def test_liveness_infantilino_no_trace_is_hold():
+    # Nicholas & Erica Infantolino: queue "SPD-0000132"; digits-only finds
+    # unrelated policies on other accounts — no correspondence, no live.
+    search = fake_search({
+        "0000132": [
+            policy_row("NJAP0000013255", account="25721735", status="Inactive", expiration="2019-03-26"),
+            policy_row("PAH00001320602", account="25631401", status="Inactive", expiration="2022-10-10"),
+        ],
+    })
+    verdict = classify(search, "SPD-0000132", "37717821", TODAY)
+    assert verdict["verdict"] == "HOLD"
+
+
+def test_liveness_alias_resolves_stale_queue_number():
+    # Shoreline Builders LLC: queue "275768" finds nothing, but the alias
+    # points at the verified live WC "WC5-33S-B276B9-026".
+    search = fake_search({
+        "WC5-33S-B276B9-026": [policy_row("WC5-33S-B276B9-026", account="48641902",
+                                          status="Active", expiration="2027-01-28")],
+    })
+    verdict = classify_policy_liveness(search, "275768", "48641902", TODAY,
+                                       policy_aliases={"275768": "WC5-33S-B276B9-026"})
+    assert verdict["verdict"] == "LIVE"
+    assert verdict["matched_policy_number"] == "WC5-33S-B276B9-026"
+    assert verdict["alias_applied"] == {"queue_number": "275768", "live_number": "WC5-33S-B276B9-026"}
+
+
+def test_liveness_alias_target_must_still_be_live():
+    # A rotted alias (target no longer live) must not produce a LIVE nag.
+    search = fake_search({
+        "WC PI 2739418-001": [policy_row("WC PI 2739418-001", account="88789196",
+                                         status="Cancelled", expiration="2025-07-15")],
+    })
+    verdict = classify_policy_liveness(search, "WC 104180 01", "88789196", TODAY,
+                                       policy_aliases={"WC 104180 01": "WC PI 2739418-001"})
+    assert verdict["verdict"] == "DEAD"
+
+
+def test_liveness_alias_target_wrong_account_is_hold():
+    search = fake_search({
+        "WC5-33S-B276B9-026": [policy_row("WC5-33S-B276B9-026", account="99999999",
+                                          status="Active", expiration="2027-01-28")],
+    })
+    verdict = classify_policy_liveness(search, "275768", "48641902", TODAY,
+                                       policy_aliases={"275768": "WC5-33S-B276B9-026"})
+    assert verdict["verdict"] == "HOLD"
+
+
+def test_load_policy_aliases_skips_comments_and_normalizes_keys():
+    import tempfile, os
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write('{"_comment": "x", "WC 104180 01": "WC PI 2739418-001"}')
+        path = fh.name
+    try:
+        assert load_policy_aliases(path) == {"WC 104180 01": "WC PI 2739418-001"}
+    finally:
+        os.unlink(path)
+
+
+def test_load_policy_aliases_corrupt_fails_closed():
+    import tempfile, os
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write('not json')
+        path = fh.name
+    try:
+        with pytest.raises(PolicyChangeReportContractError):
+            load_policy_aliases(path)
+    finally:
+        os.unlink(path)
 
 
 # -- discussion context ----------------------------------------------------------
@@ -509,7 +666,9 @@ def test_worker_sends_one_email_per_csr(tmp_path):
                            "gabrielac@streetsmart.insurance"]
     assert "SAPP Construction Corp" in email["text_body"]
     assert "S 2391821" in email["text_body"]
-    assert "41 days ago" in email["text_body"]
+    # The worker renders days-overdue from the real clock, not the test's
+    # TODAY, so compute the expectation the same way.
+    assert f"{(date.today() - date(2026, 8, 17)).days} days ago" in email["text_body"]
     assert "8 notes" in email["text_body"]
 
 

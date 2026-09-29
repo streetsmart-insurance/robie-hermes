@@ -1,0 +1,5 @@
+{
+  "_comment": "Queue policy number (as it appears in the 4359 report) -> hand-verified live policy number. Used when the report's number is stale: a renewal changed the number, or the report mis-keyed it. Verified 2026-09-29 by opening each account's policy list in EZLynx and confirming the live policy via PolicyApi (Active, applicant-account anchored, unexpired). The worker logs every alias application in the liveness verdict. Durable fix is for the CSR to update the change request in EZLynx to the live number, after which the alias can be removed.",
+  "275768": "WC5-33S-B276B9-026",
+  "WC 104180 01": "WC PI 2739418-001"
+}
