@@ -591,4 +591,4 @@ def collect_handled_verification(
             else ("ok" if denominator > 0 else "no accountable mail in window")
         ),
         "by_employee": by_employee,
-                             }
+   }
