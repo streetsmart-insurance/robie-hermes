@@ -191,7 +191,9 @@ def thread_has_internal_reply(
             continue
         hs = headers_of(m)
         frm = hs.get("from", "")
-        if employee.lower() in frm.lower() or is_internal(frm):
+        # Exact parsed sender only: a forged display name containing the
+        # employee address must not count as an internal reply.
+        if _address_of(frm) == _address_of(employee) or is_internal(frm):
             return {
                 "via": "reply",
                 "detail": f"in-thread reply {hs.get('date', '')} from {frm}",
@@ -209,14 +211,17 @@ def is_related_send(
     of the inbound? Returns a detail string or None. Unit-testable.
 
     Identity, per review: a bare subject match is NOT enough (any sent item
-    in the window could collide). Require either a References/In-Reply-To
-    hit on the inbound Message-ID, or a normalized-subject match PLUS the
-    inbound client appearing among the send's To/Cc recipients."""
+    in the window could collide), and even subject + client-recipient is not
+    proof for recurring subjects (a later unrelated send to the same client
+    can collide). Returns (detail, verified): verified=True only for a
+    References/In-Reply-To hit on the inbound Message-ID; a subject + client
+    match returns verified=False and must be labeled "possible related
+    send", never counted as verified handled."""
     refs = (sent_headers.get("references", "") + " " +
             sent_headers.get("in-reply-to", ""))
     if inbound_msgid and inbound_msgid in refs:
         return (f"references original message "
-                f"({sent_headers.get('subject', '')[:60]})")
+                f"({sent_headers.get('subject', '')[:60]})"), True
     target_subj = norm_subject(inbound_subject)
     sent_subj = norm_subject(sent_headers.get("subject", ""))
     if target_subj and len(target_subj) > 8 and target_subj in sent_subj:
@@ -227,7 +232,7 @@ def is_related_send(
         )
         if client and client in recipients:
             return (f"matching subject and client recipient "
-                    f"({sent_headers.get('subject', '')[:60]})")
+                    f"({sent_headers.get('subject', '')[:60]})"), False
     return None
 
 
@@ -324,8 +329,12 @@ def find_forward(
 ) -> tuple[dict[str, str] | None, bool]:
     """Search each Sent mailbox (with its own delegated service) for a
     forward / related send of the inbound message. Only sends dated AFTER
-    the inbound qualify. Returns (match, sent_scan_capped)."""
+    the inbound qualify. Returns (match, sent_scan_capped, possible): match
+    is a VERIFIED forward (Message-ID linkage); possible is the detail of
+    the first subject+client-only send, which is NOT verified handled and
+    must be labeled "possible related send" to the reader."""
     sent_capped = False
+    possible: str | None = None
     for box in sent_mailboxes:
         service = services_by_mailbox.get(str(box).casefold())
         if service is None:
@@ -344,12 +353,17 @@ def find_forward(
             # its forward, however similar the subject.
             if int(sent.get("internalDate", "0") or "0") <= inbound_ts:
                 continue
-            match = is_related_send(
+            related = is_related_send(
                 headers_of(sent), inbound_subject, inbound_msgid, inbound_from
             )
-            if match:
-                return {"via": "forward", "detail": f"{box} sent {match}"}, sent_capped
-    return None, sent_capped
+            if not related:
+                continue
+            detail, verified = related
+            if verified:
+                return {"via": "forward", "detail": f"{box} sent {detail}"}, sent_capped, possible
+            if possible is None:
+                possible = f"{box} sent {detail}"
+    return None, sent_capped, possible
 
 
 def verify_inbound_message(
@@ -389,7 +403,7 @@ def verify_inbound_message(
         return result, False
 
     # 2. forward / related send from the employee or a shared mailbox?
-    hit, sent_capped = find_forward(
+    hit, sent_capped, possible = find_forward(
         services_by_mailbox,
         sent_mailboxes,
         headers.get("subject", ""),
@@ -404,12 +418,17 @@ def verify_inbound_message(
         return result, sent_capped
 
     # 3. genuinely untouched: summarize the body for human judgment.
+    # A subject+client-only send is NOT verified handled; label it as a
+    # possible related send so a human can judge it.
     full = _get_message(service, result["message_id"], fmt="full")
     summary = summarize(body_text(full), headers.get("from", ""))
+    detail = "no reply in thread, no forward/send found"
+    if possible:
+        detail = f"possible related send (unverified, not counted as handled): {possible}"
     result.update(
         summary=summary["summary"],
         action_needed=summary["action_needed"],
-        detail="no reply in thread, no forward/send found",
+        detail=detail,
     )
     return result, sent_capped
 
