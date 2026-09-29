@@ -464,6 +464,7 @@ def load_applicant_index(csv_path: str = "") -> Any:
                 rows.append({
                     "account_name": (raw.get("account_name") or "").strip(),
                     "applicant_id": (raw.get("applicant_id") or "").strip(),
+                    "dba": (raw.get("dba") or "").strip(),
                     "email_primary": (raw.get("email_primary") or "").strip(),
                     "phones": phones,
                     "policy_numbers": (raw.get("policy_numbers") or "").strip(),
@@ -618,21 +619,29 @@ def build_filing_deps(db_path: str, verifier: Any = None) -> Any:
 # One sweep
 # ---------------------------------------------------------------------------
 
-def _reintake_message(gmail: Any, gmail_id: str, index: Any) -> Any:
-    """Re-drive one UNVERIFIED message through intake without touching the
-    checkpoint (it already marked the message intake_complete exactly
-    once). Mirrors run_intake_once's per-message path.
+def _reintake_message(gmail: Any, ledger_key: str, index: Any) -> Any:
+    """Re-drive one UNVERIFIED ledger row through intake without touching
+    the checkpoint (it already marked the message intake_complete exactly
+    once). Mirrors run_intake_once's per-message path, including the
+    multi-insured fan-out.
+
+    ``ledger_key`` may carry a ``#N`` fan-out suffix (one ledger row per
+    named insured); the suffix is stripped for the Gmail fetch and the
+    matching fan-out record is selected. When the email's insured set
+    changed since the row was written, returns a held record instead of
+    guessing which target the row belonged to.
 
     Returns None when the message predates the today-forward cutoff
     (defensive: the migration should have parked it already).
     """
-    from .cert_applicant_index import MATCHED, match_applicant
     from .cert_intake import CertEmail, extract_request_facts
     from .cert_intake_runner import (
-        IntakeRecord, _default_pdf_extractor, message_internal_ms,
+        _build_records_for_email, _default_pdf_extractor,
+        message_internal_ms,
     )
 
-    payload = gmail.get_full_message(gmail_id)
+    base_id = ledger_key.split("#")[0]
+    payload = gmail.get_full_message(base_id)
     internal_ms = message_internal_ms(payload)
     if internal_ms is not None and internal_ms < CUTOFF_MS:
         return None
@@ -643,27 +652,37 @@ def _reintake_message(gmail: Any, gmail_id: str, index: Any) -> Any:
     email = CertEmail.from_gmail_api(payload, attachment_fetcher=fetcher)
     facts = extract_request_facts(
         email, pdf_text_extractor=_default_pdf_extractor(gmail))
-    match = match_applicant(facts, index)
-    held = match.status != MATCHED or facts.pdf_unreadable
-    hold_reason = ""
-    if facts.pdf_unreadable:
-        hold_reason = ("PDF attachment unreadable (likely scanned); "
-                       "holding for OCR/human review — never guessing")
-    elif held:
-        hold_reason = match.hold_reason()
-    return IntakeRecord(
-        gmail_id=email.gmail_id,
-        thread_id=email.thread_id,
-        subject=email.subject,
-        from_header=email.from_header,
-        date=email.date,
-        facts=facts,
-        match=match,
-        held=held,
-        hold_reason=hold_reason,
-        attachment_count=len(email.attachments),
-        internal_ms=internal_ms,
-    )
+    records = _build_records_for_email(email, facts, index,
+                                       internal_ms=internal_ms)
+    for record in records:
+        if record.ledger_key == ledger_key:
+            return record
+    first = records[0]
+    first.held = True
+    first.hold_reason = (
+        f"re-drive target {ledger_key} no longer names a current insured "
+        f"({[r.facts.insured_name for r in records]}); "
+        "holding for human review — never guessing")
+    return first
+
+    def fetcher(mid: str, aid: str, _g=gmail) -> bytes:
+        return _g.get_attachment_bytes(mid, aid)
+
+    email = CertEmail.from_gmail_api(payload, attachment_fetcher=fetcher)
+    facts = extract_request_facts(
+        email, pdf_text_extractor=_default_pdf_extractor(gmail))
+    records = _build_records_for_email(email, facts, index,
+                                       internal_ms=internal_ms)
+    for record in records:
+        if record.ledger_key == ledger_key:
+            return record
+    first = records[0]
+    first.held = True
+    first.hold_reason = (
+        f"re-drive target {ledger_key} no longer names a current insured "
+        f"({[r.facts.insured_name for r in records]}); "
+        "holding for human review — never guessing")
+    return first
 
 
 def _mark_read_after_filed(gmail_id: str, mark_read_fn: Any,
@@ -729,7 +748,10 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                   "retried": 0, "filed": 0, "unverified": 0,
                   "marked_read": 0, "mark_read_failed": 0,
                   "skipped_pre_cutoff": 0, "parked_historical": 0,
-                  "parked_dead": 0, "index_misses": 0},
+                  "parked_dead": 0, "index_misses": 0,
+                  # Edge-case shapes (health-check counters):
+                  "tie_broken": 0, "fuzzy_matched": 0,
+                  "multi_insured_records": 0, "filename_sourced": 0},
         "verifier": verifier_note,
         "applicant_index": index.stats() if hasattr(index, "stats") else {},
     }
@@ -748,16 +770,29 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
     except Exception as exc:
         summary["errors"].append(f"backlog migration failed: {exc}")
 
-    def mark_unverified(gmail_id: str, subject: str,
-                        applicant_id: Any, reason: str) -> None:
-        ledger = retry_note(retry_conn, gmail_id, reason)
-        entry = {"gmail_id": gmail_id, "subject": subject,
+    def mark_unverified(record: Any, applicant_id: Any,
+                        reason: str) -> None:
+        # Retry bookkeeping is per insured target (ledger_key), never
+        # per message: one target's outcome must not clear another's.
+        ledger_key = getattr(record, "ledger_key", None) or record.gmail_id
+        ledger = retry_note(retry_conn, ledger_key, reason)
+        entry = {"gmail_id": ledger_key, "subject": record.subject,
+                 "insured": getattr(getattr(record, "facts", None),
+                                    "insured_name", None),
                  "applicant_id": applicant_id, "reason": reason,
                  "retry_attempts": ledger["attempts"]}
+        near = list(getattr(getattr(record, "match", None),
+                            "near_miss_ids", None) or [])
+        if near:
+            # Health-check signal: names one edit outside the fuzzy
+            # bound that ALMOST matched. Surfaced so the next
+            # EPHE-class miss is visible within a day, not months.
+            # Never used to match — informational only.
+            entry["near_miss_applicant_ids"] = near
         if ledger["parked"]:
             entry["parked_for_human_review"] = True
             summary["errors"].append(
-                f"{gmail_id}: parked after {ledger['attempts']} attempts — "
+                f"{ledger_key}: parked after {ledger['attempts']} attempts — "
                 "human review needed")
         summary["unverified"].append(entry)
         summary["stats"]["unverified"] += 1
@@ -775,7 +810,8 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
         "skipped_pre_cutoff", 0)
 
     # Re-drive UNVERIFIED records from the retry ledger.
-    seen_ids = {r.gmail_id for r in records}
+    seen_ids = {getattr(r, "ledger_key", None) or r.gmail_id
+                for r in records}
     for pending in retry_pending(retry_conn):
         if pending["gmail_id"] in seen_ids:
             continue
@@ -799,8 +835,29 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
         seen_ids.add(pending["gmail_id"])
         summary["stats"]["retried"] += 1
 
+    # Edge-case shape counters (health check): how many records this
+    # sweep matched via the new paths.
+    def _evidence_has(record: Any, needle: str) -> bool:
+        return needle in (
+            getattr(getattr(record, "match", None), "evidence", "") or "")
+
+    summary["stats"]["tie_broken"] = sum(
+        1 for r in records if _evidence_has(r, "tie-broken"))
+    summary["stats"]["fuzzy_matched"] = sum(
+        1 for r in records if _evidence_has(r, "fuzzy typo-tolerant"))
+    summary["stats"]["multi_insured_records"] = sum(
+        1 for r in records
+        if "#" in (getattr(r, "ledger_key", "") or ""))
+    summary["stats"]["filename_sourced"] = sum(
+        1 for r in records
+        if getattr(getattr(r, "facts", None),
+                   "insured_name_source", "") == "pdf_filename")
+
+    # Per-source-message filing outcomes: the mark-read pass below only
+    # marks a message read when EVERY insured target filed.
+    filed_by_base: dict[str, list[dict[str, Any]]] = {}
+
     for record in records:
-        gmail_id = record.gmail_id
         applicant_id = getattr(record.match, "applicant_id", None)
 
         # Intake-held: never verified, never filed.
@@ -814,7 +871,7 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                 # was consulted.
                 miss = miss_note(retry_conn,
                                  getattr(record.facts, "insured_name", ""),
-                                 gmail_id,
+                                 record.gmail_id,
                                  getattr(record.facts, "policy_numbers",
                                          None))
                 index_stats = summary["applicant_index"]
@@ -828,8 +885,7 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                     f"full-book export or a governed EZLynx lookup]")
                 if miss:
                     summary["stats"]["index_misses"] += 1
-            mark_unverified(gmail_id, record.subject, applicant_id,
-                            hold_reason)
+            mark_unverified(record, applicant_id, hold_reason)
             continue
 
         # The filing path is broken (e.g. the Zapier trigger script is
@@ -837,7 +893,7 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
         # state, so nothing is filed and every candidate ends UNVERIFIED.
         if deps is None:
             mark_unverified(
-                gmail_id, record.subject, applicant_id,
+                record, applicant_id,
                 f"UNVERIFIED: filing unavailable — {deps_error}; "
                 "will retry on a later sweep")
             continue
@@ -846,7 +902,7 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
         verified = verify_record(record, index, verifier=verifier)
         if verified.status != VERIFIED or not verified.applicant_id:
             mark_unverified(
-                gmail_id, record.subject, applicant_id,
+                record, applicant_id,
                 "; ".join(verified.hold_reasons) or
                 "verification hold — not VERIFIED")
             continue
@@ -857,19 +913,18 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
             result = file_record_fn(record, verified, deps,
                                     owner="cert-sweep")
         except Exception as exc:
-            mark_unverified(gmail_id, record.subject,
-                            verified.applicant_id,
+            mark_unverified(record, verified.applicant_id,
                             f"filing raised unexpectedly: {exc}")
-            summary["errors"].append(f"{gmail_id}: filing raised: {exc}")
+            summary["errors"].append(
+                f"{record.ledger_key}: filing raised: {exc}")
             continue
 
         if result.status == FILED:
-            retry_clear(retry_conn, gmail_id)
-            marked_read, mark_reason = _mark_read_after_filed(
-                gmail_id, mark_read_fn, mark_read_enabled)
-            summary["filed"].append({
-                "gmail_id": gmail_id,
+            retry_clear(retry_conn, record.ledger_key)
+            entry = {
+                "gmail_id": record.ledger_key,
                 "subject": record.subject,
+                "insured": record.facts.insured_name,
                 "applicant_id": verified.applicant_id,
                 "note_id": result.note_id,
                 "documents": [d for d in result.document_ids],
@@ -877,22 +932,45 @@ def _sweep_once(*, gmail: Any, checkpoint: Any, index: Any,
                 "task_action": result.task_action,
                 "task_id": result.task_id,
                 "evidence": list(result.evidence),
-                "marked_read": marked_read,
-                "mark_read_reason": mark_reason,
-            })
+            }
+            summary["filed"].append(entry)
+            filed_by_base.setdefault(
+                record.base_gmail_id, []).append(entry)
             summary["stats"]["filed"] += 1
-            if marked_read:
-                summary["stats"]["marked_read"] += 1
-            elif mark_read_enabled and mark_read_fn is not None:
-                # A mark-read failure is bookkeeping, not a sweep error:
-                # the filing is proven and checkpointed, the message
-                # simply stays unread for the next run to see.
-                summary["stats"]["mark_read_failed"] += 1
         else:
             mark_unverified(
-                gmail_id, record.subject, verified.applicant_id,
+                record, verified.applicant_id,
                 "; ".join(result.hold_reasons) or
                 f"filing ended {result.status} — not destination-proven")
+
+    # Mark-read pass: a source message is marked read only when ALL of
+    # its insured targets are destination-proven. Any sibling target
+    # still in the retry ledger (held, errored, or parked for human
+    # review) leaves the message unread — a partial filing must never
+    # hide the remaining work.
+    pending_keys = {p["gmail_id"] for p in retry_pending(retry_conn)}
+    for base_id, entries in filed_by_base.items():
+        blocked = any(k == base_id or k.startswith(base_id + "#")
+                      for k in pending_keys)
+        if blocked:
+            for e in entries:
+                e["marked_read"] = False
+                e["mark_read_reason"] = (
+                    "sibling insured target still unverified — "
+                    "message left unread")
+            continue
+        marked_read, mark_reason = _mark_read_after_filed(
+            base_id, mark_read_fn, mark_read_enabled)
+        for e in entries:
+            e["marked_read"] = marked_read
+            e["mark_read_reason"] = mark_reason
+        if marked_read:
+            summary["stats"]["marked_read"] += len(entries)
+        elif mark_read_enabled and mark_read_fn is not None:
+            # A mark-read failure is bookkeeping, not a sweep error:
+            # the filing is proven and checkpointed, the message
+            # simply stays unread for the next run to see.
+            summary["stats"]["mark_read_failed"] += len(entries)
 
     return summary
 
@@ -999,6 +1077,15 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_RUNTIME
 
     print(json.dumps(summary, indent=2, default=str))
+    # Persist the summary for the outcome health check
+    # (cert_edge_case_health.py). Best-effort: a write failure must never
+    # fail the sweep itself.
+    try:
+        latest_path = os.path.join(data_dir(), "latest-summary.json")
+        with open(latest_path, "w") as fh:
+            json.dump(summary, fh, indent=2, default=str)
+    except Exception:
+        pass
     # UNVERIFIED records are a designed fail-closed outcome, not a crash.
     # Exit non-zero only when the sweep itself could not complete.
     return 0 if not summary["errors"] else EXIT_RUNTIME

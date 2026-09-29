@@ -102,6 +102,12 @@ class ApplicantIndex:
     # also answers to "abg transportation" (contiguous token runs of the
     # DBA portion, length >= 2).
     by_dba_run: dict[str, list[int]] = field(default_factory=dict)
+    # applicant_id -> DBA string (commercial indicator). From the row's
+    # ``dba`` field when present, else parsed from the "DBA" infix in
+    # the account name. Used ONLY as the final ambiguous-name
+    # disambiguator (Carlo's commercial-preference rule) — never as a
+    # match key on its own.
+    dba_by_id: dict[int, str] = field(default_factory=dict)
     # Carrier policy numbers from the book's policy_numbers column
     # (semicolon-separated): "9300216995" answers to the applicant that
     # carries it. Normalized uppercase, whitespace stripped.
@@ -178,18 +184,235 @@ def _dba_runs(account_name: str | None) -> list[str]:
     return runs
 
 
+def _dba_part(account_name: str | None) -> str:
+    """Raw DBA portion of an account name, or "" when there is none.
+
+    "GTZ Transportation" from "Martin Omondi DBA GTZ Transportation".
+    Fallback for rows without a separate DBA field.
+    """
+    if not account_name:
+        return ""
+    parts = re.split(r"(?i)\bdba\b", str(account_name), maxsplit=1)
+    if len(parts) < 2:
+        return ""
+    return re.sub(r"\s+", " ", parts[1].strip(" \t-:;")).strip()
+
+
 def _dba_run_key(name: str | None) -> str:
     """Lookup key for DBA-fragment matching: space-joined word tokens."""
     return " ".join(_name_tokens(name))
+
+
+# ---------------------------------------------------------------------------
+# Typo-tolerant name matching (bounded fuzzy fallback)
+# ---------------------------------------------------------------------------
+#
+# Exact normalized matching stays first. When it finds nothing, a bounded
+# edit-distance scan offers a second chance for typos ("EPHE LCC" for
+# "EPHE LLC"). The bound is deliberately tight and the exactly-one
+# candidate rule is absolute: 0 or 2+ candidates hold, never guess.
+
+
+def _levenshtein_capped(a: str, b: str, cap: int) -> int:
+    """Edit distance, aborting early when it must exceed ``cap``.
+
+    Returns ``cap + 1`` when the true distance is larger — callers only
+    need to know "within bound or not".
+    """
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    if len(a) > len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            v = min(prev[j] + 1,          # deletion
+                    cur[j - 1] + 1,       # insertion
+                    prev[j - 1] + (ca != cb))  # substitution
+            cur.append(v)
+            if v < row_min:
+                row_min = v
+        if row_min > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def _fuzzy_threshold(key: str) -> int:
+    """Max edit distance for a typo-tolerant hit on ``key``.
+
+    One typo for short names, two for long ones. Longer allowances would
+    start merging genuinely different clients ("Main Street LLC" vs
+    "Main Street Inc" differ by more, but short names collide fast).
+    """
+    return 1 if len(key) < 8 else 2
+
+
+def fuzzy_lookup_ids(raw_name: str | None,
+                     index: ApplicantIndex) -> tuple[list[int], int]:
+    """Typo-tolerant applicant ids for ``raw_name``.
+
+    Returns ``(ids, best_distance)`` where ``ids`` are the distinct
+    applicant ids whose normalized key is within the edit bound.
+    Empty list = no typo-neighbor; the caller decides MATCHED /
+    AMBIGUOUS / NO_MATCH from the count (exactly one wins).
+    """
+    key = normalize_account_name(raw_name)
+    if not key or len(key) < 4:
+        # Too short to fuzz safely ("ABC" is one typo from "ABG", "ACC"...).
+        return [], -1
+    cap = _fuzzy_threshold(key)
+    hits: dict[int, int] = {}  # applicant_id -> best distance
+    best = cap + 1
+    for name_key, ids in index.by_name.items():
+        if name_key == key:
+            continue  # exact hits are handled before fuzzy ever runs
+        dist = _levenshtein_capped(key, name_key, cap)
+        if dist <= cap:
+            for aid in ids:
+                if aid not in hits or dist < hits[aid]:
+                    hits[aid] = dist
+            if dist < best:
+                best = dist
+    return sorted(hits), (best if hits else -1)
+
+
+def near_miss_ids(raw_name: str | None,
+                  index: ApplicantIndex) -> list[int]:
+    """Applicant ids just OUTSIDE the fuzzy bound (health-check signal).
+
+    One edit beyond the match threshold: names that almost matched.
+    Surfaced on held items so a human can spot the next EPHE-class miss
+    within a day instead of discovering it in the backlog months later.
+    Never used to match — informational only.
+    """
+    key = normalize_account_name(raw_name)
+    if not key or len(key) < 4:
+        return []
+    cap = _fuzzy_threshold(key) + 1
+    near: set[int] = set()
+    for name_key, ids in index.by_name.items():
+        if name_key == key:
+            continue
+        if _levenshtein_capped(key, name_key, cap) == cap:
+            near.update(ids)
+    return sorted(near)
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous-name tie-breaking
+# ---------------------------------------------------------------------------
+#
+# Some normalized names map to 2+ applicant IDs (same name, different
+# contact info — e.g. two "Robert Lake" records). Carlo's rule still
+# holds: never guess. But when the REQUEST ITSELF corroborates exactly
+# one candidate — the sender's email, an extracted phone, or an
+# extracted policy number belongs to that applicant — the tie is broken
+# by evidence, not by guessing. Zero or 2+ corroborated candidates
+# stay AMBIGUOUS.
+
+
+def _policy_ids_for(policy_number: str,
+                    by_policy: dict[str, Any]) -> set[int]:
+    """Applicant ids for a policy number, tolerant of key formatting.
+
+    ``by_policy`` comes from the EPHE follow-up (policy-number match
+    key); its key normalization is not assumed here — both sides are
+    compared alphanumerically so a formatting difference can't silently
+    drop the signal (a miss just means "no tie-break", never a misroute).
+    Values may be a single id or a list of ids.
+    """
+    want = re.sub(r"[^a-z0-9]", "", str(policy_number or "").lower())
+    if not want:
+        return set()
+    found: set[int] = set()
+    for raw_key, val in by_policy.items():
+        if re.sub(r"[^a-z0-9]", "", str(raw_key).lower()) != want:
+            continue
+        ids = val if isinstance(val, (list, tuple, set)) else [val]
+        for aid in ids:
+            try:
+                found.add(int(aid))
+            except (TypeError, ValueError):
+                continue
+    return found
+
+
+def tie_break_ambiguous(candidates: list[int], facts: Any,
+                        index: ApplicantIndex) -> tuple[int | None, str]:
+    """Resolve an exact-name tie using the request's own contact info.
+
+    Returns ``(applicant_id, evidence)`` when exactly one candidate is
+    corroborated by the sender email, an extracted phone, or an
+    extracted policy number; ``(None, "")`` otherwise. Corroboration by
+    two different candidates (email says A, phone says B) is still a
+    tie — AMBIGUOUS, never guess.
+    """
+    wanted = set(candidates)
+    votes: dict[int, set[str]] = {}
+
+    def vote(aid: Any, reason: str) -> None:
+        try:
+            aid_int = int(aid) if aid is not None else None
+        except (TypeError, ValueError):
+            return
+        if aid_int in wanted:
+            votes.setdefault(aid_int, set()).add(reason)
+
+    email_key = normalize_email(getattr(facts, "requester_email", None))
+    if email_key:
+        vote(index.by_email.get(email_key), f"sender email {email_key}")
+
+    for raw_phone in getattr(facts, "phones", None) or []:
+        for pkey in phone_keys(raw_phone):
+            vote(index.by_phone.get(pkey), f"phone {raw_phone}")
+
+    by_policy = getattr(index, "by_policy", None) or {}
+    if by_policy:
+        for num in getattr(facts, "policy_numbers", None) or []:
+            for aid in _policy_ids_for(num, by_policy):
+                vote(aid, f"policy number {num}")
+
+    if len(votes) == 1:
+        aid = next(iter(votes))
+        return aid, "; ".join(sorted(votes[aid]))
+    return None, ""
+
+
+def prefer_commercial(candidates: list[int],
+                      index: ApplicantIndex) -> tuple[int | None, str]:
+    """Carlo's rule: an ambiguous insured name errs toward the
+    commercial applicant.
+
+    When exactly one remaining candidate has a non-empty DBA
+    (commercial indicator — e.g. Martin Omondi DBA "GTZ TRANSPORTATION"
+    vs a bare personal "Martin Omondi" record), resolve to it. Zero or
+    2+ DBA holders stay AMBIGUOUS: this is a preference, not evidence,
+    so it never breaks a real tie. Runs AFTER the contact-info
+    tie-breaker — hard evidence from the request itself always wins.
+    """
+    with_dba = [(aid, index.dba_by_id.get(aid, "")) for aid in candidates]
+    with_dba = [(aid, dba) for aid, dba in with_dba if dba]
+    if len(with_dba) == 1:
+        aid, dba = with_dba[0]
+        return aid, (f"applicant {aid} is the only candidate with a "
+                     f"DBA ({dba!r})")
+    return None, ""
 
 
 def build_index(rows: list[dict[str, Any]], source_path: str = "") -> ApplicantIndex:
     """Build an index from row dicts.
 
     Row keys: ``account_name``, ``applicant_id``, ``email_primary``,
-    ``phones`` (list of raw phone strings), ``policy_numbers`` (semicolon-
-    separated string or list of raw policy numbers). Malformed rows are
-    skipped, never fatal: a bad row must not take down the whole index.
+    ``phones`` (list of raw phone strings), ``dba`` (optional commercial
+    name; when absent it is parsed from the "DBA" infix in
+    ``account_name``), ``policy_numbers`` (semicolon-separated string or
+    list of raw policy numbers). Malformed rows are skipped, never fatal:
+    a bad row must not take down the whole index.
     """
     index = ApplicantIndex(source_path=source_path)
     for row in rows:
@@ -225,6 +448,13 @@ def build_index(rows: list[dict[str, Any]], source_path: str = "") -> ApplicantI
             for key in phone_keys(raw_phone):
                 if key not in index.by_phone:
                     index.by_phone[key] = applicant_id
+        # Commercial indicator for ambiguous-name disambiguation:
+        # the row's DBA field, else the "DBA" infix in the account name.
+        dba_raw = row.get("dba")
+        dba = (str(dba_raw).strip() if isinstance(dba_raw, str)
+               else "") or _dba_part(row.get("account_name"))
+        if dba and applicant_id not in index.dba_by_id:
+            index.dba_by_id[applicant_id] = dba
     try:
         mtime = os.path.getmtime(source_path) if source_path else 0
         if mtime:
@@ -293,6 +523,9 @@ class MatchResult:
     evidence: str = ""
     candidates: list[int] = field(default_factory=list)
     requester_also_client: bool = False
+    # Informational only: applicant ids just outside the fuzzy bound.
+    # Never used to match — surfaced on held items as a health signal.
+    near_miss_ids: list[int] = field(default_factory=list)
 
     def hold_reason(self) -> str:
         if self.status == MATCHED:
@@ -318,15 +551,26 @@ def match_applicant(
 
     1. ``insured_name`` — the certificate is FOR the insured; the insured is
        the client even when the sender is a third party (GC, holder, town).
-    2. ``dba`` — same as the insured name.
-    3. DBA-fragment — trade name from the book's legal name.
-    4. ``policy_numbers`` — the carrier policy the email names. Strong key,
-       but never overrides a name hit: name steps return first, so a
-       policy pointing elsewhere cannot reroute a name-matched filing.
-    5. ``requester_email`` — only when no insured/dba/policy matched; covers
+       An exact-name tie (2+ applicants) is broken first by the request's
+       own contact info (sender email / phone / policy number) pointing at
+       exactly one candidate; then — and only then — by Carlo's
+       commercial-preference rule (exactly one candidate with a non-empty
+       DBA). Zero or 2+ DBA holders stay AMBIGUOUS, never guessed.
+    2. ``dba`` — same as the insured name (ties broken the same way).
+    3. Typo-tolerant fallback — bounded edit distance on the normalized
+       key, firing only when the exact lookups found nothing at all and
+       yielding exactly one candidate. A sender email pointing at a
+       different applicant makes it ambiguous, as with DBA fragments.
+    4. DBA-fragment — trade name from the book's legal name (same
+       sender-email guard as the fuzzy step).
+    5. ``policy_numbers`` — the carrier policy the email names. Weaker than
+       any name hit: name steps return first, so a policy pointing
+       elsewhere cannot reroute a name-matched filing. A policy shared by
+       several rows holds as AMBIGUOUS.
+    6. ``requester_email`` — only when no insured/dba/policy matched; covers
        the common case of the client writing from their own address without
        naming themselves.
-    6. phone numbers — optional extra signal.
+    7. phone numbers — optional extra signal.
 
     ``holder_names`` are NEVER match keys (holders are third parties).
     """
@@ -337,6 +581,15 @@ def match_applicant(
             return _with_requester_flag(facts, index, MatchResult(
                 MATCHED, ids[0], f"insured name {facts.insured_name!r}"))
         if len(ids) > 1:
+            winner, reason = tie_break_ambiguous(ids, facts, index)
+            path = "tie-broken"
+            if winner is None:
+                winner, reason = prefer_commercial(ids, index)
+                path = "commercial preference"
+            if winner is not None:
+                return _with_requester_flag(facts, index, MatchResult(
+                    MATCHED, winner,
+                    f"insured name {facts.insured_name!r} {path} ({reason})"))
             return MatchResult(AMBIGUOUS, None,
                                f"insured name {facts.insured_name!r}",
                                candidates=list(ids))
@@ -348,8 +601,44 @@ def match_applicant(
             return _with_requester_flag(facts, index, MatchResult(
                 MATCHED, ids[0], f"dba {facts.dba!r}"))
         if len(ids) > 1:
+            winner, reason = tie_break_ambiguous(ids, facts, index)
+            path = "tie-broken"
+            if winner is None:
+                winner, reason = prefer_commercial(ids, index)
+                path = "commercial preference"
+            if winner is not None:
+                return _with_requester_flag(facts, index, MatchResult(
+                    MATCHED, winner,
+                    f"dba {facts.dba!r} {path} ({reason})"))
             return MatchResult(AMBIGUOUS, None,
                                f"dba {facts.dba!r}", candidates=list(ids))
+
+    # Typo-tolerant fallback: the exact lookups above found nothing.
+    # Weaker than an exact hit, so — like DBA fragments — a sender email
+    # pointing at a DIFFERENT applicant makes it ambiguous -> hold.
+    for label, raw_name in (("insured name", getattr(facts, "insured_name", None)),
+                            ("dba", getattr(facts, "dba", None))):
+        if not normalize_account_name(raw_name):
+            continue
+        fids, _best = fuzzy_lookup_ids(raw_name, index)
+        if len(fids) == 1:
+            email_key = normalize_email(getattr(facts, "requester_email", None))
+            email_hit = index.by_email.get(email_key) if email_key else None
+            if email_hit and email_hit != fids[0]:
+                return MatchResult(
+                    AMBIGUOUS, None,
+                    f"{label} fuzzy {raw_name!r} -> applicant {fids[0]} "
+                    f"but sender email maps to applicant {email_hit}",
+                    candidates=[fids[0], email_hit])
+            return _with_requester_flag(facts, index, MatchResult(
+                MATCHED, fids[0],
+                f"{label} fuzzy typo-tolerant match {raw_name!r}"))
+        if len(fids) > 1:
+            return MatchResult(
+                AMBIGUOUS, None,
+                f"{label} fuzzy {raw_name!r} matches multiple applicants; "
+                "holding — never guessing",
+                candidates=list(fids))
 
     # DBA-fragment: the email names the trade name ("Abg Transportation")
     # while the book carries the legal name ("AMOUR BUSINESS GROUP LLC DBA
@@ -413,7 +702,17 @@ def match_applicant(
                 return MatchResult(MATCHED, index.by_phone[key],
                                    f"phone {raw}")
 
-    return MatchResult(NO_MATCH, None, "no name/policy/email/phone hit in report")
+    # No hit anywhere: record near-misses (one edit beyond the fuzzy
+    # bound) as a health-check signal on the held item — informational
+    # only, never used to match.
+    near: list[int] = []
+    for raw_name in (getattr(facts, "insured_name", None),
+                     getattr(facts, "dba", None)):
+        near.extend(aid for aid in near_miss_ids(raw_name, index)
+                    if aid not in near)
+    return MatchResult(NO_MATCH, None,
+                       "no name/policy/email/phone hit in report",
+                       near_miss_ids=near)
 
 
 def _with_requester_flag(facts: Any, index: ApplicantIndex,
