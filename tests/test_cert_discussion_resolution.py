@@ -371,3 +371,78 @@ def test_writer_without_readback_is_flagged_not_failed(monkeypatch):
                         "owner", False)
     assert out.status == FILED
     assert any("did not report a read-back" in e for e in out.evidence)
+
+
+# ---------------------------------------------------------------------------
+# find_best_certificate_discussion (2026-09-29: with-note 500 fallback)
+# ---------------------------------------------------------------------------
+
+from robie_job_engine.cert_filing import find_best_certificate_discussion  # noqa: E402
+
+
+def test_find_best_single_cert_discussion():
+    """Exactly one certificate discussion: use it (the applicant's cert discussion)."""
+    discs = [
+        _d("1", "Certificate of Insurance for Daniel Mahler", "2026-09-01T10:00:00+00:00"),
+        _d("2", "Policy Renewal Discussion", "2026-09-02T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Forest Glen"])
+    assert result == ("1", "Certificate of Insurance for Daniel Mahler")
+
+
+def test_find_best_holder_match_among_many():
+    """Multiple cert discussions: pick the one naming the holder."""
+    discs = [
+        _d("1", "Certificate of Insurance Request - Descartes MyCarrierPortal", "2026-09-01T10:00:00+00:00"),
+        _d("2", "Certificate of Insurance Request - Highway App, Inc.", "2026-09-02T10:00:00+00:00"),
+        _d("3", "Policy Renewal", "2026-09-03T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Descartes MyCarrierPortal"])
+    assert result == ("1", "Certificate of Insurance Request - Descartes MyCarrierPortal")
+
+
+def test_find_best_no_holder_match_returns_none():
+    """Multiple cert discussions, no holder match: return None (don't guess)."""
+    discs = [
+        _d("1", "Certificate of Insurance Request - Descartes MyCarrierPortal", "2026-09-01T10:00:00+00:00"),
+        _d("2", "Certificate of Insurance Request - Highway App, Inc.", "2026-09-02T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Unknown Holder XYZ"])
+    assert result is None
+
+
+def test_find_best_no_cert_discussions_returns_none():
+    """Zero certificate discussions: return None (caller tries with-note)."""
+    discs = [
+        _d("1", "Policy Renewal Discussion", "2026-09-01T10:00:00+00:00"),
+    ]
+    client = FakeDiscussions(discs)
+    result = find_best_certificate_discussion(client, 111, ["Some Holder"])
+    assert result is None
+
+
+def test_holder_info_format_extraction():
+    """'Certificate Holder Information' with name on next line is extracted."""
+    em = CertEmail(gmail_id="g", thread_id="t", rfc_message_id="r",
+                   from_header="Lisa Velez <lisa@gmail.com>",
+                   subject="Fwd: Insurance Certificate Request",
+                   date="Tue, 29 Sep 2026 09:01:31 -0400",
+                   body_text="*Certificate Holder Information*\n\nDescartes MyCarrierPortal\n543 Country Club Dr.",
+                   attachments=[])
+    facts = extract_request_facts(em)
+    assert "Descartes MyCarrierPortal" in facts.holder_names
+
+
+def test_additional_insured_extraction():
+    """'Additional insured:' is extracted as a holder."""
+    em = CertEmail(gmail_id="g", thread_id="t", rfc_message_id="r",
+                   from_header="PNM <pnm@gmail.com>",
+                   subject="cert req.",
+                   date="Tue, 29 Sep 2026 09:49:14 -0400",
+                   body_text="Certificate Holder: homeowner.\nAdditional insured: Forest Glen c/o Midlantic Property Management",
+                   attachments=[])
+    facts = extract_request_facts(em)
+    assert any("Forest Glen" in h for h in facts.holder_names)
