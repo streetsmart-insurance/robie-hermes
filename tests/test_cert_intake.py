@@ -207,6 +207,52 @@ def test_extract_facts_no_policy_means_none_not_guess():
     assert facts.insured_name is None
 
 
+def test_extract_facts_coi_for_compliance_platform_shape():
+    # Highway renewal shape (2026-09-29): the insured appears only as
+    # "COI for <NAME>" in subject and body — no "Named Insured:" line.
+    payload = _gmail_payload(
+        frm="Highway <no-reply@highway.com>",
+        subject="Renewal COI Request: COI for EPHE LLC Expires Tomorrow",
+        body=(
+            "Highway COI Request for EPHE LLC\n\nHi there,\n\n"
+            "The certificate of insurance (COI) we have on file for *EPHE LLC* "
+            "has a policy expiring tomorrow. Please provide a new COI for the "
+            "upcoming policy period so we can update our records.\n\n"
+            "Policy #: 9300216995\n"
+        ),
+    )
+    e = CertEmail.from_gmail_api(payload)
+    facts = extract_request_facts(e)
+    assert facts.insured_name == "EPHE LLC"
+    assert facts.policy_numbers == ["9300216995"]
+    assert facts.requester_email == "no-reply@highway.com"
+
+
+def test_extract_facts_coi_for_unknown_name_still_extracts():
+    # Extraction must not depend on the name being a client: an unknown
+    # name extracts cleanly so the matcher can hold it (never misroute).
+    payload = _gmail_payload(
+        frm="Highway <no-reply@highway.com>",
+        subject="Renewal COI Request: COI for Nonexistent Company LLC Expires Tomorrow",
+        body="Highway COI Request for Nonexistent Company LLC\nPolicy #: ZZZ999\n",
+    )
+    e = CertEmail.from_gmail_api(payload)
+    facts = extract_request_facts(e)
+    assert facts.insured_name == "Nonexistent Company LLC"
+
+
+def test_extract_facts_coi_for_keeps_covering_tail_off_name():
+    # "Request for COI for Ameritesting LLC Covering SilverLini" — the
+    # holder tail ("Covering ...") must not glue onto the insured name.
+    payload = _gmail_payload(
+        subject="Request for COI for Ameritesting LLC Covering SilverLini",
+        body="Please send the certificate.",
+    )
+    e = CertEmail.from_gmail_api(payload)
+    facts = extract_request_facts(e)
+    assert facts.insured_name == "Ameritesting LLC"
+
+
 def test_pdf_text_extractor_fills_missing_insured():
     blobs = {"a1": b"%PDF"}
     g = FakeGmail([], {}, blobs)

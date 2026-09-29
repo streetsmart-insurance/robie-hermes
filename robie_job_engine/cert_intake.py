@@ -238,6 +238,10 @@ _INSURED_PATTERNS = (
     re.compile(r"(?i)loss runs?\s+for\s+(.+?)\s+(?:pol#|policy\b)"),
     re.compile(r"(?i)^(.+?)\s+(?:homeowners|dwelling fire|auto|general liability|gl|wc|workers comp)\s+policy\b"),
     re.compile(r"(?i)on behalf of\s+(.+?)(?:,|\n|$)"),
+    # Compliance-platform phrasing: "COI for EPHE LLC Expires Tomorrow"
+    # (Highway). Runs over subject+body; the "expires"/"covering" tails
+    # keep renewal/holder tails from gluing onto the name.
+    re.compile(r"(?i)\bcoi\s+for\s+(.+?)(?:\s+expires|\s+covering|\n|$)"),
 )
 
 _POLICY_RE = re.compile(
@@ -280,6 +284,8 @@ _SUBJECT_PATTERNS = [
     re.compile(r"certificate request\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
     # "COI - Fonseca General Contractor LLC"
     re.compile(r"\bcoi\s*[-:]\s*(.+?)\s*$", re.IGNORECASE),
+    # "Renewal COI Request: COI for EPHE LLC Expires Tomorrow" (Highway)
+    re.compile(r"\bcoi\s+for\s+(.+?)(?:\s+expires|\s*$)", re.IGNORECASE),
 ]
 
 _NAME_LIKE = re.compile(r"[A-Za-z]{2,}")
@@ -357,10 +363,13 @@ def _clean_name(value: str) -> str:
     value = re.sub(r"\s+", " ", (value or "").strip())
     value = _truncate_sentence_runoff(value)
     # A trailing period is sentence punctuation, not part of the name —
-    # unless the name ends in an abbreviation/entity suffix ("P.C.").
+    # unless the final token is itself an abbreviation ("P.C.", "St.").
+    # A bare entity suffix ("LLC.") never takes a period: the dot ended
+    # the sentence, not the name.
     if value.endswith("."):
-        last = value[:-1].split()[-1].rstrip(".").lower() if value[:-1].split() else ""
-        if last not in _ABBREVIATIONS and last not in _ENTITY_SUFFIXES:
+        words = value[:-1].split()
+        last = words[-1] if words else ""
+        if "." not in last:
             value = value[:-1]
     return value[:120]
 
