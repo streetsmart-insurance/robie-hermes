@@ -1693,6 +1693,7 @@ def _render_chat_terminal(
             headline="Not verified.",
             what_happened=(
                 "Robie tried the work, but the full result couldn't be independently confirmed. "
+                "Unconfirmed success claims are suppressed. "
                 + status_format.plain_reason(raw_reason)
             ),
             anything_needed="Review the details below, then retry or confirm manually \u2014 don't treat this as done.",
@@ -1710,7 +1711,7 @@ def _render_chat_terminal(
     raw_reason = str(job.get("last_error") or "waiting for a human or destination update")
     return status_format.render_simple_status(
         headline="Waiting on you." if needs_input else "Waiting.",
-        what_happened=f"The job is {status.value.replace('_', ' ')} \u2014 {status_format.plain_reason(raw_reason)}.",
+        what_happened=f"The job is {status.value} \u2014 {status_format.plain_reason(raw_reason)}.",
         anything_needed=(
             "Your input is needed \u2014 see the details below."
             if needs_input

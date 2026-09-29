@@ -72,11 +72,15 @@ def plain_reason(text: str | None) -> str:
 
 
 def short_job_ref(job_id: str | None) -> str:
-    """Small reference line for the bottom of the message."""
+    """Small reference line for the bottom of the message.
+
+    Uses the full job ID so a reader can match the message to the exact
+    job it reports on.
+    """
     job_id = str(job_id or "").strip()
     if not job_id:
         return ""
-    return f"Ref: job {job_id[:8]}"
+    return f"Ref: job {job_id}"
 
 
 def render_simple_status(

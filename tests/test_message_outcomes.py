@@ -44,7 +44,7 @@ class MessageOutcomeTests(unittest.TestCase):
         self.assertIn("What happened:", result)
         self.assertIn("Anything needed:", result)
         self.assertIn("Status:", result)
-        self.assertIn(f"Ref: job {job_id[:8]}", result)
+        self.assertIn(f"Ref: job {job_id}", result)
         self.assertIn('Checked: documents found: Bond.pdf', result)
         self.assertFalse(store.list_evidence(job_id)[-1]['verified'])
 
