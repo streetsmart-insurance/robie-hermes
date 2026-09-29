@@ -297,5 +297,47 @@ class MondayTimerRegressionTests(unittest.TestCase):
         self.assertEqual(got["4247"].row_count, 1)
 
 
+class Mortgagee4744Tests(unittest.TestCase):
+    """The 4744 mortgagee report (policy-expiration, 8 cols) replaced the
+    retired 4372 task export. Fingerprinted 2026-09-28 against the real
+    05:01 delivery (Gmail 1a0e73f8f39ced03): 189 data rows, no totals row."""
+
+    def test_4744_header_count_is_8(self):
+        self.assertEqual(len(ing.expected_headers("4744")), 8)
+
+    def test_4744_fingerprint_routes(self):
+        headers = [
+            "Account Name",
+            "Policy Number",
+            "Master Company",
+            "Line Of Business",
+            "Premium - Annualized",
+            "Assigned Producer",
+            "CSR",
+            "Policy Expiration Date",
+        ]
+        self.assertEqual(ing.fingerprint_report_id(headers), "4744")
+        self.assertEqual(ing.expected_headers("4744"), headers)
+
+    def test_4744_identity_is_policy_number(self):
+        rows, _ = ing.parse_and_validate_csv(
+            "4744", ing._synthetic_csv("4744", n_rows=1), source_label="unittest"
+        )
+        self.assertEqual(ing.identity_value("4744", rows[0]), "ID-4744-1")
+
+    def test_4744_schema_is_verified(self):
+        self.assertTrue(ing.SCHEMA_VERIFIED["4744"])
+
+    def test_4744_display_name(self):
+        self.assertEqual(
+            ing.REPORT_DISPLAY_NAMES["4744"], "Mortgagee Verification Queue - ROBIE"
+        )
+
+    def test_4744_selected_by_fingerprint_not_subject(self):
+        # The 4744 email shares its subject line with a stale schedule
+        # export, so subject alone must not identify it.
+        self.assertFalse(ing.subject_matches_report("Mortgagee Verification Queue - ROBIE", "4744"))
+
+
 if __name__ == "__main__":
     unittest.main()
