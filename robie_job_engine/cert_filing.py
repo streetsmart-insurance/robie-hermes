@@ -988,6 +988,79 @@ def _find_discussion_by_exact_title(discussions_client: Any,
     return None
 
 
+def _cert_title_words(title: str) -> set[str]:
+    """Significant lowercase words from a discussion title."""
+    words = set()
+    for word in str(title or "").lower().split():
+        cleaned = "".join(c for c in word if c.isalnum())
+        if len(cleaned) >= 4:
+            words.add(cleaned)
+    return words
+
+
+def find_best_certificate_discussion(
+    discussions_client: Any,
+    applicant_id: int,
+    holder_names: list[str],
+) -> tuple[str, str] | None:
+    """Find the best existing certificate discussion to append the filing note to.
+
+    The with-note creation endpoint (POST v8/discussions/with-note) returns
+    HTTP 500 for every payload shape (proven 2026-09-29: the endpoint exists
+    but its server-side handler is broken). Appending to an existing
+    certificate discussion via POST v8/discussions/{id}/notes is the proven
+    path, so prefer it over creating a new discussion.
+
+    Selection rules (fail-closed):
+    - Only discussions whose title mentions certificate/cert/coi qualify.
+    - Exactly one qualifying discussion: it is the applicant's certificate
+      discussion — use it. The filing note names the holder explicitly.
+    - Multiple qualifying discussions: use the one whose title contains a
+      significant word from a holder name (e.g. holder "Descartes
+      MyCarrierPortal" matches "Certificate of Insurance Request -
+      Descartes MyCarrierPortal"). No holder word in any title: return None
+      (caller holds UNVERIFIED rather than guessing).
+    - Zero qualifying discussions: return None (caller falls back to
+      with-note creation).
+
+    Returns (discussion_id, title) or None.
+    """
+    try:
+        rows = discussions_client.get_discussions(applicant_id) or []
+    except Exception:
+        return None
+    cert_rows: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = _discussion_title(row) or ""
+        lowered = title.lower()
+        if "certificate" not in lowered and "cert" not in lowered \
+                and "coi" not in lowered:
+            continue
+        did = _discussion_id(row)
+        if did:
+            cert_rows.append((did, title))
+    if not cert_rows:
+        return None
+    if len(cert_rows) == 1:
+        return cert_rows[0]
+    holder_words: set[str] = set()
+    for holder in holder_names or []:
+        holder_words |= _cert_title_words(holder)
+    if not holder_words:
+        return None
+    best: tuple[str, str] | None = None
+    best_score = 0
+    for did, title in cert_rows:
+        title_words = _cert_title_words(title)
+        score = len(holder_words & title_words)
+        if score > best_score:
+            best_score = score
+            best = (did, title)
+    return best if best_score > 0 else None
+
+
 def _verify_reused_discussion(discussions_client: Any,
                               discussion_id: str) -> str | None:
     """GET-verify a dedup-reused discussion still exists. Returns its title,
@@ -1030,6 +1103,11 @@ def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
           discussion rather than creating a duplicate;
       (c) the exact auto title already on the applicant in EZLynx —
           destination-based catch for a create whose ledger row never landed;
+      (c2) the best existing certificate discussion on the applicant —
+          appended to via the proven append-note API. The with-note creation
+          endpoint is broken server-side (HTTP 500, proven 2026-09-29), so
+          an existing certificate discussion is preferred over creating one.
+          Fail-closed: no confident match means no guess;
       (d) create via POST v8/discussions/with-note with the filing note as
           the first note, then prove it with a fresh GET read-back.
 
@@ -1083,6 +1161,30 @@ def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
         return _reuse_discussion(
             record, verified, deps, res, message_id, applicant_id,
             did, title, "exact title already on the applicant", dry_run)
+
+    # (c2) best existing certificate discussion on the applicant. The
+    # with-note creation endpoint is broken server-side (HTTP 500 for every
+    # payload shape, proven 2026-09-29), so prefer appending the filing note
+    # to the applicant's existing certificate discussion via the proven
+    # append-note API. Fail-closed: no confident match means no guess — the
+    # caller falls through to (d).
+    best = find_best_certificate_discussion(client, applicant_id,
+                                            holder_names)
+    if best:
+        did, best_title = best
+        seen = _verify_reused_discussion(client, did)
+        if seen is not None:
+            if store:
+                store.auto_discussion_record(applicant_id, holder_norm, did,
+                                             best_title)
+            return _reuse_discussion(
+                record, verified, deps, res, message_id, applicant_id,
+                did, seen,
+                "best existing certificate discussion on the applicant",
+                dry_run)
+        res.evidence.append(
+            f"best certificate discussion {did} no longer reads back — "
+            "not reusing")
 
     # (d) create. Dry run validates everything but posts nothing.
     if dry_run:

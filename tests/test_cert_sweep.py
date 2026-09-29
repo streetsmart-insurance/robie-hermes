@@ -461,11 +461,10 @@ def test_sweep_redrives_retry_ledger_record(tmp_path):
     retry_conn.close()
 
 
-def test_gmail_query_uses_cutoff_with_slack_day():
-    # Today-forward cutoff 2026-09-27 ET; the query keeps one slack day
-    # because Gmail's after: is date-granular. The exact boundary is
-    # enforced client-side on internalDate.
-    assert gmail_query() == "after:2026/09/26"
+def test_gmail_query_window_is_relative():
+    now = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)
+    # QUERY_SLACK_DAYS=1: CUTOFF_ET (2026-09-27) minus 1 day = 2026-09-26.
+    assert gmail_query(now=now) == "after:2026/09/26"
 
 
 def test_load_applicant_index_maps_csv_columns(tmp_path):
@@ -764,7 +763,6 @@ def test_adapter_mark_read_never_raises(monkeypatch):
     assert "token service down" in reason
 
 
-# ---------------------------------------------------------------------------
 # Multi-insured sweep behavior
 # ---------------------------------------------------------------------------
 
