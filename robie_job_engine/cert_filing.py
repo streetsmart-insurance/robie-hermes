@@ -547,8 +547,14 @@ def file_record(record: Any, verified: Any, deps: FilingDeps,
         res.hold_reasons.append("record is not VERIFIED — refusing to file")
         return res
     applicant_id = verified.applicant_id
-    message_id = getattr(record, "gmail_id", None) or getattr(
-        record, "message_id", "unknown")
+    # Filing identity is per insured target (ledger_key), not per
+    # message: a multi-insured email files one note/task chain per named
+    # insured, and the store's "already filed" note/task state must not
+    # leak from one target into another's. Single-insured records keep
+    # ledger_key == gmail_id, so behavior there is unchanged.
+    message_id = (getattr(record, "ledger_key", None)
+                  or getattr(record, "gmail_id", None)
+                  or getattr(record, "message_id", "unknown"))
 
     if deps.store and not deps.store.claim(
             message_id, owner,

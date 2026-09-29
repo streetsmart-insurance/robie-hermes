@@ -11,6 +11,7 @@ from robie_job_engine.cert_applicant_index import (  # noqa: E402
     NO_MATCH,
     ApplicantIndex,
     build_index,
+    fuzzy_lookup_ids,
     match_applicant,
     normalize_account_name,
     normalize_email,
@@ -22,6 +23,104 @@ from robie_job_engine.cert_intake import (  # noqa: E402
     RequestFacts,
     extract_request_facts,
 )
+
+
+# ---------------------------------------------------------------------------
+# Commercial-preference rule (Carlo 2026-09-29): an ambiguous insured name
+# errs toward the commercial applicant — exactly one candidate with a
+# non-empty DBA resolves to it, after the contact-info tie-breaker.
+# The "merge duplicates" idea is dead: personal-vs-commercial splits for
+# the same human are legitimate separate records.
+# ---------------------------------------------------------------------------
+
+def make_commercial_index():
+    rows = [
+        # Martin Omondi-shaped: same normalized name, one commercial
+        # (DBA) record, one bare personal record, no distinguishing
+        # contact info in either the records or the request.
+        {"account_name": "Martin Omondi", "applicant_id": 201,
+         "dba": "GTZ TRANSPORTATION", "email_primary": "", "phones": []},
+        {"account_name": "Martin Omondi", "applicant_id": 202,
+         "dba": "", "email_primary": "", "phones": []},
+        # Both candidates commercial -> still ambiguous.
+        {"account_name": "Jordan Ellis", "applicant_id": 203,
+         "dba": "ELLIS TRUCKING", "email_primary": "", "phones": []},
+        {"account_name": "Jordan Ellis", "applicant_id": 204,
+         "dba": "ELLIS LOGISTICS", "email_primary": "", "phones": []},
+        # Neither commercial -> still ambiguous (covered by the older
+        # collision tests; here for the preference-path contrast).
+        {"account_name": "Casey Rivera", "applicant_id": 205,
+         "dba": "", "email_primary": "", "phones": []},
+        {"account_name": "Casey Rivera", "applicant_id": 206,
+         "dba": "", "email_primary": "", "phones": []},
+    ]
+    return build_index(rows, source_path="/tmp/fake.xlsx")
+
+
+def test_ambiguous_name_resolves_to_commercial_record():
+    index = make_commercial_index()
+    facts = RequestFacts(insured_name="Martin Omondi")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 201
+    assert "commercial preference" in res.evidence
+    assert "GTZ TRANSPORTATION" in res.evidence
+
+
+def test_ambiguous_name_with_two_commercial_records_holds():
+    index = make_commercial_index()
+    facts = RequestFacts(insured_name="Jordan Ellis")
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert set(res.candidates) == {203, 204}
+
+
+def test_ambiguous_name_with_no_commercial_records_holds():
+    index = make_commercial_index()
+    facts = RequestFacts(insured_name="Casey Rivera")
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert set(res.candidates) == {205, 206}
+
+
+def test_contact_tie_break_beats_commercial_preference():
+    # Hard evidence from the request itself always wins over the
+    # commercial prior: the sender email points at the BARE record.
+    rows = [
+        {"account_name": "Martin Omondi", "applicant_id": 201,
+         "dba": "GTZ TRANSPORTATION", "email_primary": "", "phones": []},
+        {"account_name": "Martin Omondi", "applicant_id": 202,
+         "dba": "", "email_primary": "martin@example.com", "phones": []},
+    ]
+    index = build_index(rows, source_path="/tmp/fake.xlsx")
+    facts = RequestFacts(insured_name="Martin Omondi",
+                         requester_email="martin@example.com")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 202
+    assert "tie-broken" in res.evidence
+
+
+def test_dba_part_parsed_from_account_name_infix():
+    from robie_job_engine.cert_applicant_index import _dba_part
+    assert _dba_part("Martin Omondi DBA GTZ Transportation") == \
+        "GTZ Transportation"
+    assert _dba_part("Martin Omondi") == ""
+    assert _dba_part(None) == ""
+
+
+def test_dba_infix_counts_as_commercial_indicator():
+    # Rows without a separate dba column: the "DBA" infix in the
+    # account name still marks the commercial record.
+    rows = [
+        {"account_name": "Martin Omondi DBA GTZ Transportation",
+         "applicant_id": 301, "email_primary": "", "phones": []},
+        {"account_name": "Martin Omondi", "applicant_id": 302,
+         "email_primary": "", "phones": []},
+    ]
+    index = build_index(rows, source_path="/tmp/fake.xlsx")
+    assert index.dba_by_id[301] == "GTZ Transportation"
+    assert 302 not in index.dba_by_id
 
 
 def make_index():
@@ -134,6 +233,175 @@ def test_bad_rows_skipped_not_fatal():
 
 
 # ---------------------------------------------------------------------------
+# Typo-tolerant matching (bounded fuzzy fallback)
+# ---------------------------------------------------------------------------
+# Exact normalized matching stays first. Fuzzy fires only when the exact
+# lookups found nothing, and exactly one candidate wins — otherwise hold.
+
+def make_typo_index():
+    rows = [
+        {"account_name": "EPHE LLC", "applicant_id": 199205654,
+         "email_primary": "sinancanlv@yahoo.com", "phones": []},
+        {"account_name": "Abc Plumbing LLC", "applicant_id": 301,
+         "email_primary": "", "phones": []},
+        {"account_name": "Abc Plumbing LLP", "applicant_id": 302,
+         "email_primary": "", "phones": []},
+        {"account_name": "Fonseca General Contractor LLC",
+         "applicant_id": 116349171, "email_primary": "office@fonsecagc.com",
+         "phones": ["7327754443"]},
+    ]
+    return build_index(rows, source_path="/tmp/fake.xlsx")
+
+
+def test_fuzzy_typo_matches_single_candidate():
+    # The live EPHE miss shape: "EPHE LCC" for "EPHE LLC".
+    index = make_typo_index()
+    facts = RequestFacts(insured_name="EPHE LCC")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 199205654
+    assert "fuzzy" in res.evidence
+
+
+def test_exact_match_still_wins_before_fuzzy():
+    index = make_typo_index()
+    facts = RequestFacts(insured_name="EPHE LLC")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 199205654
+    assert "fuzzy" not in res.evidence
+
+
+def test_fuzzy_typo_plausibly_matching_two_clients_holds():
+    # "Abc Plumbing LLQ" is one typo from BOTH Abc Plumbing LLC and
+    # Abc Plumbing LLP — held, never guessed.
+    index = make_typo_index()
+    facts = RequestFacts(insured_name="Abc Plumbing LLQ")
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert res.applicant_id is None
+    assert set(res.candidates) == {301, 302}
+    assert "never guessing" in res.hold_reason()
+
+
+def test_fuzzy_sender_email_pointing_elsewhere_holds():
+    # Weak signal + contradictory sender email = hold (same rule as
+    # DBA-fragment matching).
+    index = make_typo_index()
+    facts = RequestFacts(insured_name="EPHE LCC",
+                         requester_email="office@fonsecagc.com")
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert res.applicant_id is None
+
+
+def test_fuzzy_needs_minimum_name_length():
+    # Short names collide too fast ("ABC" is one typo from "ABD",
+    # "ACC", ...) — no fuzzy below 4 normalized chars.
+    index = make_typo_index()
+    ids, _best = fuzzy_lookup_ids("ABC", index)
+    assert ids == []
+
+
+def test_near_miss_reported_but_never_matched():
+    # "EPHE LLCXXX" is one edit OUTSIDE the bound: still NO_MATCH, but
+    # the near-miss id is surfaced for the health check.
+    index = make_typo_index()
+    facts = RequestFacts(insured_name="EPHE LLCXXX")
+    res = match_applicant(facts, index)
+    assert res.status == NO_MATCH
+    assert res.near_miss_ids == [199205654]
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous-name tie-breaking
+# ---------------------------------------------------------------------------
+# Same normalized name, 2+ applicants (different contact info). The
+# request's own sender email / phone / policy number may corroborate
+# exactly one candidate. Zero or 2+ corroborated candidates stay
+# AMBIGUOUS — never guessed.
+
+def make_tie_index():
+    rows = [
+        {"account_name": "Robert Lake", "applicant_id": 101,
+         "email_primary": "rob@lakeone.com", "phones": ["2125550101"]},
+        {"account_name": "Robert Lake", "applicant_id": 102,
+         "email_primary": "rob@laketwo.com", "phones": ["2125550102"]},
+    ]
+    index = build_index(rows, source_path="/tmp/fake.xlsx")
+    # by_policy is built by the EPHE follow-up's policy-number matching;
+    # injected here to prove the tie-break composes with it.
+    index.by_policy = {"9300216995": 102}
+    return index
+
+
+def test_tie_broken_by_sender_email():
+    index = make_tie_index()
+    facts = RequestFacts(insured_name="Robert Lake",
+                         requester_email="rob@laketwo.com")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 102
+    assert "tie-broken" in res.evidence
+
+
+def test_tie_broken_by_phone():
+    index = make_tie_index()
+    facts = RequestFacts(insured_name="Robert Lake", phones=["2125550101"])
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 101
+    assert "tie-broken" in res.evidence
+
+
+def test_tie_broken_by_policy_number():
+    index = make_tie_index()
+    facts = RequestFacts(insured_name="Robert Lake",
+                         policy_numbers=["9300216995"])
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 102
+    assert "tie-broken" in res.evidence
+
+
+def test_tie_unbreakable_when_contact_matches_none():
+    index = make_tie_index()
+    facts = RequestFacts(insured_name="Robert Lake",
+                         requester_email="nobody@nowhere.com")
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert res.applicant_id is None
+    assert set(res.candidates) == {101, 102}
+
+
+def test_tie_unbreakable_when_contact_matches_both():
+    # Sender email says 102, extracted phone says 101 — still a tie.
+    index = make_tie_index()
+    facts = RequestFacts(insured_name="Robert Lake",
+                         requester_email="rob@laketwo.com",
+                         phones=["2125550101"])
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert res.applicant_id is None
+
+
+def test_tie_broken_on_dba_too():
+    index = make_tie_index()
+    facts = RequestFacts(dba="Robert Lake",
+                         requester_email="rob@lakeone.com")
+    res = match_applicant(facts, index)
+    assert res.status == MATCHED
+    assert res.applicant_id == 101
+
+
+def test_exact_ambiguous_without_contact_info_stays_held():
+    # Composition check: exact-name tie + no tie-break = AMBIGUOUS.
+    # Fuzzy must NOT rescue it by matching some other name.
+    index = make_tie_index()
+    facts = RequestFacts(insured_name="Robert Lake")
+    res = match_applicant(facts, index)
+    assert res.status == AMBIGUOUS
+    assert "fuzzy" not in res.evidence
 # Policy-number matching (regression: the 2026-09-29 EPHE LLC miss —
 # "COI for EPHE LLC" named a client whose policy number was in the book,
 # but policy numbers were never a match key).
