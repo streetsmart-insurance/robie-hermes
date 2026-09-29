@@ -27,10 +27,21 @@ Reliability:
   no browser launches, no adapter executes, portal policies are
   recorded failed with the reason.
 - One browser context per carrier (``CarrierSession``): sign in once,
-  reuse for that carrier's policies. Session expiry mid-flow gets
-  exactly one fresh-context re-login; transient failures (timeouts,
+  reuse for that carrier's policies. Before starting work on each policy
+  on a reused session, the runner probes the adapter's
+  ``logged_in_indicator``; an absent indicator raises SessionExpiredError
+  and gets exactly one fresh-context re-login (a silent mid-run logout
+  no longer surfaces as selector timeouts). Adapters without an
+  indicator keep the old behavior, marked ``session_probe:
+  "unavailable"`` in the evidence. Transient failures (timeouts,
   dropped connections) are retried with exponential backoff; permanent
   failures are recorded as evidence, never raised.
+- A login that never reaches the authenticated state (possible MFA,
+  changed login page, bad credentials) raises LoginStalledError from the
+  adapter's login steps: never retried, never hung. The policy is
+  recorded ``blocked`` with the distinct LOGIN_STALL_REASON, the
+  screenshot + action log are saved, and the run moves to the next
+  policy.
 - Idempotent re-runs: a policy with valid prior evidence in the same
   run dir is skipped (status ``skipped``), never re-pulled.
 - Per-policy timestamped action log (selectors only — never filled
@@ -56,9 +67,11 @@ from typing import Any, Callable
 from pypdf import PdfReader
 
 from .phase1_adapters.base import (
+    LOGIN_STALL_REASON,
     READ_ONLY_ACTIONS,
     AdapterSpec,
     DownloadResult,
+    LoginStalledError,
     PolicyRef,
     SessionExpiredError,
 )
@@ -194,6 +207,33 @@ def pdf_contains_policy_number(path: Path, policy_number: str) -> bool | None:
     return _normalize(policy_number) in _normalize(text)
 
 
+def _probe_session(port: Any, spec: AdapterSpec, session_is_new: bool) -> str:
+    """Session-expiry probe outcome, for the per-policy evidence record.
+
+    Returns "deferred: fresh session" (nothing to probe before the first
+    login on a new context), "unavailable" (the adapter declares no
+    ``logged_in_indicator`` — the old behavior, marked honestly), or
+    "checked" (indicator present, session alive). Raises
+    SessionExpiredError when the indicator is declared but absent: a
+    silent mid-run logout, which the runner answers with its
+    exactly-once re-login instead of letting selector timeouts pile up.
+    """
+    if session_is_new:
+        return "deferred: fresh session (login runs inside download)"
+    indicator = (spec.logged_in_indicator or "").strip()
+    if not indicator:
+        return "unavailable"
+    probe = getattr(port, "has_selector", None)
+    if not callable(probe):
+        return "unavailable: port has no probe support"
+    if probe(indicator):
+        return "checked"
+    raise SessionExpiredError(
+        f"portal session for {spec.carrier_id} appears expired: "
+        f"login indicator {indicator!r} absent before policy work"
+    )
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -291,7 +331,14 @@ def run_pilot(
     sessions: dict[str, CarrierSession] = {}
     relogin_used: set[str] = set()  # carriers that already had their one re-login
 
-    def _session_for(carrier_id: str, runtime: str) -> CarrierSession:
+    def _session_for(carrier_id: str, runtime: str) -> tuple[CarrierSession, bool]:
+        """Return the carrier's session plus whether it is newly created.
+
+        The session-expiry probe is skipped on a new session: there is
+        nothing to probe before the adapter's first login runs inside
+        download().
+        """
+        is_new = carrier_id not in sessions
         session = sessions.get(carrier_id)
         if session is None:
             if browser_factory is None:
@@ -300,7 +347,7 @@ def run_pilot(
                 )
             session = CarrierSession(carrier_id, runtime, browser_factory)
             sessions[carrier_id] = session
-        return session
+        return session, is_new
 
     def _maybe_screenshot(port: Any, policy_number: str) -> str:
         shot_fn = getattr(port, "screenshot", None)
@@ -358,7 +405,9 @@ def run_pilot(
                             "credential preflight failed: "
                             + "; ".join(preflight_missing)
                         )
-                    session = _session_for(spec.carrier_id, spec.runtime)
+                    session, session_is_new = _session_for(
+                        spec.carrier_id, spec.runtime
+                    )
                     port = session.port()
                     reset_log = getattr(port, "reset_log", None)
                     if callable(reset_log):
@@ -372,23 +421,41 @@ def run_pilot(
                             sleep=sleep,
                         )
 
+                    def _download_once(p: Any, *, probe_first: bool) -> DownloadResult:
+                        # FIX 1 probe: on a reused session, confirm the
+                        # adapter's login indicator is still present before
+                        # doing policy work. An absent indicator raises
+                        # SessionExpiredError -> the exactly-once re-login
+                        # below. Never probed on a fresh session (the
+                        # adapter's login has not run yet) or after the
+                        # re-login (same reason).
+                        if probe_first:
+                            ev.extra["session_probe"] = _probe_session(
+                                p, spec, session_is_new
+                            )
+                        return _attempt(p)
+
                     try:
-                        result = _attempt(port)
+                        result = _download_once(port, probe_first=True)
                     except SessionExpiredError:
                         # Exactly one fresh-context re-login per carrier.
                         # The adapter's login steps run again inside
                         # download() on the new context.
                         if spec.carrier_id in relogin_used:
+                            ev.extra["session_probe"] = (
+                                "expired: re-login already used"
+                            )
                             raise SessionExpiredError(
                                 f"portal session for {spec.carrier_id} expired "
                                 "twice; re-login did not stick"
                             )
                         relogin_used.add(spec.carrier_id)
+                        ev.extra["session_probe"] = "expired: re-login engaged"
                         port = session.reset()
                         reset_log = getattr(port, "reset_log", None)
                         if callable(reset_log):
                             reset_log()
-                        result = _attempt(port)
+                        result = _download_once(port, probe_first=False)
                     action_log = getattr(port, "action_log", None)
                     if action_log:
                         ev.extra["action_log"] = list(action_log)
@@ -440,6 +507,21 @@ def run_pilot(
                 ev.status = "blocked"
                 ev.failure_reason = str(exc)
                 ev.detail = str(exc)
+            except LoginStalledError:
+                # FIX 2: the login flow never reached the authenticated
+                # state — possible MFA, changed login page, or bad
+                # credentials. Recorded blocked with the distinct reason
+                # (never retried, never hung: the login waits already
+                # timed out inside the adapter). Screenshot + action log
+                # saved; the loop moves to the next policy.
+                ev.status = "blocked"
+                ev.failure_reason = LOGIN_STALL_REASON
+                ev.detail = f"{LOGIN_STALL_REASON} (carrier: {spec.carrier_id})"
+                action_log = getattr(port, "action_log", None)
+                if action_log:
+                    ev.extra["action_log"] = list(action_log)
+                if port is not None:
+                    ev.screenshot = _maybe_screenshot(port, ref.policy_number)
             except Exception as exc:  # noqa: BLE001 - per-policy failure is evidence
                 ev.status = "failed"
                 ev.failure_reason = f"{type(exc).__name__}: {exc}"[:300]

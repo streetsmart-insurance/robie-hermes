@@ -244,6 +244,26 @@ class PlaywrightBrowserPort:
 
         self._wrap("wait", f"{selector} (timeout_ms={timeout_ms})", _do)
 
+    def has_selector(self, selector: str, timeout_ms: int = 5000) -> bool:
+        """Quiet presence probe for the session-expiry check. Never raises.
+
+        Used by the runner before starting work on each policy on a
+        reused session: the adapter's ``logged_in_indicator`` must be
+        present, or the session is treated as silently expired. A short
+        timeout keeps a dead page from stalling the run; ``attached``
+        (not ``visible``) is enough to prove the authenticated DOM is
+        there.
+        """
+        try:
+            self._page.wait_for_selector(
+                selector, state="attached", timeout=timeout_ms
+            )
+            present = True
+        except Exception:
+            present = False
+        self._record("probe", f"{selector} -> {'present' if present else 'absent'}")
+        return present
+
     def download(self, click_selector: str, dest_path: Path) -> Path:
         dest = Path(dest_path)
         dest.parent.mkdir(parents=True, exist_ok=True)

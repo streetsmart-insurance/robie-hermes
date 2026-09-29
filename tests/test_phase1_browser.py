@@ -718,3 +718,249 @@ def test_action_log_attached_to_evidence(tmp_path):
     actions = ev.extra["action_log"]
     assert [a["action"] for a in actions] == ["goto", "click"]
     assert all("t" in a for a in actions)
+
+
+# ---------------------------------------------------------------- FIX 1: session-expiry probe
+
+
+class ProbingPort(FakeSessionPort):
+    """FakeSessionPort with a controllable has_selector probe."""
+
+    def __init__(self, probe_results=()):
+        super().__init__()
+        self._probe_results = list(probe_results)
+        self.probe_calls = []
+
+    def has_selector(self, selector, timeout_ms=5000):
+        self.probe_calls.append(selector)
+        self.note("probe", selector)
+        if self._probe_results:
+            return self._probe_results.pop(0)
+        return False
+
+
+def _probed_ok_module(probe_indicator="#logout", carrier_id="amtrust"):
+    spec = AdapterSpec(
+        carrier_id=carrier_id,
+        carrier_name="Fake",
+        portal_url="https://example.invalid",
+        runtime="box",
+        runtime_reason="test",
+        username_env="",
+        password_env="",
+        doc_kind="audit_papers",
+        logged_in_indicator=probe_indicator,
+    )
+
+    class Mod:
+        ADAPTER = spec
+
+        @staticmethod
+        def download(policy, dest_dir, browser, accessor=None):
+            dest = Path(dest_dir) / "doc.pdf"
+            dest.write_bytes(_make_pdf_with_text(
+                f"Policy Number: {policy.policy_number}"))
+            return DownloadResult(ok=True, file_path=dest, detail="fake ok")
+
+    return Mod()
+
+
+def test_probe_unavailable_adapter_keeps_old_behavior(tmp_path):
+    """No indicator declared: old behavior + honest 'unavailable' flag."""
+    created = []
+
+    def factory(runtime):
+        created.append(runtime)
+        return FakeSessionPort()
+
+    rows = [_row(policy_number="P1"), _row(policy_number="P2")]
+    out = run_pilot(
+        rows,
+        run_dir=tmp_path,
+        registry={"amtrust": _ok_module()},
+        browser_factory=factory,
+        sleep=lambda s: None,
+    )
+    assert [e.status for e in out] == ["downloaded", "downloaded"]
+    # P1: fresh session, probe deferred; P2: reused session, no indicator
+    # declared -> honest "unavailable", old behavior otherwise.
+    assert out[0].extra["session_probe"].startswith("deferred")
+    assert out[1].extra["session_probe"] == "unavailable"
+    assert created == ["box"]  # one session, no probe-driven re-login
+
+
+def test_probe_deferred_on_fresh_session(tmp_path):
+    """Indicator declared but session brand new: probe deferred, no raise."""
+    created = []
+
+    def factory(runtime):
+        created.append(runtime)
+        return ProbingPort()
+
+    ev = run_pilot(
+        [_row()],
+        run_dir=tmp_path,
+        registry={"amtrust": _probed_ok_module()},
+        browser_factory=factory,
+        sleep=lambda s: None,
+    )[0]
+    assert ev.status == "downloaded"
+    assert ev.extra["session_probe"].startswith("deferred: fresh session")
+    assert created == ["box"]
+    assert FakeSessionPort.instances[0].probe_calls == []
+
+
+def test_probe_checked_when_indicator_present(tmp_path):
+    """Reused session, indicator present: 'checked', no re-login."""
+    created = []
+
+    def factory(runtime):
+        created.append(runtime)
+        return ProbingPort(probe_results=[True])
+
+    rows = [_row(policy_number="P1"), _row(policy_number="P2")]
+    out = run_pilot(
+        rows,
+        run_dir=tmp_path,
+        registry={"amtrust": _probed_ok_module()},
+        browser_factory=factory,
+        sleep=lambda s: None,
+    )
+    assert [e.status for e in out] == ["downloaded", "downloaded"]
+    assert out[0].extra["session_probe"].startswith("deferred")
+    assert out[1].extra["session_probe"] == "checked"
+    assert created == ["box"]  # same session reused, no re-login
+    assert FakeSessionPort.instances[0].probe_calls == ["#logout"]
+
+
+def test_probe_detects_logged_out_triggers_single_relogin(tmp_path):
+    """Absent indicator on a reused session: exactly one re-login, then OK."""
+    ports = []
+
+    def factory(runtime):
+        port = ProbingPort(probe_results=[False])  # reused session looks logged out
+        ports.append(port)
+        return port
+
+    rows = [_row(policy_number="P1"), _row(policy_number="P2")]
+    out = run_pilot(
+        rows,
+        run_dir=tmp_path,
+        registry={"amtrust": _probed_ok_module()},
+        browser_factory=factory,
+        sleep=lambda s: None,
+    )
+    assert [e.status for e in out] == ["downloaded", "downloaded"]
+    assert len(ports) == 2  # initial + exactly one re-login
+    # the probe ran on the reused session (found it logged out) and was
+    # skipped on the fresh post-reset session; both close at run end.
+    assert ports[0].probe_calls == ["#logout"]
+    assert ports[1].probe_calls == []
+    assert all(p.closed for p in ports)
+    assert out[1].extra["session_probe"] == "expired: re-login engaged"
+
+
+# ---------------------------------------------------------------- FIX 2: login-stall handling
+
+
+def test_login_stall_records_blocked_with_mfa_reason(tmp_path):
+    """A stalled login is blocked (not retried, not hung); next policy runs."""
+    from robie_job_engine.phase1_adapters.base import (
+        LOGIN_STALL_REASON,
+        LoginStalledError,
+    )
+
+    class StallThenOk:
+        ADAPTER = _portal_spec()
+        calls = 0
+
+        @staticmethod
+        def download(policy, dest_dir, browser, accessor=None):
+            StallThenOk.calls += 1
+            browser.note("goto", "https://example.invalid/login")
+            if StallThenOk.calls == 1:
+                raise LoginStalledError(LOGIN_STALL_REASON)
+            dest = Path(dest_dir) / "doc.pdf"
+            dest.write_bytes(_make_pdf_with_text(
+                f"Policy Number: {policy.policy_number}"))
+            return DownloadResult(ok=True, file_path=dest, detail="fake ok")
+
+    def factory(runtime):
+        return FakeSessionPort()
+
+    rows = [_row(policy_number="P1"), _row(policy_number="P2")]
+    out = run_pilot(
+        rows,
+        run_dir=tmp_path,
+        registry={"amtrust": StallThenOk()},
+        browser_factory=factory,
+        sleep=lambda s: None,
+    )
+    assert StallThenOk.calls == 2  # stalled once (no retry), then next policy ran
+    blocked, second = out
+    assert blocked.status == "blocked"
+    assert blocked.failure_reason == LOGIN_STALL_REASON  # exact, distinct string
+    assert "possible MFA" in blocked.failure_reason
+    assert blocked.screenshot == "screenshots/P1.png"
+    assert (tmp_path / blocked.screenshot).is_file()
+    assert [a["action"] for a in blocked.extra["action_log"]] == ["goto"]
+    assert second.status == "downloaded"  # run moved to the next policy
+
+
+def test_login_stall_reason_distinct_from_selector_failure(tmp_path):
+    """The stall reason must not look like an ordinary selector failure."""
+    from robie_job_engine.phase1_adapters.base import LOGIN_STALL_REASON
+
+    assert "possible MFA" in LOGIN_STALL_REASON
+    assert "timed out" not in LOGIN_STALL_REASON.lower()
+    assert "selector" not in LOGIN_STALL_REASON.lower()
+
+
+def test_adapter_login_converts_timeout_to_stall(tmp_path, monkeypatch):
+    """Real adapter login(): a login-page timeout becomes LoginStalledError."""
+    from robie_job_engine.phase1_adapters import amtrust
+    from robie_job_engine.phase1_adapters.base import (
+        LOGIN_STALL_REASON,
+        LoginStalledError,
+    )
+
+    monkeypatch.setenv("PHASE1_AMTRUST_USERNAME_SECRET",
+                       "projects/p/secrets/u/versions/1")
+    monkeypatch.setenv("PHASE1_AMTRUST_PASSWORD_SECRET",
+                       "projects/p/secrets/p/versions/1")
+
+    class FakeAccessor:
+        def access(self, ref):
+            # values chosen to not collide with any selector substring
+            return "zz-user-007" if ref.endswith("/u/versions/1") else "zz-pass-008"
+
+    page = FakePage()
+    page.failures["wait"] = TimeoutError("waiting for #policy-search timed out")
+    port = PlaywrightBrowserPort(runtime="box", page=page)
+    with pytest.raises(LoginStalledError) as exc_info:
+        amtrust.login(port, accessor=FakeAccessor())
+    assert str(exc_info.value) == LOGIN_STALL_REASON
+    # no credential values in the action log even on the stall path
+    blob = json.dumps(port.action_log)
+    assert "zz-user-007" not in blob and "zz-pass-008" not in blob
+
+
+def test_adapter_login_succeeds_when_indicator_present(tmp_path, monkeypatch):
+    """Real adapter login(): clean login passes, including the indicator."""
+    from robie_job_engine.phase1_adapters import amtrust
+
+    monkeypatch.setenv("PHASE1_AMTRUST_USERNAME_SECRET",
+                       "projects/p/secrets/u/versions/1")
+    monkeypatch.setenv("PHASE1_AMTRUST_PASSWORD_SECRET",
+                       "projects/p/secrets/p/versions/1")
+
+    class FakeAccessor:
+        def access(self, ref):
+            return "user" if ref.endswith("/u/versions/1") else "pass"
+
+    page = FakePage()
+    port = PlaywrightBrowserPort(runtime="box", page=page)
+    amtrust.login(port, accessor=FakeAccessor())  # must not raise
+    waited = [c[1] for c in page.calls if c[0] == "wait"]
+    assert "#policy-search" in waited
+    assert "a[href*='logout']" in waited  # indicator asserted after login
