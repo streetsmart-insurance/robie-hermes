@@ -9,8 +9,11 @@ in the sandbox cron definition:
    is never printed or logged). ``CERT_CALLBACK_SECRET_FETCH=0`` skips
    the fetch.
 2. Run one sweep (:func:`cert_sweep.run_sweep`).
-3. Print the JSON summary to stdout (the unit's journal + log shipper).
-4. Hand the summary to :mod:`cert_notify` so filings, UNVERIFIED items,
+3. Record the run in the ``sweep_runs`` table so the buddy
+   (:mod:`cert_sweep_health`) can prove Green independently of any
+   single run's output.
+4. Print the JSON summary to stdout (the unit's journal + log shipper).
+5. Hand the summary to :mod:`cert_notify` so filings, UNVERIFIED items,
    and errors reach Carlo without a human watching the timer.
 
 Exit codes mirror ``cert_sweep.main``: 0 clean, 1 runtime failure,
@@ -65,6 +68,7 @@ def run_service() -> tuple[dict[str, Any], int]:
     """Run one sweep and notify. Returns (summary, exit_code)."""
     from .cert_notify import notify_summary
     from .cert_sweep import run_sweep
+    from .cert_sweep_health import record_sweep_run
 
     secret_status = _fetch_callback_secret()
     try:
@@ -81,6 +85,22 @@ def run_service() -> tuple[dict[str, Any], int]:
         exit_code = 1
     else:
         exit_code = 0 if not summary.get("errors") else 1
+
+    # Buddy feed: record the run so cert_sweep_health can prove Green.
+    # Recording must never fail the service (record_sweep_run never raises,
+    # belt and suspenders here too).
+    try:
+        record_sweep_run(
+            exit_code=exit_code,
+            filed=len(summary.get("filed") or []),
+            unverified=len(summary.get("unverified") or []),
+            errors=len(summary.get("errors") or []),
+            elapsed_s=(summary.get("elapsed_s")
+                       if isinstance(summary.get("elapsed_s"),
+                                     (int, float)) else None),
+        )
+    except Exception:
+        pass
 
     summary["callback_secret"] = secret_status
     try:

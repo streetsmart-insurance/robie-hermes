@@ -64,7 +64,52 @@ change (Muse cron), not a box change — disable it only after:
   journal shows exit 0 and sane JSON summaries), and
 - one controlled production sweep proved: historical backlog parked
   (`stats.parked_historical` > 0, `stats.retried` ~ 0), current mail
-  evaluated, and the notifier delivered (or logged) its outcome.
+  evaluated, and the notifier delivered (or logged) its outcome, and
+- the buddy (below) reports Green: `cert_sweep_health` exit 0.
+
+## The buddy: health probe + alert (ships with the sweep)
+
+Carlo's standing rule: prove Green, ship the buddy with the PR. The
+buddy is `robie_job_engine/cert_sweep_health.py` — a READ-ONLY probe
+(exit 0 = Green, exit 1 = not Green) plus a deduped Google Chat alert.
+It watches the watcher: if the timer dies or runs start failing, the
+buddy is what tells Carlo — not silence.
+
+Green means all three:
+
+1. **Trigger alive** — `robie-cert-sweep.timer` is active.
+2. **Runs fresh** — the last recorded run is < 15 min old
+   (`CERT_SWEEP_HEALTH_MAX_AGE_S`, default 900).
+3. **Runs clean** — the last run exited 0 with zero `errors`.
+   (UNVERIFIED items are the designed fail-closed state and do NOT
+   break Green.)
+
+Every sweep run is recorded in the `sweep_runs` table by
+`cert_sweep_service` (last 1000 kept). The probe reads that table and
+asks systemd about the timer — it never touches Gmail, EZLynx, or
+Zapier.
+
+Install (AFTER the sweep timer is proven — until the first recorded
+run exists the buddy is red by design):
+
+```bash
+cp /opt/streetsmart-hermes/current/deploy/systemd/robie-cert-sweep-health.{service,timer} \
+   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now robie-cert-sweep-health.timer
+systemctl list-timers robie-cert-sweep-health.timer
+# Prove it:
+/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.cert_sweep_health; echo "exit=$?"
+```
+
+The `--alert` mode posts to Carlo's Chat home space (same identity as
+the sweep notifier) when red: one alert per red episode, a repeat at
+most every 4 hours (`CERT_SWEEP_HEALTH_ALERT_EVERY_S`), and a recovery
+notice when Green returns. Without a Chat identity configured the
+alert is recorded locally as skipped — the journal still shows the
+red probe.
+
+Disable with the sweep: `systemctl disable --now robie-cert-sweep-health.timer`.
 
 ## Rollback
 
@@ -93,6 +138,11 @@ sanity gates — never by hand-editing:
 ## Monitoring
 
 - `journalctl -u robie-cert-sweep.service --since "1 hour ago"` — per-run JSON.
+- `/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.cert_sweep_health; echo "exit=$?"` — the buddy (exit 0 = Green).
+- `journalctl -u robie-cert-sweep-health.service --since "1 hour ago"` — buddy probe runs + alerts.
+- `sqlite3 /home/sa_112650695780807418521/.cert-sweep/cert-sweep.db \
+  "select run_at, exit_code, filed, unverified, errors from sweep_runs order by id desc limit 5;"` —
+  recent run history (the buddy's Green feed).
 - `/home/sa_112650695780807418521/.cert-sweep/notifications.jsonl` — every
   noteworthy run (filings, UNVERIFIED, errors).
 - `sqlite3 /home/sa_112650695780807418521/.cert-sweep/cert-sweep.db \

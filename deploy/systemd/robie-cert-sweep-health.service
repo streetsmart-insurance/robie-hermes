@@ -1,0 +1,34 @@
+[Unit]
+Description=ROBIE certificate sweep buddy: health probe + alert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Same OS user as the sweep so the ledger and Chat identity resolve
+# exactly as they do for robie-cert-sweep.service.
+User=sa_112650695780807418521
+Group=sa_112650695780807418521
+UMask=0077
+# Pinned to the live production release. Re-pin on each cert-sweep release
+# (see robie-cert-sweep.RUNBOOK.md, buddy section).
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=CERT_SWEEP_DATA_DIR=/home/sa_112650695780807418521/.cert-sweep
+# Same Chat identity as the sweep's notifier (alerts reuse cert_notify's
+# Chat sink). Overrides in /etc/streetsmart-hermes/robie-cert-sweep.env.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-cert-sweep.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+# Exit 0 = Green. Exit 1 = NOT Green (the buddy "failing" is the signal).
+# The probe is read-only: it never touches Gmail, EZLynx, or Zapier.
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.cert_sweep_health --alert
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/sa_112650695780807418521/.cert-sweep
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target
