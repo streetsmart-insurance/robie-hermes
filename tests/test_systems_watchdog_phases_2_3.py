@@ -337,6 +337,41 @@ class TaskVerifierHealthTest(unittest.TestCase):
         self.assertEqual(extra["stuck_count"], 2)
         self.assertIn("stuck", detail)
 
+    def test_oldest_stuck_is_earliest_created_at(self):
+        """The value labelled oldest is MIN(created_at), not MAX."""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "pending.db")
+            conn = sqlite3.connect(p)
+            conn.execute("""CREATE TABLE pending_tasks (
+                id INTEGER PRIMARY KEY, producer TEXT, applicant_id TEXT,
+                title TEXT, assignee TEXT, fired_at TEXT, status TEXT,
+                detail TEXT, created_at TEXT, resolved_at TEXT)""")
+            older = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+            newer = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+            fresh = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            for status, created in (
+                ("PENDING", newer),
+                ("UNVERIFIED", older),
+                ("PENDING", fresh),
+            ):
+                conn.execute(
+                    "INSERT INTO pending_tasks (producer, applicant_id, title,"
+                    " assignee, fired_at, status, detail, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    ("p", "a", "t", "as", created, status, "", created),
+                )
+            conn.commit()
+            conn.close()
+            with patch.dict(os.environ, {"ROBIE_TASK_VERIFY_DB": p},
+                             clear=False), \
+                 patch.object(h, "_journal_since", return_value=""):
+                ok, detail, extra = h.check_task_verifier_health()
+        self.assertFalse(ok)
+        self.assertEqual(extra["stuck_count"], 2)
+        self.assertEqual(extra["oldest_stuck"], older)
+        self.assertIn(f"oldest {older}", detail)
+        self.assertNotIn(f"oldest {newer}", detail)
+
     def test_journal_traceback_fails(self):
         with tempfile.TemporaryDirectory() as d:
             p = self._db(d, [])
@@ -389,6 +424,62 @@ class Tuesday4359ProofTest(unittest.TestCase):
                 ok, detail, extra = h.check_4359_tuesday_proof()
         self.assertTrue(ok)
         self.assertIn("3 email(s) sent", detail)
+
+    def test_live_receipt_list_counts_as_sent(self):
+        """Production evidence has no summary.sent. Receipts are a list.
+
+        The 2026-09-29 8 AM run sent 2 and confirmed them in Sent. The probe
+        read summary.sent, found nothing, and alarmed "0 emails sent".
+        """
+        receipts = [
+            {"message_id": "m1", "exists_in_sent_mailbox": True},
+            {"message_id": "m2", "exists_in_sent_mailbox": True},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p = self._evidence(d, {
+                "ran_at": self._recent_run_ran_at(),
+                "succeeded": True,
+                "summary": {
+                    "delivery_receipts": receipts,
+                    "csr_count": 2,
+                    "due_for_nag": 2,
+                },
+                "detail": {"idempotency_key": "4359-weekly"},
+                "sent": receipts,
+            })
+            with patch.object(h, "EVIDENCE_4359_PATH", p):
+                ok, detail, extra = h.check_4359_tuesday_proof()
+        self.assertTrue(ok)
+        self.assertEqual(extra["sent"], 2)
+        self.assertIn("2 email(s) sent", detail)
+
+    def test_summary_delivery_receipts_count_when_top_level_sent_missing(self):
+        receipts = [{"message_id": "m1"}, {"message_id": "m2"}]
+        with tempfile.TemporaryDirectory() as d:
+            p = self._evidence(d, {
+                "ran_at": self._recent_run_ran_at(),
+                "succeeded": True,
+                "summary": {"delivery_receipts": receipts, "csr_count": 2},
+            })
+            with patch.object(h, "EVIDENCE_4359_PATH", p):
+                ok, detail, extra = h.check_4359_tuesday_proof()
+        self.assertTrue(ok)
+        self.assertEqual(extra["sent"], 2)
+        self.assertIn("2 email(s) sent", detail)
+
+    def test_empty_receipt_list_without_reason_still_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._evidence(d, {
+                "ran_at": self._recent_run_ran_at(),
+                "succeeded": True,
+                "summary": {"delivery_receipts": [], "csr_count": 0},
+                "sent": [],
+            })
+            with patch.object(h, "EVIDENCE_4359_PATH", p):
+                ok, detail, extra = h.check_4359_tuesday_proof()
+        self.assertFalse(ok)
+        self.assertEqual(extra["sent"], 0)
+        self.assertIn("no reason", detail)
 
     def test_zero_with_reason_ok(self):
         with tempfile.TemporaryDirectory() as d:

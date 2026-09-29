@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from durable_temp import durable_temporary_directory
 
@@ -30,6 +30,7 @@ from robie_job_engine.production_preflight import (
     CHECK_LINKS,
     CHECK_SECRETS,
     DEFAULT_CHAT_SPACE,
+    GATEWAY_AGENT_LOG,
     check_cdp,
     check_chat_intake,
     check_conversation_job_links,
@@ -38,6 +39,9 @@ from robie_job_engine.production_preflight import (
     check_login_secrets,
     ezlynx_web_tab_ok,
     format_failure,
+    last_chat_inbound_at,
+    _read_agent_log,
+    _read_gateway_journal,
     run_production_preflight,
 )
 from robie_job_engine.store import JobStore
@@ -457,6 +461,32 @@ class ChatIntakeCheckTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertIn("last Chat inbound", result["evidence"])
 
+    def test_plain_english_google_chat_source_counts_as_inbound(self):
+        """Chat now lands as hermes.plain_english, payload source Google Chat."""
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            JobStore(db).create_job(
+                "hermes.plain_english",
+                {"text": "work", "source": "Google Chat"},
+            )
+            inbound = last_chat_inbound_at(db)
+            self.assertIsNotNone(inbound)
+            result = check_chat_intake(db, journal="")
+            self.assertTrue(result["ok"])
+            self.assertIn("last Chat inbound", result["evidence"])
+
+    def test_plain_english_without_google_chat_source_is_not_inbound(self):
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            JobStore(db).create_job(
+                "hermes.plain_english",
+                {"text": "work", "source": "email"},
+            )
+            self.assertIsNone(last_chat_inbound_at(db))
+            result = check_chat_intake(db, journal="")
+            self.assertFalse(result["ok"])
+            self.assertIn("silent", result["evidence"])
+
     def test_connected_idle_without_recent_inbound_is_yes(self):
         with durable_temporary_directory() as tmp:
             db = _empty_jobs_db(tmp)
@@ -482,6 +512,61 @@ class ChatIntakeCheckTests(unittest.TestCase):
         self.assertNotIn("open_chat_job", SOURCE)
         self.assertNotIn("spaces.setup", SOURCE)
         self.assertNotIn("messages().create", SOURCE)
+
+    def test_agent_log_connected_counts_when_journal_is_empty(self):
+        """[GoogleChat] Connected is written to agent.log, not the journal."""
+        with durable_temporary_directory() as tmp:
+            db = _empty_jobs_db(tmp)
+            log = Path(tmp) / "agent.log"
+            log.write_text(
+                "[GoogleChat] Connected; inbound=pubsub\n",
+                encoding="utf-8",
+            )
+
+            def runner(_argv):
+                return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+            with patch(
+                "robie_job_engine.production_preflight.GATEWAY_AGENT_LOG",
+                str(log),
+            ):
+                result = check_chat_intake(
+                    db,
+                    journal_reader=lambda: _read_gateway_journal(runner=runner),
+                )
+            self.assertTrue(result["ok"])
+            self.assertIn("connected", result["evidence"].casefold())
+
+    def test_missing_agent_log_is_tolerated(self):
+        def runner(_argv):
+            return SimpleNamespace(stdout="gateway up\n", stderr="", returncode=0)
+
+        missing = str(Path("/tmp") / "robie-missing-agent-log" / "agent.log")
+        with patch(
+            "robie_job_engine.production_preflight.GATEWAY_AGENT_LOG",
+            missing,
+        ):
+            text = _read_gateway_journal(runner=runner)
+        self.assertIn("gateway up", text)
+        self.assertNotIn("[GoogleChat] Connected", text)
+        self.assertEqual(_read_agent_log(missing), "")
+
+    def test_unreadable_agent_log_is_tolerated(self):
+        with durable_temporary_directory() as tmp:
+            blocked = Path(tmp) / "not-a-file"
+            blocked.mkdir()
+
+            def runner(_argv):
+                return SimpleNamespace(stdout="journal line\n", stderr="", returncode=0)
+
+            with patch(
+                "robie_job_engine.production_preflight.GATEWAY_AGENT_LOG",
+                str(blocked),
+            ):
+                text = _read_gateway_journal(runner=runner)
+            self.assertIn("journal line", text)
+            self.assertEqual(_read_agent_log(blocked), "")
+        self.assertTrue(GATEWAY_AGENT_LOG.endswith("/.hermes/logs/agent.log"))
 
 
 class FailNotifyTests(unittest.TestCase):

@@ -191,6 +191,39 @@ class ManifestContractTests(unittest.TestCase):
         self.assertIn("Long typed SSH commands are not the install path", script)
 
 
+class InstallScriptCwdTests(unittest.TestCase):
+    def test_stray_cwd_package_cannot_hide_deploy_truth(self):
+        """python -m searches the caller's cwd before PYTHONPATH.
+
+        A leftover robie_job_engine/ directory in that cwd used to make every
+        deploy fail with "No module named robie_job_engine.deploy_truth".
+        The installer cds to the repo root before exec so the real package loads.
+        """
+        script = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('cd "${repo_root}"', script)
+        cd_at = script.index('cd "${repo_root}"')
+        exec_at = script.index("exec python3 -m robie_job_engine.deploy_truth")
+        self.assertLess(cd_at, exec_at)
+        with durable_temporary_directory() as tmp:
+            stray = Path(tmp) / "robie_job_engine"
+            stray.mkdir()
+            (stray / "__init__.py").write_text("STRAY = True\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                ["bash", str(INSTALL_SCRIPT), "install"],
+                cwd=tmp,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        combined = result.stdout + result.stderr
+        self.assertNotIn("No module named robie_job_engine.deploy_truth", combined)
+        self.assertIn("release-root", combined)
+        self.assertNotEqual(result.returncode, 0)
+
+
 class StaleChatFileFailsTests(unittest.TestCase):
     def test_stale_chat_adapter_is_not_live_when_pointers_match_new_sha(self):
         """PR 17 hole: pointers say the new SHA, Chat dest is still old."""

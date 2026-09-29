@@ -50,6 +50,9 @@ CHECK_LINKS = "conversation-job-links"
 CHECK_CHAT_INTAKE = "chat-intake"
 CHECK_CHAT_RUNTIME = "chat-runtime"
 CHAT_JOB_ACTION = "hermes.google_chat_task"
+CHAT_PAYLOAD_SOURCE = "Google Chat"
+# Gateway writes "[GoogleChat] Connected" here, not to the systemd journal.
+GATEWAY_AGENT_LOG = "/opt/streetsmart-hermes/.hermes/logs/agent.log"
 DEFAULT_CHAT_INTAKE_FRESH_SECONDS = 6 * 60 * 60
 LISTENER_CONNECTED_MARKER = "[GoogleChat] Connected"
 LISTENER_HANDOFF_MARKER = "durable executable handoff"
@@ -457,13 +460,16 @@ def last_chat_inbound_at(db_path: str | Path | None = None) -> datetime | None:
                     if parsed is not None:
                         stamps.append(parsed)
             if "jobs" in tables:
+                # Chat messages now arrive as hermes.plain_english with
+                # payload source "Google Chat", not only hermes.google_chat_task.
                 row = conn.execute(
                     """
                     SELECT MAX(created_at)
                     FROM jobs
                     WHERE action_type=?
+                       OR json_extract(payload_json, '$.source') = ?
                     """,
-                    (CHAT_JOB_ACTION,),
+                    (CHAT_JOB_ACTION, CHAT_PAYLOAD_SOURCE),
                 ).fetchone()
                 parsed = _parse_utc(row[0] if row else None)
                 if parsed is not None:
@@ -490,6 +496,15 @@ def classify_listener_journal(text: str) -> dict[str, Any]:
     }
 
 
+def _read_agent_log(path: str | Path | None = None) -> str:
+    """Gateway agent log. Missing or unreadable is empty, never an error."""
+    log_path = Path(path or GATEWAY_AGENT_LOG)
+    try:
+        return log_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
+
+
 def _read_gateway_journal(
     *,
     runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
@@ -509,7 +524,11 @@ def _read_gateway_journal(
             "24 hours ago",
         ]
     )
-    return (proc.stdout or "") + "\n" + (proc.stderr or "")
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    agent_log = _read_agent_log()
+    if agent_log:
+        text = f"{text}\n{agent_log}"
+    return text
 
 
 def check_chat_intake(
