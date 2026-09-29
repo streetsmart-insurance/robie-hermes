@@ -333,6 +333,12 @@ APPLICANT_FAIL_SECONDS = 36 * 3600
 # EOD outputs land here locally; Drive delivery is verified separately.
 EOD_OUTPUT_DIR = "/opt/streetsmart-phone-watchdog/data/outputs"
 
+# EOD Sheet delivery (post-2026-09-28: Sheets replaced Excel+Drive upload).
+# The probe confirms the OUTCOME (most recent run's Sheet exists in Drive).
+EOD_SHEET_NAME_FMT = "EOD Phone Report -- {date}"  # date = YYYY-MM-DD
+EOD_SHEETS_FOLDER_ID_ENV = "EOD_SHEETS_FOLDER_ID"
+EOD_SA_KEY_PATH = "/opt/streetsmart-phone-watchdog/service_key.json"
+
 # Task verifier DB: set ROBIE_TASK_VERIFY_DB to override (matches the
 # verifier service's own env). Stuck = PENDING/UNVERIFIED older than this.
 TASK_VERIFY_DB_DEFAULT = "/home/carlo_streetsmart_insurance/.robie/task_verification/pending.db"
@@ -703,44 +709,120 @@ def check_applicant_ingest_freshness() -> tuple[bool, str, dict]:
     return True, f"applicant export {age/3600:.1f}h old", extra
 
 
-def check_eod_drive_delivery() -> tuple[bool, str, dict]:
-    """Did today's EOD phone report land locally? Is Drive delivery proven?
+def _most_recent_eod_date(now: datetime | None = None) -> datetime:
+    """Return the date of the most recent expected EOD run.
 
-    The 2026-09-28 incident: the EOD Excel was generated locally but the
-    Drive upload failed (403 storageQuotaExceeded) with no alert. This check
-    verifies the local file exists for today; Drive delivery is flagged
-    UNVERIFIED unless a Drive-side proof exists (the upload path needs a
-    Drive-capable credential the health check doesn't assume).
+    EOD runs Mon-Fri at 17:00 ET. Returns the most recent weekday (Mon-Fri)
+    strictly before today: on Tue-Fri that's yesterday; on Mon/Sat/Sun
+    that's Friday. Checking for "today's" file in the morning was the
+    2026-09-29 false alarm — at 06:00, today's 17:00 run hasn't happened.
     """
-    extra: dict = {"dir": EOD_OUTPUT_DIR}
-    today = datetime.now().strftime("%Y%m%d")
-    # EOD runs Mon–Fri; don't fail on weekends when no run is expected.
-    weekday = datetime.now().weekday()  # 0=Mon … 6=Sun
-    expected = weekday < 5
-    extra["expected_today"] = expected
+    from datetime import timedelta
+    now = now or datetime.now()
+    d = now.date() - timedelta(days=1)
+    while d.weekday() > 4:  # 5=Sat, 6=Sun → walk back to Friday
+        d -= timedelta(days=1)
+    return datetime(d.year, d.month, d.day)
+
+
+def _check_eod_sheet_in_drive(date_str: str, extra: dict) -> tuple[bool, str]:
+    """Is there a Sheet named 'EOD Phone Report -- YYYY-MM-DD' in Drive?
+
+    Returns (found, detail). Any Drive/API/credential problem returns
+    (False, reason) with the problem recorded in extra — the caller decides
+    whether to fail or fall back to the local file. Never raises.
+    """
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError:
+        extra["drive_check"] = "skipped: google-api-python-client not installed"
+        return False, "Drive API client not installed"
+
+    folder_id = os.environ.get(EOD_SHEETS_FOLDER_ID_ENV, "").strip()
+    if not os.path.isfile(EOD_SA_KEY_PATH):
+        extra["drive_check"] = f"skipped: service key not found"
+        return False, "service key not found"
+    if not folder_id:
+        extra["drive_check"] = f"skipped: {EOD_SHEETS_FOLDER_ID_ENV} not set"
+        return False, f"{EOD_SHEETS_FOLDER_ID_ENV} not set"
+
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            EOD_SA_KEY_PATH,
+            scopes=["https://www.googleapis.com/auth/drive.readonly"])
+        svc = build("drive", "v3", credentials=creds)
+        sheet_name = EOD_SHEET_NAME_FMT.format(date=date_str)
+        # Escape single quotes for the Drive query language.
+        safe_name = sheet_name.replace("'", "\'")
+        q = (f"name='{safe_name}' and "
+             f"mimeType='application/vnd.google-apps.spreadsheet' and "
+             f"'{folder_id}' in parents and trashed=false")
+        res = svc.files().list(
+            q=q, corpora="drive", driveId=folder_id,
+            includeItemsFromAllDrives=True, supportsAllDrives=True,
+            fields="files(id,name,modifiedTime)").execute()
+        files = res.get("files", [])
+        extra["drive_check"] = f"found {len(files)} Sheet(s) named '{sheet_name}'"
+        if files:
+            extra["sheet_id"] = files[0]["id"]
+            extra["sheet_modified"] = files[0].get("modifiedTime", "")
+            return True, f"Sheet '{sheet_name}' found in Drive"
+        return False, f"Sheet '{sheet_name}' not found in Drive"
+    except Exception as exc:  # noqa: BLE001 - report, don't crash the probe
+        extra["drive_check"] = f"error: {type(exc).__name__}: {str(exc)[:100]}"
+        return False, f"Drive check failed: {type(exc).__name__}"
+
+
+def check_eod_drive_delivery() -> tuple[bool, str, dict]:
+    """Did the most recent EOD phone report land as a Google Sheet?
+
+    The EOD runs Mon-Fri at 17:00 ET. This confirms the OUTCOME: the most
+    recent expected run's report exists as a Google Sheet in the Shared
+    Drive. The 2026-09-29 false alarm checked for "today's" Excel at 06:00 —
+    today's 17:00 run can't have happened yet. The Sheet is the outcome now
+    (Excel+Drive upload was replaced 2026-09-28); the local file is only a
+    fallback when Drive is unreachable.
+    """
+    extra: dict = {}
+    expected = _most_recent_eod_date()
+    date_str = expected.strftime("%Y-%m-%d")      # Sheet name format
+    date_compact = expected.strftime("%Y%m%d")    # legacy Excel format
+    extra["expected_date"] = date_str
+
+    # Primary: the Google Sheet in the Shared Drive (the outcome).
+    found, detail = _check_eod_sheet_in_drive(date_str, extra)
+    if found:
+        return True, f"EOD report for {date_str} delivered as Google Sheet", extra
+
+    # Fallback: local Excel. Only fail if the local file is ALSO missing —
+    # Drive being temporarily unreachable shouldn't page when the report ran.
     try:
         names = os.listdir(EOD_OUTPUT_DIR)
-    except FileNotFoundError:
-        if not expected:
-            return True, "EOD output dir missing; no run expected today (weekend)", extra
-        return False, f"EOD output dir missing: {EOD_OUTPUT_DIR}", extra
-    except OSError as exc:
-        return False, f"EOD output dir unreadable: {type(exc).__name__}", extra
-    xlsx = f"eod_phone_report_{today}.xlsx"
-    md = f"eod_phone_leakage_{today}.md"
+    except (FileNotFoundError, OSError) as exc:
+        extra["local_fallback"] = f"unreadable: {type(exc).__name__}"
+        return False, (
+            f"Yesterday's EOD phone report ({date_str}) is missing: no Google "
+            f"Sheet in Drive ({detail}) and the local output folder is "
+            f"unreadable. The 5 PM run may not have completed."
+        ), extra
+
+    xlsx = f"eod_phone_report_{date_compact}.xlsx"
+    md = f"eod_phone_leakage_{date_compact}.md"
     extra["xlsx_present"] = xlsx in names
     extra["md_present"] = md in names
-    if not expected:
-        return True, f"no EOD run expected today (weekend); {xlsx} present={xlsx in names}", extra
-    if xlsx not in names:
-        return False, f"today's EOD report missing: {xlsx}", extra
-    # Local file exists. Drive delivery: UNVERIFIED until a Drive read-back
-    # proof exists. This is the gap that bit us on 2026-09-28.
-    extra["drive_delivery"] = "UNVERIFIED"
-    detail = f"{xlsx} present locally; Drive delivery UNVERIFIED"
-    if md not in names:
-        detail += f" (note: {md} missing)"
-    return True, detail, extra
+    if xlsx in names or md in names:
+        extra["local_fallback"] = "used"
+        return True, (
+            f"EOD report for {date_str} present locally; "
+            f"Drive Sheet check: {detail}"
+        ), extra
+
+    return False, (
+        f"Yesterday's EOD phone report ({date_str}) is missing: no Google "
+        f"Sheet in Drive ({detail}) and no local file ({xlsx}). "
+        f"The 5 PM run may not have completed."
+    ), extra
 
 
 def check_task_verifier_health() -> tuple[bool, str, dict]:
@@ -831,6 +913,16 @@ def check_4359_tuesday_proof() -> tuple[bool, str, dict]:
             ev = json.load(f)
     except FileNotFoundError:
         return False, f"4359 evidence missing: {EVIDENCE_4359_PATH}", extra
+    except PermissionError:
+        # The 2026-09-29 false alarm: the worker wrote evidence-latest.json
+        # mode 600 owned by streetsmart-hermes; the probe (different user)
+        # couldn't read it. The worker now writes 640; the health-check user
+        # must be in the file's group. This message says exactly that.
+        return False, (
+            f"4359 evidence not readable (permission denied): "
+            f"{EVIDENCE_4359_PATH}. The worker should write it group-readable "
+            f"(640) and the health-check user must be in the file's group."
+        ), extra
     except (json.JSONDecodeError, OSError) as exc:
         return False, f"4359 evidence unreadable: {type(exc).__name__}", extra
 

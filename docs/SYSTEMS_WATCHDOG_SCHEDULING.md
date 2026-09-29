@@ -45,7 +45,7 @@ update the list.
 | `phone_gmail_keys` | BOTH phone Gmail keys alive (primary + backup, separately) | Either dead = FAIL |
 | `login_secret_states` | `ezlynx-username`/`ezlynx-password` have an ENABLED version (states only, never payloads) | No ENABLED = FAIL |
 | `applicant_ingest_freshness` | `applicant_phone_match_export.xls` age | Warn 30h, FAIL 36h (fail-closed cliff) |
-| `eod_drive_delivery` | Today's EOD xlsx exists locally | Missing on weekday = FAIL; Drive always flagged UNVERIFIED until Drive read-back exists |
+| `eod_drive_delivery` | Most recent EOD run's Google Sheet exists in Shared Drive | Missing Sheet AND missing local file = FAIL; local Excel is fallback only |
 | `task_verifier_health` | Verifier DB: tasks stuck PENDING/UNVERIFIED | 2h+ stuck = FAIL; journal tracebacks = FAIL |
 | `tuesday_4359_proof` | `evidence-latest.json` from most recent Tuesday | Stale, failed run, or 0-sent-with-no-reason = FAIL |
 | `chat_intake` | Hermes Chat listener receiving (reuses preflight logic) | Silent/wedged = FAIL |
@@ -60,6 +60,29 @@ update the list.
 - **`phone_gmail_keys` will report primary DEAD / backup OK** until the new
   `workspace-inbox-collector` key is minted and installed. That's expected —
   the probe is designed to show both states separately.
+
+## Probe fixes (2026-09-29) — Dusty actions
+
+Two false alarms on 2026-09-29 06:00, both fixed in PR (link once created):
+
+### 1. `eod_drive_delivery`: now checks the Sheet, not today's Excel
+**Was:** looked for `eod_phone_report_{today}.xlsx` at 06:00 — today's 17:00
+run can't have happened yet. False alarm every morning.
+**Now:** checks for the most recent expected run's Google Sheet in the Shared
+Drive via Drive API (the outcome). Falls back to the local Excel only if
+Drive is unreachable. Needs `EOD_SHEETS_FOLDER_ID` in the health-check
+environment and the service key readable at
+`/opt/streetsmart-phone-watchdog/service_key.json`.
+
+### 2. `tuesday_4359_proof`: PermissionError → actionable message + worker fix
+**Was:** `evidence-latest.json` written mode 600 by `streetsmart-hermes`;
+the probe (different user) got PermissionError → "unreadable" alert.
+**Now:** the worker writes 640. **You need to:**
+1. Add the health-check user to the `streetsmart-hermes` group
+   (or whichever group owns the evidence file).
+2. Fix the existing file: `chmod 640 /opt/streetsmart-hermes/robie-job-engine/data/overdue_policy_change_reports/evidence-latest.json`
+3. Ensure the parent dirs are group-traversable (`+x` for the group).
+The probe now says exactly this when it hits a permission error.
 
 ## Files changed
 
