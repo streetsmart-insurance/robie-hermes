@@ -110,15 +110,17 @@ def _email_verification_lines(email_data: Optional[Dict[str, Any]]) -> List[str]
     lines = [
         "",
         "✉️ *EMAIL HANDLED VERIFICATION (REPLY/FORWARD EVIDENCE)*",
-        "| Authorized mailbox | Handled via reply | Handled via forward | Unhandled (action) | FYI (excluded) | Reply rate |",
-        "| :--- | ---: | ---: | ---: | ---: | ---: |",
+        "| Authorized mailbox | Handled via reply | Handled via forward | Unhandled (action) | Unhandled (unknown) | FYI (excluded) | Reply rate |",
+        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for mailbox, facts in sorted(by_employee.items()):
         rate = facts.get("reply_rate")
         rate_display = "NOT EVALUABLE" if rate is None else f"{rate * 100:.0f}%"
+        partial = " ⚠️ partial (scan caps hit)" if facts.get("partial") else ""
         lines.append(
             f"| {mailbox} | {facts.get('handled_via_reply', 0)} | {facts.get('handled_via_forward', 0)} | "
-            f"{facts.get('unhandled_action', 0)} | {facts.get('unhandled_fyi', 0)} | {rate_display} |"
+            f"{facts.get('unhandled_action', 0)} | {facts.get('unhandled_unknown', 0)} | "
+            f"{facts.get('unhandled_fyi', 0)} | {rate_display}{partial} |"
         )
     unhandled_items = [
         (mailbox, item)
