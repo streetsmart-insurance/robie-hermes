@@ -186,41 +186,112 @@ class ApplicantIngestFreshnessTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# EOD drive delivery
+# EOD drive delivery (Sheet-based, post-2026-09-28)
+# ---------------------------------------------------------------------------
+# The probe now confirms the OUTCOME: the most recent EOD run's Google Sheet
+# exists in the Shared Drive. Checking for "today's" local Excel at 06:00 was
+# the 2026-09-29 false alarm — today's 17:00 run hasn't happened yet.
+
+class MostRecentEodDateTest(unittest.TestCase):
+    def test_monday_morning_expects_friday(self):
+        monday = datetime(2026, 9, 28, 6, 0)  # Monday 6 AM
+        self.assertEqual(monday.weekday(), 0)
+        result = h._most_recent_eod_date(monday)
+        self.assertEqual(result.strftime("%Y-%m-%d"), "2026-09-25")  # Friday
+
+    def test_tuesday_morning_expects_monday(self):
+        tuesday = datetime(2026, 9, 29, 6, 0)  # Tuesday 6 AM
+        self.assertEqual(tuesday.weekday(), 1)
+        result = h._most_recent_eod_date(tuesday)
+        self.assertEqual(result.strftime("%Y-%m-%d"), "2026-09-28")  # Monday
+
+    def test_saturday_expects_friday(self):
+        saturday = datetime(2026, 10, 3, 6, 0)
+        self.assertEqual(saturday.weekday(), 5)
+        result = h._most_recent_eod_date(saturday)
+        self.assertEqual(result.strftime("%Y-%m-%d"), "2026-10-02")  # Friday
+
+    def test_sunday_expects_friday(self):
+        sunday = datetime(2026, 10, 4, 6, 0)
+        self.assertEqual(sunday.weekday(), 6)
+        result = h._most_recent_eod_date(sunday)
+        self.assertEqual(result.strftime("%Y-%m-%d"), "2026-10-02")  # Friday
+
+    def test_wednesday_expects_tuesday(self):
+        wednesday = datetime(2026, 9, 30, 6, 0)
+        self.assertEqual(wednesday.weekday(), 2)
+        result = h._most_recent_eod_date(wednesday)
+        self.assertEqual(result.strftime("%Y-%m-%d"), "2026-09-29")  # Tuesday
+
+
+class EodSheetDeliveryTest(unittest.TestCase):
+    """Both-ways: quiet when the Sheet exists, alerts when it doesn't."""
+
+    def test_sheet_found_is_quiet(self):
+        """Sheet in Drive → probe is QUIET (ok=True)."""
+        with patch.object(h, "_check_eod_sheet_in_drive",
+                          return_value=(True, "Sheet found")):
+            ok, detail, extra = h.check_eod_drive_delivery()
+        self.assertTrue(ok)
+        self.assertIn("Google Sheet", detail)
+        self.assertIn("expected_date", extra)
+
+    def test_sheet_missing_local_present_falls_back_quiet(self):
+        """No Sheet but local Excel exists → QUIET via fallback."""
+        yesterday_compact = h._most_recent_eod_date().strftime("%Y%m%d")
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, f"eod_phone_report_{yesterday_compact}.xlsx"),
+                 "w").close()
+            with patch.object(h, "_check_eod_sheet_in_drive",
+                              return_value=(False, "not found")), \
+                 patch.object(h, "EOD_OUTPUT_DIR", d):
+                ok, detail, extra = h.check_eod_drive_delivery()
+        self.assertTrue(ok)
+        self.assertEqual(extra.get("local_fallback"), "used")
+
+    def test_sheet_missing_local_missing_alerts(self):
+        """No Sheet AND no local file → ALERTS with plain-English message."""
+        with tempfile.TemporaryDirectory() as d:  # empty dir
+            with patch.object(h, "_check_eod_sheet_in_drive",
+                              return_value=(False, "not found")), \
+                 patch.object(h, "EOD_OUTPUT_DIR", d):
+                ok, detail, extra = h.check_eod_drive_delivery()
+        self.assertFalse(ok)
+        self.assertIn("missing", detail.lower())
+        # Plain-English: says what it means, not just the technical name.
+        self.assertIn("5 PM run", detail)
+
+    def test_drive_unreachable_local_missing_alerts(self):
+        """Drive API down and no local file → ALERTS (not silent)."""
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(h, "_check_eod_sheet_in_drive",
+                              return_value=(False, "Drive check failed: HttpError")), \
+                 patch.object(h, "EOD_OUTPUT_DIR", d):
+                ok, detail, extra = h.check_eod_drive_delivery()
+        self.assertFalse(ok)
+        self.assertIn("missing", detail.lower())
+
+
+# ---------------------------------------------------------------------------
+# 4359 evidence permission handling
 # ---------------------------------------------------------------------------
 
-class EodDriveDeliveryTest(unittest.TestCase):
-    def test_today_present_drive_unverified(self):
-        today = datetime.now().strftime("%Y%m%d")
-        with tempfile.TemporaryDirectory() as d:
-            open(os.path.join(d, f"eod_phone_report_{today}.xlsx"), "w").close()
-            open(os.path.join(d, f"eod_phone_leakage_{today}.md"), "w").close()
-            with patch.object(h, "EOD_OUTPUT_DIR", d):
-                ok, detail, extra = h.check_eod_drive_delivery()
-        # Weekday-dependent: only assert the UNVERIFIED flag when expected.
-        if extra["expected_today"]:
-            self.assertTrue(ok)
-            self.assertIn("UNVERIFIED", detail)
-            self.assertEqual(extra["drive_delivery"], "UNVERIFIED")
-            self.assertTrue(extra["xlsx_present"])
+class Evidence4359PermissionTest(unittest.TestCase):
+    def test_permission_error_gives_actionable_message(self):
+        """PermissionError → ALERTS with actionable fix (not just 'unreadable')."""
+        real_open = open
 
-    def test_today_missing_fails_on_weekday(self):
-        with tempfile.TemporaryDirectory() as d:
-            with patch.object(h, "EOD_OUTPUT_DIR", d):
-                ok, detail, extra = h.check_eod_drive_delivery()
-        if extra["expected_today"]:
-            self.assertFalse(ok)
-            self.assertIn("missing", detail)
-        else:
-            self.assertTrue(ok)  # weekend: no run expected
+        def fake_open(path, *args, **kwargs):
+            if str(path) == h.EVIDENCE_4359_PATH:
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, *args, **kwargs)
 
-    def test_missing_dir_fails_on_weekday(self):
-        with patch.object(h, "EOD_OUTPUT_DIR", "/nonexistent/eod"):
-            ok, detail, extra = h.check_eod_drive_delivery()
-        if extra["expected_today"]:
-            self.assertFalse(ok)
-        else:
-            self.assertTrue(ok)
+        with patch("builtins.open", side_effect=fake_open):
+            ok, detail, extra = h.check_4359_tuesday_proof()
+        self.assertFalse(ok)
+        self.assertIn("permission denied", detail.lower())
+        self.assertIn("640", detail)
+        self.assertIn("group", detail.lower())
 
 
 # ---------------------------------------------------------------------------

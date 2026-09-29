@@ -258,6 +258,14 @@ def run(args: argparse.Namespace, *, verifier_factory=None) -> tuple[int, dict[s
         out = Path(args.evidence_out).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(evidence, indent=2, default=str), encoding="utf-8")
+        # Group-readable so the health-check probe (different user, same group)
+        # can verify delivery. Without this, the probe gets PermissionError
+        # (the 2026-09-29 false alarm). Dusty: ensure the health-check user is
+        # in the file owner's group (streetsmart-hermes).
+        try:
+            os.chmod(out, 0o640)
+        except OSError:
+            pass  # best-effort; the probe reports if still unreadable
         print(f"evidence written to {out}", file=sys.stderr)
 
     print(json.dumps({
