@@ -48,8 +48,11 @@ PARTIAL = "PARTIAL"
 ERROR = "ERROR"
 
 # Auto-created discussions are reused for follow-up requests for the same
-# applicant + normalized holder inside this window (Carlo 2026-09-28).
-AUTO_CREATE_REUSE_DAYS = 7
+# applicant + normalized holder indefinitely (Carlo 2026-09-29): a later
+# email about the same client and holder appends to the existing discussion
+# instead of creating a duplicate. Reuse stays safe because the discussion
+# is GET-verified in EZLynx before reuse; a discussion that no longer reads
+# back is never reused.
 
 
 @dataclass
@@ -114,9 +117,8 @@ class FilingStore:
             self._db.execute("ALTER TABLE cert_filing ADD COLUMN thread_id TEXT")
         # Ledger of discussions the sweep auto-created (Carlo 2026-09-28:
         # no human gate). One row per (applicant, normalized holder): a
-        # follow-up request for the same holder within
-        # AUTO_CREATE_REUSE_DAYS reuses the discussion instead of creating
-        # a duplicate.
+        # follow-up request for the same holder reuses the discussion
+        # indefinitely instead of creating a duplicate.
         self._db.execute(
             """CREATE TABLE IF NOT EXISTS cert_auto_discussions (
                 applicant_id TEXT NOT NULL,
@@ -1017,8 +1019,9 @@ def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
       (a) another email in the same Gmail thread already filed somewhere —
           reuse that discussion;
       (b) the ledger's auto-created discussion for this applicant +
-          normalized holder, created within AUTO_CREATE_REUSE_DAYS —
-          GET-verified, then reused;
+          normalized holder — GET-verified, then reused. No expiry: a later
+          email about the same client and holder appends to the existing
+          discussion rather than creating a duplicate;
       (c) the exact auto title already on the applicant in EZLynx —
           destination-based catch for a create whose ledger row never landed;
       (d) create via POST v8/discussions/with-note with the filing note as
@@ -1047,18 +1050,18 @@ def _file_via_auto_create(record: Any, verified: Any, deps: FilingDeps,
                 f"thread discussion {did} no longer reads back — "
                 "not reusing")
 
-    # (b) same applicant + normalized holder within the reuse window
+    # (b) same applicant + normalized holder — reused indefinitely (no
+    # expiry). The GET-verification below keeps this safe: a discussion
+    # that no longer reads back in EZLynx is never reused.
     if store:
         entry = store.auto_discussion_get(applicant_id, holder_norm)
-        if entry and entry["created_at"] >= (
-                time.time() - AUTO_CREATE_REUSE_DAYS * 86400):
+        if entry:
             seen = _verify_reused_discussion(client, entry["discussion_id"])
             if seen is not None:
                 return _reuse_discussion(
                     record, verified, deps, res, message_id, applicant_id,
                     entry["discussion_id"], seen,
-                    f"auto-created for this holder "
-                    f"{AUTO_CREATE_REUSE_DAYS}-day window",
+                    "auto-created for this holder (no expiry)",
                     dry_run)
             res.evidence.append(
                 f"ledger discussion {entry['discussion_id']} no longer "

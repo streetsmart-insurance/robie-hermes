@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from robie_job_engine import ezlynx_write_scope as write_scope  # noqa: E402
 from robie_job_engine.cert_filing import (  # noqa: E402
-    AUTO_CREATE_REUSE_DAYS,
     DISCUSSION_AMBIGUOUS,
     DISCUSSION_NONE,
     DISCUSSION_RESOLVED,
@@ -508,7 +507,10 @@ def test_same_thread_reuses_discussion(tmp_path):
     assert len(deps.note_writer.calls) == 1
 
 
-def test_seven_day_same_holder_reuses(tmp_path):
+def test_same_holder_reuses_indefinitely(tmp_path):
+    """Follow-up emails for the same applicant + holder reuse the
+    auto-created discussion no matter how much time has passed — no expiry,
+    no duplicates. The discussion is still GET-verified before reuse."""
     tmp = str(tmp_path)
     client = success_client(rows=[])
     deps = make_deps(tmp, client)
@@ -516,12 +518,23 @@ def test_seven_day_same_holder_reuses(tmp_path):
     res1 = _file(make_record(message_id="m1", thread_id="t1"), deps)
     assert res1.status == FILED, res1.hold_reasons
 
-    # new thread, same applicant + holder, within the reuse window
+    # new thread, same applicant + holder — reuses the first discussion
     rec2 = make_record(message_id="m2", thread_id="t2", gmail_id="g2")
     res2 = _file(rec2, deps)
     assert res2.status == FILED, res2.hold_reasons
     assert len(client.posts) == 1
     assert res2.discussion_id == "d-new"
+
+    # age the ledger row 90 days: a much later follow-up STILL reuses it
+    deps.store._db.execute(
+        "UPDATE cert_auto_discussions SET created_at=?",
+        (time.time() - 90 * 86400,))
+    deps.store._db.commit()
+    rec3 = make_record(message_id="m3", thread_id="t3", gmail_id="g3")
+    res3 = _file(rec3, deps)
+    assert res3.status == FILED, res3.hold_reasons
+    assert len(client.posts) == 1
+    assert res3.discussion_id == "d-new"
 
 
 def test_different_holder_creates_new_discussion(tmp_path):
@@ -547,23 +560,54 @@ def test_different_holder_creates_new_discussion(tmp_path):
     assert titles[1] == "COI Request — Other Corp — 2026-09-26"
 
 
-def test_stale_ledger_creates_new_discussion(tmp_path):
+def test_old_ledger_row_still_reuses(tmp_path):
+    """A ledger row months old is still reused when the discussion reads
+    back in EZLynx — reuse has no expiry. Only a discussion that no longer
+    reads back is skipped."""
     tmp = str(tmp_path)
-    client = success_client(rows=[])
+    # d-old belongs to the applicant in EZLynx (it is in the by-applicant
+    # list), so the triple guard accepts filing into it.
+    client = success_client(
+        rows=[{"id": "d-old", "title": "old title", "noteCount": 5}])
     deps = make_deps(tmp, client)
 
-    # seed a ledger row 8 days old — outside the reuse window
+    # seed a ledger row 90 days old
     deps.store.auto_discussion_record(
         APP, holder_key_for(["Big Client Inc"]), "d-old", "old title")
     deps.store._db.execute(
         "UPDATE cert_auto_discussions SET created_at=?",
-        (time.time() - 8 * 86400,))
+        (time.time() - 90 * 86400,))
     deps.store._db.commit()
-    # the stale discussion still reads back fine; anything else reads back
-    # like a freshly created discussion
+    # the old discussion still reads back fine
     def get_response(did):
         if did == "d-old":
             return {"id": did, "title": "old title", "noteCount": 5}
+        return {"id": did, "title": "COI Request — Big Client Inc — 2026-09-26",
+                "noteCount": 1, "mostRecentNoteId": "n-first"}
+
+    client.get_response = get_response
+
+    res = _file(make_record(message_id="m1", thread_id="t1"), deps)
+    assert res.status == FILED, res.hold_reasons
+    assert client.posts == []
+    assert res.discussion_id == "d-old"
+    # the email's note IS appended to the reused discussion
+    assert len(deps.note_writer.calls) == 1
+
+
+def test_ledger_discussion_gone_creates_new_discussion(tmp_path):
+    """A ledger row whose discussion no longer reads back in EZLynx is not
+    reused — a fresh discussion is created instead."""
+    tmp = str(tmp_path)
+    client = success_client(rows=[])
+    deps = make_deps(tmp, client)
+
+    deps.store.auto_discussion_record(
+        APP, holder_key_for(["Big Client Inc"]), "d-gone", "old title")
+    # d-gone does not read back; anything else reads back like a fresh one
+    def get_response(did):
+        if did == "d-gone":
+            return None
         return {"id": did, "title": "COI Request — Big Client Inc — 2026-09-26",
                 "noteCount": 1, "mostRecentNoteId": "n-first"}
 
@@ -627,10 +671,6 @@ def test_claim_records_thread_id(tmp_path):
     row = store._db.execute(
         "SELECT thread_id FROM cert_filing WHERE message_id='m1'").fetchone()
     assert row[0] == "t5"
-
-
-def test_reuse_window_constant():
-    assert AUTO_CREATE_REUSE_DAYS == 7
 
 
 def test_allowlist_default_is_test_only():
