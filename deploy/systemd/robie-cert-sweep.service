@@ -1,0 +1,46 @@
+[Unit]
+Description=ROBIE certificate inbox sweep (every 5 min)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as the same OS user the sweep has always run as, so the ledger
+# (~/.cert-sweep/cert-sweep.db), the Gmail SA key (~/.config/gcp/), and the
+# Zapier trigger (~/workspace/skills/zapier/bin/zap-trigger) all resolve
+# exactly as they do today. CERT_SWEEP_DATA_DIR is pinned to the absolute
+# live ledger path below — a different home would fork the dedupe
+# checkpoint and re-file already-filed mail.
+User=sa_112650695780807418521
+Group=sa_112650695780807418521
+UMask=0077
+# Pinned to the live production release. Re-pin on each cert-sweep release
+# (see robie-cert-sweep.RUNBOOK.md). /opt/streetsmart-hermes/current is
+# the production pointer the release process maintains.
+WorkingDirectory=/opt/streetsmart-hermes/current
+Environment=PYTHONPATH=/opt/streetsmart-hermes/current
+Environment=ROBIE_ENV=PRODUCTION
+Environment=ROBIE_EZLYNX_API_PROD_SECRET=projects/streetsmart-hermes-poc/secrets/ezlynx-api-prod/versions/latest
+# Live production wiring (matches the approved sandbox-cron wiring it
+# replaces — same values, no tunnel, no bare `python`).
+Environment=CERT_SWEEP_DATA_DIR=/home/sa_112650695780807418521/.cert-sweep
+Environment=CERT_APPLICANT_INDEX_PATH=/opt/streetsmart-hermes/robie-job-engine/data/cert-applicant-index.csv
+Environment=CERT_ZAPIER_TRIGGER=/home/sa_112650695780807418521/workspace/skills/zapier/bin/zap-trigger
+Environment=CERT_CALLBACK_SENDERS=certificates@streetsmart.insurance
+Environment=CERT_GMAIL_MARK_READ=1
+# CERT_CALLBACK_SECRET is fetched at runtime from Secret Manager by
+# cert_sweep_service (never stored here or in the journal).
+# Optional overrides. Values in this file win over the Environment=
+# defaults above.
+EnvironmentFile=-/etc/streetsmart-hermes/robie-cert-sweep.env
+EnvironmentFile=-/etc/streetsmart-hermes/robie-ezlynx.env
+ExecStart=/opt/streetsmart-hermes/venv/bin/python -m robie_job_engine.cert_sweep_service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/sa_112650695780807418521/.cert-sweep
+TimeoutStartSec=9min
+
+[Install]
+WantedBy=multi-user.target

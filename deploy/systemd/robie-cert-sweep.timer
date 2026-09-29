@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the ROBIE certificate inbox sweep every 5 minutes
+
+[Timer]
+# Every 5 minutes. If a sweep is still running when the timer fires,
+# systemd skips the start (oneshot already active) — runs never overlap.
+OnCalendar=*:0/5
+Persistent=true
+AccuracySec=30s
+Unit=robie-cert-sweep.service
+
+[Install]
+WantedBy=timers.target
