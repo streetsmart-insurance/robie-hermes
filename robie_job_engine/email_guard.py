@@ -259,14 +259,63 @@ def run_guarded_email_task(
     response = _strip_internal_reasoning(response)
     from .message_results import verification_summary
     summary = verification_summary(store, job["id"])
-    details = f"\n\n{summary}" if summary else ""
     status = JobStatus(final["status"])
     if status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.VERIFYING, JobStatus.RETRY_WAIT}:
         raise EmailTaskPending(f"ROBIE Job {job['id']} is {status.value}; keep email unread")
+    return _render_email_terminal(
+        job_id=job["id"],
+        status=status,
+        response=response,
+        summary=str(summary or ""),
+    )
+
+
+def _render_email_terminal(
+    *,
+    job_id: str,
+    status: JobStatus,
+    response: str,
+    summary: str,
+) -> str:
+    """Render the email reply in the simple shared format.
+
+    Same shape as the Chat terminal renderer (Jake's What happened /
+    Anything needed / Status, plain words first, job ref at the bottom),
+    via the shared status_format module. Internal worker codes are
+    translated for display only.
+    """
+    from . import status_format
+
     if status == JobStatus.COMPLETE:
-        return f"ROBIE Job {job['id']} — COMPLETE\n\n{summary or 'The requested result was independently verified.'}"
-    return (
-        f"ROBIE Job {job['id']} — {status.value}\n\n"
-        f"Worker report (not proof): {response}{details}\n\n"
-        "ROBIE did not independently verify the destination state. This result must not be treated as COMPLETE."
+        return status_format.render_simple_status(
+            headline="Done.",
+            what_happened=str(summary or "The requested result was independently verified."),
+            anything_needed="No.",
+            status_line="Verified \u2014 the result was checked against the destination.",
+            job_id=job_id,
+        )
+    headline = {
+        JobStatus.FAILED: "Couldn't finish.",
+        JobStatus.UNVERIFIED: "Not verified.",
+    }.get(status, "Waiting.")
+    status_line = {
+        JobStatus.FAILED: "Failed.",
+        JobStatus.UNVERIFIED: "Not verified \u2014 don't treat this as done.",
+    }.get(status, "Not finished.")
+    details = "Worker report (not proof): " + str(response or "").strip()
+    if summary:
+        details += "\n\n" + str(summary).strip()
+    what_happened = status_format.plain_reason(response)
+    # The retry guidance lives in the "Anything needed" line; don't repeat it.
+    what_happened = what_happened.replace(
+        "Check saved results before retrying.", "").replace("  ", " ").strip(" .")
+    if what_happened and not what_happened.endswith("."):
+        what_happened += "."
+    return status_format.render_simple_status(
+        headline=headline,
+        what_happened=what_happened or "The job ended without a clear result.",
+        anything_needed="Check the saved results before retrying.",
+        status_line=status_line,
+        details=details,
+        job_id=job_id,
     )

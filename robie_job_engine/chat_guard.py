@@ -1625,11 +1625,24 @@ def _render_chat_terminal(
     content: str,
     recordings: RecordingManager,
 ) -> str:
+    """Render the terminal status in the simple shared format.
+
+    Jake's template (What happened / Anything needed / Status) leads in
+    plain words; our verification detail (confirmed facts, gaps, evidence)
+    follows below it. Shared with the email renderer via status_format so
+    every user gets the same shape. Internal codes are translated for
+    display only -- detection on raw worker text is untouched.
+    """
+    from . import status_format
+
     job_id = job["id"]
     status = JobStatus(job["status"])
     from .message_results import verification_summary
-    checked = verification_summary(store, job_id)
-    checked_note = f"\n\n{checked}" if checked else ""
+    checked = str(verification_summary(store, job_id) or "").strip()
+
+    def _details(*chunks: str) -> str:
+        return "\n\n".join(c for c in (str(s or "").strip() for s in chunks) if c)
+
     if status == JobStatus.COMPLETE:
         publication = store.get_checkpoint(job_id, "control_center_publication")
         completion_line = (
@@ -1643,45 +1656,74 @@ def _render_chat_terminal(
             if job.get("action_type") == "ezlynx.submission_audit"
             else ""
         )
-        worker_detail = "" if verified_summary or (checked and job.get("action_type") == "hermes.google_chat_task") else f"\n\n{content}"
-        return (
-            f"ROBIE Job {job_id} — COMPLETE\n\n"
-            + completion_line
-            + verified_summary
-            + worker_detail
-            + checked_note
-            + _recording_chat_note(recordings, job_id)
-            + _post_job_audit_note(str(store.path), job_id, recordings)
+        worker_detail = "" if verified_summary or (checked and job.get("action_type") == "hermes.google_chat_task") else str(content or "")
+        return status_format.render_simple_status(
+            headline="Done.",
+            what_happened=completion_line,
+            anything_needed="No.",
+            status_line="Verified \u2014 the result was checked against the destination.",
+            details=_details(
+                verified_summary,
+                worker_detail,
+                checked,
+                _recording_chat_note(recordings, job_id),
+                _post_job_audit_note(str(store.path), job_id, recordings),
+            ),
+            job_id=job_id,
         )
     if status == JobStatus.FAILED:
-        return (
-            f"ROBIE Job {job_id} — FAILED\n\n"
-            "ROBIE could not safely finish the requested work. No success claims from the Computer Worker are being reported.\n\n"
-            f"Reason: {job.get('last_error') or 'unknown error'}."
-            + checked_note
-            + _recording_chat_note(recordings, job_id)
-            + _login_secret_chat_note(store, job_id)
-            + _post_job_audit_note(str(store.path), job_id, recordings)
+        raw_reason = str(job.get("last_error") or "unknown error")
+        return status_format.render_simple_status(
+            headline="Couldn't finish.",
+            what_happened=status_format.plain_reason(raw_reason),
+            anything_needed="Needs a human to review and retry if appropriate.",
+            status_line="Failed.",
+            details=_details(
+                checked,
+                _recording_chat_note(recordings, job_id),
+                _login_secret_chat_note(store, job_id),
+                _post_job_audit_note(str(store.path), job_id, recordings),
+                f"Technical detail: {raw_reason}",
+            ),
+            job_id=job_id,
         )
     if status == JobStatus.UNVERIFIED:
-        return (
-            f"ROBIE Job {job_id} — UNVERIFIED\n\n"
-            "ROBIE attempted the work. The full requested outcome was not independently verified. "
-            "Confirmed facts and remaining gaps are reported below; unconfirmed success claims are suppressed.\n\n"
-            f"Reason: {job.get('last_error') or 'destination verification produced no authoritative evidence'}.\n\n"
-            "Do not treat this Job as COMPLETE; it remains open for review or retry."
-            + checked_note
-            + _recording_chat_note(recordings, job_id)
-            + _login_secret_chat_note(store, job_id)
-            + _post_job_audit_note(str(store.path), job_id, recordings)
+        raw_reason = str(job.get("last_error") or "destination verification produced no authoritative evidence")
+        return status_format.render_simple_status(
+            headline="Not verified.",
+            what_happened=(
+                "Robie tried the work, but the full result couldn't be independently confirmed. "
+                "Unconfirmed success claims are suppressed. "
+                + status_format.plain_reason(raw_reason)
+            ),
+            anything_needed="Review the details below, then retry or confirm manually \u2014 don't treat this as done.",
+            status_line="Not verified \u2014 treat as incomplete until confirmed.",
+            details=_details(
+                checked,
+                _recording_chat_note(recordings, job_id),
+                _login_secret_chat_note(store, job_id),
+                _post_job_audit_note(str(store.path), job_id, recordings),
+                f"Technical detail: {raw_reason}",
+            ),
+            job_id=job_id,
         )
-    return (
-        f"ROBIE Job {job_id} — {status.value}\n\n"
-        "ROBIE is not treating this request as successful. "
-        f"Reason: {job.get('last_error') or 'waiting for a human or destination update'}."
-        + checked_note
-            + _recording_chat_note(recordings, job_id)
-        + _login_secret_chat_note(store, job_id)
+    needs_input = status == JobStatus.AWAITING_HUMAN_INPUT
+    raw_reason = str(job.get("last_error") or "waiting for a human or destination update")
+    return status_format.render_simple_status(
+        headline="Waiting on you." if needs_input else "Waiting.",
+        what_happened=f"The job is {status.value} \u2014 {status_format.plain_reason(raw_reason)}.",
+        anything_needed=(
+            "Your input is needed \u2014 see the details below."
+            if needs_input
+            else "Nothing yet \u2014 the job hasn't finished."
+        ),
+        status_line="Not finished.",
+        details=_details(
+            checked,
+            _recording_chat_note(recordings, job_id),
+            _login_secret_chat_note(store, job_id),
+        ),
+        job_id=job_id,
     )
 
 

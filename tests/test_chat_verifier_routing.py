@@ -250,7 +250,7 @@ class ChatVerifierRoutingTests(unittest.TestCase):
                         "ezlynx.submission_audit": EzlynxSubmissionAuditVerifier(readback)
                     },
                 )
-            self.assertIn("FAILED", response)
+            self.assertIn("Couldn't finish.", response)
             self.assertIn("Control Center publication failed", response)
             self.assertEqual(store.get_job(job_id)["status"], JobStatus.FAILED)
 
