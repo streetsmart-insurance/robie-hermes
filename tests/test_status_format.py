@@ -194,9 +194,27 @@ class ActionGateNoteTests(unittest.TestCase):
         self.assertIn("What happened:", text)
         self.assertIn("Anything needed:", text)
         self.assertIn("Status:", text)
-        self.assertIn("No Ascend API request was sent.", text)
+        self.assertNotIn("No Ascend API request was sent.", text)
+        self.assertIn("Nothing was sent and nothing was changed.", text)
         self.assertTrue(text.rstrip().endswith("Ref: job " + JOB_ID))
         self.assertNotIn("ROBIE Job", _top(text))
+
+    def test_ascend_refusal_still_says_no_api_request_was_sent(self):
+        text = format_action_gate_chat_note(
+            {
+                "id": JOB_ID,
+                "action_type": "hermes.google_chat_task",
+                "last_error": "ACTION_GATE_REFUSED: Test has no clean pass for action ascend.create_program",
+                "payload": {"text": "Create a program in Ascend"},
+            }
+        )
+        self.assertIn("No Ascend API request was sent.", text)
+        self.assertIn(
+            "What happened: This action is blocked until a clean Test pass is on file.",
+            text,
+        )
+        self.assertNotIn("ACTION_GATE_REFUSED", text.split("\nDetails")[0])
+        self.assertIn("Technical detail: ACTION_GATE_REFUSED", text)
 
 
 if __name__ == "__main__":

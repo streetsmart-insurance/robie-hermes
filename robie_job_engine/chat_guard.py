@@ -944,6 +944,17 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "\n\n[ROBIE JOB ENGINE EXECUTION CONTRACT]",
         f"Job ID: {job_id}",
     ]
+    framing = str(dict(job.get("payload") or {}).get("task_framing") or "").strip()
+    if framing:
+        lines.append(framing)
+    from .engine import is_retry_text
+    from .runtime_env import playground_enabled
+
+    if playground_enabled() and is_retry_text(text):
+        lines.append(
+            "This is a retry of the previous job. Do the original Chat request again. "
+            "Do not bind, take payment, or email the client."
+        )
     if artifacts:
         lines.append(
             "Attachments below are trusted, private staged files owned by StreetSmart."
@@ -994,6 +1005,88 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     return text + "\n".join(lines)
 
 
+def _apply_explicit_retry(store: JobStore, job: dict[str, Any]) -> str | None:
+    """Checkpoint RETRY. Return a refusal reason, or None after an allowed resume.
+
+    AWAITING_HUMAN_INPUT is left for the existing resume path. FAILED and
+    UNVERIFIED are re-opened only when leftover_retry_hold_reason allows it
+    (playground on, younger than 24 hours).
+    """
+    from .engine import leftover_retry_hold_reason, resume_terminal_for_playground_retry
+
+    reason = leftover_retry_hold_reason(job)
+    store.checkpoint(
+        job["id"],
+        "leftover_retry",
+        {"refused": bool(reason), "reason": reason, "auto_retry": False},
+    )
+    if reason:
+        return reason
+    status = JobStatus(job["status"])
+    if status in {JobStatus.FAILED, JobStatus.UNVERIFIED}:
+        resume_terminal_for_playground_retry(store, job)
+    return None
+
+
+def _retry_target_job_id(
+    store: JobStore,
+    queue: DurableChatEventQueue,
+    conversation_id: str,
+    active_job_id: str | None,
+) -> str | None:
+    """Pick the job a retry message should touch.
+
+    Flag off keeps today's active link. Playground keeps a fresh HITL, and
+    otherwise uses the last failed or unverified job on the thread.
+    """
+    from .runtime_env import playground_enabled
+
+    if not playground_enabled():
+        return active_job_id
+    if active_job_id:
+        active = store.get_job(active_job_id)
+        if active.get("status") == JobStatus.AWAITING_HUMAN_INPUT.value:
+            return active_job_id
+    found = queue.latest_terminal_job_id(
+        conversation_id, statuses=("FAILED", "UNVERIFIED")
+    )
+    return found or active_job_id
+
+
+def retry_refusal_reply(store: JobStore, job_id: str) -> str | None:
+    """Plain-English Chat note when this job's latest RETRY was refused."""
+    checkpoint = store.get_checkpoint(job_id, "leftover_retry") or {}
+    if not checkpoint.get("refused"):
+        return None
+    job = store.get_job(job_id)
+    reason = str(checkpoint.get("reason") or "")
+    from . import status_format
+
+    return status_format.render_simple_status(
+        headline="Not retrying.",
+        what_happened=status_format.plain_retry_refusal(
+            reason, status=str(job.get("status") or "")
+        ),
+        anything_needed="Send the request again if you still want it done.",
+        status_line="Not restarted.",
+        details=f"Technical detail: {reason}",
+        job_id=job_id,
+    )
+
+
+def retry_without_job_reply() -> str:
+    """Plain-English note when retry has no job on the thread."""
+    from . import status_format
+
+    return status_format.render_simple_status(
+        headline="Not retrying.",
+        what_happened="There's no failed or unfinished job in this thread to retry.",
+        anything_needed="Send the request again.",
+        status_line="Not restarted.",
+        details="Technical detail: no job was linked to this thread.",
+    )
+
+
 def open_chat_job(
     db_path: str,
     message_id: str,
@@ -1032,17 +1125,10 @@ def open_chat_job(
 
     parked_hitl = find_parked_chat_hitl_job(store, context_key, queue=queue)
     if parked_hitl and is_chat_coverage_hitl_resume_reply(store, parked_hitl, text):
-        from .engine import is_retry_text, leftover_retry_hold_reason
+        from .engine import is_retry_text
 
-        if is_retry_text(text):
-            leftover = leftover_retry_hold_reason(parked_hitl)
-            store.checkpoint(
-                parked_hitl["id"],
-                "leftover_retry",
-                {"refused": bool(leftover), "reason": leftover, "auto_retry": False},
-            )
-            if leftover:
-                return parked_hitl["id"]
+        if is_retry_text(text) and _apply_explicit_retry(store, parked_hitl):
+            return parked_hitl["id"]
         ingest_chat_hitl_reply(
             store,
             job_id=parked_hitl["id"],
@@ -1071,6 +1157,10 @@ def open_chat_job(
         normalized.startswith(prefix)
         for prefix in (*CONTINUATION_PREFIXES, *CORRECTION_PREFIXES)
     )
+    from .engine import is_retry_text
+
+    if is_retry_text(normalized):
+        explicit_continuation = True
     if classification.hold_status == JobStatus.FAILED.value:
         # Removed integrations never resume or retarget an existing executable
         # job, even when the message uses continuation-shaped language.
@@ -1087,6 +1177,10 @@ def open_chat_job(
     if related_only or explicit_continuation:
         current = queue.active_conversation_job(context_key)
         active_job_id = current.get("job_id") if current else None
+        if is_retry_text(text):
+            active_job_id = _retry_target_job_id(
+                store, queue, context_key, active_job_id
+            )
         if not active_job_id:
             return None
         active_job = store.get_job(active_job_id)
@@ -1099,17 +1193,9 @@ def open_chat_job(
             if refused is not None:
                 return refused["id"]
         if would_resume:
-            from .engine import is_retry_text, leftover_retry_hold_reason
-
-            if is_retry_text(text):
-                leftover = leftover_retry_hold_reason(active_job)
-                store.checkpoint(
-                    active_job_id,
-                    "leftover_retry",
-                    {"refused": bool(leftover), "reason": leftover, "auto_retry": False},
-                )
-                if leftover:
-                    return active_job_id
+            if is_retry_text(text) and _apply_explicit_retry(store, active_job):
+                return active_job_id
+            active_job = store.get_job(active_job_id)
         if JobStatus(active_job["status"]) in WAITING_STATUSES:
             store.resume(active_job_id)
         elif JobStatus(active_job["status"]) == JobStatus.UNVERIFIED:
@@ -1164,26 +1250,32 @@ def open_chat_job(
         server_payload.update(_submission_audit_payload())
     if classification.action_type == "ezlynx.overdue_submission_reports":
         server_payload.update(_overdue_submission_report_payload())
+    from .request_routing import PLAYGROUND_TASK_FRAMING
+
+    framing = PLAYGROUND_TASK_FRAMING.get(classification.action_type)
+    if framing:
+        server_payload["task_framing"] = framing
     server_payload.update(dict(action_payload or {}))
     if continued_job is None:
-        from .engine import is_retry_text, leftover_retry_hold_reason
-
         if is_retry_text(text):
             parked = resume_context or queue.active_conversation_job(context_key)
             parked_id = (parked or {}).get("job_id")
+            if not parked_id:
+                parked_id = _retry_target_job_id(store, queue, context_key, None)
             if parked_id:
                 existing = store.get_job(parked_id)
-                leftover = leftover_retry_hold_reason(existing)
-                store.checkpoint(
-                    parked_id,
-                    "leftover_retry",
-                    {"refused": bool(leftover), "reason": leftover, "auto_retry": False},
-                )
-                if leftover:
+                if _apply_explicit_retry(store, existing):
                     return parked_id
+                existing = store.get_job(parked_id)
                 if JobStatus(existing["status"]) == JobStatus.AWAITING_HUMAN_INPUT:
                     store.resume(parked_id)
                     continued_job = store.get_job(parked_id)
+                elif JobStatus(existing["status"]) in {
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                    JobStatus.VERIFYING,
+                }:
+                    continued_job = existing
     if continued_job is not None:
         if is_chat_coverage_hitl_resume_reply(store, continued_job, text):
             ingest_chat_hitl_reply(
@@ -1619,6 +1711,54 @@ def _publish_terminal_job(
     return store.get_job(job_id)
 
 
+def _playground_answer_detail(content: str) -> str:
+    """Robie's actual words, included only while playground is on."""
+    from .runtime_env import playground_enabled
+
+    if not playground_enabled():
+        return ""
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    return "Robie's answer:\n" + text
+
+
+def _is_playground_informational_answer(
+    store: JobStore,
+    job: dict[str, Any],
+    content: str,
+) -> bool:
+    """A plain question with no destination action, playground only.
+
+    EZLynx quote / policy-change / certificate jobs stay on the normal
+    status line. Their answer is still included via ``_playground_answer_detail``.
+    """
+    from .runtime_env import playground_enabled
+    from .worker_contract import (
+        claimed_destination_progress_or_complete,
+        extract_infra_close_error,
+    )
+
+    if not playground_enabled():
+        return False
+    if str(job.get("action_type") or "").startswith("ezlynx."):
+        return False
+    if store.get_checkpoint(job["id"], "action"):
+        return False
+    if JobStatus(job["status"]) != JobStatus.UNVERIFIED:
+        return False
+    error = str(job.get("last_error") or "")
+    if error not in {"", "no structured destination action checkpoint"}:
+        return False
+    if not str(content or "").strip():
+        return False
+    if claimed_destination_progress_or_complete(content):
+        return False
+    if extract_infra_close_error(content, error):
+        return False
+    return True
+
+
 def _render_chat_terminal(
     store: JobStore,
     job: dict[str, Any],
@@ -1649,6 +1789,30 @@ def _render_chat_terminal(
     status = JobStatus(job["status"])
     from .message_results import verification_summary
     checked = str(verification_summary(store, job_id) or "").strip()
+
+    if _is_playground_informational_answer(store, job, content):
+        answer = str(content or "").strip()
+        raw_reason = str(
+            job.get("last_error") or "no structured destination action checkpoint"
+        )
+        return status_format.render_simple_status(
+            headline="Answered.",
+            what_happened=answer,
+            anything_needed="No.",
+            status_line="Answered — nothing was changed.",
+            details="\n\n".join(
+                part
+                for part in (
+                    checked,
+                    "No destination check was required. This was a question, not an action.",
+                    f"Technical detail: {raw_reason}",
+                    _recording_chat_note(recordings, job_id),
+                    _post_job_audit_note(str(store.path), job_id, recordings),
+                )
+                if str(part or "").strip()
+            ),
+            job_id=job_id,
+        )
 
     def _details(*chunks: str) -> str:
         return "\n\n".join(c for c in (str(s or "").strip() for s in chunks) if c)
@@ -1689,6 +1853,7 @@ def _render_chat_terminal(
             anything_needed="Needs a human to review and retry if appropriate.",
             status_line="Failed.",
             details=_details(
+                _playground_answer_detail(content),
                 checked,
                 _recording_chat_note(recordings, job_id),
                 _login_secret_chat_note(store, job_id),
@@ -1709,6 +1874,7 @@ def _render_chat_terminal(
             anything_needed="Review the details below, then retry or confirm manually \u2014 don't treat this as done.",
             status_line="Not verified \u2014 treat as incomplete until confirmed.",
             details=_details(
+                _playground_answer_detail(content),
                 checked,
                 _recording_chat_note(recordings, job_id),
                 _login_secret_chat_note(store, job_id),
@@ -1729,6 +1895,7 @@ def _render_chat_terminal(
         ),
         status_line="Not finished.",
         details=_details(
+            _playground_answer_detail(content),
             checked,
             _recording_chat_note(recordings, job_id),
             _login_secret_chat_note(store, job_id),

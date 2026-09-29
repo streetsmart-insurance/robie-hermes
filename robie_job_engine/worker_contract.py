@@ -237,11 +237,31 @@ def classify_chat_close_without_checkpoint(
             error=leftover[:1_000],
             reason="persisted last_error without destination claim",
         )
+    if _playground_informational_close(action=action, action_type=action_type):
+        # Same ledger status as today (nothing was checked, so not COMPLETE).
+        # The Chat renderer turns this reason into a normal answer.
+        return ChatCloseDecision(
+            status="UNVERIFIED",
+            error="no structured destination action checkpoint",
+            reason="playground informational answer",
+        )
     return ChatCloseDecision(
         status="UNVERIFIED",
         error="no structured destination action checkpoint",
         reason="generic close without destination evidence",
     )
+
+
+def _playground_informational_close(*, action: Any, action_type: str) -> bool:
+    """Plain question with no destination action, playground only."""
+    from .runtime_env import playground_enabled
+
+    if not playground_enabled() or action:
+        return False
+    kind = str(action_type or "").strip()
+    if kind.startswith("ezlynx."):
+        return False
+    return True
 
 
 def has_destination_action_checkpoint(store: Any, job_id: str) -> bool:

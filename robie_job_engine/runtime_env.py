@@ -12,6 +12,8 @@ import os
 TEST_ENV_NAME = "TEST"
 PRODUCTION_ENV_NAMES = frozenset({"PRODUCTION", "PROD", "LIVE"})
 SANDBOX_ENV_FLAG = "ROBIE_CHAT_SANDBOX"
+PLAYGROUND_FLAG = "ROBIE_PLAYGROUND"
+_PLAYGROUND_ON = frozenset({"1", "true", "yes", "on"})
 
 
 class ProductionGuardError(RuntimeError):
@@ -34,6 +36,18 @@ def chat_routing_env() -> str | None:
     if current in PRODUCTION_ENV_NAMES:
         return "prod"
     return None
+
+
+def playground_enabled() -> bool:
+    """Chat loosening. Off by default on every environment, including Production.
+
+    ``ROBIE_PLAYGROUND=1`` (also true, yes, or on) turns it on wherever it is
+    set, including when ``ROBIE_ENV`` is PRODUCTION, PROD, or LIVE. Unset or
+    any other value stays off. This does not widen EZLynx writes, binding,
+    payments, or outbound client email.
+    """
+    flag = str(os.environ.get(PLAYGROUND_FLAG) or "").strip().lower()
+    return flag in _PLAYGROUND_ON
 
 
 def chat_path_is_sandbox(*, conversation_id: str | None = None) -> bool:

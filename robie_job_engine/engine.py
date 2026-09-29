@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 LEFTOVER_RETRY_REFUSED = "LEFTOVER_RETRY_REFUSED"
 _RETRY_TEXTS = frozenset({"retry", "/retry"})
+PLAYGROUND_RETRY_MAX_AGE = timedelta(hours=24)
+_PLAYGROUND_RETRY_STATUSES = frozenset({JobStatus.FAILED, JobStatus.UNVERIFIED})
 RECONCILIATION_REQUIRED_ACTIONS = frozenset(
     {"ezlynx.reassign", "ezlynx.move_document", "ezlynx.apply_label"}
 )
@@ -66,7 +68,12 @@ def leftover_retry_hold_reason(
     and younger than ``LIVE_TAB_CLAIM_MAX_AGE``. Terminal FAILED /
     UNVERIFIED / leftover ids must not resume via RETRY. New @robie is
     the path. No auto-retry.
+
+    Playground (``ROBIE_PLAYGROUND=1``, including Production when that flag
+    is set) also allows FAILED / UNVERIFIED younger than 24 hours. With the
+    flag off, this refusal text stays the same on every environment.
     """
+    from .runtime_env import playground_enabled
     from .tab_cleanup import LIVE_TAB_CLAIM_MAX_AGE, job_holds_live_tab_claim
 
     job = dict(job or {})
@@ -78,6 +85,8 @@ def leftover_retry_hold_reason(
             f"{LEFTOVER_RETRY_REFUSED}: leftover job {job_id} has no usable "
             "status. RETRY is refused. Start a new @robie. No auto-retry."
         )
+    if playground_enabled() and status in _PLAYGROUND_RETRY_STATUSES:
+        return _playground_terminal_retry_reason(job, status, job_id, now=now)
     if status != JobStatus.AWAITING_HUMAN_INPUT:
         return (
             f"{LEFTOVER_RETRY_REFUSED}: leftover RETRY is refused for "
@@ -92,6 +101,57 @@ def leftover_retry_hold_reason(
             "new @robie. No auto-retry."
         )
     return None
+
+
+def _playground_terminal_retry_reason(
+    job: dict[str, Any],
+    status: JobStatus,
+    job_id: str,
+    *,
+    now: datetime | None,
+) -> str | None:
+    """Allow a recent failed or unverified retry only while playground is on.
+
+    The caller must already have checked ``playground_enabled()``. Older
+    than 24 hours stays refused on every environment.
+    """
+    from .tab_cleanup import job_claim_stamp
+
+    stamp = job_claim_stamp(job)
+    if stamp is None:
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: {status.value} job {job_id} has no "
+            "timestamp. Playground retry needs a job younger than 24 hours. "
+            "Start a new request."
+        )
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if (moment - stamp) > PLAYGROUND_RETRY_MAX_AGE:
+        return (
+            f"{LEFTOVER_RETRY_REFUSED}: {status.value} job {job_id} is older "
+            "than 24 hours. Playground retry was refused. Start a new request."
+        )
+    return None
+
+
+def resume_terminal_for_playground_retry(store: Any, job: dict[str, Any]) -> dict[str, Any]:
+    """Re-open a failed or unverified job so the same thread can run it again.
+
+    Call only after ``leftover_retry_hold_reason`` returned None. Does not
+    mark COMPLETE and does not touch the EZLynx write allowlist.
+    """
+    status = JobStatus(job.get("status"))
+    if status not in _PLAYGROUND_RETRY_STATUSES:
+        return job
+    job_id = str(job.get("id") or "")
+    return store.transition(
+        job_id,
+        JobStatus.PENDING,
+        expected={status},
+        error=None,
+        release_lease=True,
+    )
 
 
 def resolve_worker_name(action_type, payload):
