@@ -125,6 +125,101 @@ def jev_questions() -> dict[str, Any]:
     }
 
 
+def answer_quality_questions() -> dict[str, Any]:
+    """Jev scores the answer text only. No destination, no policy readback."""
+    return {
+        "satisfied": {
+            "type": "noul",
+            "instructions": (
+                "Does the answer text reply to the question that was asked? "
+                "Judge the answer only. Ignore EZLynx, policy numbers, and "
+                "destination readback. This question has no EZLynx destination."
+            ),
+            "criteria": {
+                "true": "The answer replies to the question.",
+                "false": "The answer does not reply to the question.",
+            },
+        },
+        "outcome": {
+            "type": "choice",
+            "instructions": "How complete is the answer text?",
+            "criteria": {
+                "completed": "The answer replies to the question.",
+                "partially_completed": "The answer is only part of a reply.",
+                "blocked": "The answer says it could not reply.",
+                "failed": "There is no answer.",
+            },
+        },
+    }
+
+
+def render_answer_only(
+    store: Any,
+    job: dict[str, Any],
+    worker_text: str,
+    *,
+    channel: str = "chat",
+    client: Any = None,
+) -> str:
+    """Plain reply: the answer, Details, and the job id. No EZLynx readback."""
+    from .email_guard import _strip_internal_reasoning
+
+    job_id = str(job.get("id") or "")
+    cached = store.get_checkpoint(job_id, "end_state_report") if job_id else None
+    if cached and str(cached.get("text") or "").strip() and cached.get("answer_only"):
+        return str(cached["text"])
+    payload = dict(job.get("payload") or {})
+    ask = _ask_text(payload) or _fragment(str(worker_text or ""))
+    answer = _strip_internal_reasoning(str(worker_text or ""))
+    answer = str(answer or "").strip()
+    if end_state_report_enabled():
+        scorer = client if client is not None else build_jev_client()
+        state = redact_mapping({"ask": ask, "answer": answer[:4000]})
+        questions = answer_quality_questions()
+        request_body = {"state": state, "model": "jev-latest", "questions": questions}
+        try:
+            response = scorer.evaluate(state, questions)
+        except Exception:
+            logger.warning("Jev answer scoring failed closed")
+            response = None
+        decision = decide(
+            response,
+            request_body=request_body,
+            hard_failure="",
+            login_block="",
+            readback_passed=False,
+        )
+        jev_line = (
+            f"Jev: {decision.display_verdict}, {int(decision.confidence)}% confidence. "
+            f"{plain_customer_text(decision.reason)}"
+        )
+    else:
+        decision = None
+        jev_line = "Jev was not asked. The end-state report is off."
+    summary = answer or "Robie did not write an answer."
+    details = "\n".join(
+        (
+            jev_line,
+            "No EZLynx destination check. This was a question.",
+        )
+    )
+    text = "\n".join(
+        (summary.strip(), "", "Details", details, "", status_format.short_job_ref(job_id))
+    ).strip() + "\n"
+    if job_id:
+        store.checkpoint(
+            job_id,
+            "end_state_report",
+            {
+                "text": text,
+                "answer_only": True,
+                "verdict": getattr(decision, "verdict", ""),
+                "channel": channel,
+            },
+        )
+    return text
+
+
 def render_job_end_state(
     store: Any,
     job: dict[str, Any],
@@ -136,10 +231,16 @@ def render_job_end_state(
 ) -> str:
     """Score one terminal job and return the end-state reply.
 
-    The rendered text is saved on the job so a second reply in the same
-    thread is identical and Jev is not called twice. Escalation, when
-    needed, goes through the existing Gemini-first Chat HITL path once.
+    Questions use the answer-only path: Jev judges the answer, and EZLynx
+    is not re-read.
     """
+    from .answer_only import is_answer_only_job
+
+    if is_answer_only_job(job):
+        return render_answer_only(
+            store, job, worker_text, channel=channel, client=client
+        )
+
     job_id = str(job.get("id") or "")
     cached = store.get_checkpoint(job_id, "end_state_report") if job_id else None
     if cached and str(cached.get("text") or "").strip():
@@ -389,7 +490,7 @@ def escalate_end_state(
             original_requester=None,
             notify_carlo=True,
             notify_requester=False,
-            channel="chat",
+            channel=str(channel or "chat"),
             script_or_job_stopped=True,
             job_still_running=False,
         )
@@ -406,7 +507,14 @@ def escalate_end_state(
                 )
             )
 
-        result = escalate(request, deps={"chat_sender": chat_sender})
+        deps = {"chat_sender": chat_sender}
+        if str(channel or "").strip().casefold() == "email":
+            from .hitl_email import carlo_hitl_email_sender
+
+            deps = {"email_sender": carlo_hitl_email_sender()}
+            if os.environ.get("ROBIE_CHAT_SA_KEY_FILE", "").strip():
+                deps["chat_sender"] = chat_sender
+        result = escalate(request, deps=deps)
         posted = bool(getattr(result, "hitl_posted", False))
     except Exception as exc:
         error = type(exc).__name__

@@ -124,6 +124,7 @@ class RequestClassification:
     action_type: str
     worker: str
     hold_status: str | None = None
+    answer_only: bool = False
 
 
 # General-agent framing for playground Chat types. Existing EZLynx skills
@@ -145,8 +146,12 @@ PLAYGROUND_TASK_FRAMING = {
         "Do not wait on that readback to answer."
     ),
     "ezlynx.policy_change": (
-        "Task: policy change. Use the EZLynx policy-change flow. "
+        "Task: policy change. File the note with ezlynx_discussion_note on the "
+        "existing discussion title named in the request. For a mailing-address "
+        "change, use that existing title. Do not create a discussion. "
+        "Do not use Playwright Add Note or Save Note. "
         "Do not bind, take payment, or email the client. "
+        "Do not read Robie's source, jobs.db, or token files. "
         "Writes stay on the EZLynx test account only. "
         "If an EZLynx readback is available, keep it as evidence. "
         "Do not wait on that readback to answer."
@@ -159,9 +164,11 @@ PLAYGROUND_TASK_FRAMING = {
         "Do not wait on that readback to answer."
     ),
     "ezlynx.certificate": (
-        "Task: certificate request. Use the EZLynx certificate flow. "
-        "File notes and documents through the EZLynx API only. "
-        "Do not bind, take payment, or email the client. "
+        "Task: certificate request. Use ezlynx_discussion_note and "
+        "robie_job_engine.certificate_filing to draft and file the holder note "
+        "on the existing discussion. Draft only. "
+        "Do not bind, take payment, or email the client or the certificate holder. "
+        "Do not browse EZLynx by hand. Do not read Robie's source, jobs.db, or token files. "
         "Writes stay on the EZLynx test account only. "
         "If an EZLynx readback is available, keep it as evidence. "
         "Do not wait on that readback to answer."
@@ -243,6 +250,22 @@ def classify_request(text: str, *, attachment_count: int = 0) -> RequestClassifi
     if _is_qa_entry(normalized):
         return RequestClassification(
             "appsheet.qa_audit", WORKER_FOR_ACTION["appsheet.qa_audit"]
+        )
+    # Vague short asks and questions win before "can you " becomes a job
+    # and before playground treats the word "quote" as an EZLynx write.
+    from .answer_only import is_informational_ask, is_vague_short_request
+
+    if is_vague_short_request(text, attachment_count=attachment_count):
+        return RequestClassification(
+            "hermes.needs_clarification",
+            WORKER_FOR_ACTION["hermes.needs_clarification"],
+            hold_status="NEEDS_CLARIFICATION",
+        )
+    if is_informational_ask(text):
+        return RequestClassification(
+            "hermes.plain_english",
+            WORKER_FOR_ACTION["hermes.plain_english"],
+            answer_only=True,
         )
     playground_route = _classify_playground_ezlynx(normalized)
     if playground_route is not None:

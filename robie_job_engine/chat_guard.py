@@ -610,9 +610,13 @@ def _default_chat_verifiers() -> dict[str, Any]:
             # Register anyway. Reads fail closed if Secret Manager is absent.
             client = None
         from .message_verification import MessageOutcomeVerifier
-        verifiers["hermes.google_chat_task"] = MessageOutcomeVerifier(HermesChatEzlynxDestinationVerifier(
-            EzlynxApiClientReadPort(client)
-        ))
+        from .answer_only import SkipDestinationReadback
+
+        verifiers["hermes.google_chat_task"] = SkipDestinationReadback(
+            MessageOutcomeVerifier(HermesChatEzlynxDestinationVerifier(
+                EzlynxApiClientReadPort(client)
+            ))
+        )
     except Exception as exc:
         logger.exception(
             "hermes.google_chat_task verifier unavailable; those jobs stay UNVERIFIED"
@@ -947,6 +951,22 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
     framing = str(dict(job.get("payload") or {}).get("task_framing") or "").strip()
     if framing:
         lines.append(framing)
+    from .answer_only import (
+        FORBIDDEN_READ_RULE,
+        is_answer_only_job,
+        purpose_built_instructions,
+    )
+
+    route = purpose_built_instructions(str(dict(job.get("payload") or {}).get("text") or text))
+    if route and route not in lines:
+        lines.append(route)
+    if is_answer_only_job(job):
+        lines.append(
+            "This is a question. Answer it in plain English. "
+            "Do not open EZLynx. Do not write a note or a document. "
+            "Do not include your reasoning or thinking."
+        )
+    lines.append(FORBIDDEN_READ_RULE)
     from .engine import is_retry_text
     from .runtime_env import playground_enabled
 
@@ -977,6 +997,8 @@ def build_chat_execution_text(db_path: str, job_id: str | None, text: str) -> st
         "After saving, navigate away and reopen the exact destination. Read the freshly loaded server-backed state.",
         "Never claim success from modal text, a local DOM value, quote data, or your own prior action. If any requested field is absent, say the action is not verified.",
         "Do not write that you identified a carrier, are Filling Policy Shell, filled, saved, or uploaded unless a destination-action checkpoint already exists. With no destination-action checkpoint and no destination-verified evidence, say you were stuck and made no verified progress.",
+        "If the request is ambiguous and does not name a client, policy, carrier, or task, stop immediately and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <what is missing>. Ask one plain-English question. Do not investigate the server, read source code, read jobs.db, or open token files.",
+        "Do not read Robie's own source, jobs.db, .hermes/google_token.json, or any token file during a job. Do not grep the server. Use the purpose-built tool named in the task.",
         "If execution is blocked because a required value is missing, stop and begin the response with exactly: ROBIE_BLOCKED: MISSING_REQUIRED_FIELD: <field name>.",
         "If execution is blocked at an unresolved browser step or locator, stop and begin the response with exactly: ROBIE_BLOCKED: PLAYWRIGHT_BLOCKED: <specific step or locator>.",
         "If a write is PLAYWRIGHT_BLOCKED or a modal cannot be uniquely named, stop, describe the dialog title and visible labels only (no passwords), ask Gemini for one unique field, and HITL Carlo if Gemini is unsure. Never guess a field. Never use .first/.nth/.last.",
@@ -1299,6 +1321,7 @@ def open_chat_job(
                     "worker": classification.worker,
                     **server_payload,
                     "request_text": text,
+                    "answer_only": bool(getattr(classification, "answer_only", False)),
                 }
             ),
             idempotency_key=f"gchat:{message_id}",
@@ -1433,6 +1456,8 @@ def open_chat_job(
     if classification.hold_status == JobStatus.NEEDS_CLARIFICATION.value:
         current = store.get_job(job["id"])
         if current["status"] == JobStatus.PENDING:
+            from .answer_only import CLARIFICATION_QUESTION
+
             store.transition(
                 job["id"],
                 JobStatus.NEEDS_CLARIFICATION,
@@ -1440,6 +1465,11 @@ def open_chat_job(
                 error="request is too vague to execute safely",
                 resume_status=JobStatus.PENDING,
                 release_lease=True,
+            )
+            store.checkpoint(
+                job["id"],
+                "clarification",
+                {"question": CLARIFICATION_QUESTION, "asked": True},
             )
             return job["id"]
     # Bounded workers stay PENDING so JobEngine can claim them. Hermes chat
@@ -1773,8 +1803,14 @@ def _render_chat_terminal(
     every user gets the same shape. Internal codes are translated for
     display only -- detection on raw worker text is untouched.
     """
+    from .answer_only import is_answer_only_job
     from .end_state_report import end_state_report_enabled, render_job_end_state
 
+    # A question is answered in the reply. EZLynx is not the destination.
+    if is_answer_only_job(job):
+        return render_job_end_state(
+            store, job, content, recordings=recordings, channel="chat"
+        )
     # Flag on: one end-state report scored by Jev. The old "Not verified"
     # wording is display-only and is skipped here. Deterministic verifiers
     # still ran before this render; a failed hard readback forces wrong.
@@ -2018,8 +2054,13 @@ def guard_chat_response(
     # the ledger cannot look like progress (job 468d1575).
     from .worker_contract import sanitize_worker_response
 
+    from .answer_only import is_answer_only_job
+    from .email_guard import _strip_internal_reasoning
+
+    if is_answer_only_job(job):
+        content = _strip_internal_reasoning(content) or content
     store.checkpoint(job_id, "worker_response", sanitize_worker_response(store, job_id, content))
-    if store.get_checkpoint(job_id, "action") is None:
+    if store.get_checkpoint(job_id, "action") is None and not is_answer_only_job(job):
         from .chat_destination_binding import bind_destination_for_job, claimed_from_job
 
         bind_destination_for_job(store, job, claimed=claimed_from_job(job, content))

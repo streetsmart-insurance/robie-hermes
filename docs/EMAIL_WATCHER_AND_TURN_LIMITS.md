@@ -1,0 +1,41 @@
+# Email watcher limits and the Chat turn ceiling
+
+## Where the ~10 minute cutoff lives
+
+`scripts/robie_email_agent.py` kills the email child at **930 seconds**.
+That is not what stopped the certificate and mailing-address jobs.
+
+The earlier stop is `robie_job_engine/email_agent_runner.py`: the Hermes
+`chat` subprocess timeout. The first attempt defaults to **600 seconds**
+(10 minutes). The recovery attempt stays 300 seconds. When the 600 second
+limit fires, the log and the job text say, in plain English, that the
+chat step hit its time limit.
+
+Set `ROBIE_EMAIL_AGENT_TIMEOUT_SECONDS` to change the first-attempt limit.
+Do not lower `agent.max_turns` in `config.yaml`. The email agent and Chat
+share that file.
+
+## Chat total-time ceiling
+
+`gateway/run.py` in hermes-agent only has an idle timeout
+(`agent.gateway_timeout`, default 1800 seconds). This repo does not contain
+that file. The Chat adapter enforces a separate total ceiling,
+`agent.gateway_max_turn_seconds`, default **600**. Override with
+`ROBIE_GATEWAY_MAX_TURN_SECONDS`. A turn that hits it is marked FAILED and
+the thread gets "I stopped after 10 minutes."
+
+## Email watcher service
+
+`hermes-email-watcher.service` needs the environment in
+`deploy/systemd/hermes-email-watcher.env.example`.
+
+- `ROBIE_CHAT_SA_KEY_FILE` — path to the Chat app service-account key on a
+  protected mount. Do not commit the key.
+- `ROBIE_CHAT_APP_CLIENT_EMAIL` — must match that key's client email.
+- `ROBIE_EMAIL_WORKER_CONCURRENCY` — default 2. Each email is its own job.
+  EZLynx-writing jobs still take the existing session lock.
+
+Help requests from the watcher email Carlo at carlo@streetsmart.insurance.
+They do not email clients. If the Chat key is unset, the watcher does not
+call Chat (that path sends a "[ROBIE] Chat app identity failure" mail) and
+uses the email sender instead.

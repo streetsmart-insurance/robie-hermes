@@ -449,7 +449,14 @@ def escalate(request: HitlRequest, deps: dict[str, Any] | None = None) -> HitlRe
         decide_hitl_ladder,
     )
 
-    deps = deps or {}
+    deps = dict(deps or {})
+    if (
+        str(request.channel or "").strip().casefold() == "email"
+        and "email_sender" not in deps
+    ):
+        from .hitl_email import carlo_hitl_email_sender
+
+        deps["email_sender"] = carlo_hitl_email_sender()
     coverage_unguessable = request.phase == "coverage_fill" and (
         "will not guess" in (request.error or "").casefold()
         or "coverage amounts not on the job" in (request.error or "").casefold()

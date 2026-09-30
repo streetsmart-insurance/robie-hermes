@@ -273,11 +273,12 @@ class JobStore:
     ) -> list[str]:
         """Fail generic Chat Jobs that nothing is actually executing.
 
-        JobEngine never claims ``hermes.google_chat_task`` (it is not a
-        bounded action), so RUNNING + attempt 0 + ``lease_owner IS NULL`` is
-        the normal start state. A job is abandoned only when that ledger
-        state is stale *and* hermes-gateway has not written a recent
-        ``gateway_progress`` heartbeat.
+        JobEngine never claims ``hermes.google_chat_task`` or
+        ``hermes.plain_english`` (they are not bounded actions), so
+        RUNNING + attempt 0 + ``lease_owner IS NULL`` is the normal start
+        state. A job is abandoned only when that ledger state is stale
+        *and* hermes-gateway has not written a recent ``gateway_progress``
+        heartbeat.
         """
         if older_than_seconds < 1:
             raise ValueError("orphan timeout must be positive")
@@ -291,7 +292,9 @@ class JobStore:
         with self.transaction() as conn:
             rows = conn.execute(
                 """SELECT id FROM jobs
-                   WHERE status=? AND action_type='hermes.google_chat_task'
+                   WHERE status=? AND action_type IN (
+                         'hermes.google_chat_task', 'hermes.plain_english'
+                     )
                      AND attempt_count=0 AND lease_owner IS NULL
                      AND updated_at<=?
                      AND NOT EXISTS (

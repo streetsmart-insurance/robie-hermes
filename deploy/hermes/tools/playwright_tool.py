@@ -178,6 +178,45 @@ def wait_for_cdp_json_version(
     )
 
 
+def strip_stealth_import_warning(detail: str) -> str:
+    """Drop the setuptools pkg_resources warning so it is not a blocked error.
+
+    playwright-stealth imports pkg_resources. setuptools 81+ warns that
+    pkg_resources is deprecated. Pinning setuptools in this repo would not
+    change the Hermes venv that actually imports playwright-stealth, so the
+    import is guarded and this warning line is removed from runner stderr.
+    """
+    kept = []
+    for line in str(detail or "").splitlines():
+        if "pkg_resources is deprecated" in line:
+            continue
+        if "pkg_resources" in line and "deprecated" in line.casefold():
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def forbid_job_source_read(code: str) -> str | None:
+    """Block a browser snippet that opens Robie's source, database, or tokens."""
+    text = str(code or "")
+    lowered = text.casefold()
+    markers = (
+        "jobs.db",
+        "google_token.json",
+        "robie_google_token",
+        "client_secret",
+        "robie_job_engine/",
+        "integrations/google_chat/",
+        ".hermes/",
+    )
+    if any(marker in lowered for marker in markers):
+        return (
+            "PLAYWRIGHT_BLOCKED: this job must not read Robie's source, "
+            "jobs.db, or token files. Use the purpose-built tool instead."
+        )
+    return None
+
+
 def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
     """Apply playwright-stealth to attached contexts/pages. Soft-fail if missing.
 
@@ -194,13 +233,29 @@ def apply_playwright_stealth(browser, *, stealth_apply=None, log=None):
     api_name = "injected"
     if apply_one is None:
         try:
-            from playwright_stealth import stealth_sync
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*pkg_resources is deprecated.*",
+                )
+                from playwright_stealth import stealth_sync
 
             apply_one = stealth_sync
             api_name = "stealth_sync"
         except ImportError:
             try:
-                from playwright_stealth import Stealth
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*pkg_resources is deprecated.*",
+                    )
+                    from playwright_stealth import Stealth
 
                 stealth = Stealth()
                 apply_sync = getattr(stealth, "apply_stealth_sync", None)
@@ -365,7 +420,9 @@ def _playwright_exec_wrapper() -> str:
         + "\n"
     )
     return helpers + r'''
-import os, sys
+import os, sys, warnings
+warnings.filterwarnings("ignore", message=r".*pkg_resources is deprecated.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"pkg_resources")
 from playwright.sync_api import Locator, Page, sync_playwright, expect
 
 raw = sys.stdin.read()
@@ -513,6 +570,10 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         _persist_playwright_exec_finish(db_path, row_id, result)
         return result
 
+    refused = forbid_job_source_read(code)
+    if refused:
+        return _finish(tool_error(refused))
+
     job = None
     bound_job_id = job_id or os.environ.get("ROBIE_JOB_ID") or os.environ.get("JOB_ID")
     bound_db = db_path or os.environ.get("ROBIE_JOB_DB")
@@ -648,8 +709,12 @@ def playwright_exec(code: str, timeout_s: int = _DEFAULT_TIMEOUT_S, **kwargs):
         return _finish(tool_error(f"PLAYWRIGHT_BLOCKED: runner failed to start: {exc}"))
 
     if proc.returncode != 0:
-        detail = (stderr or stdout or "runner exited without details")[-12000:]
-        return _finish(tool_error(runner_failure_error(detail)))
+        detail = strip_stealth_import_warning(stderr or "")
+        if not detail:
+            detail = strip_stealth_import_warning(stdout or "")
+        if not detail:
+            detail = "runner exited without details"
+        return _finish(tool_error(runner_failure_error(detail[-12000:])))
     return _finish(
         tool_result(
             {

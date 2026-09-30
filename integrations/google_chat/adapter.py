@@ -1024,6 +1024,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
         self._rate_limit_hits: Dict[str, int] = {}
+        # In-flight Chat turns, keyed by (chat_id, thread_id). /stop cancels
+        # the task and fails the linked job. It does not open a new job.
+        self._gateway_turns: Dict[tuple, Dict[str, Any]] = {}
         # Last-seen inbound thread name per chat_id (space). Google Chat
         # DMs create a NEW thread per top-level user message but the user
         # views them as one logical conversation. We:
@@ -1465,6 +1468,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if job_id and not chat_hermes_should_run(ROBIE_JOB_DB, job_id):
             # Fail-closed policy setup already parked HITL. Do not start a
             # google_chat_task worker that would sit in RUNNING / still working.
+            await self._send_clarification_if_needed(job_id, event)
             return
         if not job_id:
             await self.handle_message(event)
@@ -1476,7 +1480,100 @@ class GoogleChatAdapter(BasePlatformAdapter):
         except Exception:
             pass
         await self._maintain_generic_chat_job_heartbeat(job_id)
-        await self.handle_message(event)
+        await self._run_gateway_turn_with_ceiling(job_id, event)
+
+    async def _send_clarification_if_needed(self, job_id: str, event: MessageEvent) -> None:
+        """One plain-English question. Does not start the agent."""
+        store = JobStore(ROBIE_JOB_DB)
+        job = await asyncio.to_thread(store.get_job, job_id)
+        if JobStatus(job["status"]) != JobStatus.NEEDS_CLARIFICATION:
+            return
+        note = await asyncio.to_thread(store.get_checkpoint, job_id, "clarification")
+        if not note:
+            return
+        from robie_job_engine.answer_only import CLARIFICATION_QUESTION
+
+        if event.source is None:
+            return
+        await self.send(
+            event.source.chat_id,
+            f"{CLARIFICATION_QUESTION}\n\nRef: job {job_id}",
+            reply_to=event.message_id,
+            metadata={"thread_id": getattr(event.source, "thread_id", None)},
+        )
+
+    async def _run_gateway_turn_with_ceiling(self, job_id: str, event: MessageEvent) -> None:
+        """Total-time ceiling for one Chat turn. Does not change max_turns."""
+        from robie_job_engine.chat_turn_control import (
+            _abandon_timed_out_gateway_turn,
+            gateway_max_turn_seconds,
+            turn_key,
+        )
+
+        source = event.source
+        key = turn_key(
+            getattr(source, "chat_id", None),
+            getattr(source, "thread_id", None),
+        )
+        self._gateway_turns[key] = {
+            "task": asyncio.current_task(),
+            "job_id": job_id,
+        }
+        limit = gateway_max_turn_seconds()
+        try:
+            await asyncio.wait_for(self.handle_message(event), timeout=limit)
+        except asyncio.TimeoutError:
+            reply = await asyncio.to_thread(
+                _abandon_timed_out_gateway_turn,
+                JobStore(ROBIE_JOB_DB),
+                job_id,
+                seconds=limit,
+            )
+            if source is not None:
+                await self.send(
+                    source.chat_id,
+                    reply,
+                    reply_to=event.message_id,
+                    metadata={"thread_id": getattr(source, "thread_id", None)},
+                )
+        finally:
+            current = self._gateway_turns.get(key)
+            if current and current.get("job_id") == job_id:
+                self._gateway_turns.pop(key, None)
+
+    async def _apply_chat_stop(self, event: MessageEvent) -> None:
+        """Skip job creation, interrupt the running turn, fail the linked job."""
+        from robie_job_engine.chat_turn_control import fail_cancelled_chat_job, turn_key
+
+        source = event.source
+        if source is None:
+            return
+        key = turn_key(source.chat_id, getattr(source, "thread_id", None))
+        record = self._gateway_turns.pop(key, None)
+        if record is None:
+            record = self._gateway_turns.pop((source.chat_id, ""), None)
+        task = (record or {}).get("task")
+        job_id = (record or {}).get("job_id")
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        if not job_id:
+            queue = await asyncio.to_thread(self._durable_chat_queue)
+            context = await asyncio.to_thread(
+                queue.active_conversation_job, source.chat_id
+            )
+            job_id = (context or {}).get("job_id")
+        if job_id:
+            reply = await asyncio.to_thread(
+                fail_cancelled_chat_job, JobStore(ROBIE_JOB_DB), job_id
+            )
+        else:
+            reply = "Stopped. There isn't a running job in this thread."
+        await self.send(
+            source.chat_id,
+            reply,
+            reply_to=event.message_id,
+            metadata={"thread_id": getattr(source, "thread_id", None)},
+        )
 
     @staticmethod
     async def _stop_chat_queue_heartbeat(task: asyncio.Task) -> None:
@@ -2806,6 +2903,12 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     from dataclasses import replace
 
                     event = replace(event, text=text)
+
+            from robie_job_engine.chat_turn_control import is_stop_command
+
+            if is_stop_command(text) and event.source is not None:
+                await self._apply_chat_stop(event)
+                return
 
             message_id = event.message_id or f"unidentified:{id(event)}"
             text = redact_text(text)
